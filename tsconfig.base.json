@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "ignoreDeprecations": "6.0",
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": false,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@shared-types/*": ["packages/shared-types/src/*"],
+      "@shared-types": ["packages/shared-types/src/index.ts"],
+      "@agent-runtime/*": ["packages/agent-runtime/src/*"],
+      "@agent-runtime": ["packages/agent-runtime/src/index.ts"],
+      "@browser-runtime/*": ["packages/browser-runtime/src/*"],
+      "@browser-runtime": ["packages/browser-runtime/src/index.ts"],
+      "@tool-runtime/*": ["packages/tool-runtime/src/*"],
+      "@tool-runtime": ["packages/tool-runtime/src/index.ts"],
+      "@skills-runtime/*": ["packages/skills-runtime/src/*"],
+      "@skills-runtime": ["packages/skills-runtime/src/index.ts"],
+      "@knowledge-runtime/*": ["packages/knowledge-runtime/src/*"],
+      "@knowledge-runtime": ["packages/knowledge-runtime/src/index.ts"],
+      "@mcp-runtime/*": ["packages/mcp-runtime/src/*"],
+      "@mcp-runtime": ["packages/mcp-runtime/src/index.ts"],
+      "@plugin-runtime/*": ["packages/plugin-runtime/src/*"],
+      "@plugin-runtime": ["packages/plugin-runtime/src/index.ts"],
+      "@provider-adapters/*": ["packages/provider-adapters/src/*"],
+      "@provider-adapters": ["packages/provider-adapters/src/index.ts"]
+    }
+  }
+}
