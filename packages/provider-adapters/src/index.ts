@@ -103,18 +103,19 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
-    const response = await this.#client.responses.create({
-      model: input.model.id,
-      instructions: input.systemPrompt,
-      input: input.transcript.map((message) => ({
-        role: message.role === "tool" ? "assistant" : message.role,
-        content: message.content
-      })),
-      temperature: input.model.defaultTemperature,
-      max_output_tokens: input.model.defaultMaxOutputTokens
-    });
+    const response = await this.#client.chat.completions.create(
+      {
+        model: input.model.id,
+        messages: buildOpenAiCompatibleMessages(input),
+        temperature: input.model.defaultTemperature,
+        max_tokens: input.model.defaultMaxOutputTokens
+      },
+      {
+        signal: input.abortSignal
+      }
+    );
 
-    const text = response.output_text?.trim() || "";
+    const text = response.choices[0]?.message?.content?.trim() || "";
     return parseDecisionFromText(text);
   }
 }
@@ -205,6 +206,42 @@ function resolveApiKey(provider: ProviderDefinition): string {
     }
   }
   throw new Error(`Provider ${provider.id} is missing apiKey or apiKeyEnv.`);
+}
+
+function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
+  const messages: Array<{
+    role: "system" | "user" | "assistant";
+    content: string;
+  }> = [];
+
+  if (input.systemPrompt.trim()) {
+    messages.push({
+      role: "system",
+      content: input.systemPrompt
+    });
+  }
+
+  for (const message of input.transcript) {
+    messages.push({
+      role: normalizeOpenAiCompatibleRole(message.role),
+      content: message.content
+    });
+  }
+
+  return messages;
+}
+
+function normalizeOpenAiCompatibleRole(role: ProviderTurnInput["transcript"][number]["role"]) {
+  switch (role) {
+    case "system":
+      return "system";
+    case "assistant":
+      return "assistant";
+    case "tool":
+      return "assistant";
+    default:
+      return "user";
+  }
 }
 
 function parseDecisionFromText(text: string): ProviderTurnDecision {

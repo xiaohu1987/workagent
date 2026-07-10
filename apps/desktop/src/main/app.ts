@@ -183,6 +183,18 @@ export class DesktopBackend {
 
   public sendMessage(threadId: string, content: string): void {
     const thread = this.#db.getThread(threadId);
+    if (this.#db.listMessages(threadId).length === 0) {
+      const updated = this.#db.updateThread(threadId, {
+        title: buildThreadTitleFromFirstMessage(content)
+      });
+      void this.emit({
+        type: "thread.updated",
+        threadId,
+        payload: { thread: updated },
+        createdAt: new Date().toISOString()
+      });
+    }
+
     void this.refreshSkills(thread.cwd);
     this.#runtime.submitUserInput(threadId, content);
   }
@@ -935,6 +947,31 @@ function resolveProjectKnowledgeBundleRoot(
     "bundles",
     `${slugify(displayName)}-${randomUUID()}`
   );
+}
+
+function buildThreadTitleFromFirstMessage(content: string): string {
+  const normalized = content
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) {
+    return "新建任务";
+  }
+
+  const sentenceBoundary = normalized.search(/[。！？!?；;]/u);
+  const firstSentence =
+    sentenceBoundary === -1 ? normalized : normalized.slice(0, sentenceBoundary + 1).trim();
+  const codePoints = Array.from(firstSentence);
+  if (codePoints.length <= 24) {
+    return firstSentence;
+  }
+
+  return `${codePoints.slice(0, 24).join("").trimEnd()}...`;
 }
 
 function hashApprovalPayload(input: {

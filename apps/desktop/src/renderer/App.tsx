@@ -12,6 +12,13 @@ import type {
   SkillMetadata,
   ThreadRecord
 } from "@shared-types";
+import {
+  canDeleteThread,
+  getComposerPrimaryActionState,
+  getDeleteThreadBlockedMessage,
+  getHistoryItemAffordance,
+  isThreadExecutionInProgress
+} from "./thread-ui-state";
 
 type SettingsTab = "general" | "knowledge" | "provider" | "skills" | "agent" | "mcp";
 
@@ -145,11 +152,15 @@ export function App() {
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
   const [notice, setNotice] = useState<AppNotice | null>(null);
-  const [deleteConfirmThread, setDeleteConfirmThread] = useState<ThreadRecord | null>(null);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatTranscriptRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
+  const pendingTopResetThreadIdRef = useRef<string | null>(null);
+  const suppressInitialAutoScrollThreadIdRef = useRef<string | null>(null);
+  const autoScrollFrameRef = useRef<number | null>(null);
+  const autoScrollReleaseTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     void refreshAll();
@@ -177,7 +188,7 @@ export function App() {
   }, [selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !deleteConfirmThread && !notice) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !notice) {
       return;
     }
 
@@ -193,20 +204,13 @@ export function App() {
           return;
         }
 
-        if (deleteConfirmThread) {
-          if (!deletingThreadId) {
-            setDeleteConfirmThread(null);
-          }
-          return;
-        }
-
         setIsSettingsOpen(false);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deleteConfirmThread, deletingThreadId, isProjectCreateOpen, isSettingsOpen, notice]);
+  }, [isProjectCreateOpen, isSettingsOpen, notice]);
 
   useEffect(() => {
     if (!notice) {
@@ -224,6 +228,8 @@ export function App() {
     () => threads.find((thread) => thread.id === selectedThreadId) ?? null,
     [threads, selectedThreadId]
   );
+  const activeSnapshotThreadId = snapshot?.thread.id ?? null;
+  const activeSnapshotThreadStatus = snapshot?.thread.status ?? null;
   const pendingApprovals = useMemo(
     () => (snapshot?.approvals ?? []).filter((item) => item.status === "pending"),
     [snapshot]
@@ -236,11 +242,15 @@ export function App() {
   const workflowBindings = snapshot?.projectPlugins ?? [];
   const selectedMessages = snapshot?.messages ?? [];
   const visibleMessages = useMemo(
-    () => filterTranscriptMessages(selectedMessages, selectedThread?.status),
-    [selectedMessages, selectedThread?.status]
+    () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
+    [activeSnapshotThreadStatus, selectedMessages]
   );
+  const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
+  const composerPrimaryAction = getComposerPrimaryActionState(selectedThreadStatus, input);
+  const isActiveThreadExecuting = composerPrimaryAction.kind === "interrupt";
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
   const showWelcome = visibleMessages.length === 0;
+  const latestVisibleMessageId = visibleMessages[visibleMessages.length - 1]?.id ?? null;
   const settingsProvider = useMemo(() => {
     if (!configDraft) {
       return null;
@@ -308,42 +318,131 @@ export function App() {
     }
   }, [settingsTab]);
 
-  useEffect(() => {
-    if (!showWelcome) {
+  function cancelPendingAutoScrollFrame() {
+    if (autoScrollFrameRef.current === null) {
       return;
     }
 
-    chatScrollRef.current?.scrollTo({ top: 0, left: 0 });
-  }, [selectedThreadId, showWelcome]);
+    window.cancelAnimationFrame(autoScrollFrameRef.current);
+    autoScrollFrameRef.current = null;
+  }
 
-  useEffect(() => {
-    if (showWelcome) {
+  function clearAutoScrollReleaseTimer() {
+    if (autoScrollReleaseTimerRef.current === null) {
       return;
     }
 
-    const shouldAutoScroll =
-      shouldAutoScrollRef.current || isThreadExecutionInProgress(selectedThread?.status ?? null);
-    if (!shouldAutoScroll) {
+    window.clearTimeout(autoScrollReleaseTimerRef.current);
+    autoScrollReleaseTimerRef.current = null;
+  }
+
+  function settleAutoScroll(status: ThreadRecord["status"] | null) {
+    if (isThreadExecutionInProgress(status)) {
+      clearAutoScrollReleaseTimer();
       return;
     }
 
+    clearAutoScrollReleaseTimer();
+    autoScrollReleaseTimerRef.current = window.setTimeout(() => {
+      autoScrollReleaseTimerRef.current = null;
+      shouldAutoScrollRef.current = false;
+    }, 320);
+  }
+
+  function scrollTranscriptToLatest(behavior: ScrollBehavior = "auto") {
     const node = chatScrollRef.current;
     if (!node) {
       return;
     }
 
-    window.requestAnimationFrame(() => {
+    cancelPendingAutoScrollFrame();
+    autoScrollFrameRef.current = window.requestAnimationFrame(() => {
+      autoScrollFrameRef.current = null;
       node.scrollTo({
         top: node.scrollHeight,
         left: 0,
-        behavior: "smooth"
+        behavior
       });
     });
+  }
 
-    if (!isThreadExecutionInProgress(selectedThread?.status ?? null)) {
-      shouldAutoScrollRef.current = false;
+  useEffect(() => {
+    return () => {
+      cancelPendingAutoScrollFrame();
+      clearAutoScrollReleaseTimer();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!showWelcome) {
+      return;
     }
-  }, [visibleMessages.length, selectedThread?.status, selectedThreadId, showWelcome]);
+
+    cancelPendingAutoScrollFrame();
+    clearAutoScrollReleaseTimer();
+    chatScrollRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [activeSnapshotThreadId, showWelcome]);
+
+  useEffect(() => {
+    if (!activeSnapshotThreadId || pendingTopResetThreadIdRef.current !== activeSnapshotThreadId) {
+      return;
+    }
+
+    pendingTopResetThreadIdRef.current = null;
+    cancelPendingAutoScrollFrame();
+    clearAutoScrollReleaseTimer();
+    window.requestAnimationFrame(() => {
+      chatScrollRef.current?.scrollTo({ top: 0, left: 0 });
+    });
+  }, [activeSnapshotThreadId]);
+
+  useEffect(() => {
+    if (showWelcome) {
+      if (activeSnapshotThreadId && suppressInitialAutoScrollThreadIdRef.current === activeSnapshotThreadId) {
+        suppressInitialAutoScrollThreadIdRef.current = null;
+      }
+      return;
+    }
+
+    if (activeSnapshotThreadId && suppressInitialAutoScrollThreadIdRef.current === activeSnapshotThreadId) {
+      suppressInitialAutoScrollThreadIdRef.current = null;
+      return;
+    }
+
+    const shouldAutoScroll =
+      shouldAutoScrollRef.current || isThreadExecutionInProgress(activeSnapshotThreadStatus);
+    if (!shouldAutoScroll) {
+      return;
+    }
+
+    if (!chatScrollRef.current) {
+      return;
+    }
+
+    scrollTranscriptToLatest("smooth");
+    settleAutoScroll(activeSnapshotThreadStatus);
+  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, latestVisibleMessageId, showWelcome, visibleMessages.length]);
+
+  useEffect(() => {
+    const transcriptNode = chatTranscriptRef.current;
+    if (!transcriptNode || showWelcome) {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      const shouldFollowLatest =
+        shouldAutoScrollRef.current || isThreadExecutionInProgress(activeSnapshotThreadStatus);
+      if (!shouldFollowLatest) {
+        return;
+      }
+
+      scrollTranscriptToLatest();
+      settleAutoScroll(activeSnapshotThreadStatus);
+    });
+
+    observer.observe(transcriptNode);
+    return () => observer.disconnect();
+  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, showWelcome]);
 
   useEffect(() => {
     if (!configDraft) {
@@ -410,6 +509,19 @@ export function App() {
     setSnapshot((await window.codexh.getThreadSnapshot(threadId)) as RuntimeThreadSnapshot);
   }
 
+  async function openThread(threadId: string, options?: { resetTranscriptScroll?: boolean }) {
+    if (options?.resetTranscriptScroll) {
+      cancelPendingAutoScrollFrame();
+      clearAutoScrollReleaseTimer();
+      shouldAutoScrollRef.current = false;
+      pendingTopResetThreadIdRef.current = threadId;
+      suppressInitialAutoScrollThreadIdRef.current = threadId;
+    }
+
+    setSelectedThreadId(threadId);
+    await refreshSnapshot(threadId);
+  }
+
   async function refreshSkills() {
     setSkills((await window.codexh.listSkills()) as SkillMetadata[]);
   }
@@ -472,24 +584,23 @@ export function App() {
   }
 
   function requestDeleteHistoryThread(thread: ThreadRecord) {
-    if (thread.status === "running" || thread.status === "waiting") {
-      showNotice("任务正在执行，暂时不能删除。");
+    const blockedMessage = getDeleteThreadBlockedMessage(thread.status, deletingThreadId);
+    if (blockedMessage) {
+      showNotice(blockedMessage);
       return;
     }
 
-    setDeleteConfirmThread(thread);
+    if (!canDeleteThread(thread.status, deletingThreadId)) {
+      return;
+    }
+
+    void confirmDeleteHistoryThread(thread);
   }
 
-  async function confirmDeleteHistoryThread() {
-    if (!deleteConfirmThread) {
-      return;
-    }
-
-    const thread = deleteConfirmThread;
+  async function confirmDeleteHistoryThread(thread: ThreadRecord) {
     setDeletingThreadId(thread.id);
     try {
       await window.codexh.deleteThread(thread.id);
-      setDeleteConfirmThread(null);
       await refreshThreads();
       showNotice("任务已删除。", { tone: "success" });
     } catch (error) {
@@ -522,8 +633,27 @@ export function App() {
 
     await window.codexh.sendMessage({ threadId, content });
     setInput("");
+    clearAutoScrollReleaseTimer();
     shouldAutoScrollRef.current = true;
     await refreshSnapshot(threadId);
+  }
+
+  async function interruptActiveThread() {
+    const threadId = activeSnapshotThreadId ?? selectedThreadId;
+    if (!threadId) {
+      return;
+    }
+
+    await window.codexh.interruptThread(threadId);
+  }
+
+  async function handleComposerPrimaryAction() {
+    if (isActiveThreadExecuting) {
+      await interruptActiveThread();
+      return;
+    }
+
+    await sendMessage();
   }
 
   async function importKnowledge() {
@@ -788,7 +918,7 @@ export function App() {
       !event.altKey
     ) {
       event.preventDefault();
-      void sendMessage();
+      void handleComposerPrimaryAction();
     }
   }
 
@@ -846,39 +976,49 @@ export function App() {
 
           <div className="sidebar-section-title">任务历史</div>
 
-          <div className="history-list">
+              <div className="history-list">
             {threads.length === 0 ? (
               <div className="history-empty">还没有任务</div>
             ) : (
-              threads.map((thread) => (
-                <div
-                  key={thread.id}
-                  className={`history-item ${selectedThreadId === thread.id ? "selected" : ""}`}
-                >
-                  <button
-                    type="button"
-                    className="history-item-main"
-                    onClick={() => {
-                      setSelectedThreadId(thread.id);
-                      void refreshSnapshot(thread.id);
-                    }}
+              threads.map((thread) => {
+                const historyItemAffordance = getHistoryItemAffordance(thread.status);
+
+                return (
+                  <div
+                    key={thread.id}
+                    className={`history-item ${selectedThreadId === thread.id ? "selected" : ""}`}
                   >
-                    <span className="history-item-label">{thread.title}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="history-item-delete"
-                    title="删除任务"
-                    aria-label={`删除任务 ${thread.title}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      requestDeleteHistoryThread(thread);
-                    }}
-                  >
-                    <IconTrash />
-                  </button>
-                </div>
-              ))
+                    <button
+                      type="button"
+                      className="history-item-main"
+                      onClick={() => {
+                        void openThread(thread.id, { resetTranscriptScroll: true });
+                      }}
+                    >
+                      <span className="history-item-label">{thread.title}</span>
+                    </button>
+                    {historyItemAffordance.kind === "running-indicator" ? (
+                      <span className="history-item-running-indicator" title={historyItemAffordance.title} aria-hidden="true">
+                        <IconSpinner />
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="history-item-delete"
+                        title={historyItemAffordance.title}
+                        aria-label={`删除任务 ${thread.title}`}
+                        disabled={Boolean(deletingThreadId)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          requestDeleteHistoryThread(thread);
+                        }}
+                      >
+                        <IconTrash />
+                      </button>
+                    )}
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
@@ -935,7 +1075,7 @@ export function App() {
             {showWelcome ? (
               <div className="welcome-empty-state" />
             ) : (
-              <div className="chat-transcript">
+              <div ref={chatTranscriptRef} className="chat-transcript">
                 {visibleMessages.map((message) => renderTranscriptMessage(message, activeAssistantLabel))}
               </div>
             )}
@@ -984,12 +1124,13 @@ export function App() {
                     </label>
                   </div>
                   <button
-                    className="send-button"
-                    onClick={() => void sendMessage()}
-                    disabled={!input.trim()}
-                    title="发送"
+                    className={`send-button ${isActiveThreadExecuting ? "running" : ""}`}
+                    onClick={() => void handleComposerPrimaryAction()}
+                    disabled={composerPrimaryAction.disabled}
+                    title={composerPrimaryAction.title}
+                    aria-label={composerPrimaryAction.ariaLabel}
                   >
-                    <IconArrowUp />
+                    {isActiveThreadExecuting ? <IconStop /> : <IconArrowUp />}
                   </button>
                 </div>
               </div>
@@ -1444,58 +1585,6 @@ export function App() {
                 </div>
               ) : null}
               </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {deleteConfirmThread ? (
-        <div
-          className="project-sheet-overlay"
-          onClick={(event) => {
-            if (event.target === event.currentTarget && !deletingThreadId) {
-              setDeleteConfirmThread(null);
-            }
-          }}
-        >
-          <div className="project-sheet confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="delete-thread-title">
-            <div className="project-sheet-header">
-              <div className="project-sheet-copy">
-                <strong id="delete-thread-title">删除任务</strong>
-                <span>保持当前系统风格，并在删除前再次确认。</span>
-              </div>
-              <button
-                className="project-sheet-close"
-                onClick={() => {
-                  if (!deletingThreadId) {
-                    setDeleteConfirmThread(null);
-                  }
-                }}
-                title="关闭"
-                disabled={Boolean(deletingThreadId)}
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body">
-              <p>确认删除“{deleteConfirmThread.title}”吗？此操作不可撤销。</p>
-              <span>会同时清理该任务的聊天记录、工具过程和输出文件。</span>
-            </div>
-            <div className="project-sheet-actions">
-              <button
-                className="button ghost"
-                onClick={() => setDeleteConfirmThread(null)}
-                disabled={Boolean(deletingThreadId)}
-              >
-                取消
-              </button>
-              <button
-                className="button warm"
-                onClick={() => void confirmDeleteHistoryThread()}
-                disabled={Boolean(deletingThreadId)}
-              >
-                {deletingThreadId ? "删除中..." : "确认删除"}
-              </button>
             </div>
           </div>
         </div>
@@ -2313,10 +2402,6 @@ function isOutcomeTranscriptMessage(message: MessageRecord) {
   return eventBlocks.some((block) => block.type !== "commentary");
 }
 
-function isThreadExecutionInProgress(status?: ThreadRecord["status"] | null) {
-  return status === "running" || status === "waiting";
-}
-
 function renderMarkdownDocument(content: string, keyPrefix: string, className: string) {
   const blocks = parseMarkdownBlocks(content);
   if (blocks.length === 0) {
@@ -2872,12 +2957,21 @@ function IconPlus() {
 
 function IconTrash() {
   return (
-    <SvgIcon>
-      <path d="M5 7h14" />
-      <path d="M9 7V5h6v2" />
-      <path d="M8 7l.7 11h6.6L16 7" />
-      <path d="M10 10v5" />
-      <path d="M14 10v5" />
+    <SvgIcon size={16}>
+      <path d="M7.5 7.25h9" />
+      <path d="M10 5.5h4" />
+      <path d="M9.25 8.5v7.25c0 .69.56 1.25 1.25 1.25h3c.69 0 1.25-.56 1.25-1.25V8.5" />
+      <path d="M11 10.25v4.5" />
+      <path d="M13 10.25v4.5" />
+    </SvgIcon>
+  );
+}
+
+function IconSpinner() {
+  return (
+    <SvgIcon size={16}>
+      <circle cx="12" cy="12" r="6.75" opacity="0.22" />
+      <path d="M18.75 12a6.75 6.75 0 0 0-6.75-6.75" />
     </SvgIcon>
   );
 }
@@ -2985,6 +3079,14 @@ function IconArrowUp() {
     <SvgIcon>
       <path d="M12 18V6" />
       <path d="m7 11 5-5 5 5" />
+    </SvgIcon>
+  );
+}
+
+function IconStop() {
+  return (
+    <SvgIcon size={14}>
+      <rect x="7.5" y="7.5" width="9" height="9" rx="2" fill="currentColor" stroke="none" />
     </SvgIcon>
   );
 }

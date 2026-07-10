@@ -3565,9 +3565,23 @@ select:focus {
   background: #b8b8bc;
 }
 
+.send-button.running {
+  color: #2b2c30;
+  background: #f5f5f6;
+}
+
+.send-button.running svg {
+  width: 14px;
+  height: 14px;
+}
+
 .send-button:hover:not(:disabled) {
   background: #c2c2c6;
   transform: none;
+}
+
+.send-button.running:hover:not(:disabled) {
+  background: #ffffff;
 }
 
 .send-button:disabled {
@@ -4031,6 +4045,28 @@ select:focus {
   gap: 14px;
 }
 
+.delete-confirm-sheet {
+  width: min(430px, calc(100vw - 32px));
+  gap: 18px;
+  padding: 14px;
+  border-color: rgba(255, 255, 255, 0.06);
+  border-radius: 18px;
+  background: rgba(15, 16, 19, 0.96);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.42);
+}
+
+.delete-confirm-header {
+  justify-content: flex-end;
+  min-height: 0;
+  gap: 0;
+}
+
+.delete-confirm-sheet .project-sheet-close {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+}
+
 .project-sheet-header,
 .project-sheet-actions {
   display: flex;
@@ -4063,6 +4099,19 @@ select:focus {
   display: grid;
   gap: 8px;
   padding: 2px 2px 0;
+}
+
+.delete-confirm-body {
+  gap: 0;
+  padding: 0 4px 2px;
+}
+
+.delete-confirm-body strong {
+  color: #f3f4f6;
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: -0.04em;
 }
 
 .confirm-sheet-body p {
@@ -4109,6 +4158,17 @@ select:focus {
 .project-sheet-actions {
   justify-content: flex-end;
   gap: 10px;
+}
+
+.delete-confirm-actions {
+  gap: 8px;
+}
+
+.delete-confirm-actions .button {
+  min-width: 84px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 12px;
 }
 
 .app-notice-stack {
@@ -5006,6 +5066,7 @@ select:focus {
 .history-item-main {
   display: flex;
   align-items: center;
+  gap: 10px;
   min-width: 0;
   flex: 1;
   padding: 6px 0;
@@ -5014,33 +5075,81 @@ select:focus {
 }
 
 .history-item-label {
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.history-item-running-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  color: rgba(244, 244, 243, 0.54);
+}
+
+.history-item-running-indicator svg {
+  width: 16px;
+  height: 16px;
+  animation: history-item-spinner-rotate 880ms linear infinite;
+  transform-origin: center;
 }
 
 .history-item-delete {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
-  border-radius: 9px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   cursor: pointer;
-  color: rgba(244, 244, 243, 0.36);
-  transition: color 120ms ease, background 120ms ease;
+  color: rgba(244, 244, 243, 0.28);
+  opacity: 0;
+  transform: translateX(4px);
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease,
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.history-item-delete svg {
+  width: 16px;
+  height: 16px;
+}
+
+.history-item:hover .history-item-delete,
+.history-item.selected .history-item-delete,
+.history-item:hover .history-item-running-indicator,
+.history-item.selected .history-item-running-indicator {
+  color: rgba(244, 244, 243, 0.52);
+}
+
+.history-item:hover .history-item-running-indicator,
+.history-item.selected .history-item-running-indicator {
+  color: rgba(244, 244, 243, 0.78);
 }
 
 .history-item:hover .history-item-delete,
 .history-item.selected .history-item-delete {
-  color: rgba(244, 244, 243, 0.56);
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .history-item-delete:hover,
 .history-item-delete:focus-visible {
+  border-color: rgba(255, 255, 255, 0.08);
   color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
+  opacity: 1;
+  transform: translateX(0);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .history-empty {
@@ -5049,4 +5158,14 @@ select:focus {
   border-radius: 12px;
   color: rgba(244, 244, 243, 0.38);
   font-size: 15px;
+}
+
+@keyframes history-item-spinner-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
