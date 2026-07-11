@@ -41,35 +41,7 @@ set "DIST_PRELOAD=%cd%\dist\preload\index.cjs"
 set "DIST_RENDERER_DIR=%cd%\dist\renderer"
 set "DIST_RENDERER_INDEX=%DIST_RENDERER_DIR%\index.html"
 
-if /I "%CODEXH_FORCE_BUILD%"=="1" (
-  set "BUILD_REASON=forced rebuild requested"
-  goto :build
-)
-
-set "BUILD_DECISION="
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$sourceFiles = @(); " ^
-  "$sourceFiles += Get-ChildItem -LiteralPath '%cd%\apps\desktop\src' -Recurse -File; " ^
-  "$sourceFiles += Get-ChildItem -LiteralPath '%cd%\packages' -Recurse -File; " ^
-  "$sourceFiles += Get-Item -LiteralPath '%cd%\package.json','%cd%\pnpm-lock.yaml','%cd%\tsconfig.base.json' -ErrorAction SilentlyContinue; " ^
-  "$latestSource = ($sourceFiles | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).LastWriteTimeUtc; " ^
-  "$main = Get-Item -LiteralPath '%DIST_MAIN%' -ErrorAction SilentlyContinue; " ^
-  "$preload = Get-Item -LiteralPath '%DIST_PRELOAD%' -ErrorAction SilentlyContinue; " ^
-  "$rendererFiles = @(Get-ChildItem -LiteralPath '%DIST_RENDERER_DIR%' -Recurse -File -ErrorAction SilentlyContinue); " ^
-  "if (-not $main -or -not $preload -or $rendererFiles.Count -eq 0 -or -not (Test-Path -LiteralPath '%DIST_RENDERER_INDEX%')) { 'build:missing dist outputs'; exit }; " ^
-  "$latestRenderer = ($rendererFiles | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).LastWriteTimeUtc; " ^
-  "if ($main.LastWriteTimeUtc -lt $latestSource -or $preload.LastWriteTimeUtc -lt $latestSource -or $latestRenderer -lt $latestSource) { 'build:source newer than dist' } else { 'skip:dist up to date' }"` ) do (
-  set "BUILD_DECISION=%%I"
-)
-
-if not defined BUILD_DECISION (
-  set "BUILD_REASON=unable to determine bundle freshness"
-  goto :build
-)
-
-if /I "%BUILD_DECISION:~0,5%"=="skip:" goto :launch_ready
-
-set "BUILD_REASON=%BUILD_DECISION:~6%"
+set "BUILD_REASON=always rebuild before launch"
 
 :build
 if not exist "%EVITE_CLI%" (
@@ -89,18 +61,11 @@ if defined NODE_PATH (
   set "NODE_PATH=%EVITE_LOCAL_NODE_MODULES%;%EVITE_PNPM_NODE_MODULES%;%cd%\node_modules\.pnpm\node_modules"
 )
 
-if defined BUILD_REASON (
-  echo [1/2] Building codexh... (%BUILD_REASON%)
-) else (
-  echo [1/2] Building codexh...
-)
+echo [1/2] Building codexh... (%BUILD_REASON%)
 node "%EVITE_CLI%" build --config apps\desktop\electron.vite.config.ts
 if errorlevel 1 goto :build_failed
 if not exist "%DIST_MAIN%" goto :error
 goto :launch
-
-:launch_ready
-echo [1/2] Using existing dist bundle...
 
 :launch
 echo [2/2] Launching codexh...

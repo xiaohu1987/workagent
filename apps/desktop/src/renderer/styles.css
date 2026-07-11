@@ -3729,7 +3729,10 @@ select:focus {
 }
 
 .composer-attachment-chip.image { border-color: rgba(216, 131, 193, 0.28); }
-.composer-attachment-chip.skill { border-color: rgba(123, 177, 255, 0.28); }
+.composer-attachment-chip.skill {
+  border-color: rgba(242, 190, 76, 0.38);
+  background: rgba(117, 86, 26, 0.16);
+}
 .composer-attachment-chip.mcp { border-color: rgba(187, 141, 221, 0.28); }
 
 .composer-attachment-icon {
@@ -3746,7 +3749,9 @@ select:focus {
 .composer-attachment-chip.code .composer-attachment-icon { color: #91c3ff; }
 .composer-attachment-chip.folder .composer-attachment-icon { color: #e6b45e; }
 .composer-attachment-chip.image .composer-attachment-icon { color: #e89ad2; }
-.composer-attachment-chip.skill .composer-attachment-icon { color: #8dc1ff; }
+.composer-attachment-chip.skill .composer-attachment-icon { color: #f2be4c; }
+.composer-attachment-chip.skill .composer-attachment-copy strong { color: #f5c867; }
+.composer-attachment-chip.skill .composer-attachment-copy small { color: rgba(245, 200, 103, 0.7); }
 .composer-attachment-chip.mcp .composer-attachment-icon { color: #d0a6e7; }
 .composer-attachment-icon svg { width: 17px; height: 17px; }
 
@@ -6228,7 +6233,9 @@ select:focus {
 }
 
 .composer-mode-chip-gpa {
-  color: rgba(244, 244, 243, 0.7);
+  color: #75adff;
+  border-color: rgba(86, 151, 255, 0.34);
+  background: rgba(74, 137, 248, 0.12);
 }
 
 .composer-mode-chip-remove {
@@ -6449,8 +6456,7 @@ select:focus {
 
 .composer-add-menu-submenu {
   position: absolute;
-  /* Keep a wide overlap with the parent so pointer travel cannot close it. */
-  left: calc(100% - 12px);
+  left: calc(100% + 8px);
   bottom: 18px;
   width: 252px;
   margin-left: 0;
@@ -6941,6 +6947,35 @@ select:focus {
 .right-workspace-empty-state p {
   margin: 0;
   font-size: 12px;
+}
+
+.right-workspace-empty-state.open-file {
+  gap: 6px;
+  color: rgba(238, 238, 240, 0.48);
+}
+
+.right-workspace-empty-state.open-file > span {
+  width: 36px;
+  height: 36px;
+  margin-bottom: 4px;
+  border: 0;
+  color: rgba(238, 238, 240, 0.74);
+  background: transparent;
+}
+
+.right-workspace-empty-state.open-file > span svg {
+  width: 26px;
+  height: 26px;
+}
+
+.right-workspace-empty-state.open-file strong {
+  color: #f0f0f1;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.right-workspace-empty-state.open-file p {
+  font-size: 13px;
 }
 
 .project-preview-workspace {

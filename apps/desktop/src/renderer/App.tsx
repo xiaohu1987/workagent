@@ -311,10 +311,12 @@ export function App() {
     planTasks: [],
     updatedAt: ""
   });
+  const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
   const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp">("root");
   const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
   const gpaAnchorRef = useRef<HTMLDivElement | null>(null);
+  const composerAddMenuCloseTimerRef = useRef<number | null>(null);
   const [gpaRevisionOpen, setGpaRevisionOpen] = useState(false);
   const [gpaRevisionDraft, setGpaRevisionDraft] = useState("");
   const [gpaRevisionSubmitting, setGpaRevisionSubmitting] = useState(false);
@@ -507,6 +509,7 @@ export function App() {
       return;
     }
     ensureThreadTerminalTabs(selectedThreadId);
+    setGpaComposerSelected(false);
   }, [selectedThreadId]);
 
   useEffect(() => {
@@ -1413,6 +1416,7 @@ export function App() {
     if (!forcedContent) {
       setInput("");
       setComposerAttachments([]);
+      setGpaComposerSelected(false);
     }
     clearAutoScrollReleaseTimer();
     shouldAutoScrollRef.current = true;
@@ -1464,6 +1468,7 @@ export function App() {
 
   async function handleGpaStageSelect(stage: GpaStage) {
     setGpaState((prev) => ({ ...prev, stage, awaitingConfirmation: null }));
+    setGpaComposerSelected(stage !== "off");
     setGpaMenuOpen(false);
     setGpaMenuPos(null);
     const threadId = selectedThreadId;
@@ -1553,6 +1558,7 @@ export function App() {
 
   async function enableGpaMode() {
     if (gpaState.stage !== "off") {
+      setGpaComposerSelected(true);
       setGpaMenuOpen(false);
       setGpaMenuPos(null);
       return;
@@ -1647,6 +1653,21 @@ export function App() {
       return duplicate ? current : [...current, { ...attachment, id: globalThis.crypto.randomUUID() } as ComposerAttachment];
     });
     window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  function clearComposerAddMenuCloseTimer() {
+    if (composerAddMenuCloseTimerRef.current !== null) {
+      window.clearTimeout(composerAddMenuCloseTimerRef.current);
+      composerAddMenuCloseTimerRef.current = null;
+    }
+  }
+
+  function scheduleComposerAddMenuClose() {
+    clearComposerAddMenuCloseTimer();
+    composerAddMenuCloseTimerRef.current = window.setTimeout(() => {
+      setComposerAddMenuView("root");
+      composerAddMenuCloseTimerRef.current = null;
+    }, 160);
   }
 
   function removeComposerAttachment(id: string) {
@@ -2226,9 +2247,9 @@ export function App() {
               </button>
             ) : null}
             <div className="chat-composer">
-              {composerAttachments.some((attachment) => attachment.kind !== "skill") ? (
+              {composerAttachments.length > 0 ? (
                 <div className="composer-attachments" aria-label="已添加到聊天的上下文">
-                  {composerAttachments.filter((attachment) => attachment.kind !== "skill").map((attachment) => (
+                  {composerAttachments.map((attachment) => (
                     <ComposerAttachmentChip
                       key={attachment.id}
                       attachment={attachment}
@@ -2293,7 +2314,7 @@ export function App() {
                       </button>
                     </span>
                   ) : null}
-                  {gpaState.stage !== "off" ? (
+                  {gpaComposerSelected && gpaState.stage !== "off" ? (
                     <span className="composer-mode-chip composer-mode-chip-gpa" title={`GPA 当前阶段：${gpaModeLabel(gpaState.stage)}`}>
                       <IconGpa />
                       <span>开启 GPA</span>
@@ -2308,21 +2329,6 @@ export function App() {
                       </button>
                     </span>
                   ) : null}
-                  {composerAttachments
-                    .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
-                    .map((attachment) => (
-                      <span key={attachment.id} className="composer-skill-mention" title={attachment.description}>
-                        <span>/{attachment.label}</span>
-                        <button
-                          type="button"
-                          title={`移除 ${attachment.label}`}
-                          aria-label={`移除 ${attachment.label}`}
-                          onClick={() => removeComposerAttachment(attachment.id)}
-                        >
-                          <IconClose />
-                        </button>
-                      </span>
-                    ))}
                 </div>
                 <div className="composer-toolbar-right">
                   <ComposerModelPicker
@@ -3116,7 +3122,7 @@ export function App() {
               <div
                 className="gpa-popover"
                 role="menu"
-                onMouseLeave={() => setComposerAddMenuView("root")}
+                onMouseLeave={scheduleComposerAddMenuClose}
                 style={{
                   position: "fixed",
                   left: gpaMenuPos.left,
@@ -3125,14 +3131,14 @@ export function App() {
                 }}
               >
                 <>
-                    <button className="gpa-popover-item" role="menuitem" onClick={() => void chooseComposerFiles(false)}>
+                    <button className="gpa-popover-item" role="menuitem" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(false)}>
                       <span className="gpa-popover-item-icon" aria-hidden><IconFile /></span>
                       <span className="gpa-popover-item-copy">
                         <span className="gpa-popover-item-title">添加文件</span>
                         <span className="gpa-popover-item-hint">选择文件作为任务上下文</span>
                       </span>
                     </button>
-                    <button className="gpa-popover-item" role="menuitem" onClick={() => void chooseComposerFiles(true)}>
+                    <button className="gpa-popover-item" role="menuitem" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(true)}>
                       <span className="gpa-popover-item-icon" aria-hidden><IconImage /></span>
                       <span className="gpa-popover-item-copy">
                         <span className="gpa-popover-item-title">添加图片</span>
@@ -3142,7 +3148,8 @@ export function App() {
                     <button
                       className="gpa-popover-item composer-add-menu-parent"
                       role="menuitem"
-                      onMouseEnter={() => setComposerAddMenuView("skills")}
+                      data-composer-add-menu-view="skills"
+                      onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("skills"); }}
                       onFocus={() => setComposerAddMenuView("skills")}
                       onClick={() => setComposerAddMenuView("skills")}
                     >
@@ -3156,7 +3163,8 @@ export function App() {
                     <button
                       className="gpa-popover-item composer-add-menu-parent"
                       role="menuitem"
-                      onMouseEnter={() => setComposerAddMenuView("mcp")}
+                      data-composer-add-menu-view="mcp"
+                      onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("mcp"); }}
                       onFocus={() => setComposerAddMenuView("mcp")}
                       onClick={() => setComposerAddMenuView("mcp")}
                     >
@@ -3170,7 +3178,7 @@ export function App() {
                     <div className="gpa-popover-divider" />
                 </>
                 {composerAddMenuView === "skills" ? (
-                  <div className="composer-add-menu-submenu">
+                  <div className="composer-add-menu-submenu" data-composer-add-menu-view="skills" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("skills"); }}>
                     <div className="composer-add-menu-submenu-title">Skills</div>
                     <div className="composer-add-menu-list">
                       {skills.length > 0 ? skills.map((skill) => (
@@ -3200,7 +3208,7 @@ export function App() {
                   </div>
                 ) : null}
                 {composerAddMenuView === "mcp" ? (
-                  <div className="composer-add-menu-submenu">
+                  <div className="composer-add-menu-submenu" data-composer-add-menu-view="mcp" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("mcp"); }}>
                     <div className="composer-add-menu-submenu-title">MCP 服务</div>
                     <div className="composer-add-menu-list">
                       {(config?.mcpServers ?? []).filter((server) => server.enabled).map((server) => (
@@ -3233,6 +3241,7 @@ export function App() {
                 <button
                   className={`gpa-popover-item gpa-popover-item-full-access ${gpaState.fullAccess ? "is-active" : ""}`}
                   role="menuitem"
+                  onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
                   disabled={gpaState.fullAccess}
                   onClick={() => void setFullAccess(true)}
                 >
@@ -3246,6 +3255,7 @@ export function App() {
                 <button
                   className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
                   role="menuitem"
+                  onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
                   disabled={gpaState.stage !== "off"}
                   onClick={() => void enableGpaMode()}
                 >
@@ -3675,7 +3685,11 @@ function LegacyProjectPreviewWorkspace({
   loading: boolean;
 }) {
   if (!selectedPath) {
-    return <WorkspaceEmptyState icon={<IconEye />} message={loading ? "正在读取项目文件..." : "选择一个文件进行查看"} />;
+    return loading ? (
+      <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取项目文件..." />
+    ) : (
+      <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="从工作区目录树中选择文件" />
+    );
   }
 
   return (
@@ -4133,12 +4147,16 @@ function ProjectPreviewWorkspace({
 }) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
   if (tabs.length === 0) {
-    return <WorkspaceEmptyState icon={<IconEye />} message={loading ? "正在读取项目文件..." : "选择一个文件进行查看"} />;
+    return loading ? (
+      <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取项目文件..." />
+    ) : (
+      <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="从工作区目录树中选择文件" />
+    );
   }
 
   const currentPath = selectedPath ?? tabs[0];
   if (!currentPath) {
-    return <WorkspaceEmptyState icon={<IconEye />} message="选择一个文件进行查看" />;
+    return <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="从工作区目录树中选择文件" />;
   }
 
   return (
@@ -4298,10 +4316,11 @@ function BrowserWorkspace({
   );
 }
 
-function WorkspaceEmptyState({ icon, message }: { icon: ReactNode; message: string }) {
+function WorkspaceEmptyState({ icon, title, message }: { icon: ReactNode; title?: string; message: string }) {
   return (
-    <div className="right-workspace-empty-state">
+    <div className={`right-workspace-empty-state ${title ? "open-file" : ""}`}>
       <span aria-hidden="true">{icon}</span>
+      {title ? <strong>{title}</strong> : null}
       <p>{message}</p>
     </div>
   );
