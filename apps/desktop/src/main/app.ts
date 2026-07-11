@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
+import { shell } from "electron";
 import type {
   AppConfig,
   ArtifactRecord,
@@ -13,6 +14,7 @@ import type {
   MessageRecord,
   McpServerConfig,
   PluginRecord,
+  ProviderDefinition,
   ProjectPluginBinding,
   RuntimeEvent,
   RuntimeThreadSnapshot,
@@ -27,6 +29,8 @@ import { hashDirectory, PluginRuntime } from "@plugin-runtime";
 import { ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { ToolRuntime } from "@tool-runtime";
+import { RuntimeLogWriter } from "./runtime-log";
+import { TerminalRuntime } from "./terminal-runtime";
 import {
   DatabaseService,
   defaultConfig,
@@ -48,17 +52,22 @@ export class DesktopBackend {
   readonly #providerFactory = new ProviderFactory();
   readonly #browser = new BrowserRuntime();
   readonly #plugins = new PluginRuntime();
+  readonly #terminal = new TerminalRuntime();
+  readonly #openedLocalUrls = new Set<string>();
 
   #layout!: HomeLayout;
   #db!: DatabaseService;
   #config!: AppConfig;
   #runtime!: AgentRuntimeService;
   #mcp!: McpManager;
+  #logs!: RuntimeLogWriter;
 
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
+    this.#logs = new RuntimeLogWriter(this.#layout.logsDir);
     this.#config = await loadConfig(this.#layout.configFile);
     this.#db = new DatabaseService(this.#layout.dbFile);
+    this.#db.recoverInterruptedThreads();
     this.#mcp = new McpManager();
     await this.syncInstalledPlugins();
     await this.refreshMcpConfiguration();
@@ -99,6 +108,12 @@ export class DesktopBackend {
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf8");
       },
+      runTerminalCommand: async (threadId, cwd, command) =>
+        this.#terminal.execute(threadId, cwd, command, (data) => {
+          void this.emitTerminalOutput(threadId, data);
+        }, (url) => {
+          void this.openLocalServerUrl(threadId, url);
+        }),
       requestApproval: async (threadId, turnRunId, input) =>
         this.requestApproval(threadId, turnRunId, input),
       requestUserInput: async (threadId, turnRunId, input) =>
@@ -123,8 +138,10 @@ export class DesktopBackend {
       readMcpResource: async (server, uri) => this.#mcp.readResource(server, uri),
       callMcpTool: async (server, tool, argumentsJson) =>
         this.#mcp.callTool(server, tool, argumentsJson),
-      emit: async (event) => this.emit(event)
+      emit: async (event) => this.emit(event),
+      log: async (kind, threadId, payload) => this.#logs.append(kind, payload, threadId)
     });
+    await this.#logs.append("backend.initialized", { logsDir: this.#layout.logsDir });
   }
 
   public onEvent(listener: (event: RuntimeEvent) => void): () => void {
@@ -166,7 +183,74 @@ export class DesktopBackend {
     await this.removeThreadOutputDir(thread);
     this.#db.deleteThread(threadId);
     this.#browser.clearThread(threadId);
+    this.#terminal.close(threadId);
     this.#runtime.forgetThread(threadId);
+  }
+
+  public openTerminal(threadId: string) {
+    const thread = this.#db.getThread(threadId);
+    return this.#terminal.open(threadId, thread.cwd ?? process.cwd(), (data) => {
+      void this.emitTerminalOutput(threadId, data);
+    });
+  }
+
+  public writeTerminal(threadId: string, input: string): void {
+    const thread = this.#db.getThread(threadId);
+    this.#terminal.write(threadId, thread.cwd ?? process.cwd(), input, (data) => {
+      void this.emitTerminalOutput(threadId, data);
+    });
+  }
+
+  public closeTerminal(threadId: string): void {
+    this.#terminal.close(threadId);
+  }
+
+  public async listProjectFiles(threadId: string): Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>> {
+    const root = this.getProjectDirectory(threadId);
+    const files: Array<{ path: string; kind: "file" | "directory"; size?: number }> = [];
+    const ignored = new Set([".git", "node_modules", ".next", "dist", "build"]);
+
+    const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
+      const entries = await fs.readdir(directory, { withFileTypes: true });
+      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+        if (ignored.has(entry.name) || entry.isSymbolicLink() || files.length >= 2_000) {
+          continue;
+        }
+        const relativePath = relativeDirectory ? path.join(relativeDirectory, entry.name) : entry.name;
+        const absolutePath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          files.push({ path: relativePath, kind: "directory" });
+          await visit(absolutePath, relativePath);
+          continue;
+        }
+        if (entry.isFile()) {
+          const stats = await fs.stat(absolutePath);
+          files.push({ path: relativePath, kind: "file", size: stats.size });
+        }
+      }
+    };
+
+    await visit(root, "");
+    return files;
+  }
+
+  public async readProjectFile(threadId: string, relativePath: string): Promise<{ path: string; content: string; truncated: boolean }> {
+    const root = this.getProjectDirectory(threadId);
+    const target = resolveProjectFilePath(root, relativePath);
+    const stats = await fs.stat(target);
+    if (!stats.isFile()) {
+      throw new Error("The selected project entry is not a file.");
+    }
+
+    const buffer = await fs.readFile(target);
+    const limit = 512_000;
+    const visible = buffer.subarray(0, limit);
+    const isBinary = visible.includes(0);
+    return {
+      path: relativePath,
+      content: isBinary ? "Binary file preview is not available." : visible.toString("utf8"),
+      truncated: buffer.length > limit
+    };
   }
 
   public getThreadSnapshot(threadId: string): RuntimeThreadSnapshot {
@@ -195,6 +279,10 @@ export class DesktopBackend {
     await this.#runtime.setGpaStage(threadId, stage);
   }
 
+  public async setGpaFullAccess(threadId: string, fullAccess: boolean): Promise<void> {
+    await this.#runtime.setGpaFullAccess(threadId, fullAccess);
+  }
+
   public sendMessage(threadId: string, content: string): void {
     const thread = this.#db.getThread(threadId);
     if (this.#db.listMessages(threadId).length === 0) {
@@ -213,8 +301,19 @@ export class DesktopBackend {
     this.#runtime.submitUserInput(threadId, content);
   }
 
-  public interruptThread(threadId: string): void {
+  public async interruptThread(threadId: string): Promise<void> {
     this.#runtime.interrupt(threadId);
+    const thread = this.#db.getThread(threadId);
+    if (thread.status !== "running" && thread.status !== "waiting") {
+      return;
+    }
+    const updated = this.#db.interruptThreadExecution(threadId);
+    await this.emit({
+      type: "thread.updated",
+      threadId,
+      payload: { thread: updated },
+      createdAt: new Date().toISOString()
+    });
   }
 
   public listSkills(): ReturnType<SkillsManager["list"]> {
@@ -254,7 +353,7 @@ export class DesktopBackend {
     }
     const payload = (await response.json()) as {
       data?: Array<{ id: string; display_name?: string; name?: string; owned_by?: string }>;
-      models?: Array<{ id: string; name?: string }>;
+      models?: Array<{ id: string; display_name?: string; name?: string }>;
     };
     const list = Array.isArray(payload.data)
       ? payload.data
@@ -592,11 +691,14 @@ export class DesktopBackend {
     }
   ): Promise<boolean> {
     const thread = this.#db.getThread(threadId);
+    if (parseGpaState(thread.gpaStateJson).fullAccess) {
+      return true;
+    }
     const approvalKey = hashApprovalPayload({
       title: input.title,
       description: input.description,
       riskLevel: input.riskLevel,
-      payload: input.payload
+      payload: getApprovalScopePayload(input.payload)
     });
     const scopeKey = buildApprovalScopeKey(thread.projectId, approvalKey);
 
@@ -789,6 +891,9 @@ export class DesktopBackend {
   private async emit(event: RuntimeEvent): Promise<void> {
     this.#db.addRuntimeEvent(event);
     this.#events.emit("runtime-event", event);
+    if (event.type !== "assistant.delta") {
+      await this.#logs.append("runtime.event", { event }, event.threadId);
+    }
   }
 
   private async syncInstalledPlugins(): Promise<void> {
@@ -917,6 +1022,49 @@ export class DesktopBackend {
     const { outputDir } = this.resolveThreadOutputPaths(thread);
     await fs.mkdir(outputDir, { recursive: true });
     return outputDir;
+  }
+
+  private async emitTerminalOutput(threadId: string, data: string): Promise<void> {
+    await this.emit({
+      type: "terminal.output",
+      threadId,
+      payload: { data },
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  private getProjectDirectory(threadId: string): string {
+    const thread = this.#db.getThread(threadId);
+    if (!thread.cwd) {
+      throw new Error("This task does not have a project folder.");
+    }
+    return path.resolve(thread.cwd);
+  }
+
+  private async openLocalServerUrl(threadId: string, url: string): Promise<void> {
+    const key = `${threadId}:${url}`;
+    if (this.#openedLocalUrls.has(key)) {
+      return;
+    }
+    this.#openedLocalUrls.add(key);
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(1_500) });
+        if (response.ok) {
+          if (!this.#db.listBrowserTabs(threadId).some((tab) => tab.url === url)) {
+            await this.openBrowserTab(threadId, url);
+          }
+          await shell.openExternal(url);
+          return;
+        }
+      } catch {
+        // The server may still be binding its port after a background launch.
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    }
+
+    this.#openedLocalUrls.delete(key);
   }
 }
 
@@ -1055,6 +1203,26 @@ function hashApprovalPayload(input: {
   return createHash("sha256")
     .update(stableStringify(input))
     .digest("hex");
+}
+
+function resolveProjectFilePath(root: string, relativePath: string): string {
+  if (!relativePath || path.isAbsolute(relativePath)) {
+    throw new Error("Project file paths must be relative to the project folder.");
+  }
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, relativePath);
+  const relative = path.relative(resolvedRoot, resolved);
+  if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    throw new Error("Project file path is outside the project folder.");
+  }
+  return resolved;
+}
+
+function getApprovalScopePayload(payload: Record<string, unknown>): Record<string, unknown> {
+  if (typeof payload.patchPreview === "string") {
+    return { operation: "apply_patch" };
+  }
+  return payload;
 }
 
 function stableStringify(value: unknown): string {

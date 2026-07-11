@@ -15,6 +15,127 @@
   background: linear-gradient(to bottom, rgba(148, 163, 184, 0.38), rgba(148, 163, 184, 0.04));
 }
 
+.conversation-turn-rail-shell {
+  position: sticky;
+  top: 50%;
+  z-index: 6;
+  height: 0;
+  pointer-events: none;
+}
+
+.conversation-turn-rail {
+  position: absolute;
+  left: max(4px, calc(50% - 656px));
+  display: grid;
+  justify-items: start;
+  gap: 3px;
+  width: 34px;
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+
+.conversation-turn-marker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 28px;
+  height: 6px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.conversation-turn-marker-line {
+  display: block;
+  height: 1px;
+  border-radius: 1px;
+  background: rgba(148, 163, 184, 0.58);
+  transition: width 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.conversation-turn-marker.is-latest .conversation-turn-marker-line {
+  background: rgba(226, 232, 240, 0.9);
+}
+
+.conversation-turn-marker:hover .conversation-turn-marker-line,
+.conversation-turn-marker:focus-visible .conversation-turn-marker-line {
+  width: 32px !important;
+  background: #f1f5f9;
+  box-shadow: 0 0 10px rgba(226, 232, 240, 0.26);
+}
+
+.conversation-turn-marker:focus-visible {
+  outline: none;
+}
+
+.conversation-turn-preview {
+  position: absolute;
+  left: 42px;
+  top: 50%;
+  display: grid;
+  gap: 6px;
+  width: 278px;
+  padding: 12px 13px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  color: #d8dce3;
+  background: rgba(43, 43, 46, 0.98);
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) translateX(-4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  visibility: hidden;
+}
+
+.conversation-turn-marker.is-hovered .conversation-turn-preview,
+.conversation-turn-marker:focus-visible .conversation-turn-preview {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+  visibility: visible;
+}
+
+.conversation-turn-preview-copy {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #f4f5f7;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: left;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.conversation-turn-preview-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  padding-top: 2px;
+}
+
+.conversation-turn-preview-files code,
+.conversation-turn-preview-files em {
+  color: #adb3bd;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.conversation-turn-preview-files code::before {
+  content: "#";
+  margin-right: 4px;
+  color: #737b88;
+}
+
+@media (max-width: 760px) {
+  .conversation-turn-rail-shell {
+    display: none;
+  }
+}
+
 .task-timeline .message-card,
 .task-timeline .execution-step,
 .task-timeline .plan-timeline {
@@ -319,6 +440,64 @@
 .execution-output summary { cursor: pointer; color: #94a3b8; font-size: 12px; }
 .execution-output pre { max-height: 240px; overflow: auto; margin: 8px 0 0; color: #bac8da; font-family: var(--font-mono); font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
 
+.local-server-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 7px;
+  background: #111820;
+}
+
+.local-server-preview-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border-radius: 6px;
+  color: #72c5ff;
+  background: rgba(96, 165, 250, 0.12);
+}
+
+.local-server-preview-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.local-server-preview-copy strong {
+  color: #eef6ff;
+  font-size: 12px;
+}
+
+.local-server-preview-copy span {
+  overflow: hidden;
+  color: #8da0b5;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-server-preview button {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 6px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  color: #ecf5ff;
+  background: #1a2733;
+  font-size: 12px;
+}
+
+.local-server-preview button:hover {
+  border-color: rgba(114, 197, 255, 0.42);
+  background: #223545;
+}
+
 .streaming-assistant {
   position: relative;
   margin-left: 24px;
@@ -351,9 +530,92 @@
   animation: streaming-caret 780ms step-end infinite;
 }
 
+.directory-read-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  min-height: 28px;
+  margin-left: 24px;
+  padding: 0 10px 0 12px;
+  border-left: 1px solid rgba(148, 163, 184, 0.34);
+  color: #c7d3e3;
+  font-size: 13px;
+}
+
+.directory-read-group-dot {
+  position: absolute;
+  left: -5px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid #101720;
+  border-radius: 50%;
+  background: #718096;
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.42);
+}
+
+.directory-read-group code {
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: #dce7f5;
+  background: rgba(148, 163, 184, 0.16);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.directory-read-group-count {
+  padding: 2px 6px;
+  border-radius: 9px;
+  color: #8fb4dc;
+  background: rgba(59, 130, 246, 0.12);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.task-processing-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  width: fit-content;
+  min-height: 30px;
+  margin: 2px 0 2px 24px;
+  padding: 0 11px;
+  border: 1px solid rgba(96, 165, 250, 0.26);
+  border-radius: 6px;
+  color: #aebfd3;
+  background: #101720;
+  font-size: 12px;
+  animation: timeline-enter 160ms ease-out both;
+}
+
+.task-processing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 14px;
+}
+
+.task-processing-dots i {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #60a5fa;
+  animation: task-processing-dot 1.05s ease-in-out infinite;
+}
+
+.task-processing-dots i:nth-child(2) { animation-delay: 140ms; }
+.task-processing-dots i:nth-child(3) { animation-delay: 280ms; }
+
 @keyframes timeline-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes timeline-pulse { 0%, 100% { opacity: 0.58; } 50% { opacity: 1; } }
 @keyframes streaming-caret { 50% { opacity: 0; } }
+@keyframes task-processing-dot { 0%, 100% { opacity: 0.35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .task-processing-dots i { animation: none; }
+}
 
 @media (max-width: 760px) {
   .task-timeline { width: min(100% - 28px, 920px); padding-top: 22px; }

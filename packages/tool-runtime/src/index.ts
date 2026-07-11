@@ -27,6 +27,7 @@ export interface ToolRuntimeContext {
   listFiles: (dir: string) => Promise<string[]>;
   readFile: (filePath: string) => Promise<string>;
   writeFile: (filePath: string, content: string) => Promise<void>;
+  runTerminalCommand?: (command: string) => Promise<TerminalCommandResult>;
   requestApproval: (input: {
     title: string;
     description: string;
@@ -74,6 +75,21 @@ interface ToolRegistration {
   handler: ToolHandler;
 }
 
+type TerminalCommandResult = {
+  output: string;
+  localUrl?: string;
+};
+
+const TOOL_ALIASES: Record<string, string> = {
+  read: "fs.read_directory",
+  read_file: "fs.read_file",
+  read_directory: "fs.read_directory",
+  list_directory: "fs.read_directory",
+  write_file: "fs.write_file",
+  applypatch: "apply_patch",
+  execute_command: "shell.exec"
+};
+
 export class ToolRuntime {
   readonly #registry = new Map<string, ToolRegistration>();
 
@@ -111,9 +127,12 @@ export class ToolRuntime {
     call: RuntimeToolCall,
     ctx: ToolRuntimeContext
   ): Promise<ToolResult> {
-    const registration =
+    let registration =
       this.#registry.get(call.name) ||
       this.#registry.get(call.name.replace(/^([^:]+)\./, "$1:"));
+    if (!registration && TOOL_ALIASES[call.name]) {
+      registration = this.#registry.get(TOOL_ALIASES[call.name]);
+    }
     if (!registration) {
       throw new Error(`Unknown tool: ${call.name}`);
     }
@@ -171,7 +190,13 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("fs.write_file", "Write a UTF-8 text file to disk.", ["path", "content"], "medium"),
+    spec(
+      "fs.write_file",
+      "Write a UTF-8 text file to disk.",
+      ["path", "content"],
+      "medium",
+      "deferred"
+    ),
     async (args, ctx) => {
       const filePath = resolveFromCwd(ctx.cwd, String(args.path));
       const content = String(args.content ?? "");
@@ -194,17 +219,21 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     async (args, ctx) => {
       const target = resolveFromCwd(ctx.cwd, String(args.path ?? "."));
       const entries = await ctx.listFiles(target);
-      return { ok: true, content: entries.join("\n"), json: { path: target, entries } };
+      const content = entries.length > 0
+        ? `Directory listing succeeded:\n${entries.join("\n")}`
+        : "Directory listing succeeded. The selected project folder is empty. Create the requested files now with apply_patch; do not list this directory again.";
+      return { ok: true, content, json: { path: target, entries } };
     }
   );
 
   runtime.register(
     spec("code.search", "Search the current workspace for a keyword.", ["pattern"], "low"),
     async (args, ctx) => {
-      const commandTuple: [string, string[]] = process.platform === "win32"
-        ? ["powershell", ["-NoProfile", "-Command", `Get-ChildItem -Path "${ctx.cwd}" -Recurse -File | Select-String -Pattern '${escapePowerShell(String(args.pattern ?? ""))}' | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }`]]
-        : ["sh", ["-lc", `grep -RIn "${String(args.pattern ?? "")}" "${ctx.cwd}" || true`]];
-      const output = await runCommand(commandTuple[0], commandTuple[1], ctx.cwd);
+      const command = process.platform === "win32"
+        ? `Get-ChildItem -Path "${ctx.cwd}" -Recurse -File | Select-String -Pattern '${escapePowerShell(String(args.pattern ?? ""))}' | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }`
+        : `grep -RIn "${String(args.pattern ?? "")}" "${ctx.cwd}" || true`;
+      const terminal = await runShell(command, ctx);
+      const output = terminal.output;
       return { ok: true, content: output, json: { pattern: args.pattern, output } };
     }
   );
@@ -222,15 +251,24 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "命令执行被拒绝。" };
       }
-      const output = await runShell(command, ctx.cwd);
-      return { ok: true, content: output, json: { command, output } };
+      const terminal = await runShell(command, ctx);
+      return {
+        ok: true,
+        content: terminal.output,
+        json: { command, output: terminal.output, localUrl: terminal.localUrl }
+      };
     }
   );
 
   runtime.register(
-    spec("apply_patch", "Apply a codex-style patch to files.", ["patch"], "high"),
+    spec(
+      "apply_patch",
+      "Apply a Codex patch. Pass arguments.patch as raw text beginning with *** Begin Patch and ending with *** End Patch. Use *** Add File: relative/path for new files.",
+      ["patch"],
+      "high"
+    ),
     async (args, ctx) => {
-      const patchText = String(args.patch ?? "");
+      const patchText = normalizeApplyPatchInput(args);
       const approved = await ctx.requestApproval({
         title: "应用补丁",
         description: "将对多个文件写入或删除内容。",
@@ -248,7 +286,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("git.status", "Read git status for the current repository.", [], "low"),
     async (_args, ctx) => {
-      const output = await runShell("git status --short --branch", ctx.cwd);
+      const output = (await runShell("git status --short --branch", ctx)).output;
       return { ok: true, content: output, json: { output } };
     }
   );
@@ -256,7 +294,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("git.diff", "Read git diff for the current repository.", [], "low"),
     async (_args, ctx) => {
-      const output = await runShell("git diff --no-ext-diff", ctx.cwd);
+      const output = (await runShell("git diff --no-ext-diff", ctx)).output;
       return { ok: true, content: output, json: { output } };
     }
   );
@@ -274,7 +312,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "提交被拒绝。" };
       }
-      const output = await runShell(`git add -A && git commit -m "${message.replace(/"/g, '\\"')}"`, ctx.cwd);
+      const output = (await runShell(`git add -A && git commit -m "${message.replace(/"/g, '\\"')}"`, ctx)).output;
       return { ok: true, content: output, json: { output } };
     }
   );
@@ -282,7 +320,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("git.worktree_list", "List git worktrees for the current repository.", [], "low"),
     async (_args, ctx) => {
-      const output = await runShell("git worktree list --porcelain", ctx.cwd);
+      const output = (await runShell("git worktree list --porcelain", ctx)).output;
       return { ok: true, content: output, json: { output } };
     }
   );
@@ -303,7 +341,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "创建 worktree 被拒绝。" };
       }
-      const output = await runShell(command, ctx.cwd);
+      const output = (await runShell(command, ctx)).output;
       return { ok: true, content: output, json: { path: targetPath, branch, base, output } };
     }
   );
@@ -322,7 +360,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "移除 worktree 被拒绝。" };
       }
-      const output = await runShell(command, ctx.cwd);
+      const output = (await runShell(command, ctx)).output;
       return { ok: true, content: output, json: { path: targetPath, output } };
     }
   );
@@ -582,7 +620,8 @@ function spec(
   name: string,
   description: string,
   required: string[],
-  riskLevel: "low" | "medium" | "high"
+  riskLevel: "low" | "medium" | "high",
+  exposure?: ToolSpecDefinition["exposure"]
 ): ToolSpecDefinition {
   return {
     name,
@@ -595,7 +634,8 @@ function spec(
       }, {}),
       required
     },
-    riskLevel
+    riskLevel,
+    exposure
   };
 }
 
@@ -604,7 +644,65 @@ function fullyQualifiedName(spec: ToolSpecDefinition): string {
 }
 
 function resolveFromCwd(cwd: string, targetPath: string): string {
-  return path.isAbsolute(targetPath) ? targetPath : path.resolve(cwd, targetPath);
+  return resolveWorkspacePath(cwd, targetPath);
+}
+
+function normalizeApplyPatchInput(args: Record<string, unknown>): string {
+  const value = args.patch ?? args.patch_content ?? args.patchText;
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const text = value.trim();
+  const beginIndex = text.indexOf("*** Begin Patch");
+  const canonical = beginIndex >= 0 ? text.slice(beginIndex) : text;
+  if (canonical.startsWith("*** Begin Patch")) {
+    return canonical;
+  }
+
+  return convertUnifiedAddPatch(canonical, args.file_path);
+}
+
+function convertUnifiedAddPatch(text: string, requestedPath: unknown): string {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const oldPath = lines.find((line) => line.startsWith("--- "))?.slice(4).trim();
+  const newPath = lines.find((line) => line.startsWith("+++ "))?.slice(4).trim();
+  if (oldPath !== "/dev/null" || !newPath) {
+    return text;
+  }
+
+  const hunkIndex = lines.findIndex((line) => line.startsWith("@@"));
+  if (hunkIndex < 0) {
+    return text;
+  }
+  const content = lines.slice(hunkIndex + 1);
+  while (content.at(-1) === "") {
+    content.pop();
+  }
+  if (content.some((line) => line && !line.startsWith("+"))) {
+    return text;
+  }
+  const pathValue = typeof requestedPath === "string" && requestedPath.trim() ? requestedPath : newPath.replace(/^[ab]\//, "");
+  const relativePath = pathValue.replace(/^[/\\]+/, "").replace(/^[^/\\]+:[/\\]+/, "");
+  return [
+    "*** Begin Patch",
+    `*** Add File: ${relativePath}`,
+    ...content,
+    "*** End Patch"
+  ].join("\n");
+}
+
+function resolveWorkspacePath(rootDir: string, targetPath: string): string {
+  if (path.isAbsolute(targetPath)) {
+    throw new Error("File paths must be relative to the project folder.");
+  }
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(root, targetPath);
+  const relative = path.relative(root, resolved);
+  if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+    return resolved;
+  }
+  throw new Error("File path is outside the project folder.");
 }
 
 function escapePowerShell(value: string): string {
@@ -615,11 +713,14 @@ function escapeDoubleQuotes(value: string): string {
   return value.replace(/"/g, '\\"');
 }
 
-function runShell(command: string, cwd: string): Promise<string> {
-  if (process.platform === "win32") {
-    return runCommand("powershell", ["-NoProfile", "-Command", command], cwd);
+async function runShell(command: string, ctx: ToolRuntimeContext): Promise<TerminalCommandResult> {
+  if (ctx.runTerminalCommand) {
+    return ctx.runTerminalCommand(command);
   }
-  return runCommand("sh", ["-lc", command], cwd);
+  if (process.platform === "win32") {
+    return { output: await runCommand("powershell", ["-NoProfile", "-Command", command], ctx.cwd) };
+  }
+  return { output: await runCommand("sh", ["-lc", command], ctx.cwd) };
 }
 
 function runCommand(command: string, args: string[], cwd: string): Promise<string> {

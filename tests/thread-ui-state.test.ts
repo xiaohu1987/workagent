@@ -6,6 +6,11 @@ import {
   getHistoryItemAffordance,
   isThreadExecutionInProgress
 } from "../apps/desktop/src/renderer/thread-ui-state";
+import {
+  getToolProcessingLabel,
+  isFileWriteTool,
+  isPatchAssistantMessage
+} from "../apps/desktop/src/renderer/App";
 
 describe("thread UI state helpers", () => {
   it("treats running and waiting threads as executing", () => {
@@ -78,5 +83,26 @@ describe("thread UI state helpers", () => {
 
     expect(canDeleteThread("completed", null)).toBe(true);
     expect(getDeleteThreadBlockedMessage("completed", null)).toBeNull();
+  });
+});
+
+describe("tool processing labels", () => {
+  it("uses specific status text for common tool operations", () => {
+    expect(getToolProcessingLabel("fs.read_file")).toBe("正在读取文件");
+    expect(getToolProcessingLabel("fs.read_directory")).toBe("正在读取目录");
+    expect(getToolProcessingLabel("apply_patch")).toBe("正在写入文件");
+    expect(getToolProcessingLabel("shell.exec")).toBe("正在执行命令");
+    expect(getToolProcessingLabel("browser.open_tab")).toBe("正在操作浏览器");
+    expect(getToolProcessingLabel("web_search.search_query")).toBe("正在搜索网络");
+  });
+});
+
+describe("file write transcript filtering", () => {
+  it("hides raw Codex patches and their write-tool cards from the chat timeline", () => {
+    expect(isPatchAssistantMessage("*** Begin Patch\n*** Add File: src/app.ts\n+export {}\n*** End Patch")).toBe(true);
+    expect(isPatchAssistantMessage("Implemented the requested feature.")).toBe(false);
+    expect(isFileWriteTool("apply_patch")).toBe(true);
+    expect(isFileWriteTool("fs.write_file")).toBe(true);
+    expect(isFileWriteTool("fs.read_file")).toBe(false);
   });
 });

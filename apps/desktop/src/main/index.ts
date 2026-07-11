@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, screen } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -120,6 +120,17 @@ function reportStartupError(error: unknown): void {
 function registerIpc(): void {
   ipcMain.handle("threads:list", () => backend.listThreads());
   ipcMain.handle("threads:create", (_event, payload) => backend.createThread(payload));
+  ipcMain.handle("projects:choose-directory", async (_event, defaultPath?: string) => {
+    const result = await dialog.showOpenDialog({
+      defaultPath: defaultPath || undefined,
+      properties: ["openDirectory", "createDirectory"]
+    });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  ipcMain.handle("projects:list-files", (_event, threadId: string) => backend.listProjectFiles(threadId));
+  ipcMain.handle("projects:read-file", (_event, payload: { threadId: string; path: string }) =>
+    backend.readProjectFile(payload.threadId, payload.path)
+  );
   ipcMain.handle("threads:delete", (_event, threadId: string) => backend.deleteThread(threadId));
   ipcMain.handle("threads:snapshot", (_event, threadId: string) => backend.getThreadSnapshot(threadId));
   ipcMain.handle("threads:send", (_event, payload) => backend.sendMessage(payload.threadId, payload.content));
@@ -127,6 +138,12 @@ function registerIpc(): void {
   ipcMain.handle("threads:update-model", (_event, payload) =>
     backend.updateThreadModelSelection(payload.threadId, payload.providerId, payload.modelId)
   );
+  ipcMain.handle("terminal:open", (_event, threadId: string) => backend.openTerminal(threadId));
+  ipcMain.handle("terminal:write", (_event, payload: { threadId: string; input: string }) =>
+    backend.writeTerminal(payload.threadId, payload.input)
+  );
+  ipcMain.handle("terminal:close", (_event, threadId: string) => backend.closeTerminal(threadId));
+  ipcMain.handle("shell:open-external", (_event, url: string) => shell.openExternal(url));
   ipcMain.handle("skills:list", () => backend.listSkills());
   ipcMain.handle("plugins:list", () => backend.listPlugins());
   ipcMain.handle("plugins:install", (_event, source: string) => backend.installPlugin(source));
@@ -161,6 +178,9 @@ function registerIpc(): void {
   ipcMain.handle("gpa:state", (_event, threadId: string) => backend.getGpaState(threadId));
   ipcMain.handle("gpa:set-stage", (_event, payload: { threadId: string; stage: string }) =>
     backend.setGpaStage(payload.threadId, payload.stage as "off" | "goal" | "plan" | "act")
+  );
+  ipcMain.handle("gpa:set-full-access", (_event, payload: { threadId: string; fullAccess: boolean }) =>
+    backend.setGpaFullAccess(payload.threadId, payload.fullAccess)
   );
   ipcMain.handle("models:fetch", (_event, payload) => backend.fetchProviderModels(payload));
 }

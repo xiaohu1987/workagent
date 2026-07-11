@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import "./timeline.css";
 import type {
   AppConfig,
+  ApprovalRequest,
   GpaStage,
   GpaState,
   KnowledgeScope,
@@ -87,7 +88,25 @@ type AppNotice = {
 
 type TimelineEntry =
   | { kind: "message"; id: string; createdAt: string; message: MessageRecord }
-  | { kind: "tool"; id: string; createdAt: string; toolCall: ToolCallRecord };
+  | { kind: "tool"; id: string; createdAt: string; toolCall: ToolCallRecord }
+  | { kind: "file-summary"; id: string; createdAt: string; files: FileChangeSummaryItem[] }
+  | { kind: "directory-read-group"; id: string; createdAt: string; directory: string; count: number };
+
+type FileChangeAction = "created" | "modified" | "deleted";
+
+type FileChangeSummaryItem = {
+  path: string;
+  action: FileChangeAction;
+  additions: number;
+  deletions: number;
+};
+
+type ConversationTurnItem = {
+  id: string;
+  content: string;
+  createdAt: string;
+  files: FileChangeSummaryItem[];
+};
 
 type StreamingAssistant = {
   threadId: string;
@@ -95,6 +114,12 @@ type StreamingAssistant = {
   content: string;
   completed: boolean;
   messageId?: string;
+};
+
+type ActiveToolCall = {
+  threadId: string;
+  toolCallId: string;
+  toolName: string;
 };
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
@@ -148,14 +173,22 @@ const PROVIDER_TYPE_OPTIONS: ProviderTypeOption[] = [
 export function App() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+  const [terminalOutput, setTerminalOutput] = useState("");
+  const [terminalInput, setTerminalInput] = useState("");
+  const [terminalCwd, setTerminalCwd] = useState("");
+  const [terminalShell, setTerminalShell] = useState("PowerShell");
   const selectedThreadIdRef = useRef<string | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
+  const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [input, setInput] = useState("");
   const [skills, setSkills] = useState<SkillMetadata[]>([]);
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
   const [gpaState, setGpaState] = useState<GpaState>({
     stage: "off",
+    fullAccess: false,
     awaitingConfirmation: null,
     planTasks: [],
     updatedAt: ""
@@ -186,12 +219,15 @@ export function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
+  const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
+  const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
   const [notice, setNotice] = useState<AppNotice | null>(null);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatTranscriptRef = useRef<HTMLDivElement | null>(null);
+  const terminalScrollRef = useRef<HTMLPreElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
   const pendingLatestScrollThreadIdRef = useRef<string | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
@@ -237,11 +273,37 @@ export function App() {
           delta?: string;
           content?: string;
           messageId?: string;
+          toolCallId?: string;
+          toolName?: string;
+          data?: string;
         };
       };
       const currentSelectedThreadId = selectedThreadIdRef.current;
+      if (typed.type === "terminal.output" && typed.threadId === currentSelectedThreadId) {
+        setTerminalOutput((current) => `${current}${typed.payload?.data ?? ""}`.slice(-80_000));
+        return;
+      }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
         setGpaState(typed.payload.gpa);
+        return;
+      }
+      if (
+        typed.type === "tool.started" &&
+        typed.threadId &&
+        typed.payload?.toolCallId &&
+        typed.payload?.toolName
+      ) {
+        setActiveToolCall({
+          threadId: typed.threadId,
+          toolCallId: typed.payload.toolCallId,
+          toolName: typed.payload.toolName
+        });
+        return;
+      }
+      if (typed.type === "tool.completed" && typed.payload?.toolCallId) {
+        setActiveToolCall((current) =>
+          current?.toolCallId === typed.payload?.toolCallId ? null : current
+        );
         return;
       }
       if (typed.type === "assistant.delta" && typed.threadId && typed.payload?.turnRunId) {
@@ -293,6 +355,41 @@ export function App() {
     });
     return dispose;
   }, []);
+
+  useEffect(() => {
+    if (!isTerminalOpen || !selectedThreadId) {
+      return;
+    }
+
+    let cancelled = false;
+    setTerminalOutput("");
+    setTerminalInput("");
+    setTerminalCwd("");
+
+    void window.codexh.openTerminal(selectedThreadId).then((terminal) => {
+      if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
+        return;
+      }
+      setTerminalCwd(terminal.cwd);
+      setTerminalShell(terminal.shell);
+      setTerminalOutput((current) => (terminal.output.length >= current.length ? terminal.output : current));
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        setTerminalOutput(`Terminal error: ${error instanceof Error ? error.message : String(error)}\n`);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isTerminalOpen, selectedThreadId]);
+
+  useEffect(() => {
+    const node = terminalScrollRef.current;
+    if (node) {
+      node.scrollTop = node.scrollHeight;
+    }
+  }, [terminalOutput]);
 
   useEffect(() => {
     if (!isSettingsOpen && !isProjectCreateOpen && !notice) {
@@ -347,26 +444,45 @@ export function App() {
   );
   const canImportProjectKnowledge = selectedThread?.mode === "project" && !!selectedThread.cwd;
   const workflowBindings = snapshot?.projectPlugins ?? [];
+  const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
   const selectedMessages = snapshot?.messages ?? [];
   const visibleMessages = useMemo(
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
   );
   const timelineEntries = useMemo(
-    () => buildTimelineEntries(visibleMessages, snapshot?.toolCalls ?? []),
-    [snapshot?.toolCalls, visibleMessages]
+    () => buildTimelineEntries(visibleMessages, snapshot?.toolCalls ?? [], selectedThread?.cwd, selectedThreadStatus),
+    [selectedThread?.cwd, selectedThreadStatus, snapshot?.toolCalls, visibleMessages]
+  );
+  const conversationTurns = useMemo(
+    () => buildConversationTurnItems(visibleMessages, snapshot?.toolCalls ?? [], selectedThread?.cwd),
+    [selectedThread?.cwd, snapshot?.toolCalls, visibleMessages]
   );
   const activeStreamingAssistant = useMemo(
     () =>
       Object.values(streamingAssistants)
-        .filter((entry) => entry.threadId === activeSnapshotThreadId && entry.content)
+        .filter(
+          (entry) =>
+            entry.threadId === activeSnapshotThreadId &&
+            entry.content &&
+            !isPatchAssistantMessage(entry.content)
+        )
         .sort((left, right) => left.turnRunId.localeCompare(right.turnRunId))
         .at(-1) ?? null,
     [activeSnapshotThreadId, streamingAssistants]
   );
-  const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
   const composerPrimaryAction = getComposerPrimaryActionState(selectedThreadStatus, input);
   const isActiveThreadExecuting = composerPrimaryAction.kind === "interrupt";
+  const isTaskProcessing = selectedThreadStatus === "running";
+  const taskProcessingLabel = useMemo(
+    () =>
+      activeToolCall?.threadId === activeSnapshotThreadId
+        ? getToolProcessingLabel(activeToolCall.toolName)
+        : activeStreamingAssistant
+          ? "正在生成回复"
+          : "正在思考",
+    [activeSnapshotThreadId, activeStreamingAssistant, activeToolCall]
+  );
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
   const showWelcome = timelineEntries.length === 0;
   const latestVisibleMessageId = timelineEntries[timelineEntries.length - 1]?.id ?? null;
@@ -739,7 +855,7 @@ export function App() {
 
   async function createThread(mode: "project" | "chat") {
     if (mode === "project") {
-      setProjectPathDraft(selectedThread?.mode === "project" ? selectedThread.cwd ?? "" : "");
+      setProjectPathDraft("");
       setIsProjectCreateOpen(true);
       return;
     }
@@ -767,12 +883,51 @@ export function App() {
   }
 
   async function confirmProjectCreate() {
+    if (!projectPathDraft) {
+      showNotice("请选择项目文件夹。");
+      return;
+    }
     const thread = await createThreadRecord("project", projectPathDraft);
     setIsProjectCreateOpen(false);
     setProjectPathDraft("");
     selectThreadId(thread.id);
     await refreshAll();
     await refreshSnapshot(thread.id);
+  }
+
+  async function chooseProjectFolder() {
+    setIsPickingProjectFolder(true);
+    try {
+      const selectedPath = await window.codexh.chooseProjectDirectory(projectPathDraft || undefined);
+      if (selectedPath) {
+        setProjectPathDraft(selectedPath);
+      }
+    } catch (error) {
+      showNotice("选择项目文件夹失败。", {
+        message: error instanceof Error ? error.message : "请稍后重试。"
+      });
+    } finally {
+      setIsPickingProjectFolder(false);
+    }
+  }
+
+  async function resolvePendingApproval(
+    approvalId: string,
+    decision: "approved" | "denied",
+    mode?: "once" | "session" | "remember"
+  ) {
+    setResolvingApprovalId(approvalId);
+    try {
+      await window.codexh.resolveApproval(approvalId, { decision, mode });
+    } catch (error) {
+      showNotice("处理审批失败。", {
+        message: error instanceof Error ? error.message : "请稍后重试。"
+      });
+    } finally {
+      setResolvingApprovalId(null);
+      await refreshThreads();
+      await refreshSnapshot(activeSnapshotThreadId ?? selectedThreadId);
+    }
   }
 
   function showNotice(title: string, options?: { message?: string; tone?: AppNoticeTone }) {
@@ -845,6 +1000,9 @@ export function App() {
     const stage = stageOverride ?? gpaState.stage;
     if (stage !== "off") {
       await window.codexh.setGpaStage({ threadId, stage });
+    }
+    if (gpaState.fullAccess) {
+      await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
     }
 
     if (!options?.internal) {
@@ -924,7 +1082,48 @@ export function App() {
       return;
     }
 
-    await window.codexh.interruptThread(threadId);
+    // Switch the control back immediately. The subsequent refresh reconciles
+    // the optimistic state with the persisted runtime state.
+    const updatedAt = new Date().toISOString();
+    setThreads((current) =>
+      current.map((thread) =>
+        thread.id === threadId ? { ...thread, status: "idle", updatedAt } : thread
+      )
+    );
+    setSnapshot((current) =>
+      current?.thread.id === threadId
+        ? { ...current, thread: { ...current.thread, status: "idle", updatedAt } }
+        : current
+    );
+
+    try {
+      await window.codexh.interruptThread(threadId);
+    } catch (error) {
+      showNotice("停止任务失败。", {
+        message: error instanceof Error ? error.message : "请稍后重试。"
+      });
+    } finally {
+      await refreshThreads();
+      await refreshSnapshot(threadId);
+    }
+  }
+
+  async function enableGpaMode() {
+    if (gpaState.stage !== "off") {
+      setGpaMenuOpen(false);
+      setGpaMenuPos(null);
+      return;
+    }
+    await handleGpaStageSelect("goal");
+  }
+
+  async function setFullAccess(fullAccess: boolean) {
+    setGpaState((prev) => ({ ...prev, fullAccess }));
+    setGpaMenuOpen(false);
+    setGpaMenuPos(null);
+    if (selectedThreadId) {
+      await window.codexh.setGpaFullAccess({ threadId: selectedThreadId, fullAccess });
+    }
   }
 
   async function handleComposerPrimaryAction() {
@@ -1160,7 +1359,7 @@ export function App() {
         continue;
       }
       nextDraft.models.push(
-        createModelProfile(settingsProvider.id, candidate.id, candidate.displayName)
+        createModelProfile(settingsProvider.id, candidate.id, candidate.displayName ?? candidate.id)
       );
       existing.add(candidate.id);
       added += 1;
@@ -1293,11 +1492,35 @@ export function App() {
     }
   }
 
+  function submitTerminalInput() {
+    const command = terminalInput.trim();
+    if (!command || !selectedThreadId) {
+      return;
+    }
+
+    setTerminalInput("");
+    void window.codexh.writeTerminal({ threadId: selectedThreadId, input: command }).catch((error: unknown) => {
+      setTerminalOutput((current) =>
+        `${current}\nTerminal error: ${error instanceof Error ? error.message : String(error)}\n`.slice(-80_000)
+      );
+    });
+  }
+
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+        isTerminalOpen ? "terminal-open" : ""
+      }`}
+    >
       <header className="windowbar">
         <div className="windowbar-left">
-          <button className="title-icon-button" title="侧边栏">
+          <button
+            className="title-icon-button"
+            title={isSidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"}
+            aria-label={isSidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"}
+            aria-pressed={!isSidebarCollapsed}
+            onClick={() => setIsSidebarCollapsed((current) => !current)}
+          >
             <IconSidebar />
           </button>
         </div>
@@ -1403,6 +1626,19 @@ export function App() {
       </aside>
 
       <main className="workspace">
+        {!isTerminalOpen ? (
+          <div className="workspace-controls">
+            <button
+              type="button"
+              className="workspace-control-button"
+              title="显示终端"
+              aria-label="显示终端"
+              onClick={() => setIsTerminalOpen(true)}
+            >
+              <IconTerminal />
+            </button>
+          </div>
+        ) : null}
         {(pendingApprovals.length > 0 || pendingPrompts.length > 0) && (
           <div className="pending-strip">
             {pendingApprovals.length > 0 ? (
@@ -1422,6 +1658,11 @@ export function App() {
 
         <section className="chat-canvas">
           <div ref={chatScrollRef} className={`chat-scroll ${showWelcome ? "welcome-mode" : ""}`}>
+            {!showWelcome ? (
+              <div className="conversation-turn-rail-shell">
+                <ConversationTurnRail turns={conversationTurns} />
+              </div>
+            ) : null}
             {showWelcome ? (
               <div className="welcome-empty-state" />
             ) : (
@@ -1430,14 +1671,26 @@ export function App() {
                 {timelineEntries.map((entry) =>
                   entry.kind === "message" ? (
                     renderTranscriptMessage(entry.message, activeAssistantLabel)
+                  ) : entry.kind === "file-summary" ? (
+                    <FileChangeSummary key={entry.id} files={entry.files} />
+                  ) : entry.kind === "directory-read-group" ? (
+                    <DirectoryReadGroup key={entry.id} directory={entry.directory} count={entry.count} />
                   ) : (
                     <ExecutionStep key={entry.id} toolCall={entry.toolCall} />
                   )
                 )}
+                {pendingApprovals.map((approval) => (
+                  <ApprovalCard
+                    key={approval.id}
+                    approval={approval}
+                    resolving={resolvingApprovalId === approval.id}
+                    onResolve={(decision, mode) => void resolvePendingApproval(approval.id, decision, mode)}
+                  />
+                ))}
                 {gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan" ? (
                   <GpaConfirmationCard
                     stage={gpaState.awaitingConfirmation}
-                    disabled={isActiveThreadExecuting || gpaRevisionSubmitting}
+                    disabled={gpaRevisionSubmitting}
                     isEditing={gpaRevisionOpen}
                     revisionDraft={gpaRevisionDraft}
                     revisionRef={gpaRevisionRef}
@@ -1458,6 +1711,7 @@ export function App() {
                     )}
                   </section>
                 ) : null}
+                {isTaskProcessing ? <TaskProcessingIndicator label={taskProcessingLabel} /> : null}
               </div>
             )}
           </div>
@@ -1479,7 +1733,7 @@ export function App() {
                   >
                     <button
                       className={`composer-icon-button ${gpaMenuOpen ? "is-open" : ""}`}
-                      title="GPA 模式：目标 / 计划 / 执行"
+                      title="添加模式"
                       aria-haspopup="menu"
                       aria-expanded={gpaMenuOpen}
                       onClick={() => {
@@ -1503,13 +1757,34 @@ export function App() {
                       <IconPlus />
                     </button>
                   </div>
+                  {gpaState.fullAccess ? (
+                    <span className="composer-mode-chip composer-mode-chip-full-access" title="完全访问：执行时不再请求确认">
+                      <IconShield />
+                      <span>完全访问</span>
+                      <button
+                        className="composer-mode-chip-remove"
+                        type="button"
+                        title="移除完全访问"
+                        aria-label="移除完全访问"
+                        onClick={() => void setFullAccess(false)}
+                      >
+                        <IconClose />
+                      </button>
+                    </span>
+                  ) : null}
                   {gpaState.stage !== "off" ? (
-                    <span
-                      className={`gpa-mode-chip gpa-mode-chip-${gpaState.stage}`}
-                      title={`当前 GPA 阶段：${gpaModeLabel(gpaState.stage)}（点击 + 切换或关闭）`}
-                    >
-                      <span className="gpa-mode-chip-dot" aria-hidden />
-                      {gpaModeLabel(gpaState.stage)}
+                    <span className="composer-mode-chip composer-mode-chip-gpa" title={`GPA 当前阶段：${gpaModeLabel(gpaState.stage)}`}>
+                      <IconGpa />
+                      <span>开启 GPA</span>
+                      <button
+                        className="composer-mode-chip-remove"
+                        type="button"
+                        title="移除 GPA"
+                        aria-label="移除 GPA"
+                        onClick={() => void handleGpaStageSelect("off")}
+                      >
+                        <IconClose />
+                      </button>
                     </span>
                   ) : null}
                 </div>
@@ -1538,6 +1813,20 @@ export function App() {
           </footer>
         </section>
       </main>
+
+      {isTerminalOpen ? (
+        <TerminalPanel
+          shell={terminalShell}
+          cwd={terminalCwd}
+          output={terminalOutput}
+          input={terminalInput}
+          scrollRef={terminalScrollRef}
+          onInputChange={setTerminalInput}
+          onSubmit={submitTerminalInput}
+          onHide={() => setIsTerminalOpen(false)}
+          hasThread={Boolean(selectedThreadId)}
+        />
+      ) : null}
 
       {isSettingsOpen ? (
         <div
@@ -2031,7 +2320,7 @@ export function App() {
             <div className="project-sheet-header">
               <div className="project-sheet-copy">
                 <strong>新建项目</strong>
-                <span>留空则使用当前工作目录。</span>
+                <span>选择一个文件夹，此项目中的文件操作将限制在该文件夹内。</span>
               </div>
               <button
                 className="project-sheet-close"
@@ -2042,25 +2331,29 @@ export function App() {
               </button>
             </div>
             <label className="settings-field project-sheet-field">
-              <span>项目路径</span>
-              <input
-                autoFocus
-                value={projectPathDraft}
-                onChange={(event) => setProjectPathDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void confirmProjectCreate();
-                  }
-                }}
-                placeholder="例如 D:\\project 或留空"
-              />
+              <span>项目文件夹</span>
+              <div className="project-folder-picker">
+                <output>{projectPathDraft || "尚未选择文件夹"}</output>
+                <button
+                  className="button ghost"
+                  type="button"
+                  onClick={() => void chooseProjectFolder()}
+                  disabled={isPickingProjectFolder}
+                >
+                  <IconFolder />
+                  {isPickingProjectFolder ? "正在打开..." : "选择文件夹"}
+                </button>
+              </div>
             </label>
             <div className="project-sheet-actions">
               <button className="button ghost" onClick={() => setIsProjectCreateOpen(false)}>
                 取消
               </button>
-              <button className="button warm" onClick={() => void confirmProjectCreate()}>
+              <button
+                className="button warm"
+                onClick={() => void confirmProjectCreate()}
+                disabled={!projectPathDraft || isPickingProjectFolder}
+              >
                 创建
               </button>
             </div>
@@ -2177,36 +2470,30 @@ export function App() {
                 }}
               >
                 <button
-                  className={`gpa-popover-item ${gpaState.stage === "off" ? "is-active" : ""}`}
+                  className={`gpa-popover-item gpa-popover-item-full-access ${gpaState.fullAccess ? "is-active" : ""}`}
                   role="menuitem"
-                  onClick={() => void handleGpaStageSelect("off")}
+                  disabled={gpaState.fullAccess}
+                  onClick={() => void setFullAccess(true)}
                 >
-                  <span className="gpa-popover-item-title">关闭 GPA</span>
-                  <span className="gpa-popover-item-hint">普通模式，不强制三阶段</span>
+                  <span className="gpa-popover-item-icon" aria-hidden><IconShield /></span>
+                  <span className="gpa-popover-item-copy">
+                    <span className="gpa-popover-item-title">完全访问</span>
+                    <span className="gpa-popover-item-hint">最大权限，执行时无需确认</span>
+                  </span>
+                  {gpaState.fullAccess ? <span className="gpa-popover-item-check">已开启</span> : null}
                 </button>
                 <button
-                  className={`gpa-popover-item gpa-popover-item-goal ${gpaState.stage === "goal" ? "is-active" : ""}`}
+                  className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
                   role="menuitem"
-                  onClick={() => void handleGpaStageSelect("goal")}
+                  disabled={gpaState.stage !== "off"}
+                  onClick={() => void enableGpaMode()}
                 >
-                  <span className="gpa-popover-item-title">🎯 目标 GOAL</span>
-                  <span className="gpa-popover-item-hint">重述目标 / 成功标准 / 约束</span>
-                </button>
-                <button
-                  className={`gpa-popover-item gpa-popover-item-plan ${gpaState.stage === "plan" ? "is-active" : ""}`}
-                  role="menuitem"
-                  onClick={() => void handleGpaStageSelect("plan")}
-                >
-                  <span className="gpa-popover-item-title">📋 计划 PLAN</span>
-                  <span className="gpa-popover-item-hint">拆解原子任务 / 依赖 / 验收</span>
-                </button>
-                <button
-                  className={`gpa-popover-item gpa-popover-item-act ${gpaState.stage === "act" ? "is-active" : ""}`}
-                  role="menuitem"
-                  onClick={() => void handleGpaStageSelect("act")}
-                >
-                  <span className="gpa-popover-item-title">⚡ 执行 ACT</span>
-                  <span className="gpa-popover-item-hint">按计划执行 / 自检 / 汇报</span>
+                  <span className="gpa-popover-item-icon" aria-hidden><IconGpa /></span>
+                  <span className="gpa-popover-item-copy">
+                    <span className="gpa-popover-item-title">开启 GPA</span>
+                    <span className="gpa-popover-item-hint">目标、计划、执行三阶段工作流</span>
+                  </span>
+                  {gpaState.stage !== "off" ? <span className="gpa-popover-item-check">已开启</span> : null}
                 </button>
               </div>
             </>,
@@ -2214,6 +2501,75 @@ export function App() {
           )
         : null}
     </div>
+  );
+}
+
+function TerminalPanel({
+  shell,
+  cwd,
+  output,
+  input,
+  scrollRef,
+  onInputChange,
+  onSubmit,
+  onHide,
+  hasThread
+}: {
+  shell: string;
+  cwd: string;
+  output: string;
+  input: string;
+  scrollRef: React.RefObject<HTMLPreElement | null>;
+  onInputChange: (value: string) => void;
+  onSubmit: () => void;
+  onHide: () => void;
+  hasThread: boolean;
+}) {
+  return (
+    <aside className="terminal-panel" aria-label="终端">
+      <header className="terminal-header">
+        <div className="terminal-heading">
+          <span className="terminal-heading-icon" aria-hidden="true">
+            <IconTerminal />
+          </span>
+          <div>
+            <strong>{shell}</strong>
+            <span title={cwd}>{cwd || "正在连接终端"}</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="terminal-hide-button"
+          title="向右隐藏终端"
+          aria-label="向右隐藏终端"
+          onClick={onHide}
+        >
+          <IconChevronRight />
+        </button>
+      </header>
+
+      <pre ref={scrollRef} className="terminal-output" aria-live="polite">
+        {hasThread ? output || " " : "选择一个任务后即可使用终端。"}
+      </pre>
+
+      <div className="terminal-composer">
+        <span className="terminal-prompt" aria-hidden="true">&gt;</span>
+        <input
+          value={input}
+          disabled={!hasThread}
+          onChange={(event) => onInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              onSubmit();
+            }
+          }}
+          placeholder={hasThread ? "输入命令" : "请选择任务"}
+          aria-label="终端命令"
+          spellCheck={false}
+        />
+      </div>
+    </aside>
   );
 }
 
@@ -2588,25 +2944,369 @@ function ComposerModelPicker({
   );
 }
 
-function buildTimelineEntries(messages: MessageRecord[], toolCalls: ToolCallRecord[]): TimelineEntry[] {
-  const messageEntries: TimelineEntry[] = messages
-    .filter((message) => message.role !== "tool")
-    .map((message) => ({
+function buildTimelineEntries(
+  messages: MessageRecord[],
+  toolCalls: ToolCallRecord[],
+  workspaceRoot?: string | null,
+  threadStatus?: ThreadRecord["status"] | null
+): TimelineEntry[] {
+  const filesByTurn = collectFileChangesByTurn(toolCalls, workspaceRoot);
+  const messageEntries: TimelineEntry[] = [];
+
+  for (const message of messages) {
+    if (message.role === "tool" || isPatchAssistantMessage(message.content)) {
+      continue;
+    }
+
+    messageEntries.push({
       kind: "message",
       id: `message-${message.id}`,
       createdAt: message.createdAt,
       message
-    }));
-  const toolEntries: TimelineEntry[] = toolCalls.map((toolCall) => ({
-    kind: "tool",
-    id: `tool-${toolCall.id}`,
-    createdAt: toolCall.startedAt,
-    toolCall
-  }));
+    });
 
-  return [...messageEntries, ...toolEntries].sort(
+  }
+
+  const toolEntries: TimelineEntry[] = toolCalls
+    .filter((toolCall) => !isFileWriteTool(toolCall.toolName))
+    .map((toolCall) => ({
+      kind: "tool",
+      id: `tool-${toolCall.id}`,
+      createdAt: toolCall.startedAt,
+      toolCall
+    }));
+
+  const fileSummaryEntries: TimelineEntry[] = isTaskExecutionFinished(threadStatus)
+    ? [...filesByTurn.entries()].map(([turnRunId, files]) => ({
+        kind: "file-summary",
+        id: `file-summary-${turnRunId}`,
+        createdAt: getTurnSummaryCreatedAt(turnRunId, messages, toolCalls),
+        files
+      }))
+    : [];
+  const sortedEntries = [...messageEntries, ...toolEntries, ...fileSummaryEntries].sort(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
   );
+  return collapseDirectoryReadMessages(sortedEntries);
+}
+
+function isTaskExecutionFinished(status: ThreadRecord["status"] | null | undefined): boolean {
+  return status === "completed" || status === "failed";
+}
+
+function getTurnSummaryCreatedAt(
+  turnRunId: string,
+  messages: MessageRecord[],
+  toolCalls: ToolCallRecord[]
+): string {
+  const timestamps = [
+    ...messages
+      .filter((message) => message.turnRunId === turnRunId && !isPatchAssistantMessage(message.content))
+      .map((message) => Date.parse(message.createdAt)),
+    ...toolCalls
+      .filter((toolCall) => toolCall.turnRunId === turnRunId)
+      .map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt))
+  ].filter(Number.isFinite);
+  const latest = timestamps.length > 0 ? Math.max(...timestamps) : Date.now();
+  return new Date(latest + 1).toISOString();
+}
+
+export function isFileWriteTool(toolName: string): boolean {
+  return toolName === "apply_patch" || toolName === "fs.write_file";
+}
+
+export function isPatchAssistantMessage(content: string): boolean {
+  return /^\s*(?:```(?:diff|patch)?\s*)?\*\*\* Begin Patch\b/m.test(content);
+}
+
+function collapseDirectoryReadMessages(entries: TimelineEntry[]): TimelineEntry[] {
+  const collapsed: TimelineEntry[] = [];
+
+  for (let index = 0; index < entries.length; ) {
+    const entry = entries[index];
+    if (entry.kind !== "message") {
+      collapsed.push(entry);
+      index += 1;
+      continue;
+    }
+    const directory = getReadDirectory(entry.message);
+    if (!directory) {
+      collapsed.push(entry);
+      index += 1;
+      continue;
+    }
+
+    let end = index + 1;
+    while (end < entries.length) {
+      const candidate = entries[end];
+      if (
+        candidate.kind !== "message" ||
+        candidate.message.turnRunId !== entry.message.turnRunId ||
+        getReadDirectory(candidate.message) !== directory
+      ) {
+        break;
+      }
+      end += 1;
+    }
+
+    const count = end - index;
+    if (count === 1) {
+      collapsed.push(entry);
+    } else {
+      collapsed.push({
+        kind: "directory-read-group",
+        id: `directory-read-${entry.message.id}`,
+        createdAt: entry.createdAt,
+        directory,
+        count
+      });
+    }
+    index = end;
+  }
+
+  return collapsed;
+}
+
+function getReadDirectory(message: MessageRecord): string | null {
+  if (message.role !== "assistant") {
+    return null;
+  }
+  const match = message.content.match(/(?:检查|读取)\s*`?([^`\s]+)`?\s*目录(?:内容)?/);
+  return match?.[1]?.trim() || null;
+}
+
+function collectFileChangesByTurn(
+  toolCalls: ToolCallRecord[],
+  workspaceRoot?: string | null
+): Map<string, FileChangeSummaryItem[]> {
+  const changesByTurn = new Map<string, Map<string, FileChangeSummaryItem>>();
+
+  for (const toolCall of toolCalls) {
+    if (!toolCallSucceeded(toolCall)) {
+      continue;
+    }
+
+    const files = getToolFileChanges(toolCall, workspaceRoot);
+    if (files.length === 0) {
+      continue;
+    }
+
+    const turnChanges = changesByTurn.get(toolCall.turnRunId) ?? new Map<string, FileChangeSummaryItem>();
+    for (const file of files) {
+      const existing = turnChanges.get(file.path);
+      turnChanges.set(file.path, mergeFileChange(existing, file));
+    }
+    changesByTurn.set(toolCall.turnRunId, turnChanges);
+  }
+
+  return new Map(
+    [...changesByTurn.entries()].map(([turnRunId, files]) => [turnRunId, [...files.values()]])
+  );
+}
+
+function toolCallSucceeded(toolCall: ToolCallRecord) {
+  if (toolCall.status !== "completed") {
+    return false;
+  }
+
+  return parseTimelineJson(toolCall.resultJson).ok !== false;
+}
+
+function getToolFileChanges(
+  toolCall: ToolCallRecord,
+  workspaceRoot?: string | null
+): FileChangeSummaryItem[] {
+  const input = parseTimelineJson(toolCall.argumentsJson);
+
+  if (toolCall.toolName === "apply_patch") {
+    return parsePatchFileChanges(String(input.patch ?? ""), workspaceRoot);
+  }
+
+  if (toolCall.toolName === "fs.write_file") {
+    const path = typeof input.path === "string" ? input.path : "";
+    return path
+      ? [{ path: toWorkspaceRelativePath(path, workspaceRoot), action: "modified", additions: 0, deletions: 0 }]
+      : [];
+  }
+
+  return [];
+}
+
+function parsePatchFileChanges(patch: string, workspaceRoot?: string | null): FileChangeSummaryItem[] {
+  const files: FileChangeSummaryItem[] = [];
+  const lines = patch.replace(/\r\n/g, "\n").split("\n");
+  let current: FileChangeSummaryItem | null = null;
+
+  for (const line of lines) {
+    const fileMatch = line.match(/^\*\*\* (Add|Update|Delete) File: (.+)$/);
+    if (fileMatch) {
+      current = {
+        path: toWorkspaceRelativePath(fileMatch[2], workspaceRoot),
+        action: fileMatch[1] === "Add" ? "created" : fileMatch[1] === "Delete" ? "deleted" : "modified",
+        additions: 0,
+        deletions: 0
+      };
+      files.push(current);
+      continue;
+    }
+
+    if (!current || line.startsWith("*** ") || line.startsWith("@@")) {
+      continue;
+    }
+
+    if (line.startsWith("+")) {
+      current.additions += 1;
+    } else if (line.startsWith("-")) {
+      current.deletions += 1;
+    }
+  }
+
+  return files;
+}
+
+function mergeFileChange(existing: FileChangeSummaryItem | undefined, next: FileChangeSummaryItem): FileChangeSummaryItem {
+  if (!existing) {
+    return next;
+  }
+
+  return {
+    path: next.path,
+    action: existing.action === "created" && next.action === "modified" ? "created" : next.action,
+    additions: existing.additions + next.additions,
+    deletions: existing.deletions + next.deletions
+  };
+}
+
+function toWorkspaceRelativePath(filePath: string, workspaceRoot?: string | null) {
+  const normalizedPath = filePath.replace(/\\/g, "/");
+  const normalizedRoot = workspaceRoot?.replace(/\\/g, "/").replace(/\/+$/, "");
+
+  if (normalizedRoot && normalizedPath.toLowerCase().startsWith(`${normalizedRoot.toLowerCase()}/`)) {
+    return normalizedPath.slice(normalizedRoot.length + 1);
+  }
+
+  return normalizedPath;
+}
+
+function FileChangeSummary({ files }: { files: FileChangeSummaryItem[] }) {
+  const additions = files.reduce((total, file) => total + file.additions, 0);
+  const deletions = files.reduce((total, file) => total + file.deletions, 0);
+  const hasLineCounts = additions > 0 || deletions > 0;
+
+  return (
+    <section className="file-change-summary" aria-label={`已编辑 ${files.length} 个文件`}>
+      <div className="file-change-summary-head">
+        <span className="file-change-summary-icon" aria-hidden><IconFileChanges /></span>
+        <div className="file-change-summary-title">
+          <strong>已编辑 {files.length} 个文件</strong>
+          {hasLineCounts ? (
+            <span className="file-change-summary-counts">
+              <b>+{additions}</b>
+              <i>-{deletions}</i>
+            </span>
+          ) : null}
+        </div>
+      </div>
+      <div className="file-change-summary-list">
+        {files.map((file) => (
+          <div key={file.path} className="file-change-summary-row">
+            <code>{file.path}</code>
+            {file.additions || file.deletions ? (
+              <span className="file-change-row-counts">
+                {file.additions ? <b>+{file.additions}</b> : null}
+                {file.deletions ? <i>-{file.deletions}</i> : null}
+              </span>
+            ) : (
+              <span className="file-change-row-action">{formatFileChangeAction(file.action)}</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function buildConversationTurnItems(
+  messages: MessageRecord[],
+  toolCalls: ToolCallRecord[],
+  workspaceRoot?: string | null
+): ConversationTurnItem[] {
+  const filesByTurn = collectFileChangesByTurn(toolCalls, workspaceRoot);
+
+  return messages
+    .filter((message) => message.role === "user" && !message.content.startsWith("[internal:"))
+    .map((message) => ({
+      id: message.id,
+      content: message.content,
+      createdAt: message.createdAt,
+      files: message.turnRunId ? filesByTurn.get(message.turnRunId) ?? [] : []
+    }));
+}
+
+function ConversationTurnRail({ turns }: { turns: ConversationTurnItem[] }) {
+  const [hoveredTurnId, setHoveredTurnId] = useState<string | null>(null);
+
+  if (turns.length === 0) {
+    return null;
+  }
+
+  const latestTurnId = turns.at(-1)?.id;
+
+  return (
+    <nav className="conversation-turn-rail" aria-label="问话轨迹">
+      {turns.map((turn) => {
+        const preview = getConversationTurnPreview(turn.content);
+        const isHovered = hoveredTurnId === turn.id;
+        const isLatest = latestTurnId === turn.id;
+
+        return (
+          <button
+            key={turn.id}
+            type="button"
+            className={`conversation-turn-marker ${isHovered ? "is-hovered" : ""} ${isLatest ? "is-latest" : ""}`}
+            aria-label={`问话：${preview}`}
+            onClick={() => document.getElementById(`transcript-message-${turn.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+            onMouseEnter={() => setHoveredTurnId(turn.id)}
+            onMouseLeave={() => setHoveredTurnId(null)}
+            onFocus={() => setHoveredTurnId(turn.id)}
+            onBlur={() => setHoveredTurnId(null)}
+          >
+            <span className="conversation-turn-marker-line" style={{ width: getConversationTurnMarkerWidth(turn.content) }} />
+            <span className="conversation-turn-preview" role="tooltip">
+              <span className="conversation-turn-preview-copy">{preview}</span>
+              {turn.files.length > 0 ? (
+                <span className="conversation-turn-preview-files">
+                  {turn.files.slice(0, 3).map((file) => <code key={file.path}>{file.path}</code>)}
+                  {turn.files.length > 3 ? <em>+{turn.files.length - 3}</em> : null}
+                </span>
+              ) : null}
+            </span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function getConversationTurnPreview(content: string) {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  return normalized.length > 120 ? `${normalized.slice(0, 119)}...` : normalized || "空白问话";
+}
+
+function getConversationTurnMarkerWidth(content: string) {
+  const length = content.trim().length;
+  return Math.min(28, Math.max(7, 6 + Math.round(Math.sqrt(length) * 2.1)));
+}
+
+function formatFileChangeAction(action: FileChangeAction) {
+  switch (action) {
+    case "created":
+      return "已生成";
+    case "deleted":
+      return "已删除";
+    default:
+      return "已编辑";
+  }
 }
 
 function PlanTimeline({ state }: { state: GpaState }) {
@@ -2631,6 +3331,50 @@ function PlanTimeline({ state }: { state: GpaState }) {
       <div className="plan-timeline-list">
         {items.map((item) => <PlanItem key={item.id} label={item.label} status={item.status} />)}
       </div>
+    </section>
+  );
+}
+
+export function getToolProcessingLabel(toolName: string): string {
+  if (toolName === "fs.read_file" || toolName === "knowledge.read" || toolName === "read_mcp_resource") {
+    return "正在读取文件";
+  }
+  if (toolName === "fs.read_directory" || toolName === "list_mcp_resources" || toolName === "list_mcp_resource_templates") {
+    return "正在读取目录";
+  }
+  if (toolName === "fs.write_file" || toolName === "apply_patch") {
+    return "正在写入文件";
+  }
+  if (toolName === "code.search" || toolName === "knowledge.search") {
+    return "正在搜索代码";
+  }
+  if (toolName === "web_search.search_query") {
+    return "正在搜索网络";
+  }
+  if (toolName.startsWith("browser.") || toolName === "web_search.open_page") {
+    return "正在操作浏览器";
+  }
+  if (toolName.startsWith("git.")) {
+    return toolName === "git.commit" ? "正在创建提交" : "正在检查 Git 状态";
+  }
+  if (toolName === "shell.exec") {
+    return "正在执行命令";
+  }
+  if (toolName === "multi_agents.spawn") {
+    return "正在启动子任务";
+  }
+  return "正在调用工具";
+}
+
+function TaskProcessingIndicator({ label }: { label: string }) {
+  return (
+    <section className="task-processing-indicator" role="status" aria-live="polite">
+      <span className="task-processing-dots" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+      </span>
+      <span>{label}</span>
     </section>
   );
 }
@@ -2734,6 +3478,16 @@ function StatusIcon({ status }: { status: "pending" | "in_progress" | "completed
   return <span className={`timeline-status-icon ${status}`}>{glyph}</span>;
 }
 
+function DirectoryReadGroup({ directory, count }: { directory: string; count: number }) {
+  return (
+    <section className="directory-read-group">
+      <span className="directory-read-group-dot" aria-hidden="true" />
+      <span>检查 <code>{directory}</code> 目录内容</span>
+      <span className="directory-read-group-count">{count} 次</span>
+    </section>
+  );
+}
+
 function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
   const input = parseTimelineJson(toolCall.argumentsJson);
   const result = parseTimelineJson(toolCall.resultJson);
@@ -2745,6 +3499,7 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
     ? Math.max(0, Date.parse(toolCall.completedAt) - Date.parse(toolCall.startedAt))
     : null;
   const output = getTimelineOutput(result);
+  const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
 
   return (
     <section className={`execution-step ${status}`}>
@@ -2755,12 +3510,62 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
         {duration !== null ? <span className="execution-duration">{formatDuration(duration)}</span> : null}
       </div>
       <code className="execution-command">$ {command}</code>
+      {localUrl ? <LocalServerPreview url={localUrl} /> : null}
       {output ? (
         <details className="execution-output" open={failed}>
           <summary>{failed ? "View error output" : "View output"}</summary>
           <pre>{output}</pre>
         </details>
       ) : isRunning ? <div className="execution-progress">Working…</div> : null}
+    </section>
+  );
+}
+
+function LocalServerPreview({ url }: { url: string }) {
+  return (
+    <section className="local-server-preview">
+      <span className="local-server-preview-icon" aria-hidden="true"><IconGlobe /></span>
+      <span className="local-server-preview-copy">
+        <strong>网页预览</strong>
+        <span>{url}</span>
+      </span>
+      <button type="button" onClick={() => void window.codexh.openExternal(url)}>
+        打开网页
+      </button>
+    </section>
+  );
+}
+
+function ApprovalCard({
+  approval,
+  resolving,
+  onResolve
+}: {
+  approval: ApprovalRequest;
+  resolving: boolean;
+  onResolve: (decision: "approved" | "denied", mode?: "once" | "session" | "remember") => void;
+}) {
+  return (
+    <section className="approval-card" aria-label={`审批请求: ${approval.title}`}>
+      <div className="approval-card-copy">
+        <span className="approval-card-label">需要审批</span>
+        <strong>{approval.title}</strong>
+        <p>{approval.description}</p>
+      </div>
+      <div className="approval-card-actions">
+        <button type="button" className="approval-deny-button" disabled={resolving} onClick={() => onResolve("denied")}>
+          拒绝
+        </button>
+        <button type="button" className="approval-session-button" disabled={resolving} onClick={() => onResolve("approved", "session")}>
+          本会话允许
+        </button>
+        <button type="button" className="approval-remember-button" disabled={resolving} onClick={() => onResolve("approved", "remember")}>
+          允许且不再询问
+        </button>
+        <button type="button" className="approval-allow-button" disabled={resolving} onClick={() => onResolve("approved", "once")}>
+          {resolving ? "处理中..." : "允许并继续"}
+        </button>
+      </div>
     </section>
   );
 }
@@ -2812,14 +3617,14 @@ function renderRole(role: string, assistantLabel = "Assistant") {
 function renderTranscriptMessage(message: MessageRecord, assistantLabel: string) {
   if (message.role === "user") {
     return (
-      <article key={message.id} className="message-card user">
+      <article id={`transcript-message-${message.id}`} key={message.id} className="message-card user">
         {renderMessageContent(message)}
       </article>
     );
   }
 
   return (
-    <article key={message.id} className={`message-card ${message.role}`}>
+    <article id={`transcript-message-${message.id}`} key={message.id} className={`message-card ${message.role}`}>
       <div className="message-header">
         <span className={`message-author ${message.role}`}>{renderRole(message.role, assistantLabel)}</span>
         <span className="timestamp">{formatRelativeTime(message.createdAt)}</span>
@@ -3984,6 +4789,26 @@ function IconChevronRight() {
   );
 }
 
+function IconTerminal() {
+  return (
+    <SvgIcon>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <path d="m7.5 9 3 3-3 3" />
+      <path d="M13.5 15h3" />
+    </SvgIcon>
+  );
+}
+
+function IconGlobe() {
+  return (
+    <SvgIcon>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.8 12h16.4" />
+      <path d="M12 3.5c2.2 2.3 3.3 5.1 3.3 8.5S14.2 18.2 12 20.5C9.8 18.2 8.7 15.4 8.7 12S9.8 5.8 12 3.5z" />
+    </SvgIcon>
+  );
+}
+
 function IconSearch() {
   return (
     <SvgIcon>
@@ -4006,6 +4831,17 @@ function IconFolder() {
   return (
     <SvgIcon>
       <path d="M3.5 8.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+    </SvgIcon>
+  );
+}
+
+function IconFileChanges() {
+  return (
+    <SvgIcon size={18}>
+      <rect x="5" y="4.5" width="12" height="14" rx="2.5" />
+      <path d="M8.5 2.5h8a2 2 0 0 1 2 2v10" />
+      <path d="M8 11.5h6" />
+      <path d="M11 8.5v6" />
     </SvgIcon>
   );
 }
@@ -4149,8 +4985,26 @@ function IconArrowUp() {
 
 function IconStop() {
   return (
-    <SvgIcon size={14}>
-      <rect x="7.5" y="7.5" width="9" height="9" rx="2" fill="currentColor" stroke="none" />
+    <SvgIcon size={18}>
+      <rect x="6.5" y="6.5" width="11" height="11" rx="2.75" fill="currentColor" stroke="none" />
+    </SvgIcon>
+  );
+}
+
+function IconShield() {
+  return (
+    <SvgIcon>
+      <path d="M12 3.5 19 6v5.2c0 4.4-2.9 7.8-7 9.3-4.1-1.5-7-4.9-7-9.3V6z" />
+      <path d="m9.5 12 1.7 1.7 3.5-3.8" />
+    </SvgIcon>
+  );
+}
+
+function IconGpa() {
+  return (
+    <SvgIcon>
+      <circle cx="12" cy="12" r="7.5" />
+      <path d="m9.5 12 1.6 1.6 3.7-3.9" />
     </SvgIcon>
   );
 }

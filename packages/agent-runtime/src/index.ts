@@ -13,6 +13,7 @@ import type {
   ThreadRecord,
   ToolCallRecord,
   ToolResult,
+  ToolSpecDefinition,
   TurnRunRecord
 } from "@shared-types";
 import { buildDecisionSystemPrompt, ProviderFactory } from "@provider-adapters";
@@ -32,9 +33,10 @@ import type { GpaStage, GpaState } from "@shared-types";
 
 export { parseGpaState } from "./gpa";
 
+export const MAX_REPEATED_TASK_FAILURES = 5;
+
 type Submission =
   | { type: "user_input"; content: string }
-  | { type: "interrupt" }
   | { type: "approval_response"; requestId: string; approved: boolean }
   | { type: "user_input_response"; promptId: string; answers: Record<string, string> }
   | { type: "shutdown" };
@@ -73,6 +75,7 @@ interface RuntimeServices {
   listFiles(dir: string): Promise<string[]>;
   readFile(filePath: string): Promise<string>;
   writeFile(filePath: string, content: string): Promise<void>;
+  runTerminalCommand(threadId: string, cwd: string, command: string): Promise<{ output: string; localUrl?: string }>;
   requestApproval(threadId: string, turnRunId: string, input: {
     title: string;
     description: string;
@@ -106,6 +109,7 @@ interface RuntimeServices {
   readMcpResource(server: string, uri: string): Promise<any>;
   callMcpTool(server: string, tool: string, argumentsJson: Record<string, unknown>): Promise<any>;
   emit(event: RuntimeEvent): Promise<void>;
+  log(kind: string, threadId: string, payload: Record<string, unknown>): Promise<void>;
 }
 
 class AsyncQueue<T> {
@@ -130,9 +134,35 @@ class AsyncQueue<T> {
   }
 }
 
+function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(new Error("Turn interrupted.")));
+
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error))
+    );
+
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 class ThreadSessionRuntime {
   readonly #queue = new AsyncQueue<Submission>();
-  readonly #abortController = new AbortController();
+  #abortController: AbortController | null = null;
   #activeTurnRunId: string | null = null;
   #pendingInput: string[] = [];
   #running = false;
@@ -154,6 +184,14 @@ class ThreadSessionRuntime {
 
   public submit(input: Submission): void {
     this.#queue.push(input);
+  }
+
+  public interrupt(): boolean {
+    if (!this.#abortController) {
+      return false;
+    }
+    this.#abortController.abort();
+    return true;
   }
 
   public stop(): void {
@@ -197,6 +235,15 @@ class ThreadSessionRuntime {
     });
   }
 
+  public async setGpaFullAccess(fullAccess: boolean): Promise<void> {
+    await this.#ensureGpa();
+    await this.#commitGpa({
+      ...this.#gpa,
+      fullAccess,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
   public getGpa(): GpaState {
     return this.#gpa;
   }
@@ -207,10 +254,6 @@ class ThreadSessionRuntime {
       if (submission.type === "shutdown") {
         break;
       }
-      if (submission.type === "interrupt") {
-        this.#abortController.abort();
-        continue;
-      }
       if (submission.type === "approval_response" || submission.type === "user_input_response") {
         continue;
       }
@@ -219,7 +262,14 @@ class ThreadSessionRuntime {
         continue;
       }
       if (submission.type === "user_input") {
-        await this.runTurn(submission.content);
+        try {
+          await this.runTurn(submission.content);
+        } catch (error) {
+          console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
+          await this.services.log("turn.unhandled_error", this.threadId, {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
       }
     }
   }
@@ -248,6 +298,7 @@ class ThreadSessionRuntime {
     const knowledgeContext = await this.services.buildKnowledgeContext(this.threadId);
     const workflowPackContext = await this.services.buildWorkflowPackContext(this.threadId);
     const tools = await this.buildVisibleTools(accessibleMcpServerIds);
+    const availableToolsPrompt = formatAvailableTools(tools);
     const turn = await this.services.persistence.startTurn({
       threadId: this.threadId,
       kind: "regular",
@@ -260,6 +311,8 @@ class ThreadSessionRuntime {
       errorMessage: null
     });
 
+    const abortController = new AbortController();
+    this.#abortController = abortController;
     this.#activeTurnRunId = turn.id;
     await this.services.persistence.updateThread(this.threadId, {
       status: "running",
@@ -284,12 +337,20 @@ class ThreadSessionRuntime {
       });
     }
 
+    let interruptedVisibleContent = "";
+
     try {
       let transcript = compactTranscript(history);
-      let rounds = 0;
+      let hasExecutedToolCall = false;
+      let previousSuccessfulToolCall: string | null = null;
+      const successfullyCreatedFiles = new Set<string>();
+      let terminalThread: ThreadRecord | null = null;
+      const taskFailureCounts = new Map<string, number>();
+      let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
+      let previousNonExecutableDecision: string | null = null;
+      let prematureCompletionAttempts = 0;
 
-      while (rounds < 8) {
-        rounds += 1;
+      while (!repeatedTaskFailure) {
         const prompt = buildRuntimePrompt(
           model,
           skillContext,
@@ -299,30 +360,41 @@ class ThreadSessionRuntime {
         );
         const adapter = this.services.providerFactory.create(provider);
         let streamedVisibleContent = "";
-        const decision = await adapter.runTurn({
-          systemPrompt: `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
-            buildGpaSystemDirective(this.#gpa) || ""
-          }`,
-          transcript,
-          availableTools: tools,
-          model,
-          provider,
-          stream: model.supportsStreaming,
-          onTextDelta: async (delta) => {
-            streamedVisibleContent += delta;
-            await this.services.emit({
-              type: "assistant.delta",
-              threadId: this.threadId,
-              payload: {
-                turnRunId: turn.id,
-                delta,
-                content: streamedVisibleContent
-              },
-              createdAt: new Date().toISOString()
-            });
-          },
-          abortSignal: this.#abortController.signal
-        });
+        const decision = await waitForAbort(
+          adapter.runTurn({
+            systemPrompt: `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
+              buildGpaSystemDirective(this.#gpa) || ""
+            }\n\n${availableToolsPrompt}`,
+            transcript,
+            availableTools: tools,
+            model,
+            provider,
+            stream: model.supportsStreaming,
+            onTextDelta: async (delta) => {
+              if (abortController.signal.aborted) {
+                return;
+              }
+              streamedVisibleContent += delta;
+              interruptedVisibleContent = streamedVisibleContent;
+              await this.services.emit({
+                type: "assistant.delta",
+                threadId: this.threadId,
+                payload: {
+                  turnRunId: turn.id,
+                  delta,
+                  content: streamedVisibleContent
+                },
+                createdAt: new Date().toISOString()
+              });
+            },
+            abortSignal: abortController.signal
+          }),
+          abortController.signal
+        );
+
+        if (abortController.signal.aborted) {
+          throw new Error("Turn interrupted.");
+        }
 
         // 代码级强制：GOAL/PLAN 阶段严禁工具调用，拦截并提示模型用文字回应
         if (!gpaStageAllowsTools(this.#gpa) && decision.toolCalls.length > 0) {
@@ -333,7 +405,15 @@ class ThreadSessionRuntime {
           decision.toolCalls = [];
         }
 
-        if (decision.assistantMessage) {
+        const isRepeatedNonExecutableMessage =
+          decision.toolCalls.length === 0 &&
+          !decision.endTurn &&
+          decision.assistantMessage?.trim() === previousNonExecutableDecision;
+        if (
+          decision.assistantMessage &&
+          !isPatchPayload(decision.assistantMessage) &&
+          !isRepeatedNonExecutableMessage
+        ) {
           const assistantMessage = await this.recordMessage("assistant", decision.assistantMessage, turn.id);
           transcript.push({ role: "assistant", content: assistantMessage.content });
           if (streamedVisibleContent) {
@@ -346,12 +426,101 @@ class ThreadSessionRuntime {
           }
         }
 
+        if (!decision.isStructured) {
+          if (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") {
+            await this.services.persistence.finishTurn(turn.id, {
+              status: "completed",
+              completedAt: new Date().toISOString()
+            });
+            terminalThread = await this.services.persistence.updateThread(this.threadId, {
+              status: "completed",
+              updatedAt: new Date().toISOString()
+            });
+            break;
+          }
+          const decisionText = decision.assistantMessage?.trim() ?? "";
+          previousNonExecutableDecision = decisionText || null;
+          const executionNote =
+            this.#gpa.stage === "act" && !hasExecutedToolCall
+              ? " No tools have been executed for this ACT turn yet."
+              : "";
+          transcript.push({
+            role: "user",
+            content:
+              "Your previous response was not valid JSON and cannot complete this task." +
+              `${executionNote} ${availableToolsPrompt} Continue from the current transcript, use the provided tools when needed, and return only the required JSON decision envelope.`
+          });
+          continue;
+        }
+
+        if (this.#gpa.stage === "act" && decision.toolCalls.length === 0 && !decision.endTurn) {
+          const decisionText = decision.assistantMessage?.trim() ?? "";
+          previousNonExecutableDecision = decisionText || null;
+          transcript.push({
+            role: "user",
+            content:
+              "Your previous decision did not execute a tool and did not complete the task. " +
+              `${availableToolsPrompt} Use the result already in the transcript to call the next required tool, or return an end-turn decision.`
+          });
+          continue;
+        }
+
+        previousNonExecutableDecision = null;
+
+        if (
+          this.#gpa.stage === "act" &&
+          !hasExecutedToolCall &&
+          decision.toolCalls.length === 0 &&
+          decision.endTurn
+        ) {
+          transcript.push({
+            role: "user",
+            content:
+              "This is the ACT stage, but no tool has been executed in this turn. Do not mark the task complete. Continue with the required tool calls, or use a user-input tool to report a concrete blocker. Return only the required JSON decision envelope."
+          });
+          continue;
+        }
+
+        if (
+          hasExecutedToolCall &&
+          decision.toolCalls.length === 0 &&
+          decision.endTurn &&
+          !decision.goalCompleted
+        ) {
+          prematureCompletionAttempts += 1;
+          if (prematureCompletionAttempts >= MAX_REPEATED_TASK_FAILURES) {
+            repeatedTaskFailure = {
+              taskKey: "goal-completion-verification",
+              attempts: prematureCompletionAttempts,
+              lastError:
+                "The model repeatedly attempted to end the task without declaring that the original goal was complete."
+            };
+            break;
+          }
+          await this.services.log("turn.premature_completion_blocked", this.threadId, {
+            turnRunId: turn.id,
+            attempts: prematureCompletionAttempts,
+            originalGoal: initialInput
+          });
+          transcript.push({
+            role: "user",
+            content:
+              "The original user goal is not proven complete. Do not end the task after a single subtask. " +
+              "Continue implementing and verifying every requested deliverable. Return goal_completed: true only in the final response after all work is complete."
+          });
+          continue;
+        }
+
+        if (decision.toolCalls.length > 0) {
+          prematureCompletionAttempts = 0;
+        }
+
         if (decision.toolCalls.length === 0 && decision.endTurn && this.#pendingInput.length === 0) {
           await this.services.persistence.finishTurn(turn.id, {
             status: "completed",
             completedAt: new Date().toISOString()
           });
-          await this.services.persistence.updateThread(this.threadId, {
+          terminalThread = await this.services.persistence.updateThread(this.threadId, {
             status: "completed",
             updatedAt: new Date().toISOString()
           });
@@ -359,6 +528,40 @@ class ThreadSessionRuntime {
         }
 
         for (const toolCall of decision.toolCalls) {
+          if (abortController.signal.aborted) {
+            throw new Error("Turn interrupted.");
+          }
+          const toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
+          const toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+          const duplicateCreatedFile = getAddedPatchFiles(toolCall.arguments).find((filePath) =>
+            successfullyCreatedFiles.has(filePath)
+          );
+          if (duplicateCreatedFile) {
+            transcript.push({
+              role: "user",
+              content:
+                `The file ${duplicateCreatedFile} was already created successfully in this task. ` +
+                "Do not use Add File for it again. Read it first and use an Update File patch only when a change is required."
+            });
+            await this.services.log("tool.duplicate_file_create_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              filePath: duplicateCreatedFile
+            });
+            continue;
+          }
+          if (toolCallFingerprint === previousSuccessfulToolCall) {
+            const correction =
+              `The identical tool call ${toolCall.name} was just completed successfully. ` +
+              "Do not repeat it. Use its result to continue the task, choose a different tool, or return a completed decision.";
+            transcript.push({ role: "user", content: correction });
+            await this.services.log("tool.duplicate_call_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              arguments: toolCall.arguments
+            });
+            continue;
+          }
           const browserTabs = await this.services.listBrowserTabs(this.threadId);
           const toolRecord = await this.services.persistence.recordToolCall({
             threadId: this.threadId,
@@ -381,63 +584,89 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
 
-          const result = await this.services.toolRuntime.execute(toolCall, {
-            cwd: thread.cwd ?? process.cwd(),
-            appHome: "",
-            threadId: this.threadId,
-            turnRunId: turn.id,
-            approvalMode: this.services.config.desktop.approvals,
-            browserTabs,
-            knowledgeBases: visibleKnowledgeBases,
-            searchKnowledge: (query, knowledgeBaseIds) =>
-              this.services.searchKnowledge(query, knowledgeBaseIds ?? visibleKnowledgeBaseIds),
-            readKnowledgeConcept: this.services.readKnowledgeConcept,
-            listFiles: this.services.listFiles,
-            readFile: this.services.readFile,
-            writeFile: this.services.writeFile,
-            requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
-            requestUserInput: (input) => this.services.requestUserInput(this.threadId, turn.id, input),
-            spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
-            webSearch: this.services.webSearch,
-            openPage: (url) => this.services.openPage(this.threadId, url),
-            findInPage: this.services.findInPage,
-            listBrowserTabs: () => this.services.listBrowserTabs(this.threadId),
-            openBrowserTab: (url) => this.services.openBrowserTab(this.threadId, url),
-            navigateBrowserTab: (tabId, url) => this.services.navigateBrowserTab(this.threadId, tabId, url),
-            reloadBrowserTab: (tabId) => this.services.reloadBrowserTab(this.threadId, tabId),
-            goBackBrowserTab: (tabId) => this.services.goBackBrowserTab(this.threadId, tabId),
-            goForwardBrowserTab: (tabId) => this.services.goForwardBrowserTab(this.threadId, tabId),
-            focusBrowserTab: (tabId) => this.services.focusBrowserTab(this.threadId, tabId),
-            readBrowserPageText: (tabId) => this.services.readBrowserPageText(this.threadId, tabId),
-            captureBrowserSnapshot: (tabId) => this.services.captureBrowserSnapshot(this.threadId, tabId, turn.id),
-            getThreadOutputDir: () => this.services.getThreadOutputDir(this.threadId),
-            listMcpResources: async (server) => {
-              if (server) {
+          hasExecutedToolCall = true;
+          let result: ToolResult;
+          try {
+            result = await waitForAbort(
+              this.services.toolRuntime.execute(toolCall, {
+              cwd: thread.cwd ?? process.cwd(),
+              appHome: "",
+              threadId: this.threadId,
+              turnRunId: turn.id,
+              approvalMode: this.services.config.desktop.approvals,
+              browserTabs,
+              knowledgeBases: visibleKnowledgeBases,
+              searchKnowledge: (query, knowledgeBaseIds) =>
+                this.services.searchKnowledge(query, knowledgeBaseIds ?? visibleKnowledgeBaseIds),
+              readKnowledgeConcept: this.services.readKnowledgeConcept,
+              listFiles: this.services.listFiles,
+              readFile: this.services.readFile,
+              writeFile: this.services.writeFile,
+              runTerminalCommand: (command) =>
+                this.services.runTerminalCommand(this.threadId, thread.cwd ?? process.cwd(), command),
+              requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
+              requestUserInput: (input) => this.services.requestUserInput(this.threadId, turn.id, input),
+              spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
+              webSearch: this.services.webSearch,
+              openPage: (url) => this.services.openPage(this.threadId, url),
+              findInPage: this.services.findInPage,
+              listBrowserTabs: () => this.services.listBrowserTabs(this.threadId),
+              openBrowserTab: (url) => this.services.openBrowserTab(this.threadId, url),
+              navigateBrowserTab: (tabId, url) => this.services.navigateBrowserTab(this.threadId, tabId, url),
+              reloadBrowserTab: (tabId) => this.services.reloadBrowserTab(this.threadId, tabId),
+              goBackBrowserTab: (tabId) => this.services.goBackBrowserTab(this.threadId, tabId),
+              goForwardBrowserTab: (tabId) => this.services.goForwardBrowserTab(this.threadId, tabId),
+              focusBrowserTab: (tabId) => this.services.focusBrowserTab(this.threadId, tabId),
+              readBrowserPageText: (tabId) => this.services.readBrowserPageText(this.threadId, tabId),
+              captureBrowserSnapshot: (tabId) => this.services.captureBrowserSnapshot(this.threadId, tabId, turn.id),
+              getThreadOutputDir: () => this.services.getThreadOutputDir(this.threadId),
+              listMcpResources: async (server) => {
+                if (server) {
+                  assertAccessibleMcpServer(server, accessibleMcpServerIds);
+                  return this.services.listMcpResources(server);
+                }
+                return (await this.services.listMcpResources()).filter((resource) =>
+                  accessibleMcpServerIds.includes(resource.server)
+                );
+              },
+              listMcpResourceTemplates: async (server) => {
+                if (server) {
+                  assertAccessibleMcpServer(server, accessibleMcpServerIds);
+                  return this.services.listMcpResourceTemplates(server);
+                }
+                return (await this.services.listMcpResourceTemplates()).filter((template) =>
+                  accessibleMcpServerIds.includes(template.server)
+                );
+              },
+              readMcpResource: async (server, uri) => {
                 assertAccessibleMcpServer(server, accessibleMcpServerIds);
-                return this.services.listMcpResources(server);
-              }
-              return (await this.services.listMcpResources()).filter((resource) =>
-                accessibleMcpServerIds.includes(resource.server)
-              );
-            },
-            listMcpResourceTemplates: async (server) => {
-              if (server) {
+                return this.services.readMcpResource(server, uri);
+              },
+              callMcpTool: async (server, tool, argumentsJson) => {
                 assertAccessibleMcpServer(server, accessibleMcpServerIds);
-                return this.services.listMcpResourceTemplates(server);
+                return this.services.callMcpTool(server, tool, argumentsJson);
               }
-              return (await this.services.listMcpResourceTemplates()).filter((template) =>
-                accessibleMcpServerIds.includes(template.server)
-              );
-            },
-            readMcpResource: async (server, uri) => {
-              assertAccessibleMcpServer(server, accessibleMcpServerIds);
-              return this.services.readMcpResource(server, uri);
-            },
-            callMcpTool: async (server, tool, argumentsJson) => {
-              assertAccessibleMcpServer(server, accessibleMcpServerIds);
-              return this.services.callMcpTool(server, tool, argumentsJson);
+              }),
+              abortController.signal
+            );
+          } catch (error) {
+            if (abortController.signal.aborted) {
+              throw error;
             }
-          });
+            result = {
+              ok: false,
+              content: `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`
+            };
+            await this.services.log("tool.execution_error", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+
+          if (abortController.signal.aborted) {
+            throw new Error("Turn interrupted.");
+          }
 
           await this.services.persistence.finishToolCall(toolRecord.id, {
             status: result.ok ? "completed" : "failed",
@@ -462,6 +691,25 @@ class ThreadSessionRuntime {
             { toolCallId: toolRecord.id }
           );
           transcript.push({ role: "tool", content: toolMessage.content });
+          if (result.ok) {
+            previousSuccessfulToolCall = toolCallFingerprint;
+            for (const filePath of getAddedPatchFiles(toolCall.arguments)) {
+              successfullyCreatedFiles.add(filePath);
+            }
+            taskFailureCounts.delete(toolTaskKey);
+          } else {
+            previousSuccessfulToolCall = null;
+            const attempts = (taskFailureCounts.get(toolTaskKey) ?? 0) + 1;
+            taskFailureCounts.set(toolTaskKey, attempts);
+            if (attempts >= MAX_REPEATED_TASK_FAILURES) {
+              repeatedTaskFailure = {
+                taskKey: toolTaskKey,
+                attempts,
+                lastError: result.content
+              };
+              break;
+            }
+          }
         }
 
         if (this.#pendingInput.length > 0) {
@@ -473,17 +721,41 @@ class ThreadSessionRuntime {
           continue;
         }
 
-        if (decision.endTurn && decision.toolCalls.length === 0) {
-          await this.services.persistence.finishTurn(turn.id, {
-            status: "completed",
-            completedAt: new Date().toISOString()
-          });
-          await this.services.persistence.updateThread(this.threadId, {
-            status: "completed",
-            updatedAt: new Date().toISOString()
-          });
-          break;
-        }
+      }
+
+      if (repeatedTaskFailure) {
+        const errorMessage =
+          `The same task (${repeatedTaskFailure.taskKey}) failed ${repeatedTaskFailure.attempts} consecutive times. ` +
+          `Last error: ${repeatedTaskFailure.lastError}`;
+        await this.recordMessage(
+          "assistant",
+          `本次任务未完成：同一任务“${repeatedTaskFailure.taskKey}”连续失败 ${repeatedTaskFailure.attempts} 次，已停止重试。最后错误：${repeatedTaskFailure.lastError}`,
+          turn.id
+        );
+        await this.services.persistence.finishTurn(turn.id, {
+          status: "failed",
+          completedAt: new Date().toISOString(),
+          errorMessage
+        });
+        terminalThread = await this.services.persistence.updateThread(this.threadId, {
+          status: "failed",
+          updatedAt: new Date().toISOString()
+        });
+        await this.services.log("turn.repeated_task_failure", this.threadId, {
+          turnRunId: turn.id,
+          taskKey: repeatedTaskFailure.taskKey,
+          attempts: repeatedTaskFailure.attempts,
+          lastError: repeatedTaskFailure.lastError
+        });
+      }
+
+      if (terminalThread) {
+        await this.services.emit({
+          type: "thread.updated",
+          threadId: this.threadId,
+          payload: { thread: terminalThread },
+          createdAt: new Date().toISOString()
+        });
       }
 
       // GOAL/PLAN 阶段产出后，置为等待用户确认；ACT 阶段不挂起
@@ -497,18 +769,68 @@ class ThreadSessionRuntime {
         }
       }
     } catch (error) {
+      if (abortController.signal.aborted) {
+        let messageId: string | undefined;
+        if (interruptedVisibleContent.trim()) {
+          const message = await this.recordMessage(
+            "assistant",
+            interruptedVisibleContent,
+            turn.id
+          );
+          messageId = message.id;
+        }
+        const completedAt = new Date().toISOString();
+        await this.services.persistence.finishTurn(turn.id, {
+          status: "interrupted",
+          completedAt,
+          errorMessage: null
+        });
+        const updatedThread = await this.services.persistence.updateThread(this.threadId, {
+          status: "idle",
+          updatedAt: completedAt
+        });
+        if (interruptedVisibleContent) {
+          await this.services.emit({
+            type: "assistant.completed",
+            threadId: this.threadId,
+            payload: { turnRunId: turn.id, messageId },
+            createdAt: completedAt
+          });
+        }
+        await this.services.emit({
+          type: "thread.updated",
+          threadId: this.threadId,
+          payload: { thread: updatedThread },
+          createdAt: completedAt
+        });
+        return;
+      }
+      const completedAt = new Date().toISOString();
+      await this.services.log("turn.failed", this.threadId, {
+        turnRunId: turn.id,
+        error: error instanceof Error ? error.message : String(error)
+      });
       await this.services.persistence.finishTurn(turn.id, {
         status: "failed",
-        completedAt: new Date().toISOString(),
+        completedAt,
         errorMessage: error instanceof Error ? error.message : String(error)
       });
-      await this.services.persistence.updateThread(this.threadId, {
+      const updatedThread = await this.services.persistence.updateThread(this.threadId, {
         status: "failed",
-        updatedAt: new Date().toISOString()
+        updatedAt: completedAt
       });
-      throw error;
+      await this.services.emit({
+        type: "thread.updated",
+        threadId: this.threadId,
+        payload: { thread: updatedThread },
+        createdAt: completedAt
+      });
+      return;
     } finally {
       this.#activeTurnRunId = null;
+      if (this.#abortController === abortController) {
+        this.#abortController = null;
+      }
     }
   }
 
@@ -542,6 +864,44 @@ class ThreadSessionRuntime {
   }
 }
 
+export function createToolCallFingerprint(name: string, argumentsJson: Record<string, unknown>): string {
+  return `${name}:${stableSerialize(argumentsJson)}`;
+}
+
+export function getToolCallTaskKey(name: string, argumentsJson: Record<string, unknown>): string {
+  const patch = [argumentsJson.patch, argumentsJson.patch_content, argumentsJson.patchText].find(
+    (value): value is string => typeof value === "string"
+  );
+  if (patch) {
+    const paths = [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)]
+      .map((match) => match[1].trim())
+      .filter(Boolean)
+      .sort();
+    if (paths.length > 0) {
+      return `${name}:${paths.join("|")}`;
+    }
+  }
+
+  const path = argumentsJson.path ?? argumentsJson.file_path;
+  if (typeof path === "string" && path.trim()) {
+    return `${name}:${path.trim()}`;
+  }
+  return createToolCallFingerprint(name, argumentsJson);
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 export class AgentRuntimeService {
   readonly #sessions = new Map<string, ThreadSessionRuntime>();
 
@@ -562,13 +922,18 @@ export class AgentRuntimeService {
     this.ensureThread(threadId).submit({ type: "user_input", content });
   }
 
-  public interrupt(threadId: string): void {
-    this.ensureThread(threadId).submit({ type: "interrupt" });
+  public interrupt(threadId: string): boolean {
+    return this.#sessions.get(threadId)?.interrupt() ?? false;
   }
 
   public async setGpaStage(threadId: string, stage: GpaStage): Promise<void> {
     const runtime = this.ensureThread(threadId);
     await runtime.setGpaStage(stage);
+  }
+
+  public async setGpaFullAccess(threadId: string, fullAccess: boolean): Promise<void> {
+    const runtime = this.ensureThread(threadId);
+    await runtime.setGpaFullAccess(fullAccess);
   }
 
   public getGpa(threadId: string): GpaState {
@@ -583,6 +948,36 @@ export class AgentRuntimeService {
     runtime.stop();
     this.#sessions.delete(threadId);
   }
+}
+
+function isPatchPayload(content: string): boolean {
+  return /^\s*(?:```(?:diff|patch)?\s*)?\*\*\* Begin Patch\b/m.test(content);
+}
+
+export function getAddedPatchFiles(argumentsJson: Record<string, unknown>): string[] {
+  const patch = argumentsJson.patch;
+  if (typeof patch !== "string") {
+    return [];
+  }
+  return [...patch.matchAll(/^\*\*\* Add File: (.+)$/gm)]
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+}
+
+export function formatAvailableTools(tools: ToolSpecDefinition[]): string {
+  const definitions = tools.map((tool) => {
+    const required = Array.isArray((tool.inputSchema as { required?: unknown }).required)
+      ? (tool.inputSchema as { required: unknown[] }).required.map(String).join(", ")
+      : "none";
+    return `- ${tool.name}: ${tool.description} Required arguments: ${required}.`;
+  });
+
+  return [
+    "## Available Executable Tools",
+    "The following tools are available in this turn. They are real executable tools, not examples. Never claim that command execution is unavailable while shell.exec appears below.",
+    "For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete.",
+    ...definitions
+  ].join("\n");
 }
 
 function buildRuntimePrompt(

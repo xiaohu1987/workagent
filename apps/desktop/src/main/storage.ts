@@ -550,6 +550,54 @@ export class DatabaseService {
     return next;
   }
 
+  public interruptThreadExecution(threadId: string): ThreadRecord {
+    const completedAt = nowIso();
+    this.#db.exec("BEGIN");
+    try {
+      this.#db
+        .prepare(
+          `UPDATE turn_runs
+           SET status = 'interrupted', completed_at = ?, error_message = NULL
+           WHERE thread_id = ?
+             AND status IN ('pending_init', 'running', 'waiting_tool', 'waiting_approval', 'waiting_user_input', 'compacting')`
+        )
+        .run(completedAt, threadId);
+      this.#db
+        .prepare(
+          `UPDATE tool_calls
+           SET status = 'failed', completed_at = ?
+           WHERE thread_id = ? AND status IN ('pending', 'running')`
+        )
+        .run(completedAt, threadId);
+      const thread = this.updateThread(threadId, { status: "idle", updatedAt: completedAt });
+      this.#db.exec("COMMIT");
+      return thread;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public recoverInterruptedThreads(): void {
+    const runningThreadIds = this.#db
+      .prepare("SELECT id FROM threads WHERE status IN ('running', 'waiting')")
+      .all() as Array<{ id: string }>;
+    for (const { id } of runningThreadIds) {
+      this.interruptThreadExecution(id);
+    }
+    this.#db
+      .prepare(
+        `UPDATE tool_calls
+         SET status = 'failed', completed_at = ?
+         WHERE status IN ('pending', 'running')
+           AND turn_run_id IN (
+             SELECT id FROM turn_runs
+             WHERE status IN ('interrupted', 'aborted', 'completed', 'failed')
+           )`
+      )
+      .run(nowIso());
+  }
+
   public deleteThread(threadId: string): ThreadRecord | null {
     const row = this.#db.prepare("SELECT * FROM threads WHERE id = ?").get(threadId);
     if (!row) {

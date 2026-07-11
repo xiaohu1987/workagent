@@ -2,6 +2,7 @@ import type { GpaStage, GpaState } from "@shared-types";
 
 export const DEFAULT_GPA_STATE: GpaState = {
   stage: "off",
+  fullAccess: false,
   awaitingConfirmation: null,
   planTasks: [],
   updatedAt: new Date(0).toISOString()
@@ -30,6 +31,7 @@ export function parseGpaState(json: string | null | undefined): GpaState {
         : "off";
     return {
       stage,
+      fullAccess: parsed.fullAccess === true,
       awaitingConfirmation: parsed.awaitingConfirmation ?? null,
       planTasks: Array.isArray(parsed.planTasks) ? parsed.planTasks : [],
       updatedAt: parsed.updatedAt ?? new Date().toISOString()

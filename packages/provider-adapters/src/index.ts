@@ -44,7 +44,9 @@ class MockProvider implements ProviderAdapter {
         return {
           assistantMessage: `我会先调用 ${explicitSkill.name} 来收集执行上下文。`,
           toolCalls: [{ id: crypto.randomUUID(), name: explicitSkill.name, arguments: {} }],
-          endTurn: false
+          endTurn: false,
+          goalCompleted: false,
+          isStructured: true
         };
       }
     }
@@ -61,7 +63,9 @@ class MockProvider implements ProviderAdapter {
             }
           }
         ],
-        endTurn: false
+        endTurn: false,
+        goalCompleted: false,
+        isStructured: true
       };
     }
 
@@ -77,7 +81,9 @@ class MockProvider implements ProviderAdapter {
             }
           }
         ],
-        endTurn: false
+        endTurn: false,
+        goalCompleted: false,
+        isStructured: true
       };
     }
 
@@ -86,6 +92,8 @@ class MockProvider implements ProviderAdapter {
         "运行时已准备好。当前默认是 mock provider，所以我会优先通过工具收集事实，再继续推进任务。",
       toolCalls: [],
       endTurn: true,
+      goalCompleted: true,
+      isStructured: true,
       reasoningSummary: "mock-provider"
     };
   }
@@ -107,7 +115,8 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       model: input.model.id,
       messages: buildOpenAiCompatibleMessages(input),
       temperature: input.model.defaultTemperature,
-      max_tokens: input.model.defaultMaxOutputTokens
+      max_tokens: input.model.defaultMaxOutputTokens,
+      ...(input.model.supportsJsonOutput ? { response_format: { type: "json_object" as const } } : {})
     };
 
     if (input.stream && input.model.supportsStreaming) {
@@ -155,17 +164,20 @@ class AnthropicProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
-    const response = await this.#client.messages.create({
-      model: input.model.id,
-      system: input.systemPrompt,
-      max_tokens: input.model.defaultMaxOutputTokens ?? 2048,
-      messages: input.transcript
-        .filter((message) => message.role !== "system")
-        .map((message) => ({
-          role: message.role === "assistant" || message.role === "tool" ? "assistant" : "user",
-          content: message.content
-        }))
-    });
+    const response = await this.#client.messages.create(
+      {
+        model: input.model.id,
+        system: input.systemPrompt,
+        max_tokens: input.model.defaultMaxOutputTokens ?? 2048,
+        messages: input.transcript
+          .filter((message) => message.role !== "system")
+          .map((message) => ({
+            role: message.role === "assistant" || message.role === "tool" ? "assistant" : "user",
+            content: message.content
+          }))
+      },
+      { signal: input.abortSignal }
+    );
 
     const text = response.content
       .map((part) => ("text" in part ? part.text : ""))
@@ -284,6 +296,8 @@ function parseDecisionFromText(text: string): ProviderTurnDecision {
             }))
         : [],
       endTurn: parsed.end_turn !== false,
+      goalCompleted: parsed.goal_completed === true,
+      isStructured: true,
       reasoningSummary:
         typeof parsed.reasoning_summary === "string" ? parsed.reasoning_summary : undefined
     };
@@ -292,7 +306,9 @@ function parseDecisionFromText(text: string): ProviderTurnDecision {
   return {
     assistantMessage: text || "模型未返回结构化结果。",
     toolCalls: [],
-    endTurn: true
+    endTurn: false,
+    goalCompleted: false,
+    isStructured: false
   };
 }
 
@@ -343,13 +359,27 @@ function assertNever(_value: ProviderType): never {
 export function buildDecisionSystemPrompt(model: ModelProfile): string {
   return [
     "You are codexh, a desktop agent.",
-    "Always decide the next action using a JSON object.",
-    "Return keys: assistant_message, tool_calls, end_turn, reasoning_summary.",
+    "Return exactly one valid JSON object and no text outside that JSON object.",
+    "Return keys: assistant_message, tool_calls, end_turn, goal_completed, reasoning_summary.",
     "assistant_message is visible to the user: write concise Markdown or one short progress update before tool calls.",
     "Never expose private chain-of-thought; reasoning_summary is internal only and must never be rendered.",
     "tool_calls must be an array of { name, arguments }.",
     "Only call tools that were provided in the tool list.",
+    "When shell.exec is listed, it is the command execution tool. Do not state that command execution is unavailable; call shell.exec with {\"command\": \"...\"} instead.",
+    "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",
+    "For apply_patch, send arguments.patch with this exact raw grammar: *** Begin Patch\\n*** Add File: relative/path.ext\\n+content\\n*** End Patch. Do not send a Git diff, file_path, or patch_content.",
+    "To inspect the selected project folder, call fs.read_directory with { path: \".\" }. Never call read or use Unix paths such as /home.",
+    "A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with apply_patch in the very next tool call.",
+    "After an Add File patch succeeds, never use Add File for that path again in the same task. Read it and use Update File only if a follow-up edit is necessary.",
+    "There is no create_file tool. Never invent a tool name or substitute one for a provided tool.",
     "When no tool is needed, return an empty tool_calls array.",
+    "Never put patches, diffs, or source code in assistant_message. Use tool_calls for file writes; assistant_message may only contain a short progress update or final summary.",
+    "To inspect the selected project folder, call fs.read_directory with { path: \".\" }. Never call read or use Unix paths such as /home.",
+    "A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with apply_patch in the very next tool call.",
+    "There is no create_file tool. Never invent a tool name or substitute one for a provided tool.",
+    "When no tool is needed, return an empty tool_calls array.",
+    "Never state or imply that a file was created, changed, tested, or that a task is complete unless the corresponding tool call has already run and its result is in the transcript.",
+    "After any tool has run, set end_turn to true only when every deliverable in the original user goal is complete and verified. In that final response set goal_completed to true, leave tool_calls empty, and write a concise final summary. A completed subtask is never sufficient. Otherwise set end_turn and goal_completed to false.",
     `Current model: ${model.displayName}.`
   ].join("\n");
 }

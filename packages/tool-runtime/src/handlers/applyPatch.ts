@@ -26,7 +26,7 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
 
   for (const operation of operations) {
     if (operation.type === "add") {
-      const filePath = path.resolve(rootDir, operation.file);
+      const filePath = resolveWorkspacePath(rootDir, operation.file);
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, operation.content, "utf8");
       touched.push(filePath);
@@ -34,14 +34,14 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
     }
 
     if (operation.type === "delete") {
-      const filePath = path.resolve(rootDir, operation.file);
+      const filePath = resolveWorkspacePath(rootDir, operation.file);
       await fs.rm(filePath, { recursive: true, force: true });
       touched.push(filePath);
       continue;
     }
 
-    const sourcePath = path.resolve(rootDir, operation.file);
-    const nextPath = path.resolve(rootDir, operation.moveTo ?? operation.file);
+    const sourcePath = resolveWorkspacePath(rootDir, operation.file);
+    const nextPath = resolveWorkspacePath(rootDir, operation.moveTo ?? operation.file);
     const current = await fs.readFile(sourcePath, "utf8");
     const updated = applyHunks(current, operation.hunks);
     await fs.mkdir(path.dirname(nextPath), { recursive: true });
@@ -53,6 +53,19 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
   }
 
   return touched;
+}
+
+function resolveWorkspacePath(rootDir: string, targetPath: string): string {
+  if (path.isAbsolute(targetPath)) {
+    throw new Error("Patch paths must be relative to the project folder.");
+  }
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(root, targetPath);
+  const relative = path.relative(root, resolved);
+  if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+    return resolved;
+  }
+  throw new Error("Patch path is outside the project folder.");
 }
 
 function parsePatch(patchText: string): PatchOperation[] {

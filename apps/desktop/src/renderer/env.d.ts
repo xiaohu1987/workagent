@@ -9,6 +9,9 @@ declare global {
         providerId?: string | null;
         modelId?: string | null;
       }) => Promise<any>;
+      chooseProjectDirectory: (defaultPath?: string) => Promise<string | null>;
+      listProjectFiles: (threadId: string) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
+      readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean }>;
       deleteThread: (threadId: string) => Promise<void>;
       getThreadSnapshot: (threadId: string) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string }) => Promise<void>;
@@ -18,6 +21,10 @@ declare global {
         providerId: string;
         modelId: string;
       }) => Promise<any>;
+      openTerminal: (threadId: string) => Promise<{ cwd: string; shell: string; output: string }>;
+      writeTerminal: (payload: { threadId: string; input: string }) => Promise<void>;
+      closeTerminal: (threadId: string) => Promise<void>;
+      openExternal: (url: string) => Promise<void>;
       listSkills: () => Promise<any[]>;
       listPlugins: () => Promise<any[]>;
       installPlugin: (source: string) => Promise<any>;
@@ -28,6 +35,13 @@ declare global {
       }) => Promise<any>;
       getConfig: () => Promise<any>;
       saveConfig: (config: unknown) => Promise<void>;
+      fetchProviderModels: (payload: {
+        baseUrl?: string;
+        apiKey?: string;
+        apiKeyEnv?: string;
+        type?: string;
+        id?: string;
+      }) => Promise<Array<{ id: string; displayName?: string }>>;
       importKnowledge: (payload: {
         displayName: string;
         scope: "global" | "project" | "imported";
@@ -50,6 +64,7 @@ declare global {
         threadId: string;
         stage: "off" | "goal" | "plan" | "act";
       }) => Promise<void>;
+      setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) => Promise<void>;
       onRuntimeEvent: (listener: (event: unknown) => void) => () => void;
     };
   }

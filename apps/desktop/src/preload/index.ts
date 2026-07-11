@@ -10,6 +10,11 @@ const api = {
     modelId?: string | null;
   }) =>
     ipcRenderer.invoke("threads:create", payload),
+  chooseProjectDirectory: (defaultPath?: string) =>
+    ipcRenderer.invoke("projects:choose-directory", defaultPath),
+  listProjectFiles: (threadId: string) => ipcRenderer.invoke("projects:list-files", threadId),
+  readProjectFile: (payload: { threadId: string; path: string }) =>
+    ipcRenderer.invoke("projects:read-file", payload),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
   getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
   sendMessage: (payload: { threadId: string; content: string }) =>
@@ -17,6 +22,11 @@ const api = {
   interruptThread: (threadId: string) => ipcRenderer.invoke("threads:interrupt", threadId),
   updateThreadModelSelection: (payload: { threadId: string; providerId: string; modelId: string }) =>
     ipcRenderer.invoke("threads:update-model", payload),
+  openTerminal: (threadId: string) => ipcRenderer.invoke("terminal:open", threadId),
+  writeTerminal: (payload: { threadId: string; input: string }) =>
+    ipcRenderer.invoke("terminal:write", payload),
+  closeTerminal: (threadId: string) => ipcRenderer.invoke("terminal:close", threadId),
+  openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
   listSkills: () => ipcRenderer.invoke("skills:list"),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),
@@ -61,6 +71,8 @@ const api = {
   getGpaState: (threadId: string) => ipcRenderer.invoke("gpa:state", threadId),
   setGpaStage: (payload: { threadId: string; stage: "off" | "goal" | "plan" | "act" }) =>
     ipcRenderer.invoke("gpa:set-stage", payload),
+  setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) =>
+    ipcRenderer.invoke("gpa:set-full-access", payload),
   fetchProviderModels: (payload: {
     baseUrl?: string;
     apiKey?: string;

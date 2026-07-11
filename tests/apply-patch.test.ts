@@ -41,4 +41,19 @@ describe("applyCodexPatch", () => {
     expect(updated).toContain("patched");
     expect(added).toBe("new file\n");
   });
+
+  it("rejects patch paths outside the selected project folder", async () => {
+    const root = await makeTempDir();
+
+    await expect(
+      applyCodexPatch(
+        `*** Begin Patch
+*** Add File: ../outside.txt
++blocked
+*** End Patch
+`,
+        root
+      )
+    ).rejects.toThrow("outside the project folder");
+  });
 });

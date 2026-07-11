@@ -8,6 +8,8 @@ export interface GpaPlanTask {
 }
 export interface GpaState {
   stage: GpaStage;
+  /** When enabled for a task, tool calls execute without approval prompts. */
+  fullAccess: boolean;
   awaitingConfirmation: "goal" | "plan" | "act" | null;
   planTasks: GpaPlanTask[];
   updatedAt: string;
@@ -368,6 +370,10 @@ export interface ProviderTurnDecision {
   assistantMessage?: string;
   toolCalls: RuntimeToolCall[];
   endTurn: boolean;
+  /** Explicit provider declaration that every deliverable in the user goal is complete. */
+  goalCompleted: boolean;
+  /** True only when the provider response matched the runtime JSON envelope. */
+  isStructured: boolean;
   reasoningSummary?: string;
 }
 
@@ -399,7 +405,8 @@ export interface RuntimeEvent {
     | "user-input.requested"
     | "knowledge.imported"
     | "browser.updated"
-    | "gpa.updated";
+    | "gpa.updated"
+    | "terminal.output";
   threadId?: string;
   payload: Record<string, unknown>;
   createdAt: string;
