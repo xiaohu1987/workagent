@@ -12,6 +12,8 @@ const api = {
     ipcRenderer.invoke("threads:create", payload),
   chooseProjectDirectory: (defaultPath?: string) =>
     ipcRenderer.invoke("projects:choose-directory", defaultPath),
+  chooseAttachmentFiles: (payload?: { imagesOnly?: boolean }) =>
+    ipcRenderer.invoke("attachments:choose-files", payload),
   listProjectFiles: (threadId: string) => ipcRenderer.invoke("projects:list-files", threadId),
   readProjectFile: (payload: { threadId: string; path: string }) =>
     ipcRenderer.invoke("projects:read-file", payload),
@@ -22,6 +24,8 @@ const api = {
   interruptThread: (threadId: string) => ipcRenderer.invoke("threads:interrupt", threadId),
   updateThreadModelSelection: (payload: { threadId: string; providerId: string; modelId: string }) =>
     ipcRenderer.invoke("threads:update-model", payload),
+  addThreadSkill: (payload: { threadId: string; skillId: string }) =>
+    ipcRenderer.invoke("threads:add-skill", payload),
   openTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:open", payload),
   writeTerminal: (payload: { threadId: string; input: string; sessionId?: string }) =>
     ipcRenderer.invoke("terminal:write", payload),

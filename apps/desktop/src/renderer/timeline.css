@@ -788,3 +788,40 @@
   .task-timeline .message-card.user, .task-timeline .message-card.assistant, .task-timeline .message-card.system { padding-left: 18px; }
   .task-timeline .message-card.user::before, .task-timeline .message-card:not(.user)::before, .execution-step::before, .tool-activity-group::before, .plan-timeline::before { left: -15px; }
 }
+
+/* Keep the transcript flat: no decorative task rail, line, or status dots. */
+.task-timeline::before,
+.task-timeline .message-card::before,
+.execution-step::before,
+.tool-activity-group::before,
+.plan-timeline::before,
+.streaming-assistant::before,
+.directory-read-group-dot {
+  display: none;
+}
+
+.task-timeline .message-card.user,
+.task-timeline .message-card.assistant,
+.task-timeline .message-card.system {
+  padding-left: 0;
+}
+
+.execution-step,
+.tool-activity-group,
+.plan-timeline,
+.gpa-confirmation,
+.streaming-assistant,
+.directory-read-group,
+.task-processing-indicator {
+  margin-left: 0;
+}
+
+.streaming-assistant {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.directory-read-group {
+  border-left: 0;
+  padding-left: 0;
+}

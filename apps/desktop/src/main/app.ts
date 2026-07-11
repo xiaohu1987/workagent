@@ -433,6 +433,24 @@ export class DesktopBackend {
     return updated;
   }
 
+  public async addThreadSkill(threadId: string, skillId: string): Promise<ThreadRecord> {
+    const thread = this.#db.getThread(threadId);
+    if (thread.selectedSkillIds.includes(skillId)) {
+      return thread;
+    }
+    const updated = this.#db.updateThread(threadId, {
+      selectedSkillIds: [...thread.selectedSkillIds, skillId],
+      updatedAt: new Date().toISOString()
+    });
+    await this.emit({
+      type: "thread.updated",
+      threadId,
+      payload: { thread: updated },
+      createdAt: new Date().toISOString()
+    });
+    return updated;
+  }
+
   public listPlugins(): PluginRecord[] {
     return this.#db.listPlugins();
   }

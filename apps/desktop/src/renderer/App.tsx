@@ -48,6 +48,52 @@ type PreviewCacheEntry = {
   truncated: boolean;
 };
 
+type ComposerAttachment =
+  | { id: string; kind: "file" | "folder" | "image"; path: string; label: string }
+  | { id: string; kind: "code"; path: string; content: string; label: string; intent: "reference" | "edit" }
+  | { id: string; kind: "skill"; skillId: string; label: string; description: string }
+  | { id: string; kind: "mcp"; serverId: string; label: string; description: string };
+
+type ComposerAttachmentInput =
+  | { kind: "file" | "folder" | "image"; path: string; label: string }
+  | { kind: "code"; path: string; content: string; label: string; intent: "reference" | "edit" }
+  | { kind: "skill"; skillId: string; label: string; description: string }
+  | { kind: "mcp"; serverId: string; label: string; description: string };
+
+type ContextUsageSegment = {
+  id: string;
+  label: string;
+  tokens: number;
+  color: string;
+};
+
+type ContextUsage = {
+  contextWindow: number;
+  usedTokens: number;
+  percentage: number;
+  segments: ContextUsageSegment[];
+};
+
+type WorkspaceContextMenuAction = {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  onSelect: () => void;
+};
+
+function composerAttachmentKey(attachment: ComposerAttachment | ComposerAttachmentInput): string {
+  switch (attachment.kind) {
+    case "code":
+      return `${attachment.kind}:${attachment.path}:${attachment.content}`;
+    case "skill":
+      return `${attachment.kind}:${attachment.skillId}`;
+    case "mcp":
+      return `${attachment.kind}:${attachment.serverId}`;
+    default:
+      return `${attachment.kind}:${attachment.path}`;
+  }
+}
+
 type TerminalWorkspaceTab = {
   id: string;
   title: string;
@@ -233,7 +279,7 @@ export function App() {
     getStoredPanelWidth("codexh.right-workspace-width", 410, MIN_RIGHT_WORKSPACE_WIDTH, MAX_RIGHT_WORKSPACE_WIDTH)
   );
   const [resizingPane, setResizingPane] = useState<ResizePane | null>(null);
-  const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("terminal");
+  const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("files");
   const [terminalTabsByThread, setTerminalTabsByThread] = useState<Record<string, TerminalWorkspaceTab[]>>({});
   const [activeTerminalTabByThread, setActiveTerminalTabByThread] = useState<Record<string, string>>({});
   const [terminalInputsByThread, setTerminalInputsByThread] = useState<Record<string, Record<string, string>>>({});
@@ -253,6 +299,8 @@ export function App() {
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [input, setInput] = useState("");
+  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const [isContextReportOpen, setIsContextReportOpen] = useState(false);
   const [skills, setSkills] = useState<SkillMetadata[]>([]);
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
   const [gpaState, setGpaState] = useState<GpaState>({
@@ -263,6 +311,7 @@ export function App() {
     updatedAt: ""
   });
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
+  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp">("root");
   const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
   const gpaAnchorRef = useRef<HTMLDivElement | null>(null);
   const [gpaRevisionOpen, setGpaRevisionOpen] = useState(false);
@@ -461,6 +510,7 @@ export function App() {
 
   useEffect(() => {
     if (!gpaMenuOpen) {
+      setComposerAddMenuView("root");
       return;
     }
     const handleKey = (event: KeyboardEvent) => {
@@ -778,7 +828,10 @@ export function App() {
         .at(-1) ?? null,
     [activeSnapshotThreadId, streamingAssistants]
   );
-  const composerPrimaryAction = getComposerPrimaryActionState(selectedThreadStatus, input);
+  const composerPrimaryAction = getComposerPrimaryActionState(
+    selectedThreadStatus,
+    input.trim() || composerAttachments.length > 0 ? "content" : ""
+  );
   const isActiveThreadExecuting = composerPrimaryAction.kind === "interrupt";
   const isTaskProcessing = selectedThreadStatus === "running";
   const taskProcessingLabel = useMemo(
@@ -871,6 +924,23 @@ export function App() {
 
     return targetModel.displayName?.trim() || targetModel.id;
   }, [config, composerModelId, composerProviderId, selectedThread]);
+  const contextUsage = useMemo(() => {
+    const targetProviderId = selectedThread?.providerId ?? composerProviderId ?? config?.defaultProvider;
+    const targetModelId = selectedThread?.modelId ?? composerModelId ?? config?.defaultModel;
+    const contextWindow =
+      config?.models.find((model) => model.id === targetModelId && model.providerId === targetProviderId)?.contextWindow ??
+      config?.models.find((model) => model.id === targetModelId)?.contextWindow ??
+      128_000;
+    return buildContextUsage({
+      contextWindow,
+      messages: selectedMessages,
+      toolCalls: snapshot?.toolCalls ?? [],
+      gpaStage: gpaState.stage,
+      selectedSkillCount: selectedThread?.selectedSkillIds.length ?? 0,
+      mcpServerCount: config?.mcpServers.length ?? 0,
+      pendingInput: `${input}\n${formatComposerAttachments(composerAttachments)}`
+    });
+  }, [composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.toolCalls]);
   const settingsTitle = useMemo(() => {
     switch (settingsTab) {
       case "provider":
@@ -1280,7 +1350,7 @@ export function App() {
     stageOverride?: GpaStage,
     options?: { internal?: boolean }
   ) {
-    const raw = (forcedContent ?? input).trim();
+    const raw = (forcedContent ?? [input.trim(), formatComposerAttachments(composerAttachments)].filter(Boolean).join("\n\n")).trim();
     if (!raw) {
       return;
     }
@@ -1311,6 +1381,14 @@ export function App() {
     if (gpaState.fullAccess) {
       await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
     }
+    if (!forcedContent) {
+      const skillIds = composerAttachments
+        .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
+        .map((attachment) => attachment.skillId);
+      for (const skillId of new Set(skillIds)) {
+        await window.codexh.addThreadSkill({ threadId, skillId });
+      }
+    }
 
     if (!options?.internal) {
       appendOptimisticUserMessage(threadId, raw);
@@ -1318,6 +1396,7 @@ export function App() {
     await window.codexh.sendMessage({ threadId, content: raw });
     if (!forcedContent) {
       setInput("");
+      setComposerAttachments([]);
     }
     clearAutoScrollReleaseTimer();
     shouldAutoScrollRef.current = true;
@@ -1503,6 +1582,31 @@ export function App() {
   function queuePrompt(text: string) {
     setInput(text);
     window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  function addComposerAttachment(attachment: ComposerAttachmentInput) {
+    setComposerAttachments((current) => {
+      const duplicate = current.some((entry) => composerAttachmentKey(entry) === composerAttachmentKey(attachment));
+      return duplicate ? current : [...current, { ...attachment, id: globalThis.crypto.randomUUID() } as ComposerAttachment];
+    });
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  function removeComposerAttachment(id: string) {
+    setComposerAttachments((current) => current.filter((attachment) => attachment.id !== id));
+  }
+
+  async function chooseComposerFiles(imagesOnly: boolean) {
+    const paths = await window.codexh.chooseAttachmentFiles({ imagesOnly });
+    for (const path of paths) {
+      addComposerAttachment({
+        kind: imagesOnly ? "image" : "file",
+        path,
+        label: path.split(/[\\/]/).pop() || path
+      });
+    }
+    setGpaMenuOpen(false);
+    setGpaMenuPos(null);
   }
 
   function resetConfigDraft(nextConfig: AppConfig, preferredProviderId?: string | null) {
@@ -1847,7 +1951,7 @@ export function App() {
         <div className="sidebar-scroll">
           <div className="sidebar-brand-row">
             <div className="sidebar-brand">
-              <strong>codexh</strong>
+              <strong>Code<span className="sidebar-brand-accent">XH</span></strong>
               <span>AI Workspace</span>
             </div>
             <button className="sidebar-search" title="搜索">
@@ -1958,7 +2062,10 @@ export function App() {
               className="workspace-control-button"
               title="显示终端"
               aria-label="显示终端"
-              onClick={() => setIsTerminalOpen(true)}
+              onClick={() => {
+                setRightWorkspaceTab("files");
+                setIsTerminalOpen(true);
+              }}
             >
               <IconTerminal />
             </button>
@@ -2043,6 +2150,17 @@ export function App() {
 
           <footer className="composer-shell">
             <div className="chat-composer">
+              {composerAttachments.some((attachment) => attachment.kind !== "skill") ? (
+                <div className="composer-attachments" aria-label="已添加到聊天的上下文">
+                  {composerAttachments.filter((attachment) => attachment.kind !== "skill").map((attachment) => (
+                    <ComposerAttachmentChip
+                      key={attachment.id}
+                      attachment={attachment}
+                      onRemove={() => removeComposerAttachment(attachment.id)}
+                    />
+                  ))}
+                </div>
+              ) : null}
               <textarea
                 ref={composerRef}
                 value={input}
@@ -2065,6 +2183,7 @@ export function App() {
                         if (gpaMenuOpen) {
                           setGpaMenuOpen(false);
                           setGpaMenuPos(null);
+                          setComposerAddMenuView("root");
                           return;
                         }
                         // 计算 popover 出现位置（fixed 坐标，向上展开）
@@ -2076,6 +2195,7 @@ export function App() {
                             top: rect.top - 8
                           });
                         }
+                        setComposerAddMenuView("root");
                         setGpaMenuOpen(true);
                       }}
                     >
@@ -2112,6 +2232,21 @@ export function App() {
                       </button>
                     </span>
                   ) : null}
+                  {composerAttachments
+                    .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
+                    .map((attachment) => (
+                      <span key={attachment.id} className="composer-skill-mention" title={attachment.description}>
+                        <span>/{attachment.label}</span>
+                        <button
+                          type="button"
+                          title={`移除 ${attachment.label}`}
+                          aria-label={`移除 ${attachment.label}`}
+                          onClick={() => removeComposerAttachment(attachment.id)}
+                        >
+                          <IconClose />
+                        </button>
+                      </span>
+                    ))}
                 </div>
                 <div className="composer-toolbar-right">
                   <ComposerModelPicker
@@ -2122,6 +2257,12 @@ export function App() {
                     selectedModelId={composerModelId}
                     onSelectModel={handleComposerModelChange}
                     disabled={composerProviders.length === 0}
+                  />
+                  <ContextUsageControl
+                    usage={contextUsage}
+                    open={isContextReportOpen}
+                    onToggle={() => setIsContextReportOpen((current) => !current)}
+                    onClose={() => setIsContextReportOpen(false)}
                   />
                   <button
                     className={`send-button ${isActiveThreadExecuting ? "running" : ""}`}
@@ -2152,6 +2293,8 @@ export function App() {
           activeTab={rightWorkspaceTab}
           onTabChange={setRightWorkspaceTab}
           onHide={() => setIsTerminalOpen(false)}
+          projectRoot={selectedThread?.cwd ?? ""}
+          onAddAttachment={addComposerAttachment}
           projectFiles={projectFiles}
           projectFilesLoading={isProjectFilesLoading}
           previewTabs={previewTabs}
@@ -2897,6 +3040,7 @@ export function App() {
               <div
                 className="gpa-popover"
                 role="menu"
+                onMouseLeave={() => setComposerAddMenuView("root")}
                 style={{
                   position: "fixed",
                   left: gpaMenuPos.left,
@@ -2904,6 +3048,112 @@ export function App() {
                   transform: "translateY(-100%)"
                 }}
               >
+                <>
+                    <button className="gpa-popover-item" role="menuitem" onClick={() => void chooseComposerFiles(false)}>
+                      <span className="gpa-popover-item-icon" aria-hidden><IconFile /></span>
+                      <span className="gpa-popover-item-copy">
+                        <span className="gpa-popover-item-title">添加文件</span>
+                        <span className="gpa-popover-item-hint">选择文件作为任务上下文</span>
+                      </span>
+                    </button>
+                    <button className="gpa-popover-item" role="menuitem" onClick={() => void chooseComposerFiles(true)}>
+                      <span className="gpa-popover-item-icon" aria-hidden><IconImage /></span>
+                      <span className="gpa-popover-item-copy">
+                        <span className="gpa-popover-item-title">添加图片</span>
+                        <span className="gpa-popover-item-hint">选择图片作为视觉参考</span>
+                      </span>
+                    </button>
+                    <button
+                      className="gpa-popover-item composer-add-menu-parent"
+                      role="menuitem"
+                      onMouseEnter={() => setComposerAddMenuView("skills")}
+                      onFocus={() => setComposerAddMenuView("skills")}
+                      onClick={() => setComposerAddMenuView("skills")}
+                    >
+                      <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
+                      <span className="gpa-popover-item-copy">
+                        <span className="gpa-popover-item-title">Skills</span>
+                        <span className="gpa-popover-item-hint">为本次任务添加专业技能</span>
+                      </span>
+                      <IconChevronRight />
+                    </button>
+                    <button
+                      className="gpa-popover-item composer-add-menu-parent"
+                      role="menuitem"
+                      onMouseEnter={() => setComposerAddMenuView("mcp")}
+                      onFocus={() => setComposerAddMenuView("mcp")}
+                      onClick={() => setComposerAddMenuView("mcp")}
+                    >
+                      <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span>
+                      <span className="gpa-popover-item-copy">
+                        <span className="gpa-popover-item-title">MCP 服务</span>
+                        <span className="gpa-popover-item-hint">指定本次任务优先使用的服务</span>
+                      </span>
+                      <IconChevronRight />
+                    </button>
+                    <div className="gpa-popover-divider" />
+                </>
+                {composerAddMenuView === "skills" ? (
+                  <div className="composer-add-menu-submenu">
+                    <div className="composer-add-menu-submenu-title">Skills</div>
+                    <div className="composer-add-menu-list">
+                      {skills.length > 0 ? skills.map((skill) => (
+                        <button
+                          key={skill.id}
+                          className="gpa-popover-item"
+                          role="menuitem"
+                          onClick={() => {
+                            addComposerAttachment({
+                              kind: "skill",
+                              skillId: skill.id,
+                              label: skill.displayName ?? skill.name,
+                              description: skill.shortDescription ?? skill.description
+                            });
+                            setGpaMenuOpen(false);
+                            setGpaMenuPos(null);
+                          }}
+                        >
+                          <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
+                          <span className="gpa-popover-item-copy">
+                            <span className="gpa-popover-item-title">{skill.displayName ?? skill.name}</span>
+                            <span className="gpa-popover-item-hint">{skill.shortDescription ?? skill.description}</span>
+                          </span>
+                        </button>
+                      )) : <span className="composer-add-menu-empty">没有可用的 Skills</span>}
+                    </div>
+                  </div>
+                ) : null}
+                {composerAddMenuView === "mcp" ? (
+                  <div className="composer-add-menu-submenu">
+                    <div className="composer-add-menu-submenu-title">MCP 服务</div>
+                    <div className="composer-add-menu-list">
+                      {(config?.mcpServers ?? []).filter((server) => server.enabled).map((server) => (
+                        <button
+                          key={server.id}
+                          className="gpa-popover-item"
+                          role="menuitem"
+                          onClick={() => {
+                            addComposerAttachment({
+                              kind: "mcp",
+                              serverId: server.id,
+                              label: server.name,
+                              description: server.url ?? server.command ?? server.id
+                            });
+                            setGpaMenuOpen(false);
+                            setGpaMenuPos(null);
+                          }}
+                        >
+                          <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span>
+                          <span className="gpa-popover-item-copy">
+                            <span className="gpa-popover-item-title">{server.name}</span>
+                            <span className="gpa-popover-item-hint">{server.url ?? server.command ?? server.id}</span>
+                          </span>
+                        </button>
+                      ))}
+                      {(config?.mcpServers ?? []).filter((server) => server.enabled).length === 0 ? <span className="composer-add-menu-empty">没有已启用的 MCP 服务</span> : null}
+                    </div>
+                  </div>
+                ) : null}
                 <button
                   className={`gpa-popover-item gpa-popover-item-full-access ${gpaState.fullAccess ? "is-active" : ""}`}
                   role="menuitem"
@@ -2966,6 +3216,8 @@ function RightWorkspacePanel({
   activeTab,
   onTabChange,
   onHide,
+  projectRoot,
+  onAddAttachment,
   projectFiles,
   projectFilesLoading,
   previewTabs,
@@ -2994,6 +3246,8 @@ function RightWorkspacePanel({
   activeTab: RightWorkspaceTab;
   onTabChange: (tab: RightWorkspaceTab) => void;
   onHide: () => void;
+  projectRoot: string;
+  onAddAttachment: (attachment: ComposerAttachmentInput) => void;
   projectFiles: ProjectFileEntry[];
   projectFilesLoading: boolean;
   previewTabs: string[];
@@ -3023,17 +3277,17 @@ function RightWorkspacePanel({
     <aside className="right-workspace-panel" aria-label="右侧工作区">
       <header className="right-workspace-header">
         <nav className="right-workspace-tabs" aria-label="工作区标签">
+          <WorkspaceTabButton active={activeTab === "files"} label="文件夹" onClick={() => onTabChange("files")}>
+            <IconFolder />
+          </WorkspaceTabButton>
+          <WorkspaceTabButton active={activeTab === "preview"} label="查看" onClick={() => onTabChange("preview")}>
+            <IconEye />
+          </WorkspaceTabButton>
           <WorkspaceTabButton active={activeTab === "terminal"} label="终端" onClick={() => onTabChange("terminal")}>
             <IconTerminal />
           </WorkspaceTabButton>
           <WorkspaceTabButton active={activeTab === "browser"} label="浏览器" onClick={() => onTabChange("browser")}>
             <IconGlobe />
-          </WorkspaceTabButton>
-          <WorkspaceTabButton active={activeTab === "preview"} label="查看" onClick={() => onTabChange("preview")}>
-            <IconEye />
-          </WorkspaceTabButton>
-          <WorkspaceTabButton active={activeTab === "files"} label="文件夹" onClick={() => onTabChange("files")}>
-            <IconFolder />
           </WorkspaceTabButton>
         </nav>
         <button
@@ -3056,6 +3310,7 @@ function RightWorkspacePanel({
             loading={projectFilesLoading}
             onSelectTab={onSelectPreviewTab}
             onCloseTab={onClosePreviewTab}
+            onAddAttachment={onAddAttachment}
           />
         ) : null}
         {activeTab === "terminal" ? (
@@ -3088,6 +3343,8 @@ function RightWorkspacePanel({
             loading={projectFilesLoading}
             selectedPath={selectedProjectFile}
             onSelect={onSelectProjectFile}
+            projectRoot={projectRoot}
+            onAddAttachment={onAddAttachment}
           />
         ) : null}
       </div>
@@ -3166,6 +3423,106 @@ function WorkspaceSubtabStrip({
           <IconPlus />
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function WorkspaceContextMenu({
+  x,
+  y,
+  actions,
+  onClose
+}: {
+  x: number;
+  y: number;
+  actions: WorkspaceContextMenuAction[];
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const close = () => onClose();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [onClose]);
+
+  const left = Math.min(x, window.innerWidth - 188);
+  const top = Math.min(y, window.innerHeight - Math.max(54, actions.length * 38 + 12));
+
+  return createPortal(
+    <div
+      className="workspace-context-menu"
+      role="menu"
+      style={{ left: Math.max(8, left), top: Math.max(8, top) }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {actions.map((action) => (
+        <button
+          key={action.id}
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            action.onSelect();
+            onClose();
+          }}
+        >
+          <span aria-hidden="true">{action.icon}</span>
+          {action.label}
+        </button>
+      ))}
+    </div>,
+    document.body
+  );
+}
+
+function ComposerAttachmentChip({
+  attachment,
+  onRemove
+}: {
+  attachment: ComposerAttachment;
+  onRemove: () => void;
+}) {
+  const detail =
+    attachment.kind === "code"
+      ? `${attachment.path} · ${attachment.content.split(/\r?\n/).length} 行`
+      : attachment.kind === "skill" || attachment.kind === "mcp"
+        ? attachment.description
+        : attachment.kind === "folder"
+          ? "文件夹"
+          : attachment.kind === "image"
+            ? "图片"
+            : "文件";
+  const icon =
+    attachment.kind === "folder" ? <IconFolder />
+      : attachment.kind === "code" ? <IconCode />
+        : attachment.kind === "image" ? <IconImage />
+          : attachment.kind === "skill" ? <IconSkills />
+            : attachment.kind === "mcp" ? <IconMcp />
+              : <IconFile />;
+
+  return (
+    <div
+      className={`composer-attachment-chip ${attachment.kind}`}
+      title={attachment.kind === "code" ? attachment.content : attachment.kind === "skill" || attachment.kind === "mcp" ? attachment.description : attachment.path}
+    >
+      <span className="composer-attachment-icon" aria-hidden="true">{icon}</span>
+      <span className="composer-attachment-copy">
+        <strong>{attachment.label}</strong>
+        <small>{detail}</small>
+      </span>
+      <button type="button" title="移除" aria-label={`移除 ${attachment.label}`} onClick={onRemove}>
+        <IconClose />
+      </button>
     </div>
   );
 }
@@ -3267,15 +3624,20 @@ function ProjectFilesWorkspace({
   files,
   loading,
   selectedPath,
-  onSelect
+  onSelect,
+  projectRoot,
+  onAddAttachment
 }: {
   files: ProjectFileEntry[];
   loading: boolean;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  projectRoot: string;
+  onAddAttachment: (attachment: ComposerAttachmentInput) => void;
 }) {
   const [query, setQuery] = useState("");
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: ProjectFileTreeNode } | null>(null);
   const tree = useMemo(() => buildProjectFileTree(files), [files]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
 
@@ -3319,8 +3681,40 @@ function ProjectFilesWorkspace({
             });
           }}
           onSelect={onSelect}
+          onContextMenu={(event, node) => {
+            event.preventDefault();
+            setContextMenu({ x: event.clientX, y: event.clientY, node });
+          }}
         />
       </div>
+      {contextMenu ? (
+        <WorkspaceContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          actions={[
+            {
+              id: "copy-path",
+              label: "复制路径",
+              icon: <IconCopy />,
+              onSelect: () => void navigator.clipboard.writeText(resolveProjectFilePath(projectRoot, contextMenu.node.path))
+            },
+            {
+              id: "add-file-to-chat",
+              label: "添加到聊天",
+              icon: <IconCompose />,
+              onSelect: () => {
+                const target = resolveProjectFilePath(projectRoot, contextMenu.node.path);
+                onAddAttachment({
+                  kind: contextMenu.node.kind === "directory" ? "folder" : "file",
+                  path: target,
+                  label: contextMenu.node.name
+                });
+              }
+            }
+          ]}
+        />
+      ) : null}
     </section>
   );
 }
@@ -3332,7 +3726,8 @@ function ProjectFileTreeRows({
   expandedPaths,
   selectedPath,
   onToggle,
-  onSelect
+  onSelect,
+  onContextMenu
 }: {
   nodes: ProjectFileTreeNode[];
   depth: number;
@@ -3341,6 +3736,7 @@ function ProjectFileTreeRows({
   selectedPath: string | null;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
+  onContextMenu: (event: React.MouseEvent<HTMLButtonElement>, node: ProjectFileTreeNode) => void;
 }): ReactNode {
   return nodes.map((node) => {
     const matches = projectFileNodeMatches(node, query);
@@ -3361,6 +3757,7 @@ function ProjectFileTreeRows({
           aria-expanded={isDirectory ? isExpanded : undefined}
           aria-selected={isDirectory ? undefined : selectedPath === node.path}
           onClick={() => isDirectory ? onToggle(node.path) : onSelect(node.path)}
+          onContextMenu={(event) => onContextMenu(event, node)}
           title={node.path}
         >
           {isDirectory ? (
@@ -3380,6 +3777,7 @@ function ProjectFileTreeRows({
             selectedPath={selectedPath}
             onToggle={onToggle}
             onSelect={onSelect}
+            onContextMenu={onContextMenu}
           />
         ) : null}
       </div>
@@ -3435,6 +3833,81 @@ function getProjectFileGlyphClass(node: ProjectFileTreeNode): string {
   if (extension === "md") return "markdown";
   if (node.name.startsWith(".")) return "config";
   return "default";
+}
+
+export function resolveProjectFilePath(projectRoot: string, relativePath: string): string {
+  if (!projectRoot) {
+    return relativePath;
+  }
+  const separator = projectRoot.includes("\\") ? "\\" : "/";
+  const root = projectRoot.replace(/[\\/]+$/, "");
+  const relative = relativePath.replace(/[\\/]+/g, separator);
+  return relative ? `${root}${separator}${relative}` : root;
+}
+
+export function formatComposerAttachments(attachments: ComposerAttachment[]): string {
+  return attachments
+    .map((attachment) => {
+      if (attachment.kind === "code") {
+        const instruction = attachment.intent === "edit" ? "Edit the following selected code" : "Reference the following selected code";
+        return `${instruction} from ${attachment.path}:\n\`\`\`\n${attachment.content}\n\`\`\``;
+      }
+      if (attachment.kind === "skill") {
+        return `[Selected Skill]\n${attachment.label}: ${attachment.description}`;
+      }
+      if (attachment.kind === "mcp") {
+        return `[Selected MCP server]\n${attachment.label}: ${attachment.description}. Prefer this server when its tools are relevant.`;
+      }
+      if (attachment.kind === "image") {
+        return `[Attached image]\n${attachment.path}\nUse the image attachment as visual reference when the selected model supports image input.`;
+      }
+      return attachment.kind === "file" ? `[Attached file]\n${attachment.path}` : `[Attached folder]\n${attachment.path}`;
+    })
+    .join("\n\n");
+}
+
+export function buildContextUsage(input: {
+  contextWindow: number;
+  messages: MessageRecord[];
+  toolCalls: ToolCallRecord[];
+  gpaStage: GpaStage;
+  selectedSkillCount: number;
+  mcpServerCount: number;
+  pendingInput: string;
+}): ContextUsage {
+  const conversationText = [
+    ...input.messages.map((message) => message.content),
+    ...input.toolCalls.map((toolCall) => `${toolCall.argumentsJson}\n${toolCall.resultJson ?? ""}`),
+    input.pendingInput
+  ].join("\n");
+  const segments: ContextUsageSegment[] = [
+    { id: "system", label: "系统提示", tokens: 1_200, color: "#a8a8a8" },
+    { id: "tools", label: "工具定义", tokens: 900 + input.mcpServerCount * 240, color: "#9988ef" },
+    { id: "rules", label: "规则", tokens: input.gpaStage === "off" ? 240 : 980, color: "#4fba7b" },
+    { id: "skills", label: "技能", tokens: input.selectedSkillCount * 520, color: "#efb35c" },
+    { id: "mcp", label: "MCP 与动态工具", tokens: input.mcpServerCount * 360, color: "#bf98bd" },
+    { id: "conversation", label: "对话与工具结果", tokens: Math.max(1, estimateContextTokens(conversationText)), color: "#e28b85" }
+  ];
+  const usedTokens = segments.reduce((total, segment) => total + segment.tokens, 0);
+  const contextWindow = Math.max(1, input.contextWindow);
+  return {
+    contextWindow,
+    usedTokens,
+    percentage: Math.min(100, Math.round((usedTokens / contextWindow) * 100)),
+    segments
+  };
+}
+
+function estimateContextTokens(value: string): number {
+  const normalized = value.trim();
+  if (!normalized) {
+    return 0;
+  }
+  return Math.ceil(Array.from(normalized).length / 2.8);
+}
+
+function formatTokenCount(tokens: number): string {
+  return tokens >= 1_000 ? `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}K` : String(tokens);
 }
 
 function LegacyBrowserWorkspace({
@@ -3571,7 +4044,8 @@ function ProjectPreviewWorkspace({
   preview,
   loading,
   onSelectTab,
-  onCloseTab
+  onCloseTab,
+  onAddAttachment
 }: {
   tabs: string[];
   selectedPath: string | null;
@@ -3579,7 +4053,9 @@ function ProjectPreviewWorkspace({
   loading: boolean;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
+  onAddAttachment: (attachment: ComposerAttachmentInput) => void;
 }) {
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
   if (tabs.length === 0) {
     return <WorkspaceEmptyState icon={<IconEye />} message={loading ? "正在读取项目文件..." : "选择一个文件进行查看"} />;
   }
@@ -3613,7 +4089,18 @@ function ProjectPreviewWorkspace({
       </header>
       {preview ? (
         <>
-          <ol className="project-preview-code" aria-label={`${currentPath} 代码内容`}>
+          <ol
+            className="project-preview-code"
+            aria-label={`${currentPath} 代码内容`}
+            onContextMenu={(event) => {
+              const selection = window.getSelection()?.toString().trim() ?? "";
+              if (!selection) {
+                return;
+              }
+              event.preventDefault();
+              setContextMenu({ x: event.clientX, y: event.clientY, selection });
+            }}
+          >
             {preview.content.split(/\r?\n/).map((line, index) => (
               <li key={`${currentPath}-line-${index}`}>
                 <code>{renderCodePreviewLine(line, `${currentPath}-${index}`)}</code>
@@ -3621,6 +4108,41 @@ function ProjectPreviewWorkspace({
             ))}
           </ol>
           {preview.truncated ? <div className="project-preview-note">文件内容过长，仅显示前 512 KB。</div> : null}
+          {contextMenu ? (
+            <WorkspaceContextMenu
+              x={contextMenu.x}
+              y={contextMenu.y}
+              onClose={() => setContextMenu(null)}
+              actions={[
+                {
+                  id: "add-selection-to-chat",
+                  label: "添加到聊天",
+                  icon: <IconCompose />,
+                  onSelect: () => onAddAttachment({
+                    kind: "code",
+                    path: currentPath,
+                    content: contextMenu.selection,
+                    label: "已选代码段",
+                    intent: "reference"
+                  })
+                },
+                {
+                  id: "edit-selection",
+                  label: "编辑",
+                  icon: <IconCompose />,
+                  onSelect: () => {
+                    onAddAttachment({
+                    kind: "code",
+                    path: currentPath,
+                    content: contextMenu.selection,
+                    label: "待编辑代码段",
+                    intent: "edit"
+                  });
+                  }
+                }
+              ]}
+            />
+          ) : null}
         </>
       ) : (
         <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取文件..." />
@@ -3874,6 +4396,97 @@ type ComposerModelGroup = {
   providerLabel: string;
   models: Array<{ id: string; label: string }>;
 };
+
+function ContextUsageControl({
+  usage,
+  open,
+  onToggle,
+  onClose
+}: {
+  usage: ContextUsage;
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const close = () => onClose();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [onClose, open]);
+
+  return (
+    <div className="context-usage-anchor" onPointerDown={(event) => event.stopPropagation()}>
+      <button
+        type="button"
+        className={`context-usage-button ${open ? "is-open" : ""}`}
+        aria-label="查看上下文占用"
+        aria-expanded={open}
+        title={`上下文占用：约 ${usage.percentage}%`}
+        onClick={onToggle}
+      >
+        <span
+          className="context-usage-ring"
+          style={{ "--context-usage-angle": `${Math.max(3, usage.percentage * 3.6)}deg` } as React.CSSProperties}
+        >
+          <span>{usage.percentage}%</span>
+        </span>
+      </button>
+      {open ? <ContextUsageReport usage={usage} onClose={onClose} /> : null}
+    </div>
+  );
+}
+
+function ContextUsageReport({ usage, onClose }: { usage: ContextUsage; onClose: () => void }) {
+  return (
+    <section className="context-usage-report" aria-label="上下文占用详情">
+      <header>
+        <div>
+          <strong>上下文占用</strong>
+          <span>本地估算</span>
+        </div>
+        <button type="button" title="关闭" aria-label="关闭上下文详情" onClick={onClose}>
+          <IconClose />
+        </button>
+      </header>
+      <div className="context-usage-summary">
+        <span>{usage.percentage}% 已用</span>
+        <strong>约 {formatTokenCount(usage.usedTokens)} / {formatTokenCount(usage.contextWindow)} tokens</strong>
+      </div>
+      <div className="context-usage-bar" aria-hidden="true">
+        {usage.segments.map((segment) => (
+          <i
+            key={segment.id}
+            style={{
+              width: `${Math.max(usage.contextWindow ? (segment.tokens / usage.contextWindow) * 100 : 0, 0.8)}%`,
+              background: segment.color
+            }}
+          />
+        ))}
+      </div>
+      <div className="context-usage-segments">
+        {usage.segments.map((segment) => (
+          <div key={segment.id}>
+            <span style={{ background: segment.color }} aria-hidden="true" />
+            <strong>{segment.label}</strong>
+            <em>{formatTokenCount(segment.tokens)}</em>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 function ComposerModelPicker({
   triggerLabel,
@@ -6274,6 +6887,55 @@ function IconCompose() {
     <SvgIcon>
       <path d="M12 20h8" />
       <path d="m16.5 3.5 4 4-11 11-5 1 1-5z" />
+    </SvgIcon>
+  );
+}
+
+function IconCopy() {
+  return (
+    <SvgIcon>
+      <rect x="8" y="8" width="10" height="11" rx="1.5" />
+      <path d="M6 16.5H5.5A1.5 1.5 0 0 1 4 15V5.5A1.5 1.5 0 0 1 5.5 4H14a1.5 1.5 0 0 1 1.5 1.5V6" />
+    </SvgIcon>
+  );
+}
+
+function IconCode() {
+  return (
+    <SvgIcon>
+      <path d="m9.25 7-4 5 4 5" />
+      <path d="m14.75 7 4 5-4 5" />
+      <path d="m13.25 5.5-2.5 13" />
+    </SvgIcon>
+  );
+}
+
+function IconImage() {
+  return (
+    <SvgIcon>
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <circle cx="9" cy="10" r="1.5" />
+      <path d="m5.5 17 4.5-4 3 2.5 2.5-2 3 3.5" />
+    </SvgIcon>
+  );
+}
+
+function IconSkills() {
+  return (
+    <SvgIcon>
+      <path d="M12 3.5 14 8l4.5 2-4.5 2-2 4.5-2-4.5-4.5-2 4.5-2z" />
+      <path d="m18 15 .8 1.7L20.5 18l-1.7.8L18 20.5l-.8-1.7-1.7-.8 1.7-.8z" />
+    </SvgIcon>
+  );
+}
+
+function IconMcp() {
+  return (
+    <SvgIcon>
+      <circle cx="7" cy="8" r="2.5" />
+      <circle cx="17" cy="7" r="2.5" />
+      <circle cx="13" cy="17" r="2.5" />
+      <path d="m9.2 8.2 5.5-.8M8.6 10l3.1 4.8m4.2-5.3-1.8 5" />
     </SvgIcon>
   );
 }

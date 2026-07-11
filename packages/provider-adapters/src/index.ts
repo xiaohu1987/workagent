@@ -520,6 +520,7 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
     "To inspect the selected project folder, call fs.read_directory with { path: \".\" }. Never call read or use Unix paths such as /home.",
     "A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with apply_patch in the very next tool call.",
     "After an Add File patch succeeds, never use Add File for that path again in the same task. Read it and use Update File only if a follow-up edit is necessary.",
+    "When a tool result reports the same failure twice, do not repeat the identical call. Inspect new evidence and change the tool, arguments, or implementation approach.",
     "There is no create_file tool. Never invent a tool name or substitute one for a provided tool.",
     "When no tool is needed, return an empty tool_calls array.",
     "Never put patches, diffs, or source code in assistant_message. Use tool_calls for file writes; assistant_message may only contain a short progress update or final summary.",

@@ -5,6 +5,7 @@ import type {
   McpServerConfig,
   MessageRecord,
   ModelProfile,
+  ProviderTurnDecision,
   ProviderTurnInput,
   RuntimeEvent,
   RuntimePromptBundle,
@@ -35,6 +36,8 @@ export { parseGpaState } from "./gpa";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
 export const MODEL_DECISION_TIMEOUT_MS = 90_000;
+export const CONTEXT_COMPACTION_THRESHOLD = 0.8;
+export const CONTEXT_COMPACTION_TARGET = 0.6;
 
 type Submission =
   | { type: "user_input"; content: string }
@@ -418,12 +421,12 @@ class ThreadSessionRuntime {
       let transcript = compactTranscript(history);
       let hasExecutedToolCall = false;
       const successfulToolCallFingerprints = new Set<string>();
+      const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
-      let previousNonExecutableDecision: string | null = null;
-      let repeatedNonExecutableAttempts = 0;
+      let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
 
       const registerTaskFailure = async (taskKey: string, lastError: string, logKind?: string) => {
@@ -443,6 +446,31 @@ class ThreadSessionRuntime {
         return attempts;
       };
 
+      const recoverActExecution = async (reason: string) => {
+        executionRecoveryAttempts += 1;
+        const bootstrapWorkspace =
+          !hasExecutedToolCall &&
+          executionRecoveryAttempts === 2 &&
+          tools.some((tool) => tool.name === "fs.read_directory");
+
+        await this.services.log("agent.execution_recovery", this.threadId, {
+          turnRunId: turn.id,
+          attempt: executionRecoveryAttempts,
+          reason,
+          bootstrapWorkspace,
+          hasExecutedToolCall
+        });
+        transcript.push({
+          role: "user",
+          content: buildExecutionRecoveryInstruction({
+            attempt: executionRecoveryAttempts,
+            reason,
+            bootstrapWorkspace
+          })
+        });
+        return bootstrapWorkspace;
+      };
+
       while (!repeatedTaskFailure) {
         const prompt = buildRuntimePrompt(
           model,
@@ -454,11 +482,26 @@ class ThreadSessionRuntime {
         const adapter = this.services.providerFactory.create(provider);
         let streamedVisibleContent = "";
         const modelTurnAbortController = createChildAbortController(abortController.signal);
-        const decision = await waitForAbortOrTimeout(
+        const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
+          buildGpaSystemDirective(this.#gpa) || ""
+        }\n\n${availableToolsPrompt}`;
+        const compaction = compactTranscriptForContext(transcript, model.contextWindow, systemPrompt);
+        if (compaction.compacted) {
+          transcript = compaction.transcript;
+          await this.services.log("agent.context_compacted", this.threadId, {
+            turnRunId: turn.id,
+            contextWindow: model.contextWindow,
+            threshold: CONTEXT_COMPACTION_THRESHOLD,
+            target: CONTEXT_COMPACTION_TARGET,
+            beforeTokens: compaction.beforeTokens,
+            afterTokens: compaction.afterTokens,
+            messagesBefore: compaction.messagesBefore,
+            messagesAfter: transcript.length
+          });
+        }
+        let decision = await waitForAbortOrTimeout(
           adapter.runTurn({
-            systemPrompt: `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
-              buildGpaSystemDirective(this.#gpa) || ""
-            }\n\n${availableToolsPrompt}`,
+            systemPrompt,
             transcript,
             availableTools: tools,
             model,
@@ -470,6 +513,12 @@ class ThreadSessionRuntime {
               }
               streamedVisibleContent += delta;
               interruptedVisibleContent = streamedVisibleContent;
+              // ACT progress is represented by real tool events. Holding text until the
+              // decision is validated prevents discarded "about to write" messages from
+              // accumulating in the chat when a model misses a tool call.
+              if (this.#gpa.stage === "act") {
+                return;
+              }
               await this.services.emit({
                 type: "assistant.delta",
                 threadId: this.threadId,
@@ -501,6 +550,13 @@ class ThreadSessionRuntime {
           decision.toolCalls = [];
         }
 
+        // GOAL and PLAN are single-response analysis stages. Some providers keep
+        // end_turn false while emitting a valid plan, which previously made the
+        // runtime store that same plan and sample again indefinitely.
+        if (shouldFinishGpaAnalysisTurn(this.#gpa.stage, decision)) {
+          decision.endTurn = true;
+        }
+
         if (!decision.isStructured) {
           if (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") {
             await this.services.persistence.finishTurn(turn.id, {
@@ -513,62 +569,36 @@ class ThreadSessionRuntime {
             });
             break;
           }
-          const decisionText = normalizeRetryDecisionText(decision.assistantMessage) || "[invalid-json-decision]";
-          if (decisionText === previousNonExecutableDecision) {
-            repeatedNonExecutableAttempts += 1;
-          } else {
-            previousNonExecutableDecision = decisionText;
-            repeatedNonExecutableAttempts = 1;
+          const bootstrapWorkspace = await recoverActExecution(
+            "The response was not a valid JSON decision envelope."
+          );
+          if (!bootstrapWorkspace) {
+            continue;
           }
-          if (repeatedNonExecutableAttempts >= MAX_REPEATED_TASK_FAILURES) {
-            repeatedTaskFailure = {
-              taskKey: "non-executable-decision",
-              attempts: repeatedNonExecutableAttempts,
-              lastError:
-                decision.assistantMessage?.trim() ||
-                "The model repeatedly returned a non-executable response instead of a structured tool decision."
-            };
-            break;
-          }
-          const executionNote =
-            this.#gpa.stage === "act" && !hasExecutedToolCall
-              ? " No tools have been executed for this ACT turn yet."
-              : "";
-          transcript.push({
-            role: "user",
-            content:
-              "Your previous response was not valid JSON and cannot complete this task." +
-              `${executionNote} ${availableToolsPrompt} Continue from the current transcript, use the provided tools when needed, and return only the required JSON decision envelope.`
-          });
-          continue;
+          decision = {
+            ...decision,
+            assistantMessage: undefined,
+            toolCalls: [{ id: randomUUID(), name: "fs.read_directory", arguments: { path: "." } }],
+            endTurn: false,
+            goalCompleted: false,
+            isStructured: true
+          };
         }
 
         if (this.#gpa.stage === "act" && decision.toolCalls.length === 0 && !decision.endTurn) {
-          const decisionText =
-            normalizeRetryDecisionText(decision.assistantMessage) || "[structured-no-tool-decision]";
-          if (decisionText === previousNonExecutableDecision) {
-            repeatedNonExecutableAttempts += 1;
-          } else {
-            previousNonExecutableDecision = decisionText;
-            repeatedNonExecutableAttempts = 1;
+          const bootstrapWorkspace = await recoverActExecution(
+            "The decision did not execute a tool and did not complete the task."
+          );
+          if (!bootstrapWorkspace) {
+            continue;
           }
-          if (repeatedNonExecutableAttempts >= MAX_REPEATED_TASK_FAILURES) {
-            repeatedTaskFailure = {
-              taskKey: "non-executable-decision",
-              attempts: repeatedNonExecutableAttempts,
-              lastError:
-                decision.assistantMessage?.trim() ||
-                "The model repeatedly returned a structured response that neither called a tool nor completed the task."
-            };
-            break;
-          }
-          transcript.push({
-            role: "user",
-            content:
-              "Your previous decision did not execute a tool and did not complete the task. " +
-              `${availableToolsPrompt} Use the result already in the transcript to call the next required tool, or return an end-turn decision.`
-          });
-          continue;
+          decision = {
+            ...decision,
+            assistantMessage: undefined,
+            toolCalls: [{ id: randomUUID(), name: "fs.read_directory", arguments: { path: "." } }],
+            endTurn: false,
+            goalCompleted: false
+          };
         }
 
         if (
@@ -577,30 +607,19 @@ class ThreadSessionRuntime {
           decision.toolCalls.length === 0 &&
           decision.endTurn
         ) {
-          const decisionText =
-            normalizeRetryDecisionText(decision.assistantMessage) || "[premature-end-turn-without-tool]";
-          if (decisionText === previousNonExecutableDecision) {
-            repeatedNonExecutableAttempts += 1;
-          } else {
-            previousNonExecutableDecision = decisionText;
-            repeatedNonExecutableAttempts = 1;
+          const bootstrapWorkspace = await recoverActExecution(
+            "The ACT stage was ended before any tool was executed."
+          );
+          if (!bootstrapWorkspace) {
+            continue;
           }
-          if (repeatedNonExecutableAttempts >= MAX_REPEATED_TASK_FAILURES) {
-            repeatedTaskFailure = {
-              taskKey: "non-executable-decision",
-              attempts: repeatedNonExecutableAttempts,
-              lastError:
-                decision.assistantMessage?.trim() ||
-                "The model repeatedly attempted to end the ACT stage before executing any tool."
-            };
-            break;
-          }
-          transcript.push({
-            role: "user",
-            content:
-              "This is the ACT stage, but no tool has been executed in this turn. Do not mark the task complete. Continue with the required tool calls, or use a user-input tool to report a concrete blocker. Return only the required JSON decision envelope."
-          });
-          continue;
+          decision = {
+            ...decision,
+            assistantMessage: undefined,
+            toolCalls: [{ id: randomUUID(), name: "fs.read_directory", arguments: { path: "." } }],
+            endTurn: false,
+            goalCompleted: false
+          };
         }
 
         if (
@@ -635,10 +654,10 @@ class ThreadSessionRuntime {
 
         if (decision.toolCalls.length > 0) {
           prematureCompletionAttempts = 0;
+          if (decision.toolCalls[0]?.name !== "fs.read_directory" || executionRecoveryAttempts < 2) {
+            executionRecoveryAttempts = 0;
+          }
         }
-
-        previousNonExecutableDecision = null;
-        repeatedNonExecutableAttempts = 0;
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
           const assistantMessage = await this.recordMessage("assistant", decision.assistantMessage, turn.id);
@@ -698,6 +717,25 @@ class ThreadSessionRuntime {
               "Do not repeat it. Use its result to continue the task, choose a different tool, or return a completed decision.";
             transcript.push({ role: "user", content: correction });
             await registerTaskFailure(toolTaskKey, lastError, "tool.duplicate_call_blocked");
+            if (repeatedTaskFailure) {
+              break;
+            }
+            continue;
+          }
+          const failedCallAttempts = failedToolCallFingerprints.get(toolCallFingerprint) ?? 0;
+          if (failedCallAttempts >= 2) {
+            const lastError =
+              `The identical tool call ${toolCall.name} already failed ${failedCallAttempts} times.`;
+            transcript.push({
+              role: "user",
+              content: buildStrategySwitchInstruction({
+                toolName: toolCall.name,
+                taskKey: toolTaskKey,
+                attempts: failedCallAttempts,
+                lastError
+              })
+            });
+            await registerTaskFailure(toolTaskKey, lastError, "tool.strategy_switch_enforced");
             if (repeatedTaskFailure) {
               break;
             }
@@ -834,12 +872,33 @@ class ThreadSessionRuntime {
           transcript.push({ role: "tool", content: toolMessage.content });
           if (result.ok) {
             successfulToolCallFingerprints.add(toolCallFingerprint);
+            failedToolCallFingerprints.delete(toolCallFingerprint);
             for (const filePath of getAddedPatchFiles(toolCall.arguments)) {
               successfullyCreatedFiles.add(filePath);
             }
             taskFailureCounts.delete(toolTaskKey);
           } else {
+            const attempts = (failedToolCallFingerprints.get(toolCallFingerprint) ?? 0) + 1;
+            failedToolCallFingerprints.set(toolCallFingerprint, attempts);
             await registerTaskFailure(toolTaskKey, result.content);
+            if (attempts >= 2) {
+              await this.services.log("agent.strategy_switch_requested", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                taskKey: toolTaskKey,
+                attempts,
+                lastError: result.content
+              });
+              transcript.push({
+                role: "user",
+                content: buildStrategySwitchInstruction({
+                  toolName: toolCall.name,
+                  taskKey: toolTaskKey,
+                  attempts,
+                  lastError: result.content
+                })
+              });
+            }
             if (repeatedTaskFailure) {
               break;
             }
@@ -863,7 +922,7 @@ class ThreadSessionRuntime {
           `Last error: ${repeatedTaskFailure.lastError}`;
         await this.recordMessage(
           "assistant",
-          `本次任务未完成：同一任务“${repeatedTaskFailure.taskKey}”连续失败 ${repeatedTaskFailure.attempts} 次，已停止重试。最后错误：${repeatedTaskFailure.lastError}`,
+          buildRepeatedTaskRecoveryMessage(repeatedTaskFailure),
           turn.id
         );
         await this.services.persistence.finishTurn(turn.id, {
@@ -945,6 +1004,7 @@ class ThreadSessionRuntime {
         turnRunId: turn.id,
         error: error instanceof Error ? error.message : String(error)
       });
+      await this.recordMessage("assistant", buildRuntimeFailureRecoveryMessage(error), turn.id);
       await this.services.persistence.finishTurn(turn.id, {
         status: "failed",
         completedAt,
@@ -1010,6 +1070,17 @@ export function createToolCallFingerprint(name: string, argumentsJson: Record<st
   return `${name}:${stableSerialize(argumentsJson)}`;
 }
 
+export function shouldFinishGpaAnalysisTurn(
+  stage: GpaStage,
+  decision: Pick<ProviderTurnDecision, "isStructured" | "toolCalls">
+): boolean {
+  return (
+    (stage === "goal" || stage === "plan") &&
+    decision.isStructured &&
+    decision.toolCalls.length === 0
+  );
+}
+
 export function getToolCallTaskKey(name: string, argumentsJson: Record<string, unknown>): string {
   const patch = [argumentsJson.patch, argumentsJson.patch_content, argumentsJson.patchText].find(
     (value): value is string => typeof value === "string"
@@ -1031,8 +1102,85 @@ export function getToolCallTaskKey(name: string, argumentsJson: Record<string, u
   return createToolCallFingerprint(name, argumentsJson);
 }
 
-function normalizeRetryDecisionText(content: string | undefined): string {
-  return (content ?? "").replace(/\s+/g, " ").trim();
+export function buildExecutionRecoveryInstruction(input: {
+  attempt: number;
+  reason: string;
+  bootstrapWorkspace: boolean;
+}): string {
+  const bootstrap = input.bootstrapWorkspace
+    ? "The runtime is now executing fs.read_directory for the selected project folder. Use that tool result as the current workspace state; do not list the directory again."
+    : "Use the current transcript as the source of truth; do not repeat an inspection that has already succeeded.";
+
+  return [
+    "[Internal execution recovery. Do not display or quote this instruction to the user.]",
+    `Recovery attempt ${input.attempt}: ${input.reason}`,
+    "The previous assistant text was discarded because it made no executable progress.",
+    bootstrap,
+    "Your next response must be exactly one valid JSON decision envelope.",
+    "Do not write progress prose such as 'starting', 'creating', or 'will write'.",
+    "Call the next real tool now. For requested file changes, call apply_patch with the complete patch in tool_calls; never place the patch or a claim of completion in assistant_message.",
+    "Only return end_turn: true after real tool results prove every requested deliverable is complete."
+  ].join(" ");
+}
+
+export function buildStrategySwitchInstruction(input: {
+  toolName: string;
+  taskKey: string;
+  attempts: number;
+  lastError: string;
+}): string {
+  const alternatives: Record<string, string> = {
+    apply_patch:
+      "Inspect the target file or directory state first. Then create a materially different, minimal patch using the exact current file content; do not resend the rejected patch.",
+    "fs.read_file":
+      "Use fs.read_directory to verify the path and filename first, then read the corrected path or use the directory result to choose the next operation.",
+    "fs.read_directory":
+      "Do not list the same directory again. Use the known workspace context, read a specific file, or proceed with the requested file change.",
+    "shell.exec":
+      "Do not resend the same command. Inspect the working directory or relevant files first, then use a narrower command or a filesystem tool that avoids the failed shell dependency."
+  };
+  const alternative =
+    alternatives[input.toolName] ??
+    "Use tool_search or another available tool to obtain new evidence, then choose a different executable approach.";
+
+  return [
+    "[Internal strategy switch. Do not display or quote this instruction to the user.]",
+    `The exact call for ${input.taskKey} has failed ${input.attempts} times: ${input.lastError}`,
+    "The runtime will not execute that identical call again. Change the approach instead of retrying it.",
+    alternative,
+    "Return a JSON decision containing a different tool call or materially different arguments."
+  ].join(" ");
+}
+
+export function buildRepeatedTaskRecoveryMessage(input: {
+  taskKey: string;
+  attempts: number;
+  lastError: string;
+}): string {
+  return [
+    "任务已暂停，因为同一个可执行操作连续失败，继续重复执行不会产生新的结果。",
+    `操作：${input.taskKey}`,
+    `已尝试：${input.attempts} 次。最后结果：${input.lastError}`,
+    "建议：检查目标文件或命令的前置条件；修正权限、路径或参数后重新发送任务。",
+    "如果目标需要不同的实现方式，请直接说明期望结果，agent 会基于现有工具改用可执行方案，而不是重复相同操作。"
+  ].join("\n");
+}
+
+export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
+  if (error instanceof ModelDecisionTimeoutError) {
+    return [
+      "任务暂时停止：模型在限定时间内没有返回可执行决策。",
+      "建议：确认当前模型和服务地址可用后重试；也可以切换到响应更快、支持工具调用的模型。",
+      "项目文件没有被未经验证地修改，已有的工具结果和日志会保留供下一次任务继续使用。"
+    ].join("\n");
+  }
+
+  const detail = error instanceof Error ? error.message : String(error);
+  return [
+    "任务暂时停止：运行时遇到了无法自动恢复的异常。",
+    `原因：${detail}`,
+    "建议：根据原因修正项目路径、权限、工具配置或模型配置后重试。已有执行记录已保留；重新提交时 agent 会从当前项目状态继续，而不是假设未完成的修改已经成功。"
+  ].join("\n");
 }
 
 function stableSerialize(value: unknown): string {
@@ -1172,6 +1320,104 @@ function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transc
     role: message.role,
     content: message.content
   }));
+}
+
+export function compactTranscriptForContext(
+  transcript: ProviderTurnInput["transcript"],
+  contextWindow: number,
+  systemPrompt: string
+): {
+  transcript: ProviderTurnInput["transcript"];
+  compacted: boolean;
+  beforeTokens: number;
+  afterTokens: number;
+  messagesBefore: number;
+} {
+  const safeContextWindow = Math.max(1, contextWindow);
+  const systemTokens = estimateRuntimeTokens(systemPrompt);
+  const transcriptTokens = estimateRuntimeTranscriptTokens(transcript);
+  const beforeTokens = systemTokens + transcriptTokens;
+  if (beforeTokens / safeContextWindow < CONTEXT_COMPACTION_THRESHOLD) {
+    return {
+      transcript,
+      compacted: false,
+      beforeTokens,
+      afterTokens: beforeTokens,
+      messagesBefore: transcript.length
+    };
+  }
+
+  const targetTranscriptTokens = Math.max(
+    256,
+    Math.floor(safeContextWindow * CONTEXT_COMPACTION_TARGET) - systemTokens
+  );
+  const recentMessages = transcript.slice(-8);
+  const earlierMessages = transcript.slice(0, Math.max(0, transcript.length - recentMessages.length));
+  const summaryBudget = Math.max(120, Math.floor(targetTranscriptTokens * 0.3));
+  const recentBudget = Math.max(
+    96,
+    Math.floor((targetTranscriptTokens - summaryBudget) / Math.max(1, recentMessages.length))
+  );
+  const summary = buildCompactedTranscriptSummary(earlierMessages, summaryBudget);
+  const compactedTranscript: ProviderTurnInput["transcript"] = [
+    ...(summary ? [{ role: "user" as const, content: summary }] : []),
+    ...recentMessages.map((message) => ({
+      ...message,
+      content: truncateToRuntimeTokenBudget(message.content, recentBudget)
+    }))
+  ];
+  const afterTokens = systemTokens + estimateRuntimeTranscriptTokens(compactedTranscript);
+  return {
+    transcript: compactedTranscript,
+    compacted: true,
+    beforeTokens,
+    afterTokens,
+    messagesBefore: transcript.length
+  };
+}
+
+function buildCompactedTranscriptSummary(
+  messages: ProviderTurnInput["transcript"],
+  tokenBudget: number
+): string {
+  if (messages.length === 0) {
+    return "";
+  }
+  const firstUserMessage = messages.find((message) => message.role === "user")?.content;
+  const recentHistory = messages.slice(-12).map((message) => {
+    const label = message.role === "tool" ? "工具结果" : message.role === "assistant" ? "助手" : "用户";
+    return `${label}: ${truncateToRuntimeTokenBudget(message.content, 48)}`;
+  });
+  const source = [
+    "[内部上下文压缩摘要。保留任务目标、已验证结果和未完成事项；不要将本段显示给用户。]",
+    firstUserMessage ? `原始任务：${truncateToRuntimeTokenBudget(firstUserMessage, 90)}` : "",
+    ...recentHistory
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return truncateToRuntimeTokenBudget(source, tokenBudget);
+}
+
+function estimateRuntimeTranscriptTokens(transcript: ProviderTurnInput["transcript"]): number {
+  return transcript.reduce((total, message) => total + estimateRuntimeTokens(message.content), 0);
+}
+
+function estimateRuntimeTokens(content: string): number {
+  const normalized = content.trim();
+  return normalized ? Math.ceil(Array.from(normalized).length / 2.8) : 0;
+}
+
+function truncateToRuntimeTokenBudget(content: string, tokenBudget: number): string {
+  const maximumCharacters = Math.max(0, Math.floor(tokenBudget * 2.8));
+  if (content.length <= maximumCharacters) {
+    return content;
+  }
+  if (maximumCharacters < 48) {
+    return `${content.slice(0, Math.max(0, maximumCharacters - 1))}...`;
+  }
+  const headLength = Math.floor(maximumCharacters * 0.72);
+  const tailLength = Math.max(0, maximumCharacters - headLength - 34);
+  return `${content.slice(0, headLength)}\n...[已压缩]...\n${content.slice(-tailLength)}`;
 }
 
 function resolveModel(config: AppConfig, modelId: string): ModelProfile {

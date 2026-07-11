@@ -127,6 +127,18 @@ function registerIpc(): void {
     });
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
+  ipcMain.handle("attachments:choose-files", async (_event, payload?: { imagesOnly?: boolean }) => {
+    const result = await dialog.showOpenDialog({
+      properties: ["openFile", "multiSelections"],
+      filters: payload?.imagesOnly
+        ? [
+            { name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"] },
+            { name: "所有文件", extensions: ["*"] }
+          ]
+        : [{ name: "所有文件", extensions: ["*"] }]
+    });
+    return result.canceled ? [] : result.filePaths;
+  });
   ipcMain.handle("projects:list-files", (_event, threadId: string) => backend.listProjectFiles(threadId));
   ipcMain.handle("projects:read-file", (_event, payload: { threadId: string; path: string }) =>
     backend.readProjectFile(payload.threadId, payload.path)
@@ -137,6 +149,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:interrupt", (_event, threadId: string) => backend.interruptThread(threadId));
   ipcMain.handle("threads:update-model", (_event, payload) =>
     backend.updateThreadModelSelection(payload.threadId, payload.providerId, payload.modelId)
+  );
+  ipcMain.handle("threads:add-skill", (_event, payload: { threadId: string; skillId: string }) =>
+    backend.addThreadSkill(payload.threadId, payload.skillId)
   );
   ipcMain.handle("terminal:open", (_event, payload: { threadId: string; sessionId?: string }) =>
     backend.openTerminal(payload.threadId, payload.sessionId)

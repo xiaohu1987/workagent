@@ -10,6 +10,7 @@ declare global {
         modelId?: string | null;
       }) => Promise<any>;
       chooseProjectDirectory: (defaultPath?: string) => Promise<string | null>;
+      chooseAttachmentFiles: (payload?: { imagesOnly?: boolean }) => Promise<string[]>;
       listProjectFiles: (threadId: string) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
       readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean }>;
       deleteThread: (threadId: string) => Promise<void>;
@@ -21,6 +22,7 @@ declare global {
         providerId: string;
         modelId: string;
       }) => Promise<any>;
+      addThreadSkill: (payload: { threadId: string; skillId: string }) => Promise<any>;
       openTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<{ cwd: string; shell: string; output: string }>;
       writeTerminal: (payload: { threadId: string; input: string; sessionId?: string }) => Promise<void>;
       closeTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<void>;
