@@ -3357,28 +3357,40 @@ select:focus {
 .composer-shell {
   width: min(1120px, calc(100% - 80px));
   margin: 0 auto 12px;
-  padding-top: 16px;
+  padding-top: 48px;
 }
 
 .composer-project-pill {
-  top: 0;
-  left: 16px;
+  top: 6px;
   right: 16px;
+  left: auto;
   gap: 10px;
-  min-height: 52px;
-  padding: 0 16px;
+  max-width: min(420px, calc(100% - 32px));
+  min-height: 34px;
+  padding: 0 12px;
   border: 0;
-  border-radius: 18px;
+  border-radius: 8px;
   color: #f3f3f5;
   background: #1e1e20;
   box-shadow: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
   z-index: 0;
 }
 
+.composer-project-pill:hover,
+.composer-project-pill:focus-visible {
+  background: #28282c;
+}
+
 .composer-project-pill span {
+  overflow: hidden;
   color: #f3f3f5;
   font-size: 13px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-model-row {
@@ -6698,6 +6710,24 @@ select:focus {
   border-radius: 5px;
   color: rgba(242, 242, 244, 0.64);
   background: transparent;
+}
+
+.history-item::before {
+  content: "";
+  align-self: stretch;
+  width: 3px;
+  flex: 0 0 3px;
+  margin: 4px 0;
+  border-radius: 2px;
+  background: rgba(244, 244, 243, 0.22);
+}
+
+.history-item-project::before {
+  background: #5d9bff;
+}
+
+.history-item-chat::before {
+  background: #d99268;
 }
 
 .terminal-hide-button:hover {

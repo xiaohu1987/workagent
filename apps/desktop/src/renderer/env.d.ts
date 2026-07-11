@@ -27,7 +27,8 @@ declare global {
       writeTerminal: (payload: { threadId: string; input: string; sessionId?: string }) => Promise<void>;
       closeTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<void>;
       openExternal: (url: string) => Promise<void>;
-      listSkills: () => Promise<any[]>;
+      openPath: (targetPath: string) => Promise<string>;
+      listSkills: (cwd?: string | null) => Promise<any[]>;
       listPlugins: () => Promise<any[]>;
       installPlugin: (source: string) => Promise<any>;
       setProjectPluginEnabled: (payload: {

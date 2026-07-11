@@ -163,7 +163,16 @@ function registerIpc(): void {
     backend.closeTerminal(payload.threadId, payload.sessionId)
   );
   ipcMain.handle("shell:open-external", (_event, url: string) => shell.openExternal(url));
-  ipcMain.handle("skills:list", () => backend.listSkills());
+  ipcMain.handle("shell:open-path", (_event, targetPath: string) => {
+    if (typeof targetPath !== "string" || !path.isAbsolute(targetPath)) {
+      return "无效的本地路径。";
+    }
+    return shell.openPath(targetPath);
+  });
+  ipcMain.handle("skills:list", async (_event, cwd?: string | null) => {
+    await backend.reloadSkills(cwd);
+    return backend.listSkills();
+  });
   ipcMain.handle("plugins:list", () => backend.listPlugins());
   ipcMain.handle("plugins:install", (_event, source: string) => backend.installPlugin(source));
   ipcMain.handle("plugins:set-enabled", (_event, payload) =>

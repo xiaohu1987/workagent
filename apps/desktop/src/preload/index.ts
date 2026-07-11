@@ -31,7 +31,8 @@ const api = {
     ipcRenderer.invoke("terminal:write", payload),
   closeTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:close", payload),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
-  listSkills: () => ipcRenderer.invoke("skills:list"),
+  openPath: (targetPath: string) => ipcRenderer.invoke("shell:open-path", targetPath),
+  listSkills: (cwd?: string | null) => ipcRenderer.invoke("skills:list", cwd),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),
   setProjectPluginEnabled: (payload: { threadId: string; pluginId: string; enabled: boolean }) =>

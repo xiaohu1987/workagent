@@ -790,6 +790,14 @@ export function App() {
     () => threads.find((thread) => thread.id === selectedThreadId) ?? null,
     [threads, selectedThreadId]
   );
+  const selectedProjectCwd = selectedThread?.mode === "project" ? selectedThread.cwd ?? null : null;
+
+  useEffect(() => {
+    if (isSettingsOpen && settingsTab === "skills") {
+      void refreshSkills();
+    }
+  }, [isSettingsOpen, settingsTab, selectedThread?.cwd]);
+
   const activeSnapshotThreadId = snapshot?.thread.id ?? null;
   const activeSnapshotThreadStatus = snapshot?.thread.status ?? null;
   const pendingApprovals = useMemo(
@@ -1213,7 +1221,7 @@ export function App() {
   }
 
   async function refreshSkills() {
-    setSkills((await window.codexh.listSkills()) as SkillMetadata[]);
+    setSkills((await window.codexh.listSkills(selectedThread?.cwd)) as SkillMetadata[]);
   }
 
   async function refreshPlugins() {
@@ -1258,6 +1266,13 @@ export function App() {
       providerId: selection?.providerId ?? null,
       modelId: selection?.modelId ?? null
     })) as ThreadRecord;
+  }
+
+  async function openProjectFolder(targetPath: string) {
+    const error = await window.codexh.openPath(targetPath);
+    if (error) {
+      showNotice("无法打开项目文件夹", { message: error });
+    }
   }
 
   async function confirmProjectCreate() {
@@ -2031,7 +2046,7 @@ export function App() {
                 return (
                   <div
                     key={thread.id}
-                    className={`history-item ${selectedThreadId === thread.id ? "selected" : ""}`}
+                    className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""}`}
                   >
                     <button
                       type="button"
@@ -2199,6 +2214,17 @@ export function App() {
           </div>
 
           <footer className="composer-shell">
+            {selectedProjectCwd ? (
+              <button
+                type="button"
+                className="composer-project-pill"
+                title={`打开文件夹：${selectedProjectCwd}`}
+                onClick={() => void openProjectFolder(selectedProjectCwd)}
+              >
+                <IconFolder />
+                <span>{getFileLeafName(selectedProjectCwd)}</span>
+              </button>
+            ) : null}
             <div className="chat-composer">
               {composerAttachments.some((attachment) => attachment.kind !== "skill") ? (
                 <div className="composer-attachments" aria-label="已添加到聊天的上下文">
