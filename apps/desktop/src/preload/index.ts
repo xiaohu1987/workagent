@@ -22,7 +22,17 @@ const api = {
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),
   setProjectPluginEnabled: (payload: { threadId: string; pluginId: string; enabled: boolean }) =>
     ipcRenderer.invoke("plugins:set-enabled", payload),
-  getConfig: () => ipcRenderer.invoke("config:get"),
+  getConfig: async () => {
+    console.log("[preload] config:get invoke");
+    const result = await ipcRenderer.invoke("config:get");
+    console.log("[preload] config:get success", {
+      providers: Array.isArray(result?.providers) ? result.providers.length : null,
+      models: Array.isArray(result?.models) ? result.models.length : null,
+      defaultProvider: result?.defaultProvider,
+      defaultModel: result?.defaultModel
+    });
+    return result;
+  },
   saveConfig: (config: unknown) => ipcRenderer.invoke("config:save", config),
   importKnowledge: (payload: {
     displayName: string;
@@ -48,6 +58,16 @@ const api = {
   ) => ipcRenderer.invoke("approval:resolve", { id, resolution }),
   answerPrompt: (id: string, answers: Record<string, string>) =>
     ipcRenderer.invoke("prompt:answer", { id, answers }),
+  getGpaState: (threadId: string) => ipcRenderer.invoke("gpa:state", threadId),
+  setGpaStage: (payload: { threadId: string; stage: "off" | "goal" | "plan" | "act" }) =>
+    ipcRenderer.invoke("gpa:set-stage", payload),
+  fetchProviderModels: (payload: {
+    baseUrl?: string;
+    apiKey?: string;
+    apiKeyEnv?: string;
+    type?: "mock" | "openai-compatible" | "anthropic" | "gemini" | "openrouter" | "ollama" | "vllm" | "gateway";
+    id?: string;
+  }) => ipcRenderer.invoke("models:fetch", payload),
   onRuntimeEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("runtime:event", wrapped);

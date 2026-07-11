@@ -432,6 +432,7 @@ export class DatabaseService {
     this.ensureColumn("approval_records", "approval_key", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("approval_records", "resolution_mode", "TEXT");
     this.ensureColumn("approval_records", "resolved_at", "TEXT");
+    this.ensureColumn("threads", "gpa_state_json", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -472,7 +473,8 @@ export class DatabaseService {
       selectedSkillIds: [],
       knowledgeBaseIds: [],
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      gpaStateJson: null
     };
 
     this.#db
@@ -480,8 +482,8 @@ export class DatabaseService {
         INSERT INTO threads (
           id, title, mode, workspace_kind, cwd, project_id, workspace_id,
           model_id, provider_id, status, selected_skill_ids_json,
-          knowledge_base_ids_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          knowledge_base_ids_json, created_at, updated_at, gpa_state_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         thread.id,
@@ -497,7 +499,8 @@ export class DatabaseService {
         JSON.stringify(thread.selectedSkillIds),
         JSON.stringify(thread.knowledgeBaseIds),
         thread.createdAt,
-        thread.updatedAt
+        thread.updatedAt,
+        thread.gpaStateJson
       );
 
     return thread;
@@ -524,7 +527,7 @@ export class DatabaseService {
         UPDATE threads
         SET title = ?, mode = ?, workspace_kind = ?, cwd = ?, project_id = ?, workspace_id = ?,
             model_id = ?, provider_id = ?, status = ?, selected_skill_ids_json = ?,
-            knowledge_base_ids_json = ?, updated_at = ?
+            knowledge_base_ids_json = ?, updated_at = ?, gpa_state_json = ?
         WHERE id = ?
       `)
       .run(
@@ -540,6 +543,7 @@ export class DatabaseService {
         JSON.stringify(next.selectedSkillIds),
         JSON.stringify(next.knowledgeBaseIds),
         next.updatedAt,
+        next.gpaStateJson,
         threadId
       );
 
@@ -710,6 +714,25 @@ export class DatabaseService {
     this.#db
       .prepare("UPDATE tool_calls SET result_json = ?, status = ?, completed_at = ? WHERE id = ?")
       .run(next.resultJson, next.status, next.completedAt, id);
+  }
+
+  public listToolCalls(threadId: string): ToolCallRecord[] {
+    return this.#db
+      .prepare("SELECT * FROM tool_calls WHERE thread_id = ? ORDER BY started_at ASC")
+      .all(threadId)
+      .map((row: any) => ({
+        id: row.id,
+        threadId: row.thread_id,
+        turnRunId: row.turn_run_id,
+        toolName: row.tool_name,
+        argumentsJson: row.arguments_json,
+        resultJson: row.result_json,
+        status: row.status,
+        riskLevel: row.risk_level,
+        approvalMode: row.approval_mode,
+        startedAt: row.started_at,
+        completedAt: row.completed_at
+      }));
   }
 
   public createApproval(
@@ -1276,7 +1299,8 @@ function mapThreadRow(row: any): ThreadRecord {
     selectedSkillIds: JSON.parse(row.selected_skill_ids_json ?? "[]"),
     knowledgeBaseIds: JSON.parse(row.knowledge_base_ids_json ?? "[]"),
     createdAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    gpaStateJson: row.gpa_state_json ?? null
   };
 }
 

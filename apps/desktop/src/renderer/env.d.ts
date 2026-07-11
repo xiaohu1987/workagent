@@ -45,6 +45,11 @@ declare global {
         resolution: { decision: "approved" | "denied"; mode?: "once" | "session" | "remember" }
       ) => Promise<void>;
       answerPrompt: (id: string, answers: Record<string, string>) => Promise<void>;
+      getGpaState: (threadId: string) => Promise<any>;
+      setGpaStage: (payload: {
+        threadId: string;
+        stage: "off" | "goal" | "plan" | "act";
+      }) => Promise<void>;
       onRuntimeEvent: (listener: (event: unknown) => void) => () => void;
     };
   }

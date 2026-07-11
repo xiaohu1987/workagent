@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ReactNode } from "react";
+import "./timeline.css";
 import type {
   AppConfig,
+  GpaStage,
+  GpaState,
   KnowledgeScope,
   MessageRecord,
   ModelProfile,
@@ -10,7 +14,8 @@ import type {
   ProviderType,
   RuntimeThreadSnapshot,
   SkillMetadata,
-  ThreadRecord
+  ThreadRecord,
+  ToolCallRecord
 } from "@shared-types";
 import {
   canDeleteThread,
@@ -80,6 +85,18 @@ type AppNotice = {
   tone: AppNoticeTone;
 };
 
+type TimelineEntry =
+  | { kind: "message"; id: string; createdAt: string; message: MessageRecord }
+  | { kind: "tool"; id: string; createdAt: string; toolCall: ToolCallRecord };
+
+type StreamingAssistant = {
+  threadId: string;
+  turnRunId: string;
+  content: string;
+  completed: boolean;
+  messageId?: string;
+};
+
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
@@ -131,16 +148,35 @@ const PROVIDER_TYPE_OPTIONS: ProviderTypeOption[] = [
 export function App() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const selectedThreadIdRef = useRef<string | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
+  const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [input, setInput] = useState("");
   const [skills, setSkills] = useState<SkillMetadata[]>([]);
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
+  const [gpaState, setGpaState] = useState<GpaState>({
+    stage: "off",
+    awaitingConfirmation: null,
+    planTasks: [],
+    updatedAt: ""
+  });
+  const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
+  const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
+  const gpaAnchorRef = useRef<HTMLDivElement | null>(null);
+  const [gpaRevisionOpen, setGpaRevisionOpen] = useState(false);
+  const [gpaRevisionDraft, setGpaRevisionDraft] = useState("");
+  const [gpaRevisionSubmitting, setGpaRevisionSubmitting] = useState(false);
+  const gpaRevisionRef = useRef<HTMLTextAreaElement | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
   const [settingsProviderId, setSettingsProviderId] = useState<string | null>(null);
   const [providerSecretDrafts, setProviderSecretDrafts] = useState<Record<string, string>>({});
   const [newModelId, setNewModelId] = useState("");
   const [newModelDisplayName, setNewModelDisplayName] = useState("");
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [fetchedModels, setFetchedModels] = useState<{ id: string; displayName?: string }[]>([]);
+  const [showFetchedModels, setShowFetchedModels] = useState(false);
+  const [selectedFetchedModelIds, setSelectedFetchedModelIds] = useState<string[]>([]);
   const [composerProviderId, setComposerProviderId] = useState("");
   const [composerModelId, setComposerModelId] = useState("");
   const [knowledgeSourceText, setKnowledgeSourceText] = useState("");
@@ -157,8 +193,7 @@ export function App() {
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatTranscriptRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
-  const pendingTopResetThreadIdRef = useRef<string | null>(null);
-  const suppressInitialAutoScrollThreadIdRef = useRef<string | null>(null);
+  const pendingLatestScrollThreadIdRef = useRef<string | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollReleaseTimerRef = useRef<number | null>(null);
 
@@ -167,12 +202,84 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    selectedThreadIdRef.current = selectedThreadId;
+  }, [selectedThreadId]);
+
+  function selectThreadId(nextThreadId: string | null) {
+    selectedThreadIdRef.current = nextThreadId;
+    setSelectedThreadId(nextThreadId);
+  }
+
+  useEffect(() => {
+    if (!gpaMenuOpen) {
+      return;
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setGpaMenuOpen(false);
+        setGpaMenuPos(null);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [gpaMenuOpen]);
+
+  useEffect(() => {
     const dispose = window.codexh.onRuntimeEvent((event) => {
-      const typed = event as { threadId?: string; type: string };
+      const typed = event as {
+        threadId?: string;
+        type: string;
+        payload?: {
+          gpa?: GpaState;
+          turnRunId?: string;
+          delta?: string;
+          content?: string;
+          messageId?: string;
+        };
+      };
+      const currentSelectedThreadId = selectedThreadIdRef.current;
+      if (typed.type === "gpa.updated" && typed.payload?.gpa) {
+        setGpaState(typed.payload.gpa);
+        return;
+      }
+      if (typed.type === "assistant.delta" && typed.threadId && typed.payload?.turnRunId) {
+        const { threadId, payload } = typed;
+        const turnRunId = payload.turnRunId as string;
+        setStreamingAssistants((current) => ({
+          ...current,
+          [turnRunId]: {
+            threadId,
+            turnRunId,
+            content: payload.content ?? "",
+            completed: false
+          }
+        }));
+        return;
+      }
+      if (typed.type === "assistant.completed" && typed.payload?.turnRunId) {
+        const { turnRunId, messageId } = typed.payload;
+        setStreamingAssistants((current) => {
+          const active = current[turnRunId];
+          if (!active) {
+            return current;
+          }
+
+          return {
+            ...current,
+            [turnRunId]: {
+              ...active,
+              completed: true,
+              messageId: typeof messageId === "string" ? messageId : undefined
+            }
+          };
+        });
+      }
       void refreshThreads();
 
-      if (!typed.threadId || typed.threadId === selectedThreadId) {
-        void refreshSnapshot(typed.threadId ?? selectedThreadId);
+      if (!typed.threadId || typed.threadId === currentSelectedThreadId) {
+        void refreshSnapshot(typed.threadId ?? currentSelectedThreadId);
       }
 
       if (
@@ -185,7 +292,7 @@ export function App() {
       }
     });
     return dispose;
-  }, [selectedThreadId]);
+  }, []);
 
   useEffect(() => {
     if (!isSettingsOpen && !isProjectCreateOpen && !notice) {
@@ -245,12 +352,24 @@ export function App() {
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
   );
+  const timelineEntries = useMemo(
+    () => buildTimelineEntries(visibleMessages, snapshot?.toolCalls ?? []),
+    [snapshot?.toolCalls, visibleMessages]
+  );
+  const activeStreamingAssistant = useMemo(
+    () =>
+      Object.values(streamingAssistants)
+        .filter((entry) => entry.threadId === activeSnapshotThreadId && entry.content)
+        .sort((left, right) => left.turnRunId.localeCompare(right.turnRunId))
+        .at(-1) ?? null,
+    [activeSnapshotThreadId, streamingAssistants]
+  );
   const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
   const composerPrimaryAction = getComposerPrimaryActionState(selectedThreadStatus, input);
   const isActiveThreadExecuting = composerPrimaryAction.kind === "interrupt";
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
-  const showWelcome = visibleMessages.length === 0;
-  const latestVisibleMessageId = visibleMessages[visibleMessages.length - 1]?.id ?? null;
+  const showWelcome = timelineEntries.length === 0;
+  const latestVisibleMessageId = timelineEntries[timelineEntries.length - 1]?.id ?? null;
   const settingsProvider = useMemo(() => {
     if (!configDraft) {
       return null;
@@ -287,6 +406,30 @@ export function App() {
       })),
     [composerModels]
   );
+  const composerModelGroups = useMemo(
+    () =>
+      config
+        ? composerProviders.map((provider) => ({
+            providerId: provider.id,
+            providerLabel: getProviderDisplayName(provider),
+            models: getModelsForProvider(config, provider.id).map((model) => ({
+              id: model.id,
+              label: model.displayName === model.id ? model.id : `${model.displayName} (${model.id})`
+            }))
+          }))
+        : [],
+    [composerProviders, config]
+  );
+  const currentModelTriggerLabel = useMemo(() => {
+    const providerLabel = composerProviders.find((provider) => provider.id === composerProviderId)
+      ? getProviderDisplayName(composerProviders.find((provider) => provider.id === composerProviderId)!)
+      : null;
+    const modelLabel = composerModelOptions.find((option) => option.value === composerModelId)?.label ?? null;
+    if (providerLabel && modelLabel) {
+      return `${providerLabel} · ${modelLabel}`;
+    }
+    return modelLabel ?? providerLabel ?? "选择模型";
+  }, [composerModelOptions, composerProviderId, composerProviders, composerModelId]);
   const activeAssistantLabel = useMemo(() => {
     if (!config) {
       return "Assistant";
@@ -374,6 +517,36 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!snapshot) {
+      return;
+    }
+
+    setStreamingAssistants((current) => {
+      let changed = false;
+      const next = { ...current };
+
+      for (const [turnRunId, entry] of Object.entries(current)) {
+        if (entry.threadId !== snapshot.thread.id) {
+          continue;
+        }
+
+        const persisted = entry.messageId
+          ? snapshot.messages.some((message) => message.id === entry.messageId)
+          : snapshot.messages.some(
+              (message) => message.role === "assistant" && message.turnRunId === turnRunId
+            );
+        const turnFinished = !isThreadExecutionInProgress(snapshot.thread.status);
+        if ((entry.completed && persisted) || (turnFinished && !persisted)) {
+          delete next[turnRunId];
+          changed = true;
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [snapshot]);
+
+  useEffect(() => {
     if (!showWelcome) {
       return;
     }
@@ -383,29 +556,23 @@ export function App() {
     chatScrollRef.current?.scrollTo({ top: 0, left: 0 });
   }, [activeSnapshotThreadId, showWelcome]);
 
-  useEffect(() => {
-    if (!activeSnapshotThreadId || pendingTopResetThreadIdRef.current !== activeSnapshotThreadId) {
+  useLayoutEffect(() => {
+    if (!activeSnapshotThreadId || pendingLatestScrollThreadIdRef.current !== activeSnapshotThreadId) {
       return;
     }
 
-    pendingTopResetThreadIdRef.current = null;
-    cancelPendingAutoScrollFrame();
-    clearAutoScrollReleaseTimer();
-    window.requestAnimationFrame(() => {
-      chatScrollRef.current?.scrollTo({ top: 0, left: 0 });
-    });
-  }, [activeSnapshotThreadId]);
+    pendingLatestScrollThreadIdRef.current = null;
+    if (showWelcome) {
+      return;
+    }
+
+    shouldAutoScrollRef.current = true;
+    scrollTranscriptToLatest();
+    settleAutoScroll(activeSnapshotThreadStatus);
+  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, latestVisibleMessageId, showWelcome]);
 
   useEffect(() => {
     if (showWelcome) {
-      if (activeSnapshotThreadId && suppressInitialAutoScrollThreadIdRef.current === activeSnapshotThreadId) {
-        suppressInitialAutoScrollThreadIdRef.current = null;
-      }
-      return;
-    }
-
-    if (activeSnapshotThreadId && suppressInitialAutoScrollThreadIdRef.current === activeSnapshotThreadId) {
-      suppressInitialAutoScrollThreadIdRef.current = null;
       return;
     }
 
@@ -480,8 +647,7 @@ export function App() {
   }, [config, selectedThreadId, selectedThread]);
 
   async function refreshAll() {
-    await refreshThreads();
-    await Promise.all([refreshSkills(), refreshPlugins(), refreshConfig()]);
+    await Promise.all([refreshThreads(), refreshSkills(), refreshPlugins(), refreshConfig()]);
   }
 
   async function refreshThreads() {
@@ -494,7 +660,7 @@ export function App() {
         : nextThreads[0]?.id ?? null;
 
     if (targetThreadId !== selectedThreadId) {
-      setSelectedThreadId(targetThreadId);
+      selectThreadId(targetThreadId);
     }
 
     await refreshSnapshot(targetThreadId);
@@ -506,19 +672,49 @@ export function App() {
       return;
     }
 
-    setSnapshot((await window.codexh.getThreadSnapshot(threadId)) as RuntimeThreadSnapshot);
+    try {
+      const next = (await window.codexh.getThreadSnapshot(threadId)) as RuntimeThreadSnapshot;
+      setSnapshot(next);
+      if (next.gpa) {
+        setGpaState(next.gpa);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showNotice("加载聊天记录失败。", { message });
+    }
   }
 
-  async function openThread(threadId: string, options?: { resetTranscriptScroll?: boolean }) {
-    if (options?.resetTranscriptScroll) {
+  function appendOptimisticUserMessage(threadId: string, content: string) {
+    const optimisticMessage: MessageRecord = {
+      id: `optimistic-${Date.now()}`,
+      threadId,
+      turnRunId: null,
+      role: "user",
+      content,
+      metadataJson: null,
+      createdAt: new Date().toISOString()
+    };
+
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) {
+        return current;
+      }
+      return {
+        ...current,
+        messages: [...current.messages, optimisticMessage]
+      };
+    });
+  }
+
+  async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
+    if (options?.scrollToLatest) {
       cancelPendingAutoScrollFrame();
       clearAutoScrollReleaseTimer();
-      shouldAutoScrollRef.current = false;
-      pendingTopResetThreadIdRef.current = threadId;
-      suppressInitialAutoScrollThreadIdRef.current = threadId;
+      shouldAutoScrollRef.current = true;
+      pendingLatestScrollThreadIdRef.current = threadId;
     }
 
-    setSelectedThreadId(threadId);
+    selectThreadId(threadId);
     await refreshSnapshot(threadId);
   }
 
@@ -531,9 +727,14 @@ export function App() {
   }
 
   async function refreshConfig(preferredProviderId?: string | null) {
-    const nextConfig = (await window.codexh.getConfig()) as AppConfig;
-    setConfig(nextConfig);
-    resetConfigDraft(nextConfig, preferredProviderId);
+    try {
+      const nextConfig = (await window.codexh.getConfig()) as AppConfig;
+      setConfig(nextConfig);
+      resetConfigDraft(nextConfig, preferredProviderId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showNotice(`加载模型配置失败：${message}`);
+    }
   }
 
   async function createThread(mode: "project" | "chat") {
@@ -544,7 +745,7 @@ export function App() {
     }
 
     const thread = await createThreadRecord(mode);
-    setSelectedThreadId(thread.id);
+    selectThreadId(thread.id);
     await refreshAll();
     await refreshSnapshot(thread.id);
   }
@@ -569,7 +770,7 @@ export function App() {
     const thread = await createThreadRecord("project", projectPathDraft);
     setIsProjectCreateOpen(false);
     setProjectPathDraft("");
-    setSelectedThreadId(thread.id);
+    selectThreadId(thread.id);
     await refreshAll();
     await refreshSnapshot(thread.id);
   }
@@ -612,30 +813,109 @@ export function App() {
     }
   }
 
-  async function sendMessage() {
-    const content = input.trim();
-    if (!content) {
+  async function sendMessage(
+    forcedContent?: string,
+    stageOverride?: GpaStage,
+    options?: { internal?: boolean }
+  ) {
+    const raw = (forcedContent ?? input).trim();
+    if (!raw) {
       return;
     }
 
-    if (!composerProviderId || !composerModelId || !composerModels.some((model) => model.id === composerModelId)) {
-      showNotice("请先在聊天框下方选择可用的供应商和模型。");
-      return;
+    if (!forcedContent) {
+      if (
+        !composerProviderId ||
+        !composerModelId ||
+        !composerModels.some((model) => model.id === composerModelId)
+      ) {
+        showNotice("请先在聊天框下方选择可用的供应商和模型。");
+        return;
+      }
     }
 
     let threadId = selectedThreadId;
     if (!threadId) {
       const thread = await createThreadRecord("chat");
       threadId = thread.id;
-      setSelectedThreadId(thread.id);
+      selectThreadId(thread.id);
       await refreshThreads();
     }
 
-    await window.codexh.sendMessage({ threadId, content });
-    setInput("");
+    const stage = stageOverride ?? gpaState.stage;
+    if (stage !== "off") {
+      await window.codexh.setGpaStage({ threadId, stage });
+    }
+
+    if (!options?.internal) {
+      appendOptimisticUserMessage(threadId, raw);
+    }
+    await window.codexh.sendMessage({ threadId, content: raw });
+    if (!forcedContent) {
+      setInput("");
+    }
     clearAutoScrollReleaseTimer();
     shouldAutoScrollRef.current = true;
-    await refreshSnapshot(threadId);
+    window.setTimeout(() => {
+      void refreshSnapshot(threadId);
+    }, 120);
+  }
+
+  async function handleGpaStageSelect(stage: GpaStage) {
+    setGpaState((prev) => ({ ...prev, stage, awaitingConfirmation: null }));
+    setGpaMenuOpen(false);
+    setGpaMenuPos(null);
+    const threadId = selectedThreadId;
+    if (threadId) {
+      await window.codexh.setGpaStage({ threadId, stage });
+    }
+  }
+
+  async function confirmGpaStage() {
+    if (gpaState.awaitingConfirmation === "goal") {
+      await sendMessage(
+        "[internal:gpa-confirm] Continue with the confirmed goal. Produce the PLAN task list and acceptance criteria.",
+        "plan",
+        { internal: true }
+      );
+    } else if (gpaState.awaitingConfirmation === "plan") {
+      await sendMessage(
+        "[internal:gpa-confirm] The plan is confirmed. Enter ACT and implement the planned tasks.",
+        "act",
+        { internal: true }
+      );
+    }
+  }
+
+  function openGpaRevision() {
+    setGpaRevisionOpen(true);
+    window.requestAnimationFrame(() => gpaRevisionRef.current?.focus());
+  }
+
+  function cancelGpaRevision() {
+    setGpaRevisionOpen(false);
+    setGpaRevisionDraft("");
+  }
+
+  async function submitGpaRevision() {
+    const revision = gpaRevisionDraft.trim();
+    if (!revision) {
+      gpaRevisionRef.current?.focus();
+      return;
+    }
+
+    setGpaRevisionSubmitting(true);
+    try {
+      await sendMessage(`请根据以下修改意见更新当前计划：\n\n${revision}`, "plan");
+      setGpaRevisionDraft("");
+      setGpaRevisionOpen(false);
+    } catch (error) {
+      showNotice("提交修改失败。", {
+        message: error instanceof Error ? error.message : "请稍后重试。"
+      });
+    } finally {
+      setGpaRevisionSubmitting(false);
+    }
   }
 
   async function interruptActiveThread() {
@@ -806,6 +1086,97 @@ export function App() {
     });
   }
 
+  async function fetchAndShowProviderModels(providerId: string) {
+    if (!configDraft) {
+      return;
+    }
+    const provider = configDraft.providers.find((entry) => entry.id === providerId);
+    if (!provider) {
+      return;
+    }
+    const baseUrl = (provider.baseUrl ?? "").trim();
+    const secret = providerSecretDrafts[provider.id]?.trim();
+    const apiKey = secret || provider.apiKey || (provider.apiKeyEnv ? "" : "");
+    if (!baseUrl) {
+      showNotice("请先填写调用地址。");
+      return;
+    }
+    if (!apiKey && !provider.apiKeyEnv) {
+      showNotice("请先填写 API Key。", {
+        message: "或者在 KEY 字段使用环境变量名。"
+      });
+      return;
+    }
+    setIsFetchingModels(true);
+    try {
+      const list = await window.codexh.fetchProviderModels({
+        baseUrl,
+        apiKey: apiKey || undefined,
+        apiKeyEnv: provider.apiKeyEnv,
+        type: provider.type,
+        id: provider.id
+      });
+      setFetchedModels(list);
+      setSelectedFetchedModelIds([]);
+      setShowFetchedModels(true);
+    } catch (error) {
+      showNotice("获取模型失败。", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setIsFetchingModels(false);
+    }
+  }
+
+  function toggleFetchedModelSelection(modelId: string) {
+    setSelectedFetchedModelIds((current) =>
+      current.includes(modelId)
+        ? current.filter((id) => id !== modelId)
+        : [...current, modelId]
+    );
+  }
+
+  function applyFetchedModels() {
+    if (!configDraft) {
+      return;
+    }
+    if (!settingsProvider) {
+      return;
+    }
+    const candidates = fetchedModels.filter((entry) =>
+      selectedFetchedModelIds.includes(entry.id)
+    );
+    if (candidates.length === 0) {
+      showNotice("没有勾选要添加的模型。");
+      return;
+    }
+    const existing = new Set(configDraft.models.map((model) => model.id));
+    const nextDraft = cloneConfig(configDraft);
+    let added = 0;
+    let skipped = 0;
+    for (const candidate of candidates) {
+      if (existing.has(candidate.id)) {
+        skipped += 1;
+        continue;
+      }
+      nextDraft.models.push(
+        createModelProfile(settingsProvider.id, candidate.id, candidate.displayName)
+      );
+      existing.add(candidate.id);
+      added += 1;
+    }
+    setConfigDraft(normalizeDraftConfig(nextDraft));
+    setShowFetchedModels(false);
+    setSelectedFetchedModelIds([]);
+    setFetchedModels([]);
+    showNotice(
+      added > 0
+        ? `已添加 ${added} 个模型。${skipped > 0 ? `（${skipped} 个已存在已跳过）` : ""}`
+        : "没有新增模型。",
+      { tone: "success" }
+    );
+  }
+
   function addModelToProvider(providerId: string) {
     if (!configDraft) {
       return;
@@ -897,12 +1268,12 @@ export function App() {
     void updateComposerSelection(nextProviderId, nextModelId);
   }
 
-  function handleComposerModelChange(nextModelId: string) {
-    if (!nextModelId) {
+  function handleComposerModelChange(providerId: string, modelId: string) {
+    if (!providerId || !modelId) {
       return;
     }
 
-    void updateComposerSelection(composerProviderId, nextModelId);
+    void updateComposerSelection(providerId, modelId);
   }
 
   function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -929,18 +1300,6 @@ export function App() {
           <button className="title-icon-button" title="侧边栏">
             <IconSidebar />
           </button>
-          <button className="title-icon-button" title="后退">
-            <IconChevronLeft />
-          </button>
-          <button className="title-icon-button disabled" title="前进" disabled>
-            <IconChevronRight />
-          </button>
-          <nav className="windowbar-menu" aria-label="应用菜单">
-            <button className="menu-button">文件</button>
-            <button className="menu-button">编辑</button>
-            <button className="menu-button">视图</button>
-            <button className="menu-button">帮助</button>
-          </nav>
         </div>
       </header>
 
@@ -992,7 +1351,7 @@ export function App() {
                       type="button"
                       className="history-item-main"
                       onClick={() => {
-                        void openThread(thread.id, { resetTranscriptScroll: true });
+                        void openThread(thread.id, { scrollToLatest: true });
                       }}
                     >
                       <span className="history-item-label">{thread.title}</span>
@@ -1044,15 +1403,6 @@ export function App() {
       </aside>
 
       <main className="workspace">
-        <div className="workspace-controls">
-          <button className="workspace-control-button" title="单栏">
-            <IconSinglePanel />
-          </button>
-          <button className="workspace-control-button" title="双栏">
-            <IconSplitPanel />
-          </button>
-        </div>
-
         {(pendingApprovals.length > 0 || pendingPrompts.length > 0) && (
           <div className="pending-strip">
             {pendingApprovals.length > 0 ? (
@@ -1075,17 +1425,44 @@ export function App() {
             {showWelcome ? (
               <div className="welcome-empty-state" />
             ) : (
-              <div ref={chatTranscriptRef} className="chat-transcript">
-                {visibleMessages.map((message) => renderTranscriptMessage(message, activeAssistantLabel))}
+              <div ref={chatTranscriptRef} className="chat-transcript task-timeline">
+                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
+                {timelineEntries.map((entry) =>
+                  entry.kind === "message" ? (
+                    renderTranscriptMessage(entry.message, activeAssistantLabel)
+                  ) : (
+                    <ExecutionStep key={entry.id} toolCall={entry.toolCall} />
+                  )
+                )}
+                {gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan" ? (
+                  <GpaConfirmationCard
+                    stage={gpaState.awaitingConfirmation}
+                    disabled={isActiveThreadExecuting || gpaRevisionSubmitting}
+                    isEditing={gpaRevisionOpen}
+                    revisionDraft={gpaRevisionDraft}
+                    revisionRef={gpaRevisionRef}
+                    onConfirm={() => void confirmGpaStage()}
+                    onRevise={openGpaRevision}
+                    onRevisionChange={setGpaRevisionDraft}
+                    onRevisionCancel={cancelGpaRevision}
+                    onRevisionSubmit={() => void submitGpaRevision()}
+                  />
+                ) : null}
+                {activeStreamingAssistant ? (
+                  <section className="streaming-assistant" aria-live="polite">
+                    <span className="streaming-caret" aria-hidden />
+                    {renderMarkdownDocument(
+                      activeStreamingAssistant.content,
+                      `stream-${activeStreamingAssistant.turnRunId}`,
+                      "event-final-markdown"
+                    )}
+                  </section>
+                ) : null}
               </div>
             )}
           </div>
 
           <footer className="composer-shell">
-            <div className="composer-project-pill">
-              <IconFolder />
-              <span>{selectedThread?.mode === "project" ? workspaceLabel : "选择项目"}</span>
-            </div>
             <div className="chat-composer">
               <textarea
                 ref={composerRef}
@@ -1096,33 +1473,56 @@ export function App() {
               />
               <div className="composer-toolbar">
                 <div className="composer-toolbar-left">
-                  <button className="composer-icon-button" title="附加操作">
-                    <IconPlus />
-                  </button>
+                  <div
+                    ref={gpaAnchorRef}
+                    className="gpa-popover-anchor"
+                  >
+                    <button
+                      className={`composer-icon-button ${gpaMenuOpen ? "is-open" : ""}`}
+                      title="GPA 模式：目标 / 计划 / 执行"
+                      aria-haspopup="menu"
+                      aria-expanded={gpaMenuOpen}
+                      onClick={() => {
+                        if (gpaMenuOpen) {
+                          setGpaMenuOpen(false);
+                          setGpaMenuPos(null);
+                          return;
+                        }
+                        // 计算 popover 出现位置（fixed 坐标，向上展开）
+                        const node = gpaAnchorRef.current;
+                        if (node) {
+                          const rect = node.getBoundingClientRect();
+                          setGpaMenuPos({
+                            left: rect.left,
+                            top: rect.top - 8
+                          });
+                        }
+                        setGpaMenuOpen(true);
+                      }}
+                    >
+                      <IconPlus />
+                    </button>
+                  </div>
+                  {gpaState.stage !== "off" ? (
+                    <span
+                      className={`gpa-mode-chip gpa-mode-chip-${gpaState.stage}`}
+                      title={`当前 GPA 阶段：${gpaModeLabel(gpaState.stage)}（点击 + 切换或关闭）`}
+                    >
+                      <span className="gpa-mode-chip-dot" aria-hidden />
+                      {gpaModeLabel(gpaState.stage)}
+                    </span>
+                  ) : null}
                 </div>
                 <div className="composer-toolbar-right">
-                  <div className="composer-model-row">
-                    <label className="composer-model-field">
-                      <span>供应商</span>
-                      <ComposerSelect
-                        value={composerProviderId}
-                        options={composerProviderOptions}
-                        onChange={handleComposerProviderChange}
-                        placeholder="选择供应商"
-                        disabled={composerProviders.length === 0}
-                      />
-                    </label>
-                    <label className="composer-model-field">
-                      <span>模型</span>
-                      <ComposerSelect
-                        value={composerModelId}
-                        options={composerModelOptions}
-                        onChange={handleComposerModelChange}
-                        placeholder="选择模型"
-                        disabled={composerModels.length === 0}
-                      />
-                    </label>
-                  </div>
+                  <ComposerModelPicker
+                    triggerLabel={currentModelTriggerLabel}
+                    providers={composerProviderOptions}
+                    modelGroups={composerModelGroups}
+                    selectedProviderId={composerProviderId}
+                    selectedModelId={composerModelId}
+                    onSelectModel={handleComposerModelChange}
+                    disabled={composerProviders.length === 0}
+                  />
                   <button
                     className={`send-button ${isActiveThreadExecuting ? "running" : ""}`}
                     onClick={() => void handleComposerPrimaryAction()}
@@ -1325,9 +1725,19 @@ export function App() {
                             </div>
 
                             <div className="provider-model-section">
-                              <div className="section-copy">
-                                <strong>模型列表</strong>
-                                <span>保存后，聊天窗口会按这里的供应商和模型列表进行筛选。</span>
+                              <div className="section-copy section-copy-with-action">
+                                <div>
+                                  <strong>模型列表</strong>
+                                  <span>保存后，聊天窗口会按这里的供应商和模型列表进行筛选。</span>
+                                </div>
+                                <button
+                                  className="model-fetch-button"
+                                  onClick={() => void fetchAndShowProviderModels(settingsProvider.id)}
+                                  disabled={isFetchingModels || !settingsProvider.baseUrl?.trim()}
+                                  title="从供应商接口拉取所有可用模型"
+                                >
+                                  {isFetchingModels ? "获取中…" : "获取模型"}
+                                </button>
                               </div>
 
                               <div className="provider-model-box">
@@ -1400,6 +1810,24 @@ export function App() {
                   ) : (
                     <div className="config-block">
                       <div className="detail-empty">正在加载模型配置…</div>
+                      <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+                        <button
+                          className="button ghost"
+                          onClick={() => void refreshConfig()}
+                        >
+                          重试加载
+                        </button>
+                        <button
+                          className="button ghost"
+                          onClick={() => {
+                            console.log("[renderer] current config", config);
+                            console.log("[renderer] current configDraft", configDraft);
+                            showNotice(`config=${config ? "ok" : "null"}, configDraft=${configDraft ? "ok" : "null"}`);
+                          }}
+                        >
+                          检查状态
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1653,6 +2081,138 @@ export function App() {
           </section>
         </div>
       ) : null}
+
+      {showFetchedModels ? createPortal(
+        <div className="fetch-models-overlay" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setShowFetchedModels(false);
+          }
+        }}>
+          <div className="fetch-models-dialog" role="dialog" aria-label="选择要添加的模型">
+            <div className="fetch-models-head">
+              <strong>选择要添加的模型</strong>
+              <button
+                type="button"
+                onClick={() => setShowFetchedModels(false)}
+                title="关闭"
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="fetch-models-list">
+              {fetchedModels.map((entry) => {
+                const checked = selectedFetchedModelIds.includes(entry.id);
+                const already = configDraft?.models.some((model) => model.id === entry.id) ?? false;
+                return (
+                  <label
+                    key={entry.id}
+                    className={`fetch-models-item ${checked ? "is-checked" : ""} ${already ? "is-existed" : ""}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleFetchedModelSelection(entry.id)}
+                    />
+                    <div className="fetch-models-copy">
+                      <strong>{entry.id}</strong>
+                      {entry.displayName && entry.displayName !== entry.id ? (
+                        <span>{entry.displayName}</span>
+                      ) : null}
+                    </div>
+                    {already ? <em>已存在</em> : null}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="fetch-models-actions">
+              <button
+                className="button ghost"
+                onClick={() => {
+                  setSelectedFetchedModelIds(
+                    fetchedModels
+                      .filter((entry) => !configDraft?.models.some((model) => model.id === entry.id))
+                      .map((entry) => entry.id)
+                  );
+                }}
+              >
+                全选
+              </button>
+              <button
+                className="button ghost"
+                onClick={() => setShowFetchedModels(false)}
+              >
+                取消
+              </button>
+              <button
+                className="button warm"
+                onClick={applyFetchedModels}
+                disabled={selectedFetchedModelIds.length === 0}
+              >
+                添加到模型列表（{selectedFetchedModelIds.length}）
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      ) : null}
+
+      {gpaMenuOpen && gpaMenuPos
+        ? createPortal(
+            <>
+              <div
+                className="gpa-backdrop"
+                onMouseDown={() => {
+                  setGpaMenuOpen(false);
+                  setGpaMenuPos(null);
+                }}
+              />
+              <div
+                className="gpa-popover"
+                role="menu"
+                style={{
+                  position: "fixed",
+                  left: gpaMenuPos.left,
+                  top: gpaMenuPos.top,
+                  transform: "translateY(-100%)"
+                }}
+              >
+                <button
+                  className={`gpa-popover-item ${gpaState.stage === "off" ? "is-active" : ""}`}
+                  role="menuitem"
+                  onClick={() => void handleGpaStageSelect("off")}
+                >
+                  <span className="gpa-popover-item-title">关闭 GPA</span>
+                  <span className="gpa-popover-item-hint">普通模式，不强制三阶段</span>
+                </button>
+                <button
+                  className={`gpa-popover-item gpa-popover-item-goal ${gpaState.stage === "goal" ? "is-active" : ""}`}
+                  role="menuitem"
+                  onClick={() => void handleGpaStageSelect("goal")}
+                >
+                  <span className="gpa-popover-item-title">🎯 目标 GOAL</span>
+                  <span className="gpa-popover-item-hint">重述目标 / 成功标准 / 约束</span>
+                </button>
+                <button
+                  className={`gpa-popover-item gpa-popover-item-plan ${gpaState.stage === "plan" ? "is-active" : ""}`}
+                  role="menuitem"
+                  onClick={() => void handleGpaStageSelect("plan")}
+                >
+                  <span className="gpa-popover-item-title">📋 计划 PLAN</span>
+                  <span className="gpa-popover-item-hint">拆解原子任务 / 依赖 / 验收</span>
+                </button>
+                <button
+                  className={`gpa-popover-item gpa-popover-item-act ${gpaState.stage === "act" ? "is-active" : ""}`}
+                  role="menuitem"
+                  onClick={() => void handleGpaStageSelect("act")}
+                >
+                  <span className="gpa-popover-item-title">⚡ 执行 ACT</span>
+                  <span className="gpa-popover-item-hint">按计划执行 / 自检 / 汇报</span>
+                </button>
+              </div>
+            </>,
+            document.body
+          )
+        : null}
     </div>
   );
 }
@@ -1746,6 +2306,492 @@ function ComposerSelect({
       ) : null}
     </div>
   );
+}
+
+type ComposerModelGroup = {
+  providerId: string;
+  providerLabel: string;
+  models: Array<{ id: string; label: string }>;
+};
+
+function ComposerModelPicker({
+  triggerLabel,
+  providers,
+  modelGroups,
+  selectedProviderId,
+  selectedModelId,
+  onSelectModel,
+  disabled
+}: {
+  triggerLabel: string;
+  providers: ComposerSelectOption[];
+  modelGroups: ComposerModelGroup[];
+  selectedProviderId: string;
+  selectedModelId: string;
+  onSelectModel: (providerId: string, modelId: string) => void;
+  disabled: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
+  const [hoveredProviderId, setHoveredProviderId] = useState<string | null>(null);
+  const [modelsOpenRight, setModelsOpenRight] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const hoverTimerRef = useRef<number | null>(null);
+
+  const clearHoverTimer = () => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    if (disabled && isOpen) {
+      setIsOpen(false);
+      setActiveProviderId(null);
+    }
+  }, [disabled, isOpen]);
+
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const node = rootRef.current;
+    if (!node) {
+      return;
+    }
+    const triggerRect = node.getBoundingClientRect();
+    const MODEL_PANEL_WIDTH = 264;
+    setModelsOpenRight(triggerRect.left < MODEL_PANEL_WIDTH + 16);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const handleResize = () => {
+      const node = rootRef.current;
+      if (!node) {
+        return;
+      }
+      const triggerRect = node.getBoundingClientRect();
+      const MODEL_PANEL_WIDTH = 264;
+      setModelsOpenRight(triggerRect.left < MODEL_PANEL_WIDTH + 16);
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [isOpen]);
+
+  useEffect(() => {
+    return () => {
+      clearHoverTimer();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      clearHoverTimer();
+      return;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+        setActiveProviderId(null);
+        setHoveredProviderId(null);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsOpen(false);
+        setActiveProviderId(null);
+        setHoveredProviderId(null);
+      }
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const root = rootRef.current;
+    if (!root) {
+      return;
+    }
+    const handleMove = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) {
+        return;
+      }
+      const providerItem = target.closest<HTMLElement>(".composer-model-picker-provider");
+      if (providerItem) {
+        const providerId = providerItem.dataset.providerId;
+        if (providerId) {
+          handleProviderHover(providerId);
+          return;
+        }
+      }
+      const modelItem = target.closest<HTMLElement>(".composer-model-picker-model");
+      if (modelItem) {
+        clearHoverTimer();
+        return;
+      }
+    };
+    root.addEventListener("mousemove", handleMove);
+    return () => {
+      root.removeEventListener("mousemove", handleMove);
+    };
+  }, [isOpen]);
+
+  if (providers.length === 0) {
+    return (
+      <div ref={rootRef} className="composer-model-picker disabled">
+        <span className="composer-model-picker-label">选择模型</span>
+      </div>
+    );
+  }
+
+  const openMenu = (initialProviderId: string | null) => {
+    clearHoverTimer();
+    setIsOpen(true);
+    setActiveProviderId(initialProviderId);
+    setHoveredProviderId(null);
+  };
+
+  const handleProviderHover = (providerId: string) => {
+    clearHoverTimer();
+    setHoveredProviderId(providerId);
+  };
+
+  const handleProviderLeave = () => {
+    clearHoverTimer();
+    hoverTimerRef.current = window.setTimeout(() => {
+      setHoveredProviderId(null);
+    }, 160);
+  };
+
+  const handleModelPanelEnter = () => {
+    clearHoverTimer();
+  };
+
+  const handleModelPanelLeave = () => {
+    clearHoverTimer();
+    hoverTimerRef.current = window.setTimeout(() => {
+      setHoveredProviderId(null);
+    }, 180);
+  };
+
+  const visibleSecondaryProviderId = hoveredProviderId ?? activeProviderId;
+
+  return (
+    <div
+      ref={rootRef}
+      className={`composer-model-picker ${isOpen ? "open" : ""} ${disabled ? "disabled" : ""} ${modelsOpenRight ? "models-open-right" : ""}`}
+    >
+      <button
+        type="button"
+        className="composer-model-picker-trigger"
+        onClick={() => {
+          if (disabled) {
+            return;
+          }
+          if (isOpen) {
+            setIsOpen(false);
+            setActiveProviderId(null);
+            setHoveredProviderId(null);
+            return;
+          }
+          openMenu(null);
+        }}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+        disabled={disabled}
+        title="选择模型"
+      >
+        <span className="composer-model-picker-label">{triggerLabel}</span>
+        <span className="composer-select-chevron">
+          <IconChevronRight />
+        </span>
+      </button>
+
+      {isOpen ? (
+        <div className="composer-model-picker-menu" role="listbox">
+          <ul
+            className="composer-model-picker-providers"
+            onMouseLeave={handleProviderLeave}
+          >
+            {providers.map((provider) => (
+              <li key={provider.value}>
+                <button
+                  type="button"
+                  data-provider-id={provider.value}
+                  className={`composer-model-picker-provider ${visibleSecondaryProviderId === provider.value ? "is-active" : ""}`}
+                  onClick={() => {
+                    setActiveProviderId(provider.value);
+                    handleProviderHover(provider.value);
+                  }}
+                  onMouseEnter={() => handleProviderHover(provider.value)}
+                  onFocus={() => setActiveProviderId(provider.value)}
+                  role="option"
+                  aria-selected={selectedProviderId === provider.value}
+                >
+                  <span>{provider.label}</span>
+                  <span className="composer-model-picker-chevron">
+                    <IconChevronRight />
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          {visibleSecondaryProviderId ? (
+            <ul
+              className="composer-model-picker-models"
+              onMouseEnter={handleModelPanelEnter}
+              onMouseLeave={handleModelPanelLeave}
+            >
+              <li className="composer-model-picker-models-title">模型</li>
+              {modelGroups
+                .find((group) => group.providerId === visibleSecondaryProviderId)
+                ?.models.map((model) => (
+                  <li key={model.id}>
+                    <button
+                      type="button"
+                      className={`composer-model-picker-model ${selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id ? "is-selected" : ""}`}
+                      onClick={() => {
+                        if (visibleSecondaryProviderId) {
+                          onSelectModel(visibleSecondaryProviderId, model.id);
+                        }
+                        setIsOpen(false);
+                        setActiveProviderId(null);
+                        setHoveredProviderId(null);
+                      }}
+                      role="option"
+                      aria-selected={selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id}
+                    >
+                      <span>{model.label}</span>
+                      {selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id ? (
+                        <span className="composer-model-picker-check" aria-hidden="true">✓</span>
+                      ) : null}
+                    </button>
+                  </li>
+                ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function buildTimelineEntries(messages: MessageRecord[], toolCalls: ToolCallRecord[]): TimelineEntry[] {
+  const messageEntries: TimelineEntry[] = messages
+    .filter((message) => message.role !== "tool")
+    .map((message) => ({
+      kind: "message",
+      id: `message-${message.id}`,
+      createdAt: message.createdAt,
+      message
+    }));
+  const toolEntries: TimelineEntry[] = toolCalls.map((toolCall) => ({
+    kind: "tool",
+    id: `tool-${toolCall.id}`,
+    createdAt: toolCall.startedAt,
+    toolCall
+  }));
+
+  return [...messageEntries, ...toolEntries].sort(
+    (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
+  );
+}
+
+function PlanTimeline({ state }: { state: GpaState }) {
+  const phases: Array<{ id: Exclude<GpaStage, "off">; label: string }> = [
+    { id: "goal", label: "Inspect and clarify the goal" },
+    { id: "plan", label: "Build an executable plan" },
+    { id: "act", label: "Implement and verify changes" }
+  ];
+  const order: Record<Exclude<GpaStage, "off">, number> = { goal: 0, plan: 1, act: 2 };
+  const current = order[state.stage as Exclude<GpaStage, "off">] ?? 0;
+  const items: Array<{ id: string; label: string; status: "pending" | "in_progress" | "completed" }> = state.planTasks.length
+    ? state.planTasks.map((task) => ({ id: task.id, label: task.title, status: task.done ? "completed" : "pending" as const }))
+    : phases.map((phase, index) => ({
+        id: phase.id,
+        label: phase.label,
+        status: index < current ? "completed" : index === current ? "in_progress" : "pending" as const
+      }));
+
+  return (
+    <section className="plan-timeline" aria-label="Updated Plan">
+      <div className="plan-timeline-title"><span>●</span><strong>Updated Plan</strong></div>
+      <div className="plan-timeline-list">
+        {items.map((item) => <PlanItem key={item.id} label={item.label} status={item.status} />)}
+      </div>
+    </section>
+  );
+}
+
+function GpaConfirmationCard({
+  stage,
+  disabled,
+  isEditing,
+  revisionDraft,
+  revisionRef,
+  onConfirm,
+  onRevise,
+  onRevisionChange,
+  onRevisionCancel,
+  onRevisionSubmit
+}: {
+  stage: Exclude<GpaStage, "off" | "act">;
+  disabled: boolean;
+  isEditing: boolean;
+  revisionDraft: string;
+  revisionRef: React.RefObject<HTMLTextAreaElement | null>;
+  onConfirm: () => void;
+  onRevise: () => void;
+  onRevisionChange: (value: string) => void;
+  onRevisionCancel: () => void;
+  onRevisionSubmit: () => void;
+}) {
+  const isPlan = stage === "plan";
+  const title = isPlan ? "确认计划" : "确认目标";
+  const description = isPlan
+    ? "计划确认后将直接进入执行阶段。"
+    : "目标确认后将生成可执行的任务计划。";
+  const confirmLabel = isPlan ? "确认并开始执行" : "确认并生成计划";
+
+  if (isEditing) {
+    return (
+      <section className="gpa-confirmation editing" aria-label="修改计划">
+        <div className="gpa-confirmation-copy">
+          <strong>修改计划</strong>
+          <span>说明需要调整的范围、顺序或验收条件。</span>
+        </div>
+        <textarea
+          ref={revisionRef}
+          className="gpa-revision-input"
+          value={revisionDraft}
+          onChange={(event) => onRevisionChange(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+              event.preventDefault();
+              onRevisionSubmit();
+            }
+          }}
+          placeholder="例如：先完成基础玩法，再加入难度选择；验收时补充单元测试。"
+          disabled={disabled}
+        />
+        <div className="gpa-revision-footer">
+          <span>Ctrl / Cmd + Enter 提交</span>
+          <div className="gpa-confirmation-actions">
+            <button className="gpa-confirmation-button secondary" type="button" onClick={onRevisionCancel} disabled={disabled}>
+              取消
+            </button>
+            <button className="gpa-confirmation-button primary" type="button" onClick={onRevisionSubmit} disabled={disabled || !revisionDraft.trim()}>
+              提交修改
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="gpa-confirmation" aria-label={title}>
+      <div className="gpa-confirmation-copy">
+        <strong>{title}</strong>
+        <span>{description}</span>
+      </div>
+      <div className="gpa-confirmation-actions">
+        <button className="gpa-confirmation-button secondary" type="button" onClick={onRevise} disabled={disabled}>
+          修改
+        </button>
+        <button className="gpa-confirmation-button primary" type="button" onClick={onConfirm} disabled={disabled}>
+          {confirmLabel}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function PlanItem({ label, status }: { label: string; status: "pending" | "in_progress" | "completed" }) {
+  return (
+    <div className={`plan-timeline-item ${status}`}>
+      <span className="plan-tree">└─</span>
+      <StatusIcon status={status} />
+      <span className="plan-timeline-label">{label}</span>
+    </div>
+  );
+}
+
+function StatusIcon({ status }: { status: "pending" | "in_progress" | "completed" | "failed" }) {
+  const glyph = status === "completed" ? "✔" : status === "in_progress" ? "◐" : status === "failed" ? "✕" : "□";
+  return <span className={`timeline-status-icon ${status}`}>{glyph}</span>;
+}
+
+function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
+  const input = parseTimelineJson(toolCall.argumentsJson);
+  const result = parseTimelineJson(toolCall.resultJson);
+  const command = getTimelineCommand(toolCall.toolName, input);
+  const isRunning = toolCall.status === "running" || toolCall.status === "pending";
+  const failed = toolCall.status === "failed" || toolCall.status === "denied";
+  const status = isRunning ? "in_progress" : failed ? "failed" : "completed";
+  const duration = toolCall.completedAt
+    ? Math.max(0, Date.parse(toolCall.completedAt) - Date.parse(toolCall.startedAt))
+    : null;
+  const output = getTimelineOutput(result);
+
+  return (
+    <section className={`execution-step ${status}`}>
+      <div className="execution-step-head">
+        <StatusIcon status={status} />
+        <strong>{isRunning ? "Running" : failed ? "Command failed" : "Ran command"}</strong>
+        <span className="execution-tool-name">{formatToolName(toolCall.toolName)}</span>
+        {duration !== null ? <span className="execution-duration">{formatDuration(duration)}</span> : null}
+      </div>
+      <code className="execution-command">$ {command}</code>
+      {output ? (
+        <details className="execution-output" open={failed}>
+          <summary>{failed ? "View error output" : "View output"}</summary>
+          <pre>{output}</pre>
+        </details>
+      ) : isRunning ? <div className="execution-progress">Working…</div> : null}
+    </section>
+  );
+}
+
+function parseTimelineJson(value: string | null): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function getTimelineCommand(toolName: string, input: Record<string, unknown>): string {
+  const command = input.command ?? input.filePath ?? input.path ?? input.query;
+  return typeof command === "string" && command.trim() ? command : toolName;
+}
+
+function getTimelineOutput(result: Record<string, unknown>): string {
+  const content = result.content;
+  if (typeof content === "string") return content;
+  return Object.keys(result).length > 0 ? JSON.stringify(result, null, 2) : "";
+}
+
+function formatToolName(name: string): string {
+  return name.replace(/[._-]+/g, " ");
+}
+
+function formatDuration(durationMs: number): string {
+  return durationMs < 1_000 ? `${durationMs} ms` : `${(durationMs / 1_000).toFixed(1)} s`;
 }
 
 function renderRole(role: string, assistantLabel = "Assistant") {
@@ -2360,6 +3406,10 @@ function filterTranscriptMessages(messages: MessageRecord[], threadStatus?: Thre
   const hasAnyOutcome = hasStandaloneOutcome || turnIdsWithOutcome.size > 0;
 
   return messages.filter((message) => {
+    if (message.content.startsWith("[internal:gpa-confirm]")) {
+      return false;
+    }
+
     if (!isCommentaryOnlyTranscriptMessage(message)) {
       return true;
     }
@@ -2867,6 +3917,20 @@ function buildConfigToSave(
 
   return normalizeDraftConfig(next);
 }
+
+function gpaModeLabel(mode: GpaStage): string {
+  switch (mode) {
+    case "goal":
+      return "目标 GOAL";
+    case "plan":
+      return "计划 PLAN";
+    case "act":
+      return "执行 ACT";
+    default:
+      return "GPA";
+  }
+}
+
 
 function SvgIcon({
   children,

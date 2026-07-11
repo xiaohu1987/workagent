@@ -70,7 +70,7 @@ async function createWindow(): Promise<void> {
     titleBarOverlay: {
       color: "#09090a",
       symbolColor: "#f3f4f6",
-      height: 52
+      height: 32
     },
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.cjs"),
@@ -133,7 +133,17 @@ function registerIpc(): void {
   ipcMain.handle("plugins:set-enabled", (_event, payload) =>
     backend.setProjectPluginEnabled(payload.threadId, payload.pluginId, payload.enabled)
   );
-  ipcMain.handle("config:get", () => backend.getConfig());
+  ipcMain.handle("config:get", () => {
+    console.log("[ipc] config:get requested");
+    const config = backend.getConfig();
+    console.log("[ipc] config:get resolved", {
+      providers: config.providers.length,
+      models: config.models.length,
+      defaultProvider: config.defaultProvider,
+      defaultModel: config.defaultModel
+    });
+    return config;
+  });
   ipcMain.handle("config:save", (_event, config) => backend.saveConfig(config));
   ipcMain.handle("knowledge:import", (_event, payload) => backend.importKnowledge(payload));
   ipcMain.handle("browser:open", (_event, payload) => backend.openBrowserTab(payload.threadId, payload.url));
@@ -148,6 +158,11 @@ function registerIpc(): void {
     backend.resolveApproval(payload.id, payload.resolution)
   );
   ipcMain.handle("prompt:answer", (_event, payload) => backend.answerUserPrompt(payload.id, payload.answers));
+  ipcMain.handle("gpa:state", (_event, threadId: string) => backend.getGpaState(threadId));
+  ipcMain.handle("gpa:set-stage", (_event, payload: { threadId: string; stage: string }) =>
+    backend.setGpaStage(payload.threadId, payload.stage as "off" | "goal" | "plan" | "act")
+  );
+  ipcMain.handle("models:fetch", (_event, payload) => backend.fetchProviderModels(payload));
 }
 
 async function ensureRendererServerUrl(): Promise<string> {

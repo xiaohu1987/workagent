@@ -103,18 +103,41 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
-    const response = await this.#client.chat.completions.create(
-      {
-        model: input.model.id,
-        messages: buildOpenAiCompatibleMessages(input),
-        temperature: input.model.defaultTemperature,
-        max_tokens: input.model.defaultMaxOutputTokens
-      },
-      {
-        signal: input.abortSignal
-      }
-    );
+    const request = {
+      model: input.model.id,
+      messages: buildOpenAiCompatibleMessages(input),
+      temperature: input.model.defaultTemperature,
+      max_tokens: input.model.defaultMaxOutputTokens
+    };
 
+    if (input.stream && input.model.supportsStreaming) {
+      const stream = await this.#client.chat.completions.create(
+        { ...request, stream: true },
+        { signal: input.abortSignal }
+      );
+      let text = "";
+      let visibleText = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (!delta) {
+          continue;
+        }
+        text += delta;
+        const nextVisibleText = extractVisibleStreamText(text);
+        if (nextVisibleText.startsWith(visibleText)) {
+          const visibleDelta = nextVisibleText.slice(visibleText.length);
+          if (visibleDelta) {
+            await input.onTextDelta?.(visibleDelta);
+          }
+        }
+        visibleText = nextVisibleText;
+      }
+      return parseDecisionFromText(text.trim());
+    }
+
+    const response = await this.#client.chat.completions.create(request, {
+      signal: input.abortSignal
+    });
     const text = response.choices[0]?.message?.content?.trim() || "";
     return parseDecisionFromText(text);
   }
@@ -273,6 +296,31 @@ function parseDecisionFromText(text: string): ProviderTurnDecision {
   };
 }
 
+function extractVisibleStreamText(text: string): string {
+  const match = text.match(/"assistant_message"\s*:\s*"((?:\\.|[^"\\])*)/s);
+  if (match?.[1]) {
+    try {
+      return JSON.parse(`"${match[1]}"`);
+    } catch {
+      return match[1]
+        .replace(/\\n/g, "\n")
+        .replace(/\\t/g, "\t")
+        .replace(/\\"/g, "\"")
+        .replace(/\\\\/g, "\\");
+    }
+  }
+
+  // Some OpenAI-compatible models ignore the decision envelope and stream
+  // ordinary Markdown. Preserve that visible text instead of waiting for the
+  // full response, while keeping partial JSON control data out of the UI.
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("```json")) {
+    return "";
+  }
+
+  return text;
+}
+
 function tryParseJsonDecision(text: string): Record<string, any> | null {
   const fenced = text.match(/```json\s*([\s\S]*?)```/i)?.[1] ?? text;
   const firstBrace = fenced.indexOf("{");
@@ -297,6 +345,8 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
     "You are codexh, a desktop agent.",
     "Always decide the next action using a JSON object.",
     "Return keys: assistant_message, tool_calls, end_turn, reasoning_summary.",
+    "assistant_message is visible to the user: write concise Markdown or one short progress update before tool calls.",
+    "Never expose private chain-of-thought; reasoning_summary is internal only and must never be rendered.",
     "tool_calls must be an array of { name, arguments }.",
     "Only call tools that were provided in the tool list.",
     "When no tool is needed, return an empty tool_calls array.",

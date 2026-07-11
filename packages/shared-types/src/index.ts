@@ -1,5 +1,17 @@
 export type ThreadMode = "project" | "chat";
 export type WorkspaceKind = "project" | "projectless";
+export type GpaStage = "off" | "goal" | "plan" | "act";
+export interface GpaPlanTask {
+  id: string;
+  title: string;
+  done: boolean;
+}
+export interface GpaState {
+  stage: GpaStage;
+  awaitingConfirmation: "goal" | "plan" | "act" | null;
+  planTasks: GpaPlanTask[];
+  updatedAt: string;
+}
 export type ThreadStatus = "idle" | "running" | "waiting" | "completed" | "failed";
 export type TurnKind = "regular" | "review" | "compact" | "subagent";
 export type TurnStatus =
@@ -46,6 +58,7 @@ export interface ThreadRecord {
   knowledgeBaseIds: string[];
   createdAt: string;
   updatedAt: string;
+  gpaStateJson: string | null;
 }
 
 export interface MessageRecord {
@@ -367,6 +380,8 @@ export interface ProviderTurnInput {
   availableTools: ToolSpecDefinition[];
   model: ModelProfile;
   provider: ProviderDefinition;
+  stream?: boolean;
+  onTextDelta?: (delta: string) => void | Promise<void>;
   abortSignal?: AbortSignal;
 }
 
@@ -374,6 +389,8 @@ export interface RuntimeEvent {
   type:
     | "thread.updated"
     | "message.created"
+    | "assistant.delta"
+    | "assistant.completed"
     | "turn.updated"
     | "tool.started"
     | "tool.completed"
@@ -381,7 +398,8 @@ export interface RuntimeEvent {
     | "approval.resolved"
     | "user-input.requested"
     | "knowledge.imported"
-    | "browser.updated";
+    | "browser.updated"
+    | "gpa.updated";
   threadId?: string;
   payload: Record<string, unknown>;
   createdAt: string;
@@ -406,6 +424,8 @@ export interface RuntimeThreadSnapshot {
     plugin: PluginRecord;
     binding: ProjectPluginBinding | null;
   }>;
+  toolCalls: ToolCallRecord[];
+  gpa: GpaState | null;
 }
 
 export interface ToolSearchResult {

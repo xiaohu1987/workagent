@@ -7,6 +7,8 @@ import type {
   AppConfig,
   ArtifactRecord,
   BrowserTabRecord,
+  GpaStage,
+  GpaState,
   KnowledgeBaseRecord,
   MessageRecord,
   McpServerConfig,
@@ -17,7 +19,7 @@ import type {
   ThreadRecord,
   UserInputPrompt
 } from "@shared-types";
-import { AgentRuntimeService } from "@agent-runtime";
+import { AgentRuntimeService, parseGpaState } from "@agent-runtime";
 import { BrowserRuntime } from "@browser-runtime";
 import { buildOkfBundle, extractDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
@@ -77,6 +79,7 @@ export class DesktopBackend {
         finishTurn: async (turnRunId, patch) => this.#db.finishTurn(turnRunId, patch),
         recordToolCall: async (input) => this.#db.recordToolCall(input),
         finishToolCall: async (id, patch) => this.#db.finishToolCall(id, patch),
+        listToolCalls: async (threadId) => this.#db.listToolCalls(threadId),
         listThreadArtifacts: async (threadId) => this.#db.listArtifacts(threadId),
         addArtifact: async (input) => this.#db.addArtifact(input),
         addRuntimeEvent: async (event) => this.#db.addRuntimeEvent(event)
@@ -177,8 +180,19 @@ export class DesktopBackend {
       artifacts: this.#db.listArtifacts(threadId),
       knowledgeBases: this.listVisibleKnowledgeBasesForThread(thread),
       browserTabs: this.#db.listBrowserTabs(threadId),
-      projectPlugins: this.listProjectPluginsForThread(thread)
+      projectPlugins: this.listProjectPluginsForThread(thread),
+      toolCalls: this.#db.listToolCalls(threadId),
+      gpa: this.getGpaState(threadId)
     };
+  }
+
+  public getGpaState(threadId: string): GpaState {
+    const thread = this.#db.getThread(threadId);
+    return parseGpaState(thread.gpaStateJson);
+  }
+
+  public async setGpaStage(threadId: string, stage: GpaStage): Promise<void> {
+    await this.#runtime.setGpaStage(threadId, stage);
   }
 
   public sendMessage(threadId: string, content: string): void {
@@ -209,6 +223,51 @@ export class DesktopBackend {
 
   public async reloadSkills(cwd?: string | null): Promise<void> {
     await this.refreshSkills(cwd);
+  }
+
+  public async fetchProviderModels(input: {
+    baseUrl?: string;
+    apiKey?: string;
+    apiKeyEnv?: string;
+    type?: ProviderDefinition["type"];
+    id?: string;
+  }): Promise<{ id: string; displayName?: string }[]> {
+    const baseUrl = (input.baseUrl ?? "").trim().replace(/\/+$/, "");
+    const apiKey = resolveFetchedApiKey(input);
+    if (!baseUrl) {
+      throw new Error("缺少调用地址");
+    }
+    if (!apiKey) {
+      throw new Error("缺少 API Key");
+    }
+    const endpoint = `${baseUrl}/models`;
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        ...this.#config.providers.find((provider) => provider.id === input.id)?.headers
+      }
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`获取模型失败 (${response.status}): ${text.slice(0, 200)}`);
+    }
+    const payload = (await response.json()) as {
+      data?: Array<{ id: string; display_name?: string; name?: string; owned_by?: string }>;
+      models?: Array<{ id: string; name?: string }>;
+    };
+    const list = Array.isArray(payload.data)
+      ? payload.data
+      : Array.isArray(payload.models)
+        ? payload.models
+        : [];
+    if (list.length === 0) {
+      throw new Error("接口未返回任何模型");
+    }
+    return list.map((entry) => ({
+      id: entry.id,
+      displayName: entry.display_name ?? entry.name ?? entry.id
+    }));
   }
 
   public getConfig(): AppConfig {
@@ -925,6 +984,19 @@ export interface KnowledgeImportSummary {
   knowledgeBaseId: string;
   conceptCount: number;
   bundleRoot: string;
+}
+
+function resolveFetchedApiKey(input: { apiKey?: string; apiKeyEnv?: string }): string {
+  if (input.apiKey) {
+    return input.apiKey;
+  }
+  if (input.apiKeyEnv) {
+    const value = process.env[input.apiKeyEnv];
+    if (value) {
+      return value;
+    }
+  }
+  return "";
 }
 
 async function fileSha256(filePath: string): Promise<string> {

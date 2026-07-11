@@ -19,6 +19,18 @@ import { buildDecisionSystemPrompt, ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime } from "@tool-runtime";
+import {
+  buildGpaSystemDirective,
+  DEFAULT_GPA_STATE,
+  detectGpaConfirmation,
+  gpaStageAllowsTools,
+  gpaStageLabel,
+  nextStageAfterConfirmation,
+  parseGpaState
+} from "./gpa";
+import type { GpaStage, GpaState } from "@shared-types";
+
+export { parseGpaState } from "./gpa";
 
 type Submission =
   | { type: "user_input"; content: string }
@@ -38,6 +50,7 @@ interface RuntimePersistence {
     input: Omit<ToolCallRecord, "id" | "startedAt" | "completedAt">
   ): Promise<ToolCallRecord>;
   finishToolCall(id: string, patch: Partial<ToolCallRecord>): Promise<void>;
+  listToolCalls(threadId: string): Promise<ToolCallRecord[]>;
   listThreadArtifacts(threadId: string): Promise<ArtifactRecord[]>;
   addArtifact(input: Omit<ArtifactRecord, "id" | "createdAt">): Promise<ArtifactRecord>;
   addRuntimeEvent(event: RuntimeEvent): Promise<void>;
@@ -123,6 +136,8 @@ class ThreadSessionRuntime {
   #activeTurnRunId: string | null = null;
   #pendingInput: string[] = [];
   #running = false;
+  #gpa: GpaState = { ...DEFAULT_GPA_STATE };
+  #gpaLoaded = false;
 
   public constructor(
     private readonly threadId: string,
@@ -147,6 +162,43 @@ class ThreadSessionRuntime {
     }
     this.#running = false;
     this.#queue.push({ type: "shutdown" });
+  }
+
+  async #ensureGpa(): Promise<GpaState> {
+    if (this.#gpaLoaded) {
+      return this.#gpa;
+    }
+    const thread = await this.services.persistence.getThread(this.threadId);
+    this.#gpa = parseGpaState(thread.gpaStateJson);
+    this.#gpaLoaded = true;
+    return this.#gpa;
+  }
+
+  async #commitGpa(next: GpaState): Promise<void> {
+    this.#gpa = next;
+    await this.services.persistence.updateThread(this.threadId, {
+      gpaStateJson: JSON.stringify(next)
+    });
+    await this.services.emit({
+      type: "gpa.updated",
+      threadId: this.threadId,
+      payload: { gpa: next },
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  public async setGpaStage(stage: GpaStage): Promise<void> {
+    await this.#ensureGpa();
+    await this.#commitGpa({
+      ...this.#gpa,
+      stage,
+      awaitingConfirmation: null,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  public getGpa(): GpaState {
+    return this.#gpa;
   }
 
   async submissionLoop(): Promise<void> {
@@ -217,6 +269,21 @@ class ThreadSessionRuntime {
 
     const history = await this.services.persistence.listMessages(this.threadId);
 
+    // 简短确认语（确认/OK/开始等）按 doc/GPA.md 推进阶段：GOAL→PLAN→ACT
+    await this.#ensureGpa();
+    if (
+      detectGpaConfirmation(initialInput) &&
+      (this.#gpa.stage === "goal" || this.#gpa.stage === "plan")
+    ) {
+      const advanced = nextStageAfterConfirmation(this.#gpa.stage);
+      await this.#commitGpa({
+        ...this.#gpa,
+        stage: advanced,
+        awaitingConfirmation: null,
+        updatedAt: new Date().toISOString()
+      });
+    }
+
     try {
       let transcript = compactTranscript(history);
       let rounds = 0;
@@ -231,18 +298,52 @@ class ThreadSessionRuntime {
           skillDependencyWarnings
         );
         const adapter = this.services.providerFactory.create(provider);
+        let streamedVisibleContent = "";
         const decision = await adapter.runTurn({
-          systemPrompt: `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}`,
+          systemPrompt: `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
+            buildGpaSystemDirective(this.#gpa) || ""
+          }`,
           transcript,
           availableTools: tools,
           model,
           provider,
+          stream: model.supportsStreaming,
+          onTextDelta: async (delta) => {
+            streamedVisibleContent += delta;
+            await this.services.emit({
+              type: "assistant.delta",
+              threadId: this.threadId,
+              payload: {
+                turnRunId: turn.id,
+                delta,
+                content: streamedVisibleContent
+              },
+              createdAt: new Date().toISOString()
+            });
+          },
           abortSignal: this.#abortController.signal
         });
+
+        // 代码级强制：GOAL/PLAN 阶段严禁工具调用，拦截并提示模型用文字回应
+        if (!gpaStageAllowsTools(this.#gpa) && decision.toolCalls.length > 0) {
+          const blockedNote = `⚠️ GPA 约束：当前处于【${gpaStageLabel(
+            this.#gpa.stage
+          )}】阶段，系统已拦截本次全部工具调用。请仅用文字输出本阶段要求的内容，并在结尾给出 ⏳ 等待确认。`;
+          transcript.push({ role: "user", content: blockedNote });
+          decision.toolCalls = [];
+        }
 
         if (decision.assistantMessage) {
           const assistantMessage = await this.recordMessage("assistant", decision.assistantMessage, turn.id);
           transcript.push({ role: "assistant", content: assistantMessage.content });
+          if (streamedVisibleContent) {
+            await this.services.emit({
+              type: "assistant.completed",
+              threadId: this.threadId,
+              payload: { turnRunId: turn.id, messageId: assistantMessage.id },
+              createdAt: new Date().toISOString()
+            });
+          }
         }
 
         if (decision.toolCalls.length === 0 && decision.endTurn && this.#pendingInput.length === 0) {
@@ -384,6 +485,17 @@ class ThreadSessionRuntime {
           break;
         }
       }
+
+      // GOAL/PLAN 阶段产出后，置为等待用户确认；ACT 阶段不挂起
+      if (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") {
+        if (this.#gpa.awaitingConfirmation !== this.#gpa.stage) {
+          await this.#commitGpa({
+            ...this.#gpa,
+            awaitingConfirmation: this.#gpa.stage,
+            updatedAt: new Date().toISOString()
+          });
+        }
+      }
     } catch (error) {
       await this.services.persistence.finishTurn(turn.id, {
         status: "failed",
@@ -452,6 +564,15 @@ export class AgentRuntimeService {
 
   public interrupt(threadId: string): void {
     this.ensureThread(threadId).submit({ type: "interrupt" });
+  }
+
+  public async setGpaStage(threadId: string, stage: GpaStage): Promise<void> {
+    const runtime = this.ensureThread(threadId);
+    await runtime.setGpaStage(stage);
+  }
+
+  public getGpa(threadId: string): GpaState {
+    return this.ensureThread(threadId).getGpa();
   }
 
   public forgetThread(threadId: string): void {
