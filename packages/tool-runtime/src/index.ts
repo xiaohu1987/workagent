@@ -229,9 +229,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("code.search", "Search the current workspace for a keyword.", ["pattern"], "low"),
     async (args, ctx) => {
-      const command = process.platform === "win32"
-        ? `Get-ChildItem -Path "${ctx.cwd}" -Recurse -File | Select-String -Pattern '${escapePowerShell(String(args.pattern ?? ""))}' | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }`
-        : `grep -RIn "${String(args.pattern ?? "")}" "${ctx.cwd}" || true`;
+      const command = buildCodeSearchCommand(String(args.pattern ?? ""), ctx.cwd);
       const terminal = await runShell(command, ctx);
       const output = terminal.output;
       return { ok: true, content: output, json: { pattern: args.pattern, output } };
@@ -707,6 +705,31 @@ function resolveWorkspacePath(rootDir: string, targetPath: string): string {
 
 function escapePowerShell(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+export function buildCodeSearchCommand(
+  pattern: string,
+  cwd: string,
+  platform: NodeJS.Platform = process.platform
+): string {
+  if (platform === "win32") {
+    const escapedPattern = escapePowerShell(pattern);
+    const escapedCwd = escapePowerShell(cwd);
+    const rg = `rg -n --hidden --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' --glob '!.git/**' -- '${escapedPattern}' '${escapedCwd}'`;
+    const grep = `grep -RIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.git -- '${escapedPattern}' '${escapedCwd}'`;
+    const selectString = `Get-ChildItem -Path '${escapedCwd}' -Recurse -File -Exclude node_modules,dist,build | Select-String -Pattern '${escapedPattern}' | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }`;
+    return `if (Get-Command rg -ErrorAction SilentlyContinue) { ${rg}; if ($LASTEXITCODE -eq 1) { exit 0 } } elseif (Get-Command grep -ErrorAction SilentlyContinue) { ${grep}; if ($LASTEXITCODE -eq 1) { exit 0 } } else { ${selectString} }`;
+  }
+
+  const escapedPattern = escapePosixShell(pattern);
+  const escapedCwd = escapePosixShell(cwd);
+  const rg = `rg -n --hidden --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' --glob '!.git/**' -- ${escapedPattern} ${escapedCwd}`;
+  const grep = `grep -RIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.git -- ${escapedPattern} ${escapedCwd}`;
+  return `if command -v rg >/dev/null 2>&1; then ${rg}; elif command -v grep >/dev/null 2>&1; then ${grep}; else find ${escapedCwd} -type f -not -path '*/node_modules/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/.git/*' -exec sh -c 'grep -n -- "$1" "$2" 2>/dev/null && printf "%s\\n" "$2"' _ ${escapedPattern} {} \\;; fi`;
+}
+
+function escapePosixShell(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function escapeDoubleQuotes(value: string): string {

@@ -299,6 +299,7 @@ export function App() {
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [input, setInput] = useState("");
+  const [editingUserMessage, setEditingUserMessage] = useState<{ id: string; content: string } | null>(null);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [isContextReportOpen, setIsContextReportOpen] = useState(false);
   const [skills, setSkills] = useState<SkillMetadata[]>([]);
@@ -1405,6 +1406,47 @@ export function App() {
     }, 120);
   }
 
+  async function copyUserMessage(content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+      showNotice("已复制消息内容。", { tone: "success" });
+    } catch (error) {
+      showNotice("复制失败。", {
+        message: error instanceof Error ? error.message : "请检查剪贴板权限。"
+      });
+    }
+  }
+
+  function beginUserMessageEdit(message: MessageRecord) {
+    if (isActiveThreadExecuting) {
+      showNotice("任务执行中，停止后才能重新编辑消息。");
+      return;
+    }
+    setEditingUserMessage({ id: message.id, content: message.content });
+  }
+
+  function cancelUserMessageEdit() {
+    setEditingUserMessage(null);
+  }
+
+  async function submitUserMessageEdit() {
+    const content = editingUserMessage?.content.trim();
+    if (!content) {
+      return;
+    }
+    if (
+      !composerProviderId ||
+      !composerModelId ||
+      !composerModels.some((model) => model.id === composerModelId)
+    ) {
+      showNotice("请先在聊天框下方选择可用的供应商和模型。");
+      return;
+    }
+
+    await sendMessage(content);
+    setEditingUserMessage(null);
+  }
+
   async function handleGpaStageSelect(stage: GpaStage) {
     setGpaState((prev) => ({ ...prev, stage, awaitingConfirmation: null }));
     setGpaMenuOpen(false);
@@ -2102,7 +2144,15 @@ export function App() {
                 {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
                 {timelineEntries.map((entry) =>
                   entry.kind === "message" ? (
-                    renderTranscriptMessage(entry.message, activeAssistantLabel)
+                    renderTranscriptMessage(entry.message, activeAssistantLabel, {
+                      editingMessage: editingUserMessage,
+                      onEditDraftChange: (content) =>
+                        setEditingUserMessage((current) => current ? { ...current, content } : current),
+                      onCopy: (content) => void copyUserMessage(content),
+                      onEdit: beginUserMessageEdit,
+                      onEditCancel: cancelUserMessageEdit,
+                      onEditSubmit: () => void submitUserMessageEdit()
+                    })
                   ) : entry.kind === "file-summary" ? (
                     <FileChangeSummary key={entry.id} files={entry.files} />
                   ) : entry.kind === "directory-read-group" ? (
@@ -5570,7 +5620,20 @@ function renderRole(role: string, assistantLabel = "Assistant") {
   }
 }
 
-function renderTranscriptMessage(message: MessageRecord, assistantLabel: string) {
+type UserMessageActions = {
+  editingMessage: { id: string; content: string } | null;
+  onEditDraftChange: (content: string) => void;
+  onCopy: (content: string) => void;
+  onEdit: (message: MessageRecord) => void;
+  onEditCancel: () => void;
+  onEditSubmit: () => void;
+};
+
+function renderTranscriptMessage(
+  message: MessageRecord,
+  assistantLabel: string,
+  userMessageActions: UserMessageActions
+) {
   const displayContent = getDisplayMessageContent(message);
   if (message.role === "assistant" && !displayContent.trim()) {
     return null;
@@ -5579,7 +5642,7 @@ function renderTranscriptMessage(message: MessageRecord, assistantLabel: string)
   if (message.role === "user") {
     return (
       <article id={`transcript-message-${message.id}`} key={message.id} className="message-card user">
-        {renderMessageContent(message, displayContent)}
+        {renderMessageContent(message, displayContent, userMessageActions)}
       </article>
     );
   }
@@ -5595,11 +5658,80 @@ function renderTranscriptMessage(message: MessageRecord, assistantLabel: string)
   );
 }
 
-function renderMessageContent(message: MessageRecord, content = message.content) {
+function renderMessageContent(
+  message: MessageRecord,
+  content = message.content,
+  userMessageActions?: UserMessageActions
+) {
   if (message.role === "user") {
+    if (!userMessageActions) {
+      return (
+        <div className="message-user-content">
+          <div className="message-user-bubble">
+            <div className="message-user-text">{content}</div>
+          </div>
+        </div>
+      );
+    }
+
+    const editingMessage =
+      userMessageActions.editingMessage?.id === message.id ? userMessageActions.editingMessage : null;
     return (
-      <div className="message-user-bubble">
-        <div className="message-user-text">{content}</div>
+      <div className={`message-user-content ${editingMessage ? "is-editing" : ""}`}>
+        <div className="message-user-bubble">
+          {editingMessage ? (
+            <>
+              <textarea
+                className="message-user-edit-input"
+                value={editingMessage.content}
+                onChange={(event) => userMessageActions.onEditDraftChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    userMessageActions.onEditSubmit();
+                  }
+                }}
+                aria-label="编辑已发送的消息"
+                autoFocus
+              />
+              <div className="message-user-edit-actions">
+                <button type="button" className="message-user-edit-button" onClick={userMessageActions.onEditCancel}>
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="message-user-edit-button primary"
+                  onClick={userMessageActions.onEditSubmit}
+                  disabled={!editingMessage.content.trim()}
+                >
+                  发送
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="message-user-text">{content}</div>
+              <div className="message-user-actions" aria-label="消息操作">
+                <button
+                  type="button"
+                  title="复制消息"
+                  aria-label="复制消息"
+                  onClick={() => userMessageActions.onCopy(content)}
+                >
+                  <IconCopy />
+                </button>
+                <button
+                  type="button"
+                  title="重新编辑消息"
+                  aria-label="重新编辑消息"
+                  onClick={() => userMessageActions.onEdit(message)}
+                >
+                  <IconCompose />
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     );
   }

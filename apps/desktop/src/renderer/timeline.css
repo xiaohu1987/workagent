@@ -825,3 +825,25 @@
   border-left: 0;
   padding-left: 0;
 }
+
+/* User bubbles use intrinsic width; avoid percentage max-width shrinkage in the timeline. */
+.task-timeline .message-user-content:not(.is-editing) .message-user-bubble {
+  width: max-content;
+  max-width: min(68vw, 760px);
+  padding: 10px 18px;
+  border-radius: 20px;
+}
+
+/* The edit field is the only framed surface in an edited user message. */
+.task-timeline .message-user-content.is-editing .message-user-bubble {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}

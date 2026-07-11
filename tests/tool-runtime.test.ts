@@ -2,9 +2,27 @@ import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import fs from "node:fs/promises";
 import os from "node:os";
-import { ToolRuntime, type ToolRuntimeContext } from "@tool-runtime";
+import { buildCodeSearchCommand, ToolRuntime, type ToolRuntimeContext } from "@tool-runtime";
 
 describe("ToolRuntime", () => {
+  it("prefers rg and falls back to grep for Windows workspace searches", () => {
+    const command = buildCodeSearchCommand("TODO", "C:\\workspace", "win32");
+
+    expect(command).toContain("Get-Command rg");
+    expect(command).toContain("elseif (Get-Command grep");
+    expect(command).toContain("--glob '!node_modules/**'");
+    expect(command).toContain("--exclude-dir=node_modules");
+  });
+
+  it("prefers rg and falls back to grep for Unix workspace searches", () => {
+    const command = buildCodeSearchCommand("TODO", "/workspace", "linux");
+
+    expect(command).toContain("command -v rg");
+    expect(command).toContain("elif command -v grep");
+    expect(command).toContain("--glob '!node_modules/**'");
+    expect(command).toContain("--exclude-dir=node_modules");
+  });
+
   it("maps legacy read_file to the file reader", async () => {
     const readFile = vi.fn().mockResolvedValue("contents");
     const runtime = new ToolRuntime();
