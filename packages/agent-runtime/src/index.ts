@@ -34,6 +34,7 @@ import type { GpaStage, GpaState } from "@shared-types";
 export { parseGpaState } from "./gpa";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
+export const MODEL_DECISION_TIMEOUT_MS = 90_000;
 
 type Submission =
   | { type: "user_input"; content: string }
@@ -160,6 +161,66 @@ function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T>
   });
 }
 
+class ModelDecisionTimeoutError extends Error {
+  public constructor(timeoutMs: number) {
+    super(`The model decision timed out after ${timeoutMs}ms.`);
+    this.name = "ModelDecisionTimeoutError";
+  }
+}
+
+function createChildAbortController(parent: AbortSignal): AbortController {
+  const child = new AbortController();
+  if (parent.aborted) {
+    child.abort();
+    return child;
+  }
+  parent.addEventListener("abort", () => child.abort(), { once: true });
+  return child;
+}
+
+function waitForAbortOrTimeout<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  timeoutMs: number,
+  onTimeout?: () => void
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      onTimeout?.();
+      reject(new ModelDecisionTimeoutError(timeoutMs));
+    }, timeoutMs);
+
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+
+    const onAbort = () => finish(() => reject(new Error("Turn interrupted.")));
+
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error))
+    );
+
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 class ThreadSessionRuntime {
   readonly #queue = new AsyncQueue<Submission>();
   #abortController: AbortController | null = null;
@@ -222,6 +283,20 @@ class ThreadSessionRuntime {
       threadId: this.threadId,
       payload: { gpa: next },
       createdAt: new Date().toISOString()
+    });
+  }
+
+  async #clearGpaAfterExecution(): Promise<void> {
+    if (this.#gpa.stage !== "act") {
+      return;
+    }
+
+    await this.#commitGpa({
+      ...this.#gpa,
+      stage: "off",
+      awaitingConfirmation: null,
+      planTasks: [],
+      updatedAt: new Date().toISOString()
     });
   }
 
@@ -342,13 +417,31 @@ class ThreadSessionRuntime {
     try {
       let transcript = compactTranscript(history);
       let hasExecutedToolCall = false;
-      let previousSuccessfulToolCall: string | null = null;
+      const successfulToolCallFingerprints = new Set<string>();
       const successfullyCreatedFiles = new Set<string>();
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
       let previousNonExecutableDecision: string | null = null;
+      let repeatedNonExecutableAttempts = 0;
       let prematureCompletionAttempts = 0;
+
+      const registerTaskFailure = async (taskKey: string, lastError: string, logKind?: string) => {
+        const attempts = (taskFailureCounts.get(taskKey) ?? 0) + 1;
+        taskFailureCounts.set(taskKey, attempts);
+        if (logKind) {
+          await this.services.log(logKind, this.threadId, {
+            turnRunId: turn.id,
+            taskKey,
+            attempts,
+            lastError
+          });
+        }
+        if (attempts >= MAX_REPEATED_TASK_FAILURES) {
+          repeatedTaskFailure = { taskKey, attempts, lastError };
+        }
+        return attempts;
+      };
 
       while (!repeatedTaskFailure) {
         const prompt = buildRuntimePrompt(
@@ -360,7 +453,8 @@ class ThreadSessionRuntime {
         );
         const adapter = this.services.providerFactory.create(provider);
         let streamedVisibleContent = "";
-        const decision = await waitForAbort(
+        const modelTurnAbortController = createChildAbortController(abortController.signal);
+        const decision = await waitForAbortOrTimeout(
           adapter.runTurn({
             systemPrompt: `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
               buildGpaSystemDirective(this.#gpa) || ""
@@ -387,9 +481,11 @@ class ThreadSessionRuntime {
                 createdAt: new Date().toISOString()
               });
             },
-            abortSignal: abortController.signal
+            abortSignal: modelTurnAbortController.signal
           }),
-          abortController.signal
+          abortController.signal,
+          MODEL_DECISION_TIMEOUT_MS,
+          () => modelTurnAbortController.abort()
         );
 
         if (abortController.signal.aborted) {
@@ -405,27 +501,6 @@ class ThreadSessionRuntime {
           decision.toolCalls = [];
         }
 
-        const isRepeatedNonExecutableMessage =
-          decision.toolCalls.length === 0 &&
-          !decision.endTurn &&
-          decision.assistantMessage?.trim() === previousNonExecutableDecision;
-        if (
-          decision.assistantMessage &&
-          !isPatchPayload(decision.assistantMessage) &&
-          !isRepeatedNonExecutableMessage
-        ) {
-          const assistantMessage = await this.recordMessage("assistant", decision.assistantMessage, turn.id);
-          transcript.push({ role: "assistant", content: assistantMessage.content });
-          if (streamedVisibleContent) {
-            await this.services.emit({
-              type: "assistant.completed",
-              threadId: this.threadId,
-              payload: { turnRunId: turn.id, messageId: assistantMessage.id },
-              createdAt: new Date().toISOString()
-            });
-          }
-        }
-
         if (!decision.isStructured) {
           if (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") {
             await this.services.persistence.finishTurn(turn.id, {
@@ -438,8 +513,23 @@ class ThreadSessionRuntime {
             });
             break;
           }
-          const decisionText = decision.assistantMessage?.trim() ?? "";
-          previousNonExecutableDecision = decisionText || null;
+          const decisionText = normalizeRetryDecisionText(decision.assistantMessage) || "[invalid-json-decision]";
+          if (decisionText === previousNonExecutableDecision) {
+            repeatedNonExecutableAttempts += 1;
+          } else {
+            previousNonExecutableDecision = decisionText;
+            repeatedNonExecutableAttempts = 1;
+          }
+          if (repeatedNonExecutableAttempts >= MAX_REPEATED_TASK_FAILURES) {
+            repeatedTaskFailure = {
+              taskKey: "non-executable-decision",
+              attempts: repeatedNonExecutableAttempts,
+              lastError:
+                decision.assistantMessage?.trim() ||
+                "The model repeatedly returned a non-executable response instead of a structured tool decision."
+            };
+            break;
+          }
           const executionNote =
             this.#gpa.stage === "act" && !hasExecutedToolCall
               ? " No tools have been executed for this ACT turn yet."
@@ -454,8 +544,24 @@ class ThreadSessionRuntime {
         }
 
         if (this.#gpa.stage === "act" && decision.toolCalls.length === 0 && !decision.endTurn) {
-          const decisionText = decision.assistantMessage?.trim() ?? "";
-          previousNonExecutableDecision = decisionText || null;
+          const decisionText =
+            normalizeRetryDecisionText(decision.assistantMessage) || "[structured-no-tool-decision]";
+          if (decisionText === previousNonExecutableDecision) {
+            repeatedNonExecutableAttempts += 1;
+          } else {
+            previousNonExecutableDecision = decisionText;
+            repeatedNonExecutableAttempts = 1;
+          }
+          if (repeatedNonExecutableAttempts >= MAX_REPEATED_TASK_FAILURES) {
+            repeatedTaskFailure = {
+              taskKey: "non-executable-decision",
+              attempts: repeatedNonExecutableAttempts,
+              lastError:
+                decision.assistantMessage?.trim() ||
+                "The model repeatedly returned a structured response that neither called a tool nor completed the task."
+            };
+            break;
+          }
           transcript.push({
             role: "user",
             content:
@@ -465,14 +571,30 @@ class ThreadSessionRuntime {
           continue;
         }
 
-        previousNonExecutableDecision = null;
-
         if (
           this.#gpa.stage === "act" &&
           !hasExecutedToolCall &&
           decision.toolCalls.length === 0 &&
           decision.endTurn
         ) {
+          const decisionText =
+            normalizeRetryDecisionText(decision.assistantMessage) || "[premature-end-turn-without-tool]";
+          if (decisionText === previousNonExecutableDecision) {
+            repeatedNonExecutableAttempts += 1;
+          } else {
+            previousNonExecutableDecision = decisionText;
+            repeatedNonExecutableAttempts = 1;
+          }
+          if (repeatedNonExecutableAttempts >= MAX_REPEATED_TASK_FAILURES) {
+            repeatedTaskFailure = {
+              taskKey: "non-executable-decision",
+              attempts: repeatedNonExecutableAttempts,
+              lastError:
+                decision.assistantMessage?.trim() ||
+                "The model repeatedly attempted to end the ACT stage before executing any tool."
+            };
+            break;
+          }
           transcript.push({
             role: "user",
             content:
@@ -515,6 +637,22 @@ class ThreadSessionRuntime {
           prematureCompletionAttempts = 0;
         }
 
+        previousNonExecutableDecision = null;
+        repeatedNonExecutableAttempts = 0;
+
+        if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
+          const assistantMessage = await this.recordMessage("assistant", decision.assistantMessage, turn.id);
+          transcript.push({ role: "assistant", content: assistantMessage.content });
+          if (streamedVisibleContent) {
+            await this.services.emit({
+              type: "assistant.completed",
+              threadId: this.threadId,
+              payload: { turnRunId: turn.id, messageId: assistantMessage.id },
+              createdAt: new Date().toISOString()
+            });
+          }
+        }
+
         if (decision.toolCalls.length === 0 && decision.endTurn && this.#pendingInput.length === 0) {
           await this.services.persistence.finishTurn(turn.id, {
             status: "completed",
@@ -537,29 +675,32 @@ class ThreadSessionRuntime {
             successfullyCreatedFiles.has(filePath)
           );
           if (duplicateCreatedFile) {
+            const taskKey = `${toolCall.name}:${duplicateCreatedFile}`;
+            const lastError =
+              `The file ${duplicateCreatedFile} was already created successfully in this task.`;
             transcript.push({
               role: "user",
               content:
-                `The file ${duplicateCreatedFile} was already created successfully in this task. ` +
+                `${lastError} ` +
                 "Do not use Add File for it again. Read it first and use an Update File patch only when a change is required."
             });
-            await this.services.log("tool.duplicate_file_create_blocked", this.threadId, {
-              turnRunId: turn.id,
-              toolName: toolCall.name,
-              filePath: duplicateCreatedFile
-            });
+            await registerTaskFailure(taskKey, lastError, "tool.duplicate_file_create_blocked");
+            if (repeatedTaskFailure) {
+              break;
+            }
             continue;
           }
-          if (toolCallFingerprint === previousSuccessfulToolCall) {
+          if (successfulToolCallFingerprints.has(toolCallFingerprint)) {
+            const lastError =
+              `The identical tool call ${toolCall.name} already completed successfully earlier in this task.`;
             const correction =
-              `The identical tool call ${toolCall.name} was just completed successfully. ` +
+              `${lastError} ` +
               "Do not repeat it. Use its result to continue the task, choose a different tool, or return a completed decision.";
             transcript.push({ role: "user", content: correction });
-            await this.services.log("tool.duplicate_call_blocked", this.threadId, {
-              turnRunId: turn.id,
-              toolName: toolCall.name,
-              arguments: toolCall.arguments
-            });
+            await registerTaskFailure(toolTaskKey, lastError, "tool.duplicate_call_blocked");
+            if (repeatedTaskFailure) {
+              break;
+            }
             continue;
           }
           const browserTabs = await this.services.listBrowserTabs(this.threadId);
@@ -692,21 +833,14 @@ class ThreadSessionRuntime {
           );
           transcript.push({ role: "tool", content: toolMessage.content });
           if (result.ok) {
-            previousSuccessfulToolCall = toolCallFingerprint;
+            successfulToolCallFingerprints.add(toolCallFingerprint);
             for (const filePath of getAddedPatchFiles(toolCall.arguments)) {
               successfullyCreatedFiles.add(filePath);
             }
             taskFailureCounts.delete(toolTaskKey);
           } else {
-            previousSuccessfulToolCall = null;
-            const attempts = (taskFailureCounts.get(toolTaskKey) ?? 0) + 1;
-            taskFailureCounts.set(toolTaskKey, attempts);
-            if (attempts >= MAX_REPEATED_TASK_FAILURES) {
-              repeatedTaskFailure = {
-                taskKey: toolTaskKey,
-                attempts,
-                lastError: result.content
-              };
+            await registerTaskFailure(toolTaskKey, result.content);
+            if (repeatedTaskFailure) {
               break;
             }
           }
@@ -750,6 +884,7 @@ class ThreadSessionRuntime {
       }
 
       if (terminalThread) {
+        await this.#clearGpaAfterExecution();
         await this.services.emit({
           type: "thread.updated",
           threadId: this.threadId,
@@ -815,10 +950,17 @@ class ThreadSessionRuntime {
         completedAt,
         errorMessage: error instanceof Error ? error.message : String(error)
       });
+      if (error instanceof ModelDecisionTimeoutError) {
+        await this.services.log("provider.turn_timeout", this.threadId, {
+          turnRunId: turn.id,
+          timeoutMs: MODEL_DECISION_TIMEOUT_MS
+        });
+      }
       const updatedThread = await this.services.persistence.updateThread(this.threadId, {
         status: "failed",
         updatedAt: completedAt
       });
+      await this.#clearGpaAfterExecution();
       await this.services.emit({
         type: "thread.updated",
         threadId: this.threadId,
@@ -887,6 +1029,10 @@ export function getToolCallTaskKey(name: string, argumentsJson: Record<string, u
     return `${name}:${path.trim()}`;
   }
   return createToolCallFingerprint(name, argumentsJson);
+}
+
+function normalizeRetryDecisionText(content: string | undefined): string {
+  return (content ?? "").replace(/\s+/g, " ").trim();
 }
 
 function stableSerialize(value: unknown): string {

@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 type TerminalSession = {
+  threadId: string;
+  sessionId: string;
   child: ChildProcessWithoutNullStreams;
   cwd: string;
   output: string;
@@ -20,9 +22,11 @@ export type TerminalCommandResult = {
 export class TerminalRuntime {
   readonly #sessions = new Map<string, TerminalSession>();
 
-  public open(threadId: string, cwd: string, onOutput: (data: string) => void) {
-    const existing = this.#sessions.get(threadId);
+  public open(threadId: string, cwd: string, onOutput: (data: string) => void, sessionId = "default") {
+    const key = this.#sessionKey(threadId, sessionId);
+    const existing = this.#sessions.get(key);
     if (existing && !existing.child.killed) {
+      existing.onOutput = onOutput;
       return { cwd: existing.cwd, shell: shellLabel(), output: existing.output };
     }
 
@@ -44,6 +48,8 @@ export class TerminalRuntime {
       stdio: ["pipe", "pipe", "pipe"]
     });
     const session: TerminalSession = {
+      threadId,
+      sessionId,
       child,
       cwd,
       output: "",
@@ -52,7 +58,7 @@ export class TerminalRuntime {
       stdoutDecoder: process.platform === "win32" ? new TextDecoder("gb18030") : null,
       stderrDecoder: process.platform === "win32" ? new TextDecoder("gb18030") : null
     };
-    this.#sessions.set(threadId, session);
+    this.#sessions.set(key, session);
 
     const append = (chunk: Buffer | string, decoder?: TextDecoder | null) => {
       const value = Buffer.isBuffer(chunk) && decoder ? decoder.decode(chunk, { stream: true }) : String(chunk);
@@ -62,7 +68,7 @@ export class TerminalRuntime {
     child.stderr.on("data", (chunk) => append(chunk, session.stderrDecoder));
     child.on("error", (error) => append(`\nTerminal error: ${error.message}\n`));
     child.on("exit", (code) => {
-      this.#sessions.delete(threadId);
+      this.#sessions.delete(key);
       const trailing = `${session.stdoutDecoder?.decode() ?? ""}${session.stderrDecoder?.decode() ?? ""}`;
       if (trailing) {
         append(trailing);
@@ -79,13 +85,16 @@ export class TerminalRuntime {
     cwd: string,
     command: string,
     onOutput: (data: string) => void,
-    onLocalUrl?: (url: string) => void
+    onLocalUrl?: (url: string) => void,
+    sessionId = "default"
   ): Promise<TerminalCommandResult> {
-    this.#sessions.get(threadId) ?? this.open(threadId, cwd, onOutput);
-    const session = this.#sessions.get(threadId);
+    const key = this.#sessionKey(threadId, sessionId);
+    this.#sessions.get(key) ?? this.open(threadId, cwd, onOutput, sessionId);
+    const session = this.#sessions.get(key);
     if (!session) {
       return Promise.reject(new Error("Terminal is not available."));
     }
+    session.onOutput = onOutput;
 
     const effectiveCommand = redirectStaticHtmlLaunch(command) ?? command;
     const redirectedStaticFileLaunch = effectiveCommand !== command;
@@ -156,22 +165,42 @@ export class TerminalRuntime {
     });
   }
 
-  public write(threadId: string, cwd: string, input: string, onOutput: (data: string) => void): void {
-    this.#sessions.get(threadId) ?? this.open(threadId, cwd, onOutput);
-    const active = this.#sessions.get(threadId);
+  public write(
+    threadId: string,
+    cwd: string,
+    input: string,
+    onOutput: (data: string) => void,
+    sessionId = "default"
+  ): void {
+    const key = this.#sessionKey(threadId, sessionId);
+    this.#sessions.get(key) ?? this.open(threadId, cwd, onOutput, sessionId);
+    const active = this.#sessions.get(key);
     if (!active || active.child.killed) {
       throw new Error("Terminal is not available.");
     }
+    active.onOutput = onOutput;
     active.child.stdin.write(`${input}\n`);
   }
 
-  public close(threadId: string): void {
-    const session = this.#sessions.get(threadId);
-    if (!session) {
+  public close(threadId: string, sessionId?: string): void {
+    if (sessionId) {
+      const key = this.#sessionKey(threadId, sessionId);
+      const session = this.#sessions.get(key);
+      if (!session) {
+        return;
+      }
+      session.child.kill();
+      this.#sessions.delete(key);
       return;
     }
-    session.child.kill();
-    this.#sessions.delete(threadId);
+
+    for (const [key, session] of this.#sessions.entries()) {
+      if (session.threadId !== threadId) {
+        continue;
+      }
+      session.child.kill();
+      this.#sessions.delete(key);
+    }
   }
 
   #publish(session: TerminalSession, value: string): void {
@@ -181,6 +210,10 @@ export class TerminalRuntime {
     }
     session.output = `${session.output}${data}`.slice(-MAX_BUFFER_LENGTH);
     session.onOutput(data);
+  }
+
+  #sessionKey(threadId: string, sessionId: string): string {
+    return `${threadId}:${sessionId}`;
   }
 }
 

@@ -123,6 +123,30 @@ export class BrowserRuntime {
     return focused;
   }
 
+  public closeTab(threadId: string, tabId: string): BrowserTabRecord[] {
+    const tabs = this.#tabsByThread.get(threadId) ?? [];
+    const index = tabs.findIndex((candidate) => candidate.record.id === tabId);
+    if (index === -1) {
+      throw new Error(`Browser tab ${tabId} not found.`);
+    }
+
+    const [removed] = tabs.splice(index, 1);
+    if (!removed) {
+      return this.listTabs(threadId);
+    }
+
+    if (removed.record.isActive && tabs.length > 0) {
+      const nextIndex = Math.max(0, index - 1);
+      tabs.forEach((session, sessionIndex) => {
+        session.record.isActive = sessionIndex === nextIndex;
+        session.record.updatedAt = new Date().toISOString();
+      });
+    }
+
+    this.#tabsByThread.set(threadId, tabs);
+    return this.listTabs(threadId);
+  }
+
   public listTabs(threadId: string): BrowserTabRecord[] {
     return (this.#tabsByThread.get(threadId) ?? []).map((tab) => ({ ...tab.record }));
   }

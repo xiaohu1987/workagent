@@ -280,6 +280,18 @@ function normalizeOpenAiCompatibleRole(role: ProviderTurnInput["transcript"][num
 }
 
 function parseDecisionFromText(text: string): ProviderTurnDecision {
+  const taggedToolCalls = tryParseTaggedToolCalls(text);
+  if (taggedToolCalls) {
+    const assistantMessage = stripTaggedToolCalls(text).trim();
+    return {
+      assistantMessage: assistantMessage || undefined,
+      toolCalls: taggedToolCalls,
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    };
+  }
+
   const parsed = tryParseJsonDecision(text);
   if (parsed) {
     return {
@@ -334,7 +346,144 @@ function extractVisibleStreamText(text: string): string {
     return "";
   }
 
-  return text;
+  // A number of OpenAI-compatible coding models emit tool calls as XML-tagged
+  // JSON instead of the requested decision envelope. Tool markup is control
+  // data, never user-visible text, including while a response is streaming.
+  return stripTaggedToolCalls(text);
+}
+
+function tryParseTaggedToolCalls(text: string): ProviderTurnDecision["toolCalls"] | null {
+  const openingTag = text.match(/<tool_calls\b[^>]*>/i);
+  if (openingTag?.index === undefined || openingTag.index < 0) {
+    return null;
+  }
+
+  const afterOpen = text.slice(openingTag.index + openingTag[0].length);
+  const closingMatches = [...afterOpen.matchAll(/<\/tool_calls\s*>/gi)];
+  if (closingMatches.length === 0) {
+    return null;
+  }
+
+  const lastClosing = closingMatches[closingMatches.length - 1];
+  const payload = afterOpen
+    .slice(0, lastClosing.index ?? 0)
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .replace(/<\/tool_calls\s*>/gi, "")
+    .trim();
+
+  return tryParseTaggedJsonToolCalls(payload) ?? tryParseTaggedInvokeToolCalls(payload);
+}
+
+function tryParseTaggedJsonToolCalls(payload: string): ProviderTurnDecision["toolCalls"] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+
+  const rawCalls = Array.isArray(parsed) ? parsed : [parsed];
+  const toolCalls = rawCalls.flatMap((rawCall) => normalizeTaggedToolCall(rawCall));
+  return toolCalls.length > 0 ? toolCalls : null;
+}
+
+function tryParseTaggedInvokeToolCalls(payload: string): ProviderTurnDecision["toolCalls"] | null {
+  const invokes = [...payload.matchAll(/<invoke\b([^>]*)>([\s\S]*?)<\/invoke\s*>/gi)];
+  if (invokes.length === 0) {
+    return null;
+  }
+
+  const toolCalls = invokes.flatMap((match) => {
+    const name = readXmlAttribute(match[1] ?? "", "name");
+    if (!name) {
+      return [];
+    }
+
+    const body = match[2] ?? "";
+    const parameters = [...body.matchAll(/<parameter\b([^>]*)>([\s\S]*?)<\/parameter\s*>/gi)];
+    const rawArguments = parameters.find((parameter) => readXmlAttribute(parameter[1] ?? "", "name") === "arguments")?.[2]?.trim();
+    let argumentsJson: Record<string, unknown> = {};
+    if (rawArguments) {
+      try {
+        const parsedArguments = JSON.parse(rawArguments);
+        if (parsedArguments && typeof parsedArguments === "object" && !Array.isArray(parsedArguments)) {
+          argumentsJson = parsedArguments as Record<string, unknown>;
+        }
+      } catch {
+        return [];
+      }
+    }
+
+    return [{ id: crypto.randomUUID(), name, arguments: argumentsJson }];
+  });
+
+  return toolCalls.length > 0 ? toolCalls : null;
+}
+
+function normalizeTaggedToolCall(rawCall: unknown): ProviderTurnDecision["toolCalls"] {
+  if (!rawCall || typeof rawCall !== "object") {
+    return [];
+  }
+
+  const call = rawCall as {
+    name?: unknown;
+    arguments?: unknown;
+    function?: { name?: unknown; arguments?: unknown };
+  };
+  const name = typeof call.name === "string" ? call.name : call.function?.name;
+  const rawArguments = call.arguments ?? call.function?.arguments;
+  if (typeof name !== "string" || !name.trim()) {
+    return [];
+  }
+
+  let argumentsJson: Record<string, unknown> = {};
+  if (rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)) {
+    argumentsJson = rawArguments as Record<string, unknown>;
+  } else if (typeof rawArguments === "string") {
+    try {
+      const parsedArguments = JSON.parse(rawArguments);
+      if (parsedArguments && typeof parsedArguments === "object" && !Array.isArray(parsedArguments)) {
+        argumentsJson = parsedArguments as Record<string, unknown>;
+      }
+    } catch {
+      return [];
+    }
+  }
+
+  return [{ id: crypto.randomUUID(), name, arguments: argumentsJson }];
+}
+
+function readXmlAttribute(source: string, name: string): string | null {
+  const match = source.match(new RegExp(`${name}\\s*=\\s*["']([^"']+)["']`, "i"));
+  return match?.[1]?.trim() || null;
+}
+
+function stripTaggedToolCalls(text: string): string {
+  const completeTag = /<tool_calls\b[^>]*>[\s\S]*?<\/tool_calls\s*>/gi;
+  const completeResult = /<tool_result\b[^>]*>[\s\S]*?<\/tool_result\s*>/gi;
+  const withoutCompleteTags = text.replace(completeTag, "").replace(completeResult, "");
+  // Suppress an incomplete tag until the stream completes and it can be
+  // parsed. This keeps control JSON out of the transcript during streaming.
+  const visible = withoutCompleteTags
+    .replace(/<tool_calls\b[^>]*>[\s\S]*$/i, "")
+    .replace(/<tool_result\b[^>]*>[\s\S]*$/i, "")
+    .replace(/<\/tool_(?:calls|result)\s*>/gi, "")
+    .replace(/\n{3,}/g, "\n\n");
+  return stripPartialToolTagPrefix(visible);
+}
+
+function stripPartialToolTagPrefix(text: string): string {
+  const tagStart = text.lastIndexOf("<");
+  if (tagStart === -1) {
+    return text;
+  }
+
+  const trailing = text.slice(tagStart).toLowerCase();
+  return "<tool_calls".startsWith(trailing) || "<tool_result".startsWith(trailing)
+    ? text.slice(0, tagStart)
+    : text;
 }
 
 function tryParseJsonDecision(text: string): Record<string, any> | null {

@@ -22,10 +22,10 @@ const api = {
   interruptThread: (threadId: string) => ipcRenderer.invoke("threads:interrupt", threadId),
   updateThreadModelSelection: (payload: { threadId: string; providerId: string; modelId: string }) =>
     ipcRenderer.invoke("threads:update-model", payload),
-  openTerminal: (threadId: string) => ipcRenderer.invoke("terminal:open", threadId),
-  writeTerminal: (payload: { threadId: string; input: string }) =>
+  openTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:open", payload),
+  writeTerminal: (payload: { threadId: string; input: string; sessionId?: string }) =>
     ipcRenderer.invoke("terminal:write", payload),
-  closeTerminal: (threadId: string) => ipcRenderer.invoke("terminal:close", threadId),
+  closeTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:close", payload),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
   listSkills: () => ipcRenderer.invoke("skills:list"),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
@@ -62,6 +62,8 @@ const api = {
     ipcRenderer.invoke("browser:back", payload),
   goForwardBrowserTab: (payload: { threadId: string; tabId: string }) =>
     ipcRenderer.invoke("browser:forward", payload),
+  closeBrowserTab: (payload: { threadId: string; tabId: string }) =>
+    ipcRenderer.invoke("browser:close", payload),
   resolveApproval: (
     id: string,
     resolution: { decision: "approved" | "denied"; mode?: "once" | "session" | "remember" }

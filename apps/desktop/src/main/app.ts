@@ -187,22 +187,33 @@ export class DesktopBackend {
     this.#runtime.forgetThread(threadId);
   }
 
-  public openTerminal(threadId: string) {
+  public openTerminal(threadId: string, sessionId = "default") {
     const thread = this.#db.getThread(threadId);
-    return this.#terminal.open(threadId, thread.cwd ?? process.cwd(), (data) => {
-      void this.emitTerminalOutput(threadId, data);
-    });
+    return this.#terminal.open(
+      threadId,
+      thread.cwd ?? process.cwd(),
+      (data) => {
+        void this.emitTerminalOutput(threadId, data, sessionId);
+      },
+      sessionId
+    );
   }
 
-  public writeTerminal(threadId: string, input: string): void {
+  public writeTerminal(threadId: string, input: string, sessionId = "default"): void {
     const thread = this.#db.getThread(threadId);
-    this.#terminal.write(threadId, thread.cwd ?? process.cwd(), input, (data) => {
-      void this.emitTerminalOutput(threadId, data);
-    });
+    this.#terminal.write(
+      threadId,
+      thread.cwd ?? process.cwd(),
+      input,
+      (data) => {
+        void this.emitTerminalOutput(threadId, data, sessionId);
+      },
+      sessionId
+    );
   }
 
-  public closeTerminal(threadId: string): void {
-    this.#terminal.close(threadId);
+  public closeTerminal(threadId: string, sessionId?: string): void {
+    this.#terminal.close(threadId, sessionId);
   }
 
   public async listProjectFiles(threadId: string): Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>> {
@@ -520,6 +531,18 @@ export class DesktopBackend {
       createdAt: new Date().toISOString()
     });
     return tab;
+  }
+
+  public async closeBrowserTab(threadId: string, tabId: string) {
+    const tabs = this.#browser.closeTab(threadId, tabId);
+    this.persistBrowserTabs(threadId);
+    await this.emit({
+      type: "browser.updated",
+      threadId,
+      payload: { tabs },
+      createdAt: new Date().toISOString()
+    });
+    return tabs;
   }
 
   public readBrowserPageText(threadId: string, tabId: string) {
@@ -1024,11 +1047,11 @@ export class DesktopBackend {
     return outputDir;
   }
 
-  private async emitTerminalOutput(threadId: string, data: string): Promise<void> {
+  private async emitTerminalOutput(threadId: string, data: string, sessionId = "default"): Promise<void> {
     await this.emit({
       type: "terminal.output",
       threadId,
-      payload: { data },
+      payload: { data, sessionId },
       createdAt: new Date().toISOString()
     });
   }

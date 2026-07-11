@@ -21,9 +21,9 @@ declare global {
         providerId: string;
         modelId: string;
       }) => Promise<any>;
-      openTerminal: (threadId: string) => Promise<{ cwd: string; shell: string; output: string }>;
-      writeTerminal: (payload: { threadId: string; input: string }) => Promise<void>;
-      closeTerminal: (threadId: string) => Promise<void>;
+      openTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<{ cwd: string; shell: string; output: string }>;
+      writeTerminal: (payload: { threadId: string; input: string; sessionId?: string }) => Promise<void>;
+      closeTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<void>;
       openExternal: (url: string) => Promise<void>;
       listSkills: () => Promise<any[]>;
       listPlugins: () => Promise<any[]>;
@@ -54,6 +54,7 @@ declare global {
       reloadBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
       goBackBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
       goForwardBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
+      closeBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
       resolveApproval: (
         id: string,
         resolution: { decision: "approved" | "denied"; mode?: "once" | "session" | "remember" }

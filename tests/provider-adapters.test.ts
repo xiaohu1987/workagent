@@ -165,6 +165,171 @@ describe("OpenAiCompatibleProvider", () => {
     });
   });
 
+  it("executes XML-tagged tool calls returned by compatible coding models", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content:
+              '<tool_calls> [{"name":"fs.read_file","arguments":{"path":"js/pathfinder.js"}},{"name":"fs.read_file","arguments":{"path":"css/style.css"}}] </tool_calls></tool_calls>'
+          }
+        }
+      ]
+    });
+
+    const provider: ProviderDefinition = {
+      id: "company-gateway",
+      type: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "secret"
+    };
+    const model: ModelProfile = {
+      id: "test-model",
+      providerId: "company-gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: false,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON only.",
+      transcript: [{ role: "user", content: "Read the project files" }],
+      availableTools: [],
+      model,
+      provider
+    });
+
+    expect(decision).toMatchObject({
+      toolCalls: [
+        { name: "fs.read_file", arguments: { path: "js/pathfinder.js" } },
+        { name: "fs.read_file", arguments: { path: "css/style.css" } }
+      ],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    });
+    expect(decision.assistantMessage).toBeUndefined();
+  });
+
+  it("parses invoke-style XML tool calls returned by compatible coding models", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content:
+              'I will inspect the project first.\n\n<tool_calls>\n<invoke name="fs.read_file">\n<parameter name="arguments">{"path":"js/game.js"}</parameter>\n</invoke>\n<invoke name="fs.read_file">\n<parameter name="arguments">{"path":"js/app.js"}</parameter>\n</invoke>\n</tool_calls>'
+          }
+        }
+      ]
+    });
+
+    const provider: ProviderDefinition = {
+      id: "company-gateway",
+      type: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "secret"
+    };
+    const model: ModelProfile = {
+      id: "test-model",
+      providerId: "company-gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: false,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON only.",
+      transcript: [{ role: "user", content: "Read the project files" }],
+      availableTools: [],
+      model,
+      provider
+    });
+
+    expect(decision).toMatchObject({
+      assistantMessage: "I will inspect the project first.",
+      toolCalls: [
+        { name: "fs.read_file", arguments: { path: "js/game.js" } },
+        { name: "fs.read_file", arguments: { path: "js/app.js" } }
+      ],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    });
+  });
+
+  it("does not stream XML-tagged tool calls into the visible assistant message", async () => {
+    async function* streamToolCall() {
+      yield {
+        choices: [
+          {
+            delta: {
+              content: "<tool"
+            }
+          }
+        ]
+      };
+      yield {
+        choices: [
+          {
+            delta: {
+              content: '_calls> [{"name":"fs.read_directory","arguments":{"path":"."}}] </tool_calls>'
+            }
+          }
+        ]
+      };
+    }
+
+    mocks.chatCreate.mockResolvedValue(streamToolCall());
+    const provider: ProviderDefinition = {
+      id: "company-gateway",
+      type: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "secret"
+    };
+    const model: ModelProfile = {
+      id: "test-model",
+      providerId: "company-gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: true,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: false,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+    const visibleDeltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON only.",
+      transcript: [{ role: "user", content: "List the project files" }],
+      availableTools: [],
+      model,
+      provider,
+      stream: true,
+      onTextDelta: async (delta) => {
+        visibleDeltas.push(delta);
+      }
+    });
+
+    expect(visibleDeltas).toEqual([]);
+    expect(decision.toolCalls).toHaveLength(1);
+    expect(decision.toolCalls[0]).toMatchObject({
+      name: "fs.read_directory",
+      arguments: { path: "." }
+    });
+  });
+
   it("requires an explicit goal_completed declaration", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [

@@ -27,6 +27,36 @@ import {
 } from "./thread-ui-state";
 
 type SettingsTab = "general" | "knowledge" | "provider" | "skills" | "agent" | "mcp";
+type RightWorkspaceTab = "preview" | "terminal" | "browser" | "files";
+
+type ProjectFileEntry = {
+  path: string;
+  kind: "file" | "directory";
+  size?: number;
+};
+
+type ProjectFileTreeNode = {
+  path: string;
+  name: string;
+  kind: "file" | "directory";
+  children: ProjectFileTreeNode[];
+};
+
+type PreviewCacheEntry = {
+  content: string;
+  truncated: boolean;
+};
+
+type TerminalWorkspaceTab = {
+  id: string;
+  title: string;
+};
+
+type TerminalSessionState = {
+  output: string;
+  cwd: string;
+  shell: string;
+};
 
 type WelcomeCard = {
   id: string;
@@ -75,7 +105,8 @@ type MarkdownBlock =
   | { kind: "unordered-list"; items: string[] }
   | { kind: "ordered-list"; items: string[] }
   | { kind: "blockquote"; lines: string[] }
-  | { kind: "code"; language?: string; content: string };
+  | { kind: "code"; language?: string; content: string }
+  | { kind: "table"; headers: string[]; rows: string[][] };
 
 type AppNoticeTone = "success" | "warning";
 
@@ -175,10 +206,20 @@ export function App() {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
-  const [terminalOutput, setTerminalOutput] = useState("");
-  const [terminalInput, setTerminalInput] = useState("");
-  const [terminalCwd, setTerminalCwd] = useState("");
-  const [terminalShell, setTerminalShell] = useState("PowerShell");
+  const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("terminal");
+  const [terminalTabsByThread, setTerminalTabsByThread] = useState<Record<string, TerminalWorkspaceTab[]>>({});
+  const [activeTerminalTabByThread, setActiveTerminalTabByThread] = useState<Record<string, string>>({});
+  const [terminalInputsByThread, setTerminalInputsByThread] = useState<Record<string, Record<string, string>>>({});
+  const [terminalSessionsByThread, setTerminalSessionsByThread] = useState<
+    Record<string, Record<string, TerminalSessionState>>
+  >({});
+  const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
+  const [previewTabsByThread, setPreviewTabsByThread] = useState<Record<string, string[]>>({});
+  const [activePreviewPathByThread, setActivePreviewPathByThread] = useState<Record<string, string | null>>({});
+  const [projectFilePreviewsByThread, setProjectFilePreviewsByThread] = useState<
+    Record<string, Record<string, PreviewCacheEntry | null>>
+  >({});
+  const [isProjectFilesLoading, setIsProjectFilesLoading] = useState(false);
   const selectedThreadIdRef = useRef<string | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
@@ -246,6 +287,100 @@ export function App() {
     setSelectedThreadId(nextThreadId);
   }
 
+  const currentTerminalTabs = selectedThreadId ? terminalTabsByThread[selectedThreadId] ?? [] : [];
+  const activeTerminalSessionId = selectedThreadId
+    ? activeTerminalTabByThread[selectedThreadId] ?? currentTerminalTabs[0]?.id ?? null
+    : null;
+  const activeTerminalSession =
+    selectedThreadId && activeTerminalSessionId
+      ? terminalSessionsByThread[selectedThreadId]?.[activeTerminalSessionId] ?? null
+      : null;
+  const activeTerminalInput =
+    selectedThreadId && activeTerminalSessionId
+      ? terminalInputsByThread[selectedThreadId]?.[activeTerminalSessionId] ?? ""
+      : "";
+  const previewTabs = selectedThreadId ? previewTabsByThread[selectedThreadId] ?? [] : [];
+  const selectedProjectFile = selectedThreadId ? activePreviewPathByThread[selectedThreadId] ?? null : null;
+  const projectFilePreview =
+    selectedThreadId && selectedProjectFile
+      ? projectFilePreviewsByThread[selectedThreadId]?.[selectedProjectFile] ?? null
+      : null;
+
+  function ensureThreadTerminalTabs(threadId: string) {
+    setTerminalTabsByThread((current) => {
+      if (current[threadId]?.length) {
+        return current;
+      }
+      return {
+        ...current,
+        [threadId]: [{ id: "default", title: "终端" }]
+      };
+    });
+    setActiveTerminalTabByThread((current) => (
+      current[threadId]
+        ? current
+        : {
+            ...current,
+            [threadId]: "default"
+          }
+    ));
+  }
+
+  function setActiveTerminalInput(value: string) {
+    if (!selectedThreadId || !activeTerminalSessionId) {
+      return;
+    }
+    setTerminalInputsByThread((current) => ({
+      ...current,
+      [selectedThreadId]: {
+        ...(current[selectedThreadId] ?? {}),
+        [activeTerminalSessionId]: value
+      }
+    }));
+  }
+
+  function updateTerminalSessionState(
+    threadId: string,
+    sessionId: string,
+    updater: (current: TerminalSessionState | null) => TerminalSessionState
+  ) {
+    setTerminalSessionsByThread((current) => ({
+      ...current,
+      [threadId]: {
+        ...(current[threadId] ?? {}),
+        [sessionId]: updater(current[threadId]?.[sessionId] ?? null)
+      }
+    }));
+  }
+
+  function openProjectPreview(path: string) {
+    if (!selectedThreadId) {
+      return;
+    }
+    setPreviewTabsByThread((current) => {
+      const tabs = current[selectedThreadId] ?? [];
+      if (tabs.includes(path)) {
+        return current;
+      }
+      return {
+        ...current,
+        [selectedThreadId]: [...tabs, path]
+      };
+    });
+    setActivePreviewPathByThread((current) => ({
+      ...current,
+      [selectedThreadId]: path
+    }));
+    setRightWorkspaceTab("preview");
+  }
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      return;
+    }
+    ensureThreadTerminalTabs(selectedThreadId);
+  }, [selectedThreadId]);
+
   useEffect(() => {
     if (!gpaMenuOpen) {
       return;
@@ -276,11 +411,17 @@ export function App() {
           toolCallId?: string;
           toolName?: string;
           data?: string;
+          sessionId?: string;
         };
       };
       const currentSelectedThreadId = selectedThreadIdRef.current;
       if (typed.type === "terminal.output" && typed.threadId === currentSelectedThreadId) {
-        setTerminalOutput((current) => `${current}${typed.payload?.data ?? ""}`.slice(-80_000));
+        const sessionId = typeof typed.payload?.sessionId === "string" ? typed.payload.sessionId : "default";
+        updateTerminalSessionState(currentSelectedThreadId, sessionId, (current) => ({
+          output: `${current?.output ?? ""}${typed.payload?.data ?? ""}`.slice(-80_000),
+          cwd: current?.cwd ?? "",
+          shell: current?.shell ?? "PowerShell"
+        }));
         return;
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
@@ -357,39 +498,127 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!isTerminalOpen || !selectedThreadId) {
+    if (!isTerminalOpen || !selectedThreadId || rightWorkspaceTab !== "terminal" || !activeTerminalSessionId) {
       return;
     }
 
     let cancelled = false;
-    setTerminalOutput("");
-    setTerminalInput("");
-    setTerminalCwd("");
 
-    void window.codexh.openTerminal(selectedThreadId).then((terminal) => {
+    void window.codexh.openTerminal({ threadId: selectedThreadId, sessionId: activeTerminalSessionId }).then((terminal) => {
       if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
         return;
       }
-      setTerminalCwd(terminal.cwd);
-      setTerminalShell(terminal.shell);
-      setTerminalOutput((current) => (terminal.output.length >= current.length ? terminal.output : current));
+      updateTerminalSessionState(selectedThreadId, activeTerminalSessionId, (current) => ({
+        output: terminal.output.length >= (current?.output.length ?? 0) ? terminal.output : (current?.output ?? ""),
+        cwd: terminal.cwd,
+        shell: terminal.shell
+      }));
     }).catch((error: unknown) => {
       if (!cancelled) {
-        setTerminalOutput(`Terminal error: ${error instanceof Error ? error.message : String(error)}\n`);
+        updateTerminalSessionState(selectedThreadId, activeTerminalSessionId, (current) => ({
+          output: `Terminal error: ${error instanceof Error ? error.message : String(error)}\n`,
+          cwd: current?.cwd ?? "",
+          shell: current?.shell ?? "PowerShell"
+        }));
       }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [isTerminalOpen, selectedThreadId]);
+  }, [activeTerminalSessionId, isTerminalOpen, rightWorkspaceTab, selectedThreadId]);
 
   useEffect(() => {
     const node = terminalScrollRef.current;
     if (node) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [terminalOutput]);
+  }, [activeTerminalSession?.output]);
+
+  useEffect(() => {
+    if (!isTerminalOpen || !selectedThreadId || (rightWorkspaceTab !== "preview" && rightWorkspaceTab !== "files")) {
+      return;
+    }
+
+    let cancelled = false;
+    setIsProjectFilesLoading(true);
+    void window.codexh.listProjectFiles(selectedThreadId).then((entries) => {
+      if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
+        return;
+      }
+      setProjectFiles(entries);
+      setActivePreviewPathByThread((current) => {
+        const nextDefault = entries.find((entry) => entry.kind === "file")?.path ?? null;
+        const existing = current[selectedThreadId];
+        return {
+          ...current,
+          [selectedThreadId]:
+            existing && entries.some((entry) => entry.path === existing && entry.kind === "file")
+              ? existing
+              : nextDefault
+        };
+      });
+    }).catch(() => {
+      if (!cancelled) {
+        setProjectFiles([]);
+        setActivePreviewPathByThread((current) => ({
+          ...current,
+          [selectedThreadId]: null
+        }));
+      }
+    }).finally(() => {
+      if (!cancelled) {
+        setIsProjectFilesLoading(false);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isTerminalOpen, rightWorkspaceTab, selectedThreadId]);
+
+  useEffect(() => {
+    if (!selectedThreadId || !selectedProjectFile) {
+      return;
+    }
+
+    let cancelled = false;
+    setProjectFilePreviewsByThread((current) => ({
+      ...current,
+      [selectedThreadId]: {
+        ...(current[selectedThreadId] ?? {}),
+        [selectedProjectFile]: null
+      }
+    }));
+    void window.codexh.readProjectFile({ threadId: selectedThreadId, path: selectedProjectFile }).then((file) => {
+      if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
+        setProjectFilePreviewsByThread((current) => ({
+          ...current,
+          [selectedThreadId]: {
+            ...(current[selectedThreadId] ?? {}),
+            [selectedProjectFile]: { content: file.content, truncated: file.truncated }
+          }
+        }));
+      }
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        setProjectFilePreviewsByThread((current) => ({
+          ...current,
+          [selectedThreadId]: {
+            ...(current[selectedThreadId] ?? {}),
+            [selectedProjectFile]: {
+              content: error instanceof Error ? error.message : String(error),
+              truncated: false
+            }
+          }
+        }));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProjectFile, selectedThreadId]);
 
   useEffect(() => {
     if (!isSettingsOpen && !isProjectCreateOpen && !notice) {
@@ -1493,16 +1722,21 @@ export function App() {
   }
 
   function submitTerminalInput() {
-    const command = terminalInput.trim();
-    if (!command || !selectedThreadId) {
+    const command = activeTerminalInput.trim();
+    if (!command || !selectedThreadId || !activeTerminalSessionId) {
       return;
     }
 
-    setTerminalInput("");
-    void window.codexh.writeTerminal({ threadId: selectedThreadId, input: command }).catch((error: unknown) => {
-      setTerminalOutput((current) =>
-        `${current}\nTerminal error: ${error instanceof Error ? error.message : String(error)}\n`.slice(-80_000)
-      );
+    setActiveTerminalInput("");
+    void window.codexh
+      .writeTerminal({ threadId: selectedThreadId, input: command, sessionId: activeTerminalSessionId })
+      .catch((error: unknown) => {
+        updateTerminalSessionState(selectedThreadId, activeTerminalSessionId, (current) => ({
+          output: `${current?.output ?? ""}\nTerminal error: ${error instanceof Error ? error.message : String(error)}\n`
+            .slice(-80_000),
+          cwd: current?.cwd ?? "",
+          shell: current?.shell ?? "PowerShell"
+        }));
     });
   }
 
@@ -1705,7 +1939,7 @@ export function App() {
                   <section className="streaming-assistant" aria-live="polite">
                     <span className="streaming-caret" aria-hidden />
                     {renderMarkdownDocument(
-                      activeStreamingAssistant.content,
+                      stripAssistantToolMarkup(activeStreamingAssistant.content),
                       `stream-${activeStreamingAssistant.turnRunId}`,
                       "event-final-markdown"
                     )}
@@ -1815,15 +2049,117 @@ export function App() {
       </main>
 
       {isTerminalOpen ? (
-        <TerminalPanel
-          shell={terminalShell}
-          cwd={terminalCwd}
-          output={terminalOutput}
-          input={terminalInput}
-          scrollRef={terminalScrollRef}
-          onInputChange={setTerminalInput}
-          onSubmit={submitTerminalInput}
+        <RightWorkspacePanel
+          activeTab={rightWorkspaceTab}
+          onTabChange={setRightWorkspaceTab}
           onHide={() => setIsTerminalOpen(false)}
+          projectFiles={projectFiles}
+          projectFilesLoading={isProjectFilesLoading}
+          previewTabs={previewTabs}
+          selectedProjectFile={selectedProjectFile}
+          projectFilePreview={projectFilePreview}
+          onSelectProjectFile={openProjectPreview}
+          onSelectPreviewTab={(path) => {
+            if (!selectedThreadId) {
+              return;
+            }
+            setActivePreviewPathByThread((current) => ({
+              ...current,
+              [selectedThreadId]: path
+            }));
+          }}
+          onClosePreviewTab={(path) => {
+            if (!selectedThreadId) {
+              return;
+            }
+            let nextTabs: string[] = [];
+            setPreviewTabsByThread((current) => ({
+              ...current,
+              [selectedThreadId]: (() => {
+                nextTabs = (current[selectedThreadId] ?? []).filter((entry) => entry !== path);
+                return nextTabs;
+              })()
+            }));
+            setActivePreviewPathByThread((current) => {
+              return {
+                ...current,
+                [selectedThreadId]:
+                  current[selectedThreadId] === path ? nextTabs[nextTabs.length - 1] ?? null : current[selectedThreadId] ?? null
+              };
+            });
+          }}
+          browserTabs={snapshot?.browserTabs ?? []}
+          onCloseBrowserTab={(tabId) => {
+            if (!selectedThreadId) {
+              return;
+            }
+            void window.codexh.closeBrowserTab({ threadId: selectedThreadId, tabId });
+          }}
+          threadId={selectedThreadId}
+          terminalTabs={currentTerminalTabs}
+          activeTerminalSessionId={activeTerminalSessionId}
+          shell={activeTerminalSession?.shell ?? "PowerShell"}
+          cwd={activeTerminalSession?.cwd ?? ""}
+          output={activeTerminalSession?.output ?? ""}
+          input={activeTerminalInput}
+          scrollRef={terminalScrollRef}
+          onInputChange={setActiveTerminalInput}
+          onSubmit={submitTerminalInput}
+          onSelectTerminalTab={(sessionId) => {
+            if (!selectedThreadId) {
+              return;
+            }
+            setActiveTerminalTabByThread((current) => ({
+              ...current,
+              [selectedThreadId]: sessionId
+            }));
+          }}
+          onAddTerminalTab={() => {
+            if (!selectedThreadId) {
+              return;
+            }
+            const newId = globalThis.crypto.randomUUID();
+            const nextTitle = `终端 ${currentTerminalTabs.length + 1}`;
+            setTerminalTabsByThread((current) => ({
+              ...current,
+              [selectedThreadId]: [...(current[selectedThreadId] ?? []), { id: newId, title: nextTitle }]
+            }));
+            setActiveTerminalTabByThread((current) => ({
+              ...current,
+              [selectedThreadId]: newId
+            }));
+          }}
+          onCloseTerminalTab={(sessionId) => {
+            if (!selectedThreadId) {
+              return;
+            }
+            const remaining = currentTerminalTabs.filter((tab) => tab.id !== sessionId);
+            setTerminalTabsByThread((current) => ({
+              ...current,
+              [selectedThreadId]: remaining
+            }));
+            setActiveTerminalTabByThread((current) => ({
+              ...current,
+              [selectedThreadId]: remaining[remaining.length - 1]?.id ?? ""
+            }));
+            setTerminalInputsByThread((current) => {
+              const nextSessions = { ...(current[selectedThreadId] ?? {}) };
+              delete nextSessions[sessionId];
+              return {
+                ...current,
+                [selectedThreadId]: nextSessions
+              };
+            });
+            setTerminalSessionsByThread((current) => {
+              const nextSessions = { ...(current[selectedThreadId] ?? {}) };
+              delete nextSessions[sessionId];
+              return {
+                ...current,
+                [selectedThreadId]: nextSessions
+              };
+            });
+            void window.codexh.closeTerminal({ threadId: selectedThreadId, sessionId });
+          }}
           hasThread={Boolean(selectedThreadId)}
         />
       ) : null}
@@ -2500,6 +2836,753 @@ export function App() {
             document.body
           )
         : null}
+    </div>
+  );
+}
+
+function RightWorkspacePanel({
+  activeTab,
+  onTabChange,
+  onHide,
+  projectFiles,
+  projectFilesLoading,
+  previewTabs,
+  selectedProjectFile,
+  projectFilePreview,
+  onSelectProjectFile,
+  onSelectPreviewTab,
+  onClosePreviewTab,
+  browserTabs,
+  onCloseBrowserTab,
+  threadId,
+  terminalTabs,
+  activeTerminalSessionId,
+  shell,
+  cwd,
+  output,
+  input,
+  scrollRef,
+  onInputChange,
+  onSubmit,
+  onSelectTerminalTab,
+  onAddTerminalTab,
+  onCloseTerminalTab,
+  hasThread
+}: {
+  activeTab: RightWorkspaceTab;
+  onTabChange: (tab: RightWorkspaceTab) => void;
+  onHide: () => void;
+  projectFiles: ProjectFileEntry[];
+  projectFilesLoading: boolean;
+  previewTabs: string[];
+  selectedProjectFile: string | null;
+  projectFilePreview: PreviewCacheEntry | null;
+  onSelectProjectFile: (path: string) => void;
+  onSelectPreviewTab: (path: string) => void;
+  onClosePreviewTab: (path: string) => void;
+  browserTabs: RuntimeThreadSnapshot["browserTabs"];
+  onCloseBrowserTab: (tabId: string) => void;
+  threadId: string | null;
+  terminalTabs: TerminalWorkspaceTab[];
+  activeTerminalSessionId: string | null;
+  shell: string;
+  cwd: string;
+  output: string;
+  input: string;
+  scrollRef: React.RefObject<HTMLPreElement | null>;
+  onInputChange: (value: string) => void;
+  onSubmit: () => void;
+  onSelectTerminalTab: (sessionId: string) => void;
+  onAddTerminalTab: () => void;
+  onCloseTerminalTab: (sessionId: string) => void;
+  hasThread: boolean;
+}) {
+  return (
+    <aside className="right-workspace-panel" aria-label="右侧工作区">
+      <header className="right-workspace-header">
+        <nav className="right-workspace-tabs" aria-label="工作区标签">
+          <WorkspaceTabButton active={activeTab === "terminal"} label="终端" onClick={() => onTabChange("terminal")}>
+            <IconTerminal />
+          </WorkspaceTabButton>
+          <WorkspaceTabButton active={activeTab === "browser"} label="浏览器" onClick={() => onTabChange("browser")}>
+            <IconGlobe />
+          </WorkspaceTabButton>
+          <WorkspaceTabButton active={activeTab === "preview"} label="查看" onClick={() => onTabChange("preview")}>
+            <IconEye />
+          </WorkspaceTabButton>
+          <WorkspaceTabButton active={activeTab === "files"} label="文件夹" onClick={() => onTabChange("files")}>
+            <IconFolder />
+          </WorkspaceTabButton>
+        </nav>
+        <button
+          type="button"
+          className="right-workspace-hide-button"
+          title="向右隐藏工作区"
+          aria-label="向右隐藏工作区"
+          onClick={onHide}
+        >
+          <IconChevronRight />
+        </button>
+      </header>
+
+      <div className="right-workspace-content">
+        {activeTab === "preview" ? (
+          <ProjectPreviewWorkspace
+            tabs={previewTabs}
+            selectedPath={selectedProjectFile}
+            preview={projectFilePreview}
+            loading={projectFilesLoading}
+            onSelectTab={onSelectPreviewTab}
+            onCloseTab={onClosePreviewTab}
+          />
+        ) : null}
+        {activeTab === "terminal" ? (
+          <TerminalWorkspace
+            tabs={terminalTabs}
+            activeSessionId={activeTerminalSessionId}
+            shell={shell}
+            cwd={cwd}
+            output={output}
+            input={input}
+            scrollRef={scrollRef}
+            onInputChange={onInputChange}
+            onSubmit={onSubmit}
+            onSelectTab={onSelectTerminalTab}
+            onAddTab={onAddTerminalTab}
+            onCloseTab={onCloseTerminalTab}
+            hasThread={hasThread}
+          />
+        ) : null}
+        {activeTab === "browser" ? (
+          <BrowserWorkspace
+            tabs={browserTabs}
+            threadId={threadId}
+            onCloseTab={onCloseBrowserTab}
+          />
+        ) : null}
+        {activeTab === "files" ? (
+          <ProjectFilesWorkspace
+            files={projectFiles}
+            loading={projectFilesLoading}
+            selectedPath={selectedProjectFile}
+            onSelect={onSelectProjectFile}
+          />
+        ) : null}
+      </div>
+    </aside>
+  );
+}
+
+function WorkspaceTabButton({
+  active,
+  label,
+  children,
+  onClick
+}: {
+  active: boolean;
+  label: string;
+  children: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" className={`right-workspace-tab ${active ? "active" : ""}`} onClick={onClick}>
+      {children}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function WorkspaceSubtabStrip({
+  items,
+  addLabel,
+  onAdd
+}: {
+  items: Array<{
+    id: string;
+    label: string;
+    title?: string;
+    active: boolean;
+    icon: ReactNode;
+    onClick: () => void;
+    onClose?: () => void;
+  }>;
+  addLabel?: string;
+  onAdd?: () => void;
+}) {
+  return (
+    <div className="workspace-subtab-strip" role="tablist">
+      {items.map((item) => (
+        <div key={item.id} className={`workspace-subtab ${item.active ? "active" : ""}`} title={item.title}>
+          <button
+            type="button"
+            className="workspace-subtab-main"
+            role="tab"
+            aria-selected={item.active}
+            onClick={item.onClick}
+          >
+            <span className="workspace-subtab-icon" aria-hidden="true">{item.icon}</span>
+            <span className="workspace-subtab-label">{item.label}</span>
+          </button>
+          {item.onClose ? (
+            <button
+              type="button"
+              className="workspace-subtab-close"
+              aria-label={`关闭 ${item.label}`}
+              title={`关闭 ${item.label}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                item.onClose?.();
+              }}
+            >
+              <IconClose />
+            </button>
+          ) : null}
+        </div>
+      ))}
+      {onAdd ? (
+        <button type="button" className="workspace-subtab-add" title={addLabel} aria-label={addLabel} onClick={onAdd}>
+          <IconPlus />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function LegacyTerminalWorkspace({
+  tabs,
+  activeSessionId,
+  shell,
+  cwd,
+  output,
+  input,
+  scrollRef,
+  onInputChange,
+  onSubmit,
+  onSelectTab,
+  onAddTab,
+  onCloseTab,
+  hasThread
+}: {
+  tabs: TerminalWorkspaceTab[];
+  activeSessionId: string | null;
+  shell: string;
+  cwd: string;
+  output: string;
+  input: string;
+  scrollRef: React.RefObject<HTMLPreElement | null>;
+  onInputChange: (value: string) => void;
+  onSubmit: () => void;
+  onSelectTab: (sessionId: string) => void;
+  onAddTab: () => void;
+  onCloseTab: (sessionId: string) => void;
+  hasThread: boolean;
+}) {
+  return (
+    <section className="terminal-workspace" aria-label="终端">
+      <div className="terminal-heading">
+        <span className="terminal-heading-icon" aria-hidden="true"><IconTerminal /></span>
+        <div>
+          <strong>{shell}</strong>
+          <span title={cwd}>{cwd || "正在连接终端"}</span>
+        </div>
+      </div>
+      <pre ref={scrollRef} className="terminal-output" aria-live="polite">
+        {hasThread ? output || " " : "选择一个任务后即可使用终端。"}
+      </pre>
+      <div className="terminal-composer">
+        <span className="terminal-prompt" aria-hidden="true">&gt;</span>
+        <input
+          value={input}
+          disabled={!hasThread}
+          onChange={(event) => onInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              onSubmit();
+            }
+          }}
+          placeholder={hasThread ? "输入命令" : "请选择任务"}
+          aria-label="终端命令"
+          spellCheck={false}
+        />
+      </div>
+    </section>
+  );
+}
+
+function LegacyProjectPreviewWorkspace({
+  selectedPath,
+  preview,
+  loading
+}: {
+  selectedPath: string | null;
+  preview: { content: string; truncated: boolean } | null;
+  loading: boolean;
+}) {
+  if (!selectedPath) {
+    return <WorkspaceEmptyState icon={<IconEye />} message={loading ? "正在读取项目文件..." : "选择一个文件进行查看"} />;
+  }
+
+  return (
+    <section className="project-preview-workspace" aria-label="文件查看">
+      <header className="project-preview-header" title={selectedPath}>
+        <IconFile />
+        <span>{selectedPath}</span>
+      </header>
+      {preview ? (
+        <>
+          <pre className="project-preview-code">{preview.content}</pre>
+          {preview.truncated ? <div className="project-preview-note">文件内容过长，仅显示前 512 KB。</div> : null}
+        </>
+      ) : (
+        <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取文件..." />
+      )}
+    </section>
+  );
+}
+
+function ProjectFilesWorkspace({
+  files,
+  loading,
+  selectedPath,
+  onSelect
+}: {
+  files: ProjectFileEntry[];
+  loading: boolean;
+  selectedPath: string | null;
+  onSelect: (path: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
+  const tree = useMemo(() => buildProjectFileTree(files), [files]);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+
+  useEffect(() => {
+    setExpandedPaths(new Set(tree.filter((node) => node.kind === "directory").map((node) => node.path)));
+  }, [tree]);
+
+  if (loading) {
+    return <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取项目文件..." />;
+  }
+
+  if (files.length === 0) {
+    return <WorkspaceEmptyState icon={<IconFolder />} message="当前项目文件夹没有可显示的文件" />;
+  }
+
+  return (
+    <section className="project-files-workspace" aria-label="项目文件夹">
+      <label className="project-files-filter">
+        <IconSearch />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="筛选文件..."
+          aria-label="筛选项目文件"
+          spellCheck={false}
+        />
+      </label>
+      <div className="project-files-list" role="tree" aria-label="项目文件">
+        <ProjectFileTreeRows
+          nodes={tree}
+          depth={0}
+          query={normalizedQuery}
+          expandedPaths={expandedPaths}
+          selectedPath={selectedPath}
+          onToggle={(path) => {
+            setExpandedPaths((current) => {
+              const next = new Set(current);
+              if (next.has(path)) next.delete(path);
+              else next.add(path);
+              return next;
+            });
+          }}
+          onSelect={onSelect}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ProjectFileTreeRows({
+  nodes,
+  depth,
+  query,
+  expandedPaths,
+  selectedPath,
+  onToggle,
+  onSelect
+}: {
+  nodes: ProjectFileTreeNode[];
+  depth: number;
+  query: string;
+  expandedPaths: Set<string>;
+  selectedPath: string | null;
+  onToggle: (path: string) => void;
+  onSelect: (path: string) => void;
+}): ReactNode {
+  return nodes.map((node) => {
+    const matches = projectFileNodeMatches(node, query);
+    if (!matches) {
+      return null;
+    }
+
+    const isDirectory = node.kind === "directory";
+    const isExpanded = query.length > 0 || expandedPaths.has(node.path);
+    return (
+      <div key={`${node.kind}:${node.path}`} className="project-file-tree-item">
+        <button
+          type="button"
+          className={`project-file-row ${isDirectory ? "directory" : "file"} ${selectedPath === node.path ? "selected" : ""}`}
+          style={{ "--project-file-depth": depth } as React.CSSProperties}
+          role="treeitem"
+          aria-level={depth + 1}
+          aria-expanded={isDirectory ? isExpanded : undefined}
+          aria-selected={isDirectory ? undefined : selectedPath === node.path}
+          onClick={() => isDirectory ? onToggle(node.path) : onSelect(node.path)}
+          title={node.path}
+        >
+          {isDirectory ? (
+            <span className={`project-file-disclosure ${isExpanded ? "is-expanded" : ""}`} aria-hidden><IconChevronRight /></span>
+          ) : <span className="project-file-disclosure-placeholder" aria-hidden />}
+          <span className={`project-file-glyph ${getProjectFileGlyphClass(node)}`} aria-hidden>
+            {isDirectory ? <IconFolder /> : <IconFile />}
+          </span>
+          <span>{node.name}</span>
+        </button>
+        {isDirectory && isExpanded ? (
+          <ProjectFileTreeRows
+            nodes={node.children}
+            depth={depth + 1}
+            query={query}
+            expandedPaths={expandedPaths}
+            selectedPath={selectedPath}
+            onToggle={onToggle}
+            onSelect={onSelect}
+          />
+        ) : null}
+      </div>
+    );
+  });
+}
+
+export function buildProjectFileTree(files: ProjectFileEntry[]): ProjectFileTreeNode[] {
+  const root: ProjectFileTreeNode = { path: "", name: "", kind: "directory", children: [] };
+
+  for (const entry of files) {
+    const segments = entry.path.replace(/\\/g, "/").split("/").filter(Boolean);
+    let children = root.children;
+    let parentPath = "";
+    for (let index = 0; index < segments.length; index += 1) {
+      const name = segments[index];
+      parentPath = parentPath ? `${parentPath}/${name}` : name;
+      const isLeaf = index === segments.length - 1;
+      const kind = isLeaf ? entry.kind : "directory";
+      let node = children.find((candidate) => candidate.name === name);
+      if (!node) {
+        node = { path: parentPath, name, kind, children: [] };
+        children.push(node);
+      } else if (isLeaf) {
+        node.kind = kind;
+      }
+      children = node.children;
+    }
+  }
+
+  const sortNodes = (nodes: ProjectFileTreeNode[]): ProjectFileTreeNode[] =>
+    nodes
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+      .sort((left, right) => {
+        if (left.kind !== right.kind) return left.kind === "directory" ? -1 : 1;
+        return left.name.localeCompare(right.name, undefined, { numeric: true });
+      });
+
+  return sortNodes(root.children);
+}
+
+function projectFileNodeMatches(node: ProjectFileTreeNode, query: string): boolean {
+  if (!query) return true;
+  return node.name.toLocaleLowerCase().includes(query) || node.children.some((child) => projectFileNodeMatches(child, query));
+}
+
+function getProjectFileGlyphClass(node: ProjectFileTreeNode): string {
+  if (node.kind === "directory") return "folder";
+  const extension = node.name.split(".").pop()?.toLocaleLowerCase();
+  if (extension === "json") return "json";
+  if (extension === "ts" || extension === "tsx" || extension === "js" || extension === "jsx") return "script";
+  if (extension === "css" || extension === "scss") return "style";
+  if (extension === "md") return "markdown";
+  if (node.name.startsWith(".")) return "config";
+  return "default";
+}
+
+function LegacyBrowserWorkspace({
+  tabs,
+  threadId
+}: {
+  tabs: RuntimeThreadSnapshot["browserTabs"];
+  threadId: string | null;
+}) {
+  const activeTab = tabs.find((tab) => tab.isActive) ?? tabs[0];
+  if (!activeTab || !threadId) {
+    return <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" />;
+  }
+
+  return (
+    <section className="browser-workspace" aria-label="浏览器">
+      <div className="browser-tab-strip" role="tablist" aria-label="浏览器标签">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            className={`browser-tab ${tab.id === activeTab.id ? "active" : ""}`}
+            role="tab"
+            aria-selected={tab.id === activeTab.id}
+            title={tab.url}
+            onClick={() => void window.codexh.focusBrowserTab({ threadId, tabId: tab.id })}
+          >
+            <IconGlobe />
+            <span>{tab.title || tab.url}</span>
+          </button>
+        ))}
+      </div>
+      <div className="browser-location" title={activeTab.url}>{activeTab.url}</div>
+      <iframe
+        key={`${activeTab.id}:${activeTab.url}`}
+        className="browser-frame"
+        src={activeTab.url}
+        title={activeTab.title || "任务浏览器"}
+      />
+    </section>
+  );
+}
+
+function TerminalWorkspace({
+  tabs,
+  activeSessionId,
+  shell,
+  cwd,
+  output,
+  input,
+  scrollRef,
+  onInputChange,
+  onSubmit,
+  onSelectTab,
+  onAddTab,
+  onCloseTab,
+  hasThread
+}: {
+  tabs: TerminalWorkspaceTab[];
+  activeSessionId: string | null;
+  shell: string;
+  cwd: string;
+  output: string;
+  input: string;
+  scrollRef: React.RefObject<HTMLPreElement | null>;
+  onInputChange: (value: string) => void;
+  onSubmit: () => void;
+  onSelectTab: (sessionId: string) => void;
+  onAddTab: () => void;
+  onCloseTab: (sessionId: string) => void;
+  hasThread: boolean;
+}) {
+  if (!hasThread) {
+    return <WorkspaceEmptyState icon={<IconTerminal />} message="选择一个任务后即可使用终端。" />;
+  }
+
+  if (tabs.length === 0) {
+    return (
+      <section className="terminal-workspace" aria-label="终端">
+        <WorkspaceSubtabStrip items={[]} addLabel="新建终端" onAdd={onAddTab} />
+        <WorkspaceEmptyState icon={<IconTerminal />} message="新建一个终端后即可开始输入命令。" />
+      </section>
+    );
+  }
+
+  return (
+    <section className="terminal-workspace" aria-label="终端">
+      <WorkspaceSubtabStrip
+        items={tabs.map((tab) => ({
+          id: tab.id,
+          label: tab.title,
+          title: tab.title,
+          active: tab.id === activeSessionId,
+          icon: <IconTerminal />,
+          onClick: () => onSelectTab(tab.id),
+          onClose: () => onCloseTab(tab.id)
+        }))}
+        addLabel="新建终端"
+        onAdd={onAddTab}
+      />
+      <div className="terminal-heading">
+        <span className="terminal-heading-icon" aria-hidden="true"><IconTerminal /></span>
+        <div>
+          <strong>{shell}</strong>
+          <span title={cwd}>{cwd || "正在连接终端"}</span>
+        </div>
+      </div>
+      <pre ref={scrollRef} className="terminal-output" aria-live="polite">
+        {output || " "}
+      </pre>
+      <div className="terminal-composer">
+        <span className="terminal-prompt" aria-hidden="true">&gt;</span>
+        <input
+          value={input}
+          onChange={(event) => onInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              onSubmit();
+            }
+          }}
+          placeholder="输入命令"
+          aria-label="终端命令"
+          spellCheck={false}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ProjectPreviewWorkspace({
+  tabs,
+  selectedPath,
+  preview,
+  loading,
+  onSelectTab,
+  onCloseTab
+}: {
+  tabs: string[];
+  selectedPath: string | null;
+  preview: PreviewCacheEntry | null;
+  loading: boolean;
+  onSelectTab: (path: string) => void;
+  onCloseTab: (path: string) => void;
+}) {
+  if (tabs.length === 0) {
+    return <WorkspaceEmptyState icon={<IconEye />} message={loading ? "正在读取项目文件..." : "选择一个文件进行查看"} />;
+  }
+
+  const currentPath = selectedPath ?? tabs[0];
+  if (!currentPath) {
+    return <WorkspaceEmptyState icon={<IconEye />} message="选择一个文件进行查看" />;
+  }
+
+  return (
+    <section className="project-preview-workspace" aria-label="文件查看">
+      <WorkspaceSubtabStrip
+        items={tabs.map((path) => ({
+          id: path,
+          label: path.split(/[\\/]/).pop() || path,
+          title: path,
+          active: path === currentPath,
+          icon: <IconFile />,
+          onClick: () => onSelectTab(path),
+          onClose: () => onCloseTab(path)
+        }))}
+      />
+      <header className="project-preview-header project-preview-breadcrumb" title={currentPath}>
+        <IconFile />
+        {currentPath.split(/[\\/]/).map((segment, index, segments) => (
+          <span key={`${segment}-${index}`} className={index === segments.length - 1 ? "is-current" : ""}>
+            {index > 0 ? <i aria-hidden><IconChevronRight /></i> : null}
+            {segment}
+          </span>
+        ))}
+      </header>
+      {preview ? (
+        <>
+          <ol className="project-preview-code" aria-label={`${currentPath} 代码内容`}>
+            {preview.content.split(/\r?\n/).map((line, index) => (
+              <li key={`${currentPath}-line-${index}`}>
+                <code>{renderCodePreviewLine(line, `${currentPath}-${index}`)}</code>
+              </li>
+            ))}
+          </ol>
+          {preview.truncated ? <div className="project-preview-note">文件内容过长，仅显示前 512 KB。</div> : null}
+        </>
+      ) : (
+        <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取文件..." />
+      )}
+    </section>
+  );
+}
+
+function renderCodePreviewLine(line: string, keyPrefix: string): ReactNode[] {
+  const tokens: ReactNode[] = [];
+  const tokenPattern = /("(?:\\.|[^"\\])*")(?=\s*:)|("(?:\\.|[^"\\])*")|(\/\/.*$|#.*$)|\b(true|false|null|undefined|const|let|var|function|return|import|from|export|type|interface|async|await|if|else)\b|\b(-?\d+(?:\.\d+)?)\b/g;
+  let cursor = 0;
+  let index = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenPattern.exec(line)) !== null) {
+    if (match.index > cursor) {
+      tokens.push(<span key={`${keyPrefix}-text-${index}`}>{line.slice(cursor, match.index)}</span>);
+      index += 1;
+    }
+    const className = match[1]
+      ? "code-preview-key"
+      : match[2]
+        ? "code-preview-string"
+        : match[3]
+          ? "code-preview-comment"
+          : match[4]
+            ? "code-preview-keyword"
+            : "code-preview-number";
+    tokens.push(<span key={`${keyPrefix}-token-${index}`} className={className}>{match[0]}</span>);
+    cursor = tokenPattern.lastIndex;
+    index += 1;
+  }
+
+  if (cursor < line.length) {
+    tokens.push(<span key={`${keyPrefix}-tail-${index}`}>{line.slice(cursor)}</span>);
+  }
+
+  return tokens;
+}
+
+function BrowserWorkspace({
+  tabs,
+  threadId,
+  onCloseTab
+}: {
+  tabs: RuntimeThreadSnapshot["browserTabs"];
+  threadId: string | null;
+  onCloseTab: (tabId: string) => void;
+}) {
+  const activeTab = tabs.find((tab) => tab.isActive) ?? tabs[0];
+  if (!activeTab || !threadId) {
+    return <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" />;
+  }
+
+  return (
+    <section className="browser-workspace" aria-label="浏览器">
+      <WorkspaceSubtabStrip
+        items={tabs.map((tab) => ({
+          id: tab.id,
+          label: tab.title || tab.url,
+          title: tab.url,
+          active: tab.id === activeTab.id,
+          icon: <IconGlobe />,
+          onClick: () => void window.codexh.focusBrowserTab({ threadId, tabId: tab.id }),
+          onClose: () => onCloseTab(tab.id)
+        }))}
+      />
+      <div className="browser-location" title={activeTab.url}>{activeTab.url}</div>
+      <iframe
+        key={`${activeTab.id}:${activeTab.url}`}
+        className="browser-frame"
+        src={activeTab.url}
+        title={activeTab.title || "任务浏览器"}
+      />
+    </section>
+  );
+}
+
+function WorkspaceEmptyState({ icon, message }: { icon: ReactNode; message: string }) {
+  return (
+    <div className="right-workspace-empty-state">
+      <span aria-hidden="true">{icon}</span>
+      <p>{message}</p>
     </div>
   );
 }
@@ -3210,15 +4293,22 @@ function FileChangeSummary({ files }: { files: FileChangeSummaryItem[] }) {
       <div className="file-change-summary-list">
         {files.map((file) => (
           <div key={file.path} className="file-change-summary-row">
-            <code>{file.path}</code>
-            {file.additions || file.deletions ? (
-              <span className="file-change-row-counts">
-                {file.additions ? <b>+{file.additions}</b> : null}
-                {file.deletions ? <i>-{file.deletions}</i> : null}
+            <span className="file-change-row-icon" aria-hidden><IconFile /></span>
+            <div className="file-change-row-copy">
+              <strong>{getFileLeafName(file.path)}</strong>
+              <code>{getFileParentPath(file.path)}</code>
+            </div>
+            <div className="file-change-row-meta">
+              <span className={`file-change-row-badge ${getFileChangeActionClass(file.action)}`}>
+                {formatFileChangeAction(file.action)}
               </span>
-            ) : (
-              <span className="file-change-row-action">{formatFileChangeAction(file.action)}</span>
-            )}
+              {file.additions || file.deletions ? (
+                <span className="file-change-row-counts">
+                  {file.additions ? <b>+{file.additions}</b> : null}
+                  {file.deletions ? <i>-{file.deletions}</i> : null}
+                </span>
+              ) : null}
+            </div>
           </div>
         ))}
       </div>
@@ -3307,6 +4397,27 @@ function formatFileChangeAction(action: FileChangeAction) {
     default:
       return "已编辑";
   }
+}
+
+function getFileChangeActionClass(action: FileChangeAction) {
+  switch (action) {
+    case "created":
+      return "is-created";
+    case "deleted":
+      return "is-deleted";
+    default:
+      return "is-modified";
+  }
+}
+
+function getFileLeafName(filePath: string) {
+  return filePath.split(/[\\/]/).pop() || filePath;
+}
+
+function getFileParentPath(filePath: string) {
+  const normalized = filePath.replace(/\\/g, "/");
+  const index = normalized.lastIndexOf("/");
+  return index === -1 ? "./" : normalized.slice(0, index + 1);
 }
 
 function PlanTimeline({ state }: { state: GpaState }) {
@@ -3521,6 +4632,116 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
   );
 }
 
+function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
+  const runningCall = toolCalls.find((toolCall) => toolCall.status === "running" || toolCall.status === "pending");
+  const failed = toolCalls.some((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
+  const status = runningCall ? "in_progress" : failed ? "failed" : "completed";
+  const summary = getToolActivitySummary(toolCalls, runningCall);
+
+  return (
+    <details className={`tool-activity-group ${status}`} open={failed}>
+      <summary className="tool-activity-summary">
+        <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={runningCall?.toolName ?? toolCalls[0]?.toolName ?? ""} /></span>
+        <span className="tool-activity-summary-copy">
+          <strong>{summary.title}</strong>
+          {summary.detail ? <span>{summary.detail}</span> : null}
+        </span>
+        {runningCall ? <span className="tool-activity-running">进行中</span> : null}
+        <span className="tool-activity-chevron" aria-hidden />
+      </summary>
+      <div className="tool-activity-details">
+        {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} />)}
+      </div>
+    </details>
+  );
+}
+
+function ToolActivityRow({ toolCall }: { toolCall: ToolCallRecord }) {
+  const input = parseTimelineJson(toolCall.argumentsJson);
+  const result = parseTimelineJson(toolCall.resultJson);
+  const command = getTimelineCommand(toolCall.toolName, input);
+  const isRunning = toolCall.status === "running" || toolCall.status === "pending";
+  const failed = toolCall.status === "failed" || toolCall.status === "denied";
+  const status = isRunning ? "in_progress" : failed ? "failed" : "completed";
+  const duration = toolCall.completedAt
+    ? Math.max(0, Date.parse(toolCall.completedAt) - Date.parse(toolCall.startedAt))
+    : null;
+  const output = getTimelineOutput(result);
+  const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
+
+  return (
+    <article className={`tool-activity-row ${status}`}>
+      <span className="tool-activity-row-icon" aria-hidden><ToolActivityIcon toolName={toolCall.toolName} /></span>
+      <div className="tool-activity-row-copy">
+        <div className="tool-activity-row-head">
+          <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
+          <span>{isRunning ? "正在执行" : failed ? "执行失败" : "已完成"}</span>
+          {duration !== null ? <time>{formatDuration(duration)}</time> : null}
+        </div>
+        <code>{isFileWriteTool(toolCall.toolName) ? getFileWriteTarget(input) : `$ ${command}`}</code>
+        {localUrl ? <LocalServerPreview url={localUrl} /> : null}
+        {output ? (
+          <details className="tool-activity-output" open={failed}>
+            <summary>{failed ? "查看错误输出" : "查看输出"}</summary>
+            <pre>{output}</pre>
+          </details>
+        ) : isRunning ? <span className="tool-activity-row-progress">等待工具返回...</span> : null}
+      </div>
+    </article>
+  );
+}
+
+function ToolActivityIcon({ toolName }: { toolName: string }) {
+  if (toolName === "shell.exec" || toolName === "execute_command") return <IconTerminal />;
+  if (isFileWriteTool(toolName)) return <IconFileChanges />;
+  if (toolName === "fs.read_file") return <IconFile />;
+  if (toolName === "fs.read_directory") return <IconFolder />;
+  if (toolName === "code.search" || toolName === "knowledge.search") return <IconSearch />;
+  if (toolName.startsWith("browser.") || toolName.startsWith("web_search.")) return <IconGlobe />;
+  return <IconTerminal />;
+}
+
+function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord) {
+  if (runningCall) {
+    const input = parseTimelineJson(runningCall.argumentsJson);
+    return {
+      title: getToolProcessingLabel(runningCall.toolName),
+      detail: isFileWriteTool(runningCall.toolName) ? getFileWriteTarget(input) : getTimelineCommand(runningCall.toolName, input)
+    };
+  }
+
+  const commandCount = toolCalls.filter((toolCall) => toolCall.toolName === "shell.exec" || toolCall.toolName === "execute_command").length;
+  const fileCount = toolCalls.filter((toolCall) => isFileWriteTool(toolCall.toolName)).length;
+  const failed = toolCalls.some((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
+
+  if (failed) return { title: "部分步骤执行失败", detail: `${toolCalls.length} 个操作` };
+  if (fileCount && commandCount) return { title: `编辑了 ${fileCount} 个文件，运行了 ${commandCount} 个命令` };
+  if (commandCount) return { title: commandCount === 1 ? "运行了 1 个命令" : `运行了 ${commandCount} 个命令` };
+  if (fileCount) return { title: fileCount === 1 ? "编辑了 1 个文件" : `编辑了 ${fileCount} 个文件` };
+  return { title: toolCalls.length === 1 ? getToolActivityLabel(toolCalls[0]?.toolName ?? "") : `调用了 ${toolCalls.length} 个工具` };
+}
+
+function getToolActivityLabel(toolName: string) {
+  if (toolName === "shell.exec" || toolName === "execute_command") return "运行命令";
+  if (toolName === "fs.read_file") return "读取文件";
+  if (toolName === "fs.read_directory") return "读取目录";
+  if (isFileWriteTool(toolName)) return "写入文件";
+  if (toolName === "code.search" || toolName === "knowledge.search") return "搜索代码";
+  if (toolName.startsWith("browser.")) return "操作浏览器";
+  return formatToolName(toolName);
+}
+
+function getFileWriteTarget(input: Record<string, unknown>) {
+  const path = input.path ?? input.filePath;
+  if (typeof path === "string" && path.trim()) return path;
+  const patch = input.patch;
+  if (typeof patch === "string") {
+    const match = patch.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/m);
+    if (match?.[1]) return match[1];
+  }
+  return "文件变更";
+}
+
 function LocalServerPreview({ url }: { url: string }) {
   return (
     <section className="local-server-preview">
@@ -3615,10 +4836,15 @@ function renderRole(role: string, assistantLabel = "Assistant") {
 }
 
 function renderTranscriptMessage(message: MessageRecord, assistantLabel: string) {
+  const displayContent = getDisplayMessageContent(message);
+  if (message.role === "assistant" && !displayContent.trim()) {
+    return null;
+  }
+
   if (message.role === "user") {
     return (
       <article id={`transcript-message-${message.id}`} key={message.id} className="message-card user">
-        {renderMessageContent(message)}
+        {renderMessageContent(message, displayContent)}
       </article>
     );
   }
@@ -3629,23 +4855,23 @@ function renderTranscriptMessage(message: MessageRecord, assistantLabel: string)
         <span className={`message-author ${message.role}`}>{renderRole(message.role, assistantLabel)}</span>
         <span className="timestamp">{formatRelativeTime(message.createdAt)}</span>
       </div>
-      <div className="message-flat-body">{renderMessageContent(message)}</div>
+      <div className="message-flat-body">{renderMessageContent(message, displayContent)}</div>
     </article>
   );
 }
 
-function renderMessageContent(message: MessageRecord) {
+function renderMessageContent(message: MessageRecord, content = message.content) {
   if (message.role === "user") {
     return (
       <div className="message-user-bubble">
-        <div className="message-user-text">{message.content}</div>
+        <div className="message-user-text">{content}</div>
       </div>
     );
   }
 
-  const eventBlocks = parseMessageEventBlocks(message);
+  const eventBlocks = parseMessageEventBlocks({ ...message, content });
   if (!eventBlocks || eventBlocks.length === 0) {
-    return renderMarkdownDocument(message.content, `${message.id}-markdown`, "message-markdown");
+    return renderMarkdownDocument(content, `${message.id}-markdown`, "message-markdown");
   }
 
   return (
@@ -4324,6 +5550,31 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
           </pre>
         </div>
       );
+    case "table":
+      return (
+        <div key={key} className="markdown-table-wrap">
+          <table className="markdown-table">
+            <thead>
+              <tr>
+                {block.headers.map((header, index) => (
+                  <th key={`${key}-header-${index}`}>{renderMarkdownInline(header, `${key}-header-${index}`)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, rowIndex) => (
+                <tr key={`${key}-row-${rowIndex}`}>
+                  {block.headers.map((_, columnIndex) => (
+                    <td key={`${key}-cell-${rowIndex}-${columnIndex}`}>
+                      {renderMarkdownInline(row[columnIndex] ?? "", `${key}-cell-${rowIndex}-${columnIndex}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
     default:
       return null;
   }
@@ -4373,7 +5624,7 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
   return nodes;
 }
 
-function parseMarkdownBlocks(content: string): MarkdownBlock[] {
+export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
   const normalized = content.replace(/\r\n/g, "\n").trim();
   if (!normalized) {
     return [];
@@ -4420,7 +5671,8 @@ function parseMarkdownBlocks(content: string): MarkdownBlock[] {
     flushQuote();
   };
 
-  for (const rawLine of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const rawLine = lines[lineIndex];
     const trimmed = rawLine.trim();
 
     if (codeFence) {
@@ -4448,6 +5700,21 @@ function parseMarkdownBlocks(content: string): MarkdownBlock[] {
 
     if (!trimmed) {
       flushTextualState();
+      continue;
+    }
+
+    const nextLine = lines[lineIndex + 1]?.trim();
+    if (isMarkdownTableRow(trimmed) && nextLine && isMarkdownTableDivider(nextLine)) {
+      flushTextualState();
+      const headers = splitMarkdownTableRow(trimmed);
+      const rows: string[][] = [];
+      lineIndex += 2;
+      while (lineIndex < lines.length && isMarkdownTableRow(lines[lineIndex].trim())) {
+        rows.push(normalizeMarkdownTableRow(splitMarkdownTableRow(lines[lineIndex].trim()), headers.length));
+        lineIndex += 1;
+      }
+      lineIndex -= 1;
+      blocks.push({ kind: "table", headers, rows });
       continue;
     }
 
@@ -4510,6 +5777,41 @@ function parseMarkdownBlocks(content: string): MarkdownBlock[] {
   }
 
   return blocks;
+}
+
+function isMarkdownTableRow(line: string): boolean {
+  return /^\|?.+\|.+\|?$/.test(line);
+}
+
+function isMarkdownTableDivider(line: string): boolean {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  let escaped = false;
+  for (const character of trimmed) {
+    if (escaped) {
+      cell += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function normalizeMarkdownTableRow(cells: string[], columnCount: number): string[] {
+  return Array.from({ length: columnCount }, (_, index) => cells[index] ?? "");
 }
 
 function isFileReferenceLink(href: string) {
@@ -4789,6 +6091,33 @@ function IconChevronRight() {
   );
 }
 
+function getDisplayMessageContent(message: MessageRecord): string {
+  if (message.role !== "assistant") {
+    return message.content;
+  }
+
+  return stripAssistantToolMarkup(message.content);
+}
+
+function stripAssistantToolMarkup(content: string): string {
+  const visible = content
+    .replace(/<tool_calls\b[^>]*>[\s\S]*?<\/tool_calls\s*>/gi, "")
+    .replace(/<tool_result\b[^>]*>[\s\S]*?<\/tool_result\s*>/gi, "")
+    .replace(/<tool_calls\b[^>]*>[\s\S]*$/i, "")
+    .replace(/<tool_result\b[^>]*>[\s\S]*$/i, "")
+    .replace(/<\/tool_(?:calls|result)\s*>/gi, "")
+    .replace(/\n{3,}/g, "\n\n");
+  const tagStart = visible.lastIndexOf("<");
+  if (tagStart === -1) {
+    return visible;
+  }
+
+  const trailing = visible.slice(tagStart).toLowerCase();
+  return "<tool_calls".startsWith(trailing) || "<tool_result".startsWith(trailing)
+    ? visible.slice(0, tagStart)
+    : visible;
+}
+
 function IconTerminal() {
   return (
     <SvgIcon>
@@ -4831,6 +6160,24 @@ function IconFolder() {
   return (
     <SvgIcon>
       <path d="M3.5 8.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+    </SvgIcon>
+  );
+}
+
+function IconFile() {
+  return (
+    <SvgIcon>
+      <path d="M6.5 3.5h7l4 4v13h-11z" />
+      <path d="M13.5 3.5v4h4" />
+    </SvgIcon>
+  );
+}
+
+function IconEye() {
+  return (
+    <SvgIcon>
+      <path d="M3.5 12s3-5 8.5-5 8.5 5 8.5 5-3 5-8.5 5-8.5-5-8.5-5z" />
+      <circle cx="12" cy="12" r="2.5" />
     </SvgIcon>
   );
 }

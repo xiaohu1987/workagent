@@ -138,11 +138,15 @@ function registerIpc(): void {
   ipcMain.handle("threads:update-model", (_event, payload) =>
     backend.updateThreadModelSelection(payload.threadId, payload.providerId, payload.modelId)
   );
-  ipcMain.handle("terminal:open", (_event, threadId: string) => backend.openTerminal(threadId));
-  ipcMain.handle("terminal:write", (_event, payload: { threadId: string; input: string }) =>
-    backend.writeTerminal(payload.threadId, payload.input)
+  ipcMain.handle("terminal:open", (_event, payload: { threadId: string; sessionId?: string }) =>
+    backend.openTerminal(payload.threadId, payload.sessionId)
   );
-  ipcMain.handle("terminal:close", (_event, threadId: string) => backend.closeTerminal(threadId));
+  ipcMain.handle("terminal:write", (_event, payload: { threadId: string; input: string; sessionId?: string }) =>
+    backend.writeTerminal(payload.threadId, payload.input, payload.sessionId)
+  );
+  ipcMain.handle("terminal:close", (_event, payload: { threadId: string; sessionId?: string }) =>
+    backend.closeTerminal(payload.threadId, payload.sessionId)
+  );
   ipcMain.handle("shell:open-external", (_event, url: string) => shell.openExternal(url));
   ipcMain.handle("skills:list", () => backend.listSkills());
   ipcMain.handle("plugins:list", () => backend.listPlugins());
@@ -171,6 +175,7 @@ function registerIpc(): void {
   ipcMain.handle("browser:reload", (_event, payload) => backend.reloadBrowserTab(payload.threadId, payload.tabId));
   ipcMain.handle("browser:back", (_event, payload) => backend.goBackBrowserTab(payload.threadId, payload.tabId));
   ipcMain.handle("browser:forward", (_event, payload) => backend.goForwardBrowserTab(payload.threadId, payload.tabId));
+  ipcMain.handle("browser:close", (_event, payload) => backend.closeBrowserTab(payload.threadId, payload.tabId));
   ipcMain.handle("approval:resolve", (_event, payload) =>
     backend.resolveApproval(payload.id, payload.resolution)
   );
