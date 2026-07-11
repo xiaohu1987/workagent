@@ -28,6 +28,7 @@ import {
 
 type SettingsTab = "general" | "knowledge" | "provider" | "skills" | "agent" | "mcp";
 type RightWorkspaceTab = "preview" | "terminal" | "browser" | "files";
+type ResizePane = "sidebar" | "right-workspace";
 
 type ProjectFileEntry = {
   path: string;
@@ -201,11 +202,37 @@ const PROVIDER_TYPE_OPTIONS: ProviderTypeOption[] = [
   { value: "mock", label: "Mock Provider" }
 ];
 
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 520;
+const MIN_RIGHT_WORKSPACE_WIDTH = 300;
+const MAX_RIGHT_WORKSPACE_WIDTH = 720;
+const MIN_CHAT_WIDTH = 380;
+
+function getStoredPanelWidth(key: string, fallback: number, minimum: number, maximum: number): number {
+  try {
+    const value = Number(window.localStorage.getItem(key));
+    return Number.isFinite(value) && value >= minimum && value <= maximum ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function clampPanelWidth(value: number, minimum: number, maximum: number): number {
+  return Math.round(Math.min(Math.max(value, minimum), maximum));
+}
+
 export function App() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    getStoredPanelWidth("codexh.sidebar-width", 288, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+  );
+  const [rightWorkspaceWidth, setRightWorkspaceWidth] = useState(() =>
+    getStoredPanelWidth("codexh.right-workspace-width", 410, MIN_RIGHT_WORKSPACE_WIDTH, MAX_RIGHT_WORKSPACE_WIDTH)
+  );
+  const [resizingPane, setResizingPane] = useState<ResizePane | null>(null);
   const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("terminal");
   const [terminalTabsByThread, setTerminalTabsByThread] = useState<Record<string, TerminalWorkspaceTab[]>>({});
   const [activeTerminalTabByThread, setActiveTerminalTabByThread] = useState<Record<string, string>>({});
@@ -221,6 +248,7 @@ export function App() {
   >({});
   const [isProjectFilesLoading, setIsProjectFilesLoading] = useState(false);
   const selectedThreadIdRef = useRef<string | null>(null);
+  const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
@@ -279,8 +307,58 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    // Do not carry a collapsed/hidden state into a new app session.
+    setIsSidebarCollapsed(false);
+    setIsTerminalOpen(false);
+    setSidebarWidth((current) =>
+      current >= MIN_SIDEBAR_WIDTH && current <= MAX_SIDEBAR_WIDTH ? current : 288
+    );
+    setRightWorkspaceWidth((current) =>
+      current >= MIN_RIGHT_WORKSPACE_WIDTH && current <= MAX_RIGHT_WORKSPACE_WIDTH ? current : 410
+    );
+  }, []);
+
+  useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
+
+  useEffect(() => {
+    window.localStorage.setItem("codexh.sidebar-width", String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    window.localStorage.setItem("codexh.right-workspace-width", String(rightWorkspaceWidth));
+  }, [rightWorkspaceWidth]);
+
+  useEffect(() => {
+    if (!resizingPane) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const bounds = appShellRef.current?.getBoundingClientRect();
+      if (!bounds) {
+        return;
+      }
+      const availableWidth = bounds.width;
+      if (resizingPane === "sidebar") {
+        const maximum = Math.min(MAX_SIDEBAR_WIDTH, availableWidth - rightWorkspaceWidth - MIN_CHAT_WIDTH - 16);
+        setSidebarWidth(clampPanelWidth(event.clientX - bounds.left, MIN_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, maximum)));
+      } else {
+        const maximum = Math.min(MAX_RIGHT_WORKSPACE_WIDTH, availableWidth - sidebarWidth - MIN_CHAT_WIDTH - 16);
+        setRightWorkspaceWidth(clampPanelWidth(bounds.right - event.clientX, MIN_RIGHT_WORKSPACE_WIDTH, Math.max(MIN_RIGHT_WORKSPACE_WIDTH, maximum)));
+      }
+    };
+    const stopResizing = () => setResizingPane(null);
+    document.body.classList.add("panel-resizing");
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResizing, { once: true });
+    return () => {
+      document.body.classList.remove("panel-resizing");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResizing);
+    };
+  }, [resizingPane, rightWorkspaceWidth, sidebarWidth]);
 
   function selectThreadId(nextThreadId: string | null) {
     selectedThreadIdRef.current = nextThreadId;
@@ -1742,9 +1820,14 @@ export function App() {
 
   return (
     <div
+      ref={appShellRef}
       className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
         isTerminalOpen ? "terminal-open" : ""
       }`}
+      style={{
+        "--sidebar-pane-width": `${sidebarWidth}px`,
+        "--right-workspace-pane-width": `${rightWorkspaceWidth}px`
+      } as React.CSSProperties}
     >
       <header className="windowbar">
         <div className="windowbar-left">
@@ -1858,6 +1941,14 @@ export function App() {
           </span>
         </button>
       </aside>
+
+      {!isSidebarCollapsed ? (
+        <PanelResizeHandle
+          pane="sidebar"
+          active={resizingPane === "sidebar"}
+          onPointerDown={() => setResizingPane("sidebar")}
+        />
+      ) : null}
 
       <main className="workspace">
         {!isTerminalOpen ? (
@@ -2047,6 +2138,14 @@ export function App() {
           </footer>
         </section>
       </main>
+
+      {isTerminalOpen ? (
+        <PanelResizeHandle
+          pane="right-workspace"
+          active={resizingPane === "right-workspace"}
+          onPointerDown={() => setResizingPane("right-workspace")}
+        />
+      ) : null}
 
       {isTerminalOpen ? (
         <RightWorkspacePanel
@@ -2837,6 +2936,29 @@ export function App() {
           )
         : null}
     </div>
+  );
+}
+
+function PanelResizeHandle({
+  pane,
+  active,
+  onPointerDown
+}: {
+  pane: ResizePane;
+  active: boolean;
+  onPointerDown: () => void;
+}) {
+  return (
+    <div
+      className={`panel-resize-handle ${pane} ${active ? "is-active" : ""}`}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={pane === "sidebar" ? "调整侧边栏宽度" : "调整右侧工作区宽度"}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        onPointerDown();
+      }}
+    />
   );
 }
 
