@@ -119,6 +119,7 @@ function reportStartupError(error: unknown): void {
 
 function registerIpc(): void {
   ipcMain.handle("threads:list", () => backend.listThreads());
+  ipcMain.handle("threads:search", (_event, query: string) => backend.searchThreads(query));
   ipcMain.handle("threads:create", (_event, payload) => backend.createThread(payload));
   ipcMain.handle("projects:choose-directory", async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({
@@ -139,13 +140,32 @@ function registerIpc(): void {
     });
     return result.canceled ? [] : result.filePaths;
   });
+  ipcMain.handle("knowledge:choose-files", async () => {
+    const result = await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] });
+    return result.canceled ? [] : result.filePaths;
+  });
+  ipcMain.handle("knowledge:choose-folders", async () => {
+    const result = await dialog.showOpenDialog({ properties: ["openDirectory", "multiSelections"] });
+    return result.canceled ? [] : result.filePaths;
+  });
   ipcMain.handle("projects:list-files", (_event, threadId: string) => backend.listProjectFiles(threadId));
   ipcMain.handle("projects:read-file", (_event, payload: { threadId: string; path: string }) =>
     backend.readProjectFile(payload.threadId, payload.path)
   );
   ipcMain.handle("threads:delete", (_event, threadId: string) => backend.deleteThread(threadId));
   ipcMain.handle("threads:snapshot", (_event, threadId: string) => backend.getThreadSnapshot(threadId));
-  ipcMain.handle("threads:send", (_event, payload) => backend.sendMessage(payload.threadId, payload.content));
+  ipcMain.handle("threads:send", (_event, payload) =>
+    backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)
+  );
+  ipcMain.handle("attachments:import", (_event, payload) =>
+    backend.importAttachments(payload.threadId, payload.attachments ?? [])
+  );
+  ipcMain.handle("attachments:preview", (_event, payload) =>
+    backend.getAttachmentDataUrl(payload.threadId, payload.absolutePath)
+  );
+  ipcMain.handle("attachments:preview-local", (_event, payload) =>
+    backend.getLocalImagePreview(payload.absolutePath)
+  );
   ipcMain.handle("threads:reject-multimodal", (_event, payload: { threadId: string; content: string }) =>
     backend.rejectUnsupportedMultimodalInput(payload.threadId, payload.content)
   );
@@ -172,6 +192,9 @@ function registerIpc(): void {
     }
     return shell.openPath(targetPath);
   });
+  ipcMain.handle("threads:open-file-location", (_event, payload: { threadId: string; path: string }) =>
+    backend.openFileLocation(payload.threadId, payload.path)
+  );
   ipcMain.handle("skills:list", async (_event, cwd?: string | null) => {
     await backend.reloadSkills(cwd);
     return backend.listSkills();
@@ -193,7 +216,15 @@ function registerIpc(): void {
     return config;
   });
   ipcMain.handle("config:save", (_event, config) => backend.saveConfig(config));
+  ipcMain.handle("mcp:list", () => backend.listMcpServers());
+  ipcMain.handle("mcp:test", (_event, config) => backend.testMcpServer(config));
   ipcMain.handle("knowledge:import", (_event, payload) => backend.importKnowledge(payload));
+  ipcMain.handle("knowledge:list", () => backend.listKnowledgeBaseSummaries());
+  ipcMain.handle("knowledge:documents", (_event, knowledgeBaseId: string) =>
+    backend.listKnowledgeBaseDocuments(knowledgeBaseId)
+  );
+  ipcMain.handle("knowledge:refresh", (_event, knowledgeBaseId: string) => backend.refreshKnowledgeBase(knowledgeBaseId));
+  ipcMain.handle("knowledge:delete", (_event, knowledgeBaseId: string) => backend.deleteKnowledgeBase(knowledgeBaseId));
   ipcMain.handle("browser:open", (_event, payload) => backend.openBrowserTab(payload.threadId, payload.url));
   ipcMain.handle("browser:navigate", (_event, payload) =>
     backend.navigateBrowserTab(payload.threadId, payload.tabId, payload.url)
@@ -213,6 +244,9 @@ function registerIpc(): void {
   );
   ipcMain.handle("gpa:set-full-access", (_event, payload: { threadId: string; fullAccess: boolean }) =>
     backend.setGpaFullAccess(payload.threadId, payload.fullAccess)
+  );
+  ipcMain.handle("knowledge:set-enabled", (_event, payload: { threadId: string; knowledgeEnabled: boolean }) =>
+    backend.setKnowledgeEnabled(payload.threadId, payload.knowledgeEnabled)
   );
   ipcMain.handle("models:fetch", (_event, payload) => backend.fetchProviderModels(payload));
   ipcMain.handle("models:test", (_event, payload) => backend.testProviderModel(payload));

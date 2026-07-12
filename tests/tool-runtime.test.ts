@@ -70,6 +70,24 @@ describe("ToolRuntime", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("lists MCP tools and blocks calls outside the discovered directory", async () => {
+    const runtime = new ToolRuntime();
+    const listMcpTools = vi.fn().mockResolvedValue([
+      { server: "stocks", name: "market_cap", description: "Read market cap", inputSchema: { type: "object" } }
+    ]);
+    const context = { cwd: process.cwd(), listMcpTools, requestApproval: vi.fn().mockResolvedValue(true) } as unknown as ToolRuntimeContext;
+
+    const directory = await runtime.execute({ id: "mcp-directory", name: "mcp.list_tools", arguments: {} }, context);
+    const blocked = await runtime.execute(
+      { id: "mcp-blocked", name: "mcp.call", arguments: { server: "stocks", tool: "missing", arguments: {} } },
+      context
+    );
+
+    expect(directory.ok).toBe(true);
+    expect(directory.content).toContain("market_cap");
+    expect(blocked).toMatchObject({ ok: false });
+  });
+
   it("maps read to the project directory reader instead of knowledge.read", async () => {
     const listFiles = vi.fn().mockResolvedValue(["hello.txt"]);
     const runtime = new ToolRuntime();

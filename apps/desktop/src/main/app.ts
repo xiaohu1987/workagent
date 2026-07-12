@@ -5,13 +5,18 @@ import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
 import { BrowserWindow, shell } from "electron";
 import type {
+  AttachmentImportInput,
   AppConfig,
   ArtifactRecord,
   BrowserTabRecord,
   GpaStage,
   GpaState,
   KnowledgeBaseRecord,
+  KnowledgeChunkRecord,
+  KnowledgeBaseSummary,
+  KnowledgeDocumentRecord,
   MessageRecord,
+  MessageAttachment,
   McpServerConfig,
   ModelProfile,
   PluginRecord,
@@ -102,8 +107,8 @@ export class DesktopBackend {
       getAccessibleMcpServerIdsForThread: async (threadId) =>
         this.getAccessibleMcpServerIdsForThread(threadId),
       listKnowledgeBases: async (threadId) => this.listVisibleKnowledgeBases(threadId),
-      searchKnowledge: async (query, ids) => this.#db.searchKnowledge(query, ids),
-      readKnowledgeConcept: async (conceptId) => this.#db.getKnowledgeConcept(conceptId),
+      searchKnowledge: async (query, ids) => this.#db.searchKnowledgeChunks(query, ids),
+      readKnowledgeConcept: async (conceptId) => this.#db.getKnowledgeChunk(conceptId) ?? this.#db.getKnowledgeConcept(conceptId),
       listFiles: async (dir) =>
         (await fs.readdir(dir, { withFileTypes: true })).map((entry) => entry.name),
       readFile: async (filePath) => fs.readFile(filePath, "utf8"),
@@ -138,6 +143,7 @@ export class DesktopBackend {
       getThreadOutputDir: async (threadId) => this.getThreadOutputDir(threadId),
       listMcpResources: async (server) => this.#mcp.listResources(server),
       listMcpResourceTemplates: async (server) => this.#mcp.listResourceTemplates(server),
+      listMcpTools: async (server) => this.#mcp.listTools(server ? [server] : undefined),
       readMcpResource: async (server, uri) => this.#mcp.readResource(server, uri),
       callMcpTool: async (server, tool, argumentsJson) =>
         this.#mcp.callTool(server, tool, argumentsJson),
@@ -154,6 +160,22 @@ export class DesktopBackend {
 
   public listThreads(): ThreadRecord[] {
     return this.#db.listThreads();
+  }
+
+  public searchThreads(query: string) {
+    return this.#db.searchThreads(query);
+  }
+
+  public listMcpServers() {
+    const statusById = new Map(this.#mcp.listStatuses().map((status) => [status.serverId, status]));
+    return this.#mcp.listConfigs().map((server) => ({
+      ...server,
+      status: statusById.get(server.id) ?? { serverId: server.id, state: server.enabled ? "idle" : "disabled" }
+    }));
+  }
+
+  public async testMcpServer(config: McpServerConfig) {
+    return this.#mcp.testConfig({ ...config, source: "config", pluginId: undefined });
   }
 
   public createThread(input: {
@@ -190,11 +212,12 @@ export class DesktopBackend {
     this.#runtime.forgetThread(threadId);
   }
 
-  public openTerminal(threadId: string, sessionId = "default") {
+  public async openTerminal(threadId: string, sessionId = "default") {
     const thread = this.#db.getThread(threadId);
+    const cwd = thread.cwd ?? await this.getThreadOutputDir(threadId);
     return this.#terminal.open(
       threadId,
-      thread.cwd ?? process.cwd(),
+      cwd,
       (data) => {
         void this.emitTerminalOutput(threadId, data, sessionId);
       },
@@ -202,11 +225,12 @@ export class DesktopBackend {
     );
   }
 
-  public writeTerminal(threadId: string, input: string, sessionId = "default"): void {
+  public async writeTerminal(threadId: string, input: string, sessionId = "default"): Promise<void> {
     const thread = this.#db.getThread(threadId);
+    const cwd = thread.cwd ?? await this.getThreadOutputDir(threadId);
     this.#terminal.write(
       threadId,
-      thread.cwd ?? process.cwd(),
+      cwd,
       input,
       (data) => {
         void this.emitTerminalOutput(threadId, data, sessionId);
@@ -297,11 +321,15 @@ export class DesktopBackend {
     await this.#runtime.setGpaFullAccess(threadId, fullAccess);
   }
 
-  public async sendMessage(threadId: string, content: string): Promise<void> {
+  public async setKnowledgeEnabled(threadId: string, knowledgeEnabled: boolean): Promise<void> {
+    await this.#runtime.setKnowledgeEnabled(threadId, knowledgeEnabled);
+  }
+
+  public async sendMessage(threadId: string, content: string, attachments: MessageAttachment[] = [], displayContent?: string): Promise<void> {
     const thread = this.#db.getThread(threadId);
     if (this.#db.listMessages(threadId).length === 0) {
       const updated = this.#db.updateThread(threadId, {
-        title: buildThreadTitleFromFirstMessage(content)
+        title: buildThreadTitleFromFirstMessage(displayContent || content)
       });
       await this.emit({
         type: "thread.updated",
@@ -312,7 +340,51 @@ export class DesktopBackend {
     }
 
     await this.refreshSkills(thread.cwd);
-    this.#runtime.submitUserInput(threadId, content);
+    this.#runtime.submitUserInput(threadId, content, attachments, displayContent);
+  }
+
+  public async importAttachments(threadId: string, inputs: AttachmentImportInput[]): Promise<MessageAttachment[]> {
+    const targetDir = path.join(this.#layout.attachmentsDir, threadId);
+    await fs.mkdir(targetDir, { recursive: true });
+    if (inputs.length > 16) throw new Error("一次最多添加 16 个附件。");
+    const attachments: MessageAttachment[] = [];
+    for (const input of inputs) {
+      const name = path.basename(input.name || input.path || "attachment");
+      const inputData = input.data ? Buffer.from(input.data) : input.path ? await fs.readFile(input.path) : null;
+      if (!inputData) throw new Error(`附件 ${name} 没有可读取内容。`);
+      if (inputData.byteLength > 20 * 1024 * 1024) throw new Error(`附件 ${name} 超过 20 MB 限制。`);
+      const mimeType = normalizeAttachmentMimeType(input.mimeType, name);
+      const isImage = mimeType.startsWith("image/");
+      if (isImage && inputData.byteLength > 10 * 1024 * 1024) throw new Error(`图片 ${name} 超过 10 MB 限制。`);
+      const digest = createHash("sha256").update(inputData).digest("hex");
+      const extension = path.extname(name) || extensionForMimeType(mimeType);
+      const absolutePath = path.join(targetDir, `${digest.slice(0, 24)}${extension.toLowerCase()}`);
+      try { await fs.access(absolutePath); } catch { await fs.writeFile(absolutePath, inputData); }
+      attachments.push({
+        id: randomUUID(), kind: isImage ? "image" : "file", name, mimeType, absolutePath,
+        sizeBytes: inputData.byteLength, source: "user"
+      });
+    }
+    return attachments;
+  }
+
+  public async getAttachmentDataUrl(threadId: string, absolutePath: string): Promise<string> {
+    const allowed = await this.isThreadAttachmentPath(threadId, absolutePath);
+    if (!allowed) throw new Error("该附件不属于当前对话。");
+    const mimeType = normalizeAttachmentMimeType(undefined, absolutePath);
+    if (!mimeType.startsWith("image/")) throw new Error("该附件不是可预览图片。");
+    const data = await fs.readFile(absolutePath);
+    if (data.byteLength > 20 * 1024 * 1024) throw new Error("图片过大，无法预览。");
+    return `data:${mimeType};base64,${data.toString("base64")}`;
+  }
+
+  public async getLocalImagePreview(absolutePath: string): Promise<string> {
+    const mimeType = normalizeAttachmentMimeType(undefined, absolutePath);
+    if (!mimeType.startsWith("image/")) throw new Error("该文件不是图片。");
+    const stat = await fs.stat(absolutePath);
+    if (!stat.isFile() || stat.size > 10 * 1024 * 1024) throw new Error("图片无法预览。");
+    const data = await fs.readFile(absolutePath);
+    return `data:${mimeType};base64,${data.toString("base64")}`;
   }
 
   public async rejectUnsupportedMultimodalInput(threadId: string, content: string): Promise<void> {
@@ -430,6 +502,19 @@ export class DesktopBackend {
     const timeoutId = setTimeout(() => timeout.abort(), 30_000);
 
     try {
+      if (input.model.supportsImageGeneration) {
+        if (!adapter.generateImage) {
+          throw new Error("当前供应商不支持 OpenAI 兼容图片生成接口。请使用 OpenAI Chat Completions 或 Gateway，并确认中转提供 /images/generations。");
+        }
+        const image = await adapter.generateImage({
+          model: input.model,
+          prompt: "A small blue square on a white background.",
+          abortSignal: timeout.signal
+        });
+        if (image.data.byteLength === 0) throw new Error("图片生成接口未返回有效图片数据。");
+        const latencyMs = Math.max(1, Math.round(performance.now() - startedAt));
+        return { latencyMs, outputTokens: 0, tokensPerSecond: 0 };
+      }
       const decision = await adapter.runTurn({
         systemPrompt:
           "You are testing a model connection. Return one compact JSON object with no tool calls.",
@@ -496,6 +581,7 @@ export class DesktopBackend {
       });
     }
     await this.refreshMcpConfiguration();
+    await this.#mcp.refresh();
   }
 
   public async updateThreadModelSelection(
@@ -648,6 +734,14 @@ export class DesktopBackend {
     return this.#browser.readPageText(threadId, tabId);
   }
 
+  public async openFileLocation(threadId: string, filePath: string): Promise<string> {
+    const thread = this.#db.getThread(threadId);
+    const workspaceRoot = thread.cwd ?? await this.getThreadOutputDir(threadId);
+    const resolvedRoot = path.resolve(workspaceRoot);
+    const absolutePath = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(resolvedRoot, filePath);
+    return shell.openPath(path.dirname(absolutePath));
+  }
+
   public async captureBrowserSnapshot(threadId: string, tabId: string, turnRunId: string) {
     const outputDir = await this.getThreadOutputDir(threadId);
     const snapshot = await this.#browser.captureSnapshot(threadId, tabId, outputDir);
@@ -695,57 +789,145 @@ export class DesktopBackend {
       okfVersion: "0.1",
       status: "importing"
     });
-    const importRunId = this.#db.createKnowledgeImportRun(knowledgeBase.id, input.sourcePaths);
-    const documents = await Promise.all(input.sourcePaths.map((sourcePath) => extractDocument(sourcePath)));
-    const built = await buildOkfBundle({
-      bundleRoot: knowledgeBase.bundleRoot,
-      knowledgeBaseId: knowledgeBase.id,
-      importRunId,
-      documents
-    });
-
-    for (const concept of built.concepts) {
-      this.#db.insertKnowledgeConcept(concept);
-    }
-    this.#db.updateKnowledgeBase(knowledgeBase.id, { status: "ready" });
-
-    if (thread) {
-      this.bindKnowledgeBaseToThread(thread.id, knowledgeBase.id);
-    }
-
-    const indexStats = await fs.stat(built.indexPath);
-    this.#db.addArtifact({
-      threadId: input.threadId ?? "knowledge",
-      turnRunId: null,
-      messageId: null,
-      toolCallId: null,
-      artifactKind: "knowledge-index",
-      displayName: `${input.displayName} index.md`,
-      absolutePath: built.indexPath,
-      relativePath: "index.md",
-      mimeType: "text/markdown",
-      sizeBytes: indexStats.size,
-      sha256: await fileSha256(built.indexPath),
-      sourceKind: "knowledge-import",
-      isUserVisible: true,
-      status: "ready"
-    });
-
-    await this.emit({
-      type: "knowledge.imported",
-      threadId: input.threadId,
-      payload: {
+    try {
+      const sourcePaths = await expandKnowledgeSources(input.sourcePaths);
+      // Keep the user's original folders so manual refresh can discover added files.
+      const importRunId = this.#db.createKnowledgeImportRun(knowledgeBase.id, input.sourcePaths);
+      const documents = await Promise.all(sourcePaths.map((sourcePath) => extractDocument(sourcePath)));
+      const built = await buildOkfBundle({
+        bundleRoot: knowledgeBase.bundleRoot,
         knowledgeBaseId: knowledgeBase.id,
-        conceptCount: built.concepts.length
-      },
-      createdAt: new Date().toISOString()
-    });
+        importRunId,
+        documents
+      });
 
-    return {
-      knowledgeBaseId: knowledgeBase.id,
-      conceptCount: built.concepts.length,
-      bundleRoot: built.bundleRoot
-    };
+      for (const concept of built.concepts) this.#db.insertKnowledgeConcept(concept);
+      for (const document of documents) this.storeKnowledgeDocument(knowledgeBase.id, document);
+      this.#db.updateKnowledgeBase(knowledgeBase.id, { status: "ready" });
+
+      if (thread) this.bindKnowledgeBaseToThread(thread.id, knowledgeBase.id);
+
+      const indexStats = await fs.stat(built.indexPath);
+      this.#db.addArtifact({
+        threadId: input.threadId ?? "knowledge",
+        turnRunId: null,
+        messageId: null,
+        toolCallId: null,
+        artifactKind: "knowledge-index",
+        displayName: `${input.displayName} index.md`,
+        absolutePath: built.indexPath,
+        relativePath: "index.md",
+        mimeType: "text/markdown",
+        sizeBytes: indexStats.size,
+        sha256: await fileSha256(built.indexPath),
+        sourceKind: "knowledge-import",
+        isUserVisible: true,
+        status: "ready"
+      });
+
+      await this.emit({
+        type: "knowledge.imported",
+        threadId: input.threadId,
+        payload: { knowledgeBaseId: knowledgeBase.id, conceptCount: built.concepts.length },
+        createdAt: new Date().toISOString()
+      });
+      return { knowledgeBaseId: knowledgeBase.id, conceptCount: built.concepts.length, bundleRoot: built.bundleRoot };
+    } catch (error) {
+      this.#db.updateKnowledgeBase(knowledgeBase.id, { status: "failed" });
+      throw error;
+    }
+  }
+
+  public listKnowledgeBaseSummaries(): KnowledgeBaseSummary[] {
+    const threads = this.#db.listThreads();
+    return this.#db.listKnowledgeBaseSummaries().map((knowledgeBase) => {
+      if (knowledgeBase.scope === "global") {
+        return { ...knowledgeBase, scopeTargetLabel: "所有聊天" };
+      }
+      if (knowledgeBase.scope === "project") {
+        const projectThread = threads.find((thread) => thread.projectId === knowledgeBase.projectId);
+        return {
+          ...knowledgeBase,
+          scopeTargetLabel: projectThread?.cwd ? `项目：${projectThread.cwd}` : "原项目已删除"
+        };
+      }
+      const owners = threads.filter((thread) => thread.knowledgeBaseIds.includes(knowledgeBase.id));
+      return {
+        ...knowledgeBase,
+        scopeTargetLabel: owners.length > 0
+          ? `对话：${owners.slice(0, 2).map((thread) => thread.title).join("、")}${owners.length > 2 ? ` 等 ${owners.length} 个` : ""}`
+          : "原对话已删除"
+      };
+    });
+  }
+
+  public listKnowledgeBaseDocuments(knowledgeBaseId: string): KnowledgeDocumentRecord[] {
+    return this.#db.listKnowledgeDocuments(knowledgeBaseId);
+  }
+
+  public async refreshKnowledgeBase(knowledgeBaseId: string): Promise<KnowledgeBaseSummary> {
+    const knowledgeBase = this.#db.getKnowledgeBase(knowledgeBaseId);
+    if (!knowledgeBase) throw new Error("Knowledge base not found.");
+    this.#db.updateKnowledgeBase(knowledgeBaseId, { status: "importing" });
+    try {
+      const selectedSources = this.#db.listLatestKnowledgeImportSources(knowledgeBaseId);
+      const sourcePaths = await expandKnowledgeSources(selectedSources, { allowEmpty: true });
+      const currentPaths = new Set(sourcePaths);
+      const existing = new Map(this.#db.listKnowledgeDocuments(knowledgeBaseId).map((document) => [document.sourcePath, document]));
+      for (const document of existing.values()) {
+        if (!currentPaths.has(document.sourcePath)) this.#db.markKnowledgeDocumentMissing(document.id);
+      }
+      for (const sourcePath of sourcePaths) {
+        const document = await extractDocument(sourcePath);
+        const previous = existing.get(sourcePath);
+        if (!previous || previous.sourceHash !== document.sourceHash || previous.status !== "ready") {
+          this.storeKnowledgeDocument(knowledgeBaseId, document);
+        }
+      }
+      this.#db.updateKnowledgeBase(knowledgeBaseId, { status: "ready" });
+    } catch (error) {
+      this.#db.updateKnowledgeBase(knowledgeBaseId, { status: "failed" });
+      throw error;
+    }
+    const summary = this.#db.listKnowledgeBaseSummaries().find((item) => item.id === knowledgeBaseId);
+    if (!summary) throw new Error("Knowledge base disappeared during refresh.");
+    return summary;
+  }
+
+  public async deleteKnowledgeBase(knowledgeBaseId: string): Promise<void> {
+    const knowledgeBase = this.#db.getKnowledgeBase(knowledgeBaseId);
+    if (!knowledgeBase) return;
+    await fs.rm(knowledgeBase.bundleRoot, { recursive: true, force: true });
+    this.#db.deleteKnowledgeBase(knowledgeBaseId);
+  }
+
+  private storeKnowledgeDocument(
+    knowledgeBaseId: string,
+    document: { title: string; body: string; sourcePath: string; sourceHash: string; mimeHint: string }
+  ): void {
+    const documentId = randomUUID();
+    const now = new Date().toISOString();
+    const chunks = splitKnowledgeDocument(document.body).map((content, chunkIndex) => ({
+      id: randomUUID(),
+      knowledgeBaseId,
+      documentId,
+      chunkIndex,
+      title: document.title,
+      content,
+      sourcePath: document.sourcePath,
+      locator: getChunkLocator(content, chunkIndex),
+      createdAt: now
+    } satisfies KnowledgeChunkRecord));
+    this.#db.replaceKnowledgeDocument({
+      id: documentId,
+      knowledgeBaseId,
+      sourcePath: document.sourcePath,
+      sourceHash: document.sourceHash,
+      title: document.title,
+      mimeHint: document.mimeHint,
+      status: "ready",
+      updatedAt: now
+    }, chunks);
   }
 
   public resolveApproval(
@@ -910,12 +1092,16 @@ export class DesktopBackend {
 
   private async buildKnowledgeContext(threadId: string): Promise<string | null> {
     const bundles = this.listVisibleKnowledgeBases(threadId).map(
-      (item) => `- ${item.displayName}: ${path.join(item.bundleRoot, "index.md")}`
+      (item) => `- ${item.displayName} (${item.scope})`
     );
     if (bundles.length === 0) {
       return null;
     }
-    return bundles.length > 0 ? ["Available knowledge bases:", ...bundles].join("\n") : null;
+    return [
+      "Available local knowledge bases:",
+      ...bundles,
+      "Use knowledge.search to retrieve their contents. Bundle paths are intentionally not exposed as workspace files."
+    ].join("\n");
   }
 
   private async buildWorkflowPackContext(threadId: string): Promise<string | null> {
@@ -1178,7 +1364,7 @@ export class DesktopBackend {
       .listKnowledgeBases()
       .filter(
         (knowledgeBase) =>
-          explicit.has(knowledgeBase.id) ||
+          knowledgeBase.scope === "global" || explicit.has(knowledgeBase.id) ||
           (thread.projectId &&
             knowledgeBase.scope === "project" &&
             knowledgeBase.projectId === thread.projectId)
@@ -1228,6 +1414,26 @@ export class DesktopBackend {
     const { outputDir } = this.resolveThreadOutputPaths(thread);
     await fs.mkdir(outputDir, { recursive: true });
     return outputDir;
+  }
+
+  private async isThreadAttachmentPath(threadId: string, absolutePath: string): Promise<boolean> {
+    const candidate = path.resolve(absolutePath);
+    const attachmentsRoot = path.resolve(this.#layout.attachmentsDir, threadId);
+    const outputRoot = path.resolve(await this.getThreadOutputDir(threadId));
+    const isWithin = (root: string) => {
+      const relative = path.relative(root, candidate);
+      return relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+    };
+    if (isWithin(attachmentsRoot) || isWithin(outputRoot)) return true;
+    const messages = this.#db.listMessages(threadId);
+    return messages.some((message) => {
+      try {
+        const attachments = JSON.parse(message.metadataJson ?? "{}").attachments;
+        return Array.isArray(attachments) && attachments.some((item) => item?.absolutePath === candidate);
+      } catch {
+        return false;
+      }
+    });
   }
 
   private async emitTerminalOutput(threadId: string, data: string, sessionId = "default"): Promise<void> {
@@ -1353,6 +1559,29 @@ function resolveFetchedApiKey(input: { apiKey?: string; apiKeyEnv?: string }): s
   return "";
 }
 
+function normalizeAttachmentMimeType(value: string | undefined, fileName: string): string {
+  if (value && value !== "application/octet-stream") return value.toLowerCase();
+  switch (path.extname(fileName).toLowerCase()) {
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".webp": return "image/webp";
+    case ".gif": return "image/gif";
+    case ".svg": return "image/svg+xml";
+    case ".pdf": return "application/pdf";
+    case ".txt": return "text/plain";
+    default: return "application/octet-stream";
+  }
+}
+
+function extensionForMimeType(mimeType: string): string {
+  if (mimeType === "image/png") return ".png";
+  if (mimeType === "image/jpeg") return ".jpg";
+  if (mimeType === "image/webp") return ".webp";
+  if (mimeType === "image/gif") return ".gif";
+  return "";
+}
+
 async function fileSha256(filePath: string): Promise<string> {
   const buffer = await fs.readFile(filePath);
   return createHash("sha256").update(buffer).digest("hex");
@@ -1417,6 +1646,59 @@ function estimateTokenCount(text: string): number {
     return 1;
   }
   return Math.max(1, Math.ceil(Array.from(normalized).length / 4));
+}
+
+function splitKnowledgeDocument(body: string, maximumCharacters = 2_400): string[] {
+  const paragraphs = body.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+  const chunks: string[] = [];
+  let current = "";
+  for (const paragraph of paragraphs) {
+    if (current && current.length + paragraph.length + 2 > maximumCharacters) {
+      chunks.push(current);
+      current = "";
+    }
+    if (paragraph.length > maximumCharacters) {
+      for (let offset = 0; offset < paragraph.length; offset += maximumCharacters) chunks.push(paragraph.slice(offset, offset + maximumCharacters));
+    } else {
+      current = current ? `${current}\n\n${paragraph}` : paragraph;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.length > 0 ? chunks : [body.trim()];
+}
+
+function getChunkLocator(content: string, chunkIndex: number): string {
+  const heading = content.match(/^\s*#{1,6}\s+(.+)$/m)?.[1]?.trim();
+  return heading ? `${heading} · Chunk ${chunkIndex + 1}` : `Chunk ${chunkIndex + 1}`;
+}
+
+async function expandKnowledgeSources(
+  sourcePaths: string[],
+  options: { allowEmpty?: boolean } = {}
+): Promise<string[]> {
+  const supported = new Set([".md", ".txt", ".json", ".html", ".htm", ".csv", ".xlsx", ".xls", ".docx", ".pdf", ".pptx"]);
+  const files = new Set<string>();
+  const visit = async (target: string): Promise<void> => {
+    let stat;
+    try {
+      stat = await fs.stat(target);
+    } catch (error: any) {
+      if (options.allowEmpty && error?.code === "ENOENT") return;
+      throw error;
+    }
+    if (stat.isFile()) {
+      if (supported.has(path.extname(target).toLowerCase())) files.add(path.resolve(target));
+      return;
+    }
+    if (!stat.isDirectory()) return;
+    for (const entry of await fs.readdir(target, { withFileTypes: true })) {
+      if (entry.name.startsWith(".")) continue;
+      await visit(path.join(target, entry.name));
+    }
+  };
+  for (const sourcePath of sourcePaths) await visit(sourcePath);
+  if (files.size === 0 && !options.allowEmpty) throw new Error("No supported documents were found.");
+  return [...files];
 }
 
 function resolveSearchResultUrl(pageUrl: string, href: string): string {

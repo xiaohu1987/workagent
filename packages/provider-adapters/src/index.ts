@@ -1,6 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { readFile } from "node:fs/promises";
 import type {
+  MessageAttachment,
   ModelProfile,
   ProviderDefinition,
   ProviderTurnDecision,
@@ -10,6 +12,7 @@ import type {
 
 export interface ProviderAdapter {
   runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision>;
+  generateImage?(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<{ data: Uint8Array; mimeType: string }>;
 }
 
 export class ProviderFactory {
@@ -113,7 +116,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
     const request = {
       model: input.model.id,
-      messages: buildOpenAiCompatibleMessages(input),
+      messages: await buildOpenAiCompatibleMessages(input),
       temperature: input.model.defaultTemperature,
       max_tokens: input.model.defaultMaxOutputTokens,
       ...(input.model.supportsJsonOutput ? { response_format: { type: "json_object" as const } } : {})
@@ -150,6 +153,29 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
     const text = response.choices[0]?.message?.content?.trim() || "";
     return withOutputTokens(parseDecisionFromText(text), response.usage?.completion_tokens);
   }
+
+  public async generateImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }) {
+    const response = await this.#client.images.generate({
+      model: input.model.id,
+      prompt: input.prompt,
+      n: 1,
+      size: "1024x1024",
+      response_format: "b64_json"
+    }, { signal: input.abortSignal });
+    const image = response.data?.[0];
+    if (image?.b64_json) {
+      return { data: Buffer.from(image.b64_json, "base64"), mimeType: "image/png" };
+    }
+    if (image?.url) {
+      const downloaded = await fetch(image.url, { signal: input.abortSignal });
+      if (!downloaded.ok) throw new Error(`Image download failed: HTTP ${downloaded.status}`);
+      return {
+        data: new Uint8Array(await downloaded.arrayBuffer()),
+        mimeType: downloaded.headers.get("content-type")?.split(";")[0] || "image/png"
+      };
+    }
+    throw new Error("The image generation service returned no image data.");
+  }
 }
 
 class AnthropicProvider implements ProviderAdapter {
@@ -169,12 +195,12 @@ class AnthropicProvider implements ProviderAdapter {
         model: input.model.id,
         system: input.systemPrompt,
         max_tokens: input.model.defaultMaxOutputTokens ?? 2048,
-        messages: input.transcript
+        messages: await Promise.all(input.transcript
           .filter((message) => message.role !== "system")
-          .map((message) => ({
+          .map(async (message) => ({
             role: message.role === "assistant" || message.role === "tool" ? "assistant" : "user",
-            content: message.content
-          }))
+            content: await buildAnthropicContent(contentWithFileAttachments(message.content, message.attachments), message.attachments)
+          })))
       },
       { signal: input.abortSignal }
     );
@@ -207,10 +233,10 @@ class GeminiProvider implements ProviderAdapter {
         systemInstruction: {
           parts: [{ text: input.systemPrompt }]
         },
-        contents: input.transcript.map((message) => ({
+        contents: await Promise.all(input.transcript.map(async (message) => ({
           role: message.role === "assistant" || message.role === "tool" ? "model" : "user",
-          parts: [{ text: message.content }]
-        }))
+          parts: await buildGeminiParts(contentWithFileAttachments(message.content, message.attachments), message.attachments)
+        })))
       }),
       signal: input.abortSignal
     });
@@ -246,10 +272,10 @@ function resolveApiKey(provider: ProviderDefinition): string {
   throw new Error(`Provider ${provider.id} is missing apiKey or apiKeyEnv.`);
 }
 
-function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
+async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
   const messages: Array<{
     role: "system" | "user" | "assistant";
-    content: string;
+    content: any;
   }> = [];
 
   if (input.systemPrompt.trim()) {
@@ -262,7 +288,7 @@ function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
   for (const message of input.transcript) {
     messages.push({
       role: normalizeOpenAiCompatibleRole(message.role),
-      content: message.content
+      content: await buildOpenAiContent(contentWithFileAttachments(message.content, message.attachments), message.attachments)
     });
   }
 
@@ -353,6 +379,51 @@ function extractVisibleStreamText(text: string): string {
   // JSON instead of the requested decision envelope. Tool markup is control
   // data, never user-visible text, including while a response is streaming.
   return stripTaggedToolCalls(text);
+}
+
+async function buildOpenAiContent(content: string, attachments?: MessageAttachment[]): Promise<any> {
+  const images = attachments?.filter((attachment) => attachment.kind === "image") ?? [];
+  if (images.length === 0) return content;
+  return [
+    { type: "text", text: content },
+    ...(await Promise.all(images.map(async (attachment) => ({
+      type: "image_url",
+      image_url: { url: await attachmentDataUrl(attachment) }
+    }))))
+  ];
+}
+
+async function buildAnthropicContent(content: string, attachments?: MessageAttachment[]): Promise<any> {
+  const images = attachments?.filter((attachment) => attachment.kind === "image") ?? [];
+  if (images.length === 0) return content;
+  return [
+    { type: "text", text: content },
+    ...(await Promise.all(images.map(async (attachment) => {
+      const data = await readFile(attachment.absolutePath);
+      return { type: "image", source: { type: "base64", media_type: attachment.mimeType, data: data.toString("base64") } };
+    })))
+  ];
+}
+
+async function buildGeminiParts(content: string, attachments?: MessageAttachment[]): Promise<any[]> {
+  const images = attachments?.filter((attachment) => attachment.kind === "image") ?? [];
+  return [
+    { text: content },
+    ...(await Promise.all(images.map(async (attachment) => ({
+      inlineData: { mimeType: attachment.mimeType, data: (await readFile(attachment.absolutePath)).toString("base64") }
+    }))))
+  ];
+}
+
+async function attachmentDataUrl(attachment: MessageAttachment): Promise<string> {
+  const data = await readFile(attachment.absolutePath);
+  return `data:${attachment.mimeType};base64,${data.toString("base64")}`;
+}
+
+function contentWithFileAttachments(content: string, attachments?: MessageAttachment[]): string {
+  const files = attachments?.filter((attachment) => attachment.kind === "file") ?? [];
+  if (files.length === 0) return content;
+  return [content, ...files.map((file) => `[Attached file]\n${file.absolutePath}`)].filter(Boolean).join("\n\n");
 }
 
 function withOutputTokens(decision: ProviderTurnDecision, outputTokens?: number): ProviderTurnDecision {

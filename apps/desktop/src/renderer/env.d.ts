@@ -2,6 +2,7 @@ declare global {
   interface Window {
     codexh: {
       listThreads: () => Promise<any[]>;
+      searchThreads: (query: string) => Promise<Array<{ thread: ThreadRecord; snippet: string | null; score: number }>>;
       createThread: (payload: {
         title: string;
         mode: "project" | "chat";
@@ -11,11 +12,16 @@ declare global {
       }) => Promise<any>;
       chooseProjectDirectory: (defaultPath?: string) => Promise<string | null>;
       chooseAttachmentFiles: (payload?: { imagesOnly?: boolean }) => Promise<string[]>;
+      chooseKnowledgeFiles: () => Promise<string[]>;
+      chooseKnowledgeFolders: () => Promise<string[]>;
       listProjectFiles: (threadId: string) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
       readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean }>;
       deleteThread: (threadId: string) => Promise<void>;
       getThreadSnapshot: (threadId: string) => Promise<any>;
-      sendMessage: (payload: { threadId: string; content: string }) => Promise<void>;
+      sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[] }) => Promise<void>;
+      importAttachments: (payload: { threadId: string; attachments: any[] }) => Promise<any[]>;
+      previewAttachment: (payload: { threadId: string; absolutePath: string }) => Promise<string>;
+      previewLocalImage: (payload: { absolutePath: string }) => Promise<string>;
       rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) => Promise<void>;
       interruptThread: (threadId: string) => Promise<void>;
       updateThreadModelSelection: (payload: {
@@ -29,6 +35,7 @@ declare global {
       closeTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<void>;
       openExternal: (url: string) => Promise<void>;
       openPath: (targetPath: string) => Promise<string>;
+      openFileLocation: (payload: { threadId: string; path: string }) => Promise<string>;
       listSkills: (cwd?: string | null) => Promise<any[]>;
       listPlugins: () => Promise<any[]>;
       installPlugin: (source: string) => Promise<any>;
@@ -39,6 +46,8 @@ declare global {
       }) => Promise<any>;
       getConfig: () => Promise<any>;
       saveConfig: (config: unknown) => Promise<void>;
+      listMcpServers: () => Promise<any[]>;
+      testMcpServer: (config: unknown) => Promise<{ tools: any[]; resources: any[]; resourceTemplates: any[] }>;
       fetchProviderModels: (payload: {
         baseUrl?: string;
         apiKey?: string;
@@ -56,6 +65,10 @@ declare global {
         sourcePaths: string[];
         threadId?: string;
       }) => Promise<any>;
+      listKnowledgeBases: () => Promise<any[]>;
+      listKnowledgeDocuments: (knowledgeBaseId: string) => Promise<any[]>;
+      refreshKnowledgeBase: (knowledgeBaseId: string) => Promise<any>;
+      deleteKnowledgeBase: (knowledgeBaseId: string) => Promise<void>;
       openBrowserTab: (payload: { threadId: string; url: string }) => Promise<any>;
       navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) => Promise<any>;
       focusBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
@@ -74,6 +87,7 @@ declare global {
         stage: "off" | "goal" | "plan" | "act";
       }) => Promise<void>;
       setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) => Promise<void>;
+      setKnowledgeEnabled: (payload: { threadId: string; knowledgeEnabled: boolean }) => Promise<void>;
       onRuntimeEvent: (listener: (event: unknown) => void) => () => void;
     };
   }

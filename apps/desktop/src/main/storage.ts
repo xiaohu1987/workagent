@@ -11,7 +11,10 @@ import type {
   ArtifactRecord,
   BrowserTabRecord,
   KnowledgeBaseRecord,
+  KnowledgeBaseSummary,
   KnowledgeConcept,
+  KnowledgeChunkRecord,
+  KnowledgeDocumentRecord,
   McpServerConfig,
   MessageRecord,
   ModelProfile,
@@ -31,6 +34,7 @@ export interface HomeLayout {
   configFile: string;
   dbFile: string;
   outputsDir: string;
+  attachmentsDir: string;
   logsDir: string;
   tmpDir: string;
   cacheDir: string;
@@ -44,6 +48,12 @@ export interface HomeLayout {
   pluginsDisabledDir: string;
 }
 
+export interface ThreadSearchResult {
+  thread: ThreadRecord;
+  snippet: string | null;
+  score: number;
+}
+
 export async function ensureHomeLayout(): Promise<HomeLayout> {
   const root = path.join(os.homedir(), ".codexh");
   const layout: HomeLayout = {
@@ -51,6 +61,7 @@ export async function ensureHomeLayout(): Promise<HomeLayout> {
     configFile: path.join(root, "config.toml"),
     dbFile: path.join(root, "codexh.sqlite"),
     outputsDir: path.join(root, "outputs"),
+    attachmentsDir: path.join(root, "attachments"),
     logsDir: path.join(root, "logs"),
     tmpDir: path.join(root, "tmp"),
     cacheDir: path.join(root, "cache"),
@@ -66,6 +77,7 @@ export async function ensureHomeLayout(): Promise<HomeLayout> {
 
   await Promise.all([
     fs.mkdir(layout.outputsDir, { recursive: true }),
+    fs.mkdir(layout.attachmentsDir, { recursive: true }),
     fs.mkdir(layout.logsDir, { recursive: true }),
     fs.mkdir(layout.tmpDir, { recursive: true }),
     fs.mkdir(layout.cacheDir, { recursive: true }),
@@ -117,6 +129,7 @@ export function defaultConfig(): AppConfig {
       supportsParallelToolCalls: true,
       supportsJsonOutput: true,
       supportsMultimodalInput: false,
+      supportsImageGeneration: false,
       supportsReasoningSummary: true,
       defaultTemperature: 0.2,
       defaultMaxOutputTokens: 2_048
@@ -131,6 +144,7 @@ export function defaultConfig(): AppConfig {
       supportsParallelToolCalls: true,
       supportsJsonOutput: true,
       supportsMultimodalInput: true,
+      supportsImageGeneration: false,
       supportsReasoningSummary: true,
       defaultTemperature: 0.2,
       defaultMaxOutputTokens: 4_096
@@ -363,6 +377,19 @@ export class DatabaseService {
         tags,
         body
       );
+      CREATE TABLE IF NOT EXISTS knowledge_documents (
+        id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL, source_path TEXT NOT NULL,
+        source_hash TEXT NOT NULL, title TEXT NOT NULL, mime_hint TEXT NOT NULL,
+        status TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS knowledge_chunks (
+        id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL, document_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL,
+        source_path TEXT NOT NULL, locator TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunk_fts USING fts5 (
+        chunk_id UNINDEXED, title, content, source_path, locator
+      );
       CREATE TABLE IF NOT EXISTS browser_tabs (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
@@ -448,6 +475,38 @@ export class DatabaseService {
       .prepare("SELECT * FROM threads ORDER BY updated_at DESC")
       .all()
       .map(mapThreadRow);
+  }
+
+  public searchThreads(query: string, limit = 50): ThreadSearchResult[] {
+    const normalizedQuery = query.trim();
+    const threads = this.listThreads();
+    if (!normalizedQuery) {
+      return threads.slice(0, limit).map((thread) => ({ thread, snippet: null, score: 0 }));
+    }
+
+    const messages = this.#db
+      .prepare("SELECT thread_id, content FROM messages ORDER BY created_at DESC")
+      .all() as Array<{ thread_id: string; content: string }>;
+    const threadById = new Map(threads.map((thread) => [thread.id, thread]));
+    const bestByThread = new Map<string, ThreadSearchResult>();
+
+    for (const thread of threads) {
+      const score = fuzzyMatchScore(thread.title, normalizedQuery);
+      if (score > 0) bestByThread.set(thread.id, { thread, snippet: null, score: score + 120 });
+    }
+    for (const message of messages) {
+      const thread = threadById.get(message.thread_id);
+      if (!thread) continue;
+      const score = fuzzyMatchScore(message.content, normalizedQuery);
+      const previous = bestByThread.get(thread.id);
+      if (score > 0 && (!previous || score > previous.score)) {
+        bestByThread.set(thread.id, { thread, snippet: createSearchSnippet(message.content, normalizedQuery), score });
+      }
+    }
+
+    return [...bestByThread.values()]
+      .sort((left, right) => right.score - left.score || right.thread.updatedAt.localeCompare(left.thread.updatedAt))
+      .slice(0, limit);
   }
 
   public createThread(input: {
@@ -1063,6 +1122,32 @@ export class DatabaseService {
       }));
   }
 
+  public getKnowledgeBase(id: string): KnowledgeBaseRecord | null {
+    const row = this.#db.prepare("SELECT * FROM knowledge_bases WHERE id = ?").get(id) as any;
+    return row ? {
+      id: row.id, scope: row.scope, projectId: row.project_id, displayName: row.display_name,
+      bundleRoot: row.bundle_root, okfVersion: row.okf_version, status: row.status,
+      createdAt: row.created_at, updatedAt: row.updated_at
+    } : null;
+  }
+
+  public listKnowledgeBaseSummaries(): KnowledgeBaseSummary[] {
+    return this.#db.prepare(`
+      SELECT kb.*, COUNT(DISTINCT kd.id) AS document_count, COUNT(kc.id) AS chunk_count,
+        COALESCE(SUM(LENGTH(kc.content)), 0) AS indexed_bytes
+      FROM knowledge_bases kb
+      LEFT JOIN knowledge_documents kd ON kd.knowledge_base_id = kb.id
+      LEFT JOIN knowledge_chunks kc ON kc.knowledge_base_id = kb.id
+      GROUP BY kb.id
+      ORDER BY kb.updated_at DESC
+    `).all().map((row: any) => ({
+      id: row.id, scope: row.scope, projectId: row.project_id, displayName: row.display_name,
+      bundleRoot: row.bundle_root, okfVersion: row.okf_version, status: row.status,
+      createdAt: row.created_at, updatedAt: row.updated_at,
+      documentCount: Number(row.document_count), chunkCount: Number(row.chunk_count), indexedBytes: Number(row.indexed_bytes)
+    }));
+  }
+
   public createKnowledgeImportRun(knowledgeBaseId: string, sourcePaths: string[]): string {
     const id = randomUUID();
     this.#db
@@ -1071,6 +1156,19 @@ export class DatabaseService {
       )
       .run(id, knowledgeBaseId, JSON.stringify(sourcePaths), nowIso());
     return id;
+  }
+
+  public listLatestKnowledgeImportSources(knowledgeBaseId: string): string[] {
+    const row = this.#db.prepare(
+      "SELECT source_paths_json FROM knowledge_import_runs WHERE knowledge_base_id = ? ORDER BY created_at DESC LIMIT 1"
+    ).get(knowledgeBaseId) as { source_paths_json?: string } | undefined;
+    if (!row?.source_paths_json) return [];
+    try {
+      const paths = JSON.parse(row.source_paths_json);
+      return Array.isArray(paths) ? paths.filter((item): item is string => typeof item === "string") : [];
+    } catch {
+      return [];
+    }
   }
 
   public insertKnowledgeConcept(concept: KnowledgeConcept): void {
@@ -1096,6 +1194,86 @@ export class DatabaseService {
     this.#db
       .prepare("INSERT INTO knowledge_fts (concept_id, title, description, tags, body) VALUES (?, ?, ?, ?, ?)")
       .run(concept.id, concept.title, concept.description, concept.tags.join(" "), concept.body);
+  }
+
+  public replaceKnowledgeDocument(document: KnowledgeDocumentRecord, chunks: KnowledgeChunkRecord[]): void {
+    const existing = this.#db.prepare("SELECT id FROM knowledge_documents WHERE knowledge_base_id = ? AND source_path = ?").get(document.knowledgeBaseId, document.sourcePath) as { id?: string } | undefined;
+    if (existing?.id) {
+      const rows = this.#db.prepare("SELECT id FROM knowledge_chunks WHERE document_id = ?").all(existing.id) as Array<{ id: string }>;
+      for (const row of rows) this.#db.prepare("DELETE FROM knowledge_chunk_fts WHERE chunk_id = ?").run(row.id);
+      this.#db.prepare("DELETE FROM knowledge_chunks WHERE document_id = ?").run(existing.id);
+      this.#db.prepare("DELETE FROM knowledge_documents WHERE id = ?").run(existing.id);
+    }
+    this.#db.prepare("INSERT INTO knowledge_documents (id, knowledge_base_id, source_path, source_hash, title, mime_hint, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(document.id, document.knowledgeBaseId, document.sourcePath, document.sourceHash, document.title, document.mimeHint, document.status, document.updatedAt);
+    const insertChunk = this.#db.prepare("INSERT INTO knowledge_chunks (id, knowledge_base_id, document_id, chunk_index, title, content, source_path, locator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    const insertFts = this.#db.prepare("INSERT INTO knowledge_chunk_fts (chunk_id, title, content, source_path, locator) VALUES (?, ?, ?, ?, ?)");
+    for (const chunk of chunks) {
+      insertChunk.run(chunk.id, chunk.knowledgeBaseId, chunk.documentId, chunk.chunkIndex, chunk.title, chunk.content, chunk.sourcePath, chunk.locator, chunk.createdAt);
+      insertFts.run(chunk.id, chunk.title, chunk.content, chunk.sourcePath, chunk.locator);
+    }
+  }
+
+  public listKnowledgeDocuments(knowledgeBaseId: string): KnowledgeDocumentRecord[] {
+    return this.#db.prepare("SELECT * FROM knowledge_documents WHERE knowledge_base_id = ? ORDER BY source_path").all(knowledgeBaseId).map((row: any) => ({
+      id: row.id, knowledgeBaseId: row.knowledge_base_id, sourcePath: row.source_path, sourceHash: row.source_hash, title: row.title, mimeHint: row.mime_hint, status: row.status, updatedAt: row.updated_at
+    }));
+  }
+
+  public markKnowledgeDocumentMissing(documentId: string): void {
+    const chunks = this.#db.prepare("SELECT id FROM knowledge_chunks WHERE document_id = ?").all(documentId) as Array<{ id: string }>;
+    for (const chunk of chunks) this.#db.prepare("DELETE FROM knowledge_chunk_fts WHERE chunk_id = ?").run(chunk.id);
+    this.#db.prepare("DELETE FROM knowledge_chunks WHERE document_id = ?").run(documentId);
+    this.#db.prepare("UPDATE knowledge_documents SET status = 'missing', updated_at = ? WHERE id = ?").run(nowIso(), documentId);
+  }
+
+  public deleteKnowledgeBase(id: string): void {
+    const chunks = this.#db.prepare("SELECT id FROM knowledge_chunks WHERE knowledge_base_id = ?").all(id) as Array<{ id: string }>;
+    for (const chunk of chunks) this.#db.prepare("DELETE FROM knowledge_chunk_fts WHERE chunk_id = ?").run(chunk.id);
+    this.#db.prepare("DELETE FROM knowledge_chunks WHERE knowledge_base_id = ?").run(id);
+    this.#db.prepare("DELETE FROM knowledge_documents WHERE knowledge_base_id = ?").run(id);
+    this.#db.prepare("DELETE FROM knowledge_fts WHERE concept_id IN (SELECT id FROM knowledge_concepts WHERE knowledge_base_id = ?)").run(id);
+    this.#db.prepare("DELETE FROM knowledge_concepts WHERE knowledge_base_id = ?").run(id);
+    this.#db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(id);
+  }
+
+  public searchKnowledgeChunks(query: string, knowledgeBaseIds?: string[]): KnowledgeChunkRecord[] {
+    const params: any[] = [query];
+    let filter = "";
+    if (knowledgeBaseIds?.length) { filter = ` AND kc.knowledge_base_id IN (${knowledgeBaseIds.map(() => "?").join(",")})`; params.push(...knowledgeBaseIds); }
+    let rows: any[] = [];
+    try {
+      rows = this.#db.prepare(`SELECT kc.*, bm25(knowledge_chunk_fts) AS score FROM knowledge_chunk_fts f JOIN knowledge_chunks kc ON kc.id = f.chunk_id WHERE knowledge_chunk_fts MATCH ?${filter} ORDER BY score LIMIT 8`).all(...params) as any[];
+    } catch {
+      rows = [];
+    }
+    if (rows.length === 0 && query.trim()) {
+      const fallbackFilter = knowledgeBaseIds?.length
+        ? ` AND knowledge_base_id IN (${knowledgeBaseIds.map(() => "?").join(",")})`
+        : "";
+      const terms = extractKnowledgeSearchTerms(query);
+      if (terms.length > 0) {
+        const termClauses = terms
+          .map(() => "(title LIKE ? OR content LIKE ? OR source_path LIKE ?)")
+          .join(" OR ");
+        const termParams = terms.flatMap((term) => {
+          const pattern = `%${term}%`;
+          return [pattern, pattern, pattern];
+        });
+        rows = this.#db.prepare(`SELECT *, 0 AS score FROM knowledge_chunks WHERE (${termClauses})${fallbackFilter} ORDER BY created_at DESC LIMIT 8`)
+          .all(...termParams, ...(knowledgeBaseIds ?? [])) as any[];
+      }
+    }
+    return rows.map((row: any) => ({
+      id: row.id, knowledgeBaseId: row.knowledge_base_id, documentId: row.document_id, chunkIndex: row.chunk_index,
+      title: row.title, content: row.content, sourcePath: row.source_path, locator: row.locator,
+      createdAt: row.created_at, score: Number(row.score ?? 0)
+    }));
+  }
+
+  public getKnowledgeChunk(id: string): KnowledgeChunkRecord | null {
+    const row = this.#db.prepare("SELECT * FROM knowledge_chunks WHERE id = ?").get(id) as any;
+    return row ? { id: row.id, knowledgeBaseId: row.knowledge_base_id, documentId: row.document_id, chunkIndex: row.chunk_index, title: row.title, content: row.content, sourcePath: row.source_path, locator: row.locator, createdAt: row.created_at } : null;
   }
 
   public searchKnowledge(query: string, knowledgeBaseIds?: string[]): any[] {
@@ -1412,6 +1590,56 @@ function mapRememberedApprovalRow(row: any): RememberedApprovalRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+export function fuzzyMatchScore(value: string, query: string): number {
+  const source = value.toLocaleLowerCase().replace(/\s+/g, "");
+  const needle = query.toLocaleLowerCase().replace(/\s+/g, "");
+  if (!source || !needle) return 0;
+  const exactIndex = source.indexOf(needle);
+  if (exactIndex >= 0) return 300 - Math.min(exactIndex, 180) + Math.min(needle.length, 40);
+
+  let cursor = 0;
+  let gaps = 0;
+  for (const character of needle) {
+    const index = source.indexOf(character, cursor);
+    if (index < 0) return 0;
+    gaps += index - cursor;
+    cursor = index + 1;
+  }
+  return Math.max(1, 120 - Math.min(gaps, 110));
+}
+
+function extractKnowledgeSearchTerms(query: string): string[] {
+  const terms = new Set<string>();
+  const normalized = query.trim();
+  if (!normalized) {
+    return [];
+  }
+
+  for (const asciiTerm of normalized.match(/[A-Za-z0-9][A-Za-z0-9._-]*/g) ?? []) {
+    if (asciiTerm.length >= 2) {
+      terms.add(asciiTerm);
+    }
+  }
+  for (const chineseRun of normalized.match(/[\u4e00-\u9fff]+/g) ?? []) {
+    if (chineseRun.length >= 2) {
+      terms.add(chineseRun);
+      for (let index = 0; index <= chineseRun.length - 2; index += 1) {
+        terms.add(chineseRun.slice(index, index + 2));
+      }
+    }
+  }
+
+  return [...terms].slice(0, 16);
+}
+
+function createSearchSnippet(content: string, query: string): string {
+  const compact = content.replace(/\s+/g, " ").trim();
+  const index = compact.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
+  const start = Math.max(0, index - 42);
+  const end = Math.min(compact.length, Math.max(index + query.length + 78, 160));
+  return `${start > 0 ? "..." : ""}${compact.slice(start, end)}${end < compact.length ? "..." : ""}`;
 }
 
 function nowIso(): string {

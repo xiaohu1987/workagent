@@ -60,8 +60,11 @@ export interface ToolRuntimeContext {
   getThreadOutputDir: () => Promise<string>;
   listMcpResources: (server?: string) => Promise<any[]>;
   listMcpResourceTemplates: (server?: string) => Promise<any[]>;
+  listMcpTools: (server?: string) => Promise<Array<{ server: string; name: string; description: string; inputSchema: Record<string, unknown> }>>;
   readMcpResource: (server: string, uri: string) => Promise<any>;
   callMcpTool: (server: string, tool: string, argumentsJson: Record<string, unknown>) => Promise<any>;
+  deferredToolSpecs?: ToolSpecDefinition[];
+  hiddenToolNames?: string[];
   loadSkill?: (skillId: string) => Promise<{ skill: { qualifiedName: string; domain?: string; scope: string }; content: string }>;
 }
 
@@ -227,11 +230,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "low",
       parallelSafe: true
     },
-    async (args, _ctx, self) => ({
-      ok: true,
-      content: JSON.stringify(self.searchTools(String(args.query ?? "")), null, 2),
-      json: { results: self.searchTools(String(args.query ?? "")) }
-    })
+    async (args, ctx, self) => {
+      const hidden = new Set(ctx.hiddenToolNames ?? []);
+      const results = self.searchTools(String(args.query ?? ""), ctx.deferredToolSpecs)
+        .filter((entry) => !hidden.has(entry.name));
+      return { ok: true, content: JSON.stringify(results, null, 2), json: { results } };
+    }
   );
 
   runtime.register(
@@ -418,7 +422,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("knowledge.search", "Search imported local knowledge.", ["query"], "low"),
+    spec("knowledge.search", "Search local knowledge chunks. Results include chunk id, source path, locator, excerpt, and score; search before reading.", ["query"], "low"),
     async (args, ctx) => {
       const results = await ctx.searchKnowledge(String(args.query ?? ""), Array.isArray(args.knowledgeBaseIds) ? args.knowledgeBaseIds.map(String) : undefined);
       return {
@@ -430,12 +434,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("knowledge.read", "Read a knowledge concept by id.", ["conceptId"], "low"),
+    spec("knowledge.read", "Read one local knowledge chunk by its id after search.", ["conceptId"], "low"),
     async (args, ctx) => {
       const concept = await ctx.readKnowledgeConcept(String(args.conceptId ?? ""));
       return {
         ok: !!concept,
-        content: concept ? concept.body ?? JSON.stringify(concept, null, 2) : "Not found",
+        content: concept ? concept.content ?? concept.body ?? JSON.stringify(concept, null, 2) : "Not found",
         json: { concept }
       };
     }
@@ -631,6 +635,14 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
+    spec("mcp.list_tools", "List discoverable tools from enabled MCP servers before calling mcp.call.", [], "low"),
+    async (args, ctx) => {
+      const tools = await ctx.listMcpTools(typeof args.server === "string" ? args.server : undefined);
+      return { ok: true, content: JSON.stringify(tools, null, 2), json: { tools } };
+    }
+  );
+
+  runtime.register(
     spec("list_mcp_resources", "List resources from configured MCP servers.", [], "low"),
     async (args, ctx) => {
       const resources = await ctx.listMcpResources(typeof args.server === "string" ? args.server : undefined);
@@ -657,9 +669,15 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("mcp.call", "Call a tool on a configured MCP server.", ["server", "tool", "arguments"], "high"),
     async (args, ctx) => {
+      const server = String(args.server ?? "");
+      const tool = String(args.tool ?? "");
+      const tools = await ctx.listMcpTools(server);
+      if (!tools.some((entry) => entry.server === server && entry.name === tool)) {
+        return { ok: false, content: `MCP tool ${server}:${tool} is not in the discovered tool directory.` };
+      }
       const approved = await ctx.requestApproval({
         title: "调用 MCP 工具",
-        description: `${args.server}:${args.tool}`,
+        description: `${server}:${tool}`,
         riskLevel: "high",
         payload: args
       });
@@ -667,8 +685,8 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         return { ok: false, content: "MCP 调用被拒绝。" };
       }
       const result = await ctx.callMcpTool(
-        String(args.server ?? ""),
-        String(args.tool ?? ""),
+        server,
+        tool,
         (args.arguments as Record<string, unknown>) ?? {}
       );
       return { ok: true, content: JSON.stringify(result, null, 2), json: { result } };

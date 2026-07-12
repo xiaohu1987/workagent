@@ -1,7 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
+import path from "node:path";
 import type {
   AppConfig,
   ArtifactRecord,
+  MessageAttachment,
   McpServerConfig,
   MessageRecord,
   ModelProfile,
@@ -40,7 +43,7 @@ export const CONTEXT_COMPACTION_THRESHOLD = 0.8;
 export const CONTEXT_COMPACTION_TARGET = 0.6;
 
 type Submission =
-  | { type: "user_input"; content: string }
+  | { type: "user_input"; content: string; attachments?: MessageAttachment[]; displayContent?: string }
   | { type: "approval_response"; requestId: string; approved: boolean }
   | { type: "user_input_response"; promptId: string; answers: Record<string, string> }
   | { type: "shutdown" };
@@ -110,6 +113,7 @@ interface RuntimeServices {
   getThreadOutputDir(threadId: string): Promise<string>;
   listMcpResources(server?: string): Promise<any[]>;
   listMcpResourceTemplates(server?: string): Promise<any[]>;
+  listMcpTools(server?: string): Promise<any[]>;
   readMcpResource(server: string, uri: string): Promise<any>;
   callMcpTool(server: string, tool: string, argumentsJson: Record<string, unknown>): Promise<any>;
   emit(event: RuntimeEvent): Promise<void>;
@@ -322,6 +326,15 @@ class ThreadSessionRuntime {
     });
   }
 
+  public async setKnowledgeEnabled(knowledgeEnabled: boolean): Promise<void> {
+    await this.#ensureGpa();
+    await this.#commitGpa({
+      ...this.#gpa,
+      knowledgeEnabled,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
   public getGpa(): GpaState {
     return this.#gpa;
   }
@@ -341,7 +354,7 @@ class ThreadSessionRuntime {
       }
       if (submission.type === "user_input") {
         try {
-          await this.runTurn(submission.content);
+          await this.runTurn(submission.content, submission.attachments ?? [], submission.displayContent);
         } catch (error) {
           console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
           await this.services.log("turn.unhandled_error", this.threadId, {
@@ -352,13 +365,17 @@ class ThreadSessionRuntime {
     }
   }
 
-  private async runTurn(initialInput: string): Promise<void> {
+  private async runTurn(initialInput: string, attachments: MessageAttachment[] = [], displayContent?: string): Promise<void> {
     const thread = await this.services.persistence.getThread(this.threadId);
+    const gpa = await this.#ensureGpa();
+    const knowledgeEnabled = gpa.knowledgeEnabled;
     const enabledPluginIds = await this.services.getEnabledPluginIdsForThread(this.threadId);
     const accessibleMcpServerIds = await this.services.getAccessibleMcpServerIdsForThread(
       this.threadId
     );
-    const visibleKnowledgeBases = await this.services.listKnowledgeBases(this.threadId);
+    const visibleKnowledgeBases = knowledgeEnabled
+      ? await this.services.listKnowledgeBases(this.threadId)
+      : [];
     const visibleKnowledgeBaseIds = visibleKnowledgeBases.map((entry: { id: string }) => entry.id);
     const model = resolveModel(this.services.config, thread.modelId);
     const provider = resolveProvider(this.services.config, thread.providerId);
@@ -377,9 +394,11 @@ class ThreadSessionRuntime {
       this.services.mcp.listConfigs(),
       accessibleMcpServerIds
     );
-    const knowledgeContext = await this.services.buildKnowledgeContext(this.threadId);
+    const knowledgeContext = knowledgeEnabled
+      ? await this.services.buildKnowledgeContext(this.threadId)
+      : null;
     const workflowPackContext = await this.services.buildWorkflowPackContext(this.threadId);
-    const tools = await this.buildVisibleTools(accessibleMcpServerIds);
+    const { tools, mcpTools } = await this.buildVisibleTools(accessibleMcpServerIds, knowledgeEnabled);
     const availableToolsPrompt = formatAvailableTools(tools);
     const turn = await this.services.persistence.startTurn({
       threadId: this.threadId,
@@ -400,7 +419,20 @@ class ThreadSessionRuntime {
       status: "running",
       updatedAt: new Date().toISOString()
     });
-    await this.recordMessage("user", initialInput, turn.id);
+    await this.recordMessage("user", displayContent ?? initialInput, turn.id, attachments.length > 0 ? { attachments } : undefined);
+
+    if (model.supportsImageGeneration) {
+      await this.runImageGeneration({
+        turnId: turn.id,
+        model,
+        provider,
+        prompt: initialInput,
+        abortController
+      });
+      this.#activeTurnRunId = null;
+      if (this.#abortController === abortController) this.#abortController = null;
+      return;
+    }
 
     const history = await this.services.persistence.listMessages(this.threadId);
 
@@ -427,6 +459,7 @@ class ThreadSessionRuntime {
       const successfulToolCallFingerprints = new Set<string>();
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
+      const visibleAssistantMessages = new Set<string>();
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
@@ -481,7 +514,8 @@ class ThreadSessionRuntime {
           skillContext,
           knowledgeContext,
           workflowPackContext,
-          skillDependencyWarnings
+          skillDependencyWarnings,
+          knowledgeEnabled
         );
         const adapter = this.services.providerFactory.create(provider);
         let streamedVisibleContent = "";
@@ -664,15 +698,19 @@ class ThreadSessionRuntime {
         }
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
-          const assistantMessage = await this.recordMessage("assistant", decision.assistantMessage, turn.id);
-          transcript.push({ role: "assistant", content: assistantMessage.content });
-          if (streamedVisibleContent) {
-            await this.services.emit({
-              type: "assistant.completed",
-              threadId: this.threadId,
-              payload: { turnRunId: turn.id, messageId: assistantMessage.id },
-              createdAt: new Date().toISOString()
-            });
+          const fingerprint = normalizeAssistantMessageForDeduplication(decision.assistantMessage);
+          if (!visibleAssistantMessages.has(fingerprint)) {
+            visibleAssistantMessages.add(fingerprint);
+            const assistantMessage = await this.recordMessage("assistant", decision.assistantMessage, turn.id);
+            transcript.push({ role: "assistant", content: assistantMessage.content });
+            if (streamedVisibleContent) {
+              await this.services.emit({
+                type: "assistant.completed",
+                threadId: this.threadId,
+                payload: { turnRunId: turn.id, messageId: assistantMessage.id },
+                createdAt: new Date().toISOString()
+              });
+            }
           }
         }
 
@@ -770,9 +808,11 @@ class ThreadSessionRuntime {
           hasExecutedToolCall = true;
           let result: ToolResult;
           try {
+            // Projectless chats must never inherit the desktop application's launch folder.
+            const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
             result = await waitForAbort(
               this.services.toolRuntime.execute(toolCall, {
-              cwd: thread.cwd ?? process.cwd(),
+              cwd: workspaceCwd,
               appHome: "",
               threadId: this.threadId,
               turnRunId: turn.id,
@@ -786,7 +826,7 @@ class ThreadSessionRuntime {
               readFile: this.services.readFile,
               writeFile: this.services.writeFile,
               runTerminalCommand: (command) =>
-                this.services.runTerminalCommand(this.threadId, thread.cwd ?? process.cwd(), command),
+                this.services.runTerminalCommand(this.threadId, workspaceCwd, command),
               requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
               requestUserInput: (input) => this.services.requestUserInput(this.threadId, turn.id, input),
               spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
@@ -821,6 +861,15 @@ class ThreadSessionRuntime {
                   accessibleMcpServerIds.includes(template.server)
                 );
               },
+              listMcpTools: async (server) => {
+                if (server) {
+                  assertAccessibleMcpServer(server, accessibleMcpServerIds);
+                  return this.services.listMcpTools(server);
+                }
+                return (await this.services.listMcpTools()).filter((tool) =>
+                  accessibleMcpServerIds.includes(tool.server)
+                );
+              },
               readMcpResource: async (server, uri) => {
                 assertAccessibleMcpServer(server, accessibleMcpServerIds);
                 return this.services.readMcpResource(server, uri);
@@ -829,6 +878,8 @@ class ThreadSessionRuntime {
                 assertAccessibleMcpServer(server, accessibleMcpServerIds);
                 return this.services.callMcpTool(server, tool, argumentsJson);
               },
+              deferredToolSpecs: mcpTools,
+              hiddenToolNames: knowledgeEnabled ? undefined : ["knowledge.search", "knowledge.read"],
               loadSkill: (skillId) =>
                 this.services.skills.loadInstructions(skillId, availableSkillIds)
               }),
@@ -1042,11 +1093,64 @@ class ThreadSessionRuntime {
     }
   }
 
-  private async buildVisibleTools(accessibleMcpServerIds: string[]) {
+  private async buildVisibleTools(accessibleMcpServerIds: string[], knowledgeEnabled: boolean) {
     await this.services.mcp.refresh(accessibleMcpServerIds);
     const mcpTools = await this.services.mcp.listToolSpecs(accessibleMcpServerIds);
     const { direct } = this.services.toolRuntime.listToolSpecs(mcpTools);
-    return direct;
+    return {
+      tools: knowledgeEnabled
+        ? direct
+        : direct.filter((tool) => tool.name !== "knowledge.search" && tool.name !== "knowledge.read"),
+      mcpTools
+    };
+  }
+
+  private async runImageGeneration(input: {
+    turnId: string;
+    model: ModelProfile;
+    provider: ReturnType<typeof resolveProvider>;
+    prompt: string;
+    abortController: AbortController;
+  }): Promise<void> {
+    const completedAt = new Date().toISOString();
+    try {
+      const adapter = this.services.providerFactory.create(input.provider);
+      if (!adapter.generateImage) {
+        throw new Error("The selected provider does not support the OpenAI-compatible image generation API.");
+      }
+      const image = await waitForAbort(adapter.generateImage({
+        model: input.model,
+        prompt: input.prompt,
+        abortSignal: input.abortController.signal
+      }), input.abortController.signal);
+      const outputDir = await this.services.getThreadOutputDir(this.threadId);
+      await fs.mkdir(outputDir, { recursive: true });
+      const fileName = `generated-${Date.now()}-${randomUUID().slice(0, 8)}.${imageExtensionForMime(image.mimeType)}`;
+      const absolutePath = path.join(outputDir, fileName);
+      await fs.writeFile(absolutePath, image.data);
+      const attachment: MessageAttachment = {
+        id: randomUUID(), kind: "image", name: fileName, mimeType: image.mimeType,
+        absolutePath, sizeBytes: image.data.byteLength, source: "generated"
+      };
+      const artifact = await this.services.persistence.addArtifact({
+        threadId: this.threadId, turnRunId: input.turnId, messageId: null, toolCallId: null,
+        artifactKind: "generated-image", displayName: fileName, absolutePath, relativePath: fileName,
+        mimeType: image.mimeType, sizeBytes: image.data.byteLength,
+        sha256: createHash("sha256").update(image.data).digest("hex"), sourceKind: "image-generation",
+        isUserVisible: true, status: "ready"
+      });
+      const message = await this.recordMessage("assistant", "已生成图片。", input.turnId, { attachments: [attachment], artifactId: artifact.id });
+      await this.services.persistence.finishTurn(input.turnId, { status: "completed", completedAt, errorMessage: null });
+      const thread = await this.services.persistence.updateThread(this.threadId, { status: "completed", updatedAt: completedAt });
+      await this.services.emit({ type: "assistant.completed", threadId: this.threadId, payload: { turnRunId: input.turnId, messageId: message.id }, createdAt: completedAt });
+      await this.services.emit({ type: "thread.updated", threadId: this.threadId, payload: { thread }, createdAt: completedAt });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await this.recordMessage("assistant", `图片生成失败：${reason}`, input.turnId);
+      await this.services.persistence.finishTurn(input.turnId, { status: "failed", completedAt, errorMessage: reason });
+      const thread = await this.services.persistence.updateThread(this.threadId, { status: "failed", updatedAt: completedAt });
+      await this.services.emit({ type: "thread.updated", threadId: this.threadId, payload: { thread }, createdAt: completedAt });
+    }
   }
 
   private async recordMessage(
@@ -1218,8 +1322,8 @@ export class AgentRuntimeService {
     return runtime;
   }
 
-  public submitUserInput(threadId: string, content: string): void {
-    this.ensureThread(threadId).submit({ type: "user_input", content });
+  public submitUserInput(threadId: string, content: string, attachments?: MessageAttachment[], displayContent?: string): void {
+    this.ensureThread(threadId).submit({ type: "user_input", content, attachments, displayContent });
   }
 
   public interrupt(threadId: string): boolean {
@@ -1234,6 +1338,11 @@ export class AgentRuntimeService {
   public async setGpaFullAccess(threadId: string, fullAccess: boolean): Promise<void> {
     const runtime = this.ensureThread(threadId);
     await runtime.setGpaFullAccess(fullAccess);
+  }
+
+  public async setKnowledgeEnabled(threadId: string, knowledgeEnabled: boolean): Promise<void> {
+    const runtime = this.ensureThread(threadId);
+    await runtime.setKnowledgeEnabled(knowledgeEnabled);
   }
 
   public getGpa(threadId: string): GpaState {
@@ -1282,7 +1391,8 @@ function buildRuntimePrompt(
   skillContext: RuntimePromptBundle["skillContext"],
   knowledgeContext: string | null,
   workflowPackContext: string | null,
-  skillDependencyWarnings: string[]
+  skillDependencyWarnings: string[],
+  knowledgeEnabled: boolean
 ): RuntimePromptBundle {
   const blocks = [
     "You are codexh, a desktop agent for project and chat workflows.",
@@ -1290,6 +1400,7 @@ function buildRuntimePrompt(
     "Prefer progressive disclosure: inspect facts before making edits.",
     "When a tool can gather needed facts, call it instead of guessing.",
     "Before responding, decide whether an available Skill is the best fit. When it is, call skills.load with that skill_id before following its instructions. Use Function Calling for Skills and external tools rather than merely claiming a Skill was used.",
+    "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
     "Respond as an IDE software engineering agent using an event stream format.",
     "Your visible output is consumed by a renderer that understands structured event blocks.",
     "Prefer XML-like event envelopes when possible: <event type=\"commentary\">...</event>.",
@@ -1298,6 +1409,9 @@ function buildRuntimePrompt(
     "Do not expose chain-of-thought. Do not fabricate tool usage, file changes, or verification.",
     `Context window: ${model.contextWindow}.`
   ];
+  if (knowledgeEnabled) {
+    blocks.splice(5, 0, "For local knowledge questions, call knowledge.search first. It returns ranked document chunks with source_path and locator; use knowledge.read only for the relevant chunk. Never use fs.read_file on a knowledge Bundle or index path. If search returns no results, refine the query once or explain that no matching local material was found; do not repeat the same progress reply.");
+  }
   if (skillContext?.text) {
     blocks.push(skillContext.text);
   }
@@ -1331,8 +1445,19 @@ function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transc
   const visible = messages.slice(-maxMessages);
   return visible.map((message) => ({
     role: message.role,
-    content: message.content
+    content: message.content,
+    attachments: getMessageAttachments(message)
   }));
+}
+
+function getMessageAttachments(message: MessageRecord): MessageAttachment[] | undefined {
+  if (!message.metadataJson) return undefined;
+  try {
+    const metadata = JSON.parse(message.metadataJson) as { attachments?: unknown };
+    return Array.isArray(metadata.attachments) ? metadata.attachments as MessageAttachment[] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function compactTranscriptForContext(
@@ -1418,6 +1543,17 @@ function estimateRuntimeTranscriptTokens(transcript: ProviderTurnInput["transcri
 function estimateRuntimeTokens(content: string): number {
   const normalized = content.trim();
   return normalized ? Math.ceil(Array.from(normalized).length / 2.8) : 0;
+}
+
+function normalizeAssistantMessageForDeduplication(content: string): string {
+  return content.replace(/\s+/g, " ").trim();
+}
+
+function imageExtensionForMime(mimeType: string): string {
+  if (mimeType === "image/jpeg") return "jpg";
+  if (mimeType === "image/webp") return "webp";
+  if (mimeType === "image/gif") return "gif";
+  return "png";
 }
 
 function truncateToRuntimeTokenBudget(content: string, tokenBudget: number): string {

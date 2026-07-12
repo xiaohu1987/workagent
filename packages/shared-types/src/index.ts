@@ -10,6 +10,8 @@ export interface GpaState {
   stage: GpaStage;
   /** When enabled for a task, tool calls execute without approval prompts. */
   fullAccess: boolean;
+  /** When enabled for a task, local knowledge bases are available to the model. */
+  knowledgeEnabled: boolean;
   awaitingConfirmation: "goal" | "plan" | "act" | null;
   planTasks: GpaPlanTask[];
   updatedAt: string;
@@ -345,6 +347,7 @@ export interface ModelProfile {
   supportsParallelToolCalls: boolean;
   supportsJsonOutput: boolean;
   supportsMultimodalInput: boolean;
+  supportsImageGeneration?: boolean;
   supportsReasoningSummary: boolean;
   defaultTemperature?: number;
   defaultMaxOutputTokens?: number;
@@ -381,11 +384,62 @@ export interface ProviderTurnDecision {
   reasoningSummary?: string;
 }
 
+export interface MessageAttachment {
+  id: string;
+  kind: "image" | "file";
+  name: string;
+  mimeType: string;
+  absolutePath: string;
+  sizeBytes: number;
+  width?: number;
+  height?: number;
+  source: "user" | "generated";
+}
+
+export interface AttachmentImportInput {
+  name: string;
+  mimeType?: string;
+  path?: string;
+  data?: Uint8Array;
+}
+
+export interface KnowledgeDocumentRecord {
+  id: string;
+  knowledgeBaseId: string;
+  sourcePath: string;
+  sourceHash: string;
+  title: string;
+  mimeHint: string;
+  status: "ready" | "missing" | "failed";
+  updatedAt: string;
+}
+
+export interface KnowledgeChunkRecord {
+  id: string;
+  knowledgeBaseId: string;
+  documentId: string;
+  chunkIndex: number;
+  title: string;
+  content: string;
+  sourcePath: string;
+  locator: string;
+  createdAt: string;
+  score?: number;
+}
+
+export interface KnowledgeBaseSummary extends KnowledgeBaseRecord {
+  documentCount: number;
+  chunkCount: number;
+  indexedBytes: number;
+  scopeTargetLabel?: string;
+}
+
 export interface ProviderTurnInput {
   systemPrompt: string;
   transcript: Array<{
     role: MessageRole;
     content: string;
+    attachments?: MessageAttachment[];
   }>;
   availableTools: ToolSpecDefinition[];
   model: ModelProfile;

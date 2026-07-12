@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 const api = {
   listThreads: () => ipcRenderer.invoke("threads:list"),
+  searchThreads: (query: string) => ipcRenderer.invoke("threads:search", query),
   createThread: (payload: {
     title: string;
     mode: "project" | "chat";
@@ -14,13 +15,21 @@ const api = {
     ipcRenderer.invoke("projects:choose-directory", defaultPath),
   chooseAttachmentFiles: (payload?: { imagesOnly?: boolean }) =>
     ipcRenderer.invoke("attachments:choose-files", payload),
+  chooseKnowledgeFiles: () => ipcRenderer.invoke("knowledge:choose-files"),
+  chooseKnowledgeFolders: () => ipcRenderer.invoke("knowledge:choose-folders"),
   listProjectFiles: (threadId: string) => ipcRenderer.invoke("projects:list-files", threadId),
   readProjectFile: (payload: { threadId: string; path: string }) =>
     ipcRenderer.invoke("projects:read-file", payload),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
   getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
-  sendMessage: (payload: { threadId: string; content: string }) =>
+  sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[] }) =>
     ipcRenderer.invoke("threads:send", payload),
+  importAttachments: (payload: { threadId: string; attachments: unknown[] }) =>
+    ipcRenderer.invoke("attachments:import", payload),
+  previewAttachment: (payload: { threadId: string; absolutePath: string }) =>
+    ipcRenderer.invoke("attachments:preview", payload),
+  previewLocalImage: (payload: { absolutePath: string }) =>
+    ipcRenderer.invoke("attachments:preview-local", payload),
   rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) =>
     ipcRenderer.invoke("threads:reject-multimodal", payload),
   interruptThread: (threadId: string) => ipcRenderer.invoke("threads:interrupt", threadId),
@@ -34,6 +43,8 @@ const api = {
   closeTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:close", payload),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
   openPath: (targetPath: string) => ipcRenderer.invoke("shell:open-path", targetPath),
+  openFileLocation: (payload: { threadId: string; path: string }) =>
+    ipcRenderer.invoke("threads:open-file-location", payload),
   listSkills: (cwd?: string | null) => ipcRenderer.invoke("skills:list", cwd),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),
@@ -51,12 +62,18 @@ const api = {
     return result;
   },
   saveConfig: (config: unknown) => ipcRenderer.invoke("config:save", config),
+  listMcpServers: () => ipcRenderer.invoke("mcp:list"),
+  testMcpServer: (config: unknown) => ipcRenderer.invoke("mcp:test", config),
   importKnowledge: (payload: {
     displayName: string;
     scope: "global" | "project" | "imported";
     sourcePaths: string[];
     threadId?: string;
   }) => ipcRenderer.invoke("knowledge:import", payload),
+  listKnowledgeBases: () => ipcRenderer.invoke("knowledge:list"),
+  listKnowledgeDocuments: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:documents", knowledgeBaseId),
+  refreshKnowledgeBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:refresh", knowledgeBaseId),
+  deleteKnowledgeBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:delete", knowledgeBaseId),
   openBrowserTab: (payload: { threadId: string; url: string }) =>
     ipcRenderer.invoke("browser:open", payload),
   navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) =>
@@ -82,6 +99,8 @@ const api = {
     ipcRenderer.invoke("gpa:set-stage", payload),
   setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) =>
     ipcRenderer.invoke("gpa:set-full-access", payload),
+  setKnowledgeEnabled: (payload: { threadId: string; knowledgeEnabled: boolean }) =>
+    ipcRenderer.invoke("knowledge:set-enabled", payload),
   fetchProviderModels: (payload: {
     baseUrl?: string;
     apiKey?: string;
