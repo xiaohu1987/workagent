@@ -95,7 +95,7 @@ interface RuntimeServices {
     role: string;
     modelId?: string;
   }): Promise<string>;
-  webSearch(query: string): Promise<Array<{ title: string; url: string; snippet: string }>>;
+  webSearch(threadId: string, query: string): Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage(threadId: string, url: string): Promise<{ title: string; url: string; text: string }>;
   findInPage(url: string, pattern: string): Promise<string[]>;
   listBrowserTabs(threadId: string): Promise<any[]>;
@@ -790,7 +790,7 @@ class ThreadSessionRuntime {
               requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
               requestUserInput: (input) => this.services.requestUserInput(this.threadId, turn.id, input),
               spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
-              webSearch: this.services.webSearch,
+              webSearch: (query) => this.services.webSearch(this.threadId, query),
               openPage: (url) => this.services.openPage(this.threadId, url),
               findInPage: this.services.findInPage,
               listBrowserTabs: () => this.services.listBrowserTabs(this.threadId),

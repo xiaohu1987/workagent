@@ -138,7 +138,7 @@ export class ToolRuntime {
       throw new Error(`Unknown tool: ${call.name}`);
     }
 
-    return registration.handler(call.arguments, ctx, this);
+    return registration.handler(normalizeToolArguments(call.arguments), ctx, this);
   }
 
   public searchTools(query: string, extra: ToolSpecDefinition[] = []): ToolSearchResult[] {
@@ -159,6 +159,25 @@ export class ToolRuntime {
       .filter((entry) => entry.score > 0)
       .sort((left, right) => right.score - left.score);
   }
+}
+
+function normalizeToolArguments(argumentsValue: unknown): Record<string, unknown> {
+  if (argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)) {
+    return argumentsValue as Record<string, unknown>;
+  }
+  if (typeof argumentsValue !== "string") {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(argumentsValue);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Tool validation below will report missing required fields in the normal way.
+  }
+  return {};
 }
 
 function registerBuiltinTools(runtime: ToolRuntime): void {

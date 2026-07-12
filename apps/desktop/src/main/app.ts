@@ -122,7 +122,7 @@ export class DesktopBackend {
       requestUserInput: async (threadId, turnRunId, input) =>
         this.requestUserInput(threadId, turnRunId, input),
       spawnChildAgent: async (parentThreadId, input) => this.spawnChildAgent(parentThreadId, input),
-      webSearch: async (query) => this.webSearch(query),
+      webSearch: async (threadId, query) => this.webSearch(threadId, query),
       openPage: async (threadId, url) => this.openPage(threadId, url),
       findInPage: async (url, pattern) => this.findInPage(url, pattern),
       listBrowserTabs: async (threadId) => this.#db.listBrowserTabs(threadId),
@@ -960,7 +960,7 @@ export class DesktopBackend {
     return blocks.join("\n\n");
   }
 
-  private async webSearch(query: string): Promise<Array<{ title: string; url: string; snippet: string }>> {
+  private async webSearch(threadId: string, query: string): Promise<Array<{ title: string; url: string; snippet: string }>> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
       return [];
@@ -968,27 +968,35 @@ export class DesktopBackend {
 
     const providers = [
       {
-        name: "baidu",
-        url: `https://www.baidu.com/s?rn=8&wd=${encodeURIComponent(normalizedQuery)}`,
-        selector: "h3 a"
-      },
-      {
         name: "bing",
         url: `https://www.bing.com/search?count=8&setlang=zh-Hans&q=${encodeURIComponent(normalizedQuery)}`,
         selector: "li.b_algo h2 a"
+      },
+      {
+        name: "360",
+        url: `https://www.so.com/s?q=${encodeURIComponent(normalizedQuery)}`,
+        selector: "h3.res-title a"
+      },
+      {
+        name: "baidu",
+        url: `https://www.baidu.com/s?rn=8&wd=${encodeURIComponent(normalizedQuery)}`,
+        selector: "h3 a"
       }
     ];
 
     for (const provider of providers) {
       try {
-        const page = await this.loadBrowserPage(provider.url);
+        // A search is visible in the workspace as well as being parsed for the agent.
+        const page = threadId
+          ? (await this.openBrowserTab(threadId, provider.url)).page
+          : await this.loadBrowserPage(provider.url);
         const $ = cheerio.load(page.html);
         const results = $(provider.selector)
           .toArray()
           .slice(0, 8)
           .map((element) => {
             const anchor = $(element);
-            const href = anchor.attr("href") ?? "";
+            const href = anchor.attr("data-mdurl") ?? anchor.attr("href") ?? "";
             const container = anchor.closest(".result, .c-container, .b_algo, article, div");
             return {
               title: anchor.text().replace(/\s+/g, " ").trim(),
@@ -997,13 +1005,15 @@ export class DesktopBackend {
             };
           })
           .filter((item) => item.title && /^https?:\/\//i.test(item.url));
-        if (results.length > 0) {
-          return results;
+        const relevantResults = filterRelevantSearchResults(normalizedQuery, results);
+        if (relevantResults.length > 0) {
+          return relevantResults;
         }
-        await this.#logs.append("web.search_provider_empty", {
+        await this.#logs.append("web.search_provider_irrelevant", {
           provider: provider.name,
           query: normalizedQuery,
-          pageUrl: page.url
+          pageUrl: page.url,
+          resultCount: results.length
         });
       } catch (error) {
         await this.#logs.append("web.search_provider_failed", {
@@ -1415,6 +1425,23 @@ function resolveSearchResultUrl(pageUrl: string, href: string): string {
   } catch {
     return href;
   }
+}
+
+function filterRelevantSearchResults<T extends { title: string; snippet: string }>(
+  query: string,
+  results: T[]
+): T[] {
+  const terms = [
+    ...Array.from(query.matchAll(/[\u4e00-\u9fff]{2,}/g), (match) => match[0]),
+    ...Array.from(query.matchAll(/[a-z0-9][a-z0-9._-]{1,}/gi), (match) => match[0])
+  ];
+  if (terms.length === 0) {
+    return results;
+  }
+  return results.filter((result) => {
+    const text = `${result.title} ${result.snippet}`.toLowerCase();
+    return terms.some((term) => text.includes(term.toLowerCase()));
+  });
 }
 
 function resolveProjectFilePath(root: string, relativePath: string): string {

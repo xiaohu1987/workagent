@@ -40,6 +40,36 @@ describe("ToolRuntime", () => {
     expect(readFile).toHaveBeenCalledTimes(1);
   });
 
+  it("treats an unavailable web search as a successful, actionable result", async () => {
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "search-unavailable", name: "web_search.search_query", arguments: { query: "台风巴威 最新消息" } },
+      { cwd: process.cwd(), webSearch: vi.fn().mockResolvedValue([]) } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("Do not retry the same query");
+    expect(result.json).toMatchObject({ unavailable: true, results: [] });
+  });
+
+  it("unwraps JSON-stringified tool arguments before calling a handler", async () => {
+    const webSearch = vi.fn().mockResolvedValue([
+      { title: "台风巴威", url: "https://example.com/bavi", snippet: "result" }
+    ]);
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "stringified-search",
+        name: "web_search.search_query",
+        arguments: "{\"query\":\"台风巴威 2026 最新路径\"}" as unknown as Record<string, unknown>
+      },
+      { cwd: process.cwd(), webSearch } as unknown as ToolRuntimeContext
+    );
+
+    expect(webSearch).toHaveBeenCalledWith("台风巴威 2026 最新路径");
+    expect(result.ok).toBe(true);
+  });
+
   it("maps read to the project directory reader instead of knowledge.read", async () => {
     const listFiles = vi.fn().mockResolvedValue(["hello.txt"]);
     const runtime = new ToolRuntime();
