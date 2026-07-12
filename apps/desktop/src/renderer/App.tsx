@@ -81,6 +81,11 @@ type MessageKnowledgeSource = {
   locator?: string;
 };
 
+type MessageBrowserSource = {
+  title: string;
+  url: string;
+};
+
 type KnowledgeSourceAttachment = {
   path: string;
   kind: "file" | "folder";
@@ -239,6 +244,15 @@ type RuntimeProgress = {
   runtimeObserved: boolean;
 };
 
+type RuntimeActivityEntry =
+  | { id: string; kind: "status"; label: string; createdAt: string }
+  | { id: string; kind: "tool"; toolCall: ToolCallRecord };
+
+type RuntimeActivity = {
+  threadId: string;
+  entries: RuntimeActivityEntry[];
+};
+
 type McpRuntimeServer = McpServerConfig & {
   status: { state: "idle" | "connecting" | "connected" | "error" | "disabled"; error?: string };
 };
@@ -351,6 +365,8 @@ export function App() {
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null);
+  const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
+  const [expandedRuntimeThreads, setExpandedRuntimeThreads] = useState<Record<string, boolean>>({});
   const [input, setInput] = useState("");
   const [isHistorySearchOpen, setIsHistorySearchOpen] = useState(false);
   const [historySearchQuery, setHistorySearchQuery] = useState("");
@@ -623,11 +639,91 @@ export function App() {
     };
   }, [gpaMenuOpen]);
 
+  function startRuntimeActivity(threadId: string) {
+    const createdAt = new Date().toISOString();
+    setRuntimeActivities((current) => ({
+      ...current,
+      [threadId]: {
+        threadId,
+        entries: [{ id: `submitted-${createdAt}`, kind: "status", label: "消息已发送，正在准备任务", createdAt }]
+      }
+    }));
+    setExpandedRuntimeThreads((current) => ({ ...current, [threadId]: false }));
+  }
+
+  function appendRuntimeStatus(threadId: string, label: string, createdAt = new Date().toISOString()) {
+    setRuntimeActivities((current) => {
+      const activity = current[threadId] ?? { threadId, entries: [] };
+      const last = activity.entries.at(-1);
+      if (last?.kind === "status" && last.label === label) return current;
+      return {
+        ...current,
+        [threadId]: {
+          ...activity,
+          entries: [...activity.entries, { id: `status-${createdAt}-${label}`, kind: "status", label, createdAt }]
+        }
+      };
+    });
+  }
+
+  function upsertRuntimeTool(threadId: string, toolCall: ToolCallRecord) {
+    setRuntimeActivities((current) => {
+      const activity = current[threadId] ?? { threadId, entries: [] };
+      const existingIndex = activity.entries.findIndex((entry) => entry.kind === "tool" && entry.toolCall.id === toolCall.id);
+      const entries = existingIndex < 0
+        ? [...activity.entries, { id: `tool-${toolCall.id}`, kind: "tool" as const, toolCall }]
+        : activity.entries.map((entry, index) => index === existingIndex
+          ? { id: entry.id, kind: "tool" as const, toolCall }
+          : entry
+        );
+      return { ...current, [threadId]: { ...activity, entries } };
+    });
+  }
+
+  function completeRuntimeTool(
+    threadId: string,
+    toolCallId: string,
+    status: Extract<ToolCallRecord["status"], "completed" | "failed">,
+    resultJson: string | null,
+    completedAt: string
+  ) {
+    setRuntimeActivities((current) => {
+      const activity = current[threadId];
+      if (!activity) return current;
+      return {
+        ...current,
+        [threadId]: {
+          ...activity,
+          entries: activity.entries.map((entry) => entry.kind === "tool" && entry.toolCall.id === toolCallId
+            ? { ...entry, toolCall: { ...entry.toolCall, status, resultJson, completedAt } }
+            : entry
+          )
+        }
+      };
+    });
+  }
+
+  function clearRuntimeActivity(threadId: string) {
+    setRuntimeActivities((current) => {
+      if (!current[threadId]) return current;
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
+    setExpandedRuntimeThreads((current) => {
+      if (!(threadId in current)) return current;
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
+  }
+
   useEffect(() => {
     const dispose = window.codexh.onRuntimeEvent((event) => {
       const typed = event as {
         threadId?: string;
         type: string;
+        createdAt?: string;
         payload?: {
           gpa?: GpaState;
           turnRunId?: string;
@@ -636,6 +732,13 @@ export function App() {
           messageId?: string;
           toolCallId?: string;
           toolName?: string;
+          argumentsJson?: string;
+          resultJson?: string;
+          riskLevel?: ToolCallRecord["riskLevel"];
+          approvalMode?: ToolCallRecord["approvalMode"];
+          status?: ToolCallRecord["status"];
+          startedAt?: string;
+          completedAt?: string;
           message?: { role?: MessageRecord["role"] };
           thread?: ThreadRecord;
           data?: string;
@@ -667,6 +770,19 @@ export function App() {
           toolCallId: typed.payload.toolCallId,
           toolName: typed.payload.toolName
         });
+        upsertRuntimeTool(typed.threadId, {
+          id: typed.payload.toolCallId,
+          threadId: typed.threadId,
+          turnRunId: typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : "",
+          toolName: typed.payload.toolName,
+          argumentsJson: typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}",
+          resultJson: null,
+          status: "running",
+          riskLevel: typed.payload.riskLevel ?? "medium",
+          approvalMode: typed.payload.approvalMode ?? "prompt",
+          startedAt: typeof typed.payload.startedAt === "string" ? typed.payload.startedAt : typed.createdAt ?? new Date().toISOString(),
+          completedAt: null
+        });
         setRuntimeProgress({ threadId: typed.threadId, phase: "tool", runtimeObserved: true });
         return;
       }
@@ -676,6 +792,14 @@ export function App() {
         );
         if (typed.threadId) {
           const runtimeThreadId = typed.threadId;
+          completeRuntimeTool(
+            runtimeThreadId,
+            typed.payload.toolCallId,
+            typed.payload.status === "failed" ? "failed" : "completed",
+            typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null,
+            typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString()
+          );
+          appendRuntimeStatus(runtimeThreadId, "工具已完成，正在整理结果", typed.createdAt);
           setRuntimeProgress((current) =>
             current?.threadId === runtimeThreadId
               ? { ...current, phase: "thinking", runtimeObserved: true }
@@ -697,11 +821,13 @@ export function App() {
             completed: false
           }
         }));
+        appendRuntimeStatus(threadId, "正在生成回复", typed.createdAt);
         setRuntimeProgress({ threadId, phase: "generating", runtimeObserved: true });
         return;
       }
       if (typed.type === "message.created" && typed.threadId && typed.payload?.message?.role === "user") {
         const runtimeThreadId = typed.threadId;
+        appendRuntimeStatus(runtimeThreadId, "正在理解任务", typed.createdAt);
         setRuntimeProgress((current) =>
           current?.threadId === runtimeThreadId
             ? { ...current, phase: "thinking", runtimeObserved: true }
@@ -716,6 +842,9 @@ export function App() {
           if (status === "running") return { ...current, phase: "thinking", runtimeObserved: true };
           return current.runtimeObserved ? null : current;
         });
+        if (status !== "running") {
+          clearRuntimeActivity(runtimeThreadId);
+        }
       }
       if (typed.type === "assistant.completed" && typed.payload?.turnRunId) {
         const { turnRunId, messageId } = typed.payload;
@@ -983,9 +1112,12 @@ export function App() {
     input.trim() || composerAttachments.length > 0 ? "content" : ""
   );
   const isActiveThreadExecuting = composerPrimaryAction.kind === "interrupt";
-  const localRuntimeProgress = runtimeProgress?.threadId === (activeSnapshotThreadId ?? selectedThreadId)
+  const activeRuntimeThreadId = activeSnapshotThreadId ?? selectedThreadId;
+  const localRuntimeProgress = runtimeProgress?.threadId === activeRuntimeThreadId
     ? runtimeProgress
     : null;
+  const activeRuntimeActivity = activeRuntimeThreadId ? runtimeActivities[activeRuntimeThreadId] ?? null : null;
+  const isRuntimeActivityExpanded = activeRuntimeThreadId ? !!expandedRuntimeThreads[activeRuntimeThreadId] : false;
   const isTaskProcessing = selectedThreadStatus === "running" || !!localRuntimeProgress;
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
   const taskProcessingLabel = useMemo(
@@ -1630,6 +1762,7 @@ export function App() {
     const displayContent = forcedContent ?? inputContent;
     const optimisticMessage = !options?.internal ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments) : null;
     if (!options?.internal) {
+      startRuntimeActivity(threadId);
       setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
     }
     try {
@@ -1644,6 +1777,7 @@ export function App() {
         );
       }
       setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+      clearRuntimeActivity(threadId);
       showNotice("发送消息失败", { message: error instanceof Error ? error.message : String(error) });
       return;
     }
@@ -2721,7 +2855,20 @@ export function App() {
                     )}
                   </section>
                 ) : null}
-                {isTaskProcessing ? <TaskProcessingIndicator label={taskProcessingLabel} /> : null}
+                {isTaskProcessing ? (
+                  <RuntimeActivityPanel
+                    label={taskProcessingLabel}
+                    entries={activeRuntimeActivity?.entries ?? []}
+                    expanded={isRuntimeActivityExpanded}
+                    onToggle={() => {
+                      if (!activeRuntimeThreadId) return;
+                      setExpandedRuntimeThreads((current) => ({
+                        ...current,
+                        [activeRuntimeThreadId]: !current[activeRuntimeThreadId]
+                      }));
+                    }}
+                  />
+                ) : null}
               </div>
             )}
           </div>
@@ -6164,15 +6311,48 @@ export function getToolProcessingLabel(toolName: string): string {
   return "正在调用工具";
 }
 
-function TaskProcessingIndicator({ label }: { label: string }) {
+function RuntimeActivityPanel({
+  label,
+  entries,
+  expanded,
+  onToggle
+}: {
+  label: string;
+  entries: RuntimeActivityEntry[];
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
+  const toolEntries = entries.filter((entry) => entry.kind === "tool").reverse();
+  const visibleEntries = latestStatus
+    ? [latestStatus, ...toolEntries]
+    : toolEntries.length > 0
+      ? toolEntries
+      : [{ id: "current-status", kind: "status" as const, label, createdAt: new Date().toISOString() }];
   return (
-    <section className="task-processing-indicator" role="status" aria-live="polite">
-      <span className="task-processing-dots" aria-hidden="true">
-        <i />
-        <i />
-        <i />
-      </span>
-      <span>{label}</span>
+    <section className={`runtime-activity-panel ${expanded ? "expanded" : ""}`} aria-live="polite">
+      <button
+        type="button"
+        className="runtime-activity-toggle"
+        aria-expanded={expanded}
+        onClick={onToggle}
+      >
+        <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
+        <span>{label}</span>
+        <span className="runtime-activity-chevron" aria-hidden="true" />
+      </button>
+      {expanded ? (
+        <div className="runtime-activity-details">
+          {visibleEntries.map((entry, index) => entry.kind === "tool" ? (
+            <ToolActivityRow key={entry.id} toolCall={entry.toolCall} />
+          ) : (
+            <div key={entry.id} className={`runtime-activity-status-row ${index === 0 ? "current" : ""}`}>
+              <span className="runtime-activity-status-dot" aria-hidden="true" />
+              <span>{entry.label}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -6643,11 +6823,13 @@ function renderMessageContent(
 
   const eventBlocks = parseMessageEventBlocks({ ...message, content });
   const knowledgeSources = message.role === "assistant" ? getMessageKnowledgeSources(message) : [];
+  const browserSources = message.role === "assistant" ? getMessageBrowserSources(message) : [];
   if (!eventBlocks || eventBlocks.length === 0) {
     return <>
       {renderMarkdownDocument(content, `${message.id}-markdown`, "message-markdown")}
       <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
       <MessageKnowledgeSources sources={knowledgeSources} />
+      <MessageBrowserSources sources={browserSources} />
     </>;
   }
 
@@ -6656,6 +6838,7 @@ function renderMessageContent(
       {eventBlocks.map((block, index) => renderEventBlock(block, `${message.id}-${block.type}-${index}`))}
       <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
       <MessageKnowledgeSources sources={knowledgeSources} />
+      <MessageBrowserSources sources={browserSources} />
     </div>
   );
 }
@@ -6693,6 +6876,44 @@ function MessageKnowledgeSources({ sources }: { sources: MessageKnowledgeSource[
           </span>
         );
       })}
+    </div>
+  );
+}
+
+function getMessageBrowserSources(message: MessageRecord): MessageBrowserSource[] {
+  try {
+    const sources = JSON.parse(message.metadataJson ?? "{}").browserSources;
+    if (!Array.isArray(sources)) return [];
+    return sources.filter((source): source is MessageBrowserSource =>
+      Boolean(source) &&
+      typeof source.title === "string" &&
+      typeof source.url === "string" &&
+      /^https?:\/\//i.test(source.url)
+    );
+  } catch {
+    return [];
+  }
+}
+
+function MessageBrowserSources({ sources }: { sources: MessageBrowserSource[] }) {
+  if (sources.length === 0) return null;
+  return (
+    <div className="message-browser-sources" aria-label="网页来源">
+      {sources.map((source) => (
+        <a
+          key={source.url}
+          className="message-browser-source"
+          href={source.url}
+          title={`网页来源\n${source.title}\n${source.url}`}
+          onClick={(event) => {
+            event.preventDefault();
+            void window.codexh.openExternal(source.url);
+          }}
+        >
+          <IconGlobe />
+          <span>网页来源 · {source.title}</span>
+        </a>
+      ))}
     </div>
   );
 }

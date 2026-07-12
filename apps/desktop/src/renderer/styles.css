@@ -4453,17 +4453,105 @@ select:focus {
   animation: runtime-status-spin 900ms linear infinite;
 }
 
-.task-processing-indicator {
-  display: inline-flex;
+.runtime-activity-panel {
+  width: fit-content;
+  min-width: min(100%, 300px);
+  max-width: min(100%, 720px);
+  margin: 0 0 2px;
+  color: #aeb9c8;
+  font-size: 12px;
+}
+
+.runtime-activity-toggle {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  gap: 9px;
+  padding: 0 10px;
+  border: 0;
+  border-left: 2px solid #5ca9ef;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  text-align: left;
+}
+
+.runtime-activity-toggle:hover { background: rgba(92, 169, 239, 0.07); }
+.runtime-activity-toggle:focus-visible { outline: 1px solid rgba(92, 169, 239, 0.7); outline-offset: 2px; }
+
+.runtime-activity-panel.expanded .runtime-activity-toggle {
+  border: 1px solid rgba(92, 169, 239, 0.28);
+  border-left: 2px solid #5ca9ef;
+  border-radius: 5px 5px 0 0;
+  background: #111419;
+}
+
+.runtime-activity-panel.expanded {
+  width: min(100%, 720px);
+}
+
+.runtime-activity-chevron {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-right: 1px solid #8d9aab;
+  border-bottom: 1px solid #8d9aab;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 150ms ease;
+}
+
+.runtime-activity-panel.expanded .runtime-activity-chevron { transform: rotate(225deg) translate(-2px, -2px); }
+
+.runtime-activity-details {
+  display: grid;
+  gap: 6px;
+  overflow: hidden;
+  padding: 6px;
+  border: 1px solid rgba(92, 169, 239, 0.18);
+  border-top: 0;
+  border-radius: 0 0 5px 5px;
+  background: #191a1d;
+}
+
+.runtime-activity-status-row {
+  display: flex;
   align-items: center;
   gap: 9px;
   min-height: 30px;
-  margin: 0 0 2px;
   padding: 0 10px;
-  border-left: 2px solid #5ca9ef;
-  color: #aeb9c8;
-  font-size: 12px;
-  line-height: 1;
+  border-radius: 4px;
+  color: #8e98a6;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.runtime-activity-status-row.current { color: #b5c9df; }
+
+.runtime-activity-status-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #747e8a;
+}
+
+.runtime-activity-status-row.current .runtime-activity-status-dot {
+  background: #67b4ff;
+  animation: runtime-status-pulse 1.15s ease-in-out infinite;
+}
+
+.runtime-activity-details .tool-activity-row {
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.runtime-activity-details .tool-activity-output pre {
+  max-height: 360px;
 }
 
 .task-processing-dots {
@@ -5731,6 +5819,42 @@ select:focus {
 }
 
 .message-knowledge-source span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-browser-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.message-browser-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid rgba(92, 169, 239, 0.3);
+  border-radius: 4px;
+  color: #82bdff;
+  background: rgba(92, 169, 239, 0.09);
+  font-size: 12px;
+  line-height: 1.35;
+  text-decoration: none;
+}
+
+.message-browser-source:hover { background: rgba(92, 169, 239, 0.16); }
+
+.message-browser-source svg {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+}
+
+.message-browser-source span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

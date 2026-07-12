@@ -55,6 +55,11 @@ type KnowledgeSourceReference = {
   locator?: string;
 };
 
+type BrowserSourceReference = {
+  title: string;
+  url: string;
+};
+
 interface RuntimePersistence {
   getThread(threadId: string): Promise<ThreadRecord>;
   updateThread(threadId: string, patch: Partial<ThreadRecord>): Promise<ThreadRecord>;
@@ -467,6 +472,7 @@ class ThreadSessionRuntime {
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
       const knowledgeSources = new Map<string, KnowledgeSourceReference>();
+      const browserSources = new Map<string, BrowserSourceReference>();
       const visibleAssistantMessages = new Set<string>();
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
@@ -709,11 +715,15 @@ class ThreadSessionRuntime {
           const fingerprint = normalizeAssistantMessageForDeduplication(decision.assistantMessage);
           if (!visibleAssistantMessages.has(fingerprint)) {
             visibleAssistantMessages.add(fingerprint);
+            const sourceMetadata = {
+              ...(knowledgeSources.size > 0 ? { knowledgeSources: [...knowledgeSources.values()] } : {}),
+              ...(browserSources.size > 0 ? { browserSources: [...browserSources.values()] } : {})
+            };
             const assistantMessage = await this.recordMessage(
               "assistant",
               decision.assistantMessage,
               turn.id,
-              knowledgeSources.size > 0 ? { knowledgeSources: [...knowledgeSources.values()] } : undefined
+              Object.keys(sourceMetadata).length > 0 ? sourceMetadata : undefined
             );
             transcript.push({ role: "assistant", content: assistantMessage.content });
             if (streamedVisibleContent) {
@@ -813,7 +823,12 @@ class ThreadSessionRuntime {
             threadId: this.threadId,
             payload: {
               toolCallId: toolRecord.id,
-              toolName: toolCall.name
+              turnRunId: toolRecord.turnRunId,
+              toolName: toolCall.name,
+              argumentsJson: toolRecord.argumentsJson,
+              riskLevel: toolRecord.riskLevel,
+              approvalMode: toolRecord.approvalMode,
+              startedAt: toolRecord.startedAt
             },
             createdAt: new Date().toISOString()
           });
@@ -917,10 +932,13 @@ class ThreadSessionRuntime {
             throw new Error("Turn interrupted.");
           }
 
+          const completedAt = new Date().toISOString();
+          const resultJson = JSON.stringify(result);
+          const status = result.ok ? "completed" : "failed";
           await this.services.persistence.finishToolCall(toolRecord.id, {
-            status: result.ok ? "completed" : "failed",
-            resultJson: JSON.stringify(result),
-            completedAt: new Date().toISOString()
+            status,
+            resultJson,
+            completedAt
           });
           await this.services.emit({
             type: "tool.completed",
@@ -928,6 +946,10 @@ class ThreadSessionRuntime {
             payload: {
               toolCallId: toolRecord.id,
               toolName: toolCall.name,
+              turnRunId: toolRecord.turnRunId,
+              resultJson,
+              status,
+              completedAt,
               ok: result.ok
             },
             createdAt: new Date().toISOString()
@@ -935,6 +957,7 @@ class ThreadSessionRuntime {
 
           if (result.ok) {
             collectKnowledgeSources(toolCall.name, result, visibleKnowledgeBases, knowledgeSources);
+            collectBrowserSources(toolCall.name, result, browserSources);
           }
 
           const toolMessage = await this.recordMessage(
@@ -1430,6 +1453,40 @@ function collectKnowledgeSources(
   }
 }
 
+function collectBrowserSources(
+  toolName: string,
+  result: ToolResult,
+  sources: Map<string, BrowserSourceReference>
+): void {
+  if (toolName === "web_search.search_query") {
+    const results = Array.isArray(result.json?.results) ? result.json.results : [];
+    for (const candidate of results) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const item = candidate as Record<string, unknown>;
+      const url = typeof item.url === "string" ? item.url : "";
+      if (!/^https?:\/\//i.test(url)) continue;
+      const title = typeof item.title === "string" && item.title.trim() ? item.title.trim() : url;
+      sources.set(url, { title, url });
+    }
+    return;
+  }
+
+  if (![
+    "web_search.open_page",
+    "browser.read_page_text",
+    "browser.reload",
+    "browser.go_back",
+    "browser.go_forward"
+  ].includes(toolName)) return;
+
+  const root = result.json ?? {};
+  const page = root.page && typeof root.page === "object" ? root.page as Record<string, unknown> : root;
+  const url = typeof page.url === "string" ? page.url : "";
+  if (!/^https?:\/\//i.test(url)) return;
+  const title = typeof page.title === "string" && page.title.trim() ? page.title.trim() : url;
+  sources.set(url, { title, url });
+}
+
 function buildRuntimePrompt(
   model: ModelProfile,
   skillContext: RuntimePromptBundle["skillContext"],
@@ -1456,6 +1513,7 @@ function buildRuntimePrompt(
   if (knowledgeEnabled) {
     blocks.splice(5, 0, "For local knowledge questions, call knowledge.search first. It returns ranked document chunks with source_path and locator; use knowledge.read only for the relevant chunk. Cite the source file and locator in your answer when you rely on retrieved material. Never use fs.read_file on a knowledge Bundle or index path. If search returns no results, refine the query once or explain that no matching local material was found; do not repeat the same progress reply.");
   }
+  blocks.splice(6, 0, "When using text extracted from a browser page, cite the page title or URL in your answer. The chat will show the page source automatically.");
   if (skillContext?.text) {
     blocks.push(skillContext.text);
   }
