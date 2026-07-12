@@ -1452,12 +1452,15 @@ export function App() {
     const nextThreads = (await window.codexh.listThreads()) as ThreadRecord[];
     setThreads(nextThreads);
 
+    // Runtime listeners are registered once, so read the current selection from the ref
+    // instead of the render that created the listener.
+    const currentSelectedThreadId = selectedThreadIdRef.current;
     const targetThreadId =
-      selectedThreadId && nextThreads.some((thread) => thread.id === selectedThreadId)
-        ? selectedThreadId
+      currentSelectedThreadId && nextThreads.some((thread) => thread.id === currentSelectedThreadId)
+        ? currentSelectedThreadId
         : nextThreads[0]?.id ?? null;
 
-    if (targetThreadId !== selectedThreadId) {
+    if (targetThreadId !== currentSelectedThreadId) {
       selectThreadId(targetThreadId);
     }
 
@@ -6387,11 +6390,6 @@ function RuntimeActivityPanel({
 }) {
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
   const toolEntries = entries.filter((entry) => entry.kind === "tool").reverse();
-  const visibleEntries = latestStatus
-    ? [latestStatus, ...toolEntries]
-    : toolEntries.length > 0
-      ? toolEntries
-      : [{ id: "current-status", kind: "status" as const, label, createdAt: new Date().toISOString() }];
   return (
     <section className={`runtime-activity-panel ${expanded ? "expanded" : ""}`} aria-live="polite">
       <button
@@ -6406,14 +6404,14 @@ function RuntimeActivityPanel({
       </button>
       {expanded ? (
         <div className="runtime-activity-details">
-          {visibleEntries.map((entry, index) => entry.kind === "tool" ? (
-            <ToolActivityRow key={entry.id} toolCall={entry.toolCall} />
-          ) : (
-            <div key={entry.id} className={`runtime-activity-status-row ${index === 0 ? "current" : ""}`}>
+          {toolEntries.length > 0 ? toolEntries.map((entry) => (
+            <ToolActivityRow key={entry.id} toolCall={entry.toolCall} compact />
+          )) : (
+            <div className="runtime-activity-status-row current">
               <span className="runtime-activity-status-dot" aria-hidden="true" />
-              <span>{entry.label}</span>
+              <span>{latestStatus?.label ?? label}</span>
             </div>
-          ))}
+          )}
         </div>
       ) : null}
     </section>
@@ -6589,7 +6587,7 @@ function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
   );
 }
 
-function ToolActivityRow({ toolCall }: { toolCall: ToolCallRecord }) {
+function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallRecord; compact?: boolean }) {
   const input = parseTimelineJson(toolCall.argumentsJson);
   const result = parseTimelineJson(toolCall.resultJson);
   const command = getTimelineCommand(toolCall.toolName, input);
@@ -6601,6 +6599,32 @@ function ToolActivityRow({ toolCall }: { toolCall: ToolCallRecord }) {
     : null;
   const output = getTimelineOutput(result);
   const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
+  const target = isFileWriteTool(toolCall.toolName) ? getFileWriteTarget(input) : command;
+
+  if (compact) {
+    return (
+      <details className={`tool-activity-row compact ${status}`}>
+        <summary className="tool-activity-compact-summary">
+          <span className="tool-activity-row-icon" aria-hidden><ToolActivityIcon toolName={toolCall.toolName} /></span>
+          <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
+          <code title={target}>{target}</code>
+          <span className="tool-activity-compact-status">{isRunning ? "执行中" : failed ? "失败" : "完成"}</span>
+          {duration !== null ? <time>{formatDuration(duration)}</time> : null}
+        </summary>
+        <div className="tool-activity-compact-details">
+          <code>$ {command}</code>
+          {localUrl ? <LocalServerPreview url={localUrl} /> : null}
+          {output ? (
+            <details className="tool-activity-output">
+              <summary>{failed ? "查看错误输出" : "查看输出"}</summary>
+              <pre>{output}</pre>
+              <MessageDetectedMediaGallery content={output} />
+            </details>
+          ) : isRunning ? <span className="tool-activity-row-progress">等待工具返回...</span> : null}
+        </div>
+      </details>
+    );
+  }
 
   return (
     <article className={`tool-activity-row ${status}`}>
