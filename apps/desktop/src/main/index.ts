@@ -161,6 +161,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)
   );
+  ipcMain.handle("threads:queue:delete", (_event, payload: { threadId: string; id: string }) =>
+    backend.deleteQueuedMessage(payload.threadId, payload.id)
+  );
   ipcMain.handle("attachments:import", (_event, payload) =>
     backend.importAttachments(payload.threadId, payload.attachments ?? [])
   );

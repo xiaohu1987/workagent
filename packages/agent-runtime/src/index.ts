@@ -10,6 +10,7 @@ import type {
   ModelProfile,
   ProviderTurnDecision,
   ProviderTurnInput,
+  QueuedMessageRecord,
   RuntimeEvent,
   RuntimePromptBundle,
   RuntimeThreadSnapshot,
@@ -45,7 +46,7 @@ export const CONTEXT_COMPACTION_THRESHOLD = 0.8;
 export const CONTEXT_COMPACTION_TARGET = 0.6;
 
 type Submission =
-  | { type: "user_input"; content: string; attachments?: MessageAttachment[]; displayContent?: string }
+  | { type: "queue_wakeup" }
   | { type: "approval_response"; requestId: string; approved: boolean }
   | { type: "user_input_response"; promptId: string; answers: Record<string, string> }
   | { type: "shutdown" };
@@ -66,6 +67,8 @@ interface RuntimePersistence {
   getThread(threadId: string): Promise<ThreadRecord>;
   updateThread(threadId: string, patch: Partial<ThreadRecord>): Promise<ThreadRecord>;
   listMessages(threadId: string): Promise<MessageRecord[]>;
+  claimNextQueuedMessage(threadId: string): Promise<QueuedMessageRecord | null>;
+  completeQueuedMessage(id: string): Promise<void>;
   createMessage(input: Omit<MessageRecord, "id" | "createdAt">): Promise<MessageRecord>;
   startTurn(input: Omit<TurnRunRecord, "id" | "startedAt" | "completedAt">): Promise<TurnRunRecord>;
   finishTurn(turnRunId: string, patch: Partial<TurnRunRecord>): Promise<void>;
@@ -257,7 +260,6 @@ class ThreadSessionRuntime {
   readonly #queue = new AsyncQueue<Submission>();
   #abortController: AbortController | null = null;
   #activeTurnRunId: string | null = null;
-  #pendingInput: string[] = [];
   #running = false;
   #gpa: GpaState = { ...DEFAULT_GPA_STATE };
   #gpaLoaded = false;
@@ -373,19 +375,39 @@ class ThreadSessionRuntime {
       if (submission.type === "approval_response" || submission.type === "user_input_response") {
         continue;
       }
-      if (this.#activeTurnRunId && submission.type === "user_input") {
-        this.#pendingInput.push(submission.content);
-        continue;
+      if (submission.type === "queue_wakeup") {
+        await this.drainQueuedMessages();
       }
-      if (submission.type === "user_input") {
-        try {
-          await this.runTurn(submission.content, submission.attachments ?? [], submission.displayContent);
-        } catch (error) {
-          console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
-          await this.services.log("turn.unhandled_error", this.threadId, {
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
+    }
+  }
+
+  private async drainQueuedMessages(): Promise<void> {
+    while (!this.#activeTurnRunId) {
+      const queued = await this.services.persistence.claimNextQueuedMessage(this.threadId);
+      if (!queued) {
+        return;
+      }
+      await this.services.emit({
+        type: "queue.updated",
+        threadId: this.threadId,
+        payload: { queueItemId: queued.id, action: "dispatching" },
+        createdAt: new Date().toISOString()
+      });
+      try {
+        await this.runTurn(queued.content, queued.attachments, queued.displayContent);
+      } catch (error) {
+        console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
+        await this.services.log("turn.unhandled_error", this.threadId, {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      } finally {
+        await this.services.persistence.completeQueuedMessage(queued.id);
+        await this.services.emit({
+          type: "queue.updated",
+          threadId: this.threadId,
+          payload: { queueItemId: queued.id, action: "dispatched" },
+          createdAt: new Date().toISOString()
+        });
       }
     }
   }
@@ -636,6 +658,39 @@ class ThreadSessionRuntime {
         }
 
         // 代码级强制：GOAL/PLAN 阶段严禁工具调用，拦截并提示模型用文字回应
+        if (this.#gpa.stage === "act" && decision.clarification) {
+          const clarification = decision.clarification;
+          const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+            title: clarification.title,
+            kind: "gpa_plan_clarification",
+            allowSkip: true,
+            questions: [{
+              id: "gpa_clarification",
+              label: clarification.title,
+              prompt: clarification.question,
+              options: clarification.options,
+              allowFreeText: clarification.allowFreeText
+            }]
+          });
+          const skipped = answers.gpa_clarification === "__skip__";
+          transcript.push({
+            role: "user",
+            content: skipped
+              ? "The user skipped the GPA clarification. Continue the existing plan and state the assumption in the final summary."
+              : `GPA clarification answer: ${JSON.stringify(answers)}`
+          });
+          if (!skipped) {
+            await this.#commitGpa({
+              ...this.#gpa,
+              stage: "plan",
+              awaitingConfirmation: null,
+              updatedAt: new Date().toISOString()
+            });
+            transcript.push({ role: "user", content: buildGpaPlanRevisionInstruction() });
+          }
+          continue;
+        }
+
         if (!gpaStageAllowsTools(this.#gpa) && decision.toolCalls.length > 0) {
           const blockedNote = `⚠️ GPA 约束：当前处于【${gpaStageLabel(
             this.#gpa.stage
@@ -819,7 +874,7 @@ class ThreadSessionRuntime {
           }
         }
 
-        if (decision.toolCalls.length === 0 && decision.endTurn && this.#pendingInput.length === 0) {
+        if (decision.toolCalls.length === 0 && decision.endTurn) {
           await this.services.persistence.finishTurn(turn.id, {
             status: "completed",
             completedAt: new Date().toISOString()
@@ -1121,15 +1176,6 @@ class ThreadSessionRuntime {
         }
 
         if (reevaluateAfterUserInput) {
-          continue;
-        }
-
-        if (this.#pendingInput.length > 0) {
-          const pending = this.#pendingInput.splice(0, this.#pendingInput.length);
-          for (const item of pending) {
-            const message = await this.recordMessage("user", item, turn.id);
-            transcript.push({ role: "user", content: message.content });
-          }
           continue;
         }
 
@@ -1478,8 +1524,8 @@ export class AgentRuntimeService {
     return runtime;
   }
 
-  public submitUserInput(threadId: string, content: string, attachments?: MessageAttachment[], displayContent?: string): void {
-    this.ensureThread(threadId).submit({ type: "user_input", content, attachments, displayContent });
+  public wakeQueuedMessages(threadId: string): void {
+    this.ensureThread(threadId).submit({ type: "queue_wakeup" });
   }
 
   public interrupt(threadId: string): boolean {

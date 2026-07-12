@@ -168,6 +168,16 @@ export interface UserInputOption {
   recommended?: boolean;
 }
 
+export interface QueuedMessageRecord {
+  id: string;
+  threadId: string;
+  content: string;
+  displayContent: string;
+  attachments: MessageAttachment[];
+  status: "queued" | "dispatching";
+  createdAt: string;
+}
+
 export interface UserInputQuestion {
   id: string;
   label: string;
@@ -389,6 +399,12 @@ export interface AppConfig {
 
 export interface ProviderTurnDecision {
   assistantMessage?: string;
+  clarification?: {
+    title: string;
+    question: string;
+    options: UserInputOption[];
+    allowFreeText: boolean;
+  };
   /** Provider-reported completion token count when its API exposes usage data. */
   outputTokens?: number;
   toolCalls: RuntimeToolCall[];
@@ -473,6 +489,7 @@ export interface RuntimeEvent {
     | "assistant.completed"
     | "assistant.execution_output"
     | "agent.retrying"
+    | "queue.updated"
     | "turn.updated"
     | "tool.started"
     | "tool.completed"
@@ -498,6 +515,7 @@ export interface RuntimePromptBundle {
 export interface RuntimeThreadSnapshot {
   thread: ThreadRecord;
   messages: MessageRecord[];
+  queuedMessages: QueuedMessageRecord[];
   approvals: ApprovalRequest[];
   prompts: UserInputPrompt[];
   artifacts: ArtifactRecord[];

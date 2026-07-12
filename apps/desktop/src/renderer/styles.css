@@ -3615,6 +3615,87 @@ select:focus {
   padding-top: 48px;
 }
 
+.composer-shell.has-queue {
+  padding-top: var(--queued-message-space);
+}
+
+.composer-queue {
+  position: absolute;
+  top: 6px;
+  left: 0;
+  right: 0;
+  display: grid;
+  gap: 4px;
+  z-index: 1;
+}
+
+.composer-queue.has-project {
+  right: 184px;
+}
+
+.composer-queue-item {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content 24px;
+  align-items: center;
+  min-height: 32px;
+  gap: 8px;
+  padding: 0 6px 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  color: #c8d0da;
+  background: #17171a;
+}
+
+.composer-queue-label {
+  color: #7f8996;
+  font-size: 11px;
+}
+
+.composer-queue-preview {
+  min-width: 0;
+  overflow: hidden;
+  color: #d9dde4;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-queue-attachments {
+  color: #8893a1;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.composer-queue-delete {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  color: #7f8996;
+  background: transparent;
+  cursor: pointer;
+}
+
+.composer-queue-delete svg {
+  width: 14px;
+  height: 14px;
+}
+
+.composer-queue-delete:hover:not(:disabled),
+.composer-queue-delete:focus-visible {
+  color: #f3b1b1;
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.composer-queue-delete:disabled { opacity: 0.45; cursor: wait; }
+
+.scroll-to-latest-button.with-queue {
+  top: var(--queued-message-scroll-offset);
+}
+
 .composer-project-pill {
   top: 6px;
   right: 16px;

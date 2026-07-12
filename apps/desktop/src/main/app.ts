@@ -94,6 +94,8 @@ export class DesktopBackend {
         getThread: async (threadId) => this.#db.getThread(threadId),
         updateThread: async (threadId, patch) => this.#db.updateThread(threadId, patch),
         listMessages: async (threadId) => this.#db.listMessages(threadId),
+        claimNextQueuedMessage: async (threadId) => this.#db.claimNextQueuedMessage(threadId),
+        completeQueuedMessage: async (id) => this.#db.completeQueuedMessage(id),
         createMessage: async (input) => this.#db.createMessage(input),
         startTurn: async (input) => this.#db.startTurn(input),
         finishTurn: async (turnRunId, patch) => this.#db.finishTurn(turnRunId, patch),
@@ -162,6 +164,9 @@ export class DesktopBackend {
       emit: async (event) => this.emit(event),
       log: async (kind, threadId, payload) => this.#logs.append(kind, payload, threadId)
     });
+    for (const threadId of this.#db.listQueuedMessageThreadIds()) {
+      this.#runtime.wakeQueuedMessages(threadId);
+    }
     await this.#logs.append("backend.initialized", { logsDir: this.#layout.logsDir });
   }
 
@@ -323,6 +328,7 @@ export class DesktopBackend {
     return {
       thread,
       messages: this.#db.listMessages(threadId),
+      queuedMessages: this.#db.listQueuedMessages(threadId).filter((message) => message.status === "queued"),
       approvals: this.#db.listApprovals(threadId),
       prompts: this.#db.listUserPrompts(threadId),
       artifacts: this.#db.listArtifacts(threadId),
@@ -353,7 +359,8 @@ export class DesktopBackend {
 
   public async sendMessage(threadId: string, content: string, attachments: MessageAttachment[] = [], displayContent?: string): Promise<void> {
     const thread = this.#db.getThread(threadId);
-    if (this.#db.listMessages(threadId).length === 0) {
+    const isFirstThreadMessage = this.#db.listMessages(threadId).length === 0 && this.#db.listQueuedMessages(threadId).length === 0;
+    if (isFirstThreadMessage) {
       const updated = this.#db.updateThread(threadId, {
         title: buildThreadTitleFromFirstMessage(displayContent || content)
       });
@@ -366,7 +373,31 @@ export class DesktopBackend {
     }
 
     await this.refreshSkills(thread.cwd);
-    this.#runtime.submitUserInput(threadId, content, attachments, displayContent);
+    const queued = this.#db.enqueueQueuedMessage({
+      threadId,
+      content,
+      displayContent: displayContent || content,
+      attachments
+    });
+    await this.emit({
+      type: "queue.updated",
+      threadId,
+      payload: { queueItemId: queued.id, action: "queued" },
+      createdAt: new Date().toISOString()
+    });
+    this.#runtime.wakeQueuedMessages(threadId);
+  }
+
+  public async deleteQueuedMessage(threadId: string, id: string): Promise<void> {
+    if (!this.#db.deleteQueuedMessage(threadId, id)) {
+      throw new Error("The queued message is no longer available.");
+    }
+    await this.emit({
+      type: "queue.updated",
+      threadId,
+      payload: { queueItemId: id, action: "deleted" },
+      createdAt: new Date().toISOString()
+    });
   }
 
   public async importAttachments(threadId: string, inputs: AttachmentImportInput[]): Promise<MessageAttachment[]> {
@@ -1455,7 +1486,7 @@ export class DesktopBackend {
       modelId: input.modelId ?? parent.modelId,
       providerId: parent.providerId
     });
-    this.#runtime.submitUserInput(thread.id, input.prompt);
+    await this.sendMessage(thread.id, input.prompt);
     return thread.id;
   }
 

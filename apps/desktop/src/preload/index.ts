@@ -26,6 +26,8 @@ const api = {
   getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[] }) =>
     ipcRenderer.invoke("threads:send", payload),
+  deleteQueuedMessage: (payload: { threadId: string; id: string }) =>
+    ipcRenderer.invoke("threads:queue:delete", payload),
   importAttachments: (payload: { threadId: string; attachments: unknown[] }) =>
     ipcRenderer.invoke("attachments:import", payload),
   previewAttachment: (payload: { threadId: string; absolutePath: string }) =>

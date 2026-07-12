@@ -16,11 +16,13 @@ import type {
   KnowledgeChunkRecord,
   KnowledgeDocumentRecord,
   McpServerConfig,
+  MessageAttachment,
   MessageRecord,
   ModelProfile,
   PluginRecord,
   ProjectPluginBinding,
   RememberedApprovalRecord,
+  QueuedMessageRecord,
   ProviderDefinition,
   RuntimeEvent,
   ThreadRecord,
@@ -269,6 +271,15 @@ export class DatabaseService {
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         metadata_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS queued_messages (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        display_content TEXT NOT NULL,
+        attachments_json TEXT NOT NULL,
+        status TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS turn_runs (
@@ -656,6 +667,7 @@ export class DatabaseService {
   }
 
   public recoverInterruptedThreads(): void {
+    this.#db.prepare("UPDATE queued_messages SET status = 'queued' WHERE status = 'dispatching'").run();
     const runningThreadIds = this.#db
       .prepare("SELECT id FROM threads WHERE status IN ('running', 'waiting')")
       .all() as Array<{ id: string }>;
@@ -684,6 +696,7 @@ export class DatabaseService {
     const thread = mapThreadRow(row);
     const threadScopedTables = [
       "messages",
+      "queued_messages",
       "turn_runs",
       "tool_calls",
       "approval_records",
@@ -713,6 +726,74 @@ export class DatabaseService {
       .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC")
       .all(threadId)
       .map(mapMessageRow);
+  }
+
+  public enqueueQueuedMessage(input: Omit<QueuedMessageRecord, "id" | "status" | "createdAt">): QueuedMessageRecord {
+    const record: QueuedMessageRecord = {
+      ...input,
+      id: randomUUID(),
+      status: "queued",
+      createdAt: nowIso()
+    };
+    this.#db
+      .prepare(
+        `INSERT INTO queued_messages (id, thread_id, content, display_content, attachments_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        record.id,
+        record.threadId,
+        record.content,
+        record.displayContent,
+        JSON.stringify(record.attachments),
+        record.status,
+        record.createdAt
+      );
+    return record;
+  }
+
+  public listQueuedMessages(threadId: string): QueuedMessageRecord[] {
+    return this.#db
+      .prepare("SELECT * FROM queued_messages WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC")
+      .all(threadId)
+      .map(mapQueuedMessageRow);
+  }
+
+  public listQueuedMessageThreadIds(): string[] {
+    return (this.#db
+      .prepare("SELECT DISTINCT thread_id FROM queued_messages WHERE status = 'queued'")
+      .all() as Array<{ thread_id: string }>)
+      .map((row) => row.thread_id);
+  }
+
+  public claimNextQueuedMessage(threadId: string): QueuedMessageRecord | null {
+    this.#db.exec("BEGIN");
+    try {
+      const row = this.#db
+        .prepare("SELECT * FROM queued_messages WHERE thread_id = ? AND status = 'queued' ORDER BY created_at ASC, rowid ASC LIMIT 1")
+        .get(threadId) as any;
+      if (!row) {
+        this.#db.exec("COMMIT");
+        return null;
+      }
+      this.#db.prepare("UPDATE queued_messages SET status = 'dispatching' WHERE id = ?").run(row.id);
+      this.#db.exec("COMMIT");
+      return mapQueuedMessageRow({ ...row, status: "dispatching" });
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public completeQueuedMessage(id: string): void {
+    this.#db.prepare("DELETE FROM queued_messages WHERE id = ?").run(id);
+  }
+
+  public deleteQueuedMessage(threadId: string, id: string): boolean {
+    const result = this.#db
+      .prepare("DELETE FROM queued_messages WHERE id = ? AND thread_id = ? AND status = 'queued'")
+      .run(id, threadId) as { changes?: number };
+    return (result.changes ?? 0) > 0;
   }
 
   public createMessage(input: Omit<MessageRecord, "id" | "createdAt">): MessageRecord {
@@ -1614,6 +1695,25 @@ function mapRememberedApprovalRow(row: any): RememberedApprovalRecord {
     payloadJson: row.payload_json,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function mapQueuedMessageRow(row: any): QueuedMessageRecord {
+  let attachments: MessageAttachment[] = [];
+  try {
+    const parsed = JSON.parse(row.attachments_json ?? "[]");
+    attachments = Array.isArray(parsed) ? parsed as MessageAttachment[] : [];
+  } catch {
+    attachments = [];
+  }
+  return {
+    id: row.id,
+    threadId: row.thread_id,
+    content: row.content,
+    displayContent: row.display_content,
+    attachments,
+    status: row.status === "dispatching" ? "dispatching" : "queued",
+    createdAt: row.created_at
   };
 }
 

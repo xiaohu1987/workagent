@@ -89,7 +89,7 @@ export function buildGpaSystemDirective(state: GpaState): string {
   };
 
   const actClarificationRule = state.stage === "act"
-    ? "\n7) If a decision cannot be verified with the available context or tools and would affect the approach, scope, priority, irreversible actions, or acceptance criteria, call request_user_input. Ask exactly one mutually exclusive decision with 2-4 options, a recommended option, and concise descriptions. Never ask for facts that tools can determine. After an answer, revise the remaining PLAN before resuming ACT; after a skip, continue under the current plan and state the assumption in the final summary."
+    ? "\n7) Before any write, command, or external side effect, if a decision cannot be verified with the available context or tools and would affect the approach, scope, priority, irreversible actions, or acceptance criteria, return the structured clarification field. Ask exactly one mutually exclusive decision with 2-4 options, a recommended option, and concise descriptions. Set tool_calls to [] and end_turn to false. Never ask for facts that tools can determine. After an answer, revise the remaining PLAN before resuming ACT; after a skip, continue under the current plan and state the assumption in the final summary."
     : "";
   return `${header}\n\n${rules[state.stage]}${actClarificationRule}`;
 }

@@ -1,6 +1,6 @@
 import { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import "./timeline.css";
 import type {
   AppConfig,
@@ -15,6 +15,7 @@ import type {
   MessageRecord,
   McpServerConfig,
   ModelProfile,
+  QueuedMessageRecord,
   PluginRecord,
   ProviderDefinition,
   ProviderType,
@@ -439,6 +440,7 @@ export function App() {
   const [exitingNoticeId, setExitingNoticeId] = useState<number | null>(null);
   const [isTranscriptAtLatest, setIsTranscriptAtLatest] = useState(true);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
+  const [deletingQueuedMessageId, setDeletingQueuedMessageId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatTranscriptRef = useRef<HTMLDivElement | null>(null);
@@ -1136,6 +1138,7 @@ export function App() {
   const workflowBindings = snapshot?.projectPlugins ?? [];
   const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
   const selectedMessages = snapshot?.messages ?? [];
+  const queuedMessages = snapshot?.queuedMessages ?? [];
   const visibleMessages = useMemo(
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
@@ -1839,8 +1842,11 @@ export function App() {
     const raw = (forcedContent ?? [inputContent, formatComposerAttachments(composerAttachments.filter((attachment) => attachment.kind !== "file" && attachment.kind !== "image"))]
       .filter(Boolean).join("\n\n")).trim();
     const displayContent = forcedContent ?? inputContent;
-    const optimisticMessage = !options?.internal ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments) : null;
-    if (!options?.internal) {
+    const queueingBehindActiveTask = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime;
+    const optimisticMessage = !options?.internal && !queueingBehindActiveTask
+      ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments)
+      : null;
+    if (!options?.internal && !queueingBehindActiveTask) {
       startRuntimeActivity(threadId);
       setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
     }
@@ -2029,6 +2035,19 @@ export function App() {
     }
 
     await sendMessage();
+  }
+
+  async function deleteQueuedMessage(id: string) {
+    if (!selectedThreadId) return;
+    setDeletingQueuedMessageId(id);
+    try {
+      await window.codexh.deleteQueuedMessage({ threadId: selectedThreadId, id });
+      await refreshSnapshot(selectedThreadId);
+    } catch (error) {
+      showNotice("删除排队消息失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setDeletingQueuedMessageId((current) => current === id ? null : current);
+    }
   }
 
   async function importKnowledge() {
@@ -3012,11 +3031,27 @@ export function App() {
             )}
           </div>
 
-          <footer className="composer-shell">
+          <footer
+            className={`composer-shell ${queuedMessages.length > 0 ? "has-queue" : ""}`}
+            style={queuedMessages.length > 0
+              ? {
+                  "--queued-message-space": `${48 + queuedMessages.length * 36}px`,
+                  "--queued-message-scroll-offset": `${3 + queuedMessages.length * 36}px`
+                } as CSSProperties
+              : undefined}
+          >
+            {queuedMessages.length > 0 ? (
+              <QueuedMessageList
+                messages={queuedMessages}
+                hasProject={!!selectedProjectCwd}
+                deletingId={deletingQueuedMessageId}
+                onDelete={(id) => void deleteQueuedMessage(id)}
+              />
+            ) : null}
             {!showWelcome && !isTranscriptAtLatest ? (
               <button
                 type="button"
-                className="scroll-to-latest-button"
+                className={`scroll-to-latest-button ${queuedMessages.length > 0 ? "with-queue" : ""}`}
                 title="定位到最新消息"
                 aria-label="定位到最新消息"
                 onClick={() => scrollTranscriptToLatest("smooth")}
@@ -3162,13 +3197,13 @@ export function App() {
                     onClose={() => setIsContextReportOpen(false)}
                   />
                   <button
-                    className={`send-button ${isActiveThreadExecuting || isPreparingRuntime ? "running" : ""}`}
+                    className={`send-button ${isActiveThreadExecuting ? "running" : ""}`}
                     onClick={() => void handleComposerPrimaryAction()}
-                    disabled={composerPrimaryAction.disabled && !isPreparingRuntime}
-                    title={isPreparingRuntime ? "正在准备任务" : composerPrimaryAction.title}
-                    aria-label={isPreparingRuntime ? "正在准备任务" : composerPrimaryAction.ariaLabel}
+                    disabled={composerPrimaryAction.disabled}
+                    title={composerPrimaryAction.title}
+                    aria-label={composerPrimaryAction.ariaLabel}
                   >
-                    {isActiveThreadExecuting || isPreparingRuntime ? "停止" : "发送"}
+                    {isActiveThreadExecuting ? "停止" : "发送"}
                   </button>
                 </div>
               </div>
@@ -6548,6 +6583,40 @@ function RuntimeActivityOutputRow({ label, content }: { label: string; content: 
       </summary>
       <pre>{content}</pre>
     </details>
+  );
+}
+
+function QueuedMessageList({
+  messages,
+  hasProject,
+  deletingId,
+  onDelete
+}: {
+  messages: QueuedMessageRecord[];
+  hasProject: boolean;
+  deletingId: string | null;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <section className={`composer-queue ${hasProject ? "has-project" : ""}`} aria-label="排队消息">
+      {messages.map((message) => (
+        <div key={message.id} className="composer-queue-item">
+          <span className="composer-queue-label">排队中</span>
+          <span className="composer-queue-preview" title={message.displayContent}>{message.displayContent}</span>
+          {message.attachments.length > 0 ? <span className="composer-queue-attachments">{message.attachments.length} 个附件</span> : null}
+          <button
+            type="button"
+            className="composer-queue-delete"
+            title="删除排队消息"
+            aria-label="删除排队消息"
+            disabled={deletingId === message.id}
+            onClick={() => onDelete(message.id)}
+          >
+            <IconClose />
+          </button>
+        </div>
+      ))}
+    </section>
   );
 }
 

@@ -20,6 +20,7 @@ declare global {
       deleteThread: (threadId: string) => Promise<void>;
       getThreadSnapshot: (threadId: string) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[] }) => Promise<void>;
+      deleteQueuedMessage: (payload: { threadId: string; id: string }) => Promise<void>;
       importAttachments: (payload: { threadId: string; attachments: any[] }) => Promise<any[]>;
       previewAttachment: (payload: { threadId: string; absolutePath: string }) => Promise<string>;
       previewLocalImage: (payload: { absolutePath: string }) => Promise<string>;

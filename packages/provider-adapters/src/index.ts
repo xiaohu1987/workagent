@@ -325,6 +325,7 @@ function parseDecisionFromText(text: string): ProviderTurnDecision {
   if (parsed) {
     return {
       assistantMessage: typeof parsed.assistant_message === "string" ? parsed.assistant_message : undefined,
+      clarification: parseClarification(parsed.clarification),
       toolCalls: Array.isArray(parsed.tool_calls)
         ? parsed.tool_calls
             .filter((call): call is { name: string; arguments?: Record<string, unknown> } =>
@@ -371,6 +372,37 @@ function extractVisibleStreamText(text: string): string {
   // payloads without a reliable wrapper; the runtime publishes only a parsed,
   // validated assistant message to the transcript.
   return "";
+}
+
+function parseClarification(value: unknown): ProviderTurnDecision["clarification"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  const title = typeof raw.title === "string" ? raw.title.trim() : "";
+  const question = typeof raw.question === "string" ? raw.question.trim() : "";
+  const options = Array.isArray(raw.options)
+    ? raw.options.slice(0, 4).flatMap((option, index) => {
+        if (typeof option === "string" && option.trim()) {
+          return [{ id: `option_${index + 1}`, label: option.trim() }];
+        }
+        if (!option || typeof option !== "object" || Array.isArray(option)) {
+          return [];
+        }
+        const item = option as Record<string, unknown>;
+        const label = typeof item.label === "string" ? item.label.trim() : "";
+        if (!label) return [];
+        return [{
+          id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : `option_${index + 1}`,
+          label,
+          description: typeof item.description === "string" ? item.description.trim() || undefined : undefined,
+          recommended: item.recommended === true
+        }];
+      })
+    : [];
+  return title && question && options.length >= 2
+    ? { title, question, options, allowFreeText: raw.allow_free_text === true }
+    : undefined;
 }
 
 async function buildOpenAiContent(content: string, attachments?: MessageAttachment[]): Promise<any> {
@@ -581,10 +613,11 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
   return [
     "You are codexh, a desktop agent.",
     "Return exactly one valid JSON object and no text outside that JSON object.",
-    "Return keys: assistant_message, tool_calls, end_turn, goal_completed, reasoning_summary.",
+    "Return keys: assistant_message, clarification, tool_calls, end_turn, goal_completed, reasoning_summary.",
     "assistant_message is visible to the user: write concise Markdown or one short progress update before tool calls.",
     "Never expose private chain-of-thought; reasoning_summary is internal only and must never be rendered.",
     "tool_calls must be an array of { name, arguments }.",
+    "clarification is optional and only for a material user decision. Its shape is { title, question, options, allow_free_text }, where options contains 2-4 { id, label, description, recommended } objects. When clarification is present, tool_calls must be empty and end_turn must be false.",
     "Only call tools that were provided in the tool list.",
     "When shell.exec is listed, it is the command execution tool. Do not state that command execution is unavailable; call shell.exec with {\"command\": \"...\"} instead.",
     "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",

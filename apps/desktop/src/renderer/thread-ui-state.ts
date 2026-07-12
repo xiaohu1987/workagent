@@ -46,6 +46,15 @@ export function getComposerPrimaryActionState(
   status: ThreadRecord["status"] | null | undefined,
   input: string
 ): ComposerPrimaryActionState {
+  if (input.trim()) {
+    return {
+      kind: "send",
+      title: "发送",
+      ariaLabel: "发送",
+      disabled: false
+    };
+  }
+
   if (isThreadExecutionInProgress(status)) {
     return {
       kind: "interrupt",
@@ -55,12 +64,7 @@ export function getComposerPrimaryActionState(
     };
   }
 
-  return {
-    kind: "send",
-    title: "发送",
-    ariaLabel: "发送",
-    disabled: !input.trim()
-  };
+  return { kind: "send", title: "发送", ariaLabel: "发送", disabled: true };
 }
 
 export function canDeleteThread(status?: ThreadRecord["status"] | null, deletingThreadId?: string | null) {
