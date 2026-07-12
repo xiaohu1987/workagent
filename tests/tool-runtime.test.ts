@@ -5,6 +5,60 @@ import os from "node:os";
 import { buildCodeSearchCommand, ToolRuntime, type ToolRuntimeContext } from "@tool-runtime";
 
 describe("ToolRuntime", () => {
+  it("normalizes a GPA plan clarification into one rich, user-visible decision", async () => {
+    const requestUserInput = vi.fn().mockResolvedValue({ approach: "recommended" });
+    const runtime = new ToolRuntime();
+
+    const result = await runtime.execute(
+      {
+        id: "gpa-clarification",
+        name: "request_user_input",
+        arguments: {
+          title: "Choose the implementation approach",
+          questions: [
+            {
+              id: "approach",
+              label: "Implementation approach",
+              prompt: "Which approach should be used?",
+              options: [
+                { id: "recommended", label: "Use the recommended approach", description: "Lower maintenance", recommended: true },
+                { id: "alternative", label: "Use the alternative approach" }
+              ]
+            },
+            { id: "ignored", label: "A second question", prompt: "This must not be shown in GPA." }
+          ]
+        }
+      },
+      { cwd: process.cwd(), requestUserInput, gpaPlanClarification: true } as unknown as ToolRuntimeContext
+    );
+
+    expect(requestUserInput).toHaveBeenCalledWith(expect.objectContaining({
+      questions: [expect.objectContaining({ id: "approach", allowFreeText: true })]
+    }));
+    expect(result.json).toMatchObject({
+      skipped: false,
+      selections: [{ answer: "Use the recommended approach" }]
+    });
+  });
+
+  it("marks a skipped GPA clarification so execution can retain the current plan", async () => {
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "gpa-skip",
+        name: "request_user_input",
+        arguments: { title: "Decision", questions: [{ id: "choice", label: "Choice", prompt: "Choose" }] }
+      },
+      {
+        cwd: process.cwd(),
+        gpaPlanClarification: true,
+        requestUserInput: vi.fn().mockResolvedValue({ choice: "__skip__" })
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.json).toMatchObject({ skipped: true });
+  });
+
   it("prefers rg and falls back to grep for Windows workspace searches", () => {
     const command = buildCodeSearchCommand("TODO", "C:\\workspace", "win32");
 

@@ -26,6 +26,7 @@ import type {
   RuntimeEvent,
   RuntimeThreadSnapshot,
   ThreadRecord,
+  UserInputQuestion,
   UserInputPrompt
 } from "@shared-types";
 import { AgentRuntimeService, parseGpaState } from "@agent-runtime";
@@ -53,7 +54,7 @@ export class DesktopBackend {
   readonly #events = new EventEmitter();
   readonly #approvalResolvers: ResolverMap<boolean> = new Map();
   readonly #promptResolvers: ResolverMap<Record<string, string>> = new Map();
-  readonly #sessionApprovalKeys = new Set<string>();
+  readonly #sessionApprovedThreadIds = new Set<string>();
   readonly #skills = new SkillsManager();
   readonly #toolRuntime = new ToolRuntime();
   readonly #providerFactory = new ProviderFactory();
@@ -1287,9 +1288,8 @@ export class DesktopBackend {
     this.#db.resolveApproval(id, { approved, resolutionMode });
 
     if (approved) {
-      const scopeKey = buildApprovalScopeKey(approval.projectId, approval.approvalKey);
       if (resolutionMode === "session") {
-        this.#sessionApprovalKeys.add(scopeKey);
+        this.#sessionApprovedThreadIds.add(approval.threadId);
       }
       if (resolutionMode === "remember") {
         this.#db.upsertRememberedApproval({
@@ -1318,9 +1318,24 @@ export class DesktopBackend {
     this.#approvalResolvers.delete(id);
   }
 
-  public answerUserPrompt(id: string, answers: Record<string, string>): void {
-    this.#db.resolveUserPrompt(id);
-    this.#promptResolvers.get(id)?.(answers);
+  public async answerUserPrompt(id: string, answers: Record<string, string>): Promise<void> {
+    const prompt = this.#db.getUserPrompt(id);
+    const resolve = this.#promptResolvers.get(id);
+    const thread = prompt ? this.#db.getThread(prompt.threadId) : null;
+    if (!prompt || prompt.status !== "pending" || !resolve || !thread || thread.status !== "waiting") {
+      throw new Error("此问题所属的任务已中断，请重新开始后再决定。");
+    }
+
+    this.#db.resolveUserPrompt(id, answers);
+    this.#db.finishTurn(prompt.turnRunId, { status: "running" });
+    const updatedThread = this.#db.updateThread(prompt.threadId, { status: "running" });
+    await this.emit({
+      type: "thread.updated",
+      threadId: prompt.threadId,
+      payload: { thread: updatedThread },
+      createdAt: new Date().toISOString()
+    });
+    resolve(answers);
     this.#promptResolvers.delete(id);
   }
 
@@ -1344,13 +1359,13 @@ export class DesktopBackend {
       riskLevel: input.riskLevel,
       payload: getApprovalScopePayload(input.payload)
     });
-    const scopeKey = buildApprovalScopeKey(thread.projectId, approvalKey);
-
     if (this.#config.desktop.approvals === "auto" && input.riskLevel === "low") {
       return true;
     }
 
-    if (this.#sessionApprovalKeys.has(scopeKey)) {
+    // A session approval intentionally covers later operations in this chat,
+    // including commands whose arguments differ from the first request.
+    if (this.#sessionApprovedThreadIds.has(threadId)) {
       return true;
     }
 
@@ -1389,15 +1404,25 @@ export class DesktopBackend {
     turnRunId: string,
     input: {
       title: string;
-      questions: Array<{ id: string; label: string; prompt: string; options?: string[] }>;
+      kind: "generic" | "gpa_plan_clarification";
+      allowSkip: boolean;
+      questions: UserInputQuestion[];
     }
   ): Promise<Record<string, string>> {
     const prompt = this.#db.createUserPrompt({
       threadId,
       turnRunId,
       title: input.title,
+      kind: input.kind,
+      allowSkip: input.allowSkip,
       questions: input.questions,
       status: "pending"
+    });
+
+    this.#db.finishTurn(turnRunId, { status: "waiting_user_input" });
+    const waitingThread = this.#db.updateThread(threadId, { status: "waiting" });
+    const response = new Promise<Record<string, string>>((resolve) => {
+      this.#promptResolvers.set(prompt.id, resolve);
     });
 
     await this.emit({
@@ -1406,10 +1431,14 @@ export class DesktopBackend {
       payload: { prompt },
       createdAt: new Date().toISOString()
     });
-
-    return new Promise((resolve) => {
-      this.#promptResolvers.set(prompt.id, resolve);
+    await this.emit({
+      type: "thread.updated",
+      threadId,
+      payload: { thread: waitingThread },
+      createdAt: new Date().toISOString()
     });
+
+    return response;
   }
 
   private async spawnChildAgent(

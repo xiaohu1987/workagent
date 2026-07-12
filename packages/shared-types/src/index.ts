@@ -161,19 +161,33 @@ export interface RememberedApprovalRecord {
   updatedAt: string;
 }
 
+export interface UserInputOption {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+}
+
+export interface UserInputQuestion {
+  id: string;
+  label: string;
+  prompt: string;
+  options?: UserInputOption[];
+  allowFreeText?: boolean;
+}
+
 export interface UserInputPrompt {
   id: string;
   threadId: string;
   turnRunId: string;
   title: string;
-  questions: Array<{
-    id: string;
-    label: string;
-    prompt: string;
-    options?: string[];
-  }>;
-  status: "pending" | "answered";
+  kind: "generic" | "gpa_plan_clarification";
+  allowSkip: boolean;
+  questions: UserInputQuestion[];
+  status: "pending" | "answered" | "cancelled";
+  answers: Record<string, string> | null;
   createdAt: string;
+  answeredAt: string | null;
 }
 
 export interface ArtifactRecord {
@@ -457,6 +471,8 @@ export interface RuntimeEvent {
     | "message.created"
     | "assistant.delta"
     | "assistant.completed"
+    | "assistant.execution_output"
+    | "agent.retrying"
     | "turn.updated"
     | "tool.started"
     | "tool.completed"

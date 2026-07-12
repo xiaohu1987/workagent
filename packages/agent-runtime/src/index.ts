@@ -18,7 +18,8 @@ import type {
   ToolCallRecord,
   ToolResult,
   ToolSpecDefinition,
-  TurnRunRecord
+  TurnRunRecord,
+  UserInputQuestion
 } from "@shared-types";
 import { buildDecisionSystemPrompt, ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
@@ -39,6 +40,7 @@ export { parseGpaState } from "./gpa";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
 export const MODEL_DECISION_TIMEOUT_MS = 90_000;
+export const MAX_MODEL_TIMEOUT_RETRIES = 5;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.8;
 export const CONTEXT_COMPACTION_TARGET = 0.6;
 
@@ -103,7 +105,9 @@ interface RuntimeServices {
   }): Promise<boolean>;
   requestUserInput(threadId: string, turnRunId: string, input: {
     title: string;
-    questions: Array<{ id: string; label: string; prompt: string; options?: string[] }>;
+    kind: "generic" | "gpa_plan_clarification";
+    allowSkip: boolean;
+    questions: UserInputQuestion[];
   }): Promise<Record<string, string>>;
   spawnChildAgent(parentThreadId: string, input: {
     prompt: string;
@@ -488,6 +492,7 @@ class ThreadSessionRuntime {
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
       let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
+      let modelTimeoutAttempts = 0;
 
       const registerTaskFailure = async (taskKey: string, lastError: string, logKind?: string) => {
         const attempts = (taskFailureCounts.get(taskKey) ?? 0) + 1;
@@ -560,43 +565,71 @@ class ThreadSessionRuntime {
             messagesAfter: transcript.length
           });
         }
-        let decision = await waitForAbortOrTimeout(
-          adapter.runTurn({
-            systemPrompt,
-            transcript,
-            availableTools: tools,
-            model,
-            provider,
-            stream: model.supportsStreaming,
-            onTextDelta: async (delta) => {
-              if (abortController.signal.aborted) {
+        let decision: ProviderTurnDecision;
+        try {
+          decision = await waitForAbortOrTimeout(
+            adapter.runTurn({
+              systemPrompt,
+              transcript,
+              availableTools: tools,
+              model,
+              provider,
+              stream: model.supportsStreaming,
+              onTextDelta: async (delta) => {
+                if (abortController.signal.aborted) {
+                  return;
+                }
+                streamedVisibleContent += delta;
+                interruptedVisibleContent = streamedVisibleContent;
+                // The renderer receives text only after the complete decision is
+                // validated. This prevents malformed tool payloads from leaking
+                // into the user-facing transcript during streaming.
                 return;
-              }
-              streamedVisibleContent += delta;
-              interruptedVisibleContent = streamedVisibleContent;
-              // ACT progress is represented by real tool events. Holding text until the
-              // decision is validated prevents discarded "about to write" messages from
-              // accumulating in the chat when a model misses a tool call.
-              if (this.#gpa.stage === "act") {
-                return;
-              }
-              await this.services.emit({
-                type: "assistant.delta",
-                threadId: this.threadId,
-                payload: {
-                  turnRunId: turn.id,
-                  delta,
-                  content: streamedVisibleContent
-                },
-                createdAt: new Date().toISOString()
-              });
+              },
+              abortSignal: modelTurnAbortController.signal
+            }),
+            abortController.signal,
+            MODEL_DECISION_TIMEOUT_MS,
+            () => modelTurnAbortController.abort()
+          );
+        } catch (error) {
+          if (!(error instanceof ModelDecisionTimeoutError) || abortController.signal.aborted) {
+            throw error;
+          }
+
+          modelTimeoutAttempts += 1;
+          const retrying = modelTimeoutAttempts <= MAX_MODEL_TIMEOUT_RETRIES;
+          await this.services.log("provider.turn_timeout", this.threadId, {
+            turnRunId: turn.id,
+            timeoutMs: MODEL_DECISION_TIMEOUT_MS,
+            attempt: modelTimeoutAttempts,
+            maxRetries: MAX_MODEL_TIMEOUT_RETRIES,
+            retrying
+          });
+
+          if (!retrying) {
+            throw error;
+          }
+
+          await this.services.emit({
+            type: "agent.retrying",
+            threadId: this.threadId,
+            payload: {
+              attempt: modelTimeoutAttempts,
+              maxAttempts: MAX_MODEL_TIMEOUT_RETRIES,
+              reason: "model_timeout"
             },
-            abortSignal: modelTurnAbortController.signal
-          }),
-          abortController.signal,
-          MODEL_DECISION_TIMEOUT_MS,
-          () => modelTurnAbortController.abort()
-        );
+            createdAt: new Date().toISOString()
+          });
+          transcript.push({
+            role: "user",
+            content:
+              "The previous model request timed out. Continue from the existing verified context now. " +
+              "Return the required structured decision without repeating completed work."
+          });
+          continue;
+        }
+        modelTimeoutAttempts = 0;
 
         if (abortController.signal.aborted) {
           throw new Error("Turn interrupted.");
@@ -684,6 +717,7 @@ class ThreadSessionRuntime {
         }
 
         if (
+          this.#gpa.stage === "act" &&
           hasExecutedToolCall &&
           decision.toolCalls.length === 0 &&
           decision.endTurn &&
@@ -718,6 +752,45 @@ class ThreadSessionRuntime {
           if (decision.toolCalls[0]?.name !== "fs.read_directory" || executionRecoveryAttempts < 2) {
             executionRecoveryAttempts = 0;
           }
+        }
+
+        const assistantMessage = decision.assistantMessage?.trim();
+        const deferredExecutionPayload = assistantMessage && isDeferredExecutionPayload(assistantMessage);
+        if (deferredExecutionPayload) {
+          await this.services.emit({
+            type: "assistant.execution_output",
+            threadId: this.threadId,
+            payload: {
+              turnRunId: turn.id,
+              title: "待整理的模型执行输出",
+              content: assistantMessage
+            },
+            createdAt: new Date().toISOString()
+          });
+          await this.services.log("assistant.execution_output_deferred", this.threadId, {
+            turnRunId: turn.id,
+            contentLength: assistantMessage.length,
+            hasToolCalls: decision.toolCalls.length > 0,
+            endTurn: decision.endTurn
+          });
+          decision.assistantMessage = undefined;
+
+          if (decision.toolCalls.length === 0 && decision.endTurn) {
+            transcript.push({
+              role: "user",
+              content:
+                "The previous response was raw execution output and was hidden from the user. " +
+                "Use the verified tool results to produce a concise user-facing final answer now. " +
+                "Do not repeat tool payloads, JSON results, or internal execution text."
+            });
+            decision.endTurn = false;
+            decision.goalCompleted = false;
+            continue;
+          }
+        } else if (decision.toolCalls.length > 0) {
+          // Progress prose belongs to the execution panel while tools are still
+          // running. Only a validated final response is written to the chat.
+          decision.assistantMessage = undefined;
         }
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
@@ -758,6 +831,7 @@ class ThreadSessionRuntime {
           break;
         }
 
+        let reevaluateAfterUserInput = false;
         for (const toolCall of decision.toolCalls) {
           if (abortController.signal.aborted) {
             throw new Error("Turn interrupted.");
@@ -865,7 +939,16 @@ class ThreadSessionRuntime {
               runTerminalCommand: (command) =>
                 this.services.runTerminalCommand(this.threadId, workspaceCwd, command),
               requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
-              requestUserInput: (input) => this.services.requestUserInput(this.threadId, turn.id, input),
+              requestUserInput: (input) => {
+                const isGpaPlanClarification = this.#gpa.stage === "act";
+                return this.services.requestUserInput(this.threadId, turn.id, {
+                  title: input.title,
+                  kind: isGpaPlanClarification ? "gpa_plan_clarification" : "generic",
+                  allowSkip: isGpaPlanClarification,
+                  questions: isGpaPlanClarification ? input.questions.slice(0, 1) : input.questions
+                });
+              },
+              gpaPlanClarification: this.#gpa.stage === "act",
               spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
               webSearch: (query) => this.services.webSearch(this.threadId, query),
               openPage: (url) => this.services.openPage(this.threadId, url),
@@ -985,6 +1068,23 @@ class ThreadSessionRuntime {
             { toolCallId: toolRecord.id }
           );
           transcript.push({ role: "tool", content: toolMessage.content });
+          if (toolCall.name === "request_user_input" && result.ok) {
+            const skipped = result.json && typeof result.json === "object" && (result.json as { skipped?: unknown }).skipped === true;
+            if (this.#gpa.stage === "act" && !skipped) {
+              await this.#commitGpa({
+                ...this.#gpa,
+                stage: "plan",
+                awaitingConfirmation: null,
+                updatedAt: new Date().toISOString()
+              });
+              transcript.push({
+                role: "user",
+                content: buildGpaPlanRevisionInstruction()
+              });
+            }
+            reevaluateAfterUserInput = true;
+            break;
+          }
           if (result.ok) {
             successfulToolCallFingerprints.add(toolCallFingerprint);
             failedToolCallFingerprints.delete(toolCallFingerprint);
@@ -1018,6 +1118,10 @@ class ThreadSessionRuntime {
               break;
             }
           }
+        }
+
+        if (reevaluateAfterUserInput) {
+          continue;
         }
 
         if (this.#pendingInput.length > 0) {
@@ -1080,7 +1184,7 @@ class ThreadSessionRuntime {
     } catch (error) {
       if (abortController.signal.aborted) {
         let messageId: string | undefined;
-        if (interruptedVisibleContent.trim()) {
+        if (interruptedVisibleContent.trim() && !isDeferredExecutionPayload(interruptedVisibleContent)) {
           const message = await this.recordMessage(
             "assistant",
             interruptedVisibleContent,
@@ -1125,12 +1229,6 @@ class ThreadSessionRuntime {
         completedAt,
         errorMessage: error instanceof Error ? error.message : String(error)
       });
-      if (error instanceof ModelDecisionTimeoutError) {
-        await this.services.log("provider.turn_timeout", this.threadId, {
-          turnRunId: turn.id,
-          timeoutMs: MODEL_DECISION_TIMEOUT_MS
-        });
-      }
       const updatedThread = await this.services.persistence.updateThread(this.threadId, {
         status: "failed",
         updatedAt: completedAt
@@ -1421,6 +1519,39 @@ function isPatchPayload(content: string): boolean {
   return /^\s*(?:```(?:diff|patch)?\s*)?\*\*\* Begin Patch\b/m.test(content);
 }
 
+function isDeferredExecutionPayload(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (/^<\/?tool_(?:calls|result)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  if (/^(?:web_search|browser|shell|fs|knowledge|mcp|execute_command|read_file|write_file|apply_patch)(?:[._][\w-]+)+\s*[\[\{(]/i.test(trimmed)) {
+    return true;
+  }
+
+  if (!/^[\[{]/.test(trimmed)) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    const values = Array.isArray(parsed) ? parsed : [parsed];
+    return values.some((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return false;
+      }
+      const record = value as Record<string, unknown>;
+      return ["tool_calls", "tool_result", "query", "url", "snippet", "results", "output"].some((key) => key in record);
+    });
+  } catch {
+    return false;
+  }
+}
+
 export function getAddedPatchFiles(argumentsJson: Record<string, unknown>): string[] {
   const patch = argumentsJson.patch;
   if (typeof patch !== "string") {
@@ -1442,6 +1573,14 @@ export function formatAvailableTools(tools: ToolSpecDefinition[]): string {
     "For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete.",
     ...definitions
   ].join("\n");
+}
+
+function buildGpaPlanRevisionInstruction(): string {
+  return [
+    "GPA plan clarification was answered. Stop ACT execution and revise the remaining plan now.",
+    "Keep already completed work, update only unfinished tasks, dependencies, risks, and acceptance criteria.",
+    "Do not call tools in this PLAN revision. Present the complete revised remaining plan and wait for explicit user confirmation before returning to ACT."
+  ].join(" ");
 }
 
 function collectKnowledgeSources(

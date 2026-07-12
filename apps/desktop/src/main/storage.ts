@@ -320,9 +320,13 @@ export class DatabaseService {
         thread_id TEXT NOT NULL,
         turn_run_id TEXT NOT NULL,
         title TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'generic',
+        allow_skip INTEGER NOT NULL DEFAULT 0,
         questions_json TEXT NOT NULL,
         status TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        answers_json TEXT,
+        created_at TEXT NOT NULL,
+        answered_at TEXT
       );
       CREATE TABLE IF NOT EXISTS artifacts (
         id TEXT PRIMARY KEY,
@@ -464,6 +468,10 @@ export class DatabaseService {
     this.ensureColumn("threads", "gpa_state_json", "TEXT");
     this.ensureColumn("threads", "is_pinned", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("threads", "pinned_at", "TEXT");
+    this.ensureColumn("user_input_prompts", "kind", "TEXT NOT NULL DEFAULT 'generic'");
+    this.ensureColumn("user_input_prompts", "allow_skip", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("user_input_prompts", "answers_json", "TEXT");
+    this.ensureColumn("user_input_prompts", "answered_at", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -973,45 +981,50 @@ export class DatabaseService {
     return record;
   }
 
-  public createUserPrompt(input: Omit<UserInputPrompt, "id" | "createdAt">): UserInputPrompt {
+  public createUserPrompt(input: Omit<UserInputPrompt, "id" | "createdAt" | "answers" | "answeredAt">): UserInputPrompt {
     const prompt: UserInputPrompt = {
       ...input,
       id: randomUUID(),
-      createdAt: nowIso()
+      answers: null,
+      createdAt: nowIso(),
+      answeredAt: null
     };
     this.#db
       .prepare(
-        "INSERT INTO user_input_prompts (id, thread_id, turn_run_id, title, questions_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO user_input_prompts (id, thread_id, turn_run_id, title, kind, allow_skip, questions_json, status, answers_json, created_at, answered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       .run(
         prompt.id,
         prompt.threadId,
         prompt.turnRunId,
         prompt.title,
+        prompt.kind,
+        Number(prompt.allowSkip),
         JSON.stringify(prompt.questions),
         prompt.status,
-        prompt.createdAt
+        null,
+        prompt.createdAt,
+        null
       );
     return prompt;
   }
 
-  public resolveUserPrompt(id: string): void {
-    this.#db.prepare("UPDATE user_input_prompts SET status = 'answered' WHERE id = ?").run(id);
+  public getUserPrompt(id: string): UserInputPrompt | null {
+    const row = this.#db.prepare("SELECT * FROM user_input_prompts WHERE id = ?").get(id) as any;
+    return row ? mapUserInputPromptRow(row) : null;
+  }
+
+  public resolveUserPrompt(id: string, answers: Record<string, string>): void {
+    this.#db
+      .prepare("UPDATE user_input_prompts SET status = 'answered', answers_json = ?, answered_at = ? WHERE id = ?")
+      .run(JSON.stringify(answers), nowIso(), id);
   }
 
   public listUserPrompts(threadId: string): UserInputPrompt[] {
     return this.#db
       .prepare("SELECT * FROM user_input_prompts WHERE thread_id = ? ORDER BY created_at DESC")
       .all(threadId)
-      .map((row: any) => ({
-        id: row.id,
-        threadId: row.thread_id,
-        turnRunId: row.turn_run_id,
-        title: row.title,
-        questions: JSON.parse(row.questions_json),
-        status: row.status,
-        createdAt: row.created_at
-      }));
+      .map(mapUserInputPromptRow);
   }
 
   public addArtifact(input: Omit<ArtifactRecord, "id" | "createdAt">): ArtifactRecord {
@@ -1601,6 +1614,38 @@ function mapRememberedApprovalRow(row: any): RememberedApprovalRecord {
     payloadJson: row.payload_json,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function mapUserInputPromptRow(row: any): UserInputPrompt {
+  const rawQuestions = JSON.parse(row.questions_json ?? "[]") as Array<any>;
+  return {
+    id: row.id,
+    threadId: row.thread_id,
+    turnRunId: row.turn_run_id,
+    title: row.title,
+    kind: row.kind === "gpa_plan_clarification" ? "gpa_plan_clarification" : "generic",
+    allowSkip: Boolean(row.allow_skip),
+    questions: rawQuestions.map((question, questionIndex) => ({
+      id: String(question?.id ?? `q${questionIndex + 1}`),
+      label: String(question?.label ?? `问题 ${questionIndex + 1}`),
+      prompt: String(question?.prompt ?? ""),
+      options: Array.isArray(question?.options)
+        ? question.options.map((option: unknown, optionIndex: number) => typeof option === "string"
+          ? { id: `option_${optionIndex + 1}`, label: option }
+          : {
+              id: String((option as any)?.id ?? `option_${optionIndex + 1}`),
+              label: String((option as any)?.label ?? "选项"),
+              description: typeof (option as any)?.description === "string" ? (option as any).description : undefined,
+              recommended: (option as any)?.recommended === true
+            })
+        : undefined,
+      allowFreeText: question?.allowFreeText === true
+    })),
+    status: row.status === "cancelled" ? "cancelled" : row.status === "answered" ? "answered" : "pending",
+    answers: row.answers_json ? JSON.parse(row.answers_json) : null,
+    createdAt: row.created_at,
+    answeredAt: row.answered_at ?? null
   };
 }
 

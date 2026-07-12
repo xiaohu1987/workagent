@@ -88,7 +88,10 @@ export function buildGpaSystemDirective(state: GpaState): string {
     ].join("\n")
   };
 
-  return `${header}\n\n${rules[state.stage]}`;
+  const actClarificationRule = state.stage === "act"
+    ? "\n7) If a decision cannot be verified with the available context or tools and would affect the approach, scope, priority, irreversible actions, or acceptance criteria, call request_user_input. Ask exactly one mutually exclusive decision with 2-4 options, a recommended option, and concise descriptions. Never ask for facts that tools can determine. After an answer, revise the remaining PLAN before resuming ACT; after a skip, continue under the current plan and state the assumption in the final summary."
+    : "";
+  return `${header}\n\n${rules[state.stage]}${actClarificationRule}`;
 }
 
 /** 识别用户以简短确认语推进阶段（与「确认」按钮的长指令区分，避免误触发） */

@@ -10,7 +10,8 @@ import type {
   RuntimeToolCall,
   ToolResult,
   ToolSearchResult,
-  ToolSpecDefinition
+  ToolSpecDefinition,
+  UserInputQuestion
 } from "@shared-types";
 import { applyCodexPatch } from "./handlers/applyPatch";
 
@@ -36,8 +37,9 @@ export interface ToolRuntimeContext {
   }) => Promise<boolean>;
   requestUserInput: (input: {
     title: string;
-    questions: Array<{ id: string; label: string; prompt: string; options?: string[] }>;
+    questions: UserInputQuestion[];
   }) => Promise<Record<string, string>>;
+  gpaPlanClarification?: boolean;
   spawnChildAgent: (input: { prompt: string; role: string; modelId?: string }) => Promise<string>;
   webSearch: (query: string) => Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage: (url: string) => Promise<{ title: string; url: string; text: string }>;
@@ -597,20 +599,88 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("request_user_input", "Ask the user one or more short questions.", ["title", "questions"], "low"),
+    {
+      name: "request_user_input",
+      description: "Ask the user for one concise decision when the task cannot proceed safely without a choice. In GPA ACT, use it only for material plan uncertainty and provide 2-4 mutually exclusive options.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          questions: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                label: { type: "string" },
+                prompt: { type: "string" },
+                allowFreeText: { type: "boolean" },
+                options: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      id: { type: "string" },
+                      label: { type: "string" },
+                      description: { type: "string" },
+                      recommended: { type: "boolean" }
+                    },
+                    required: ["id", "label"]
+                  }
+                }
+              },
+              required: ["id", "label", "prompt"]
+            }
+          }
+        },
+        required: ["title", "questions"]
+      },
+      riskLevel: "low"
+    },
     async (args, ctx) => {
+      const rawQuestions = Array.isArray(args.questions) ? args.questions : [];
+      const questions = rawQuestions.map((question, index) => ({
+        id: String((question as any).id ?? `q${index + 1}`),
+        label: String((question as any).label ?? `Q${index + 1}`),
+        prompt: String((question as any).prompt ?? ""),
+        options: Array.isArray((question as any).options)
+          ? (question as any).options.slice(0, 4).map((option: unknown, optionIndex: number) => typeof option === "string"
+            ? { id: `option_${optionIndex + 1}`, label: option }
+            : {
+                id: String((option as any)?.id ?? `option_${optionIndex + 1}`),
+                label: String((option as any)?.label ?? "选项"),
+                description: typeof (option as any)?.description === "string" ? (option as any).description : undefined,
+                recommended: (option as any)?.recommended === true
+              })
+          : undefined,
+        allowFreeText: (question as any).allowFreeText === true
+      }));
+      const gpaPlanClarification = ctx.gpaPlanClarification === true;
+      const effectiveQuestions = gpaPlanClarification
+        ? questions.slice(0, 1).map((question) => ({ ...question, allowFreeText: true }))
+        : questions;
       const answers = await ctx.requestUserInput({
         title: String(args.title ?? "Need input"),
-        questions: Array.isArray(args.questions)
-          ? args.questions.map((question, index) => ({
-              id: String((question as any).id ?? `q${index + 1}`),
-              label: String((question as any).label ?? `Q${index + 1}`),
-              prompt: String((question as any).prompt ?? ""),
-              options: Array.isArray((question as any).options) ? (question as any).options.map(String) : undefined
-            }))
-          : []
+        questions: effectiveQuestions
       });
-      return { ok: true, content: JSON.stringify(answers, null, 2), json: { answers } };
+      const skipped = Object.values(answers).includes("__skip__");
+      const selections = effectiveQuestions.map((question) => {
+        const value = answers[question.id] ?? "";
+        const option = question.options?.find((item: { id: string }) => item.id === value);
+        const note = answers[`${question.id}__note`]?.replace(/^__note__:/, "") ?? "";
+        return {
+          question: question.prompt,
+          answer: value === "__skip__"
+            ? "Keep the current plan and assumptions."
+            : option?.label ?? value.replace(/^__custom__:/, ""),
+          note: note || undefined
+        };
+      });
+      return {
+        ok: true,
+        content: JSON.stringify({ answers, selections, skipped }, null, 2),
+        json: { answers, selections, skipped, gpaPlanClarification }
+      };
     }
   );
 

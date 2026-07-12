@@ -21,7 +21,8 @@ import type {
   RuntimeThreadSnapshot,
   SkillMetadata,
   ThreadRecord,
-  ToolCallRecord
+  ToolCallRecord,
+  UserInputPrompt
 } from "@shared-types";
 import {
   canDeleteThread,
@@ -250,6 +251,7 @@ type RuntimeProgress = {
 
 type RuntimeActivityEntry =
   | { id: string; kind: "status"; label: string; createdAt: string }
+  | { id: string; kind: "output"; label: string; content: string; createdAt: string }
   | { id: string; kind: "tool"; toolCall: ToolCallRecord };
 
 type RuntimeActivity = {
@@ -430,10 +432,12 @@ export function App() {
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
+  const [resolvingPromptId, setResolvingPromptId] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
   const [notice, setNotice] = useState<AppNotice | null>(null);
   const [isNoticeHovered, setIsNoticeHovered] = useState(false);
   const [exitingNoticeId, setExitingNoticeId] = useState<number | null>(null);
+  const [isTranscriptAtLatest, setIsTranscriptAtLatest] = useState(true);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -671,6 +675,24 @@ export function App() {
     });
   }
 
+  function appendRuntimeOutput(
+    threadId: string,
+    label: string,
+    content: string,
+    createdAt = new Date().toISOString()
+  ) {
+    setRuntimeActivities((current) => {
+      const activity = current[threadId] ?? { threadId, entries: [] };
+      return {
+        ...current,
+        [threadId]: {
+          ...activity,
+          entries: [...activity.entries, { id: `output-${createdAt}`, kind: "output", label, content, createdAt }]
+        }
+      };
+    });
+  }
+
   function upsertRuntimeTool(threadId: string, toolCall: ToolCallRecord) {
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? { threadId, entries: [] };
@@ -734,6 +756,10 @@ export function App() {
           turnRunId?: string;
           delta?: string;
           content?: string;
+          title?: string;
+          attempt?: number;
+          maxAttempts?: number;
+          reason?: string;
           messageId?: string;
           toolCallId?: string;
           toolName?: string;
@@ -832,6 +858,24 @@ export function App() {
         }));
         appendRuntimeStatus(threadId, "正在生成回复", typed.createdAt);
         setRuntimeProgress({ threadId, phase: "generating", runtimeObserved: true });
+        return;
+      }
+      if (typed.type === "assistant.execution_output" && typed.threadId && typed.payload?.content) {
+        appendRuntimeOutput(
+          typed.threadId,
+          typed.payload.title ?? "待整理的模型执行输出",
+          typed.payload.content,
+          typed.createdAt
+        );
+        appendRuntimeStatus(typed.threadId, "正在校验并整理结果", typed.createdAt);
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "model_timeout") {
+        const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
+        const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 5;
+        appendRuntimeStatus(typed.threadId, `模型响应超时，正在重试 (${attempt}/${maxAttempts})`, typed.createdAt);
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
       if (typed.type === "message.created" && typed.threadId && typed.payload?.message?.role === "user") {
@@ -1087,6 +1131,7 @@ export function App() {
     () => (snapshot?.prompts ?? []).filter((item) => item.status === "pending"),
     [snapshot]
   );
+  const userInputPrompts = snapshot?.prompts ?? [];
   const canImportProjectKnowledge = selectedThread?.mode === "project" && !!selectedThread.cwd;
   const workflowBindings = snapshot?.projectPlugins ?? [];
   const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
@@ -1296,6 +1341,8 @@ export function App() {
       return;
     }
 
+    shouldAutoScrollRef.current = true;
+    setIsTranscriptAtLatest(true);
     cancelPendingAutoScrollFrame();
     autoScrollFrameRef.current = window.requestAnimationFrame(() => {
       autoScrollFrameRef.current = null;
@@ -1305,6 +1352,17 @@ export function App() {
         behavior
       });
     });
+  }
+
+  function handleTranscriptScroll() {
+    const node = chatScrollRef.current;
+    if (!node) {
+      return;
+    }
+
+    const atLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 48;
+    shouldAutoScrollRef.current = atLatest;
+    setIsTranscriptAtLatest((current) => current === atLatest ? current : atLatest);
   }
 
   useEffect(() => {
@@ -1355,6 +1413,17 @@ export function App() {
   }, [activeSnapshotThreadId, showWelcome]);
 
   useLayoutEffect(() => {
+    if (showWelcome) {
+      setIsTranscriptAtLatest(true);
+      return;
+    }
+
+    if (!shouldAutoScrollRef.current) {
+      handleTranscriptScroll();
+    }
+  }, [activeSnapshotThreadId, latestVisibleMessageId, showWelcome]);
+
+  useLayoutEffect(() => {
     if (!activeSnapshotThreadId || pendingLatestScrollThreadIdRef.current !== activeSnapshotThreadId) {
       return;
     }
@@ -1374,8 +1443,7 @@ export function App() {
       return;
     }
 
-    const shouldAutoScroll =
-      shouldAutoScrollRef.current || isThreadExecutionInProgress(activeSnapshotThreadStatus);
+    const shouldAutoScroll = shouldAutoScrollRef.current;
     if (!shouldAutoScroll) {
       return;
     }
@@ -1395,8 +1463,7 @@ export function App() {
     }
 
     const observer = new ResizeObserver(() => {
-      const shouldFollowLatest =
-        shouldAutoScrollRef.current || isThreadExecutionInProgress(activeSnapshotThreadStatus);
+      const shouldFollowLatest = shouldAutoScrollRef.current;
       if (!shouldFollowLatest) {
         return;
       }
@@ -1817,7 +1884,7 @@ export function App() {
   }
 
   function beginUserMessageEdit(message: MessageRecord) {
-    if (isActiveThreadExecuting) {
+    if (isActiveThreadExecuting || isPreparingRuntime) {
       showNotice("任务执行中，停止后才能重新编辑消息。");
       return;
     }
@@ -1988,6 +2055,20 @@ export function App() {
       showNotice("知识库已导入", { tone: "success" });
     } catch (error) {
       showNotice("知识库导入失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function answerPendingPrompt(prompt: UserInputPrompt, answers: Record<string, string>) {
+    setResolvingPromptId(prompt.id);
+    try {
+      await window.codexh.answerPrompt(prompt.id, answers);
+      await refreshSnapshot(prompt.threadId);
+    } catch (error) {
+      showNotice("提交选择失败。", {
+        message: error instanceof Error ? error.message : "请重新开始任务后再试。"
+      });
+    } finally {
+      setResolvingPromptId((current) => current === prompt.id ? null : current);
     }
   }
 
@@ -2823,16 +2904,24 @@ export function App() {
               </div>
             ) : null}
             {pendingPrompts.length > 0 ? (
-              <div className="pending-pill">
+              <button
+                type="button"
+                className="pending-pill"
+                onClick={() => document.getElementById(`user-input-prompt-${pendingPrompts[0]?.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+              >
                 <span className="pending-count">{pendingPrompts.length}</span>
-                <span>待输入</span>
-              </div>
+                <span>需要选择</span>
+              </button>
             ) : null}
           </div>
         )}
 
         <section className="chat-canvas">
-          <div ref={chatScrollRef} className={`chat-scroll ${showWelcome ? "welcome-mode" : ""}`}>
+          <div
+            ref={chatScrollRef}
+            className={`chat-scroll ${showWelcome ? "welcome-mode" : ""}`}
+            onScroll={handleTranscriptScroll}
+          >
             {!showWelcome ? (
               <div className="conversation-turn-rail-shell">
                 <ConversationTurnRail turns={conversationTurns} />
@@ -2872,6 +2961,15 @@ export function App() {
                     approval={approval}
                     resolving={resolvingApprovalId === approval.id}
                     onResolve={(decision, mode) => void resolvePendingApproval(approval.id, decision, mode)}
+                  />
+                ))}
+                {userInputPrompts.map((prompt) => (
+                  <UserInputPromptCard
+                    key={prompt.id}
+                    prompt={prompt}
+                    resolving={resolvingPromptId === prompt.id}
+                    canAnswer={selectedThreadStatus === "waiting"}
+                    onAnswer={(answers) => void answerPendingPrompt(prompt, answers)}
                   />
                 ))}
                 {gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan" ? (
@@ -2915,6 +3013,17 @@ export function App() {
           </div>
 
           <footer className="composer-shell">
+            {!showWelcome && !isTranscriptAtLatest ? (
+              <button
+                type="button"
+                className="scroll-to-latest-button"
+                title="定位到最新消息"
+                aria-label="定位到最新消息"
+                onClick={() => scrollTranscriptToLatest("smooth")}
+              >
+                <IconChevronDown />
+              </button>
+            ) : null}
             {selectedProjectCwd ? (
               <button
                 type="button"
@@ -3053,13 +3162,13 @@ export function App() {
                     onClose={() => setIsContextReportOpen(false)}
                   />
                   <button
-                    className={`send-button ${isActiveThreadExecuting || isPreparingRuntime ? "running" : ""} ${isPreparingRuntime ? "is-preparing" : ""}`}
+                    className={`send-button ${isActiveThreadExecuting || isPreparingRuntime ? "running" : ""}`}
                     onClick={() => void handleComposerPrimaryAction()}
-                    disabled={isPreparingRuntime || composerPrimaryAction.disabled}
+                    disabled={composerPrimaryAction.disabled && !isPreparingRuntime}
                     title={isPreparingRuntime ? "正在准备任务" : composerPrimaryAction.title}
                     aria-label={isPreparingRuntime ? "正在准备任务" : composerPrimaryAction.ariaLabel}
                   >
-                    {isPreparingRuntime ? <IconSpinner /> : isActiveThreadExecuting ? <IconStop /> : <IconArrowUp />}
+                    {isActiveThreadExecuting || isPreparingRuntime ? "停止" : "发送"}
                   </button>
                 </div>
               </div>
@@ -6389,7 +6498,7 @@ function RuntimeActivityPanel({
   onToggle: () => void;
 }) {
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
-  const toolEntries = entries.filter((entry) => entry.kind === "tool").reverse();
+  const detailEntries = [...entries].reverse();
   return (
     <section className={`runtime-activity-panel ${expanded ? "expanded" : ""}`} aria-live="polite">
       <button
@@ -6404,9 +6513,20 @@ function RuntimeActivityPanel({
       </button>
       {expanded ? (
         <div className="runtime-activity-details">
-          {toolEntries.length > 0 ? toolEntries.map((entry) => (
-            <ToolActivityRow key={entry.id} toolCall={entry.toolCall} compact />
-          )) : (
+          {detailEntries.length > 0 ? detailEntries.map((entry) => {
+            if (entry.kind === "tool") {
+              return <ToolActivityRow key={entry.id} toolCall={entry.toolCall} compact />;
+            }
+            if (entry.kind === "output") {
+              return <RuntimeActivityOutputRow key={entry.id} label={entry.label} content={entry.content} />;
+            }
+            return (
+              <div key={entry.id} className="runtime-activity-status-row">
+                <span className="runtime-activity-status-dot" aria-hidden="true" />
+                <span>{entry.label}</span>
+              </div>
+            );
+          }) : (
             <div className="runtime-activity-status-row current">
               <span className="runtime-activity-status-dot" aria-hidden="true" />
               <span>{latestStatus?.label ?? label}</span>
@@ -6415,6 +6535,19 @@ function RuntimeActivityPanel({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function RuntimeActivityOutputRow({ label, content }: { label: string; content: string }) {
+  return (
+    <details className="runtime-activity-output">
+      <summary>
+        <span className="runtime-activity-output-icon" aria-hidden><IconTerminal /></span>
+        <strong>{label}</strong>
+        <span>查看输出</span>
+      </summary>
+      <pre>{content}</pre>
+    </details>
   );
 }
 
@@ -6745,6 +6878,118 @@ function ApprovalCard({
           {resolving ? "处理中..." : "允许并继续"}
         </button>
       </div>
+    </section>
+  );
+}
+
+function UserInputPromptCard({
+  prompt,
+  resolving,
+  canAnswer,
+  onAnswer
+}: {
+  prompt: UserInputPrompt;
+  resolving: boolean;
+  canAnswer: boolean;
+  onAnswer: (answers: Record<string, string>) => void;
+}) {
+  const [selected, setSelected] = useState<Record<string, string>>({});
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const pending = prompt.status === "pending";
+  const canSubmit = prompt.questions.every((question) => {
+    const hasOptions = (question.options?.length ?? 0) > 0;
+    return !hasOptions || !!selected[question.id] || !!notes[question.id]?.trim();
+  });
+
+  if (!pending) {
+    const skipped = Object.values(prompt.answers ?? {}).includes("__skip__");
+    const firstQuestion = prompt.questions[0];
+    const rawAnswer = firstQuestion ? prompt.answers?.[firstQuestion.id] ?? "" : "";
+    const selectedLabel = firstQuestion?.options?.find((option) => option.id === rawAnswer)?.label;
+    const summary = selectedLabel ?? rawAnswer.replace(/^__custom__:/, "");
+    return (
+      <section className="user-input-prompt-card resolved" aria-label={`${prompt.title} 已处理`}>
+        <span className="user-input-prompt-resolved-mark" aria-hidden><IconCheck /></span>
+        <span>{prompt.kind === "gpa_plan_clarification" ? "计划澄清已选择" : "已提供输入"}</span>
+        <strong>{skipped ? "保持原计划" : summary || "已提交"}</strong>
+      </section>
+    );
+  }
+
+  if (!canAnswer) {
+    return (
+      <section className="user-input-prompt-card resolved interrupted" aria-label={`${prompt.title} 已中断`}>
+        <span className="user-input-prompt-resolved-mark" aria-hidden><IconClose /></span>
+        <span>该问题所属任务已中断</span>
+        <strong>请重新开始后再决定</strong>
+      </section>
+    );
+  }
+
+  return (
+    <section id={`user-input-prompt-${prompt.id}`} className={`user-input-prompt-card ${prompt.kind}`} aria-label={prompt.title}>
+      <header className="user-input-prompt-head">
+        <span className="user-input-prompt-icon" aria-hidden><IconHelpCircle /></span>
+        <strong>{prompt.title}</strong>
+      </header>
+      <div className="user-input-prompt-questions">
+        {prompt.questions.map((question, index) => (
+          <fieldset key={question.id} className="user-input-question" disabled={resolving}>
+            <legend>{prompt.questions.length > 1 ? `${index + 1}. ${question.label}` : question.label}</legend>
+            <p>{question.prompt}</p>
+            {question.options?.length ? (
+              <div className="user-input-options">
+                {question.options.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`user-input-option ${selected[question.id] === option.id ? "selected" : ""}`}
+                    onClick={() => setSelected((current) => ({ ...current, [question.id]: option.id }))}
+                  >
+                    <span className="user-input-option-marker" aria-hidden>{selected[question.id] === option.id ? "●" : "○"}</span>
+                    <span className="user-input-option-copy">
+                      <strong>{option.label}</strong>
+                      {option.description ? <small>{option.description}</small> : null}
+                    </span>
+                    {option.recommended ? <em>推荐</em> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {(question.allowFreeText || !question.options?.length) ? (
+              <textarea
+                value={notes[question.id] ?? ""}
+                onChange={(event) => setNotes((current) => ({ ...current, [question.id]: event.target.value }))}
+                placeholder="补充你的决定或其他方案"
+                rows={2}
+              />
+            ) : null}
+          </fieldset>
+        ))}
+      </div>
+      <footer className="user-input-prompt-actions">
+        {prompt.allowSkip ? (
+          <button type="button" className="user-input-skip" disabled={resolving} onClick={() => onAnswer({ [prompt.questions[0]?.id ?? "decision"]: "__skip__" })}>
+            跳过
+          </button>
+        ) : <span />}
+        <button
+          type="button"
+          className="user-input-submit"
+          disabled={resolving || !canSubmit}
+          onClick={() => {
+            const answers: Record<string, string> = {};
+            for (const question of prompt.questions) {
+              const note = notes[question.id]?.trim();
+              answers[question.id] = selected[question.id] || (note ? `__custom__:${note}` : "");
+              if (note && selected[question.id]) answers[`${question.id}__note`] = `__note__:${note}`;
+            }
+            onAnswer(answers);
+          }}
+        >
+          {resolving ? "提交中..." : "确认选择"}
+        </button>
+      </footer>
     </section>
   );
 }
@@ -8606,6 +8851,14 @@ function IconChevronRight() {
   );
 }
 
+function IconChevronDown() {
+  return (
+    <SvgIcon>
+      <path d="m6.5 9.5 5.5 5 5.5-5" />
+    </SvgIcon>
+  );
+}
+
 function getDisplayMessageContent(message: MessageRecord): string {
   if (message.role !== "assistant") {
     return message.content;
@@ -8676,6 +8929,14 @@ function IconCopy() {
     <SvgIcon>
       <rect x="8" y="8" width="10" height="11" rx="1.5" />
       <path d="M6 16.5H5.5A1.5 1.5 0 0 1 4 15V5.5A1.5 1.5 0 0 1 5.5 4H14a1.5 1.5 0 0 1 1.5 1.5V6" />
+    </SvgIcon>
+  );
+}
+
+function IconCheck() {
+  return (
+    <SvgIcon>
+      <path d="m6 12.5 3.8 3.8L18 8.2" />
     </SvgIcon>
   );
 }

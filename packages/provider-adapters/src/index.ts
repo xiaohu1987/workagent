@@ -367,18 +367,10 @@ function extractVisibleStreamText(text: string): string {
     }
   }
 
-  // Some OpenAI-compatible models ignore the decision envelope and stream
-  // ordinary Markdown. Preserve that visible text instead of waiting for the
-  // full response, while keeping partial JSON control data out of the UI.
-  const trimmed = text.trimStart();
-  if (trimmed.startsWith("{") || trimmed.startsWith("```json")) {
-    return "";
-  }
-
-  // A number of OpenAI-compatible coding models emit tool calls as XML-tagged
-  // JSON instead of the requested decision envelope. Tool markup is control
-  // data, never user-visible text, including while a response is streaming.
-  return stripTaggedToolCalls(text);
+  // Do not render a fallback stream. Some compatible models emit raw tool
+  // payloads without a reliable wrapper; the runtime publishes only a parsed,
+  // validated assistant message to the transcript.
+  return "";
 }
 
 async function buildOpenAiContent(content: string, attachments?: MessageAttachment[]): Promise<any> {
