@@ -10,7 +10,8 @@
     "build": "electron-vite build --config apps/desktop/electron.vite.config.ts",
     "generate:icon": "node scripts/generate-app-icon.mjs",
     "stage:skills": "node scripts/stage-bundled-skills.mjs",
-    "package:win": "pnpm generate:icon && pnpm stage:skills && pnpm build && electron-builder --win nsis",
+    "prepare:windows-icon": "node scripts/prepare-windows-icon-tool.mjs",
+    "package:win": "pnpm generate:icon && pnpm stage:skills && pnpm prepare:windows-icon && pnpm build && electron-builder --win nsis",
     "preview": "electron-vite preview --config apps/desktop/electron.vite.config.ts",
     "typecheck": "tsc --project apps/desktop/tsconfig.json --noEmit",
     "test": "vitest run"
@@ -48,6 +49,7 @@
     "productName": "CodeXH",
     "asar": true,
     "electronDist": "node_modules/electron/dist",
+    "afterPack": "./scripts/after-pack.cjs",
     "directories": { "output": "release" },
     "files": ["dist/**/*", "package.json"],
     "extraResources": [{ "from": "build/seed-skills", "to": "seed-skills", "filter": ["**/*"] }],
@@ -58,9 +60,9 @@
       "signAndEditExecutable": false
     },
     "nsis": {
-      "oneClick": true,
+      "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
+      "allowToChangeInstallationDirectory": true,
       "runAfterFinish": true,
       "deleteAppDataOnUninstall": false,
       "installerIcon": "assets/icon.ico",

@@ -32,6 +32,7 @@ set "EVITE_CLI=%cd%\node_modules\electron-vite\bin\electron-vite.js"
 set "BUILDER_CLI=%cd%\node_modules\electron-builder\cli.js"
 set "ICON_SCRIPT=%cd%\scripts\generate-app-icon.mjs"
 set "SKILLS_SCRIPT=%cd%\scripts\stage-bundled-skills.mjs"
+set "WINDOWS_ICON_SCRIPT=%cd%\scripts\prepare-windows-icon-tool.mjs"
 if not exist "%EVITE_CLI%" goto :install_dependencies
 if not exist "%BUILDER_CLI%" goto :install_dependencies
 goto :check_scripts
@@ -60,20 +61,29 @@ if not exist "%SKILLS_SCRIPT%" (
   pause
   exit /b 1
 )
+if not exist "%WINDOWS_ICON_SCRIPT%" (
+  echo ERROR: The Windows icon tool preparation script was not found.
+  pause
+  exit /b 1
+)
 
-echo [1/4] Generating application icon...
+echo [1/5] Generating application icon...
 "%NODE_EXE%" "%ICON_SCRIPT%"
 if errorlevel 1 goto :failed
 
-echo [2/4] Staging bundled skills...
+echo [2/5] Staging bundled skills...
 "%NODE_EXE%" "%SKILLS_SCRIPT%"
 if errorlevel 1 goto :failed
 
-echo [3/4] Building CodeXH...
+echo [3/5] Preparing Windows icon tool...
+"%NODE_EXE%" "%WINDOWS_ICON_SCRIPT%"
+if errorlevel 1 goto :failed
+
+echo [4/5] Building CodeXH...
 "%NODE_EXE%" "%EVITE_CLI%" build --config apps\desktop\electron.vite.config.ts
 if errorlevel 1 goto :failed
 
-echo [4/4] Creating NSIS installer...
+echo [5/5] Creating NSIS installer...
 "%NODE_EXE%" "%BUILDER_CLI%" --win nsis
 if errorlevel 1 goto :failed
 
