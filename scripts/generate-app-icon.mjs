@@ -113,7 +113,7 @@ line(142, 85, 142, 171, 11, orange);
 line(181, 85, 181, 171, 11, orangeSoft);
 line(142, 128, 181, 128, 11, orange);
 
-const outputDir = path.resolve("build");
+const outputDir = path.resolve("assets");
 await mkdir(outputDir, { recursive: true });
 const png = createPng();
 await writeFile(path.join(outputDir, "icon.png"), png);
