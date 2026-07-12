@@ -3653,13 +3653,22 @@ export function App() {
                                           />
                                           <span>支持生图</span>
                                         </label>
-                                        <button
-                                          className="settings-mini-button"
-                                          onClick={() => void checkProviderModel(settingsProvider, model)}
-                                          disabled={testingModelKey === getModelProfileKey(settingsProvider.id, model.id)}
-                                        >
-                                          {testingModelKey === getModelProfileKey(settingsProvider.id, model.id) ? "测试中" : "测试"}
-                                        </button>
+                                        {(() => {
+                                          const isTesting = testingModelKey === getModelProfileKey(settingsProvider.id, model.id);
+                                          return (
+                                            <button
+                                              className={`settings-mini-button model-test-button${isTesting ? " is-testing" : ""}`}
+                                              onClick={() => void checkProviderModel(settingsProvider, model)}
+                                              disabled={isTesting}
+                                              aria-busy={isTesting}
+                                            >
+                                              <span className="model-test-label">
+                                                {isTesting ? "测试中" : "测试"}
+                                                {isTesting ? <i aria-hidden="true" /> : null}
+                                              </span>
+                                            </button>
+                                          );
+                                        })()}
                                         <button
                                           className="settings-icon-button"
                                           onClick={() => removeModel(model.id)}
