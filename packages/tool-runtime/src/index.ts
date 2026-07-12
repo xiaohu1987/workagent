@@ -39,7 +39,7 @@ export interface ToolRuntimeContext {
     title: string;
     questions: UserInputQuestion[];
   }) => Promise<Record<string, string>>;
-  gpaPlanClarification?: boolean;
+  requestUserInputEnabled?: boolean;
   spawnChildAgent: (input: { prompt: string; role: string; modelId?: string }) => Promise<string>;
   webSearch: (query: string) => Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage: (url: string) => Promise<{ title: string; url: string; text: string }>;
@@ -152,7 +152,18 @@ export class ToolRuntime {
       throw new Error(`Unknown tool: ${call.name}`);
     }
 
-    return registration.handler(normalizeToolArguments(call.arguments), ctx, this);
+    const argumentsValue = normalizeToolArguments(call.arguments);
+    const validationErrors = validateToolArguments(registration.spec.inputSchema, argumentsValue);
+    if (validationErrors.length > 0) {
+      return {
+        ok: false,
+        content:
+          `Invalid arguments for ${registration.spec.name}: ${validationErrors.join(" ")} ` +
+          "Correct the arguments and call the same listed tool again."
+      };
+    }
+
+    return registration.handler(argumentsValue, ctx, this);
   }
 
   public searchTools(query: string, extra: ToolSpecDefinition[] = []): ToolSearchResult[] {
@@ -177,7 +188,7 @@ export class ToolRuntime {
 
 function normalizeToolArguments(argumentsValue: unknown): Record<string, unknown> {
   if (argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)) {
-    return argumentsValue as Record<string, unknown>;
+    return normalizeLegacyToolArguments(argumentsValue as Record<string, unknown>);
   }
   if (typeof argumentsValue !== "string") {
     return {};
@@ -186,12 +197,92 @@ function normalizeToolArguments(argumentsValue: unknown): Record<string, unknown
   try {
     const parsed = JSON.parse(argumentsValue);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
+      return normalizeLegacyToolArguments(parsed as Record<string, unknown>);
     }
   } catch {
     // Tool validation below will report missing required fields in the normal way.
   }
   return {};
+}
+
+function normalizeLegacyToolArguments(argumentsValue: Record<string, unknown>): Record<string, unknown> {
+  if (typeof argumentsValue.patch !== "string" && typeof argumentsValue.patch_content === "string") {
+    return { ...argumentsValue, patch: argumentsValue.patch_content };
+  }
+  return argumentsValue;
+}
+
+function validateToolArguments(schema: Record<string, unknown>, value: Record<string, unknown>): string[] {
+  return validateJsonSchemaValue(schema, value, "arguments");
+}
+
+function validateJsonSchemaValue(schema: Record<string, unknown>, value: unknown, label: string): string[] {
+  if (Array.isArray(schema.anyOf)) {
+    const alternatives = schema.anyOf.filter(isRecord);
+    if (alternatives.some((alternative) => validateJsonSchemaValue(alternative, value, label).length === 0)) {
+      return [];
+    }
+    return [`${label} does not match any accepted argument format.`];
+  }
+
+  const errors: string[] = [];
+  const type = typeof schema.type === "string" ? schema.type : undefined;
+  const actualType = jsonValueType(value);
+  if (type && !matchesJsonSchemaType(type, value)) {
+    return [`${label} must be ${articleFor(type)} ${type}.`];
+  }
+
+  if (Array.isArray(schema.enum) && !schema.enum.some((item) => Object.is(item, value))) {
+    errors.push(`${label} must be one of: ${schema.enum.map(String).join(", ")}.`);
+  }
+
+  if ((type === "object" || (!type && schema.properties)) && actualType === "object") {
+    const record = value as Record<string, unknown>;
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    const required = Array.isArray(schema.required) ? schema.required.filter((key): key is string => typeof key === "string") : [];
+    for (const key of required) {
+      if (!(key in record) || record[key] === undefined || record[key] === null) {
+        errors.push(`${label}.${key} is required.`);
+      }
+    }
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (!(key in record) || record[key] === undefined) continue;
+      if (isRecord(propertySchema)) {
+        errors.push(...validateJsonSchemaValue(propertySchema, record[key], `${label}.${key}`));
+      }
+    }
+  }
+
+  if (type === "array" && Array.isArray(value) && isRecord(schema.items)) {
+    value.forEach((item, index) => {
+      errors.push(...validateJsonSchemaValue(schema.items as Record<string, unknown>, item, `${label}[${index}]`));
+    });
+  }
+
+  return errors;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function jsonValueType(value: unknown): "object" | "array" | "string" | "number" | "integer" | "boolean" | "null" {
+  if (Array.isArray(value)) return "array";
+  if (value === null) return "null";
+  if (typeof value === "object") return "object";
+  if (typeof value === "number" && Number.isInteger(value)) return "integer";
+  return typeof value as "string" | "number" | "boolean";
+}
+
+function matchesJsonSchemaType(type: string, value: unknown): boolean {
+  const actualType = jsonValueType(value);
+  return type === "number"
+    ? actualType === "number" || actualType === "integer"
+    : actualType === type;
+}
+
+function articleFor(type: string): string {
+  return /^[aeiou]/i.test(type) ? "an" : "a";
 }
 
 function registerBuiltinTools(runtime: ToolRuntime): void {
@@ -601,7 +692,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     {
       name: "request_user_input",
-      description: "Ask the user for one concise decision when the task cannot proceed safely without a choice. In GPA ACT, use it only for material plan uncertainty and provide 2-4 mutually exclusive options.",
+      description: "Request user input for one to three short, material decisions and wait for the response. Use only when the task cannot safely proceed without the user's choice. Provide 2-3 mutually exclusive options for each question; free-form input is available automatically.",
       inputSchema: {
         type: "object",
         properties: {
@@ -618,18 +709,23 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
                 options: {
                   type: "array",
                   items: {
-                    type: "object",
-                    properties: {
-                      id: { type: "string" },
-                      label: { type: "string" },
-                      description: { type: "string" },
-                      recommended: { type: "boolean" }
-                    },
-                    required: ["id", "label"]
+                    anyOf: [
+                      { type: "string" },
+                      {
+                        type: "object",
+                        properties: {
+                          id: { type: "string" },
+                          label: { type: "string" },
+                          description: { type: "string" },
+                          recommended: { type: "boolean" }
+                        },
+                        required: ["id", "label"]
+                      }
+                    ]
                   }
                 }
               },
-              required: ["id", "label", "prompt"]
+              required: ["id", "label", "prompt", "options"]
             }
           }
         },
@@ -638,7 +734,11 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "low"
     },
     async (args, ctx) => {
-      const rawQuestions = Array.isArray(args.questions) ? args.questions : [];
+      if (ctx.requestUserInputEnabled !== true) {
+        return { ok: false, content: "request_user_input is only available while GPA mode is active." };
+      }
+
+      const rawQuestions = Array.isArray(args.questions) ? args.questions.slice(0, 3) : [];
       const questions = rawQuestions.map((question, index) => ({
         id: String((question as any).id ?? `q${index + 1}`),
         label: String((question as any).label ?? `Q${index + 1}`),
@@ -652,34 +752,30 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
                 description: typeof (option as any)?.description === "string" ? (option as any).description : undefined,
                 recommended: (option as any)?.recommended === true
               })
-          : undefined,
-        allowFreeText: (question as any).allowFreeText === true
+          : [],
+        allowFreeText: true
       }));
-      const gpaPlanClarification = ctx.gpaPlanClarification === true;
-      const effectiveQuestions = gpaPlanClarification
-        ? questions.slice(0, 1).map((question) => ({ ...question, allowFreeText: true }))
-        : questions;
+      if (questions.length === 0 || questions.some((question) => question.options.length === 0)) {
+        return { ok: false, content: "request_user_input requires one to three questions with non-empty options." };
+      }
       const answers = await ctx.requestUserInput({
         title: String(args.title ?? "Need input"),
-        questions: effectiveQuestions
+        questions
       });
-      const skipped = Object.values(answers).includes("__skip__");
-      const selections = effectiveQuestions.map((question) => {
+      const selections = questions.map((question) => {
         const value = answers[question.id] ?? "";
         const option = question.options?.find((item: { id: string }) => item.id === value);
         const note = answers[`${question.id}__note`]?.replace(/^__note__:/, "") ?? "";
         return {
           question: question.prompt,
-          answer: value === "__skip__"
-            ? "Keep the current plan and assumptions."
-            : option?.label ?? value.replace(/^__custom__:/, ""),
+          answer: option?.label ?? value.replace(/^__custom__:/, ""),
           note: note || undefined
         };
       });
       return {
         ok: true,
-        content: JSON.stringify({ answers, selections, skipped }, null, 2),
-        json: { answers, selections, skipped, gpaPlanClarification }
+        content: JSON.stringify({ answers, selections }, null, 2),
+        json: { answers, selections }
       };
     }
   );
@@ -766,7 +862,19 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("browser.scroll", "Scroll the visible browser page by a vertical pixel delta.", ["tabId", "deltaY"], "low"),
+    {
+      name: "browser.scroll",
+      description: "Scroll the visible browser page by a vertical pixel delta.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string" },
+          deltaY: { type: "number" }
+        },
+        required: ["tabId", "deltaY"]
+      },
+      riskLevel: "low"
+    },
     async (args, ctx) => {
       const page = await ctx.scrollBrowserPage(String(args.tabId ?? ""), Number(args.deltaY ?? 0));
       return { ok: true, content: `${page.title}\n${page.url}`, json: page };
@@ -793,7 +901,21 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("browser.wait_for", "Wait for text or an element id to appear after a browser action.", ["tabId"], "low"),
+    {
+      name: "browser.wait_for",
+      description: "Wait for text or an element id to appear after a browser action.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string" },
+          text: { type: "string" },
+          elementId: { type: "string" },
+          timeoutMs: { type: "number" }
+        },
+        required: ["tabId"]
+      },
+      riskLevel: "low"
+    },
     async (args, ctx) => {
       const result = await ctx.waitForBrowserPage(String(args.tabId ?? ""), {
         text: typeof args.text === "string" ? args.text : undefined,
@@ -842,7 +964,20 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("mcp.call", "Call a tool on a configured MCP server.", ["server", "tool", "arguments"], "high"),
+    {
+      name: "mcp.call",
+      description: "Call a tool on a configured MCP server.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          server: { type: "string" },
+          tool: { type: "string" },
+          arguments: { type: "object" }
+        },
+        required: ["server", "tool", "arguments"]
+      },
+      riskLevel: "high"
+    },
     async (args, ctx) => {
       const server = String(args.server ?? "");
       const tool = String(args.tool ?? "");

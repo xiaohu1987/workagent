@@ -26,6 +26,7 @@ import type {
   RuntimeEvent,
   RuntimeThreadSnapshot,
   ThreadRecord,
+  ToolSpecDefinition,
   UserInputQuestion,
   UserInputPrompt
 } from "@shared-types";
@@ -161,6 +162,8 @@ export class DesktopBackend {
       readMcpResource: async (server, uri) => this.#mcp.readResource(server, uri),
       callMcpTool: async (server, tool, argumentsJson) =>
         this.#mcp.callTool(server, tool, argumentsJson),
+      markModelAgentIncompatible: async (threadId, modelId, reason) =>
+        this.markModelAgentIncompatible(threadId, modelId, reason),
       emit: async (event) => this.emit(event),
       log: async (kind, threadId, payload) => this.#logs.append(kind, payload, threadId)
     });
@@ -552,7 +555,13 @@ export class DesktopBackend {
   public async testProviderModel(input: {
     provider: ProviderDefinition;
     model: ModelProfile;
-  }): Promise<{ latencyMs: number; outputTokens: number; tokensPerSecond: number }> {
+  }): Promise<{
+    latencyMs: number;
+    outputTokens: number;
+    tokensPerSecond: number;
+    agentCapability: "verified" | "unsupported";
+    agentCapabilityReason?: string;
+  }> {
     const startedAt = performance.now();
     const adapter = this.#providerFactory.create(input.provider);
     const timeout = new AbortController();
@@ -570,7 +579,13 @@ export class DesktopBackend {
         });
         if (image.data.byteLength === 0) throw new Error("图片生成接口未返回有效图片数据。");
         const latencyMs = Math.max(1, Math.round(performance.now() - startedAt));
-        return { latencyMs, outputTokens: 0, tokensPerSecond: 0 };
+        return {
+          latencyMs,
+          outputTokens: 0,
+          tokensPerSecond: 0,
+          agentCapability: "unsupported",
+          agentCapabilityReason: "Image-generation models do not run Agent tools."
+        };
       }
       const decision = await adapter.runTurn({
         systemPrompt:
@@ -588,10 +603,75 @@ export class DesktopBackend {
         decision.outputTokens ?? estimateTokenCount(decision.assistantMessage ?? "")
       );
 
+      let agentCapability: "verified" | "unsupported" = "unsupported";
+      let agentCapabilityReason: string | undefined;
+      if (!input.model.supportsToolCalling) {
+        agentCapabilityReason = "Tool calling is disabled for this model.";
+      } else {
+        const probeTool: ToolSpecDefinition = {
+          name: "fs.read_directory",
+          description: "List the selected workspace directory. Call this exact tool now.",
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"]
+          },
+          riskLevel: "low"
+        };
+        try {
+          const toolDecision = await adapter.runTurn({
+            systemPrompt: "Call the provided fs.read_directory tool exactly once with {\"path\":\".\"}. Do not answer in text.",
+            transcript: [{ role: "user", content: "Run the Agent protocol test now." }],
+            availableTools: [probeTool],
+            model: { ...input.model, supportsStreaming: false },
+            provider: input.provider,
+            stream: false,
+            abortSignal: timeout.signal
+          });
+          const call = toolDecision.toolCalls.find((entry) => entry.name === probeTool.name);
+          if (call?.arguments.path === ".") {
+            const followUpDecision = await adapter.runTurn({
+              systemPrompt:
+                "The requested tool has completed. Read its result and return a concise final answer. Do not call another tool.",
+              transcript: [
+                { role: "user", content: "Inspect the selected workspace." },
+                { role: "assistant", content: "", toolCalls: [call] },
+                {
+                  role: "tool",
+                  toolCallId: call.id,
+                  content: "fs.read_directory\nDirectory listing completed successfully."
+                }
+              ],
+              availableTools: [probeTool],
+              model: { ...input.model, supportsStreaming: false },
+              provider: input.provider,
+              stream: false,
+              abortSignal: timeout.signal
+            });
+            if (
+              followUpDecision.isStructured &&
+              followUpDecision.endTurn &&
+              followUpDecision.assistantMessage?.trim()
+            ) {
+              agentCapability = "verified";
+            } else {
+              agentCapabilityReason =
+                "The model called the tool but did not complete the native tool-result follow-up.";
+            }
+          } else {
+            agentCapabilityReason = "The provider did not return the required native fs.read_directory tool call.";
+          }
+        } catch (error) {
+          agentCapabilityReason = error instanceof Error ? error.message : String(error);
+        }
+      }
+
       return {
         latencyMs,
         outputTokens,
-        tokensPerSecond: Number((outputTokens / (latencyMs / 1_000)).toFixed(2))
+        tokensPerSecond: Number((outputTokens / (latencyMs / 1_000)).toFixed(2)),
+        agentCapability,
+        agentCapabilityReason
       };
     } catch (error) {
       if (timeout.signal.aborted) {
@@ -605,6 +685,64 @@ export class DesktopBackend {
 
   public getConfig(): AppConfig {
     return this.#config;
+  }
+
+  public async saveModelAgentCapability(input: {
+    providerId: string;
+    modelId: string;
+    agentCapability: "verified" | "unsupported";
+    agentCapabilityReason?: string;
+  }): Promise<ModelProfile> {
+    const model = this.#config.models.find(
+      (entry) => entry.id === input.modelId && entry.providerId === input.providerId
+    );
+    if (!model) {
+      throw new Error("该模型尚未保存。请先保存模型配置后再验证。");
+    }
+
+    model.agentCapability = input.agentCapability;
+    model.agentCapabilityCheckedAt = new Date().toISOString();
+    model.agentCapabilityReason = input.agentCapabilityReason;
+    await saveConfig(this.#layout.configFile, this.#config);
+    await this.#logs.append("model.agent_capability_saved", {
+      modelId: model.id,
+      providerId: model.providerId,
+      agentCapability: model.agentCapability,
+      agentCapabilityReason: model.agentCapabilityReason
+    });
+    return { ...model };
+  }
+
+  private async markModelAgentIncompatible(
+    threadId: string,
+    modelId: string,
+    reason: string
+  ): Promise<void> {
+    const model = this.#config.models.find((entry) => entry.id === modelId);
+    if (!model) {
+      return;
+    }
+
+    model.agentCapability = "unsupported";
+    model.agentCapabilityCheckedAt = new Date().toISOString();
+    model.agentCapabilityReason = `Runtime Agent protocol failure: ${reason}`;
+    await saveConfig(this.#layout.configFile, this.#config);
+    await this.#logs.append("model.agent_capability_downgraded", {
+      modelId: model.id,
+      providerId: model.providerId,
+      reason
+    });
+    await this.emit({
+      type: "model.capability.updated",
+      threadId,
+      payload: {
+        modelId: model.id,
+        agentCapability: model.agentCapability,
+        agentCapabilityCheckedAt: model.agentCapabilityCheckedAt,
+        agentCapabilityReason: model.agentCapabilityReason
+      },
+      createdAt: new Date().toISOString()
+    });
   }
 
   public async saveConfig(nextConfig: AppConfig): Promise<void> {

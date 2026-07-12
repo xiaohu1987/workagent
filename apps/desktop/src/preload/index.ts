@@ -121,6 +121,12 @@ const api = {
     provider: unknown;
     model: unknown;
   }) => ipcRenderer.invoke("models:test", payload),
+  saveModelAgentCapability: (payload: {
+    providerId: string;
+    modelId: string;
+    agentCapability: "verified" | "unsupported";
+    agentCapabilityReason?: string;
+  }) => ipcRenderer.invoke("models:save-capability", payload),
   onRuntimeEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("runtime:event", wrapped);

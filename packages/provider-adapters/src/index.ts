@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type {
   MessageAttachment,
@@ -7,7 +8,8 @@ import type {
   ProviderDefinition,
   ProviderTurnDecision,
   ProviderTurnInput,
-  ProviderType
+  ProviderType,
+  RuntimeToolCall
 } from "@shared-types";
 
 export interface ProviderAdapter {
@@ -114,19 +116,30 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
-    const request = {
+    const nativeTools = input.model.supportsToolCalling && input.availableTools.length > 0
+      ? input.availableTools.map((tool) => ({
+          type: "function" as const,
+          function: {
+            name: nativeToolName(tool.name),
+            description: tool.description,
+            parameters: tool.inputSchema
+          }
+        }))
+      : undefined;
+    const request: any = {
       model: input.model.id,
       messages: await buildOpenAiCompatibleMessages(input),
       temperature: input.model.defaultTemperature,
       max_tokens: input.model.defaultMaxOutputTokens,
-      ...(input.model.supportsJsonOutput ? { response_format: { type: "json_object" as const } } : {})
+      ...(nativeTools ? { tools: nativeTools, parallel_tool_calls: input.model.supportsParallelToolCalls } : {}),
+      ...(!nativeTools && input.model.supportsJsonOutput ? { response_format: { type: "json_object" as const } } : {})
     };
 
-    if (input.stream && input.model.supportsStreaming) {
+    if (!nativeTools && input.stream && input.model.supportsStreaming) {
       const stream = await this.#client.chat.completions.create(
         { ...request, stream: true },
         { signal: input.abortSignal }
-      );
+      ) as any;
       let text = "";
       let visibleText = "";
       for await (const chunk of stream) {
@@ -150,8 +163,31 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
     const response = await this.#client.chat.completions.create(request, {
       signal: input.abortSignal
     });
-    const text = response.choices[0]?.message?.content?.trim() || "";
-    return withOutputTokens(parseDecisionFromText(text), response.usage?.completion_tokens);
+    const message = response.choices[0]?.message;
+    const nativeCalls = message?.tool_calls?.flatMap((call) => {
+      if (call.type !== "function") return [];
+      const name = originalToolName(call.function.name, input.availableTools);
+      if (!name) return [];
+      return [{
+        id: call.id || crypto.randomUUID(),
+        name,
+        arguments: parseNativeToolArguments(call.function.arguments)
+      }];
+    }) ?? [];
+    if (nativeCalls.length > 0) {
+      return withOutputTokens({
+        assistantMessage: message?.content?.trim() || undefined,
+        toolCalls: nativeCalls,
+        endTurn: false,
+        goalCompleted: false,
+        isStructured: true
+      }, response.usage?.completion_tokens);
+    }
+    const text = message?.content?.trim() || "";
+    return withOutputTokens(
+      nativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
+      response.usage?.completion_tokens
+    );
   }
 
   public async generateImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }) {
@@ -178,6 +214,53 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 }
 
+export function nativeToolName(name: string): string {
+  // Provider function names have a narrow character set. Replacing punctuation
+  // with underscores is ambiguous (`foo.bar` and `foo_bar` collide), so use a
+  // stable compact digest only on the provider boundary.
+  return `tool_${createHash("sha256").update(name).digest("hex").slice(0, 24)}`;
+}
+
+function originalToolName(nativeName: string, availableTools: ProviderTurnInput["availableTools"]): string | null {
+  return availableTools.find((tool) => nativeToolName(tool.name) === nativeName)?.name ?? null;
+}
+
+function parseNativeToolArguments(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function objectToolArguments(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function nativeTextDecision(text: string): ProviderTurnDecision {
+  if (!text) {
+    return {
+      assistantMessage: "The model returned neither a native tool call nor a final response.",
+      toolCalls: [],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: false
+    };
+  }
+  return {
+    assistantMessage: text,
+    toolCalls: [],
+    endTurn: true,
+    goalCompleted: true,
+    isStructured: true
+  };
+}
+
 class AnthropicProvider implements ProviderAdapter {
   readonly #client: Anthropic;
 
@@ -190,27 +273,56 @@ class AnthropicProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    const nativeTools = input.model.supportsToolCalling && input.availableTools.length > 0
+      ? input.availableTools.map((tool) => ({
+          name: nativeToolName(tool.name),
+          description: tool.description,
+          input_schema: tool.inputSchema as any
+        }))
+      : undefined;
     const response = await this.#client.messages.create(
       {
         model: input.model.id,
         system: input.systemPrompt,
         max_tokens: input.model.defaultMaxOutputTokens ?? 2048,
-        messages: await Promise.all(input.transcript
-          .filter((message) => message.role !== "system")
-          .map(async (message) => ({
-            role: message.role === "assistant" || message.role === "tool" ? "assistant" : "user",
-            content: await buildAnthropicContent(contentWithFileAttachments(message.content, message.attachments), message.attachments)
-          })))
-      },
+        messages: await buildAnthropicMessages(input),
+        ...(nativeTools ? { tools: nativeTools } : {})
+      } as any,
       { signal: input.abortSignal }
     );
 
+    const nativeCalls = response.content.flatMap((part) => {
+      if (part.type !== "tool_use") return [];
+      const name = originalToolName(part.name, input.availableTools);
+      if (!name) return [];
+      return [{
+        id: part.id || crypto.randomUUID(),
+        name,
+        arguments: objectToolArguments(part.input)
+      }];
+    });
+    if (nativeCalls.length > 0) {
+      return withOutputTokens({
+        assistantMessage: response.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n")
+          .trim() || undefined,
+        toolCalls: nativeCalls,
+        endTurn: false,
+        goalCompleted: false,
+        isStructured: true
+      }, response.usage.output_tokens);
+    }
     const text = response.content
       .map((part) => ("text" in part ? part.text : ""))
       .join("\n")
       .trim();
 
-    return withOutputTokens(parseDecisionFromText(text), response.usage.output_tokens);
+    return withOutputTokens(
+      nativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
+      response.usage.output_tokens
+    );
   }
 }
 
@@ -233,10 +345,18 @@ class GeminiProvider implements ProviderAdapter {
         systemInstruction: {
           parts: [{ text: input.systemPrompt }]
         },
-        contents: await Promise.all(input.transcript.map(async (message) => ({
-          role: message.role === "assistant" || message.role === "tool" ? "model" : "user",
-          parts: await buildGeminiParts(contentWithFileAttachments(message.content, message.attachments), message.attachments)
-        })))
+        contents: await buildGeminiContents(input),
+        ...(input.model.supportsToolCalling && input.availableTools.length > 0
+          ? {
+              tools: [{
+                functionDeclarations: input.availableTools.map((tool) => ({
+                  name: nativeToolName(tool.name),
+                  description: tool.description,
+                  parameters: tool.inputSchema
+                }))
+              }]
+            }
+          : {})
       }),
       signal: input.abortSignal
     });
@@ -244,7 +364,7 @@ class GeminiProvider implements ProviderAdapter {
     const json = (await response.json()) as {
       candidates?: Array<{
         content?: {
-          parts?: Array<{ text?: string }>;
+          parts?: Array<{ text?: string; functionCall?: { name?: string; args?: unknown } }>;
         };
       }>;
       usageMetadata?: {
@@ -252,10 +372,33 @@ class GeminiProvider implements ProviderAdapter {
       };
     };
 
-    const text =
-      json.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n").trim() ??
-      "";
-    return withOutputTokens(parseDecisionFromText(text), json.usageMetadata?.candidatesTokenCount);
+    const parts = json.candidates?.[0]?.content?.parts ?? [];
+    const nativeCalls = parts.flatMap((part, index) => {
+      const nativeName = part.functionCall?.name;
+      if (!nativeName) return [];
+      const name = originalToolName(nativeName, input.availableTools);
+      if (!name) return [];
+      return [{
+        id: `gemini-${crypto.randomUUID()}-${index}`,
+        name,
+        arguments: objectToolArguments(part.functionCall?.args)
+      }];
+    });
+    if (nativeCalls.length > 0) {
+      return withOutputTokens({
+        assistantMessage: parts.map((part) => part.text ?? "").join("\n").trim() || undefined,
+        toolCalls: nativeCalls,
+        endTurn: false,
+        goalCompleted: false,
+        isStructured: true
+      }, json.usageMetadata?.candidatesTokenCount);
+    }
+    const text = parts.map((part) => part.text ?? "").join("\n").trim();
+    const usesNativeTools = input.model.supportsToolCalling && input.availableTools.length > 0;
+    return withOutputTokens(
+      usesNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
+      json.usageMetadata?.candidatesTokenCount
+    );
   }
 }
 
@@ -274,8 +417,14 @@ function resolveApiKey(provider: ProviderDefinition): string {
 
 async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
   const messages: Array<{
-    role: "system" | "user" | "assistant";
+    role: "system" | "user" | "assistant" | "tool";
     content: any;
+    tool_calls?: Array<{
+      id: string;
+      type: "function";
+      function: { name: string; arguments: string };
+    }>;
+    tool_call_id?: string;
   }> = [];
 
   if (input.systemPrompt.trim()) {
@@ -286,6 +435,25 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
   }
 
   for (const message of input.transcript) {
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      messages.push({
+        role: "assistant",
+        content: message.content || null,
+        tool_calls: message.toolCalls.map((call) => ({
+          id: call.id,
+          type: "function",
+          function: {
+            name: nativeToolName(call.name),
+            arguments: JSON.stringify(call.arguments)
+          }
+        }))
+      });
+      continue;
+    }
+    if (message.role === "tool" && message.toolCallId) {
+      messages.push({ role: "tool", tool_call_id: message.toolCallId, content: message.content });
+      continue;
+    }
     messages.push({
       role: normalizeOpenAiCompatibleRole(message.role),
       content: await buildOpenAiContent(contentWithFileAttachments(message.content, message.attachments), message.attachments)
@@ -306,6 +474,99 @@ function normalizeOpenAiCompatibleRole(role: ProviderTurnInput["transcript"][num
     default:
       return "user";
   }
+}
+
+async function buildAnthropicMessages(input: ProviderTurnInput): Promise<any[]> {
+  const messages: any[] = [];
+  const calls = new Map<string, RuntimeToolCall>();
+  for (const message of input.transcript) {
+    if (message.role === "system") continue;
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      for (const call of message.toolCalls) calls.set(call.id, call);
+      messages.push({
+        role: "assistant",
+        content: [
+          ...(message.content ? [{ type: "text", text: message.content }] : []),
+          ...message.toolCalls.map((call) => ({
+            type: "tool_use",
+            id: call.id,
+            name: nativeToolName(call.name),
+            input: call.arguments
+          }))
+        ]
+      });
+      continue;
+    }
+    if (message.role === "tool" && message.toolCallId) {
+      const call = calls.get(message.toolCallId);
+      if (call) {
+        messages.push({
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: call.id,
+            content: message.content,
+            ...(message.toolResultOk === false ? { is_error: true } : {})
+          }]
+        });
+        continue;
+      }
+    }
+    messages.push({
+      role: message.role === "assistant" ? "assistant" : "user",
+      content: await buildAnthropicContent(
+        contentWithFileAttachments(message.content, message.attachments),
+        message.attachments
+      )
+    });
+  }
+  return messages;
+}
+
+async function buildGeminiContents(input: ProviderTurnInput): Promise<any[]> {
+  const contents: any[] = [];
+  const calls = new Map<string, RuntimeToolCall>();
+  for (const message of input.transcript) {
+    if (message.role === "system") continue;
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      for (const call of message.toolCalls) calls.set(call.id, call);
+      contents.push({
+        role: "model",
+        parts: [
+          ...(message.content ? [{ text: message.content }] : []),
+          ...message.toolCalls.map((call) => ({
+            functionCall: { name: nativeToolName(call.name), args: call.arguments }
+          }))
+        ]
+      });
+      continue;
+    }
+    if (message.role === "tool" && message.toolCallId) {
+      const call = calls.get(message.toolCallId);
+      if (call) {
+        contents.push({
+          role: "user",
+          parts: [{
+            functionResponse: {
+              name: nativeToolName(call.name),
+              response: message.toolResultOk === false
+                ? { error: message.content }
+                : { content: message.content }
+            }
+          }]
+        });
+        continue;
+      }
+    }
+    contents.push({
+      role: message.role === "assistant" ? "model" : "user",
+      parts: await buildGeminiParts(
+        contentWithFileAttachments(message.content, message.attachments),
+        message.attachments
+      )
+    });
+  }
+  return contents;
 }
 
 function parseDecisionFromText(text: string): ProviderTurnDecision {
@@ -612,12 +873,14 @@ function assertNever(_value: ProviderType): never {
 export function buildDecisionSystemPrompt(model: ModelProfile): string {
   return [
     "You are codexh, a desktop agent.",
-    "Return exactly one valid JSON object and no text outside that JSON object.",
-    "Return keys: assistant_message, clarification, tool_calls, end_turn, goal_completed, reasoning_summary.",
+    "When native function tools are provided, invoke them through the provider tool-call channel; never serialize a tool call into assistant text.",
+    "With native function tools, return normal assistant text only after the entire original user goal is complete and verified. If more work is needed, call the next provided tool instead of returning a progress promise.",
+    "When no native tools are provided, return exactly one valid JSON object and no text outside that JSON object.",
+    "The JSON fallback keys are: assistant_message, tool_calls, end_turn, goal_completed, reasoning_summary.",
     "assistant_message is visible to the user: write concise Markdown or one short progress update before tool calls.",
     "Never expose private chain-of-thought; reasoning_summary is internal only and must never be rendered.",
     "tool_calls must be an array of { name, arguments }.",
-    "clarification is optional and only for a material user decision. Its shape is { title, question, options, allow_free_text }, where options contains 2-4 { id, label, description, recommended } objects. When clarification is present, tool_calls must be empty and end_turn must be false.",
+    "When request_user_input is listed, use that tool for a material user decision instead of placing questions in assistant_message. Do not call tools that were not listed.",
     "Only call tools that were provided in the tool list.",
     "When shell.exec is listed, it is the command execution tool. Do not state that command execution is unavailable; call shell.exec with {\"command\": \"...\"} instead.",
     "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",

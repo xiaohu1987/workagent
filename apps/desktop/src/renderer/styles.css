@@ -4055,6 +4055,17 @@ select:focus {
   font-style: normal;
 }
 
+.model-agent-capability {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 3px;
+  color: rgba(235, 237, 241, 0.56) !important;
+  font-size: 11px;
+}
+
+.model-agent-capability.verified { color: #78d69c !important; }
+.model-agent-capability.unsupported { color: #efad81 !important; }
+
 .composer-model-picker-model-label {
   display: inline-flex;
   min-width: 0;

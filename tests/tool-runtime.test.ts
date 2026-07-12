@@ -5,8 +5,8 @@ import os from "node:os";
 import { buildCodeSearchCommand, ToolRuntime, type ToolRuntimeContext } from "@tool-runtime";
 
 describe("ToolRuntime", () => {
-  it("normalizes a GPA plan clarification into one rich, user-visible decision", async () => {
-    const requestUserInput = vi.fn().mockResolvedValue({ approach: "recommended" });
+  it("normalizes up to three GPA user-input questions into one structured tool result", async () => {
+    const requestUserInput = vi.fn().mockResolvedValue({ approach: "recommended", scope: "minimal" });
     const runtime = new ToolRuntime();
 
     const result = await runtime.execute(
@@ -25,38 +25,86 @@ describe("ToolRuntime", () => {
                 { id: "alternative", label: "Use the alternative approach" }
               ]
             },
-            { id: "ignored", label: "A second question", prompt: "This must not be shown in GPA." }
+            {
+              id: "scope",
+              label: "Scope",
+              prompt: "Which scope should be used?",
+              options: [{ id: "minimal", label: "Minimal", description: "Core workflow only" }]
+            }
           ]
         }
       },
-      { cwd: process.cwd(), requestUserInput, gpaPlanClarification: true } as unknown as ToolRuntimeContext
+      { cwd: process.cwd(), requestUserInput, requestUserInputEnabled: true } as unknown as ToolRuntimeContext
     );
 
     expect(requestUserInput).toHaveBeenCalledWith(expect.objectContaining({
-      questions: [expect.objectContaining({ id: "approach", allowFreeText: true })]
+      questions: [
+        expect.objectContaining({ id: "approach", allowFreeText: true }),
+        expect.objectContaining({ id: "scope", allowFreeText: true })
+      ]
     }));
     expect(result.json).toMatchObject({
-      skipped: false,
-      selections: [{ answer: "Use the recommended approach" }]
+      selections: [
+        { answer: "Use the recommended approach" },
+        { answer: "Minimal" }
+      ]
     });
   });
 
-  it("marks a skipped GPA clarification so execution can retain the current plan", async () => {
+  it("keeps legacy string GPA options compatible with schema validation", async () => {
+    const requestUserInput = vi.fn().mockResolvedValue({ approach: "option_2" });
+    const runtime = new ToolRuntime();
+
+    const result = await runtime.execute(
+      {
+        id: "legacy-gpa-options",
+        name: "request_user_input",
+        arguments: {
+          title: "Choose an approach",
+          questions: [{
+            id: "approach",
+            label: "Approach",
+            prompt: "Which approach should be used?",
+            options: ["Option A", "Option B"]
+          }]
+        }
+      },
+      { cwd: process.cwd(), requestUserInput, requestUserInputEnabled: true } as unknown as ToolRuntimeContext
+    );
+
+    expect(requestUserInput).toHaveBeenCalledWith(expect.objectContaining({
+      questions: [expect.objectContaining({
+        options: [{ id: "option_1", label: "Option A" }, { id: "option_2", label: "Option B" }]
+      })]
+    }));
+    expect(result.json).toMatchObject({ selections: [{ answer: "Option B" }] });
+  });
+
+  it("rejects request_user_input outside GPA mode", async () => {
     const runtime = new ToolRuntime();
     const result = await runtime.execute(
       {
         id: "gpa-skip",
         name: "request_user_input",
-        arguments: { title: "Decision", questions: [{ id: "choice", label: "Choice", prompt: "Choose" }] }
+        arguments: {
+          title: "Decision",
+          questions: [{
+            id: "choice",
+            label: "Choice",
+            prompt: "Choose",
+            options: [{ id: "one", label: "One" }]
+          }]
+        }
       },
       {
         cwd: process.cwd(),
-        gpaPlanClarification: true,
-        requestUserInput: vi.fn().mockResolvedValue({ choice: "__skip__" })
+        requestUserInputEnabled: false,
+        requestUserInput: vi.fn()
       } as unknown as ToolRuntimeContext
     );
 
-    expect(result.json).toMatchObject({ skipped: true });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.content).toContain("only available while GPA mode is active");
   });
 
   it("prefers rg and falls back to grep for Windows workspace searches", () => {
@@ -142,6 +190,29 @@ describe("ToolRuntime", () => {
     expect(blocked).toMatchObject({ ok: false });
   });
 
+  it("accepts object arguments for a discovered MCP tool", async () => {
+    const callMcpTool = vi.fn().mockResolvedValue({ value: 42 });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "mcp-object-args",
+        name: "mcp.call",
+        arguments: { server: "stocks", tool: "market_cap", arguments: { symbol: "SSE:301236" } }
+      },
+      {
+        cwd: process.cwd(),
+        listMcpTools: vi.fn().mockResolvedValue([
+          { server: "stocks", name: "market_cap", description: "Read market cap", inputSchema: { type: "object" } }
+        ]),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        callMcpTool
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(true);
+    expect(callMcpTool).toHaveBeenCalledWith("stocks", "market_cap", { symbol: "SSE:301236" });
+  });
+
   it("maps read to the project directory reader instead of knowledge.read", async () => {
     const listFiles = vi.fn().mockResolvedValue(["hello.txt"]);
     const runtime = new ToolRuntime();
@@ -184,6 +255,43 @@ describe("ToolRuntime", () => {
     expect(requestApproval).toHaveBeenCalledWith(
       expect.objectContaining({ title: "执行命令", payload: { command: "echo tool-alias" } })
     );
+  });
+
+  it("rejects invalid tool arguments before requesting approval or executing", async () => {
+    const requestApproval = vi.fn();
+    const runTerminalCommand = vi.fn();
+    const runtime = new ToolRuntime();
+
+    const result = await runtime.execute(
+      { id: "invalid-command", name: "shell.exec", arguments: { command: 42 } },
+      { cwd: process.cwd(), requestApproval, runTerminalCommand } as unknown as ToolRuntimeContext
+    );
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.content).toContain("arguments.command must be a string");
+    expect(result.content).toContain("Correct the arguments");
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(runTerminalCommand).not.toHaveBeenCalled();
+  });
+
+  it("accepts numeric browser scroll deltas and rejects string values", async () => {
+    const scrollBrowserPage = vi.fn().mockResolvedValue({ title: "Page", url: "https://example.com" });
+    const runtime = new ToolRuntime();
+    const context = { cwd: process.cwd(), scrollBrowserPage } as unknown as ToolRuntimeContext;
+
+    const valid = await runtime.execute(
+      { id: "scroll-valid", name: "browser.scroll", arguments: { tabId: "tab-1", deltaY: 480 } },
+      context
+    );
+    const invalid = await runtime.execute(
+      { id: "scroll-invalid", name: "browser.scroll", arguments: { tabId: "tab-1", deltaY: "480" } },
+      context
+    );
+
+    expect(valid.ok).toBe(true);
+    expect(scrollBrowserPage).toHaveBeenCalledWith("tab-1", 480);
+    expect(invalid).toMatchObject({ ok: false });
+    expect(invalid.content).toContain("arguments.deltaY must be a number");
   });
 
   it("makes an empty directory an explicit successful result", async () => {

@@ -61,7 +61,19 @@ declare global {
       testProviderModel: (payload: {
         provider: ProviderDefinition;
         model: ModelProfile;
-      }) => Promise<{ latencyMs: number; outputTokens: number; tokensPerSecond: number }>;
+      }) => Promise<{
+        latencyMs: number;
+        outputTokens: number;
+        tokensPerSecond: number;
+        agentCapability: "verified" | "unsupported";
+        agentCapabilityReason?: string;
+      }>;
+      saveModelAgentCapability: (payload: {
+        providerId: string;
+        modelId: string;
+        agentCapability: "verified" | "unsupported";
+        agentCapabilityReason?: string;
+      }) => Promise<ModelProfile>;
       importKnowledge: (payload: {
         displayName: string;
         scope: "global" | "project" | "imported";

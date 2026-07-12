@@ -374,6 +374,10 @@ export interface ModelProfile {
   supportsJsonOutput: boolean;
   supportsMultimodalInput: boolean;
   supportsImageGeneration?: boolean;
+  /** Result of the last real function-calling protocol check for this model. */
+  agentCapability?: "unknown" | "verified" | "unsupported";
+  agentCapabilityCheckedAt?: string;
+  agentCapabilityReason?: string;
   supportsReasoningSummary: boolean;
   defaultTemperature?: number;
   defaultMaxOutputTokens?: number;
@@ -472,6 +476,10 @@ export interface ProviderTurnInput {
     role: MessageRole;
     content: string;
     attachments?: MessageAttachment[];
+    /** Transient metadata used to correlate native tool calls and results. */
+    toolCalls?: RuntimeToolCall[];
+    toolCallId?: string;
+    toolResultOk?: boolean;
   }>;
   availableTools: ToolSpecDefinition[];
   model: ModelProfile;
@@ -499,6 +507,7 @@ export interface RuntimeEvent {
     | "knowledge.imported"
     | "browser.updated"
     | "gpa.updated"
+    | "model.capability.updated"
     | "terminal.output";
   threadId?: string;
   payload: Record<string, unknown>;

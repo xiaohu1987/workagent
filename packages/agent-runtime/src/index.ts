@@ -14,6 +14,7 @@ import type {
   RuntimeEvent,
   RuntimePromptBundle,
   RuntimeThreadSnapshot,
+  RuntimeToolCall,
   SkillMetadata,
   ThreadRecord,
   ToolCallRecord,
@@ -28,7 +29,6 @@ import { McpManager } from "@mcp-runtime";
 import { ToolRuntime } from "@tool-runtime";
 import {
   buildGpaSystemDirective,
-  buildGpaTextClarificationFallback,
   DEFAULT_GPA_STATE,
   detectGpaConfirmation,
   gpaStageAllowsTools,
@@ -38,11 +38,13 @@ import {
 } from "./gpa";
 import type { GpaStage, GpaState } from "@shared-types";
 
-export { buildGpaTextClarificationFallback, parseGpaState } from "./gpa";
+export { parseGpaState } from "./gpa";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
 export const MODEL_DECISION_TIMEOUT_MS = 90_000;
 export const MAX_MODEL_TIMEOUT_RETRIES = 5;
+export const MAX_AGENT_PROTOCOL_FAILURES = 2;
+export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 20_000;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.8;
 export const CONTEXT_COMPACTION_TARGET = 0.6;
 
@@ -145,6 +147,7 @@ interface RuntimeServices {
   listMcpTools(server?: string): Promise<any[]>;
   readMcpResource(server: string, uri: string): Promise<any>;
   callMcpTool(server: string, tool: string, argumentsJson: Record<string, unknown>): Promise<any>;
+  markModelAgentIncompatible(threadId: string, modelId: string, reason: string): Promise<void>;
   emit(event: RuntimeEvent): Promise<void>;
   log(kind: string, threadId: string, payload: Record<string, unknown>): Promise<void>;
 }
@@ -321,8 +324,8 @@ class ThreadSessionRuntime {
     });
   }
 
-  async #clearGpaAfterExecution(): Promise<void> {
-    if (this.#gpa.stage !== "act") {
+  async #clearGpaAfterExecution(force = false): Promise<void> {
+    if (this.#gpa.stage === "off" || (!force && this.#gpa.stage !== "act")) {
       return;
     }
 
@@ -446,8 +449,21 @@ class ThreadSessionRuntime {
       ? await this.services.buildKnowledgeContext(this.threadId)
       : null;
     const workflowPackContext = await this.services.buildWorkflowPackContext(this.threadId);
-    const { tools, mcpTools } = await this.buildVisibleTools(accessibleMcpServerIds, knowledgeEnabled);
-    const availableToolsPrompt = formatAvailableTools(tools);
+    // Older configurations predate agentCapability. Preserve their existing
+    // tool-enabled behavior and only block a model after an explicit failed
+    // verification or a runtime incompatibility downgrade.
+    const agentToolsEnabled = isAgentToolEnabled(model);
+    const { tools, mcpTools } = await this.buildVisibleTools(
+      accessibleMcpServerIds,
+      knowledgeEnabled,
+      agentToolsEnabled
+    );
+    // Native provider APIs already receive full function schemas. Repeating them
+    // in the system prompt wastes context and can make weaker models emit text
+    // tool payloads instead of using the provider tool-call channel.
+    const availableToolsPrompt = formatAvailableTools(tools, {
+      includeSchemas: !agentToolsEnabled
+    });
     const turn = await this.services.persistence.startTurn({
       threadId: this.threadId,
       kind: "regular",
@@ -516,6 +532,36 @@ class ThreadSessionRuntime {
       let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
+      let agentProtocolFailureAttempts = 0;
+      const requiresAgentDecisionProtocol = () => this.#gpa.stage === "off" || this.#gpa.stage === "act";
+
+      if (this.#gpa.stage !== "off" && !agentToolsEnabled) {
+        throw new AgentModelCompatibilityError(
+          model.displayName,
+          0,
+          model.agentCapability === "unsupported"
+            ? model.agentCapabilityReason ?? "This model is marked incompatible with Agent tool calling."
+            : "Tool calling is disabled for this model. Enable it or select a different model for GPA."
+        );
+      }
+
+      const registerAgentProtocolFailure = async (reason: string) => {
+        agentProtocolFailureAttempts += 1;
+        const incompatible = agentProtocolFailureAttempts >= MAX_AGENT_PROTOCOL_FAILURES;
+        await this.services.log("agent.model_protocol_failure", this.threadId, {
+          turnRunId: turn.id,
+          modelId: model.id,
+          modelName: model.displayName,
+          attempt: agentProtocolFailureAttempts,
+          maxAttempts: MAX_AGENT_PROTOCOL_FAILURES,
+          reason,
+          incompatible
+        });
+        if (incompatible) {
+          await this.services.markModelAgentIncompatible(this.threadId, model.id, reason);
+          throw new AgentModelCompatibilityError(model.displayName, agentProtocolFailureAttempts, reason);
+        }
+      };
 
       const registerTaskFailure = async (taskKey: string, lastError: string, logKind?: string) => {
         const attempts = (taskFailureCounts.get(taskKey) ?? 0) + 1;
@@ -535,6 +581,7 @@ class ThreadSessionRuntime {
       };
 
       const recoverActExecution = async (reason: string) => {
+        await registerAgentProtocolFailure(reason);
         executionRecoveryAttempts += 1;
         const bootstrapWorkspace =
           !hasExecutedToolCall &&
@@ -588,6 +635,9 @@ class ThreadSessionRuntime {
             messagesAfter: transcript.length
           });
         }
+        const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
+          ? RECOVERY_MODEL_DECISION_TIMEOUT_MS
+          : MODEL_DECISION_TIMEOUT_MS;
         let decision: ProviderTurnDecision;
         try {
           decision = await waitForAbortOrTimeout(
@@ -612,7 +662,7 @@ class ThreadSessionRuntime {
               abortSignal: modelTurnAbortController.signal
             }),
             abortController.signal,
-            MODEL_DECISION_TIMEOUT_MS,
+            decisionTimeoutMs,
             () => modelTurnAbortController.abort()
           );
         } catch (error) {
@@ -621,10 +671,15 @@ class ThreadSessionRuntime {
           }
 
           modelTimeoutAttempts += 1;
+          if (requiresAgentDecisionProtocol()) {
+            await registerAgentProtocolFailure(
+              "The model did not return an Agent decision before the response timeout."
+            );
+          }
           const retrying = modelTimeoutAttempts <= MAX_MODEL_TIMEOUT_RETRIES;
           await this.services.log("provider.turn_timeout", this.threadId, {
             turnRunId: turn.id,
-            timeoutMs: MODEL_DECISION_TIMEOUT_MS,
+            timeoutMs: decisionTimeoutMs,
             attempt: modelTimeoutAttempts,
             maxRetries: MAX_MODEL_TIMEOUT_RETRIES,
             retrying
@@ -658,56 +713,35 @@ class ThreadSessionRuntime {
           throw new Error("Turn interrupted.");
         }
 
-        // GPA cannot advance past a material unresolved choice. Some compatible
-        // models put that choice in prose rather than the JSON clarification
-        // field, so preserve the user decision point with a narrow fallback.
-        const clarification = decision.clarification
-          ?? buildGpaTextClarificationFallback(this.#gpa.stage, decision.assistantMessage);
-        if (clarification) {
-          const answers = await this.services.requestUserInput(this.threadId, turn.id, {
-            title: clarification.title,
-            kind: "gpa_plan_clarification",
-            allowSkip: true,
-            questions: [{
-              id: "gpa_clarification",
-              label: clarification.title,
-              prompt: clarification.question,
-              options: clarification.options,
-              allowFreeText: clarification.allowFreeText
-            }]
-          });
-          const skipped = answers.gpa_clarification === "__skip__";
-          transcript.push({
-            role: "user",
-            content: skipped
-              ? "The user skipped the GPA clarification. Continue the existing plan and state the assumption in the final summary."
-              : `GPA clarification answer: ${JSON.stringify(answers)}`
-          });
-          if (!skipped && this.#gpa.stage === "act") {
-            await this.#commitGpa({
-              ...this.#gpa,
-              stage: "plan",
-              awaitingConfirmation: null,
-              updatedAt: new Date().toISOString()
-            });
-            transcript.push({ role: "user", content: buildGpaPlanRevisionInstruction() });
-          } else {
-            transcript.push({
-              role: "user",
-              content: skipped
-                ? "The user skipped this GPA clarification. Continue under documented reasonable assumptions."
-                : "Use the user's clarification above. Continue the current GPA analysis stage and do not leave further material decisions only in prose."
-            });
-          }
-          continue;
+        if (decision.clarification && this.#gpa.stage !== "off") {
+          const clarification = decision.clarification;
+          // Compatibility bridge for adapters that still return the legacy
+          // structured field. Plain assistant text is never inferred as input.
+          decision.clarification = undefined;
+          decision.toolCalls = [{
+            id: randomUUID(),
+            name: "request_user_input",
+            arguments: {
+              title: clarification.title,
+              questions: [{
+                id: "gpa_clarification",
+                label: clarification.title,
+                prompt: clarification.question,
+                options: clarification.options,
+                allowFreeText: clarification.allowFreeText
+              }]
+            }
+          }];
+          decision.endTurn = false;
+          decision.goalCompleted = false;
         }
 
-        if (!gpaStageAllowsTools(this.#gpa) && decision.toolCalls.length > 0) {
+        if (!gpaStageAllowsTools(this.#gpa) && decision.toolCalls.some((call) => call.name !== "request_user_input")) {
           const blockedNote = `⚠️ GPA 约束：当前处于【${gpaStageLabel(
             this.#gpa.stage
           )}】阶段，系统已拦截本次全部工具调用。请仅用文字输出本阶段要求的内容，并在结尾给出 ⏳ 等待确认。`;
           transcript.push({ role: "user", content: blockedNote });
-          decision.toolCalls = [];
+          decision.toolCalls = decision.toolCalls.filter((call) => call.name === "request_user_input");
         }
 
         // GOAL and PLAN are single-response analysis stages. Some providers keep
@@ -813,11 +847,25 @@ class ThreadSessionRuntime {
           continue;
         }
 
+        const originalToolCallCount = decision.toolCalls.length;
+        decision.toolCalls = prioritizeUserInputToolCall(decision.toolCalls);
+        if (decision.toolCalls.length !== originalToolCallCount) {
+          await this.services.log("agent.user_input_batch_trimmed", this.threadId, {
+            turnRunId: turn.id,
+            originalToolCallCount,
+            retainedToolCallId: decision.toolCalls[0]?.id
+          });
+        }
+
         if (decision.toolCalls.length > 0) {
           prematureCompletionAttempts = 0;
           if (decision.toolCalls[0]?.name !== "fs.read_directory" || executionRecoveryAttempts < 2) {
             executionRecoveryAttempts = 0;
+            agentProtocolFailureAttempts = 0;
           }
+          // Native provider APIs require the original call envelope before its result.
+          // This remains transient and is not added to the visible chat history.
+          transcript.push({ role: "assistant", content: "", toolCalls: decision.toolCalls });
         }
 
         const assistantMessage = decision.assistantMessage?.trim();
@@ -1006,15 +1054,15 @@ class ThreadSessionRuntime {
                 this.services.runTerminalCommand(this.threadId, workspaceCwd, command),
               requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
               requestUserInput: (input) => {
-                const isGpaPlanClarification = this.#gpa.stage === "act";
+                const isGpaClarification = this.#gpa.stage !== "off";
                 return this.services.requestUserInput(this.threadId, turn.id, {
                   title: input.title,
-                  kind: isGpaPlanClarification ? "gpa_plan_clarification" : "generic",
-                  allowSkip: isGpaPlanClarification,
-                  questions: isGpaPlanClarification ? input.questions.slice(0, 1) : input.questions
+                  kind: isGpaClarification ? "gpa_plan_clarification" : "generic",
+                  allowSkip: false,
+                  questions: input.questions.slice(0, 3)
                 });
               },
-              gpaPlanClarification: this.#gpa.stage === "act",
+              requestUserInputEnabled: this.#gpa.stage !== "off",
               spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
               webSearch: (query) => this.services.webSearch(this.threadId, query),
               openPage: (url) => this.services.openPage(this.threadId, url),
@@ -1074,7 +1122,10 @@ class ThreadSessionRuntime {
                 return this.services.callMcpTool(server, tool, argumentsJson);
               },
               deferredToolSpecs: mcpTools,
-              hiddenToolNames: knowledgeEnabled ? undefined : ["knowledge.search", "knowledge.read"],
+              hiddenToolNames: [
+                ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read"]),
+                ...(this.#gpa.stage === "off" ? ["request_user_input"] : [])
+              ],
               loadSkill: (skillId) =>
                 this.services.skills.loadInstructions(skillId, availableSkillIds)
               }),
@@ -1133,21 +1184,13 @@ class ThreadSessionRuntime {
             turn.id,
             { toolCallId: toolRecord.id }
           );
-          transcript.push({ role: "tool", content: toolMessage.content });
+          transcript.push({
+            role: "tool",
+            content: toolMessage.content,
+            toolCallId: toolCall.id,
+            toolResultOk: result.ok
+          });
           if (toolCall.name === "request_user_input" && result.ok) {
-            const skipped = result.json && typeof result.json === "object" && (result.json as { skipped?: unknown }).skipped === true;
-            if (this.#gpa.stage === "act" && !skipped) {
-              await this.#commitGpa({
-                ...this.#gpa,
-                stage: "plan",
-                awaitingConfirmation: null,
-                updatedAt: new Date().toISOString()
-              });
-              transcript.push({
-                role: "user",
-                content: buildGpaPlanRevisionInstruction()
-              });
-            }
             reevaluateAfterUserInput = true;
             break;
           }
@@ -1259,6 +1302,7 @@ class ThreadSessionRuntime {
           status: "idle",
           updatedAt: completedAt
         });
+        await this.#clearGpaAfterExecution(true);
         if (interruptedVisibleContent) {
           await this.services.emit({
             type: "assistant.completed",
@@ -1290,7 +1334,7 @@ class ThreadSessionRuntime {
         status: "failed",
         updatedAt: completedAt
       });
-      await this.#clearGpaAfterExecution();
+      await this.#clearGpaAfterExecution(true);
       await this.services.emit({
         type: "thread.updated",
         threadId: this.threadId,
@@ -1306,14 +1350,24 @@ class ThreadSessionRuntime {
     }
   }
 
-  private async buildVisibleTools(accessibleMcpServerIds: string[], knowledgeEnabled: boolean) {
+  private async buildVisibleTools(
+    accessibleMcpServerIds: string[],
+    knowledgeEnabled: boolean,
+    agentToolsEnabled: boolean
+  ) {
     await this.services.mcp.refresh(accessibleMcpServerIds);
     const mcpTools = await this.services.mcp.listToolSpecs(accessibleMcpServerIds);
     const { direct } = this.services.toolRuntime.listToolSpecs(mcpTools);
+    const gpaEnabled = this.#gpa.stage !== "off";
+    const withKnowledge = knowledgeEnabled
+      ? direct
+      : direct.filter((tool) => tool.name !== "knowledge.search" && tool.name !== "knowledge.read");
     return {
-      tools: knowledgeEnabled
-        ? direct
-        : direct.filter((tool) => tool.name !== "knowledge.search" && tool.name !== "knowledge.read"),
+      tools: !agentToolsEnabled
+        ? []
+        : gpaEnabled
+        ? withKnowledge
+        : withKnowledge.filter((tool) => tool.name !== "request_user_input"),
       mcpTools
     };
   }
@@ -1490,6 +1544,16 @@ export function buildRepeatedTaskRecoveryMessage(input: {
 }
 
 export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
+  if (error instanceof AgentModelCompatibilityError) {
+    return [
+      "任务已停止：当前模型无法稳定返回 Agent 所需的可执行决策。",
+      `模型：${error.modelName}`,
+      `已连续出现 ${error.failures} 次协议失败：${error.lastReason}`,
+      "请在模型选择中切换到支持工具调用或结构化 JSON 输出的模型后，再重新执行 GPA/Agent 任务。普通聊天仍可继续使用当前模型。",
+      "为避免误执行，系统没有根据普通文本猜测命令或文件修改；已完成的工具结果和项目文件会被保留。"
+    ].join("\n");
+  }
+
   if (error instanceof ModelDecisionTimeoutError) {
     return [
       "任务暂时停止：模型在限定时间内没有返回可执行决策。",
@@ -1576,6 +1640,17 @@ function isPatchPayload(content: string): boolean {
   return /^\s*(?:```(?:diff|patch)?\s*)?\*\*\* Begin Patch\b/m.test(content);
 }
 
+export class AgentModelCompatibilityError extends Error {
+  public constructor(
+    public readonly modelName: string,
+    public readonly failures: number,
+    public readonly lastReason: string
+  ) {
+    super(`Model ${modelName} is incompatible with Agent decision execution: ${lastReason}`);
+    this.name = "AgentModelCompatibilityError";
+  }
+}
+
 function isDeferredExecutionPayload(content: string): boolean {
   const trimmed = content.trim();
   if (!trimmed) {
@@ -1619,14 +1694,36 @@ export function getAddedPatchFiles(argumentsJson: Record<string, unknown>): stri
     .filter(Boolean);
 }
 
-export function formatAvailableTools(tools: ToolSpecDefinition[]): string {
+/**
+ * A user-input request pauses the turn. Native provider APIs require every
+ * function call in a batch to receive a result, so do not leave sibling calls
+ * outstanding while the runtime waits for the user.
+ */
+export function prioritizeUserInputToolCall(calls: RuntimeToolCall[]): RuntimeToolCall[] {
+  const userInputCall = calls.find((call) => call.name === "request_user_input");
+  return userInputCall ? [userInputCall] : calls;
+}
+
+export function isAgentToolEnabled(model: ModelProfile): boolean {
+  return model.supportsToolCalling && model.agentCapability !== "unsupported";
+}
+
+export function formatAvailableTools(
+  tools: ToolSpecDefinition[],
+  options: { includeSchemas?: boolean } = {}
+): string {
+  const includeSchemas = options.includeSchemas ?? true;
   const definitions = tools.map((tool) => {
-    return `- ${tool.name}: ${tool.description} Input schema: ${JSON.stringify(tool.inputSchema)}.`;
+    return includeSchemas
+      ? `- ${tool.name}: ${tool.description} Input schema: ${JSON.stringify(tool.inputSchema)}.`
+      : `- ${tool.name}: ${tool.description}`;
   });
 
   return [
     "## Available Executable Tools",
-    "The following tools are available in this turn. They are real executable tools, not examples. Never claim that command execution is unavailable while shell.exec appears below.",
+    tools.length > 0
+      ? "The following tools are available in this turn. They are real executable tools, not examples. Never claim that command execution is unavailable while shell.exec appears below."
+      : "No executable tools are available in this turn.",
     "For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete.",
     ...definitions
   ].join("\n");
@@ -1806,7 +1903,10 @@ export function compactTranscriptForContext(
     256,
     Math.floor(safeContextWindow * CONTEXT_COMPACTION_TARGET) - systemTokens
   );
-  const recentMessages = transcript.slice(-8);
+  // A native function-call assistant message and every following tool result
+  // form one protocol unit. Do not leave tool results in the context after
+  // truncating their originating call envelope.
+  const recentMessages = selectProtocolSafeRecentMessages(transcript, 8);
   const earlierMessages = transcript.slice(0, Math.max(0, transcript.length - recentMessages.length));
   const summaryBudget = Math.max(120, Math.floor(targetTranscriptTokens * 0.3));
   const recentBudget = Math.max(
@@ -1860,6 +1960,29 @@ function estimateRuntimeTranscriptTokens(transcript: ProviderTurnInput["transcri
 function estimateRuntimeTokens(content: string): number {
   const normalized = content.trim();
   return normalized ? Math.ceil(Array.from(normalized).length / 2.8) : 0;
+}
+
+function selectProtocolSafeRecentMessages(
+  transcript: ProviderTurnInput["transcript"],
+  minimumRecentMessages: number
+): ProviderTurnInput["transcript"] {
+  const startIndex = Math.max(0, transcript.length - minimumRecentMessages);
+  const firstRecent = transcript[startIndex];
+  if (startIndex === 0 || firstRecent?.role !== "tool" || !firstRecent.toolCallId) {
+    return transcript.slice(startIndex);
+  }
+
+  for (let index = startIndex - 1; index >= 0; index -= 1) {
+    const candidate = transcript[index];
+    if (
+      candidate?.role === "assistant" &&
+      candidate.toolCalls?.some((call) => call.id === firstRecent.toolCallId)
+    ) {
+      return transcript.slice(index);
+    }
+  }
+
+  return transcript.slice(startIndex);
 }
 
 function normalizeAssistantMessageForDeduplication(content: string): string {

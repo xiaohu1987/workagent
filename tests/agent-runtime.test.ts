@@ -5,12 +5,15 @@ import {
   buildStrategySwitchInstruction,
   buildRepeatedTaskRecoveryMessage,
   buildRuntimeFailureRecoveryMessage,
+  AgentModelCompatibilityError,
   compactTranscriptForContext,
   CONTEXT_COMPACTION_THRESHOLD,
-  buildGpaTextClarificationFallback,
   shouldFinishGpaAnalysisTurn,
   getAddedPatchFiles,
   getToolCallTaskKey,
+  formatAvailableTools,
+  isAgentToolEnabled,
+  prioritizeUserInputToolCall,
   MAX_REPEATED_TASK_FAILURES,
   parseGpaState
 } from "@agent-runtime";
@@ -66,6 +69,42 @@ describe("ACT execution recovery", () => {
   });
 });
 
+describe("Agent model compatibility failures", () => {
+  it("tells the user to switch models instead of leaving an Agent task retrying", () => {
+    const message = buildRuntimeFailureRecoveryMessage(
+      new AgentModelCompatibilityError("Unreliable Model", 2, "invalid JSON decision")
+    );
+
+    expect(message).toContain("Unreliable Model");
+    expect(message).toContain("切换");
+    expect(message).toContain("结构化 JSON");
+  });
+});
+
+describe("Agent capability compatibility", () => {
+  const baseModel = {
+    id: "legacy-model",
+    providerId: "provider",
+    displayName: "Legacy model",
+    contextWindow: 8_192,
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    supportsParallelToolCalls: false,
+    supportsJsonOutput: true,
+    supportsMultimodalInput: false,
+    supportsReasoningSummary: false
+  };
+
+  it("keeps tool calling enabled for an unverified legacy model", () => {
+    expect(isAgentToolEnabled(baseModel)).toBe(true);
+  });
+
+  it("disables tools only after an explicit incompatibility result", () => {
+    expect(isAgentToolEnabled({ ...baseModel, agentCapability: "unsupported" })).toBe(false);
+    expect(isAgentToolEnabled({ ...baseModel, supportsToolCalling: false })).toBe(false);
+  });
+});
+
 describe("context compaction", () => {
   it("compresses the transcript before it reaches the model context limit", () => {
     const transcript = Array.from({ length: 20 }, (_, index) => ({
@@ -88,6 +127,86 @@ describe("context compaction", () => {
     expect(result.compacted).toBe(false);
     expect(result.transcript).toBe(transcript);
   });
+
+  it("keeps recent native tool-call metadata during compaction", () => {
+    const transcript = [
+      ...Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" as const : "assistant" as const,
+        content: `older message ${index} ${"x".repeat(600)}`
+      })),
+      {
+        role: "assistant" as const,
+        content: "",
+        toolCalls: [{ id: "native-call", name: "fs.read_directory", arguments: { path: "." } }]
+      },
+      {
+        role: "tool" as const,
+        content: `fs.read_directory\n${"result ".repeat(180)}`,
+        toolCallId: "native-call"
+      }
+    ];
+    const result = compactTranscriptForContext(transcript, 2_000, "system instructions");
+
+    expect(result.compacted).toBe(true);
+    expect(result.transcript).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolCalls: [expect.objectContaining({ id: "native-call" })] }),
+      expect.objectContaining({ role: "tool", toolCallId: "native-call" })
+    ]));
+  });
+
+  it("keeps a complete large native tool batch during compaction", () => {
+    const calls = Array.from({ length: 10 }, (_, index) => ({
+      id: `native-call-${index}`,
+      name: "fs.read_file",
+      arguments: { path: `src/file-${index}.ts` }
+    }));
+    const transcript = [
+      ...Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" as const : "assistant" as const,
+        content: `older message ${index} ${"x".repeat(600)}`
+      })),
+      { role: "assistant" as const, content: "", toolCalls: calls },
+      ...calls.map((call) => ({
+        role: "tool" as const,
+        toolCallId: call.id,
+        content: `fs.read_file\n${call.arguments.path}\n${"result ".repeat(80)}`
+      }))
+    ];
+    const result = compactTranscriptForContext(transcript, 2_000, "system instructions");
+    const retainedEnvelope = result.transcript.find((message) => message.toolCalls?.[0]?.id === "native-call-0");
+    const retainedResultIds = result.transcript
+      .filter((message) => message.role === "tool")
+      .map((message) => message.toolCallId);
+
+    expect(result.compacted).toBe(true);
+    expect(retainedEnvelope?.toolCalls).toHaveLength(10);
+    expect(retainedResultIds).toEqual(calls.map((call) => call.id));
+  });
+});
+
+describe("native tool prompt budget", () => {
+  const tools = [{
+    name: "fs.read_directory",
+    description: "List project files.",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string", description: "Directory path." } },
+      required: ["path"]
+    },
+    riskLevel: "low" as const
+  }];
+
+  it("does not duplicate function schemas in a native provider prompt", () => {
+    const prompt = formatAvailableTools(tools, { includeSchemas: false });
+
+    expect(prompt).toContain("fs.read_directory");
+    expect(prompt).not.toContain("Input schema");
+    expect(prompt).not.toContain("Directory path.");
+  });
+
+  it("keeps schemas available for the text-protocol fallback", () => {
+    expect(formatAvailableTools(tools)).toContain("Input schema");
+  });
 });
 
 describe("GPA analysis turn completion", () => {
@@ -109,22 +228,24 @@ describe("GPA analysis turn completion", () => {
   });
 });
 
-describe("GPA prose clarification fallback", () => {
-  it("turns an explicitly unresolved technical choice into a visible clarification", () => {
-    const clarification = buildGpaTextClarificationFallback(
-      "goal",
-      "\u6280\u672f\u6808\u672a\u6307\u5b9a\uff08\u9700\u8981\u4f60\u786e\u8ba4\uff09\uff0c\u8fdb\u5165\u8ba1\u5212\u524d\u9700\u8981\u786e\u8ba4\u3002"
-    );
+describe("GPA user-input tool batches", () => {
+  it("keeps only the user-input call while a turn is waiting", () => {
+    const calls = [
+      { id: "read", name: "fs.read_directory", arguments: { path: "." } },
+      { id: "input", name: "request_user_input", arguments: { title: "Choose" } },
+      { id: "patch", name: "apply_patch", arguments: { patch: "*** Begin Patch\n*** End Patch" } }
+    ];
 
-    expect(clarification?.title).toBe("\u6280\u672f\u65b9\u6848\u5f85\u786e\u8ba4");
-    expect(clarification?.options).toHaveLength(3);
-    expect(clarification?.allowFreeText).toBe(true);
+    expect(prioritizeUserInputToolCall(calls)).toEqual([calls[1]]);
   });
 
-  it("does not mistake a normal plan confirmation sentence for a clarification", () => {
-    expect(
-      buildGpaTextClarificationFallback("plan", "\u8bf7\u786e\u8ba4\u8ba1\u5212\uff0c\u6216\u63d0\u51fa\u4fee\u6539\u610f\u89c1\u3002")
-    ).toBeUndefined();
+  it("does not change a regular native tool batch", () => {
+    const calls = [
+      { id: "read", name: "fs.read_directory", arguments: { path: "." } },
+      { id: "search", name: "code.search", arguments: { pattern: "TODO" } }
+    ];
+
+    expect(prioritizeUserInputToolCall(calls)).toBe(calls);
   });
 });
 

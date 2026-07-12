@@ -89,10 +89,10 @@ export function buildGpaSystemDirective(state: GpaState): string {
   };
 
   const analysisClarificationRule = state.stage === "goal" || state.stage === "plan"
-    ? "\nFor GPA analysis, never leave a material unresolved choice only in assistant_message. If technology, scope, priority, irreversible impact, or acceptance criteria is not specified or needs confirmation, return the structured clarification field before asking the user to confirm the goal or plan."
+    ? "\nFor GPA analysis, the only permitted tool is request_user_input. If technology, scope, priority, irreversible impact, or acceptance criteria cannot be safely resolved from the available context, call request_user_input once with one to three short questions and options. Do not put questions in assistant_message and do not use a clarification field. After its tool result, incorporate every answer and continue the same analysis stage."
     : "";
   const actClarificationRule = state.stage === "act"
-    ? "\n7) Before any write, command, or external side effect, if a decision cannot be verified with the available context or tools and would affect the approach, scope, priority, irreversible actions, or acceptance criteria, return the structured clarification field. Ask exactly one mutually exclusive decision with 2-4 options, a recommended option, and concise descriptions. Set tool_calls to [] and end_turn to false. Never ask for facts that tools can determine. After an answer, revise the remaining PLAN before resuming ACT; after a skip, continue under the current plan and state the assumption in the final summary."
+    ? "\n7) Before any write, command, or external side effect, if a material decision cannot be verified with the available context or tools, call request_user_input with one to three concise questions and options. Never ask for facts that tools can determine. After its tool result, continue from the verified context; revise the plan only when the answers materially change it."
     : "";
   return `${header}\n\n${rules[state.stage]}${analysisClarificationRule}${actClarificationRule}`;
 }

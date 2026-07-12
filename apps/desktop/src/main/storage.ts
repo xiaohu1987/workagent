@@ -132,6 +132,7 @@ export function defaultConfig(): AppConfig {
       supportsJsonOutput: true,
       supportsMultimodalInput: false,
       supportsImageGeneration: false,
+      agentCapability: "verified",
       supportsReasoningSummary: true,
       defaultTemperature: 0.2,
       defaultMaxOutputTokens: 2_048

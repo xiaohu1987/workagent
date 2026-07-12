@@ -274,6 +274,7 @@ function registerIpc(): void {
   );
   ipcMain.handle("models:fetch", (_event, payload) => backend.fetchProviderModels(payload));
   ipcMain.handle("models:test", (_event, payload) => backend.testProviderModel(payload));
+  ipcMain.handle("models:save-capability", (_event, payload) => backend.saveModelAgentCapability(payload));
 }
 
 async function ensureRendererServerUrl(): Promise<string> {

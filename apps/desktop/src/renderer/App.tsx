@@ -205,6 +205,8 @@ type ModelTestResult = {
   latencyMs: number;
   outputTokens: number;
   tokensPerSecond: number;
+  agentCapability: "verified" | "unsupported";
+  agentCapabilityReason?: string;
 };
 
 type TimelineEntry =
@@ -774,6 +776,10 @@ export function App() {
           completedAt?: string;
           message?: { role?: MessageRecord["role"] };
           thread?: ThreadRecord;
+          modelId?: string;
+          agentCapability?: ModelProfile["agentCapability"];
+          agentCapabilityCheckedAt?: string;
+          agentCapabilityReason?: string;
           data?: string;
           sessionId?: string;
         };
@@ -790,7 +796,24 @@ export function App() {
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
         setGpaState(typed.payload.gpa);
+        setGpaComposerSelected(typed.payload.gpa.stage !== "off");
         return;
+      }
+      if (typed.type === "model.capability.updated" && typed.payload?.modelId) {
+        const modelId = typed.payload.modelId;
+        const patch = {
+          agentCapability: typed.payload.agentCapability,
+          agentCapabilityCheckedAt: typed.payload.agentCapabilityCheckedAt,
+          agentCapabilityReason: typed.payload.agentCapabilityReason
+        };
+        const updateCapability = (current: AppConfig | null) => current
+          ? {
+              ...current,
+              models: current.models.map((model) => model.id === modelId ? { ...model, ...patch } : model)
+            }
+          : current;
+        setConfig(updateCapability);
+        setConfigDraft(updateCapability);
       }
       if (typed.type === "browser.updated" && typed.threadId === currentSelectedThreadId) {
         setRightWorkspaceTab("browser");
@@ -1216,6 +1239,9 @@ export function App() {
     [composerModelId, composerModels]
   );
   const composerSupportsMultimodalInput = selectedComposerModel?.supportsMultimodalInput ?? false;
+  const composerSupportsAgentTools =
+    selectedComposerModel?.supportsToolCalling === true &&
+    selectedComposerModel.agentCapability !== "unsupported";
   const composerProviderOptions = useMemo<ComposerSelectOption[]>(
     () =>
       composerProviders.map((provider) => ({
@@ -1568,6 +1594,7 @@ export function App() {
       });
       if (next.gpa) {
         setGpaState(next.gpa);
+        setGpaComposerSelected(next.gpa.stage !== "off");
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1869,7 +1896,6 @@ export function App() {
     if (!forcedContent) {
       setInput("");
       setComposerAttachments([]);
-      setGpaComposerSelected(false);
     }
     clearAutoScrollReleaseTimer();
     shouldAutoScrollRef.current = true;
@@ -2620,10 +2646,45 @@ export function App() {
     try {
       const result = await window.codexh.testProviderModel({ provider: testProvider, model });
       setModelTestResults((current) => ({ ...current, [key]: result }));
-      showNotice(`${model.displayName?.trim() || model.id} 模型测试成功。`, {
-        message: `延迟 ${formatLatency(result.latencyMs)}，输出 ${result.outputTokens} Tokens，吞吐量 ${formatTokensPerSecond(result.tokensPerSecond)}。`,
-        tone: "success"
-      });
+      const capabilityPatch = {
+        agentCapability: result.agentCapability,
+        agentCapabilityCheckedAt: new Date().toISOString(),
+        agentCapabilityReason: result.agentCapabilityReason
+      };
+      updateModelDraft(model.id, capabilityPatch);
+      try {
+        const savedModel = await window.codexh.saveModelAgentCapability({
+          providerId: provider.id,
+          modelId: model.id,
+          agentCapability: result.agentCapability,
+          agentCapabilityReason: result.agentCapabilityReason
+        });
+        setConfig((current) => current
+          ? {
+              ...current,
+              models: current.models.map((entry) =>
+                entry.id === savedModel.id && entry.providerId === savedModel.providerId ? savedModel : entry
+              )
+            }
+          : current
+        );
+      } catch (error) {
+        showNotice("模型已测试，但验证状态未保存。", {
+          message: error instanceof Error ? error.message : "请保存模型配置后再测试。",
+          tone: "warning"
+        });
+      }
+      showNotice(
+        result.agentCapability === "verified"
+          ? `${model.displayName?.trim() || model.id} 模型测试成功。`
+          : `${model.displayName?.trim() || model.id} 只适合普通聊天。`,
+        {
+          message: result.agentCapability === "verified"
+            ? `连接与 Agent 工具协议均验证通过。延迟 ${formatLatency(result.latencyMs)}。`
+            : result.agentCapabilityReason ?? "连接正常，但未通过 Agent 工具协议测试。",
+          tone: result.agentCapability === "verified" ? "success" : "warning"
+        }
+      );
     } catch (error) {
       showNotice("模型测试失败。", {
         message: error instanceof Error ? error.message : "请检查模型地址、密钥和网络连接。"
@@ -3554,6 +3615,22 @@ export function App() {
                                             {formatTokensPerSecond(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].tokensPerSecond)}
                                           </span>
                                         ) : null}
+                                        <span
+                                          className={`model-agent-capability ${model.agentCapability ?? "unknown"}`}
+                                          title={
+                                            model.agentCapability === "verified"
+                                              ? "已验证连接、原生工具调用、工具结果回传和最终回复。"
+                                              : model.agentCapability === "unsupported"
+                                                ? model.agentCapabilityReason ?? "该模型不适合 Agent 工具调用。"
+                                                : "请先运行模型测试，验证 Agent 工具协议。"
+                                          }
+                                        >
+                                          {model.agentCapability === "verified"
+                                            ? "Agent 已验证"
+                                            : model.agentCapability === "unsupported"
+                                              ? "仅聊天"
+                                              : "未验证 Agent"}
+                                        </span>
                                       </div>
                                       <div className="provider-model-actions">
                                         <label className="model-capability-toggle" title="启用后，此模型可以接收文件、文件夹和图片附件。">
@@ -4371,7 +4448,8 @@ export function App() {
                   className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
                   role="menuitem"
                   onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  disabled={gpaState.stage !== "off"}
+                  disabled={!composerSupportsAgentTools || gpaState.stage !== "off"}
+                  title={!composerSupportsAgentTools ? "当前模型不支持或已被标记为不兼容 Agent 工具调用，请在设置中测试或切换模型。" : undefined}
                   onClick={() => void enableGpaMode()}
                 >
                   <span className="gpa-popover-item-icon" aria-hidden><IconGpa /></span>
