@@ -418,10 +418,7 @@
 }
 
 .execution-step {
-  display: grid;
-  gap: 8px;
   margin-left: 24px;
-  padding: 11px 12px;
   border: 1px solid rgba(96, 165, 250, 0.22);
   border-radius: 8px;
   background: #101720;
@@ -433,7 +430,12 @@
 .execution-step.failed { border-color: rgba(248, 113, 113, 0.28); background: #1a1114; }
 .execution-step.failed::before { background: #f87171; box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.5); }
 
-.execution-step-head { display: flex; align-items: center; gap: 7px; color: #dce7f5; font-size: 12px; }
+.execution-step-head { display: flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 12px; color: #dce7f5; font-size: 12px; cursor: pointer; list-style: none; }
+.execution-step-head::-webkit-details-marker { display: none; }
+.execution-step-head::after { content: ""; width: 7px; height: 7px; margin-left: 4px; border-right: 1px solid #8d9aab; border-bottom: 1px solid #8d9aab; transform: rotate(45deg) translateY(-2px); transition: transform 150ms ease; }
+.execution-step[open] .execution-step-head::after { transform: rotate(225deg) translate(-2px, -2px); }
+.execution-step-head:hover { background: rgba(255, 255, 255, 0.035); }
+.execution-step-details { display: grid; gap: 8px; padding: 0 12px 12px; border-top: 1px solid rgba(255, 255, 255, 0.07); }
 .execution-tool-name { color: #94a3b8; font-family: var(--font-mono); font-size: 11px; }
 .execution-duration { margin-left: auto; color: #718096; font-family: var(--font-mono); font-size: 11px; }
 .execution-command { display: block; overflow-x: auto; padding: 8px 9px; border-radius: 5px; color: #d7e4f6; background: #0a0f16; font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; }

@@ -50,6 +50,15 @@ export interface ToolRuntimeContext {
   goForwardBrowserTab: (tabId: string) => Promise<{ tab: BrowserTabRecord; page: { title: string; url: string; text: string } }>;
   focusBrowserTab: (tabId: string) => Promise<BrowserTabRecord>;
   readBrowserPageText: (tabId: string) => Promise<{ tab: BrowserTabRecord; text: string; title: string; url: string }>;
+  inspectBrowserPage: (tabId: string) => Promise<any>;
+  inspectBrowserTarget: (tabId: string, elementId: string) => Promise<{ name: string; requiresApproval: boolean; description: string }>;
+  clickBrowserElement: (tabId: string, elementId: string) => Promise<any>;
+  fillBrowserElement: (tabId: string, elementId: string, value: string) => Promise<any>;
+  selectBrowserOption: (tabId: string, elementId: string, value: string) => Promise<any>;
+  scrollBrowserPage: (tabId: string, deltaY: number) => Promise<any>;
+  pressBrowserKey: (tabId: string, key: string) => Promise<any>;
+  waitForBrowserPage: (tabId: string, input: { text?: string; elementId?: string; timeoutMs?: number }) => Promise<any>;
+  captureBrowserScreenshot: (tabId: string) => Promise<{ title: string; url: string; filePath: string; artifact: ArtifactRecord }>;
   captureBrowserSnapshot: (tabId: string) => Promise<{
     filePath: string;
     title: string;
@@ -639,6 +648,102 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     async (args, ctx) => {
       const tools = await ctx.listMcpTools(typeof args.server === "string" ? args.server : undefined);
       return { ok: true, content: JSON.stringify(tools, null, 2), json: { tools } };
+    }
+  );
+
+  runtime.register(
+    spec("browser.inspect_page", "Inspect the visible browser page before interacting. Returns page text and interactive element ids.", ["tabId"], "low"),
+    async (args, ctx) => {
+      const page = await ctx.inspectBrowserPage(String(args.tabId ?? ""));
+      return { ok: true, content: JSON.stringify(page, null, 2), json: page };
+    }
+  );
+
+  runtime.register(
+    spec("browser.click", "Click an element id returned by browser.inspect_page. Inspect first and do not guess ids.", ["tabId", "elementId"], "medium"),
+    async (args, ctx) => {
+      const tabId = String(args.tabId ?? "");
+      const elementId = String(args.elementId ?? "");
+      const target = await ctx.inspectBrowserTarget(tabId, elementId);
+      if (target.requiresApproval) {
+        const approved = await ctx.requestApproval({
+          title: "确认浏览器提交操作",
+          description: target.description,
+          riskLevel: "high",
+          payload: { tabId, elementId, action: "click" }
+        });
+        if (!approved) return { ok: false, content: "Browser action was denied by the user." };
+      }
+      const page = await ctx.clickBrowserElement(tabId, elementId);
+      return { ok: true, content: `${page.title}\n${page.url}`, json: page };
+    }
+  );
+
+  runtime.register(
+    spec("browser.fill", "Fill an editable element id returned by browser.inspect_page. This does not submit the form.", ["tabId", "elementId", "value"], "low"),
+    async (args, ctx) => {
+      const page = await ctx.fillBrowserElement(String(args.tabId ?? ""), String(args.elementId ?? ""), String(args.value ?? ""));
+      return { ok: true, content: `${page.title}\n${page.url}`, json: page };
+    }
+  );
+
+  runtime.register(
+    spec("browser.select_option", "Select an option in a select element returned by browser.inspect_page.", ["tabId", "elementId", "value"], "low"),
+    async (args, ctx) => {
+      const page = await ctx.selectBrowserOption(String(args.tabId ?? ""), String(args.elementId ?? ""), String(args.value ?? ""));
+      return { ok: true, content: `${page.title}\n${page.url}`, json: page };
+    }
+  );
+
+  runtime.register(
+    spec("browser.scroll", "Scroll the visible browser page by a vertical pixel delta.", ["tabId", "deltaY"], "low"),
+    async (args, ctx) => {
+      const page = await ctx.scrollBrowserPage(String(args.tabId ?? ""), Number(args.deltaY ?? 0));
+      return { ok: true, content: `${page.title}\n${page.url}`, json: page };
+    }
+  );
+
+  runtime.register(
+    spec("browser.press_key", "Press a key in the visible browser tab. Enter requires confirmation because it may submit a form.", ["tabId", "key"], "medium"),
+    async (args, ctx) => {
+      const tabId = String(args.tabId ?? "");
+      const key = String(args.key ?? "");
+      if (key.toLowerCase() === "enter") {
+        const approved = await ctx.requestApproval({
+          title: "确认浏览器提交操作",
+          description: "Press Enter in the active browser page.",
+          riskLevel: "high",
+          payload: { tabId, key, action: "press_key" }
+        });
+        if (!approved) return { ok: false, content: "Browser key press was denied by the user." };
+      }
+      const page = await ctx.pressBrowserKey(tabId, key);
+      return { ok: true, content: `${page.title}\n${page.url}`, json: page };
+    }
+  );
+
+  runtime.register(
+    spec("browser.wait_for", "Wait for text or an element id to appear after a browser action.", ["tabId"], "low"),
+    async (args, ctx) => {
+      const result = await ctx.waitForBrowserPage(String(args.tabId ?? ""), {
+        text: typeof args.text === "string" ? args.text : undefined,
+        elementId: typeof args.elementId === "string" ? args.elementId : undefined,
+        timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined
+      });
+      return { ok: true, content: JSON.stringify(result), json: result };
+    }
+  );
+
+  runtime.register(
+    spec("browser.capture_screenshot", "Capture the visible browser tab as a PNG artifact.", ["tabId"], "low"),
+    async (args, ctx) => {
+      const screenshot = await ctx.captureBrowserScreenshot(String(args.tabId ?? ""));
+      return {
+        ok: true,
+        content: `${screenshot.title}\n${screenshot.filePath}`,
+        json: screenshot,
+        artifacts: [screenshot.artifact]
+      };
     }
   );
 

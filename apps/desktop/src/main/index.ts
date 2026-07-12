@@ -76,6 +76,7 @@ async function createWindow(): Promise<void> {
       preload: path.join(__dirname, "../preload/index.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
       sandbox: false
     }
   });
@@ -192,6 +193,17 @@ function registerIpc(): void {
     }
     return shell.openPath(targetPath);
   });
+  ipcMain.handle("shell:open-folder", async (_event, targetPath: string) => {
+    if (typeof targetPath !== "string" || !path.isAbsolute(targetPath)) {
+      return "无效的本地路径。";
+    }
+    try {
+      const stats = await fs.stat(targetPath);
+      return shell.openPath(stats.isDirectory() ? targetPath : path.dirname(targetPath));
+    } catch {
+      return shell.openPath(path.dirname(targetPath));
+    }
+  });
   ipcMain.handle("threads:open-file-location", (_event, payload: { threadId: string; path: string }) =>
     backend.openFileLocation(payload.threadId, payload.path)
   );
@@ -234,6 +246,12 @@ function registerIpc(): void {
   ipcMain.handle("browser:back", (_event, payload) => backend.goBackBrowserTab(payload.threadId, payload.tabId));
   ipcMain.handle("browser:forward", (_event, payload) => backend.goForwardBrowserTab(payload.threadId, payload.tabId));
   ipcMain.handle("browser:close", (_event, payload) => backend.closeBrowserTab(payload.threadId, payload.tabId));
+  ipcMain.handle("browser:register-webcontents", (_event, payload: { threadId: string; tabId: string; webContentsId: number }) =>
+    backend.registerBrowserWebContents(payload.threadId, payload.tabId, payload.webContentsId)
+  );
+  ipcMain.handle("browser:sync-webcontents", (_event, payload: { threadId: string; tabId: string }) =>
+    backend.syncBrowserWebContents(payload)
+  );
   ipcMain.handle("approval:resolve", (_event, payload) =>
     backend.resolveApproval(payload.id, payload.resolution)
   );

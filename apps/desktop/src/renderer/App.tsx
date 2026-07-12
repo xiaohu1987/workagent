@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ReactNode } from "react";
 import "./timeline.css";
@@ -72,6 +72,10 @@ type ComposerBinaryAttachment = {
   label: string;
   file?: File;
   previewUrl?: string;
+};
+
+type BrowserWebviewElement = HTMLElement & {
+  getWebContentsId: () => number;
 };
 
 type MessageKnowledgeSource = {
@@ -758,6 +762,10 @@ export function App() {
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
         setGpaState(typed.payload.gpa);
         return;
+      }
+      if (typed.type === "browser.updated" && typed.threadId === currentSelectedThreadId) {
+        setRightWorkspaceTab("browser");
+        setIsTerminalOpen(true);
       }
       if (
         typed.type === "tool.started" &&
@@ -5224,6 +5232,29 @@ function BrowserWorkspace({
   onCloseTab: (tabId: string) => void;
 }) {
   const activeTab = tabs.find((tab) => tab.isActive) ?? tabs[0];
+  const webviewRef = useRef<BrowserWebviewElement | null>(null);
+  useEffect(() => {
+    const view = webviewRef.current;
+    if (!view || !activeTab || !threadId) return;
+
+    const register = () => {
+      const webContentsId = view.getWebContentsId();
+      void window.codexh.registerBrowserWebContents({ threadId, tabId: activeTab.id, webContentsId })
+        .then(() => window.codexh.syncBrowserWebContents({ threadId, tabId: activeTab.id }))
+        .catch(() => undefined);
+    };
+    const sync = () => void window.codexh.syncBrowserWebContents({ threadId, tabId: activeTab.id }).catch(() => undefined);
+    view.addEventListener("dom-ready", register);
+    view.addEventListener("did-navigate", sync);
+    view.addEventListener("did-navigate-in-page", sync);
+    view.addEventListener("page-title-updated", sync);
+    return () => {
+      view.removeEventListener("dom-ready", register);
+      view.removeEventListener("did-navigate", sync);
+      view.removeEventListener("did-navigate-in-page", sync);
+      view.removeEventListener("page-title-updated", sync);
+    };
+  }, [activeTab?.id, activeTab?.url, threadId]);
   if (!activeTab || !threadId) {
     return <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" />;
   }
@@ -5242,12 +5273,14 @@ function BrowserWorkspace({
         }))}
       />
       <div className="browser-location" title={activeTab.url}>{activeTab.url}</div>
-      <iframe
-        key={`${activeTab.id}:${activeTab.url}`}
-        className="browser-frame"
-        src={activeTab.url}
-        title={activeTab.title || "任务浏览器"}
-      />
+      {createElement("webview", {
+        key: `${activeTab.id}:${activeTab.url}`,
+        ref: webviewRef,
+        className: "browser-frame",
+        src: activeTab.url,
+        webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
+        title: activeTab.title || "任务浏览器"
+      })}
     </section>
   );
 }
@@ -6480,22 +6513,25 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
   const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
 
   return (
-    <section className={`execution-step ${status}`}>
-      <div className="execution-step-head">
+    <details className={`execution-step ${status}`}>
+      <summary className="execution-step-head">
         <StatusIcon status={status} />
         <strong>{isRunning ? "Running" : failed ? "Command failed" : "Ran command"}</strong>
         <span className="execution-tool-name">{formatToolName(toolCall.toolName)}</span>
         {duration !== null ? <span className="execution-duration">{formatDuration(duration)}</span> : null}
+      </summary>
+      <div className="execution-step-details">
+        <code className="execution-command">$ {command}</code>
+        {localUrl ? <LocalServerPreview url={localUrl} /> : null}
+        {output ? (
+          <details className="execution-output" open={failed}>
+            <summary>{failed ? "View error output" : "View output"}</summary>
+            <pre>{output}</pre>
+            <MessageDetectedMediaGallery content={output} />
+          </details>
+        ) : isRunning ? <div className="execution-progress">Working…</div> : null}
       </div>
-      <code className="execution-command">$ {command}</code>
-      {localUrl ? <LocalServerPreview url={localUrl} /> : null}
-      {output ? (
-        <details className="execution-output" open={failed}>
-          <summary>{failed ? "View error output" : "View output"}</summary>
-          <pre>{output}</pre>
-        </details>
-      ) : isRunning ? <div className="execution-progress">Working…</div> : null}
-    </section>
+    </details>
   );
 }
 
@@ -6551,6 +6587,7 @@ function ToolActivityRow({ toolCall }: { toolCall: ToolCallRecord }) {
           <details className="tool-activity-output" open={failed}>
             <summary>{failed ? "查看错误输出" : "查看输出"}</summary>
             <pre>{output}</pre>
+            <MessageDetectedMediaGallery content={output} />
           </details>
         ) : isRunning ? <span className="tool-activity-row-progress">等待工具返回...</span> : null}
       </div>
@@ -6827,6 +6864,7 @@ function renderMessageContent(
   if (!eventBlocks || eventBlocks.length === 0) {
     return <>
       {renderMarkdownDocument(content, `${message.id}-markdown`, "message-markdown")}
+      {message.role === "assistant" ? <MessageDetectedMediaGallery content={content} /> : null}
       <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
       <MessageKnowledgeSources sources={knowledgeSources} />
       <MessageBrowserSources sources={browserSources} />
@@ -6836,6 +6874,7 @@ function renderMessageContent(
   return (
     <div className="message-event-stream">
       {eventBlocks.map((block, index) => renderEventBlock(block, `${message.id}-${block.type}-${index}`))}
+      {message.role === "assistant" ? <MessageDetectedMediaGallery content={content} /> : null}
       <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
       <MessageKnowledgeSources sources={knowledgeSources} />
       <MessageBrowserSources sources={browserSources} />
@@ -6927,20 +6966,48 @@ function getMessageAttachments(message: MessageRecord): MessageAttachment[] {
   }
 }
 
+type MessageImagePreview = { source: string; name: string; localPath?: string; url?: string };
+
 function MessageAttachmentGallery({ threadId, attachments }: { threadId: string; attachments: MessageAttachment[] }) {
+  const [preview, setPreview] = useState<MessageImagePreview | null>(null);
   if (attachments.length === 0) return null;
+  const imageCount = attachments.filter((attachment) => attachment.kind === "image").length;
   return (
-    <div className="message-attachment-gallery">
-      {attachments.map((attachment) => attachment.kind === "image" ? (
-        <MessageAttachmentImage key={attachment.id} threadId={threadId} attachment={attachment} />
-      ) : (
-        <span key={attachment.id} className="message-file-attachment"><IconFile />{attachment.name}</span>
-      ))}
-    </div>
+    <>
+      <div className={`message-attachment-gallery ${imageCount > 1 ? "image-grid" : ""}`}>
+        {attachments.map((attachment) => attachment.kind === "image" ? (
+          <MessageAttachmentImage
+            key={attachment.id}
+            threadId={threadId}
+            attachment={attachment}
+            onPreview={(source) => setPreview({ source, name: attachment.name, localPath: attachment.absolutePath })}
+          />
+        ) : (
+          <button
+            key={attachment.id}
+            type="button"
+            className="message-file-attachment"
+            title={`打开文件：${attachment.absolutePath}`}
+            onClick={() => void window.codexh.openPath(attachment.absolutePath)}
+          >
+            <IconFile />{attachment.name}
+          </button>
+        ))}
+      </div>
+      {preview ? <MessageImageLightbox preview={preview} onClose={() => setPreview(null)} /> : null}
+    </>
   );
 }
 
-function MessageAttachmentImage({ threadId, attachment }: { threadId: string; attachment: MessageAttachment }) {
+function MessageAttachmentImage({
+  threadId,
+  attachment,
+  onPreview
+}: {
+  threadId: string;
+  attachment: MessageAttachment;
+  onPreview: (source: string) => void;
+}) {
   const [source, setSource] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -6950,10 +7017,96 @@ function MessageAttachmentImage({ threadId, attachment }: { threadId: string; at
     return () => { cancelled = true; };
   }, [attachment.absolutePath, threadId]);
   return (
-    <button className="message-image-attachment" type="button" title={attachment.name} onClick={() => void window.codexh.openFileLocation({ threadId, path: attachment.absolutePath })}>
+    <button className="message-image-attachment" type="button" title={`查看原图：${attachment.name}`} onClick={() => source && onPreview(source)}>
       {source ? <img src={source} alt={attachment.name} /> : <span><IconImage />{attachment.name}</span>}
     </button>
   );
+}
+
+function MessageImageLightbox({ preview, onClose }: { preview: MessageImagePreview; onClose: () => void }) {
+  return createPortal(
+    <div className="message-image-lightbox" role="dialog" aria-modal="true" aria-label={preview.name} onClick={onClose}>
+      <div className="message-image-lightbox-content" onClick={(event) => event.stopPropagation()}>
+        <div className="message-image-lightbox-head">
+          <span title={preview.name}>{preview.name}</span>
+          <div>
+            {preview.localPath ? (
+              <button type="button" title="打开本地文件" aria-label="打开本地文件" onClick={() => void window.codexh.openPath(preview.localPath!)}><IconFolder /></button>
+            ) : null}
+            {preview.url ? (
+              <button type="button" title="打开网页" aria-label="打开网页" onClick={() => void window.codexh.openExternal(preview.url!)}><IconGlobe /></button>
+            ) : null}
+            <button type="button" title="关闭" aria-label="关闭" onClick={onClose}><IconClose /></button>
+          </div>
+        </div>
+        <img src={preview.source} alt={preview.name} />
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+type MessageMediaReference = { source: string; kind: "local" | "url" };
+
+function MessageDetectedMediaGallery({ content }: { content: string }) {
+  const references = extractMessageMediaReferences(content);
+  const [preview, setPreview] = useState<MessageImagePreview | null>(null);
+  if (references.length === 0) return null;
+  return (
+    <>
+      <div className={`message-attachment-gallery detected-media ${references.length > 1 ? "image-grid" : ""}`}>
+        {references.map((reference) => (
+          <DetectedMessageImage
+            key={reference.source}
+            reference={reference}
+            onPreview={(source) => setPreview({
+              source,
+              name: getFileLeafName(reference.source),
+              ...(reference.kind === "local" ? { localPath: reference.source } : { url: reference.source })
+            })}
+          />
+        ))}
+      </div>
+      {preview ? <MessageImageLightbox preview={preview} onClose={() => setPreview(null)} /> : null}
+    </>
+  );
+}
+
+function DetectedMessageImage({ reference, onPreview }: { reference: MessageMediaReference; onPreview: (source: string) => void }) {
+  const [source, setSource] = useState<string | null>(reference.kind === "url" ? reference.source : null);
+  useEffect(() => {
+    if (reference.kind === "url") {
+      setSource(reference.source);
+      return;
+    }
+    let cancelled = false;
+    void window.codexh.previewLocalImage({ absolutePath: reference.source })
+      .then((value) => { if (!cancelled) setSource(value); })
+      .catch(() => { if (!cancelled) setSource(null); });
+    return () => { cancelled = true; };
+  }, [reference]);
+  if (!source) return null;
+  return (
+    <button className="message-image-attachment" type="button" title={`查看原图：${getFileLeafName(reference.source)}`} onClick={() => onPreview(source)}>
+      <img src={source} alt={getFileLeafName(reference.source)} />
+    </button>
+  );
+}
+
+function extractMessageMediaReferences(content: string): MessageMediaReference[] {
+  const matches: MessageMediaReference[] = [];
+  const seen = new Set<string>();
+  const add = (source: string, kind: MessageMediaReference["kind"]) => {
+    const normalized = source.replace(/[),.;，。；]+$/, "").trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    matches.push({ source: normalized, kind });
+  };
+  const localPattern = /[a-zA-Z]:[\\/][^\r\n<>"|?*]+?\.(?:png|jpe?g|gif|webp|bmp)/gi;
+  const urlPattern = /https?:\/\/[^\s<>()]+?\.(?:png|jpe?g|gif|webp|bmp)(?:\?[^\s<>()]*)?/gi;
+  for (const match of content.matchAll(localPattern)) add(match[0], "local");
+  for (const match of content.matchAll(urlPattern)) add(match[0], "url");
+  return matches;
 }
 
 function parseMessageEventBlocks(message: MessageRecord): ChatEventBlock[] | null {
@@ -7334,6 +7487,7 @@ function renderTestResultBody(block: ChatEventBlock, key: string) {
 function renderMonoShell(content: string, key: string, className: string) {
   return (
     <div key={key} className="event-mono-shell">
+      <CopyTextButton content={content} />
       <pre className={className}>{content}</pre>
     </div>
   );
@@ -7699,6 +7853,7 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
     case "code":
       return (
         <div key={key} className="markdown-code-block">
+          <CopyTextButton content={block.content} />
           {block.language ? <div className="markdown-code-label">{block.language}</div> : null}
           <pre>
             <code>{block.content}</code>
@@ -7735,6 +7890,38 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
   }
 }
 
+function CopyTextButton({ content }: { content: string }) {
+  const [copied, setCopied] = useState(false);
+  const resetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+  }, []);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className={`copy-text-button ${copied ? "is-copied" : ""}`}
+      title={copied ? "已复制" : "复制内容"}
+      aria-label={copied ? "已复制" : "复制内容"}
+      onClick={() => void copy()}
+    >
+      <IconCopy />
+    </button>
+  );
+}
+
 function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const tokenPattern = /!\[([^\]]*)\]\(([^)]+)\)|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
@@ -7744,29 +7931,21 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
 
   while ((match = tokenPattern.exec(text)) !== null) {
     if (match.index > cursor) {
-      nodes.push(<span key={`${keyPrefix}-text-${tokenIndex}`}>{text.slice(cursor, match.index)}</span>);
+      nodes.push(...renderPlainTextReferences(text.slice(cursor, match.index), `${keyPrefix}-text-${tokenIndex}`));
       tokenIndex += 1;
     }
 
     if (match[1] && match[2]) {
       const source = match[2];
-      nodes.push(isSafeMarkdownImageSource(source)
-        ? <img key={`${keyPrefix}-image-${tokenIndex}`} className="markdown-image" src={source} alt={match[1]} />
+      nodes.push((isSafeMarkdownImageSource(source) || isAbsoluteLocalPath(source))
+        ? <MarkdownMessageImage key={`${keyPrefix}-image-${tokenIndex}`} source={source} alt={match[1]} />
         : <span key={`${keyPrefix}-image-${tokenIndex}`}>{match[1] || source}</span>);
     } else if (match[3]) {
       nodes.push(<code key={`${keyPrefix}-code-${tokenIndex}`}>{match[3]}</code>);
     } else if (match[4] && match[5]) {
-      nodes.push(
-        <a
-          key={`${keyPrefix}-link-${tokenIndex}`}
-          href={match[5]}
-          title={match[5]}
-          className={`markdown-link ${isFileReferenceLink(match[5]) ? "file" : ""}`}
-          onClick={(event) => event.preventDefault()}
-        >
-          {match[4]}
-        </a>
-      );
+      const linkLabel = match[4];
+      const linkTarget = match[5];
+      nodes.push(<OpenableMessageReference key={`${keyPrefix}-link-${tokenIndex}`} target={linkTarget} label={linkLabel} />);
     } else if (match[6]) {
       nodes.push(<strong key={`${keyPrefix}-strong-${tokenIndex}`}>{match[6]}</strong>);
     } else if (match[7]) {
@@ -7778,10 +7957,80 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
   }
 
   if (cursor < text.length) {
-    nodes.push(<span key={`${keyPrefix}-tail-${tokenIndex}`}>{text.slice(cursor)}</span>);
+    nodes.push(...renderPlainTextReferences(text.slice(cursor), `${keyPrefix}-tail-${tokenIndex}`));
   }
 
   return nodes;
+}
+
+function renderPlainTextReferences(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const referencePattern = /https?:\/\/[^\s<>()]+|[a-zA-Z]:[\\/][^\s<>"|?*]+/g;
+  let cursor = 0;
+  let index = 0;
+  let match: RegExpExecArray | null;
+  while ((match = referencePattern.exec(text)) !== null) {
+    if (match.index > cursor) nodes.push(<span key={`${keyPrefix}-text-${index}`}>{text.slice(cursor, match.index)}</span>);
+    const reference = match[0].replace(/[),.;，。；]+$/, "");
+    const trailing = match[0].slice(reference.length);
+    nodes.push(<OpenableMessageReference key={`${keyPrefix}-reference-${index}`} target={reference} label={reference} />);
+    if (trailing) nodes.push(<span key={`${keyPrefix}-trailing-${index}`}>{trailing}</span>);
+    cursor = match.index + match[0].length;
+    index += 1;
+  }
+  if (cursor < text.length || nodes.length === 0) nodes.push(<span key={`${keyPrefix}-tail`}>{text.slice(cursor)}</span>);
+  return nodes;
+}
+
+function OpenableMessageReference({ target, label }: { target: string; label: string }) {
+  const localPath = isAbsoluteLocalPath(target);
+  return (
+    <span className={`message-reference ${localPath ? "local" : ""}`}>
+      <a
+        href={target}
+        className={`markdown-link ${localPath || isFileReferenceLink(target) ? "file" : ""}`}
+        title={target}
+        onClick={(event) => {
+          event.preventDefault();
+          if (/^https?:\/\//i.test(target)) void window.codexh.openExternal(target);
+          else if (localPath) void window.codexh.openPath(target);
+        }}
+      >
+        {label}
+      </a>
+      {localPath ? (
+        <button type="button" title="打开所在文件夹" aria-label="打开所在文件夹" onClick={() => void window.codexh.openFolder(target)}>
+          <IconFolder />
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+function MarkdownMessageImage({ source, alt }: { source: string; alt: string }) {
+  const isLocal = isAbsoluteLocalPath(source);
+  const [previewSource, setPreviewSource] = useState<string | null>(isLocal ? null : source);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  useEffect(() => {
+    if (!isLocal) return;
+    let cancelled = false;
+    void window.codexh.previewLocalImage({ absolutePath: source })
+      .then((value) => { if (!cancelled) setPreviewSource(value); })
+      .catch(() => { if (!cancelled) setPreviewSource(null); });
+    return () => { cancelled = true; };
+  }, [isLocal, source]);
+  if (!previewSource) return <span>{alt || source}</span>;
+  return <>
+    <button className="markdown-image-button" type="button" onClick={() => setPreviewOpen(true)} title={`查看原图：${alt || getFileLeafName(source)}`}>
+      <img className="markdown-image" src={previewSource} alt={alt} />
+    </button>
+    {previewOpen ? (
+      <MessageImageLightbox
+        preview={{ source: previewSource, name: alt || getFileLeafName(source), ...(isLocal ? { localPath: source } : { url: source }) }}
+        onClose={() => setPreviewOpen(false)}
+      />
+    ) : null}
+  </>;
 }
 
 export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
@@ -8105,6 +8354,10 @@ function getModelsForProvider(config: Pick<AppConfig, "models">, providerId: str
 
 function isSafeMarkdownImageSource(source: string): boolean {
   return /^https:\/\//i.test(source) || /^data:image\/(png|jpeg|jpg|gif|webp);base64,/i.test(source);
+}
+
+function isAbsoluteLocalPath(source: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(source) || /^\\\\/.test(source);
 }
 
 function formatKnowledgeScope(scope: KnowledgeScope): string {

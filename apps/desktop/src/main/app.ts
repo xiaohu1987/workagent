@@ -3,7 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
-import { BrowserWindow, shell } from "electron";
+import { BrowserWindow, shell, webContents } from "electron";
+import type { WebContents } from "electron";
 import type {
   AttachmentImportInput,
   AppConfig,
@@ -62,6 +63,7 @@ export class DesktopBackend {
   readonly #plugins = new PluginRuntime();
   readonly #terminal = new TerminalRuntime();
   readonly #openedLocalUrls = new Set<string>();
+  readonly #browserContents = new Map<string, WebContents>();
 
   #layout!: HomeLayout;
   #db!: DatabaseService;
@@ -138,6 +140,15 @@ export class DesktopBackend {
       goForwardBrowserTab: async (threadId, tabId) => this.goForwardBrowserTab(threadId, tabId),
       focusBrowserTab: async (threadId, tabId) => this.focusBrowserTab(threadId, tabId),
       readBrowserPageText: async (threadId, tabId) => this.readBrowserPageText(threadId, tabId),
+      inspectBrowserPage: async (threadId, tabId) => this.inspectBrowserPage(threadId, tabId),
+      inspectBrowserTarget: async (threadId, tabId, elementId) => this.inspectBrowserTarget(threadId, tabId, elementId),
+      clickBrowserElement: async (threadId, tabId, elementId) => this.clickBrowserElement(threadId, tabId, elementId),
+      fillBrowserElement: async (threadId, tabId, elementId, value) => this.fillBrowserElement(threadId, tabId, elementId, value),
+      selectBrowserOption: async (threadId, tabId, elementId, value) => this.selectBrowserOption(threadId, tabId, elementId, value),
+      scrollBrowserPage: async (threadId, tabId, deltaY) => this.scrollBrowserPage(threadId, tabId, deltaY),
+      pressBrowserKey: async (threadId, tabId, key) => this.pressBrowserKey(threadId, tabId, key),
+      waitForBrowserPage: async (threadId, tabId, input) => this.waitForBrowserPage(threadId, tabId, input),
+      captureBrowserScreenshot: async (threadId, tabId, turnRunId) => this.captureBrowserScreenshot(threadId, tabId, turnRunId),
       captureBrowserSnapshot: async (threadId, tabId, turnRunId) =>
         this.captureBrowserSnapshot(threadId, tabId, turnRunId),
       getThreadOutputDir: async (threadId) => this.getThreadOutputDir(threadId),
@@ -659,6 +670,14 @@ export class DesktopBackend {
   }
 
   public async navigateBrowserTab(threadId: string, tabId: string, url: string) {
+    const contents = this.#browserContents.get(this.browserContentsKey(threadId, tabId));
+    if (contents && !contents.isDestroyed()) {
+      await contents.loadURL(url);
+      const page = await this.readVisibleBrowserPage(contents, false);
+      const tab = await this.syncBrowserTabFromPage(threadId, tabId, page);
+      await this.emit({ type: "browser.updated", threadId, payload: { action: "navigate", tab }, createdAt: new Date().toISOString() });
+      return { tab, page };
+    }
     const result = await this.#browser.navigate(threadId, tabId, url);
     this.persistBrowserTabs(threadId);
     await this.emit({
@@ -671,6 +690,16 @@ export class DesktopBackend {
   }
 
   public async reloadBrowserTab(threadId: string, tabId: string) {
+    const contents = this.#browserContents.get(this.browserContentsKey(threadId, tabId));
+    if (contents && !contents.isDestroyed()) {
+      const loaded = this.waitForBrowserLoad(contents);
+      contents.reload();
+      await loaded;
+      const page = await this.readVisibleBrowserPage(contents, false);
+      const tab = await this.syncBrowserTabFromPage(threadId, tabId, page);
+      await this.emit({ type: "browser.updated", threadId, payload: { action: "reload", tab }, createdAt: new Date().toISOString() });
+      return { tab, page };
+    }
     const result = await this.#browser.reload(threadId, tabId);
     this.persistBrowserTabs(threadId);
     await this.emit({
@@ -683,6 +712,17 @@ export class DesktopBackend {
   }
 
   public async goBackBrowserTab(threadId: string, tabId: string) {
+    const contents = this.#browserContents.get(this.browserContentsKey(threadId, tabId));
+    if (contents && !contents.isDestroyed()) {
+      if (!contents.canGoBack()) throw new Error("Already at the oldest history entry.");
+      const loaded = this.waitForBrowserLoad(contents);
+      contents.goBack();
+      await loaded;
+      const page = await this.readVisibleBrowserPage(contents, false);
+      const tab = await this.syncBrowserTabFromPage(threadId, tabId, page);
+      await this.emit({ type: "browser.updated", threadId, payload: { action: "back", tab }, createdAt: new Date().toISOString() });
+      return { tab, page };
+    }
     const result = this.#browser.goBack(threadId, tabId);
     this.persistBrowserTabs(threadId);
     await this.emit({
@@ -695,6 +735,17 @@ export class DesktopBackend {
   }
 
   public async goForwardBrowserTab(threadId: string, tabId: string) {
+    const contents = this.#browserContents.get(this.browserContentsKey(threadId, tabId));
+    if (contents && !contents.isDestroyed()) {
+      if (!contents.canGoForward()) throw new Error("Already at the latest history entry.");
+      const loaded = this.waitForBrowserLoad(contents);
+      contents.goForward();
+      await loaded;
+      const page = await this.readVisibleBrowserPage(contents, false);
+      const tab = await this.syncBrowserTabFromPage(threadId, tabId, page);
+      await this.emit({ type: "browser.updated", threadId, payload: { action: "forward", tab }, createdAt: new Date().toISOString() });
+      return { tab, page };
+    }
     const result = this.#browser.goForward(threadId, tabId);
     this.persistBrowserTabs(threadId);
     await this.emit({
@@ -730,8 +781,248 @@ export class DesktopBackend {
     return tabs;
   }
 
-  public readBrowserPageText(threadId: string, tabId: string) {
+  public async readBrowserPageText(threadId: string, tabId: string) {
+    const contents = this.#browserContents.get(this.browserContentsKey(threadId, tabId));
+    if (contents && !contents.isDestroyed()) {
+      const page = await this.readVisibleBrowserPage(contents, false);
+      const tab = await this.syncBrowserTabFromPage(threadId, tabId, page);
+      return { tab, text: page.text, title: page.title, url: page.url };
+    }
     return this.#browser.readPageText(threadId, tabId);
+  }
+
+  public registerBrowserWebContents(threadId: string, tabId: string, webContentsId: number): void {
+    if (!this.#db.listBrowserTabs(threadId).some((tab) => tab.id === tabId)) {
+      throw new Error("Browser tab does not belong to this thread.");
+    }
+    const contents = webContents.fromId(webContentsId);
+    if (!contents || contents.isDestroyed() || contents.getType() !== "webview") {
+      throw new Error("Browser page is not available for automation.");
+    }
+    const key = this.browserContentsKey(threadId, tabId);
+    this.#browserContents.set(key, contents);
+    contents.setWindowOpenHandler(() => ({ action: "deny" }));
+    contents.once("destroyed", () => {
+      if (this.#browserContents.get(key) === contents) this.#browserContents.delete(key);
+    });
+  }
+
+  public async syncBrowserWebContents(input: { threadId: string; tabId: string }): Promise<BrowserTabRecord> {
+    const contents = await this.requireBrowserContents(input.threadId, input.tabId);
+    const page = await this.readVisibleBrowserPage(contents, false);
+    const tab = this.#browser.syncTab(input.threadId, input.tabId, page);
+    this.persistBrowserTabs(input.threadId);
+    await this.emit({
+      type: "browser.updated",
+      threadId: input.threadId,
+      payload: { action: "sync", tab },
+      createdAt: new Date().toISOString()
+    });
+    return tab;
+  }
+
+  public async inspectBrowserPage(threadId: string, tabId: string) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    const inspection = await contents.executeJavaScript(`
+      (() => {
+        const visible = (element) => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+        };
+        const label = (element) => {
+          const labelledBy = element.getAttribute('aria-labelledby');
+          const labelled = labelledBy ? labelledBy.split(/\\s+/).map((id) => document.getElementById(id)?.innerText || '').join(' ') : '';
+          return (element.getAttribute('aria-label') || labelled || element.innerText || element.value || element.getAttribute('placeholder') || element.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 180);
+        };
+        let index = 0;
+        const elements = [...document.querySelectorAll('a[href], button, input, textarea, select, [contenteditable="true"], [role="button"], [role="link"], [role="textbox"]')]
+          .filter(visible)
+          .slice(0, 120)
+          .map((element) => {
+            const id = 'xh-' + (++index);
+            element.setAttribute('data-codexh-agent-id', id);
+            return {
+              id,
+              tag: element.tagName.toLowerCase(),
+              role: element.getAttribute('role') || element.getAttribute('type') || element.tagName.toLowerCase(),
+              name: label(element),
+              disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true')
+            };
+          });
+        return {
+          title: document.title || location.href,
+          url: location.href,
+          text: (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 12000),
+          elements
+        };
+      })()
+    `, true) as {
+      title: string;
+      url: string;
+      text: string;
+      elements: Array<{ id: string; tag: string; role: string; name: string; disabled: boolean }>;
+    };
+    await this.syncBrowserTabFromPage(threadId, tabId, inspection);
+    return inspection;
+  }
+
+  public async inspectBrowserTarget(threadId: string, tabId: string, elementId: string) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    return contents.executeJavaScript(`
+      (() => {
+        const element = document.querySelector('[data-codexh-agent-id="' + CSS.escape(${JSON.stringify(elementId)}) + '"]');
+        if (!element) throw new Error('Element is no longer available. Inspect the page again.');
+        const tag = element.tagName.toLowerCase();
+        const type = (element.getAttribute('type') || '').toLowerCase();
+        const href = element.getAttribute('href') || '';
+        const form = element.closest('form');
+        const requiresApproval = type === 'submit' || tag === 'form' || Boolean(form) || /^(mailto:|tel:|intent:)/i.test(href) || element.hasAttribute('download');
+        const name = (element.getAttribute('aria-label') || element.innerText || element.value || href || tag).trim().slice(0, 180);
+        return { name, requiresApproval, description: tag + (type ? '[' + type + ']' : '') + ': ' + name };
+      })()
+    `, true) as Promise<{ name: string; requiresApproval: boolean; description: string }>;
+  }
+
+  public async clickBrowserElement(threadId: string, tabId: string, elementId: string) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    const result = await contents.executeJavaScript(`
+      (() => {
+        const element = document.querySelector('[data-codexh-agent-id="' + CSS.escape(${JSON.stringify(elementId)}) + '"]');
+        if (!element) throw new Error('Element is no longer available. Inspect the page again.');
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+        element.click();
+        return { title: document.title || location.href, url: location.href };
+      })()
+    `, true) as { title: string; url: string };
+    await this.syncBrowserTabFromPage(threadId, tabId, { ...result, text: "", html: "" });
+    return result;
+  }
+
+  public async fillBrowserElement(threadId: string, tabId: string, elementId: string, value: string) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    return contents.executeJavaScript(`
+      (() => {
+        const element = document.querySelector('[data-codexh-agent-id="' + CSS.escape(${JSON.stringify(elementId)}) + '"]');
+        if (!element) throw new Error('Element is no longer available. Inspect the page again.');
+        if (element instanceof HTMLInputElement && element.type === 'file') throw new Error('File upload requires user action.');
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+          const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set;
+          setter ? setter.call(element, ${JSON.stringify(value)}) : element.value = ${JSON.stringify(value)};
+        } else if (element.isContentEditable) {
+          element.textContent = ${JSON.stringify(value)};
+        } else {
+          throw new Error('Target is not editable.');
+        }
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        return { title: document.title || location.href, url: location.href };
+      })()
+    `, true) as Promise<{ title: string; url: string }>;
+  }
+
+  public async selectBrowserOption(threadId: string, tabId: string, elementId: string, value: string) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    return contents.executeJavaScript(`
+      (() => {
+        const element = document.querySelector('[data-codexh-agent-id="' + CSS.escape(${JSON.stringify(elementId)}) + '"]');
+        if (!(element instanceof HTMLSelectElement)) throw new Error('Target is not a select element.');
+        const option = [...element.options].find((item) => item.value === ${JSON.stringify(value)} || item.text.trim() === ${JSON.stringify(value)});
+        if (!option) throw new Error('Option was not found.');
+        element.value = option.value;
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        return { title: document.title || location.href, url: location.href };
+      })()
+    `, true) as Promise<{ title: string; url: string }>;
+  }
+
+  public async scrollBrowserPage(threadId: string, tabId: string, deltaY: number) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    return contents.executeJavaScript(`window.scrollBy({ top: ${Math.max(-4000, Math.min(4000, deltaY))}, behavior: 'instant' }); ({ title: document.title || location.href, url: location.href, scrollY: window.scrollY })`, true);
+  }
+
+  public async pressBrowserKey(threadId: string, tabId: string, key: string) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    const keyCode = key.length === 1 ? key.toUpperCase() : key;
+    contents.sendInputEvent({ type: "keyDown", keyCode });
+    contents.sendInputEvent({ type: "keyUp", keyCode });
+    return { title: contents.getTitle(), url: contents.getURL(), key };
+  }
+
+  public async waitForBrowserPage(threadId: string, tabId: string, input: { text?: string; elementId?: string; timeoutMs?: number }) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    const timeoutMs = Math.max(250, Math.min(input.timeoutMs ?? 5_000, 15_000));
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const matched = await contents.executeJavaScript(`
+        (() => {
+          const elementId = ${JSON.stringify(input.elementId ?? "")};
+          const text = ${JSON.stringify(input.text ?? "")};
+          return (elementId && !!document.querySelector('[data-codexh-agent-id="' + CSS.escape(elementId) + '"]')) ||
+            (text && (document.body?.innerText || '').includes(text));
+        })()
+      `, true) as boolean;
+      if (matched) return { matched: true, waitedMs: Date.now() - startedAt };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    throw new Error("Timed out waiting for the requested page state.");
+  }
+
+  private browserContentsKey(threadId: string, tabId: string) {
+    return `${threadId}:${tabId}`;
+  }
+
+  private async requireBrowserContents(threadId: string, tabId: string): Promise<WebContents> {
+    const key = this.browserContentsKey(threadId, tabId);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const contents = this.#browserContents.get(key);
+      if (contents && !contents.isDestroyed()) return contents;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Browser tab is not ready. Open the Browser workspace and retry.");
+  }
+
+  private waitForBrowserLoad(contents: WebContents, timeoutMs = 15_000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("Browser page load timed out."));
+      }, timeoutMs);
+      const onLoaded = () => {
+        cleanup();
+        resolve();
+      };
+      const onFailed = (_event: unknown, errorCode: number, errorDescription: string) => {
+        if (errorCode === -3) return;
+        cleanup();
+        reject(new Error(`Browser page load failed: ${errorDescription}`));
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        contents.removeListener("did-finish-load", onLoaded);
+        contents.removeListener("did-fail-load", onFailed);
+      };
+      contents.once("did-finish-load", onLoaded);
+      contents.once("did-fail-load", onFailed);
+    });
+  }
+
+  private async readVisibleBrowserPage(contents: WebContents, includeHtml: boolean) {
+    return contents.executeJavaScript(`
+      ({
+        title: document.title || location.href,
+        url: location.href,
+        text: (document.body?.innerText || '').replace(/\\s+/g, ' ').trim(),
+        html: ${includeHtml ? "document.documentElement?.outerHTML || ''" : "''"}
+      })
+    `, true) as Promise<{ title: string; url: string; text: string; html: string }>;
+  }
+
+  private async syncBrowserTabFromPage(threadId: string, tabId: string, page: { title: string; url: string; text: string; html?: string }) {
+    const tab = this.#browser.syncTab(threadId, tabId, { ...page, html: page.html ?? "" });
+    this.persistBrowserTabs(threadId);
+    return tab;
   }
 
   public async openFileLocation(threadId: string, filePath: string): Promise<string> {
@@ -744,6 +1035,11 @@ export class DesktopBackend {
 
   public async captureBrowserSnapshot(threadId: string, tabId: string, turnRunId: string) {
     const outputDir = await this.getThreadOutputDir(threadId);
+    const contents = this.#browserContents.get(this.browserContentsKey(threadId, tabId));
+    if (contents && !contents.isDestroyed()) {
+      const page = await this.readVisibleBrowserPage(contents, true);
+      await this.syncBrowserTabFromPage(threadId, tabId, page);
+    }
     const snapshot = await this.#browser.captureSnapshot(threadId, tabId, outputDir);
     const stats = await fs.stat(snapshot.filePath);
     const artifact = this.#db.addArtifact({
@@ -763,6 +1059,36 @@ export class DesktopBackend {
       status: "ready"
     });
     return { ...snapshot, artifact };
+  }
+
+  public async captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    const outputDir = await this.getThreadOutputDir(threadId);
+    const browserDir = path.join(outputDir, "browser");
+    await fs.mkdir(browserDir, { recursive: true });
+    const title = contents.getTitle() || "browser-page";
+    const fileName = `${title.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "page"}-${Date.now()}.png`;
+    const filePath = path.join(browserDir, fileName);
+    const image = await contents.capturePage();
+    await fs.writeFile(filePath, image.toPNG());
+    const stats = await fs.stat(filePath);
+    const artifact = this.#db.addArtifact({
+      threadId,
+      turnRunId,
+      messageId: null,
+      toolCallId: null,
+      artifactKind: "browser-screenshot",
+      displayName: fileName,
+      absolutePath: filePath,
+      relativePath: path.relative(outputDir, filePath),
+      mimeType: "image/png",
+      sizeBytes: stats.size,
+      sha256: await fileSha256(filePath),
+      sourceKind: "browser",
+      isUserVisible: true,
+      status: "ready"
+    });
+    return { title, url: contents.getURL(), filePath, artifact };
   }
 
   public async importKnowledge(input: {

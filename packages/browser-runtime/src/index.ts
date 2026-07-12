@@ -166,6 +166,28 @@ export class BrowserRuntime {
     };
   }
 
+  public syncTab(threadId: string, tabId: string, page: Pick<PageSnapshot, "title" | "url" | "text" | "html">): BrowserTabRecord {
+    const session = this.requireTab(threadId, tabId);
+    const current = session.history[session.historyIndex];
+    const next: PageSnapshot = {
+      title: page.title,
+      url: page.url,
+      text: page.text,
+      html: page.html,
+      fetchedAt: new Date().toISOString()
+    };
+    if (current) {
+      session.history[session.historyIndex] = next;
+    } else {
+      session.history = [next];
+      session.historyIndex = 0;
+    }
+    session.record.title = next.title;
+    session.record.url = next.url;
+    session.record.updatedAt = next.fetchedAt;
+    return { ...session.record };
+  }
+
   public async captureSnapshot(threadId: string, tabId: string, outputDir: string): Promise<{
     filePath: string;
     title: string;

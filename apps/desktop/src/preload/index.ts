@@ -43,6 +43,7 @@ const api = {
   closeTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:close", payload),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
   openPath: (targetPath: string) => ipcRenderer.invoke("shell:open-path", targetPath),
+  openFolder: (targetPath: string) => ipcRenderer.invoke("shell:open-folder", targetPath),
   openFileLocation: (payload: { threadId: string; path: string }) =>
     ipcRenderer.invoke("threads:open-file-location", payload),
   listSkills: (cwd?: string | null) => ipcRenderer.invoke("skills:list", cwd),
@@ -88,6 +89,10 @@ const api = {
     ipcRenderer.invoke("browser:forward", payload),
   closeBrowserTab: (payload: { threadId: string; tabId: string }) =>
     ipcRenderer.invoke("browser:close", payload),
+  registerBrowserWebContents: (payload: { threadId: string; tabId: string; webContentsId: number }) =>
+    ipcRenderer.invoke("browser:register-webcontents", payload),
+  syncBrowserWebContents: (payload: { threadId: string; tabId: string }) =>
+    ipcRenderer.invoke("browser:sync-webcontents", payload),
   resolveApproval: (
     id: string,
     resolution: { decision: "approved" | "denied"; mode?: "once" | "session" | "remember" }

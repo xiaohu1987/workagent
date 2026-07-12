@@ -35,6 +35,7 @@ declare global {
       closeTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<void>;
       openExternal: (url: string) => Promise<void>;
       openPath: (targetPath: string) => Promise<string>;
+      openFolder: (targetPath: string) => Promise<string>;
       openFileLocation: (payload: { threadId: string; path: string }) => Promise<string>;
       listSkills: (cwd?: string | null) => Promise<any[]>;
       listPlugins: () => Promise<any[]>;
@@ -76,6 +77,8 @@ declare global {
       goBackBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
       goForwardBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
       closeBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
+      registerBrowserWebContents: (payload: { threadId: string; tabId: string; webContentsId: number }) => Promise<void>;
+      syncBrowserWebContents: (payload: { threadId: string; tabId: string }) => Promise<any>;
       resolveApproval: (
         id: string,
         resolution: { decision: "approved" | "denied"; mode?: "once" | "session" | "remember" }

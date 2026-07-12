@@ -121,6 +121,15 @@ interface RuntimeServices {
   goForwardBrowserTab(threadId: string, tabId: string): Promise<any>;
   focusBrowserTab(threadId: string, tabId: string): Promise<any>;
   readBrowserPageText(threadId: string, tabId: string): Promise<any>;
+  inspectBrowserPage(threadId: string, tabId: string): Promise<any>;
+  inspectBrowserTarget(threadId: string, tabId: string, elementId: string): Promise<any>;
+  clickBrowserElement(threadId: string, tabId: string, elementId: string): Promise<any>;
+  fillBrowserElement(threadId: string, tabId: string, elementId: string, value: string): Promise<any>;
+  selectBrowserOption(threadId: string, tabId: string, elementId: string, value: string): Promise<any>;
+  scrollBrowserPage(threadId: string, tabId: string, deltaY: number): Promise<any>;
+  pressBrowserKey(threadId: string, tabId: string, key: string): Promise<any>;
+  waitForBrowserPage(threadId: string, tabId: string, input: { text?: string; elementId?: string; timeoutMs?: number }): Promise<any>;
+  captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string): Promise<any>;
   captureBrowserSnapshot(threadId: string, tabId: string, turnRunId: string): Promise<any>;
   getThreadOutputDir(threadId: string): Promise<string>;
   listMcpResources(server?: string): Promise<any[]>;
@@ -869,6 +878,15 @@ class ThreadSessionRuntime {
               goForwardBrowserTab: (tabId) => this.services.goForwardBrowserTab(this.threadId, tabId),
               focusBrowserTab: (tabId) => this.services.focusBrowserTab(this.threadId, tabId),
               readBrowserPageText: (tabId) => this.services.readBrowserPageText(this.threadId, tabId),
+              inspectBrowserPage: (tabId) => this.services.inspectBrowserPage(this.threadId, tabId),
+              inspectBrowserTarget: (tabId, elementId) => this.services.inspectBrowserTarget(this.threadId, tabId, elementId),
+              clickBrowserElement: (tabId, elementId) => this.services.clickBrowserElement(this.threadId, tabId, elementId),
+              fillBrowserElement: (tabId, elementId, value) => this.services.fillBrowserElement(this.threadId, tabId, elementId, value),
+              selectBrowserOption: (tabId, elementId, value) => this.services.selectBrowserOption(this.threadId, tabId, elementId, value),
+              scrollBrowserPage: (tabId, deltaY) => this.services.scrollBrowserPage(this.threadId, tabId, deltaY),
+              pressBrowserKey: (tabId, key) => this.services.pressBrowserKey(this.threadId, tabId, key),
+              waitForBrowserPage: (tabId, input) => this.services.waitForBrowserPage(this.threadId, tabId, input),
+              captureBrowserScreenshot: (tabId) => this.services.captureBrowserScreenshot(this.threadId, tabId, turn.id),
               captureBrowserSnapshot: (tabId) => this.services.captureBrowserSnapshot(this.threadId, tabId, turn.id),
               getThreadOutputDir: () => this.services.getThreadOutputDir(this.threadId),
               listMcpResources: async (server) => {
@@ -1502,6 +1520,7 @@ function buildRuntimePrompt(
     "When a tool can gather needed facts, call it instead of guessing.",
     "Before responding, decide whether an available Skill is the best fit. When it is, call skills.load with that skill_id before following its instructions. Use Function Calling for Skills and external tools rather than merely claiming a Skill was used.",
     "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
+    "For browser automation, call browser.inspect_page before browser.click, browser.fill, browser.select_option, or browser.press_key. Use only element ids returned by the latest inspection, then inspect again after navigation or page changes. Never guess selectors or claim a browser action succeeded without a tool result.",
     "Respond as an IDE software engineering agent using an event stream format.",
     "Your visible output is consumed by a renderer that understands structured event blocks.",
     "Prefer XML-like event envelopes when possible: <event type=\"commentary\">...</event>.",
