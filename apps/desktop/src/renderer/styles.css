@@ -3652,6 +3652,116 @@ select:focus {
   line-height: 1;
 }
 
+.provider-model-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.provider-model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.model-capability-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid rgba(116, 181, 255, 0.22);
+  border-radius: 8px;
+  color: rgba(218, 232, 255, 0.88);
+  background: rgba(74, 139, 217, 0.1);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.model-capability-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #71abff;
+  cursor: pointer;
+}
+
+.model-capability-toggle:has(input:not(:checked)) {
+  border-color: rgba(255, 255, 255, 0.1);
+  color: rgba(234, 236, 240, 0.58);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.model-test-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  color: #8bc7a0 !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-test-result i {
+  color: rgba(139, 199, 160, 0.55);
+  font-style: normal;
+}
+
+.composer-model-picker-model-label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.composer-model-picker-model-label > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-model-picker-multimodal {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 5px;
+  color: #8bbcff;
+  background: rgba(102, 164, 255, 0.14);
+}
+
+.composer-model-picker-multimodal svg {
+  width: 12px;
+  height: 12px;
+}
+
+.mcp-settings-card {
+  gap: 10px;
+}
+
+.skill-metadata-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.skill-domain-pill {
+  color: #f0c56a;
+  border-color: rgba(240, 197, 106, 0.3);
+  background: rgba(240, 197, 106, 0.1);
+}
+
+@media (max-width: 760px) {
+  .provider-model-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .provider-model-actions {
+    justify-content: flex-start;
+  }
+}
+
 .composer-model-picker-chevron {
   display: inline-flex;
   color: #8b8f97;
@@ -3730,8 +3840,8 @@ select:focus {
 
 .composer-attachment-chip.image { border-color: rgba(216, 131, 193, 0.28); }
 .composer-attachment-chip.skill {
-  border-color: rgba(242, 190, 76, 0.38);
-  background: rgba(117, 86, 26, 0.16);
+  border-color: rgba(242, 190, 76, 0.52);
+  background: rgba(117, 86, 26, 0.22);
 }
 .composer-attachment-chip.mcp { border-color: rgba(187, 141, 221, 0.28); }
 
@@ -3749,7 +3859,10 @@ select:focus {
 .composer-attachment-chip.code .composer-attachment-icon { color: #91c3ff; }
 .composer-attachment-chip.folder .composer-attachment-icon { color: #e6b45e; }
 .composer-attachment-chip.image .composer-attachment-icon { color: #e89ad2; }
-.composer-attachment-chip.skill .composer-attachment-icon { color: #f2be4c; }
+.composer-attachment-chip.skill .composer-attachment-icon {
+  color: #f2be4c;
+  background: rgba(242, 190, 76, 0.1);
+}
 .composer-attachment-chip.skill .composer-attachment-copy strong { color: #f5c867; }
 .composer-attachment-chip.skill .composer-attachment-copy small { color: rgba(245, 200, 103, 0.7); }
 .composer-attachment-chip.mcp .composer-attachment-icon { color: #d0a6e7; }
@@ -3769,9 +3882,32 @@ select:focus {
 }
 
 .composer-attachment-copy strong {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   color: #f2f3f5;
   font-size: 12px;
   font-weight: 600;
+}
+
+.composer-attachment-copy strong > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-kind {
+  flex: 0 0 auto;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: #f6ca69;
+  background: rgba(242, 190, 76, 0.17);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
 .composer-attachment-copy small {
@@ -6467,6 +6603,15 @@ select:focus {
   background: #202023;
 }
 
+.composer-add-menu-submenu::before {
+  position: absolute;
+  top: 0;
+  right: 100%;
+  bottom: 0;
+  width: 8px;
+  content: "";
+}
+
 .composer-add-menu-submenu-title {
   padding: 6px 7px 4px;
   color: rgba(243, 243, 245, 0.55);
@@ -7533,6 +7678,56 @@ body.panel-resizing {
 
 .windowbar {
   background: #0b0c0e;
+}
+
+/* Compact provider chooser: provider cards only need a single name line. */
+.provider-list-panel {
+  padding: 10px;
+}
+
+.provider-list-header {
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.provider-list-scroll {
+  gap: 6px;
+}
+
+.provider-list-card-row {
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 6px;
+}
+
+.provider-list-card {
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  padding: 8px 11px;
+  border-radius: 10px;
+}
+
+.provider-remove-button {
+  width: 36px;
+  border-radius: 10px;
+}
+
+.provider-remove-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-add-provider {
+  min-height: 34px;
+  padding: 0 11px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.secret-badge {
+  border-color: rgba(94, 211, 130, 0.38);
+  color: #9be6ad;
+  background: rgba(65, 175, 99, 0.16);
 }
 
 @media (max-width: 980px) {

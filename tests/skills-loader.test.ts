@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadSkillsFromRoots, type SkillRootDefinition } from "@skills-runtime";
+import { loadSkillsFromRoots, SkillsManager, type SkillRootDefinition } from "@skills-runtime";
 
 const tempDirs: string[] = [];
 
@@ -51,5 +51,49 @@ policy:
     expect(skills[0]?.scope).toBe("repo");
     expect(skills[0]?.displayName).toBe("Local Skill");
     expect(skills[0]?.allowImplicitInvocation).toBe(false);
+  });
+
+  it("keeps system skills cached while exposing user domains for on-demand loading", async () => {
+    const appHome = await makeTempDir();
+    const systemSkillDir = path.join(appHome, "skills", "system", "release-skill");
+    const userSkillDir = path.join(appHome, "skills", "imported", "data-skill");
+    await fs.mkdir(systemSkillDir, { recursive: true });
+    await fs.mkdir(userSkillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(systemSkillDir, "SKILL.md"),
+      "---\nname: release-skill\ndescription: Prepare a software release\n---\nSystem release instructions.",
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(userSkillDir, "SKILL.md"),
+      "---\nname: data-skill\ndescription: Analyze CSV files\ndomain: 数据分析\n---\nUse the CSV analysis workflow.",
+      "utf8"
+    );
+
+    const manager = new SkillsManager();
+    const skills = await manager.refresh(appHome);
+    const userSkill = skills.find((skill) => skill.name === "data-skill");
+
+    expect(skills.find((skill) => skill.name === "release-skill")?.domain).toBe("系统");
+    expect(userSkill?.domain).toBe("数据分析");
+
+    const catalog = manager.buildContext(skills, { explicitSkillIds: [userSkill!.id] });
+    expect(catalog?.text).toContain("priority: selected");
+    expect(catalog?.text).toContain("parameters_schema");
+
+    await expect(manager.loadInstructions(userSkill!.id)).resolves.toMatchObject({
+      skill: { qualifiedName: "data-skill" },
+      content: expect.stringContaining("CSV analysis workflow")
+    });
+
+    await fs.writeFile(
+      path.join(systemSkillDir, "SKILL.md"),
+      "---\nname: release-skill\ndescription: Changed after startup\n---\nChanged instructions.",
+      "utf8"
+    );
+    const refreshed = await manager.refresh(appHome);
+    expect(refreshed.find((skill) => skill.name === "release-skill")?.description).toBe(
+      "Prepare a software release"
+    );
   });
 });

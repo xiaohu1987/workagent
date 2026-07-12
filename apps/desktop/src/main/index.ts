@@ -146,6 +146,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:delete", (_event, threadId: string) => backend.deleteThread(threadId));
   ipcMain.handle("threads:snapshot", (_event, threadId: string) => backend.getThreadSnapshot(threadId));
   ipcMain.handle("threads:send", (_event, payload) => backend.sendMessage(payload.threadId, payload.content));
+  ipcMain.handle("threads:reject-multimodal", (_event, payload: { threadId: string; content: string }) =>
+    backend.rejectUnsupportedMultimodalInput(payload.threadId, payload.content)
+  );
   ipcMain.handle("threads:interrupt", (_event, threadId: string) => backend.interruptThread(threadId));
   ipcMain.handle("threads:update-model", (_event, payload) =>
     backend.updateThreadModelSelection(payload.threadId, payload.providerId, payload.modelId)
@@ -212,6 +215,7 @@ function registerIpc(): void {
     backend.setGpaFullAccess(payload.threadId, payload.fullAccess)
   );
   ipcMain.handle("models:fetch", (_event, payload) => backend.fetchProviderModels(payload));
+  ipcMain.handle("models:test", (_event, payload) => backend.testProviderModel(payload));
 }
 
 async function ensureRendererServerUrl(): Promise<string> {

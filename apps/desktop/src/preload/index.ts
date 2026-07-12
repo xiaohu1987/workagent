@@ -21,6 +21,8 @@ const api = {
   getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
   sendMessage: (payload: { threadId: string; content: string }) =>
     ipcRenderer.invoke("threads:send", payload),
+  rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) =>
+    ipcRenderer.invoke("threads:reject-multimodal", payload),
   interruptThread: (threadId: string) => ipcRenderer.invoke("threads:interrupt", threadId),
   updateThreadModelSelection: (payload: { threadId: string; providerId: string; modelId: string }) =>
     ipcRenderer.invoke("threads:update-model", payload),
@@ -87,6 +89,10 @@ const api = {
     type?: "mock" | "openai-compatible" | "anthropic" | "gemini" | "openrouter" | "ollama" | "vllm" | "gateway";
     id?: string;
   }) => ipcRenderer.invoke("models:fetch", payload),
+  testProviderModel: (payload: {
+    provider: unknown;
+    model: unknown;
+  }) => ipcRenderer.invoke("models:test", payload),
   onRuntimeEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("runtime:event", wrapped);

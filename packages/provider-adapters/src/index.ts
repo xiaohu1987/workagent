@@ -148,7 +148,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       signal: input.abortSignal
     });
     const text = response.choices[0]?.message?.content?.trim() || "";
-    return parseDecisionFromText(text);
+    return withOutputTokens(parseDecisionFromText(text), response.usage?.completion_tokens);
   }
 }
 
@@ -184,7 +184,7 @@ class AnthropicProvider implements ProviderAdapter {
       .join("\n")
       .trim();
 
-    return parseDecisionFromText(text);
+    return withOutputTokens(parseDecisionFromText(text), response.usage.output_tokens);
   }
 }
 
@@ -221,12 +221,15 @@ class GeminiProvider implements ProviderAdapter {
           parts?: Array<{ text?: string }>;
         };
       }>;
+      usageMetadata?: {
+        candidatesTokenCount?: number;
+      };
     };
 
     const text =
       json.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n").trim() ??
       "";
-    return parseDecisionFromText(text);
+    return withOutputTokens(parseDecisionFromText(text), json.usageMetadata?.candidatesTokenCount);
   }
 }
 
@@ -350,6 +353,12 @@ function extractVisibleStreamText(text: string): string {
   // JSON instead of the requested decision envelope. Tool markup is control
   // data, never user-visible text, including while a response is streaming.
   return stripTaggedToolCalls(text);
+}
+
+function withOutputTokens(decision: ProviderTurnDecision, outputTokens?: number): ProviderTurnDecision {
+  return typeof outputTokens === "number" && Number.isFinite(outputTokens)
+    ? { ...decision, outputTokens }
+    : decision;
 }
 
 function tryParseTaggedToolCalls(text: string): ProviderTurnDecision["toolCalls"] | null {

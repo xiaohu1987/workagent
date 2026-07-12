@@ -220,6 +220,7 @@ async function readSkillDirectory(
         ? parsed.data.metadata["short-description"]
         : metadata?.interface?.short_description),
     scope: root.scope,
+    domain: resolveSkillDomain({ name, description, scope: root.scope, pluginId: root.pluginId, frontmatter: parsed.data }),
     rootPath: root.path,
     skillPath,
     metadataPath: metadata ? path.join(skillDir, METADATA_FILE) : null,
@@ -232,6 +233,40 @@ async function readSkillDirectory(
     products: metadata?.policy?.products ?? [],
     contentHash: hash
   };
+}
+
+function resolveSkillDomain(input: {
+  name: string;
+  description: string;
+  scope: SkillScope;
+  pluginId?: string;
+  frontmatter: Record<string, unknown>;
+}): string {
+  if (input.pluginId) {
+    return "第三方/插件";
+  }
+  if (input.scope === "system") {
+    return "系统";
+  }
+
+  const declared = input.frontmatter.domain ?? input.frontmatter.category;
+  if (typeof declared === "string" && declared.trim()) {
+    return declared.trim();
+  }
+  const tags = input.frontmatter.tags;
+  if (Array.isArray(tags) && typeof tags[0] === "string" && tags[0].trim()) {
+    return tags[0].trim();
+  }
+
+  const source = `${input.name} ${input.description}`.toLowerCase();
+  if (/(react|vue|frontend|css|ui|design|前端|界面)/.test(source)) return "前端";
+  if (/(test|testing|vitest|playwright|测试)/.test(source)) return "测试";
+  if (/(git|pr|review|commit|github|代码审查)/.test(source)) return "代码协作";
+  if (/(excel|csv|data|数据库|数据)/.test(source)) return "数据";
+  if (/(image|图像|图片|视觉)/.test(source)) return "多媒体";
+  if (/(deploy|release|ci|cd|发布)/.test(source)) return "交付运维";
+  if (/(plan|brainstorm|规划|需求)/.test(source)) return "规划";
+  return "通用";
 }
 
 async function readOptionalMetadataFile(

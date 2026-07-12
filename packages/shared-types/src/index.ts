@@ -198,6 +198,8 @@ export interface SkillMetadata {
   description: string;
   shortDescription?: string;
   scope: SkillScope;
+  /** User skills are grouped by a lightweight domain label for on-demand loading. */
+  domain?: string;
   rootPath: string;
   skillPath: string;
   metadataPath: string | null;
@@ -368,6 +370,8 @@ export interface AppConfig {
 
 export interface ProviderTurnDecision {
   assistantMessage?: string;
+  /** Provider-reported completion token count when its API exposes usage data. */
+  outputTokens?: number;
   toolCalls: RuntimeToolCall[];
   endTurn: boolean;
   /** Explicit provider declaration that every deliverable in the user goal is complete. */

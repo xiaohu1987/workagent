@@ -108,6 +108,23 @@ describe("ToolRuntime", () => {
     expect(deferred.map((tool) => tool.name)).toContain("fs.write_file");
   });
 
+  it("loads selected Skill instructions through the skills.load tool", async () => {
+    const loadSkill = vi.fn().mockResolvedValue({
+      skill: { qualifiedName: "data-skill", domain: "数据分析", scope: "user" },
+      content: "Use the data workflow."
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "skill-load", name: "skills.load", arguments: { skill_id: "skill-1" } },
+      { cwd: process.cwd(), loadSkill } as unknown as ToolRuntimeContext
+    );
+
+    expect(loadSkill).toHaveBeenCalledWith("skill-1");
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("# Loaded Skill: data-skill");
+    expect(result.content).toContain("Use the data workflow.");
+  });
+
   it("rejects direct file paths outside the project folder", async () => {
     const readFile = vi.fn();
     const runtime = new ToolRuntime();

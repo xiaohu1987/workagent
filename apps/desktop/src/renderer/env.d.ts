@@ -16,6 +16,7 @@ declare global {
       deleteThread: (threadId: string) => Promise<void>;
       getThreadSnapshot: (threadId: string) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string }) => Promise<void>;
+      rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) => Promise<void>;
       interruptThread: (threadId: string) => Promise<void>;
       updateThreadModelSelection: (payload: {
         threadId: string;
@@ -45,6 +46,10 @@ declare global {
         type?: string;
         id?: string;
       }) => Promise<Array<{ id: string; displayName?: string }>>;
+      testProviderModel: (payload: {
+        provider: ProviderDefinition;
+        model: ModelProfile;
+      }) => Promise<{ latencyMs: number; outputTokens: number; tokensPerSecond: number }>;
       importKnowledge: (payload: {
         displayName: string;
         scope: "global" | "project" | "imported";

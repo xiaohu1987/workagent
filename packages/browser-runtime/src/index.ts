@@ -4,13 +4,15 @@ import path from "node:path";
 import * as cheerio from "cheerio";
 import type { BrowserTabRecord } from "@shared-types";
 
-interface PageSnapshot {
+export interface PageSnapshot {
   title: string;
   url: string;
   text: string;
   html: string;
   fetchedAt: string;
 }
+
+export type PageLoader = (target: string) => Promise<PageSnapshot>;
 
 interface BrowserTabSession {
   record: BrowserTabRecord;
@@ -21,8 +23,10 @@ interface BrowserTabSession {
 export class BrowserRuntime {
   readonly #tabsByThread = new Map<string, BrowserTabSession[]>();
 
+  public constructor(private readonly pageLoader: PageLoader = loadPage) {}
+
   public async openTab(threadId: string, target: string): Promise<{ tab: BrowserTabRecord; page: PageSnapshot }> {
-    const page = await loadPage(target);
+    const page = await this.pageLoader(target);
     const now = new Date().toISOString();
     const tab: BrowserTabRecord = {
       id: randomUUID(),
@@ -52,7 +56,7 @@ export class BrowserRuntime {
 
   public async navigate(threadId: string, tabId: string, target: string): Promise<{ tab: BrowserTabRecord; page: PageSnapshot }> {
     const session = this.requireTab(threadId, tabId);
-    const page = await loadPage(target);
+    const page = await this.pageLoader(target);
     session.history = session.history.slice(0, session.historyIndex + 1);
     session.history.push(page);
     session.historyIndex = session.history.length - 1;
@@ -69,7 +73,7 @@ export class BrowserRuntime {
     if (!current) {
       throw new Error(`Browser tab ${tabId} has no history.`);
     }
-    const reloaded = await loadPage(current.url);
+    const reloaded = await this.pageLoader(current.url);
     session.history[session.historyIndex] = reloaded;
     session.record.title = reloaded.title;
     session.record.url = reloaded.url;
@@ -221,7 +225,7 @@ export class BrowserRuntime {
   }
 }
 
-async function loadPage(target: string): Promise<PageSnapshot> {
+export async function loadPage(target: string): Promise<PageSnapshot> {
   const resolved = await resolveTarget(target);
   const html = resolved.html;
   const $ = cheerio.load(html);

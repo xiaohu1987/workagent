@@ -367,7 +367,11 @@ class ThreadSessionRuntime {
       query: initialInput,
       allowedPluginIds: enabledPluginIds
     });
-    const skillContext = this.services.skills.buildContext(selectedSkills);
+    const availableSkills = this.services.skills.listForThread(enabledPluginIds);
+    const skillContext = this.services.skills.buildContext(availableSkills, {
+      explicitSkillIds: thread.selectedSkillIds
+    });
+    const availableSkillIds = availableSkills.map((skill) => skill.id);
     const skillDependencyWarnings = buildSkillDependencyWarnings(
       selectedSkills,
       this.services.mcp.listConfigs(),
@@ -824,7 +828,9 @@ class ThreadSessionRuntime {
               callMcpTool: async (server, tool, argumentsJson) => {
                 assertAccessibleMcpServer(server, accessibleMcpServerIds);
                 return this.services.callMcpTool(server, tool, argumentsJson);
-              }
+              },
+              loadSkill: (skillId) =>
+                this.services.skills.loadInstructions(skillId, availableSkillIds)
               }),
               abortController.signal
             );
@@ -1260,10 +1266,7 @@ export function getAddedPatchFiles(argumentsJson: Record<string, unknown>): stri
 
 export function formatAvailableTools(tools: ToolSpecDefinition[]): string {
   const definitions = tools.map((tool) => {
-    const required = Array.isArray((tool.inputSchema as { required?: unknown }).required)
-      ? (tool.inputSchema as { required: unknown[] }).required.map(String).join(", ")
-      : "none";
-    return `- ${tool.name}: ${tool.description} Required arguments: ${required}.`;
+    return `- ${tool.name}: ${tool.description} Input schema: ${JSON.stringify(tool.inputSchema)}.`;
   });
 
   return [
@@ -1283,8 +1286,10 @@ function buildRuntimePrompt(
 ): RuntimePromptBundle {
   const blocks = [
     "You are codexh, a desktop agent for project and chat workflows.",
+    `Current local date: ${formatRuntimeDate(new Date())}. Use this date for time-sensitive queries. Do not add, infer, or reuse a year that the user did not request.`,
     "Prefer progressive disclosure: inspect facts before making edits.",
     "When a tool can gather needed facts, call it instead of guessing.",
+    "Before responding, decide whether an available Skill is the best fit. When it is, call skills.load with that skill_id before following its instructions. Use Function Calling for Skills and external tools rather than merely claiming a Skill was used.",
     "Respond as an IDE software engineering agent using an event stream format.",
     "Your visible output is consumed by a renderer that understands structured event blocks.",
     "Prefer XML-like event envelopes when possible: <event type=\"commentary\">...</event>.",
@@ -1311,6 +1316,14 @@ function buildRuntimePrompt(
     knowledgeContext,
     workflowPackContext
   };
+}
+
+function formatRuntimeDate(date: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
 }
 
 function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {

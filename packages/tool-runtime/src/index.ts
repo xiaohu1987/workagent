@@ -62,6 +62,7 @@ export interface ToolRuntimeContext {
   listMcpResourceTemplates: (server?: string) => Promise<any[]>;
   readMcpResource: (server: string, uri: string) => Promise<any>;
   callMcpTool: (server: string, tool: string, argumentsJson: Record<string, unknown>) => Promise<any>;
+  loadSkill?: (skillId: string) => Promise<{ skill: { qualifiedName: string; domain?: string; scope: string }; content: string }>;
 }
 
 export type ToolHandler = (
@@ -161,6 +162,40 @@ export class ToolRuntime {
 }
 
 function registerBuiltinTools(runtime: ToolRuntime): void {
+  runtime.register(
+    {
+      name: "skills.load",
+      description: "Load the complete SKILL.md instructions for a listed skill before using that skill. Explicitly selected skills should be loaded first when relevant.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          skill_id: {
+            type: "string",
+            description: "The exact skill_id from the Available Skills catalog."
+          }
+        },
+        required: ["skill_id"]
+      },
+      riskLevel: "low",
+      parallelSafe: true
+    },
+    async (args, ctx) => {
+      if (!ctx.loadSkill) {
+        return { ok: false, content: "Skill loading is not available for this task." };
+      }
+      const loaded = await ctx.loadSkill(String(args.skill_id ?? ""));
+      return {
+        ok: true,
+        content: `# Loaded Skill: ${loaded.skill.qualifiedName}\nDomain: ${loaded.skill.domain ?? "通用"}\n\n${loaded.content}`,
+        json: {
+          skill: loaded.skill.qualifiedName,
+          domain: loaded.skill.domain ?? "通用",
+          instructions: loaded.content
+        }
+      };
+    }
+  );
+
   runtime.register(
     {
       name: "tool_search",
@@ -391,6 +426,14 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     spec("web_search.search_query", "Search the web for a topic.", ["query"], "low"),
     async (args, ctx) => {
       const results = await ctx.webSearch(String(args.query ?? ""));
+      if (results.length === 0) {
+        return {
+          ok: true,
+          content:
+            "No search results are currently available. Do not retry the same query, invent a URL, or add a year the user did not request. Explain this limitation clearly and end the task.",
+          json: { results, unavailable: true }
+        };
+      }
       return { ok: true, content: JSON.stringify(results, null, 2), json: { results } };
     }
   );

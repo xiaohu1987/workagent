@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
-import { shell } from "electron";
+import { BrowserWindow, shell } from "electron";
 import type {
   AppConfig,
   ArtifactRecord,
@@ -13,6 +13,7 @@ import type {
   KnowledgeBaseRecord,
   MessageRecord,
   McpServerConfig,
+  ModelProfile,
   PluginRecord,
   ProviderDefinition,
   ProjectPluginBinding,
@@ -22,7 +23,7 @@ import type {
   UserInputPrompt
 } from "@shared-types";
 import { AgentRuntimeService, parseGpaState } from "@agent-runtime";
-import { BrowserRuntime } from "@browser-runtime";
+import { BrowserRuntime, loadPage, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
 import { hashDirectory, PluginRuntime } from "@plugin-runtime";
@@ -50,7 +51,9 @@ export class DesktopBackend {
   readonly #skills = new SkillsManager();
   readonly #toolRuntime = new ToolRuntime();
   readonly #providerFactory = new ProviderFactory();
-  readonly #browser = new BrowserRuntime();
+  // The right-side browser is rendered by Chromium. Use the same engine for tool
+  // extraction so sites that block raw HTTP clients do not return a challenge page.
+  readonly #browser = new BrowserRuntime((target) => this.loadBrowserPage(target));
   readonly #plugins = new PluginRuntime();
   readonly #terminal = new TerminalRuntime();
   readonly #openedLocalUrls = new Set<string>();
@@ -294,13 +297,13 @@ export class DesktopBackend {
     await this.#runtime.setGpaFullAccess(threadId, fullAccess);
   }
 
-  public sendMessage(threadId: string, content: string): void {
+  public async sendMessage(threadId: string, content: string): Promise<void> {
     const thread = this.#db.getThread(threadId);
     if (this.#db.listMessages(threadId).length === 0) {
       const updated = this.#db.updateThread(threadId, {
         title: buildThreadTitleFromFirstMessage(content)
       });
-      void this.emit({
+      await this.emit({
         type: "thread.updated",
         threadId,
         payload: { thread: updated },
@@ -308,8 +311,45 @@ export class DesktopBackend {
       });
     }
 
-    void this.refreshSkills(thread.cwd);
+    await this.refreshSkills(thread.cwd);
     this.#runtime.submitUserInput(threadId, content);
+  }
+
+  public async rejectUnsupportedMultimodalInput(threadId: string, content: string): Promise<void> {
+    if (this.#db.listMessages(threadId).length === 0) {
+      const updated = this.#db.updateThread(threadId, {
+        title: buildThreadTitleFromFirstMessage(content)
+      });
+      await this.emit({
+        type: "thread.updated",
+        threadId,
+        payload: { thread: updated },
+        createdAt: new Date().toISOString()
+      });
+    }
+
+    const userMessage = this.#db.createMessage({
+      threadId,
+      turnRunId: null,
+      role: "user",
+      content,
+      metadataJson: null
+    });
+    const assistantMessage = this.#db.createMessage({
+      threadId,
+      turnRunId: null,
+      role: "assistant",
+      content: "此模型不支持多模态输入，无法处理本次文件、文件夹或图片附件。请切换到支持多模态的模型后重试。",
+      metadataJson: JSON.stringify({ reason: "multimodal_not_supported" })
+    });
+    for (const message of [userMessage, assistantMessage]) {
+      await this.emit({
+        type: "message.created",
+        threadId,
+        payload: { message },
+        createdAt: new Date().toISOString()
+      });
+    }
   }
 
   public async interruptThread(threadId: string): Promise<void> {
@@ -378,6 +418,47 @@ export class DesktopBackend {
       id: entry.id,
       displayName: entry.display_name ?? entry.name ?? entry.id
     }));
+  }
+
+  public async testProviderModel(input: {
+    provider: ProviderDefinition;
+    model: ModelProfile;
+  }): Promise<{ latencyMs: number; outputTokens: number; tokensPerSecond: number }> {
+    const startedAt = performance.now();
+    const adapter = this.#providerFactory.create(input.provider);
+    const timeout = new AbortController();
+    const timeoutId = setTimeout(() => timeout.abort(), 30_000);
+
+    try {
+      const decision = await adapter.runTurn({
+        systemPrompt:
+          "You are testing a model connection. Return one compact JSON object with no tool calls.",
+        transcript: [{ role: "user", content: "Return a short connection-test JSON response." }],
+        availableTools: [],
+        model: { ...input.model, supportsStreaming: false },
+        provider: input.provider,
+        stream: false,
+        abortSignal: timeout.signal
+      });
+      const latencyMs = Math.max(1, Math.round(performance.now() - startedAt));
+      const outputTokens = Math.max(
+        1,
+        decision.outputTokens ?? estimateTokenCount(decision.assistantMessage ?? "")
+      );
+
+      return {
+        latencyMs,
+        outputTokens,
+        tokensPerSecond: Number((outputTokens / (latencyMs / 1_000)).toFixed(2))
+      };
+    } catch (error) {
+      if (timeout.signal.aborted) {
+        throw new Error("模型测试超时（30 秒）。请检查服务地址和网络连接。");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   public getConfig(): AppConfig {
@@ -880,27 +961,62 @@ export class DesktopBackend {
   }
 
   private async webSearch(query: string): Promise<Array<{ title: string; url: string; snippet: string }>> {
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": "codexh/0.1.0"
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      return [];
+    }
+
+    const providers = [
+      {
+        name: "baidu",
+        url: `https://www.baidu.com/s?rn=8&wd=${encodeURIComponent(normalizedQuery)}`,
+        selector: "h3 a"
+      },
+      {
+        name: "bing",
+        url: `https://www.bing.com/search?count=8&setlang=zh-Hans&q=${encodeURIComponent(normalizedQuery)}`,
+        selector: "li.b_algo h2 a"
       }
-    });
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    return $(".result")
-      .toArray()
-      .slice(0, 8)
-      .map((element) => {
-        const anchor = $(element).find(".result__a").first();
-        const snippet = $(element).find(".result__snippet").text().trim();
-        return {
-          title: anchor.text().trim(),
-          url: anchor.attr("href") ?? "",
-          snippet
-        };
-      })
-      .filter((item) => item.title && item.url);
+    ];
+
+    for (const provider of providers) {
+      try {
+        const page = await this.loadBrowserPage(provider.url);
+        const $ = cheerio.load(page.html);
+        const results = $(provider.selector)
+          .toArray()
+          .slice(0, 8)
+          .map((element) => {
+            const anchor = $(element);
+            const href = anchor.attr("href") ?? "";
+            const container = anchor.closest(".result, .c-container, .b_algo, article, div");
+            return {
+              title: anchor.text().replace(/\s+/g, " ").trim(),
+              url: resolveSearchResultUrl(page.url, href),
+              snippet: container.text().replace(/\s+/g, " ").trim().slice(0, 600)
+            };
+          })
+          .filter((item) => item.title && /^https?:\/\//i.test(item.url));
+        if (results.length > 0) {
+          return results;
+        }
+        await this.#logs.append("web.search_provider_empty", {
+          provider: provider.name,
+          query: normalizedQuery,
+          pageUrl: page.url
+        });
+      } catch (error) {
+        await this.#logs.append("web.search_provider_failed", {
+          provider: provider.name,
+          query: normalizedQuery,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    // A search outage is a valid result state, not an executable-tool failure.
+    // This lets the agent complete with a clear limitation instead of retrying it.
+    return [];
   }
 
   private async openPage(threadId: string, url: string): Promise<{ title: string; url: string; text: string }> {
@@ -909,18 +1025,57 @@ export class DesktopBackend {
       return opened.page;
     }
 
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": "codexh/0.1.0"
+    const page = await this.loadBrowserPage(url);
+    return { title: page.title, url: page.url, text: page.text };
+  }
+
+  private async loadBrowserPage(target: string): Promise<PageSnapshot> {
+    if (!/^https?:\/\//i.test(target)) {
+      return loadPage(target);
+    }
+
+    let extractor: BrowserWindow | null = null;
+    try {
+      extractor = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true
+        }
+      });
+      await extractor.loadURL(target);
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const rendered = await extractor.webContents.executeJavaScript(`
+        (() => {
+          const ignored = document.querySelectorAll("script, style, noscript, template");
+          for (const node of ignored) node.remove();
+          const text = (document.body?.innerText || document.documentElement?.innerText || "")
+            .replace(/\\s+/g, " ")
+            .trim();
+          return {
+            title: document.title || location.href,
+            url: location.href,
+            text,
+            html: document.documentElement?.outerHTML || ""
+          };
+        })();
+      `);
+      if (!rendered.text) {
+        throw new Error("The rendered page did not contain readable text.");
       }
-    });
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    return {
-      title: $("title").text().trim() || url,
-      url: response.url || url,
-      text: $.text().replace(/\s+/g, " ").trim()
-    };
+      return { ...rendered, fetchedAt: new Date().toISOString() };
+    } catch (error) {
+      await this.#logs.append("browser.rendered_extraction_fallback", {
+        url: target,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return loadPage(target);
+    } finally {
+      if (extractor && !extractor.isDestroyed()) {
+        extractor.destroy();
+      }
+    }
   }
 
   private async findInPage(url: string, pattern: string): Promise<string[]> {
@@ -1244,6 +1399,22 @@ function hashApprovalPayload(input: {
   return createHash("sha256")
     .update(stableStringify(input))
     .digest("hex");
+}
+
+function estimateTokenCount(text: string): number {
+  const normalized = text.trim();
+  if (!normalized) {
+    return 1;
+  }
+  return Math.max(1, Math.ceil(Array.from(normalized).length / 4));
+}
+
+function resolveSearchResultUrl(pageUrl: string, href: string): string {
+  try {
+    return new URL(href, pageUrl).toString();
+  } catch {
+    return href;
+  }
 }
 
 function resolveProjectFilePath(root: string, relativePath: string): string {

@@ -164,6 +164,12 @@ type AppNotice = {
   tone: AppNoticeTone;
 };
 
+type ModelTestResult = {
+  latencyMs: number;
+  outputTokens: number;
+  tokensPerSecond: number;
+};
+
 type TimelineEntry =
   | { kind: "message"; id: string; createdAt: string; message: MessageRecord }
   | { kind: "tool"; id: string; createdAt: string; toolCall: ToolCallRecord }
@@ -201,9 +207,10 @@ type ActiveToolCall = {
 };
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
-  { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
-  { id: "skills", label: "Skill 管理", hint: "已加载技能与来源范围" }
+  { id: "skills", label: "Skill 管理", hint: "已加载技能与来源范围" },
+  { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
+  { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" }
 ];
 
 const WELCOME_CARDS: WelcomeCard[] = [
@@ -328,6 +335,8 @@ export function App() {
   const [newModelId, setNewModelId] = useState("");
   const [newModelDisplayName, setNewModelDisplayName] = useState("");
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [testingModelKey, setTestingModelKey] = useState<string | null>(null);
+  const [modelTestResults, setModelTestResults] = useState<Record<string, ModelTestResult>>({});
   const [fetchedModels, setFetchedModels] = useState<{ id: string; displayName?: string }[]>([]);
   const [showFetchedModels, setShowFetchedModels] = useState(false);
   const [selectedFetchedModelIds, setSelectedFetchedModelIds] = useState<string[]>([]);
@@ -344,6 +353,7 @@ export function App() {
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
   const [notice, setNotice] = useState<AppNotice | null>(null);
+  const [isNoticeHovered, setIsNoticeHovered] = useState(false);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -778,7 +788,7 @@ export function App() {
   }, [isProjectCreateOpen, isSettingsOpen, notice]);
 
   useEffect(() => {
-    if (!notice) {
+    if (!notice || isNoticeHovered) {
       return;
     }
 
@@ -787,7 +797,7 @@ export function App() {
     }, notice.tone === "success" ? 3200 : 4200);
 
     return () => window.clearTimeout(timer);
-  }, [notice]);
+  }, [isNoticeHovered, notice]);
 
   const selectedThread = useMemo(
     () => threads.find((thread) => thread.id === selectedThreadId) ?? null,
@@ -878,6 +888,11 @@ export function App() {
     () => (config ? getModelsForProvider(config, composerProviderId) : []),
     [config, composerProviderId]
   );
+  const selectedComposerModel = useMemo(
+    () => composerModels.find((model) => model.id === composerModelId) ?? null,
+    [composerModelId, composerModels]
+  );
+  const composerSupportsMultimodalInput = selectedComposerModel?.supportsMultimodalInput ?? false;
   const composerProviderOptions = useMemo<ComposerSelectOption[]>(
     () =>
       composerProviders.map((provider) => ({
@@ -902,7 +917,8 @@ export function App() {
             providerLabel: getProviderDisplayName(provider),
             models: getModelsForProvider(config, provider.id).map((model) => ({
               id: model.id,
-              label: model.displayName === model.id ? model.id : `${model.displayName} (${model.id})`
+              label: model.displayName === model.id ? model.id : `${model.displayName} (${model.id})`,
+              supportsMultimodalInput: model.supportsMultimodalInput
             }))
           }))
         : [],
@@ -959,6 +975,8 @@ export function App() {
         return "模型提供商";
       case "skills":
         return "Skill 管理";
+      case "mcp":
+        return "MCP 管理";
       case "knowledge":
         return "知识库";
       default:
@@ -1327,6 +1345,7 @@ export function App() {
   }
 
   function showNotice(title: string, options?: { message?: string; tone?: AppNoticeTone }) {
+    setIsNoticeHovered(false);
     setNotice({
       id: Date.now(),
       title,
@@ -1374,6 +1393,7 @@ export function App() {
       return;
     }
 
+    let unsupportedMultimodalInput = false;
     if (!forcedContent) {
       if (
         !composerProviderId ||
@@ -1383,6 +1403,12 @@ export function App() {
         showNotice("请先在聊天框下方选择可用的供应商和模型。");
         return;
       }
+      const hasMultimodalAttachment = composerAttachments.some(
+        (attachment) => attachment.kind === "file" || attachment.kind === "folder" || attachment.kind === "image"
+      );
+      if (hasMultimodalAttachment && !selectedComposerModel?.supportsMultimodalInput) {
+        unsupportedMultimodalInput = true;
+      }
     }
 
     let threadId = selectedThreadId;
@@ -1391,6 +1417,19 @@ export function App() {
       threadId = thread.id;
       selectThreadId(thread.id);
       await refreshThreads();
+    }
+
+    if (unsupportedMultimodalInput) {
+      await window.codexh.rejectUnsupportedMultimodal({ threadId, content: raw });
+      setInput("");
+      setComposerAttachments([]);
+      setGpaComposerSelected(false);
+      showNotice("此模型不支持多模态", {
+        message: "已在对话中返回原因，请切换到支持多模态输入的模型后再重试。"
+      });
+      await refreshThreads();
+      await refreshSnapshot(threadId);
+      return;
     }
 
     const stage = stageOverride ?? gpaState.stage;
@@ -1890,6 +1929,19 @@ export function App() {
     setNewModelDisplayName("");
   }
 
+  function updateModelDraft(modelId: string, patch: Partial<ModelProfile>) {
+    setConfigDraft((current) => {
+      if (!current) {
+        return current;
+      }
+      const next = cloneConfig(current);
+      next.models = next.models.map((model) =>
+        model.id === modelId ? { ...model, ...patch } : model
+      );
+      return normalizeDraftConfig(next);
+    });
+  }
+
   function removeModel(modelId: string) {
     if (!configDraft) {
       return;
@@ -1905,7 +1957,7 @@ export function App() {
     setConfigDraft(normalizeDraftConfig(nextDraft));
   }
 
-  function checkProviderModel(provider: ProviderDefinition, model: ModelProfile) {
+  async function checkProviderModel(provider: ProviderDefinition, model: ModelProfile) {
     const secretDraft = providerSecretDrafts[provider.id]?.trim();
     const hasSecret =
       Boolean(secretDraft || provider.apiKey || provider.apiKeyEnv) ||
@@ -1919,10 +1971,27 @@ export function App() {
       return;
     }
 
-    showNotice("本地检查已通过。", {
-      message: `${getProviderDisplayName(provider)} / ${model.id} 保存后即可在聊天区直接选择并试用。`,
-      tone: "success"
-    });
+    const key = getModelProfileKey(provider.id, model.id);
+    const testProvider: ProviderDefinition = secretDraft
+      ? { ...provider, apiKey: secretDraft, apiKeyEnv: undefined }
+      : provider.type === "ollama" && !provider.apiKey && !provider.apiKeyEnv
+        ? { ...provider, apiKey: "ollama" }
+        : provider;
+    setTestingModelKey(key);
+    try {
+      const result = await window.codexh.testProviderModel({ provider: testProvider, model });
+      setModelTestResults((current) => ({ ...current, [key]: result }));
+      showNotice(`${model.displayName?.trim() || model.id} 模型测试成功。`, {
+        message: `延迟 ${formatLatency(result.latencyMs)}，输出 ${result.outputTokens} Tokens，吞吐量 ${formatTokensPerSecond(result.tokensPerSecond)}。`,
+        tone: "success"
+      });
+    } catch (error) {
+      showNotice("模型测试失败。", {
+        message: error instanceof Error ? error.message : "请检查模型地址、密钥和网络连接。"
+      });
+    } finally {
+      setTestingModelKey((current) => (current === key ? null : current));
+    }
   }
 
   async function updateComposerSelection(providerId: string, modelId: string) {
@@ -2593,7 +2662,6 @@ export function App() {
                                 }}
                               >
                                 <strong>{getProviderDisplayName(provider)}</strong>
-                                <span>{getProviderSubtitle(provider)}</span>
                               </button>
                               <button
                                 className="provider-remove-button"
@@ -2696,13 +2764,33 @@ export function App() {
                                       <div className="provider-model-copy">
                                         <strong>{model.id}</strong>
                                         {model.displayName !== model.id ? <span>{model.displayName}</span> : null}
+                                        {modelTestResults[getModelProfileKey(settingsProvider.id, model.id)] ? (
+                                          <span className="model-test-result">
+                                            延迟 {formatLatency(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].latencyMs)}
+                                            <i aria-hidden="true">·</i>
+                                            输出 {modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].outputTokens} Tokens
+                                            <i aria-hidden="true">·</i>
+                                            {formatTokensPerSecond(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].tokensPerSecond)}
+                                          </span>
+                                        ) : null}
                                       </div>
                                       <div className="provider-model-actions">
+                                        <label className="model-capability-toggle" title="启用后，此模型可以接收文件、文件夹和图片附件。">
+                                          <input
+                                            type="checkbox"
+                                            checked={model.supportsMultimodalInput}
+                                            onChange={(event) =>
+                                              updateModelDraft(model.id, { supportsMultimodalInput: event.target.checked })
+                                            }
+                                          />
+                                          <span>支持多模态</span>
+                                        </label>
                                         <button
                                           className="settings-mini-button"
-                                          onClick={() => checkProviderModel(settingsProvider, model)}
+                                          onClick={() => void checkProviderModel(settingsProvider, model)}
+                                          disabled={testingModelKey === getModelProfileKey(settingsProvider.id, model.id)}
                                         >
-                                          测试
+                                          {testingModelKey === getModelProfileKey(settingsProvider.id, model.id) ? "测试中" : "测试"}
                                         </button>
                                         <button
                                           className="settings-icon-button"
@@ -2856,13 +2944,68 @@ export function App() {
                         <article key={skill.id} className="stack-card">
                           <div className="stack-card-header">
                             <strong>{skill.displayName ?? skill.qualifiedName}</strong>
-                            <span className="pill">{skill.scope}</span>
+                            <div className="skill-metadata-pills">
+                              <span className="pill">{skill.pluginId ? "插件" : skill.scope}</span>
+                              {skill.scope === "user" && !skill.pluginId ? (
+                                <span className="pill skill-domain-pill">领域：{skill.domain ?? "通用"}</span>
+                              ) : null}
+                            </div>
                           </div>
                           <p>{skill.description}</p>
                           <span>{skill.skillPath}</span>
                         </article>
                       ))}
                     </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {settingsTab === "mcp" ? (
+                <div className="settings-section">
+                  <div className="config-block">
+                    <div className="section-copy">
+                      <strong>MCP 服务</strong>
+                      <span>启用后的服务可在聊天任务中被模型调用。</span>
+                    </div>
+                    <div className="stack-list">
+                      {configDraft?.mcpServers.length ? (
+                        configDraft.mcpServers.map((server) => (
+                          <article key={server.id} className="stack-card compact mcp-settings-card">
+                            <div className="stack-card-header">
+                              <strong>{server.name}</strong>
+                              <label className="model-capability-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={server.enabled}
+                                  onChange={(event) =>
+                                    setConfigDraft((current) => {
+                                      if (!current) {
+                                        return current;
+                                      }
+                                      const next = cloneConfig(current);
+                                      next.mcpServers = next.mcpServers.map((item) =>
+                                        item.id === server.id ? { ...item, enabled: event.target.checked } : item
+                                      );
+                                      return next;
+                                    })
+                                  }
+                                />
+                                <span>{server.enabled ? "已启用" : "已停用"}</span>
+                              </label>
+                            </div>
+                            <span>{server.url ?? server.command ?? server.id}</span>
+                          </article>
+                        ))
+                      ) : (
+                        <div className="detail-empty">当前还没有配置 MCP 服务。</div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="settings-save-row">
+                    <span className="subtle-inline">保存后会同步到聊天运行时。</span>
+                    <button className="button warm" onClick={() => void saveConfigDraft()} disabled={!configDraft}>
+                      保存
+                    </button>
                   </div>
                 </div>
               ) : null}
@@ -3023,12 +3166,16 @@ export function App() {
 
       {notice ? (
         <div className="app-notice-stack" aria-live="polite" aria-atomic="true">
-          <section className={`app-notice ${notice.tone}`}>
+          <section
+            className={`app-notice ${notice.tone}`}
+            onMouseEnter={() => setIsNoticeHovered(true)}
+            onMouseLeave={() => setIsNoticeHovered(false)}
+          >
             <div className="app-notice-copy">
               <strong>{notice.title}</strong>
               {notice.message ? <p>{notice.message}</p> : null}
             </div>
-            <button className="app-notice-close" onClick={() => setNotice(null)} title="关闭提示">
+            <button className="app-notice-close" onClick={() => { setIsNoticeHovered(false); setNotice(null); }} title="关闭提示">
               <IconClose />
             </button>
           </section>
@@ -3122,6 +3269,7 @@ export function App() {
               <div
                 className="gpa-popover"
                 role="menu"
+                onMouseEnter={clearComposerAddMenuCloseTimer}
                 onMouseLeave={scheduleComposerAddMenuClose}
                 style={{
                   position: "fixed",
@@ -3131,14 +3279,14 @@ export function App() {
                 }}
               >
                 <>
-                    <button className="gpa-popover-item" role="menuitem" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(false)}>
+                    <button className="gpa-popover-item" role="menuitem" disabled={!composerSupportsMultimodalInput} title={!composerSupportsMultimodalInput ? "当前模型不支持多模态输入" : undefined} onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(false)}>
                       <span className="gpa-popover-item-icon" aria-hidden><IconFile /></span>
                       <span className="gpa-popover-item-copy">
                         <span className="gpa-popover-item-title">添加文件</span>
                         <span className="gpa-popover-item-hint">选择文件作为任务上下文</span>
                       </span>
                     </button>
-                    <button className="gpa-popover-item" role="menuitem" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(true)}>
+                    <button className="gpa-popover-item" role="menuitem" disabled={!composerSupportsMultimodalInput} title={!composerSupportsMultimodalInput ? "当前模型不支持多模态输入" : undefined} onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(true)}>
                       <span className="gpa-popover-item-icon" aria-hidden><IconImage /></span>
                       <span className="gpa-popover-item-copy">
                         <span className="gpa-popover-item-title">添加图片</span>
@@ -3146,12 +3294,14 @@ export function App() {
                       </span>
                     </button>
                     <button
+                      type="button"
                       className="gpa-popover-item composer-add-menu-parent"
                       role="menuitem"
                       data-composer-add-menu-view="skills"
+                      aria-haspopup="menu"
+                      aria-expanded={composerAddMenuView === "skills"}
                       onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("skills"); }}
                       onFocus={() => setComposerAddMenuView("skills")}
-                      onClick={() => setComposerAddMenuView("skills")}
                     >
                       <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
                       <span className="gpa-popover-item-copy">
@@ -3161,12 +3311,14 @@ export function App() {
                       <IconChevronRight />
                     </button>
                     <button
+                      type="button"
                       className="gpa-popover-item composer-add-menu-parent"
                       role="menuitem"
                       data-composer-add-menu-view="mcp"
+                      aria-haspopup="menu"
+                      aria-expanded={composerAddMenuView === "mcp"}
                       onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("mcp"); }}
                       onFocus={() => setComposerAddMenuView("mcp")}
-                      onClick={() => setComposerAddMenuView("mcp")}
                     >
                       <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span>
                       <span className="gpa-popover-item-copy">
@@ -3603,7 +3755,10 @@ function ComposerAttachmentChip({
     >
       <span className="composer-attachment-icon" aria-hidden="true">{icon}</span>
       <span className="composer-attachment-copy">
-        <strong>{attachment.label}</strong>
+        <strong>
+          <span>{attachment.label}</span>
+          {attachment.kind === "skill" ? <em className="composer-attachment-kind">Skill</em> : null}
+        </strong>
         <small>{detail}</small>
       </span>
       <button type="button" title="移除" aria-label={`移除 ${attachment.label}`} onClick={onRemove}>
@@ -4489,7 +4644,7 @@ function ComposerSelect({
 type ComposerModelGroup = {
   providerId: string;
   providerLabel: string;
-  models: Array<{ id: string; label: string }>;
+  models: Array<{ id: string; label: string; supportsMultimodalInput: boolean }>;
 };
 
 function ContextUsageControl({
@@ -4842,7 +4997,14 @@ function ComposerModelPicker({
                       role="option"
                       aria-selected={selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id}
                     >
-                      <span>{model.label}</span>
+                      <span className="composer-model-picker-model-label">
+                        {model.supportsMultimodalInput ? (
+                          <span className="composer-model-picker-multimodal" title="支持多模态输入" aria-label="支持多模态输入">
+                            <IconImage />
+                          </span>
+                        ) : null}
+                        <span>{model.label}</span>
+                      </span>
                       {selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id ? (
                         <span className="composer-model-picker-check" aria-hidden="true">✓</span>
                       ) : null}
@@ -6855,6 +7017,18 @@ function getModelsForProvider(config: Pick<AppConfig, "models">, providerId: str
   return config.models.filter((model) => model.providerId === providerId);
 }
 
+function getModelProfileKey(providerId: string, modelId: string): string {
+  return `${providerId}:${modelId}`;
+}
+
+function formatLatency(latencyMs: number): string {
+  return latencyMs >= 1_000 ? `${(latencyMs / 1_000).toFixed(2)} s` : `${latencyMs} ms`;
+}
+
+function formatTokensPerSecond(tokensPerSecond: number): string {
+  return `${tokensPerSecond.toFixed(tokensPerSecond >= 10 ? 1 : 2)} Tokens/s`;
+}
+
 function getProviderDisplayName(provider: ProviderDefinition): string {
   return provider.name?.trim() || provider.id;
 }
@@ -6901,7 +7075,7 @@ function createModelProfile(providerId: string, modelId: string, displayName: st
     supportsToolCalling: true,
     supportsParallelToolCalls: true,
     supportsJsonOutput: true,
-    supportsMultimodalInput: true,
+    supportsMultimodalInput: false,
     supportsReasoningSummary: true,
     defaultTemperature: 0.2,
     defaultMaxOutputTokens: 4_096
