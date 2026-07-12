@@ -74,6 +74,13 @@ type ComposerBinaryAttachment = {
   previewUrl?: string;
 };
 
+type MessageKnowledgeSource = {
+  knowledgeBaseId: string;
+  knowledgeBaseName: string;
+  sourcePath: string;
+  locator?: string;
+};
+
 type KnowledgeSourceAttachment = {
   path: string;
   kind: "file" | "folder";
@@ -2708,10 +2715,9 @@ export function App() {
                 ) : null}
                 {activeStreamingAssistant ? (
                   <section className="streaming-assistant" aria-live="polite">
-                    {renderMarkdownDocument(
+                    {renderStreamingAssistant(
                       stripAssistantToolMarkup(activeStreamingAssistant.content),
-                      `stream-${activeStreamingAssistant.turnRunId}`,
-                      "event-final-markdown"
+                      `stream-${activeStreamingAssistant.turnRunId}`
                     )}
                   </section>
                 ) : null}
@@ -6636,14 +6642,57 @@ function renderMessageContent(
   }
 
   const eventBlocks = parseMessageEventBlocks({ ...message, content });
+  const knowledgeSources = message.role === "assistant" ? getMessageKnowledgeSources(message) : [];
   if (!eventBlocks || eventBlocks.length === 0) {
-    return <>{renderMarkdownDocument(content, `${message.id}-markdown`, "message-markdown")}<MessageAttachmentGallery threadId={message.threadId} attachments={attachments} /></>;
+    return <>
+      {renderMarkdownDocument(content, `${message.id}-markdown`, "message-markdown")}
+      <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
+      <MessageKnowledgeSources sources={knowledgeSources} />
+    </>;
   }
 
   return (
     <div className="message-event-stream">
       {eventBlocks.map((block, index) => renderEventBlock(block, `${message.id}-${block.type}-${index}`))}
       <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
+      <MessageKnowledgeSources sources={knowledgeSources} />
+    </div>
+  );
+}
+
+function getMessageKnowledgeSources(message: MessageRecord): MessageKnowledgeSource[] {
+  try {
+    const sources = JSON.parse(message.metadataJson ?? "{}").knowledgeSources;
+    if (!Array.isArray(sources)) return [];
+    return sources.filter((source): source is MessageKnowledgeSource =>
+      Boolean(source) &&
+      typeof source.knowledgeBaseId === "string" &&
+      typeof source.knowledgeBaseName === "string" &&
+      typeof source.sourcePath === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function MessageKnowledgeSources({ sources }: { sources: MessageKnowledgeSource[] }) {
+  if (sources.length === 0) return null;
+  const byKnowledgeBase = new Map<string, MessageKnowledgeSource[]>();
+  for (const source of sources) {
+    byKnowledgeBase.set(source.knowledgeBaseId, [...(byKnowledgeBase.get(source.knowledgeBaseId) ?? []), source]);
+  }
+  return (
+    <div className="message-knowledge-sources" aria-label="知识库来源">
+      {[...byKnowledgeBase.values()].map((entries) => {
+        const [source] = entries;
+        const locations = entries.map((item) => `${item.sourcePath}${item.locator ? ` (${item.locator})` : ""}`).join("\n");
+        return (
+          <span key={source.knowledgeBaseId} className="message-knowledge-source" title={`知识库来源\n${locations}`}>
+            <IconKnowledge />
+            <span>知识库来源 · {source.knowledgeBaseName}</span>
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -6755,6 +6804,71 @@ function parseStructuredEventBlocks(content: string): ChatEventBlock[] | null {
   }
 
   return parseLabeledEventBlocks(content);
+}
+
+function renderStreamingAssistant(content: string, keyPrefix: string): ReactNode {
+  const eventBlocks = parseStreamingEventBlocks(content);
+  if (!eventBlocks || eventBlocks.length === 0) {
+    return renderMarkdownDocument(content, keyPrefix, "event-final-markdown");
+  }
+  return <div className="message-event-stream">{eventBlocks.map((block, index) =>
+    renderEventBlock(block, `${keyPrefix}-${block.type}-${index}`)
+  )}</div>;
+}
+
+function parseStreamingEventBlocks(content: string): ChatEventBlock[] | null {
+  const normalized = content.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+
+  const openPattern = /<event\b([^>]*)>/gi;
+  const closePattern = /<\/event\s*>/gi;
+  const blocks: ChatEventBlock[] = [];
+  let sawEvent = false;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = openPattern.exec(normalized)) !== null) {
+    sawEvent = true;
+    const before = normalized.slice(cursor, match.index).trim();
+    if (before) blocks.push({ type: "commentary", content: before });
+
+    const attributes = parseEventAttributes(match[1] ?? "");
+    const type = normalizeEventType(attributes.type) ?? "commentary";
+    const contentStart = match.index + match[0].length;
+    closePattern.lastIndex = contentStart;
+    const closingTag = closePattern.exec(normalized);
+    const contentEnd = closingTag?.index ?? normalized.length;
+    blocks.push({
+      type,
+      content: normalized.slice(contentStart, contentEnd).trim(),
+      title: attributes.title,
+      name: attributes.name,
+      status: attributes.status,
+      path: attributes.path,
+      action: attributes.action,
+      startLine: parseNumericAttribute(attributes.start_line),
+      durationMs: parseNumericAttribute(attributes.duration_ms),
+      exitCode: parseNumericAttribute(attributes.exit_code),
+      ok: parseBooleanAttribute(attributes.ok)
+    });
+
+    if (!closingTag) return blocks;
+    cursor = closingTag.index + closingTag[0].length;
+    openPattern.lastIndex = cursor;
+  }
+
+  if (!sawEvent) {
+    const incompleteTagAt = normalized.search(/<event\b[^>]*$/i);
+    return incompleteTagAt >= 0
+      ? (normalized.slice(0, incompleteTagAt).trim() ? [{ type: "commentary", content: normalized.slice(0, incompleteTagAt).trim() }] : [])
+      : null;
+  }
+
+  const after = normalized.slice(cursor).trim();
+  const incompleteTagAt = after.search(/<event\b[^>]*$/i);
+  const visibleAfter = (incompleteTagAt >= 0 ? after.slice(0, incompleteTagAt) : after).trim();
+  if (visibleAfter) blocks.push({ type: "commentary", content: visibleAfter });
+  return blocks;
 }
 
 function parseXmlEventBlocks(content: string): ChatEventBlock[] | null {

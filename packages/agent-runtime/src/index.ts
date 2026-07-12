@@ -48,6 +48,13 @@ type Submission =
   | { type: "user_input_response"; promptId: string; answers: Record<string, string> }
   | { type: "shutdown" };
 
+type KnowledgeSourceReference = {
+  knowledgeBaseId: string;
+  knowledgeBaseName: string;
+  sourcePath: string;
+  locator?: string;
+};
+
 interface RuntimePersistence {
   getThread(threadId: string): Promise<ThreadRecord>;
   updateThread(threadId: string, patch: Partial<ThreadRecord>): Promise<ThreadRecord>;
@@ -459,6 +466,7 @@ class ThreadSessionRuntime {
       const successfulToolCallFingerprints = new Set<string>();
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
+      const knowledgeSources = new Map<string, KnowledgeSourceReference>();
       const visibleAssistantMessages = new Set<string>();
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
@@ -701,7 +709,12 @@ class ThreadSessionRuntime {
           const fingerprint = normalizeAssistantMessageForDeduplication(decision.assistantMessage);
           if (!visibleAssistantMessages.has(fingerprint)) {
             visibleAssistantMessages.add(fingerprint);
-            const assistantMessage = await this.recordMessage("assistant", decision.assistantMessage, turn.id);
+            const assistantMessage = await this.recordMessage(
+              "assistant",
+              decision.assistantMessage,
+              turn.id,
+              knowledgeSources.size > 0 ? { knowledgeSources: [...knowledgeSources.values()] } : undefined
+            );
             transcript.push({ role: "assistant", content: assistantMessage.content });
             if (streamedVisibleContent) {
               await this.services.emit({
@@ -919,6 +932,10 @@ class ThreadSessionRuntime {
             },
             createdAt: new Date().toISOString()
           });
+
+          if (result.ok) {
+            collectKnowledgeSources(toolCall.name, result, visibleKnowledgeBases, knowledgeSources);
+          }
 
           const toolMessage = await this.recordMessage(
             "tool",
@@ -1386,6 +1403,33 @@ export function formatAvailableTools(tools: ToolSpecDefinition[]): string {
   ].join("\n");
 }
 
+function collectKnowledgeSources(
+  toolName: string,
+  result: ToolResult,
+  visibleKnowledgeBases: Array<{ id?: string; displayName?: string }>,
+  sources: Map<string, KnowledgeSourceReference>
+): void {
+  if (toolName !== "knowledge.search" && toolName !== "knowledge.read") return;
+
+  const candidates = toolName === "knowledge.search"
+    ? Array.isArray(result.json?.results) ? result.json.results : []
+    : result.json?.concept ? [result.json.concept] : [];
+
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const item = candidate as Record<string, unknown>;
+    const knowledgeBaseId = typeof item.knowledgeBaseId === "string" ? item.knowledgeBaseId : "";
+    const sourcePath = typeof item.sourcePath === "string" ? item.sourcePath : "";
+    if (!knowledgeBaseId || !sourcePath) continue;
+
+    const locator = typeof item.locator === "string" ? item.locator : undefined;
+    const knowledgeBaseName = visibleKnowledgeBases.find((base) => base.id === knowledgeBaseId)?.displayName
+      ?? "本地知识库";
+    const key = `${knowledgeBaseId}:${sourcePath}:${locator ?? ""}`;
+    sources.set(key, { knowledgeBaseId, knowledgeBaseName, sourcePath, locator });
+  }
+}
+
 function buildRuntimePrompt(
   model: ModelProfile,
   skillContext: RuntimePromptBundle["skillContext"],
@@ -1410,7 +1454,7 @@ function buildRuntimePrompt(
     `Context window: ${model.contextWindow}.`
   ];
   if (knowledgeEnabled) {
-    blocks.splice(5, 0, "For local knowledge questions, call knowledge.search first. It returns ranked document chunks with source_path and locator; use knowledge.read only for the relevant chunk. Never use fs.read_file on a knowledge Bundle or index path. If search returns no results, refine the query once or explain that no matching local material was found; do not repeat the same progress reply.");
+    blocks.splice(5, 0, "For local knowledge questions, call knowledge.search first. It returns ranked document chunks with source_path and locator; use knowledge.read only for the relevant chunk. Cite the source file and locator in your answer when you rely on retrieved material. Never use fs.read_file on a knowledge Bundle or index path. If search returns no results, refine the query once or explain that no matching local material was found; do not repeat the same progress reply.");
   }
   if (skillContext?.text) {
     blocks.push(skillContext.text);
