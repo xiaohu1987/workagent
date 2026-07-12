@@ -1,3 +1,15 @@
+type UpdateState = {
+  phase: "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installing" | "error";
+  currentVersion: string;
+  remoteVersion?: string;
+  changelog?: string;
+  downloadUrl?: string;
+  insecureTransport?: boolean;
+  progress?: number;
+  error?: string;
+  isPackaged: boolean;
+};
+
 declare global {
   interface Window {
     codexh: {
@@ -74,6 +86,11 @@ declare global {
         agentCapability: "verified" | "unsupported";
         agentCapabilityReason?: string;
       }) => Promise<ModelProfile>;
+      getUpdateState: () => Promise<UpdateState | null>;
+      checkForUpdates: () => Promise<UpdateState>;
+      downloadUpdate: (payload: { confirmInsecureHttp?: boolean }) => Promise<UpdateState>;
+      installUpdate: () => Promise<void>;
+      onUpdateState: (listener: (state: UpdateState) => void) => () => void;
       importKnowledge: (payload: {
         displayName: string;
         scope: "global" | "project" | "imported";

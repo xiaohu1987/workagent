@@ -1,6 +1,9 @@
 node_modules/
 dist/
 tmp/
+build/
+release/
+log/
 
 *.log
 coverage/

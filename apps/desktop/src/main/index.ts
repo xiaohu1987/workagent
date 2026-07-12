@@ -4,10 +4,12 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DesktopBackend } from "./app";
+import { UpdateService } from "./update-service";
 
 let mainWindow: BrowserWindow | null = null;
 let rendererServer: http.Server | null = null;
 const backend = new DesktopBackend();
+let updates: UpdateService | null = null;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const sessionDataDir = path.join(app.getPath("userData"), "session-data");
@@ -42,6 +44,17 @@ if (!hasSingleInstanceLock) {
 
 async function createWindow(): Promise<void> {
   await backend.initialize();
+  const updatePaths = backend.getUpdatePaths();
+  updates = new UpdateService({
+    currentVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    cacheDir: updatePaths.cacheDir,
+    executablePath: process.execPath,
+    getRunningTaskCount: () => backend.listThreads().filter((thread) => thread.status === "running" || thread.status === "waiting").length,
+    log: (kind, payload) => backend.appendRuntimeLog(kind, payload),
+    emit: (state) => mainWindow?.webContents.send("update:state", state),
+    quit: () => app.quit()
+  });
   const workArea = screen.getPrimaryDisplay().workArea;
   const preferredWidth = 1212;
   const preferredHeight = 767;
@@ -102,6 +115,7 @@ async function createWindow(): Promise<void> {
   }
 
   mainWindow.webContents.setZoomFactor(0.9);
+  void updates.check();
 }
 
 function reportStartupError(error: unknown): void {
@@ -275,6 +289,12 @@ function registerIpc(): void {
   ipcMain.handle("models:fetch", (_event, payload) => backend.fetchProviderModels(payload));
   ipcMain.handle("models:test", (_event, payload) => backend.testProviderModel(payload));
   ipcMain.handle("models:save-capability", (_event, payload) => backend.saveModelAgentCapability(payload));
+  ipcMain.handle("updates:state", () => updates?.getState() ?? null);
+  ipcMain.handle("updates:check", () => updates?.check() ?? Promise.reject(new Error("更新服务尚未初始化。")));
+  ipcMain.handle("updates:download", (_event, payload: { confirmInsecureHttp?: boolean }) =>
+    updates?.download(payload?.confirmInsecureHttp === true) ?? Promise.reject(new Error("更新服务尚未初始化。"))
+  );
+  ipcMain.handle("updates:install", () => updates?.install() ?? Promise.reject(new Error("更新服务尚未初始化。")));
 }
 
 async function ensureRendererServerUrl(): Promise<string> {

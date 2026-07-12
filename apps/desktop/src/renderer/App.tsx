@@ -33,9 +33,21 @@ import {
   isThreadExecutionInProgress
 } from "./thread-ui-state";
 
-type SettingsTab = "general" | "knowledge" | "provider" | "skills" | "agent" | "mcp";
+type SettingsTab = "general" | "knowledge" | "provider" | "skills" | "agent" | "mcp" | "update";
 type RightWorkspaceTab = "preview" | "terminal" | "browser" | "files";
 type ResizePane = "sidebar" | "right-workspace";
+
+type UpdateState = {
+  phase: "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installing" | "error";
+  currentVersion: string;
+  remoteVersion?: string;
+  changelog?: string;
+  downloadUrl?: string;
+  insecureTransport?: boolean;
+  progress?: number;
+  error?: string;
+  isPackaged: boolean;
+};
 
 type ProjectFileEntry = {
   path: string;
@@ -274,6 +286,7 @@ type HistorySearchResult = {
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
+  { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" },
   { id: "skills", label: "Skill 管理", hint: "已加载技能与来源范围" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" }
@@ -407,6 +420,7 @@ export function App() {
   const gpaRevisionRef = useRef<HTMLTextAreaElement | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [mcpRuntimeServers, setMcpRuntimeServers] = useState<McpRuntimeServer[]>([]);
   const [editingMcpServerId, setEditingMcpServerId] = useState<string | null>(null);
   const [testingMcpServerId, setTestingMcpServerId] = useState<string | null>(null);
@@ -454,6 +468,11 @@ export function App() {
 
   useEffect(() => {
     void refreshAll();
+  }, []);
+
+  useEffect(() => {
+    void window.codexh.getUpdateState().then(setUpdateState).catch(() => undefined);
+    return window.codexh.onUpdateState(setUpdateState);
   }, []);
 
   useEffect(() => {
@@ -1328,6 +1347,8 @@ export function App() {
         return "MCP 管理";
       case "knowledge":
         return "知识库";
+      case "update":
+        return "应用更新";
       default:
         return "设置";
     }
@@ -2694,6 +2715,33 @@ export function App() {
     }
   }
 
+  async function checkForUpdates() {
+    try {
+      setUpdateState(await window.codexh.checkForUpdates());
+    } catch (error) {
+      showNotice("检查更新失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function downloadAvailableUpdate() {
+    if (!updateState) return;
+    if (updateState.insecureTransport && !window.confirm("当前更新源使用 HTTP，可能被篡改。仍要下载并校验该更新吗？")) return;
+    try {
+      setUpdateState(await window.codexh.downloadUpdate({ confirmInsecureHttp: updateState.insecureTransport === true }));
+    } catch (error) {
+      showNotice("下载更新失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function installDownloadedUpdate() {
+    if (!window.confirm("安装更新会关闭 CodeXH 并覆盖当前版本，是否继续？")) return;
+    try {
+      await window.codexh.installUpdate();
+    } catch (error) {
+      showNotice("暂时无法安装更新", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async function updateComposerSelection(providerId: string, modelId: string) {
     setComposerProviderId(providerId);
     setComposerModelId(modelId);
@@ -3744,6 +3792,52 @@ export function App() {
                       </div>
                     </div>
                   )}
+                </div>
+              ) : null}
+
+              {settingsTab === "update" ? (
+                <div className="settings-section">
+                  <div className="config-block update-settings-panel">
+                    <div className="section-copy section-copy-with-action">
+                      <div>
+                        <strong>CodeXH 更新</strong>
+                        <span>启动时会静默检查；安装更新会保留本地聊天、项目、知识库和日志。</span>
+                      </div>
+                      <button
+                        className="button ghost"
+                        onClick={() => void checkForUpdates()}
+                        disabled={updateState?.phase === "checking" || updateState?.phase === "downloading" || updateState?.phase === "installing"}
+                      >
+                        {updateState?.phase === "checking" ? "检查中" : "检查更新"}
+                      </button>
+                    </div>
+                    <div className="update-version-row">
+                      <span>当前版本</span>
+                      <strong>{updateState?.currentVersion ?? "读取中"}</strong>
+                      {updateState?.remoteVersion ? <><span>最新版本</span><strong>{updateState.remoteVersion}</strong></> : null}
+                      {updateState ? <span className={`update-phase ${updateState.phase}`}>{formatUpdatePhase(updateState.phase)}</span> : null}
+                    </div>
+                    {updateState?.insecureTransport ? (
+                      <div className="update-security-warning">当前更新源使用 HTTP。下载前会要求确认，建议服务端升级为 HTTPS。</div>
+                    ) : null}
+                    {updateState?.changelog ? <pre className="update-changelog">{updateState.changelog}</pre> : null}
+                    {updateState?.phase === "downloading" ? (
+                      <div className="update-progress"><span style={{ width: `${updateState.progress ?? 0}%` }} /></div>
+                    ) : null}
+                    {updateState?.error ? <div className="update-error">{updateState.error}</div> : null}
+                    {updateState?.phase === "available" ? (
+                      <div className="action-row">
+                        <button className="button warm" onClick={() => void downloadAvailableUpdate()} disabled={!updateState.isPackaged}>
+                          {updateState.isPackaged ? "下载更新" : "开发模式不可下载"}
+                        </button>
+                      </div>
+                    ) : null}
+                    {updateState?.phase === "downloaded" ? (
+                      <div className="action-row">
+                        <button className="button warm" onClick={() => void installDownloadedUpdate()}>立即安装并重启</button>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ) : null}
 
@@ -8219,6 +8313,19 @@ function filterTranscriptMessages(messages: MessageRecord[], threadStatus?: Thre
     visibleAssistantMessages.add(`${message.turnRunId}:${fingerprint}`);
     return true;
   });
+}
+
+function formatUpdatePhase(phase: UpdateState["phase"]): string {
+  switch (phase) {
+    case "checking": return "正在检查";
+    case "up-to-date": return "已是最新";
+    case "available": return "发现新版本";
+    case "downloading": return "正在下载";
+    case "downloaded": return "已验证，可安装";
+    case "installing": return "正在安装";
+    case "error": return "更新失败";
+    default: return "等待检查";
+  }
 }
 
 function isCommentaryOnlyTranscriptMessage(message: MessageRecord) {

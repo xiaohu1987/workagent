@@ -127,6 +127,15 @@ const api = {
     agentCapability: "verified" | "unsupported";
     agentCapabilityReason?: string;
   }) => ipcRenderer.invoke("models:save-capability", payload),
+  getUpdateState: () => ipcRenderer.invoke("updates:state"),
+  checkForUpdates: () => ipcRenderer.invoke("updates:check"),
+  downloadUpdate: (payload: { confirmInsecureHttp?: boolean }) => ipcRenderer.invoke("updates:download", payload),
+  installUpdate: () => ipcRenderer.invoke("updates:install"),
+  onUpdateState: (listener: (state: unknown) => void) => {
+    const wrapped = (_event: unknown, state: unknown) => listener(state);
+    ipcRenderer.on("update:state", wrapped);
+    return () => ipcRenderer.off("update:state", wrapped);
+  },
   onRuntimeEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("runtime:event", wrapped);

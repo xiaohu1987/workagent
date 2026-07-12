@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
-import { BrowserWindow, shell, webContents } from "electron";
+import { app, BrowserWindow, shell, webContents } from "electron";
 import type { WebContents } from "electron";
 import type {
   AttachmentImportInput,
@@ -51,6 +51,31 @@ import {
 
 type ResolverMap<T> = Map<string, (value: T) => void>;
 
+async function seedBundledSkills(layout: Pick<HomeLayout, "skillsSystemDir" | "skillsImportedDir" | "skillsInstalledDir">): Promise<number> {
+  if (!app.isPackaged) {
+    return 0;
+  }
+
+  const bundledRoot = path.join(process.resourcesPath, "seed-skills");
+  const destinations = {
+    system: layout.skillsSystemDir,
+    imported: layout.skillsImportedDir,
+    installed: layout.skillsInstalledDir
+  };
+  let copied = 0;
+  for (const [scope, destination] of Object.entries(destinations)) {
+    const source = path.join(bundledRoot, scope);
+    try {
+      const entries = await fs.readdir(source, { recursive: true, withFileTypes: true });
+      copied += entries.filter((entry) => entry.isFile()).length;
+      await fs.cp(source, destination, { recursive: true, force: false, errorOnExist: false, preserveTimestamps: true });
+    } catch {
+      // A release without bundled skills remains usable and keeps its local skills unchanged.
+    }
+  }
+  return copied;
+}
+
 export class DesktopBackend {
   readonly #events = new EventEmitter();
   readonly #approvalResolvers: ResolverMap<boolean> = new Map();
@@ -77,6 +102,7 @@ export class DesktopBackend {
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
     this.#logs = new RuntimeLogWriter(this.#layout.logsDir);
+    const bundledSkillFileCount = await seedBundledSkills(this.#layout);
     this.#config = await loadConfig(this.#layout.configFile);
     this.#db = new DatabaseService(this.#layout.dbFile);
     this.#db.recoverInterruptedThreads();
@@ -170,7 +196,7 @@ export class DesktopBackend {
     for (const threadId of this.#db.listQueuedMessageThreadIds()) {
       this.#runtime.wakeQueuedMessages(threadId);
     }
-    await this.#logs.append("backend.initialized", { logsDir: this.#layout.logsDir });
+    await this.#logs.append("backend.initialized", { logsDir: this.#layout.logsDir, bundledSkillFileCount });
   }
 
   public onEvent(listener: (event: RuntimeEvent) => void): () => void {
@@ -685,6 +711,14 @@ export class DesktopBackend {
 
   public getConfig(): AppConfig {
     return this.#config;
+  }
+
+  public getUpdatePaths(): Pick<HomeLayout, "cacheDir" | "logsDir"> {
+    return { cacheDir: this.#layout.cacheDir, logsDir: this.#layout.logsDir };
+  }
+
+  public appendRuntimeLog(kind: string, payload: Record<string, unknown>): Promise<void> {
+    return this.#logs.append(kind, payload);
   }
 
   public async saveModelAgentCapability(input: {
