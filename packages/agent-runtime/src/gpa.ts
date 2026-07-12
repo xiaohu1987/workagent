@@ -1,4 +1,4 @@
-import type { GpaStage, GpaState } from "@shared-types";
+import type { GpaStage, GpaState, ProviderTurnDecision } from "@shared-types";
 
 export const DEFAULT_GPA_STATE: GpaState = {
   stage: "off",
@@ -88,10 +88,13 @@ export function buildGpaSystemDirective(state: GpaState): string {
     ].join("\n")
   };
 
+  const analysisClarificationRule = state.stage === "goal" || state.stage === "plan"
+    ? "\nFor GPA analysis, never leave a material unresolved choice only in assistant_message. If technology, scope, priority, irreversible impact, or acceptance criteria is not specified or needs confirmation, return the structured clarification field before asking the user to confirm the goal or plan."
+    : "";
   const actClarificationRule = state.stage === "act"
     ? "\n7) Before any write, command, or external side effect, if a decision cannot be verified with the available context or tools and would affect the approach, scope, priority, irreversible actions, or acceptance criteria, return the structured clarification field. Ask exactly one mutually exclusive decision with 2-4 options, a recommended option, and concise descriptions. Set tool_calls to [] and end_turn to false. Never ask for facts that tools can determine. After an answer, revise the remaining PLAN before resuming ACT; after a skip, continue under the current plan and state the assumption in the final summary."
     : "";
-  return `${header}\n\n${rules[state.stage]}${actClarificationRule}`;
+  return `${header}\n\n${rules[state.stage]}${analysisClarificationRule}${actClarificationRule}`;
 }
 
 /** 识别用户以简短确认语推进阶段（与「确认」按钮的长指令区分，避免误触发） */
@@ -111,4 +114,44 @@ export function nextStageAfterConfirmation(stage: GpaStage): GpaStage {
     return "act";
   }
   return stage;
+}
+
+/** Converts explicit prose about unresolved GPA decisions into a safe input card. */
+export function buildGpaTextClarificationFallback(
+  stage: GpaStage,
+  assistantMessage: string | undefined
+): ProviderTurnDecision["clarification"] | undefined {
+  if ((stage !== "goal" && stage !== "plan") || !assistantMessage) {
+    return undefined;
+  }
+
+  const text = assistantMessage.replace(/\s+/g, " ");
+  const hasUnresolvedDecision =
+    /(?:\u672a\u6307\u5b9a|\u672a\u660e\u786e|\u672a\u786e\u8ba4|\u5f85\u786e\u8ba4|\u9700\u8981(?:\u5148)?(?:\u786e\u8ba4|\u660e\u786e|\u8865\u5145)|\u9700\u8981\u4f60\u786e\u8ba4|\u9700\u8981\u4f60\u8865\u5145|\u5173\u952e(?:\u95ee\u9898|\u4fe1\u606f|\u51b3\u7b56)|(?:need|needs|require|requires)\s+(?:your\s+)?(?:confirmation|input|decision)|(?:not\s+specified|to\s+be\s+confirmed))/i.test(text);
+  if (!hasUnresolvedDecision) {
+    return undefined;
+  }
+
+  const isTechnical = /(?:\u6280\u672f\u6808|\u524d\u7aef|\u540e\u7aef|\u6570\u636e\u5e93|\u67b6\u6784|framework|database|stack)/i.test(text);
+  return isTechnical
+    ? {
+        title: "\u6280\u672f\u65b9\u6848\u5f85\u786e\u8ba4",
+        question: "\u5f53\u524d\u76ee\u6807\u6216\u8ba1\u5212\u5305\u542b\u672a\u6307\u5b9a\u7684\u6280\u672f\u65b9\u6848\u3002\u8bf7\u8bf4\u660e\u4f60\u7684\u504f\u597d\uff0c\u6216\u9009\u62e9\u4e00\u4e2a\u7ee7\u7eed\u65b9\u5f0f\u3002",
+        options: [
+          { id: "provide_requirements", label: "\u6211\u6765\u6307\u5b9a\u6280\u672f\u6808", description: "\u586b\u5199\u524d\u7aef\u3001\u540e\u7aef\u3001\u6570\u636e\u5e93\u6216\u90e8\u7f72\u8981\u6c42\u3002", recommended: true },
+          { id: "web_mvp", label: "\u6309\u901a\u7528 Web MVP \u5b9e\u73b0", description: "\u4f7f\u7528\u6210\u719f\u7684 Web \u6280\u672f\u6808\uff0c\u4f18\u5148\u4ea4\u4ed8\u53ef\u8fd0\u884c\u7248\u672c\u3002" },
+          { id: "prototype", label: "\u5148\u505a\u672c\u5730\u6f14\u793a\u7248", description: "\u4ec5\u5b9e\u73b0\u6838\u5fc3\u754c\u9762\u548c\u6d41\u7a0b\uff0c\u4e0d\u63a5\u5165\u771f\u5b9e\u670d\u52a1\u3002" }
+        ],
+        allowFreeText: true
+      }
+    : {
+        title: "\u5173\u952e\u9700\u6c42\u5f85\u786e\u8ba4",
+        question: "\u5f53\u524d\u76ee\u6807\u6216\u8ba1\u5212\u5b58\u5728\u4f1a\u5f71\u54cd\u8303\u56f4\u6216\u9a8c\u6536\u7684\u672a\u51b3\u9879\u3002\u8bf7\u8865\u5145\u4f60\u7684\u8981\u6c42\uff0c\u6216\u9009\u62e9\u7ee7\u7eed\u65b9\u5f0f\u3002",
+        options: [
+          { id: "provide_requirements", label: "\u6211\u6765\u8865\u5145\u8981\u6c42", description: "\u8bf4\u660e\u8303\u56f4\u3001\u4f18\u5148\u7ea7\u6216\u9a8c\u6536\u6807\u51c6\u3002", recommended: true },
+          { id: "recommended_scope", label: "\u6309\u63a8\u8350\u8303\u56f4\u89c4\u5212", description: "\u4f18\u5148\u5b8c\u6210\u6838\u5fc3\u529f\u80fd\u548c\u53ef\u9a8c\u8bc1\u4ea4\u4ed8\u7269\u3002" },
+          { id: "continue_assumptions", label: "\u6309\u9ed8\u8ba4\u5047\u8bbe\u7ee7\u7eed", description: "\u7531 Agent \u8bb0\u5f55\u5408\u7406\u5047\u8bbe\u540e\u7ee7\u7eed\u3002" }
+        ],
+        allowFreeText: true
+      };
 }

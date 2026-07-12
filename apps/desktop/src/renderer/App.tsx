@@ -3035,8 +3035,8 @@ export function App() {
             className={`composer-shell ${queuedMessages.length > 0 ? "has-queue" : ""}`}
             style={queuedMessages.length > 0
               ? {
-                  "--queued-message-space": `${48 + queuedMessages.length * 36}px`,
-                  "--queued-message-scroll-offset": `${3 + queuedMessages.length * 36}px`
+                  "--queued-message-space": `${48 + queuedMessages.length * 40}px`,
+                  "--queued-message-scroll-offset": `${3 + queuedMessages.length * 40}px`
                 } as CSSProperties
               : undefined}
           >

@@ -28,6 +28,7 @@ import { McpManager } from "@mcp-runtime";
 import { ToolRuntime } from "@tool-runtime";
 import {
   buildGpaSystemDirective,
+  buildGpaTextClarificationFallback,
   DEFAULT_GPA_STATE,
   detectGpaConfirmation,
   gpaStageAllowsTools,
@@ -37,7 +38,7 @@ import {
 } from "./gpa";
 import type { GpaStage, GpaState } from "@shared-types";
 
-export { parseGpaState } from "./gpa";
+export { buildGpaTextClarificationFallback, parseGpaState } from "./gpa";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
 export const MODEL_DECISION_TIMEOUT_MS = 90_000;
@@ -657,9 +658,12 @@ class ThreadSessionRuntime {
           throw new Error("Turn interrupted.");
         }
 
-        // 代码级强制：GOAL/PLAN 阶段严禁工具调用，拦截并提示模型用文字回应
-        if (this.#gpa.stage === "act" && decision.clarification) {
-          const clarification = decision.clarification;
+        // GPA cannot advance past a material unresolved choice. Some compatible
+        // models put that choice in prose rather than the JSON clarification
+        // field, so preserve the user decision point with a narrow fallback.
+        const clarification = decision.clarification
+          ?? buildGpaTextClarificationFallback(this.#gpa.stage, decision.assistantMessage);
+        if (clarification) {
           const answers = await this.services.requestUserInput(this.threadId, turn.id, {
             title: clarification.title,
             kind: "gpa_plan_clarification",
@@ -679,7 +683,7 @@ class ThreadSessionRuntime {
               ? "The user skipped the GPA clarification. Continue the existing plan and state the assumption in the final summary."
               : `GPA clarification answer: ${JSON.stringify(answers)}`
           });
-          if (!skipped) {
+          if (!skipped && this.#gpa.stage === "act") {
             await this.#commitGpa({
               ...this.#gpa,
               stage: "plan",
@@ -687,6 +691,13 @@ class ThreadSessionRuntime {
               updatedAt: new Date().toISOString()
             });
             transcript.push({ role: "user", content: buildGpaPlanRevisionInstruction() });
+          } else {
+            transcript.push({
+              role: "user",
+              content: skipped
+                ? "The user skipped this GPA clarification. Continue under documented reasonable assumptions."
+                : "Use the user's clarification above. Continue the current GPA analysis stage and do not leave further material decisions only in prose."
+            });
           }
           continue;
         }

@@ -7,6 +7,7 @@ import {
   buildRuntimeFailureRecoveryMessage,
   compactTranscriptForContext,
   CONTEXT_COMPACTION_THRESHOLD,
+  buildGpaTextClarificationFallback,
   shouldFinishGpaAnalysisTurn,
   getAddedPatchFiles,
   getToolCallTaskKey,
@@ -105,6 +106,25 @@ describe("GPA analysis turn completion", () => {
         toolCalls: [{ id: "call-1", name: "fs.read_directory", arguments: { path: "." } }]
       })
     ).toBe(false);
+  });
+});
+
+describe("GPA prose clarification fallback", () => {
+  it("turns an explicitly unresolved technical choice into a visible clarification", () => {
+    const clarification = buildGpaTextClarificationFallback(
+      "goal",
+      "\u6280\u672f\u6808\u672a\u6307\u5b9a\uff08\u9700\u8981\u4f60\u786e\u8ba4\uff09\uff0c\u8fdb\u5165\u8ba1\u5212\u524d\u9700\u8981\u786e\u8ba4\u3002"
+    );
+
+    expect(clarification?.title).toBe("\u6280\u672f\u65b9\u6848\u5f85\u786e\u8ba4");
+    expect(clarification?.options).toHaveLength(3);
+    expect(clarification?.allowFreeText).toBe(true);
+  });
+
+  it("does not mistake a normal plan confirmation sentence for a clarification", () => {
+    expect(
+      buildGpaTextClarificationFallback("plan", "\u8bf7\u786e\u8ba4\u8ba1\u5212\uff0c\u6216\u63d0\u51fa\u4fee\u6539\u610f\u89c1\u3002")
+    ).toBeUndefined();
   });
 });
 

@@ -3623,39 +3623,43 @@ select:focus {
   position: absolute;
   top: 6px;
   left: 0;
-  right: 0;
+  width: min(420px, 100%);
   display: grid;
-  gap: 4px;
+  gap: 6px;
   z-index: 1;
 }
 
 .composer-queue.has-project {
-  right: 184px;
+  width: min(420px, calc(100% - 184px));
 }
 
 .composer-queue-item {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr) max-content 24px;
   align-items: center;
-  min-height: 32px;
+  min-height: 34px;
   gap: 8px;
-  padding: 0 6px 0 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 6px;
+  padding: 0 5px 0 12px;
+  border: 0;
+  border-radius: 8px;
   color: #c8d0da;
-  background: #17171a;
+  background: #1e1e20;
+  transition: background 140ms ease;
 }
 
+.composer-queue-item:hover { background: #28282c; }
+
 .composer-queue-label {
-  color: #7f8996;
+  color: #8390a0;
   font-size: 11px;
+  font-weight: 500;
 }
 
 .composer-queue-preview {
   min-width: 0;
   overflow: hidden;
-  color: #d9dde4;
-  font-size: 12px;
+  color: #eff1f4;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3677,6 +3681,8 @@ select:focus {
   color: #7f8996;
   background: transparent;
   cursor: pointer;
+  opacity: 0;
+  transition: color 140ms ease, background 140ms ease, opacity 140ms ease;
 }
 
 .composer-queue-delete svg {
@@ -3690,6 +3696,8 @@ select:focus {
   background: rgba(248, 113, 113, 0.1);
 }
 
+.composer-queue-item:hover .composer-queue-delete,
+.composer-queue-delete:focus-visible { opacity: 1; }
 .composer-queue-delete:disabled { opacity: 0.45; cursor: wait; }
 
 .scroll-to-latest-button.with-queue {
@@ -4637,7 +4645,7 @@ select:focus {
 }
 
 .runtime-activity-panel {
-  width: min(100%, 680px);
+  width: 100%;
   margin: 2px 0 6px;
   color: #9ea7b4;
   font-size: 12px;
