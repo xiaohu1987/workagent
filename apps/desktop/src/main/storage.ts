@@ -258,7 +258,9 @@ export class DatabaseService {
         selected_skill_ids_json TEXT NOT NULL,
         knowledge_base_ids_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        pinned_at TEXT
       );
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -460,6 +462,8 @@ export class DatabaseService {
     this.ensureColumn("approval_records", "resolution_mode", "TEXT");
     this.ensureColumn("approval_records", "resolved_at", "TEXT");
     this.ensureColumn("threads", "gpa_state_json", "TEXT");
+    this.ensureColumn("threads", "is_pinned", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("threads", "pinned_at", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -472,7 +476,7 @@ export class DatabaseService {
 
   public listThreads(): ThreadRecord[] {
     return this.#db
-      .prepare("SELECT * FROM threads ORDER BY updated_at DESC")
+      .prepare("SELECT * FROM threads ORDER BY is_pinned DESC, pinned_at DESC, created_at DESC, rowid DESC")
       .all()
       .map(mapThreadRow);
   }
@@ -533,6 +537,8 @@ export class DatabaseService {
       knowledgeBaseIds: [],
       createdAt: now,
       updatedAt: now,
+      isPinned: false,
+      pinnedAt: null,
       gpaStateJson: null
     };
 
@@ -541,8 +547,8 @@ export class DatabaseService {
         INSERT INTO threads (
           id, title, mode, workspace_kind, cwd, project_id, workspace_id,
           model_id, provider_id, status, selected_skill_ids_json,
-          knowledge_base_ids_json, created_at, updated_at, gpa_state_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          knowledge_base_ids_json, created_at, updated_at, is_pinned, pinned_at, gpa_state_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         thread.id,
@@ -559,6 +565,8 @@ export class DatabaseService {
         JSON.stringify(thread.knowledgeBaseIds),
         thread.createdAt,
         thread.updatedAt,
+        Number(thread.isPinned),
+        thread.pinnedAt,
         thread.gpaStateJson
       );
 
@@ -586,7 +594,7 @@ export class DatabaseService {
         UPDATE threads
         SET title = ?, mode = ?, workspace_kind = ?, cwd = ?, project_id = ?, workspace_id = ?,
             model_id = ?, provider_id = ?, status = ?, selected_skill_ids_json = ?,
-            knowledge_base_ids_json = ?, updated_at = ?, gpa_state_json = ?
+            knowledge_base_ids_json = ?, updated_at = ?, is_pinned = ?, pinned_at = ?, gpa_state_json = ?
         WHERE id = ?
       `)
       .run(
@@ -602,6 +610,8 @@ export class DatabaseService {
         JSON.stringify(next.selectedSkillIds),
         JSON.stringify(next.knowledgeBaseIds),
         next.updatedAt,
+        Number(next.isPinned),
+        next.pinnedAt,
         next.gpaStateJson,
         threadId
       );
@@ -1526,6 +1536,8 @@ function mapThreadRow(row: any): ThreadRecord {
     knowledgeBaseIds: JSON.parse(row.knowledge_base_ids_json ?? "[]"),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    isPinned: Boolean(row.is_pinned),
+    pinnedAt: row.pinned_at ?? null,
     gpaStateJson: row.gpa_state_json ?? null
   };
 }

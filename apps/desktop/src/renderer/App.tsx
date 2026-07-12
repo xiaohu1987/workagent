@@ -376,6 +376,7 @@ export function App() {
   const [historySearchQuery, setHistorySearchQuery] = useState("");
   const [historySearchResults, setHistorySearchResults] = useState<HistorySearchResult[]>([]);
   const [isHistorySearchLoading, setIsHistorySearchLoading] = useState(false);
+  const [historyContextMenu, setHistoryContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [editingUserMessage, setEditingUserMessage] = useState<{ id: string; content: string } | null>(null);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [isContextReportOpen, setIsContextReportOpen] = useState(false);
@@ -1987,6 +1988,18 @@ export function App() {
     }
   }
 
+  async function toggleThreadPinned(thread: ThreadRecord) {
+    try {
+      await window.codexh.setThreadPinned({ threadId: thread.id, isPinned: !thread.isPinned });
+      await refreshThreads();
+      showNotice(thread.isPinned ? "已取消置顶。" : "任务已置顶。", { tone: "success" });
+    } catch (error) {
+      showNotice("修改置顶状态失败。", {
+        message: error instanceof Error ? error.message : "请稍后重试。"
+      });
+    }
+  }
+
   async function setKnowledgeEnabled(knowledgeEnabled: boolean) {
     setGpaState((prev) => ({ ...prev, knowledgeEnabled }));
     setGpaMenuOpen(false);
@@ -2663,11 +2676,18 @@ export function App() {
             ) : (
               threads.map((thread) => {
                 const historyItemAffordance = getHistoryItemAffordance(thread.status);
+                const isThreadRunning = historyItemAffordance.kind === "running-indicator";
 
                 return (
                   <div
                     key={thread.id}
-                    className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""}`}
+                    className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""} ${isThreadRunning ? "running" : ""}`}
+                    title={isThreadRunning ? historyItemAffordance.title : undefined}
+                    aria-busy={isThreadRunning}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setHistoryContextMenu({ x: event.clientX, y: event.clientY, thread });
+                    }}
                   >
                     <button
                       type="button"
@@ -2677,12 +2697,9 @@ export function App() {
                       }}
                     >
                       <span className="history-item-label">{thread.title}</span>
+                      {thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}
                     </button>
-                    {historyItemAffordance.kind === "running-indicator" ? (
-                      <span className="history-item-running-indicator" title={historyItemAffordance.title} aria-hidden="true">
-                        <IconSpinner />
-                      </span>
-                    ) : (
+                    {!isThreadRunning && (
                       <button
                         type="button"
                         className="history-item-delete"
@@ -2702,6 +2719,19 @@ export function App() {
               })
             )}
           </div>
+          {historyContextMenu ? (
+            <WorkspaceContextMenu
+              x={historyContextMenu.x}
+              y={historyContextMenu.y}
+              onClose={() => setHistoryContextMenu(null)}
+              actions={[{
+                id: "toggle-history-pin",
+                label: historyContextMenu.thread.isPinned ? "取消置顶" : "置顶任务",
+                icon: <IconPin />,
+                onSelect: () => void toggleThreadPinned(historyContextMenu.thread)
+              }]}
+            />
+          ) : null}
         </div>
 
         <button
@@ -8622,6 +8652,17 @@ function IconCopy() {
     <SvgIcon>
       <rect x="8" y="8" width="10" height="11" rx="1.5" />
       <path d="M6 16.5H5.5A1.5 1.5 0 0 1 4 15V5.5A1.5 1.5 0 0 1 5.5 4H14a1.5 1.5 0 0 1 1.5 1.5V6" />
+    </SvgIcon>
+  );
+}
+
+function IconPin() {
+  return (
+    <SvgIcon>
+      <path d="m9 4 6 6" />
+      <path d="m7 9 8 8" />
+      <path d="M14.5 4.5 19 9l-3 1.5-3.5 3.5L11 17l-4-4 3-1.5 3.5-3.5z" />
+      <path d="m7 17-3 3" />
     </SvgIcon>
   );
 }

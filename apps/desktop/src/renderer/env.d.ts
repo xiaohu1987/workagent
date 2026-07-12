@@ -3,6 +3,7 @@ declare global {
     codexh: {
       listThreads: () => Promise<any[]>;
       searchThreads: (query: string) => Promise<Array<{ thread: ThreadRecord; snippet: string | null; score: number }>>;
+      setThreadPinned: (payload: { threadId: string; isPinned: boolean }) => Promise<ThreadRecord>;
       createThread: (payload: {
         title: string;
         mode: "project" | "chat";

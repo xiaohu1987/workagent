@@ -62,6 +62,8 @@ export interface ThreadRecord {
   knowledgeBaseIds: string[];
   createdAt: string;
   updatedAt: string;
+  isPinned: boolean;
+  pinnedAt: string | null;
   gpaStateJson: string | null;
 }
 

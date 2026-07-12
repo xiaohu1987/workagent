@@ -3,6 +3,8 @@ import { contextBridge, ipcRenderer } from "electron";
 const api = {
   listThreads: () => ipcRenderer.invoke("threads:list"),
   searchThreads: (query: string) => ipcRenderer.invoke("threads:search", query),
+  setThreadPinned: (payload: { threadId: string; isPinned: boolean }) =>
+    ipcRenderer.invoke("threads:set-pinned", payload),
   createThread: (payload: {
     title: string;
     mode: "project" | "chat";

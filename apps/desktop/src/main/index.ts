@@ -122,6 +122,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:list", () => backend.listThreads());
   ipcMain.handle("threads:search", (_event, query: string) => backend.searchThreads(query));
   ipcMain.handle("threads:create", (_event, payload) => backend.createThread(payload));
+  ipcMain.handle("threads:set-pinned", (_event, payload: { threadId: string; isPinned: boolean }) =>
+    backend.setThreadPinned(payload.threadId, payload.isPinned)
+  );
   ipcMain.handle("projects:choose-directory", async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({
       defaultPath: defaultPath || undefined,

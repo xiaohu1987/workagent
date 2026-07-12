@@ -177,6 +177,20 @@ export class DesktopBackend {
     return this.#db.searchThreads(query);
   }
 
+  public async setThreadPinned(threadId: string, isPinned: boolean): Promise<ThreadRecord> {
+    const updated = this.#db.updateThread(threadId, {
+      isPinned,
+      pinnedAt: isPinned ? new Date().toISOString() : null
+    });
+    await this.emit({
+      type: "thread.updated",
+      threadId,
+      payload: { thread: updated },
+      createdAt: new Date().toISOString()
+    });
+    return updated;
+  }
+
   public listMcpServers() {
     const statusById = new Map(this.#mcp.listStatuses().map((status) => [status.serverId, status]));
     return this.#mcp.listConfigs().map((server) => ({

@@ -6930,6 +6930,30 @@ select:focus {
   background: #17171b;
 }
 
+.history-item.running {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(217, 146, 104, 0.28);
+  background: rgba(217, 146, 104, 0.05);
+}
+
+.history-item.running::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #f0ac82;
+  box-shadow: 0 0 0 2px rgba(217, 146, 104, 0.18), 0 0 12px 2px rgba(217, 146, 104, 0.72);
+  offset-path: inset(2px round 10px);
+  offset-rotate: 0deg;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: history-item-running-orb 2.4s linear infinite;
+}
+
 .history-item-main {
   display: flex;
   align-items: center;
@@ -6949,21 +6973,18 @@ select:focus {
   white-space: nowrap;
 }
 
-.history-item-running-indicator {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  flex: 0 0 auto;
-  color: rgba(244, 244, 243, 0.54);
-}
-
-.history-item-running-indicator svg {
+.history-item-pin {
+  display: inline-grid;
   width: 16px;
   height: 16px;
-  animation: history-item-spinner-rotate 880ms linear infinite;
-  transform-origin: center;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #d99268;
+}
+
+.history-item-pin svg {
+  width: 14px;
+  height: 14px;
 }
 
 .history-item-delete {
@@ -6993,15 +7014,8 @@ select:focus {
 }
 
 .history-item:hover .history-item-delete,
-.history-item.selected .history-item-delete,
-.history-item:hover .history-item-running-indicator,
-.history-item.selected .history-item-running-indicator {
+.history-item.selected .history-item-delete {
   color: rgba(244, 244, 243, 0.52);
-}
-
-.history-item:hover .history-item-running-indicator,
-.history-item.selected .history-item-running-indicator {
-  color: rgba(244, 244, 243, 0.78);
 }
 
 .history-item:hover .history-item-delete,
@@ -7027,13 +7041,19 @@ select:focus {
   font-size: 15px;
 }
 
-@keyframes history-item-spinner-rotate {
-  from {
-    transform: rotate(0deg);
+@keyframes history-item-running-orb {
+  0% {
+    offset-distance: 0%;
+    opacity: 0.88;
   }
 
-  to {
-    transform: rotate(360deg);
+  50% {
+    opacity: 1;
+  }
+
+  100% {
+    offset-distance: 100%;
+    opacity: 0.88;
   }
 }
 
