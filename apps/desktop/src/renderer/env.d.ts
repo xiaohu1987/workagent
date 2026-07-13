@@ -5,6 +5,7 @@ type UpdateState = {
   changelog?: string;
   downloadUrl?: string;
   insecureTransport?: boolean;
+  missingSha256?: boolean;
   progress?: number;
   error?: string;
   isPackaged: boolean;
@@ -35,6 +36,11 @@ declare global {
       deleteQueuedMessage: (payload: { threadId: string; id: string }) => Promise<void>;
       importAttachments: (payload: { threadId: string; attachments: any[] }) => Promise<any[]>;
       previewAttachment: (payload: { threadId: string; absolutePath: string }) => Promise<string>;
+      getAttachmentMediaUrl: (payload: { threadId: string; absolutePath: string }) => Promise<{
+        url: string;
+        mimeType: string;
+        kind: "image" | "video" | "file";
+      }>;
       previewLocalImage: (payload: { absolutePath: string }) => Promise<string>;
       rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) => Promise<void>;
       interruptThread: (threadId: string) => Promise<void>;

@@ -52,7 +52,10 @@
     "afterPack": "./scripts/after-pack.cjs",
     "directories": { "output": "release" },
     "files": ["dist/**/*", "package.json"],
-    "extraResources": [{ "from": "build/seed-skills", "to": "seed-skills", "filter": ["**/*"] }],
+    "extraResources": [
+      { "from": "build/seed-skills", "to": "seed-skills", "filter": ["**/*"] },
+      { "from": "assets/icon.ico", "to": "icon.ico" }
+    ],
     "win": {
       "icon": "assets/icon.ico",
       "target": [{ "target": "nsis", "arch": ["x64"] }],

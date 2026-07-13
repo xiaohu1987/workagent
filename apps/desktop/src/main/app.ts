@@ -438,17 +438,25 @@ export class DesktopBackend {
       const name = path.basename(input.name || input.path || "attachment");
       const inputData = input.data ? Buffer.from(input.data) : input.path ? await fs.readFile(input.path) : null;
       if (!inputData) throw new Error(`附件 ${name} 没有可读取内容。`);
-      if (inputData.byteLength > 20 * 1024 * 1024) throw new Error(`附件 ${name} 超过 20 MB 限制。`);
       const mimeType = normalizeAttachmentMimeType(input.mimeType, name);
       const isImage = mimeType.startsWith("image/");
-      if (isImage && inputData.byteLength > 10 * 1024 * 1024) throw new Error(`图片 ${name} 超过 10 MB 限制。`);
+      const isVideo = mimeType.startsWith("video/");
+      const maxBytes = isVideo ? 100 * 1024 * 1024 : isImage ? 10 * 1024 * 1024 : 20 * 1024 * 1024;
+      if (inputData.byteLength > maxBytes) {
+        throw new Error(`${isVideo ? "视频" : isImage ? "图片" : "附件"} ${name} 超过 ${Math.round(maxBytes / (1024 * 1024))} MB 限制。`);
+      }
       const digest = createHash("sha256").update(inputData).digest("hex");
       const extension = path.extname(name) || extensionForMimeType(mimeType);
       const absolutePath = path.join(targetDir, `${digest.slice(0, 24)}${extension.toLowerCase()}`);
       try { await fs.access(absolutePath); } catch { await fs.writeFile(absolutePath, inputData); }
       attachments.push({
-        id: randomUUID(), kind: isImage ? "image" : "file", name, mimeType, absolutePath,
-        sizeBytes: inputData.byteLength, source: "user"
+        id: randomUUID(),
+        kind: isImage ? "image" : isVideo ? "video" : "file",
+        name,
+        mimeType,
+        absolutePath,
+        sizeBytes: inputData.byteLength,
+        source: "user"
       });
     }
     return attachments;
@@ -462,6 +470,43 @@ export class DesktopBackend {
     const data = await fs.readFile(absolutePath);
     if (data.byteLength > 20 * 1024 * 1024) throw new Error("图片过大，无法预览。");
     return `data:${mimeType};base64,${data.toString("base64")}`;
+  }
+
+  public async getAttachmentMediaUrl(threadId: string, absolutePath: string): Promise<{
+    url: string;
+    mimeType: string;
+    kind: "image" | "video" | "file";
+  }> {
+    const resolved = path.resolve(absolutePath);
+    const allowed = await this.isThreadAttachmentPath(threadId, resolved);
+    if (!allowed) throw new Error("该附件不属于当前对话。");
+    const mimeType = normalizeAttachmentMimeType(undefined, resolved);
+    if (mimeType.startsWith("image/")) {
+      const data = await fs.readFile(resolved);
+      if (data.byteLength > 20 * 1024 * 1024) throw new Error("图片过大，无法预览。");
+      return {
+        url: `data:${mimeType};base64,${data.toString("base64")}`,
+        mimeType,
+        kind: "image"
+      };
+    }
+    if (mimeType.startsWith("video/")) {
+      await fs.access(resolved);
+      return {
+        url: buildCodexhMediaUrl(threadId, resolved),
+        mimeType,
+        kind: "video"
+      };
+    }
+    throw new Error("该附件不支持内嵌预览。");
+  }
+
+  public async assertThreadMediaPath(threadId: string, absolutePath: string): Promise<string> {
+    const resolved = path.resolve(absolutePath);
+    const allowed = await this.isThreadAttachmentPath(threadId, resolved);
+    if (!allowed) throw new Error("该媒体文件不属于当前对话。");
+    await fs.access(resolved);
+    return resolved;
   }
 
   public async getLocalImagePreview(absolutePath: string): Promise<string> {
@@ -787,6 +832,10 @@ export class DesktopBackend {
     this.#config.providers = [...normalized.providers];
     this.#config.models = [...normalized.models];
     this.#config.routing = { ...normalized.routing };
+    this.#config.multimodal = {
+      image: { ...normalized.multimodal.image },
+      video: { ...normalized.multimodal.video }
+    };
     this.#config.desktop = { ...normalized.desktop };
     this.#config.mcpServers = normalized.mcpServers.map((server) => ({
       ...server,
@@ -2058,33 +2107,72 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
   const models = config.models.filter((model) =>
     providers.some((provider) => provider.id === model.providerId)
   );
-  const nextModels = models.length ? models : fallback.models;
+  const nextModels = (models.length ? models : fallback.models).map((model) => ({
+    ...model,
+    role:
+      model.role === "image" || model.role === "video" || model.role === "reasoning"
+        ? model.role
+        : undefined,
+    supportsImageGeneration:
+      model.role === "image" ? true : model.supportsImageGeneration === true,
+    supportsVideoGeneration:
+      model.role === "video" ? true : model.supportsVideoGeneration === true
+  }));
 
   const firstModel = nextModels[0];
   if (!firstModel) {
     return fallback;
   }
 
+  const reasoningModels = nextModels.filter((model) => model.role === "reasoning");
   const firstProviderWithModel =
+    providers.find((provider) => reasoningModels.some((model) => model.providerId === provider.id)) ??
     providers.find((provider) => nextModels.some((model) => model.providerId === provider.id)) ??
     providers.find((provider) => provider.id === firstModel.providerId) ??
     fallback.providers[0];
-  const defaultProvider = nextModels.some(
+  const defaultProvider = reasoningModels.some(
     (model) => model.providerId === config.defaultProvider
   )
     ? config.defaultProvider
     : firstProviderWithModel.id;
-  const providerModels = nextModels.filter((model) => model.providerId === defaultProvider);
+  const providerModels = reasoningModels.filter((model) => model.providerId === defaultProvider);
   const defaultModel = providerModels.some((model) => model.id === config.defaultModel)
     ? config.defaultModel
-    : providerModels[0]?.id ?? firstModel.id;
+    : providerModels[0]?.id ?? reasoningModels[0]?.id ?? firstModel.id;
 
   return {
     ...config,
     defaultProvider,
     defaultModel,
     providers,
-    models: nextModels
+    models: nextModels,
+    multimodal: {
+      image: normalizeMultimodalDefaults(config.multimodal?.image, nextModels, "image"),
+      video: normalizeMultimodalDefaults(config.multimodal?.video, nextModels, "video")
+    }
+  };
+}
+
+function normalizeMultimodalDefaults(
+  value: AppConfig["multimodal"]["image"] | undefined,
+  models: AppConfig["models"],
+  role: "image" | "video"
+): AppConfig["multimodal"]["image"] {
+  const roleModels = models.filter((model) => model.role === role);
+  let defaultProviderId = value?.defaultProviderId?.trim();
+  let defaultModelId = value?.defaultModelId?.trim();
+  const ok = roleModels.some(
+    (model) => model.id === defaultModelId && model.providerId === defaultProviderId
+  );
+  if (!ok) {
+    const first = roleModels[0];
+    defaultProviderId = first?.providerId;
+    defaultModelId = first?.id;
+  }
+  return {
+    enabled: value?.enabled !== false,
+    defaultProviderId,
+    defaultModelId
   };
 }
 
@@ -2094,8 +2182,11 @@ function resolveThreadModelSelection(
   modelId?: string | null
 ): Pick<ThreadRecord, "providerId" | "modelId"> {
   const normalized = normalizeAppConfig(config);
+  const reasoningModels = normalized.models.filter(
+    (model) => model.role === "reasoning"
+  );
   const providerModels = providerId
-    ? normalized.models.filter((model) => model.providerId === providerId)
+    ? reasoningModels.filter((model) => model.providerId === providerId)
     : [];
 
   if (providerId && providerModels.length > 0) {
@@ -2140,10 +2231,21 @@ function normalizeAttachmentMimeType(value: string | undefined, fileName: string
     case ".webp": return "image/webp";
     case ".gif": return "image/gif";
     case ".svg": return "image/svg+xml";
+    case ".mp4": return "video/mp4";
+    case ".webm": return "video/webm";
+    case ".mov": return "video/quicktime";
+    case ".mkv": return "video/x-matroska";
     case ".pdf": return "application/pdf";
     case ".txt": return "text/plain";
     default: return "application/octet-stream";
   }
+}
+
+function buildCodexhMediaUrl(threadId: string, absolutePath: string): string {
+  const url = new URL("codexh-media://local/play");
+  url.searchParams.set("threadId", threadId);
+  url.searchParams.set("path", absolutePath);
+  return url.toString();
 }
 
 function extensionForMimeType(mimeType: string): string {
@@ -2151,6 +2253,10 @@ function extensionForMimeType(mimeType: string): string {
   if (mimeType === "image/jpeg") return ".jpg";
   if (mimeType === "image/webp") return ".webp";
   if (mimeType === "image/gif") return ".gif";
+  if (mimeType === "video/mp4") return ".mp4";
+  if (mimeType === "video/webm") return ".webm";
+  if (mimeType === "video/quicktime") return ".mov";
+  if (mimeType === "video/x-matroska") return ".mkv";
   return "";
 }
 

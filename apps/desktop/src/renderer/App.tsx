@@ -33,7 +33,7 @@ import {
   isThreadExecutionInProgress
 } from "./thread-ui-state";
 
-type SettingsTab = "general" | "knowledge" | "provider" | "skills" | "agent" | "mcp" | "update";
+type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "update";
 type RightWorkspaceTab = "preview" | "terminal" | "browser" | "files";
 type ResizePane = "sidebar" | "right-workspace";
 
@@ -44,6 +44,7 @@ type UpdateState = {
   changelog?: string;
   downloadUrl?: string;
   insecureTransport?: boolean;
+  missingSha256?: boolean;
   progress?: number;
   error?: string;
   isPackaged: boolean;
@@ -235,6 +236,8 @@ type FileChangeSummaryItem = {
   action: FileChangeAction;
   additions: number;
   deletions: number;
+  kind?: "generated-image" | "generated-video" | "patch";
+  description?: string;
 };
 
 type ConversationTurnItem = {
@@ -286,10 +289,11 @@ type HistorySearchResult = {
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
-  { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" },
+  { id: "multimodal", label: "多模态", hint: "配置生图模型与视频模型" },
   { id: "skills", label: "Skill 管理", hint: "已加载技能与来源范围" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
-  { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" }
+  { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
+  { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
 ];
 
 const WELCOME_CARDS: WelcomeCard[] = [
@@ -435,6 +439,9 @@ export function App() {
   const [fetchedModels, setFetchedModels] = useState<{ id: string; displayName?: string }[]>([]);
   const [showFetchedModels, setShowFetchedModels] = useState(false);
   const [selectedFetchedModelIds, setSelectedFetchedModelIds] = useState<string[]>([]);
+  const [fetchedModelsTarget, setFetchedModelsTarget] = useState<"provider">("provider");
+  const [multimodalPickerRole, setMultimodalPickerRole] = useState<"reasoning" | "image" | "video" | null>(null);
+  const [multimodalPickerSelected, setMultimodalPickerSelected] = useState<string[]>([]);
   const [composerProviderId, setComposerProviderId] = useState("");
   const [composerModelId, setComposerModelId] = useState("");
   const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSourceAttachment[]>([]);
@@ -1246,11 +1253,11 @@ export function App() {
   );
   const composerProviders = useMemo(
     () =>
-      config?.providers.filter((provider) => getModelsForProvider(config, provider.id).length > 0) ?? [],
+      config?.providers.filter((provider) => getReasoningModelsForProvider(config, provider.id).length > 0) ?? [],
     [config]
   );
   const composerModels = useMemo(
-    () => (config ? getModelsForProvider(config, composerProviderId) : []),
+    () => (config ? getReasoningModelsForProvider(config, composerProviderId) : []),
     [config, composerProviderId]
   );
   const selectedComposerModel = useMemo(
@@ -1283,7 +1290,7 @@ export function App() {
         ? composerProviders.map((provider) => ({
             providerId: provider.id,
             providerLabel: getProviderDisplayName(provider),
-            models: getModelsForProvider(config, provider.id).map((model) => ({
+            models: getReasoningModelsForProvider(config, provider.id).map((model) => ({
               id: model.id,
               label: model.displayName === model.id ? model.id : `${model.displayName} (${model.id})`,
               supportsMultimodalInput: model.supportsMultimodalInput
@@ -1341,6 +1348,8 @@ export function App() {
     switch (settingsTab) {
       case "provider":
         return "模型提供商";
+      case "multimodal":
+        return "多模态模型";
       case "skills":
         return "Skill 管理";
       case "mcp":
@@ -2418,6 +2427,8 @@ export function App() {
     setConfigDraft(draft);
     setSettingsProviderId(nextProviderId);
     setProviderSecretDrafts({});
+    setMultimodalPickerRole(null);
+    setMultimodalPickerSelected([]);
     setNewModelId("");
     setNewModelDisplayName("");
   }
@@ -2521,6 +2532,7 @@ export function App() {
       return;
     }
     setIsFetchingModels(true);
+    setFetchedModelsTarget("provider");
     try {
       const list = await window.codexh.fetchProviderModels({
         baseUrl,
@@ -2553,14 +2565,15 @@ export function App() {
     if (!configDraft) {
       return;
     }
-    if (!settingsProvider) {
-      return;
-    }
     const candidates = fetchedModels.filter((entry) =>
       selectedFetchedModelIds.includes(entry.id)
     );
     if (candidates.length === 0) {
       showNotice("没有勾选要添加的模型。");
+      return;
+    }
+
+    if (!settingsProvider) {
       return;
     }
     const existing = new Set(configDraft.models.map((model) => model.id));
@@ -2583,10 +2596,8 @@ export function App() {
     setSelectedFetchedModelIds([]);
     setFetchedModels([]);
     showNotice(
-      added > 0
-        ? `已添加 ${added} 个模型。${skipped > 0 ? `（${skipped} 个已存在已跳过）` : ""}`
-        : "没有新增模型。",
-      { tone: "success" }
+      added > 0 ? `已添加 ${added} 个模型。` : "没有新增模型。",
+      skipped > 0 ? { message: `跳过 ${skipped} 个已存在模型。` } : undefined
     );
   }
 
@@ -2626,6 +2637,112 @@ export function App() {
       );
       return normalizeDraftConfig(next);
     });
+  }
+
+  function setModelRole(providerId: string, modelId: string, role: "reasoning" | "image" | "video" | null) {
+    const roleLabel = role === "reasoning" ? "推理模型" : role === "image" ? "图片模型" : role === "video" ? "视频模型" : null;
+    void persistMultimodalChange((next) => {
+      const model = next.models.find((entry) => entry.providerId === providerId && entry.id === modelId);
+      if (!model) return;
+      const previousRole = model.role === "image" || model.role === "video" || model.role === "reasoning"
+        ? model.role
+        : null;
+      if (role) {
+        model.role = role;
+        if (role === "image") model.supportsImageGeneration = true;
+        if (role === "video") model.supportsVideoGeneration = true;
+      } else {
+        delete model.role;
+      }
+      if (previousRole === "image" || previousRole === "video") {
+        if (next.multimodal[previousRole].defaultProviderId === providerId &&
+          next.multimodal[previousRole].defaultModelId === modelId) {
+          delete next.multimodal[previousRole].defaultProviderId;
+          delete next.multimodal[previousRole].defaultModelId;
+        }
+      }
+      if ((role === "image" || role === "video") && !next.multimodal[role].defaultModelId) {
+        next.multimodal[role].defaultProviderId = providerId;
+        next.multimodal[role].defaultModelId = modelId;
+      }
+    }, roleLabel ? `已加入${roleLabel}` : "已从多模态列表移除");
+  }
+
+  function setMultimodalDefault(kind: "image" | "video", providerId: string, modelId: string) {
+    void persistMultimodalChange((next) => {
+      next.multimodal[kind].defaultProviderId = providerId;
+      next.multimodal[kind].defaultModelId = modelId;
+    }, `已设为默认${kind === "image" ? "图片" : "视频"}模型`);
+  }
+
+  function setMultimodalEnabled(kind: "image" | "video", enabled: boolean) {
+    void persistMultimodalChange((next) => {
+      next.multimodal[kind].enabled = enabled;
+    }, enabled
+      ? `已启用${kind === "image" ? "图片" : "视频"}生成`
+      : `已关闭${kind === "image" ? "图片" : "视频"}生成`);
+  }
+
+  function removeFromMultimodalRole(providerId: string, modelId: string) {
+    setModelRole(providerId, modelId, null);
+  }
+
+  function applyMultimodalPicker() {
+    if (!multimodalPickerRole || multimodalPickerSelected.length === 0) return;
+    const role = multimodalPickerRole;
+    const selected = [...multimodalPickerSelected];
+    const roleLabel = role === "reasoning" ? "推理模型" : role === "image" ? "图片模型" : "视频模型";
+    setMultimodalPickerRole(null);
+    setMultimodalPickerSelected([]);
+    void persistMultimodalChange((next) => {
+      for (const key of selected) {
+        const [providerId, ...modelIdParts] = key.split("::");
+        const modelId = modelIdParts.join("::");
+        if (!providerId || !modelId) continue;
+        const model = next.models.find((entry) => entry.providerId === providerId && entry.id === modelId);
+        if (!model) continue;
+        const previousRole = model.role === "image" || model.role === "video" || model.role === "reasoning"
+          ? model.role
+          : null;
+        model.role = role;
+        if (role === "image") model.supportsImageGeneration = true;
+        if (role === "video") model.supportsVideoGeneration = true;
+        if (previousRole === "image" || previousRole === "video") {
+          if (next.multimodal[previousRole].defaultProviderId === providerId &&
+            next.multimodal[previousRole].defaultModelId === modelId) {
+            delete next.multimodal[previousRole].defaultProviderId;
+            delete next.multimodal[previousRole].defaultModelId;
+          }
+        }
+        if ((role === "image" || role === "video") && !next.multimodal[role].defaultModelId) {
+          next.multimodal[role].defaultProviderId = providerId;
+          next.multimodal[role].defaultModelId = modelId;
+        }
+      }
+    }, `已添加 ${selected.length} 个到${roleLabel}`);
+  }
+
+  async function persistMultimodalChange(mutate: (draft: AppConfig) => void, successTitle = "多模态配置已保存") {
+    if (!config || !configDraft) return;
+    const nextDraft = cloneConfig(configDraft);
+    mutate(nextDraft);
+    const normalized = normalizeDraftConfig(nextDraft);
+    setConfigDraft(normalized);
+    try {
+      const nextConfig = buildConfigToSave(normalized, config, providerSecretDrafts);
+      await window.codexh.saveConfig(nextConfig);
+      setConfig(nextConfig);
+      showNotice(successTitle, {
+        message: "已立即生效，无需再点保存。",
+        tone: "success"
+      });
+    } catch (error) {
+      showNotice("多模态配置保存失败", {
+        message: error instanceof Error ? error.message : String(error),
+        tone: "warning"
+      });
+      await refreshConfig(settingsProviderId);
+    }
   }
 
   function removeModel(modelId: string) {
@@ -2725,9 +2842,16 @@ export function App() {
 
   async function downloadAvailableUpdate() {
     if (!updateState) return;
-    if (updateState.insecureTransport && !window.confirm("当前更新源使用 HTTP，可能被篡改。仍要下载并校验该更新吗？")) return;
+    const needsConfirm = updateState.insecureTransport === true || updateState.missingSha256 === true;
+    if (needsConfirm) {
+      const reasons = [
+        updateState.insecureTransport ? "更新源使用 HTTP，可能被篡改" : null,
+        updateState.missingSha256 ? "更新清单未提供 sha256，无法校验安装包完整性" : null
+      ].filter(Boolean).join("；");
+      if (!window.confirm(`${reasons}。仍要继续下载吗？`)) return;
+    }
     try {
-      setUpdateState(await window.codexh.downloadUpdate({ confirmInsecureHttp: updateState.insecureTransport === true }));
+      setUpdateState(await window.codexh.downloadUpdate({ confirmInsecureHttp: needsConfirm }));
     } catch (error) {
       showNotice("下载更新失败", { message: error instanceof Error ? error.message : String(error) });
     }
@@ -2760,7 +2884,7 @@ export function App() {
       return;
     }
 
-    const nextModels = getModelsForProvider(config, nextProviderId);
+    const nextModels = getReasoningModelsForProvider(config, nextProviderId);
     if (nextModels.length === 0) {
       showNotice("这个供应商下还没有模型。", {
         message: "请先去设置里添加。"
@@ -3691,16 +3815,6 @@ export function App() {
                                           />
                                           <span>支持多模态</span>
                                         </label>
-                                        <label className="model-capability-toggle" title="启用后，发送消息会直接调用 OpenAI 兼容图片生成接口。">
-                                          <input
-                                            type="checkbox"
-                                            checked={model.supportsImageGeneration === true}
-                                            onChange={(event) =>
-                                              updateModelDraft(model.id, { supportsImageGeneration: event.target.checked })
-                                            }
-                                          />
-                                          <span>支持生图</span>
-                                        </label>
                                         {(() => {
                                           const isTesting = testingModelKey === getModelProfileKey(settingsProvider.id, model.id);
                                           return (
@@ -3795,6 +3909,101 @@ export function App() {
                 </div>
               ) : null}
 
+              {settingsTab === "multimodal" ? (
+                <div className="settings-section multimodal-settings-section">
+                  {configDraft ? (
+                    <>
+                      {(["reasoning", "image", "video"] as const).map((role) => {
+                        const models = configDraft.models.filter((model) =>
+                          role === "reasoning" ? isReasoningModel(model) : model.role === role
+                        );
+                        const kind = role === "reasoning" ? null : role;
+                        const title = role === "reasoning" ? "推理模型" : role === "image" ? "图片模型" : "视频模型";
+                        const hint = role === "reasoning"
+                          ? "手动添加后会出现在聊天下拉；可随时移除。"
+                          : `从统一模型库中分配${role === "image" ? "图片" : "视频"}生成模型。`;
+                        return (
+                          <div key={role} className={`config-block multimodal-model-panel is-${role}`}>
+                            <div className="section-copy section-copy-with-action">
+                              <div>
+                                <strong>{title}</strong>
+                                <span>{hint}</span>
+                              </div>
+                              <button className="model-add-button" onClick={() => {
+                                setMultimodalPickerRole(role);
+                                setMultimodalPickerSelected([]);
+                              }} title={`添加${title}`}><IconPlus /></button>
+                            </div>
+                            {kind ? (
+                              <div className="multimodal-toggle-row">
+                                <span>启用{kind === "image" ? "图片" : "视频"}生成</span>
+                                <label className="model-capability-toggle">
+                                  <input type="checkbox" checked={configDraft.multimodal[kind].enabled} onChange={(event) => setMultimodalEnabled(kind, event.target.checked)} />
+                                  <span>{configDraft.multimodal[kind].enabled ? "已启用" : "已关闭"}</span>
+                                </label>
+                              </div>
+                            ) : null}
+                            {kind && !configDraft.multimodal[kind].enabled ? (
+                              <div className="multimodal-empty-tip">
+                                {kind === "image" ? "图片" : "视频"}生成已关闭。开启后，Agent 才会在识别到相关意图时调用默认模型。
+                              </div>
+                            ) : null}
+                            <div className={`provider-model-box multimodal-compact-list${!kind || configDraft.multimodal[kind].enabled ? "" : " is-disabled"}`}>
+                              {models.length > 0 ? models.map((model) => {
+                                const isDefault = kind
+                                  ? configDraft.multimodal[kind].defaultProviderId === model.providerId &&
+                                    configDraft.multimodal[kind].defaultModelId === model.id
+                                  : false;
+                                const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
+                                return (
+                                  <div key={modelKey(model.providerId, model.id)} className="provider-model-row multimodal-list-row">
+                                    <div className="provider-model-copy multimodal-list-main">
+                                      <strong>{model.displayName}</strong>
+                                      <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : model.providerId}</span>
+                                      {role === "reasoning" ? <em className="mm-tag is-chat">聊天下拉</em> : null}
+                                      {isDefault ? <em className="mm-tag is-default">默认</em> : null}
+                                      {model.supportsMultimodalInput ? <em className="mm-tag is-mm">多模态</em> : null}
+                                      {model.supportsVideoGeneration ? <em className="mm-tag is-video">视频</em> : null}
+                                    </div>
+                                    <div className="provider-model-actions">
+                                      {kind && !isDefault ? <button className="settings-mini-button" onClick={() => setMultimodalDefault(kind, model.providerId, model.id)}>设为默认</button> : null}
+                                      <button className="settings-mini-button" onClick={() => removeFromMultimodalRole(model.providerId, model.id)}>移除</button>
+                                    </div>
+                                  </div>
+                                );
+                              }) : (
+                                <div className="provider-empty-state">
+                                  {role === "reasoning"
+                                    ? "尚未添加推理模型。点击 + 从模型库加入，加入后才会出现在聊天下拉。"
+                                    : `尚未添加${title}。请先在供应商设置中添加模型，再点 + 加入，并指定默认模型。`}
+                                </div>
+                              )}
+                            </div>
+                            {kind && models.length > 0 && !configDraft.multimodal[kind].defaultModelId ? (
+                              <div className="multimodal-empty-tip">
+                                请选择一个默认{kind === "image" ? "图片" : "视频"}模型，否则对话中无法自动生成。
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+
+                      <div className="settings-save-row">
+                        <span className="subtle-inline">
+                          操作即保存 · 默认图片：{configDraft.multimodal.image.defaultModelId ?? "未设置"}
+                          {" · "}
+                          默认视频：{configDraft.multimodal.video.defaultModelId ?? "未设置"}
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="config-block">
+                      <div className="detail-empty">正在加载模型配置…</div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
               {settingsTab === "update" ? (
                 <div className="settings-section">
                   <div className="config-block update-settings-panel">
@@ -3819,6 +4028,9 @@ export function App() {
                     </div>
                     {updateState?.insecureTransport ? (
                       <div className="update-security-warning">当前更新源使用 HTTP。下载前会要求确认，建议服务端升级为 HTTPS。</div>
+                    ) : null}
+                    {updateState?.missingSha256 ? (
+                      <div className="update-security-warning">更新清单未提供 sha256。下载前会要求确认，建议服务端补齐校验值。</div>
                     ) : null}
                     {updateState?.changelog ? <pre className="update-changelog">{updateState.changelog}</pre> : null}
                     {updateState?.phase === "downloading" ? (
@@ -4359,7 +4571,9 @@ export function App() {
                 onClick={() => {
                   setSelectedFetchedModelIds(
                     fetchedModels
-                      .filter((entry) => !configDraft?.models.some((model) => model.id === entry.id))
+                      .filter((entry) => {
+                        return !configDraft?.models.some((model) => model.id === entry.id);
+                      })
                       .map((entry) => entry.id)
                   );
                 }}
@@ -4379,6 +4593,64 @@ export function App() {
               >
                 添加到模型列表（{selectedFetchedModelIds.length}）
               </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      ) : null}
+
+      {multimodalPickerRole && configDraft ? createPortal(
+        <div className="fetch-models-overlay" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setMultimodalPickerRole(null);
+            setMultimodalPickerSelected([]);
+          }
+        }}>
+          <div className="fetch-models-dialog multimodal-picker-dialog" role="dialog" aria-label="选择模型角色">
+            <div className="fetch-models-head">
+              <strong>添加到{multimodalPickerRole === "reasoning" ? "推理模型" : multimodalPickerRole === "image" ? "图片模型" : "视频模型"}</strong>
+              <button type="button" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }} title="关闭"><IconClose /></button>
+            </div>
+            <div className="fetch-models-list multimodal-picker-list">
+              {configDraft.models
+                .filter((model) => multimodalPickerRole === "reasoning"
+                  ? !isReasoningModel(model)
+                  : model.role !== multimodalPickerRole)
+                .sort((left, right) => {
+                  const score = (model: typeof left) => {
+                    if (multimodalPickerRole === "video") return model.supportsVideoGeneration ? 2 : model.supportsMultimodalInput ? 1 : 0;
+                    return model.supportsMultimodalInput ? 1 : 0;
+                  };
+                  return score(right) - score(left) || left.id.localeCompare(right.id);
+                })
+                .map((model) => {
+                  const key = modelKey(model.providerId, model.id);
+                  const checked = multimodalPickerSelected.includes(key);
+                  const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
+                  const currentRoleLabel = model.role === "reasoning"
+                    ? "已在推理"
+                    : model.role === "video"
+                      ? "已在视频"
+                      : null;
+                  return (
+                    <label key={key} className={`fetch-models-item multimodal-picker-item ${checked ? "is-checked" : ""}`}>
+                      <input type="checkbox" checked={checked} onChange={() => setMultimodalPickerSelected((current) =>
+                        current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
+                      )} />
+                      <div className="fetch-models-copy multimodal-picker-main">
+                        <strong>{model.displayName}</strong>
+                        <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : model.providerId}</span>
+                        {model.supportsMultimodalInput ? <em className="mm-tag is-mm">多模态</em> : null}
+                        {model.supportsVideoGeneration ? <em className="mm-tag is-video">视频</em> : null}
+                        {currentRoleLabel ? <em className={`mm-tag is-muted is-role-${model.role}`}>{currentRoleLabel}</em> : null}
+                      </div>
+                    </label>
+                  );
+                })}
+            </div>
+            <div className="fetch-models-actions">
+              <button className="button ghost" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }}>取消</button>
+              <button className="button warm" onClick={applyMultimodalPicker} disabled={multimodalPickerSelected.length === 0}>确认添加（{multimodalPickerSelected.length}）</button>
             </div>
           </div>
         </div>,
@@ -6208,8 +6480,9 @@ function buildTimelineEntries(
 ): TimelineEntry[] {
   const filesByTurn = collectFileChangesByTurn(toolCalls, workspaceRoot);
   for (const artifact of artifacts) {
-    if (artifact.artifactKind !== "generated-image") continue;
+    if (artifact.artifactKind !== "generated-image" && artifact.artifactKind !== "generated-video") continue;
     const turnRunId = artifact.turnRunId ?? `artifact-${artifact.id}`;
+    const isVideo = artifact.artifactKind === "generated-video";
     filesByTurn.set(turnRunId, [
       ...(filesByTurn.get(turnRunId) ?? []),
       {
@@ -6217,7 +6490,9 @@ function buildTimelineEntries(
         absolutePath: artifact.absolutePath,
         action: "created",
         additions: 0,
-        deletions: 0
+        deletions: 0,
+        kind: isVideo ? "generated-video" : "generated-image",
+        description: isVideo ? "生成的视频" : "生成的图片"
       }
     ]);
   }
@@ -6478,55 +6753,83 @@ function FileChangeSummary({
   files: FileChangeSummaryItem[];
   onOpenFolder: (filePath: string) => void;
 }) {
-  const additions = files.reduce((total, file) => total + file.additions, 0);
-  const deletions = files.reduce((total, file) => total + file.deletions, 0);
+  const generatedFiles = files.filter((file) => file.kind === "generated-image" || file.kind === "generated-video");
+  const otherFiles = files.filter((file) => file.kind !== "generated-image" && file.kind !== "generated-video");
+  const additions = otherFiles.reduce((total, file) => total + file.additions, 0);
+  const deletions = otherFiles.reduce((total, file) => total + file.deletions, 0);
   const hasLineCounts = additions > 0 || deletions > 0;
 
   return (
-    <section className="file-change-summary" aria-label={`已编辑 ${files.length} 个文件`}>
-      <div className="file-change-summary-head">
-        <span className="file-change-summary-icon" aria-hidden><IconFileChanges /></span>
-        <div className="file-change-summary-title">
-          <strong>已编辑 {files.length} 个文件</strong>
-          {hasLineCounts ? (
-            <span className="file-change-summary-counts">
-              <b>+{additions}</b>
-              <i>-{deletions}</i>
-            </span>
-          ) : null}
-        </div>
-      </div>
-      <div className="file-change-summary-list">
-        {files.map((file) => (
-          <div key={file.path} className="file-change-summary-row">
-            <span className="file-change-row-icon" aria-hidden><IconFile /></span>
-            <div className="file-change-row-copy">
-              <strong>{getFileLeafName(file.path)}</strong>
-              <code>{getFileParentPath(file.path)}</code>
-            </div>
-            <div className="file-change-row-meta">
-              <span className={`file-change-row-badge ${getFileChangeActionClass(file.action)}`}>
-                {formatFileChangeAction(file.action)}
-              </span>
-              {file.additions || file.deletions ? (
-                <span className="file-change-row-counts">
-                  {file.additions ? <b>+{file.additions}</b> : null}
-                  {file.deletions ? <i>-{file.deletions}</i> : null}
+    <>
+      {generatedFiles.length > 0 ? (
+        <section className="generated-file-list" aria-label="主要改动文件">
+          <h3 className="generated-file-list-title">主要改动文件</h3>
+          <ul className="generated-file-list-items">
+            {generatedFiles.map((file) => (
+              <li key={file.path} className="generated-file-list-item">
+                <button
+                  type="button"
+                  className="generated-file-path"
+                  onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
+                  title="打开所在文件夹"
+                >
+                  {file.path}
+                </button>
+                <span className="generated-file-sep" aria-hidden="true">—</span>
+                <span className="generated-file-desc">{file.description ?? (file.kind === "generated-video" ? "生成的视频" : "生成的图片")}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {otherFiles.length > 0 ? (
+        <section className="file-change-summary" aria-label={`已编辑 ${otherFiles.length} 个文件`}>
+          <div className="file-change-summary-head">
+            <span className="file-change-summary-icon" aria-hidden><IconFileChanges /></span>
+            <div className="file-change-summary-title">
+              <strong>已编辑 {otherFiles.length} 个文件</strong>
+              {hasLineCounts ? (
+                <span className="file-change-summary-counts">
+                  <b>+{additions}</b>
+                  <i>-{deletions}</i>
                 </span>
               ) : null}
-              <button
-                className="file-change-open-folder"
-                onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
-                title="打开所在文件夹"
-                aria-label={`打开 ${file.path} 所在文件夹`}
-              >
-                <IconFolder />
-              </button>
             </div>
           </div>
-        ))}
-      </div>
-    </section>
+          <div className="file-change-summary-list">
+            {otherFiles.map((file) => (
+              <div key={file.path} className="file-change-summary-row">
+                <span className="file-change-row-icon" aria-hidden><IconFile /></span>
+                <div className="file-change-row-copy">
+                  <strong>{getFileLeafName(file.path)}</strong>
+                  <code>{getFileParentPath(file.path)}</code>
+                </div>
+                <div className="file-change-row-meta">
+                  <span className={`file-change-row-badge ${getFileChangeActionClass(file.action)}`}>
+                    {formatFileChangeAction(file.action)}
+                  </span>
+                  {file.additions || file.deletions ? (
+                    <span className="file-change-row-counts">
+                      {file.additions ? <b>+{file.additions}</b> : null}
+                      {file.deletions ? <i>-{file.deletions}</i> : null}
+                    </span>
+                  ) : null}
+                  <button
+                    className="file-change-open-folder"
+                    onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
+                    title="打开所在文件夹"
+                    aria-label={`打开 ${file.path} 所在文件夹`}
+                  >
+                    <IconFolder />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+    </>
   );
 }
 
@@ -7515,35 +7818,72 @@ function getMessageAttachments(message: MessageRecord): MessageAttachment[] {
   }
 }
 
-type MessageImagePreview = { source: string; name: string; localPath?: string; url?: string };
+type MessageMediaPreview = {
+  source: string;
+  name: string;
+  kind: "image" | "video";
+  localPath?: string;
+  url?: string;
+};
+
+function isVideoAttachment(attachment: MessageAttachment): boolean {
+  if (attachment.kind === "video") return true;
+  if (attachment.mimeType?.startsWith("video/")) return true;
+  return /\.(mp4|webm|mov|mkv)$/i.test(attachment.name || attachment.absolutePath || "");
+}
 
 function MessageAttachmentGallery({ threadId, attachments }: { threadId: string; attachments: MessageAttachment[] }) {
-  const [preview, setPreview] = useState<MessageImagePreview | null>(null);
+  const [preview, setPreview] = useState<MessageMediaPreview | null>(null);
   if (attachments.length === 0) return null;
-  const imageCount = attachments.filter((attachment) => attachment.kind === "image").length;
+  const mediaCount = attachments.filter((attachment) => attachment.kind === "image" || isVideoAttachment(attachment)).length;
   return (
     <>
-      <div className={`message-attachment-gallery ${imageCount > 1 ? "image-grid" : ""}`}>
-        {attachments.map((attachment) => attachment.kind === "image" ? (
-          <MessageAttachmentImage
-            key={attachment.id}
-            threadId={threadId}
-            attachment={attachment}
-            onPreview={(source) => setPreview({ source, name: attachment.name, localPath: attachment.absolutePath })}
-          />
-        ) : (
-          <button
-            key={attachment.id}
-            type="button"
-            className="message-file-attachment"
-            title={`打开文件：${attachment.absolutePath}`}
-            onClick={() => void window.codexh.openPath(attachment.absolutePath)}
-          >
-            <IconFile />{attachment.name}
-          </button>
-        ))}
+      <div className={`message-attachment-gallery ${mediaCount > 1 ? "image-grid" : ""}`}>
+        {attachments.map((attachment) => {
+          if (attachment.kind === "image") {
+            return (
+              <MessageAttachmentImage
+                key={attachment.id}
+                threadId={threadId}
+                attachment={attachment}
+                onPreview={(source) => setPreview({
+                  source,
+                  name: attachment.name,
+                  kind: "image",
+                  localPath: attachment.absolutePath
+                })}
+              />
+            );
+          }
+          if (isVideoAttachment(attachment)) {
+            return (
+              <MessageAttachmentVideo
+                key={attachment.id}
+                threadId={threadId}
+                attachment={attachment}
+                onExpand={(source) => setPreview({
+                  source,
+                  name: attachment.name,
+                  kind: "video",
+                  localPath: attachment.absolutePath
+                })}
+              />
+            );
+          }
+          return (
+            <button
+              key={attachment.id}
+              type="button"
+              className="message-file-attachment"
+              title={`打开文件：${attachment.absolutePath}`}
+              onClick={() => void window.codexh.openPath(attachment.absolutePath)}
+            >
+              <IconFile />{attachment.name}
+            </button>
+          );
+        })}
       </div>
-      {preview ? <MessageImageLightbox preview={preview} onClose={() => setPreview(null)} /> : null}
+      {preview ? <MessageMediaLightbox preview={preview} onClose={() => setPreview(null)} /> : null}
     </>
   );
 }
@@ -7572,7 +7912,81 @@ function MessageAttachmentImage({
   );
 }
 
-function MessageImageLightbox({ preview, onClose }: { preview: MessageImagePreview; onClose: () => void }) {
+function MessageAttachmentVideo({
+  threadId,
+  attachment,
+  onExpand
+}: {
+  threadId: string;
+  attachment: MessageAttachment;
+  onExpand: (source: string) => void;
+}) {
+  const [source, setSource] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void window.codexh.getAttachmentMediaUrl({ threadId, absolutePath: attachment.absolutePath })
+      .then((value) => {
+        if (cancelled) return;
+        if (value.kind !== "video") {
+          setError("无法预览该视频");
+          return;
+        }
+        setSource(value.url);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => { cancelled = true; };
+  }, [attachment.absolutePath, threadId]);
+
+  if (error) {
+    return (
+      <button
+        type="button"
+        className="message-file-attachment"
+        title={error}
+        onClick={() => void window.codexh.openPath(attachment.absolutePath)}
+      >
+        <IconVideo />{attachment.name}
+      </button>
+    );
+  }
+
+  return (
+    <div className="message-video-attachment">
+      <div className="message-video-attachment-head">
+        <span title={attachment.name}><IconVideo />{attachment.name}</span>
+        <div>
+          <button
+            type="button"
+            title="放大播放"
+            aria-label="放大播放"
+            disabled={!source}
+            onClick={() => source && onExpand(source)}
+          >
+            <IconEye />
+          </button>
+          <button
+            type="button"
+            title="打开本地文件"
+            aria-label="打开本地文件"
+            onClick={() => void window.codexh.openPath(attachment.absolutePath)}
+          >
+            <IconFolder />
+          </button>
+        </div>
+      </div>
+      {source ? (
+        <video className="message-video-player" src={source} controls playsInline preload="metadata" />
+      ) : (
+        <div className="message-video-loading">正在加载视频…</div>
+      )}
+    </div>
+  );
+}
+
+function MessageMediaLightbox({ preview, onClose }: { preview: MessageMediaPreview; onClose: () => void }) {
   return createPortal(
     <div className="message-image-lightbox" role="dialog" aria-modal="true" aria-label={preview.name} onClick={onClose}>
       <div className="message-image-lightbox-content" onClick={(event) => event.stopPropagation()}>
@@ -7588,7 +8002,11 @@ function MessageImageLightbox({ preview, onClose }: { preview: MessageImagePrevi
             <button type="button" title="关闭" aria-label="关闭" onClick={onClose}><IconClose /></button>
           </div>
         </div>
-        <img src={preview.source} alt={preview.name} />
+        {preview.kind === "video" ? (
+          <video className="message-video-lightbox-player" src={preview.source} controls autoPlay playsInline />
+        ) : (
+          <img src={preview.source} alt={preview.name} />
+        )}
       </div>
     </div>,
     document.body
@@ -7599,7 +8017,7 @@ type MessageMediaReference = { source: string; kind: "local" | "url" };
 
 function MessageDetectedMediaGallery({ content }: { content: string }) {
   const references = extractMessageMediaReferences(content);
-  const [preview, setPreview] = useState<MessageImagePreview | null>(null);
+  const [preview, setPreview] = useState<MessageMediaPreview | null>(null);
   if (references.length === 0) return null;
   return (
     <>
@@ -7611,12 +8029,13 @@ function MessageDetectedMediaGallery({ content }: { content: string }) {
             onPreview={(source) => setPreview({
               source,
               name: getFileLeafName(reference.source),
+              kind: "image",
               ...(reference.kind === "local" ? { localPath: reference.source } : { url: reference.source })
             })}
           />
         ))}
       </div>
-      {preview ? <MessageImageLightbox preview={preview} onClose={() => setPreview(null)} /> : null}
+      {preview ? <MessageMediaLightbox preview={preview} onClose={() => setPreview(null)} /> : null}
     </>
   );
 }
@@ -8587,8 +9006,13 @@ function MarkdownMessageImage({ source, alt }: { source: string; alt: string }) 
       <img className="markdown-image" src={previewSource} alt={alt} />
     </button>
     {previewOpen ? (
-      <MessageImageLightbox
-        preview={{ source: previewSource, name: alt || getFileLeafName(source), ...(isLocal ? { localPath: source } : { url: source }) }}
+      <MessageMediaLightbox
+        preview={{
+          source: previewSource,
+          name: alt || getFileLeafName(source),
+          kind: "image",
+          ...(isLocal ? { localPath: source } : { url: source })
+        }}
         onClose={() => setPreviewOpen(false)}
       />
     ) : null}
@@ -8821,6 +9245,10 @@ function formatRelativeTime(isoTime: string) {
 }
 
 function cloneConfig(config: AppConfig): AppConfig {
+  const multimodal = config.multimodal ?? {
+    image: { enabled: true },
+    video: { enabled: true }
+  };
   return {
     defaultModel: config.defaultModel,
     defaultProvider: config.defaultProvider,
@@ -8830,6 +9258,18 @@ function cloneConfig(config: AppConfig): AppConfig {
     })),
     models: config.models.map((model) => ({ ...model })),
     routing: { ...config.routing },
+    multimodal: {
+      image: {
+        enabled: multimodal.image?.enabled !== false,
+        defaultProviderId: multimodal.image?.defaultProviderId,
+        defaultModelId: multimodal.image?.defaultModelId
+      },
+      video: {
+        enabled: multimodal.video?.enabled !== false,
+        defaultProviderId: multimodal.video?.defaultProviderId,
+        defaultModelId: multimodal.video?.defaultModelId
+      }
+    },
     desktop: { ...config.desktop },
     mcpServers: config.mcpServers.map((server) => ({
       ...server,
@@ -8845,13 +9285,44 @@ function normalizeDraftConfig(config: AppConfig): AppConfig {
     next.providers.some((provider) => provider.id === model.providerId)
   );
 
-  const firstModel = next.models[0];
+  next.models = next.models.map((model) => ({
+    ...model,
+    role:
+      model.role === "image" || model.role === "video" || model.role === "reasoning"
+        ? model.role
+        : undefined,
+    supportsImageGeneration:
+      model.role === "image" ? true : model.supportsImageGeneration === true,
+    supportsVideoGeneration:
+      model.role === "video" ? true : model.supportsVideoGeneration === true
+  }));
+
+  for (const kind of ["image", "video"] as const) {
+    const defaults = next.multimodal[kind];
+    const validDefault = next.models.some((model) =>
+      model.role === kind &&
+      model.providerId === defaults.defaultProviderId &&
+      model.id === defaults.defaultModelId
+    );
+    if (!validDefault) {
+      const firstRoleModel = next.models.find((model) => model.role === kind);
+      next.multimodal[kind] = {
+        enabled: defaults.enabled !== false,
+        defaultProviderId: firstRoleModel?.providerId,
+        defaultModelId: firstRoleModel?.id
+      };
+    } else {
+      next.multimodal[kind] = { ...defaults, enabled: defaults.enabled !== false };
+    }
+  }
+
+  const firstModel = next.models.find(isReasoningModel) ?? next.models[0];
   if (!firstModel) {
     return next;
   }
 
   const firstProviderWithModel =
-    next.providers.find((provider) => next.models.some((model) => model.providerId === provider.id)) ??
+    next.providers.find((provider) => next.models.some((model) => model.providerId === provider.id && isReasoningModel(model))) ??
     next.providers[0] ??
     null;
 
@@ -8859,13 +9330,13 @@ function normalizeDraftConfig(config: AppConfig): AppConfig {
     return next;
   }
 
-  if (!next.models.some((model) => model.providerId === next.defaultProvider)) {
+  if (!next.models.some((model) => model.providerId === next.defaultProvider && isReasoningModel(model))) {
     next.defaultProvider = firstProviderWithModel.id;
   }
 
-  const providerModels = getModelsForProvider(next, next.defaultProvider);
+  const providerModels = getReasoningModelsForProvider(next, next.defaultProvider);
   if (!providerModels.some((model) => model.id === next.defaultModel)) {
-    next.defaultModel = providerModels[0]?.id ?? firstModel.id;
+    next.defaultModel = providerModels[0]?.id ?? next.models.find(isReasoningModel)?.id ?? firstModel.id;
   }
 
   return next;
@@ -8877,7 +9348,7 @@ function resolveSelectionFromConfig(
   modelId?: string | null
 ): { providerId: string; modelId: string } {
   const normalized = normalizeDraftConfig(config);
-  const providerModels = providerId ? getModelsForProvider(normalized, providerId) : [];
+  const providerModels = providerId ? getReasoningModelsForProvider(normalized, providerId) : [];
 
   if (providerId && providerModels.length > 0) {
     return {
@@ -8887,10 +9358,10 @@ function resolveSelectionFromConfig(
   }
 
   const fallbackProviderId =
-    normalized.providers.find((provider) => getModelsForProvider(normalized, provider.id).length > 0)?.id ??
+    normalized.providers.find((provider) => getReasoningModelsForProvider(normalized, provider.id).length > 0)?.id ??
     normalized.providers[0]?.id ??
     "";
-  const fallbackModels = getModelsForProvider(normalized, fallbackProviderId);
+  const fallbackModels = getReasoningModelsForProvider(normalized, fallbackProviderId);
 
   return {
     providerId: fallbackProviderId,
@@ -8912,6 +9383,18 @@ function resolveSettingsProviderId(config: AppConfig, preferredProviderId?: stri
 
 function getModelsForProvider(config: Pick<AppConfig, "models">, providerId: string): ModelProfile[] {
   return config.models.filter((model) => model.providerId === providerId);
+}
+
+function isReasoningModel(model: ModelProfile): boolean {
+  return model.role === "reasoning";
+}
+
+function modelKey(providerId: string, modelId: string): string {
+  return `${providerId}::${modelId}`;
+}
+
+function getReasoningModelsForProvider(config: Pick<AppConfig, "models">, providerId: string): ModelProfile[] {
+  return getModelsForProvider(config, providerId).filter(isReasoningModel);
 }
 
 function isSafeMarkdownImageSource(source: string): boolean {
@@ -9012,7 +9495,9 @@ function createModelProfile(providerId: string, modelId: string, displayName: st
     supportsParallelToolCalls: true,
     supportsJsonOutput: true,
     supportsMultimodalInput: false,
+    role: undefined,
     supportsImageGeneration: false,
+    supportsVideoGeneration: false,
     supportsReasoningSummary: true,
     defaultTemperature: 0.2,
     defaultMaxOutputTokens: 4_096
@@ -9231,6 +9716,15 @@ function IconImage() {
       <rect x="4" y="5" width="16" height="14" rx="2" />
       <circle cx="9" cy="10" r="1.5" />
       <path d="m5.5 17 4.5-4 3 2.5 2.5-2 3 3.5" />
+    </SvgIcon>
+  );
+}
+
+function IconVideo() {
+  return (
+    <SvgIcon>
+      <rect x="3.5" y="6" width="12" height="12" rx="2" />
+      <path d="m15.5 10 5-2.5v9L15.5 14z" />
     </SvgIcon>
   );
 }

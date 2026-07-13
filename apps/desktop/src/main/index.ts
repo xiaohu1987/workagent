@@ -1,12 +1,29 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
-import fs from "node:fs/promises";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, protocol, screen, shell, Tray } from "electron";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DesktopBackend } from "./app";
 import { UpdateService } from "./update-service";
 
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "codexh-media",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: true,
+      corsEnabled: true
+    }
+  }
+]);
+
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let isQuitting = false;
 let rendererServer: http.Server | null = null;
 const backend = new DesktopBackend();
 let updates: UpdateService | null = null;
@@ -29,17 +46,74 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow) {
-      return;
-    }
-
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore();
-    }
-
-    mainWindow.show();
-    mainWindow.focus();
+    showMainWindow();
   });
+}
+
+function showMainWindow(): void {
+  if (!mainWindow) {
+    return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function quitApplication(): void {
+  isQuitting = true;
+  tray?.destroy();
+  tray = null;
+  app.quit();
+}
+
+function resolveTrayIconPath(): string | null {
+  const candidates = [
+    path.join(process.resourcesPath, "icon.ico"),
+    path.resolve(__dirname, "../../assets/icon.ico"),
+    path.resolve(__dirname, "../../../assets/icon.ico")
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function createTray(): void {
+  if (tray) {
+    return;
+  }
+
+  const iconPath = resolveTrayIconPath();
+  if (iconPath) {
+    tray = new Tray(iconPath);
+  } else {
+    tray = new Tray(nativeImage.createEmpty());
+  }
+
+  tray.setToolTip("CodeXH");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "显示主窗口",
+        click: () => showMainWindow()
+      },
+      { type: "separator" },
+      {
+        label: "退出",
+        click: () => quitApplication()
+      }
+    ])
+  );
+  tray.on("click", () => showMainWindow());
+  tray.on("double-click", () => showMainWindow());
 }
 
 async function createWindow(): Promise<void> {
@@ -53,7 +127,7 @@ async function createWindow(): Promise<void> {
     getRunningTaskCount: () => backend.listThreads().filter((thread) => thread.status === "running" || thread.status === "waiting").length,
     log: (kind, payload) => backend.appendRuntimeLog(kind, payload),
     emit: (state) => mainWindow?.webContents.send("update:state", state),
-    quit: () => app.quit()
+    quit: () => quitApplication()
   });
   const workArea = screen.getPrimaryDisplay().workArea;
   const preferredWidth = 1212;
@@ -100,6 +174,15 @@ async function createWindow(): Promise<void> {
 
   mainWindow.removeMenu();
   mainWindow.setMenuBarVisibility(false);
+  createTray();
+  mainWindow.on("close", (event) => {
+    if (isQuitting) {
+      return;
+    }
+
+    event.preventDefault();
+    mainWindow?.hide();
+  });
   registerIpc();
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
     console.error("[renderer] Failed to load", { errorCode, errorDescription, validatedURL });
@@ -184,6 +267,9 @@ function registerIpc(): void {
   ipcMain.handle("attachments:preview", (_event, payload) =>
     backend.getAttachmentDataUrl(payload.threadId, payload.absolutePath)
   );
+  ipcMain.handle("attachments:media-url", (_event, payload) =>
+    backend.getAttachmentMediaUrl(payload.threadId, payload.absolutePath)
+  );
   ipcMain.handle("attachments:preview-local", (_event, payload) =>
     backend.getLocalImagePreview(payload.absolutePath)
   );
@@ -218,7 +304,7 @@ function registerIpc(): void {
       return "无效的本地路径。";
     }
     try {
-      const stats = await fs.stat(targetPath);
+      const stats = await fsp.stat(targetPath);
       return shell.openPath(stats.isDirectory() ? targetPath : path.dirname(targetPath));
     } catch {
       return shell.openPath(path.dirname(targetPath));
@@ -320,7 +406,7 @@ async function ensureRendererServerUrl(): Promise<string> {
         return;
       }
 
-      const asset = await fs.readFile(filePath);
+      const asset = await fsp.readFile(filePath);
       response.writeHead(200, { "Content-Type": getContentType(filePath) });
       response.end(asset);
     } catch (error) {
@@ -389,15 +475,41 @@ function getContentType(filePath: string): string {
 }
 
 app.whenReady().then(() => {
+  protocol.handle("codexh-media", async (request) => {
+    try {
+      const url = new URL(request.url);
+      const threadId = url.searchParams.get("threadId")?.trim() ?? "";
+      const mediaPath = url.searchParams.get("path")?.trim() ?? "";
+      if (!threadId || !mediaPath) {
+        return new Response("Bad Request", { status: 400 });
+      }
+      const resolved = await backend.assertThreadMediaPath(threadId, mediaPath);
+      return net.fetch(pathToFileURL(resolved).href);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return new Response(message, { status: 403 });
+    }
+  });
   void createWindow().catch(reportStartupError);
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       void createWindow().catch(reportStartupError);
+      return;
     }
+
+    showMainWindow();
   });
 });
 
+app.on("before-quit", () => {
+  isQuitting = true;
+});
+
 app.on("window-all-closed", () => {
+  if (!isQuitting) {
+    return;
+  }
+
   rendererServer?.close();
   rendererServer = null;
   if (process.platform !== "darwin") {

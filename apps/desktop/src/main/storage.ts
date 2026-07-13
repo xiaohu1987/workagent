@@ -131,7 +131,9 @@ export function defaultConfig(): AppConfig {
       supportsParallelToolCalls: true,
       supportsJsonOutput: true,
       supportsMultimodalInput: false,
+      role: "reasoning",
       supportsImageGeneration: false,
+      supportsVideoGeneration: false,
       agentCapability: "verified",
       supportsReasoningSummary: true,
       defaultTemperature: 0.2,
@@ -147,7 +149,9 @@ export function defaultConfig(): AppConfig {
       supportsParallelToolCalls: true,
       supportsJsonOutput: true,
       supportsMultimodalInput: true,
+      role: "reasoning",
       supportsImageGeneration: false,
+      supportsVideoGeneration: false,
       supportsReasoningSummary: true,
       defaultTemperature: 0.2,
       defaultMaxOutputTokens: 4_096
@@ -160,6 +164,10 @@ export function defaultConfig(): AppConfig {
     providers,
     models,
     routing: {},
+    multimodal: {
+      image: { enabled: true },
+      video: { enabled: true }
+    },
     desktop: {
       theme: "system",
       approvals: "prompt",
@@ -169,39 +177,128 @@ export function defaultConfig(): AppConfig {
   };
 }
 
+function readMultimodalModels(value: unknown): Array<{ id: string; displayName?: string }> {
+  if (!Array.isArray(value)) return [];
+  const models: Array<{ id: string; displayName?: string }> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const item = entry as Record<string, unknown>;
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id) continue;
+    models.push({
+      id,
+      displayName: typeof item.displayName === 'string' ? item.displayName : undefined
+    });
+  }
+  return models;
+}
+
+function readModalityDefaults(
+  value: unknown,
+  role: 'image' | 'video',
+  models: ModelProfile[]
+): { enabled: boolean; defaultProviderId?: string; defaultModelId?: string } {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const enabled = source.enabled !== false;
+
+  let defaultProviderId = typeof source.defaultProviderId === 'string' ? source.defaultProviderId.trim() : '';
+  let defaultModelId = typeof source.defaultModelId === 'string' ? source.defaultModelId.trim() : '';
+
+  if (Array.isArray(source.providers)) {
+    for (const entry of source.providers) {
+      if (!entry || typeof entry !== 'object') continue;
+      const item = entry as Record<string, unknown>;
+      for (const modelEntry of readMultimodalModels(item.models)) {
+        const matched = models.find((model) => model.id === modelEntry.id);
+        if (matched) {
+          matched.role = role;
+          if (!defaultModelId) {
+            defaultModelId = matched.id;
+            defaultProviderId = matched.providerId;
+          }
+        }
+      }
+    }
+  } else if (Array.isArray(source.models)) {
+    for (const modelEntry of readMultimodalModels(source.models)) {
+      const matched = models.find((model) => model.id === modelEntry.id);
+      if (matched) {
+        matched.role = role;
+        if (!defaultModelId) {
+          defaultModelId = matched.id;
+          defaultProviderId = matched.providerId;
+        }
+      }
+    }
+  }
+
+  const roleModels = models.filter((model) => model.role === role);
+  if (defaultModelId && !defaultProviderId) {
+    const owner = roleModels.find((model) => model.id === defaultModelId);
+    defaultProviderId = owner?.providerId ?? '';
+  }
+
+  const defaultOk = roleModels.some(
+    (model) => model.id === defaultModelId && model.providerId === defaultProviderId
+  );
+  if (!defaultOk) {
+    const first = roleModels[0];
+    defaultProviderId = first?.providerId;
+    defaultModelId = first?.id;
+  }
+
+  return {
+    enabled,
+    defaultProviderId: defaultProviderId || undefined,
+    defaultModelId: defaultModelId || undefined
+  };
+}
+
 export async function loadConfig(configFile: string): Promise<AppConfig> {
-  const raw = await fs.readFile(configFile, "utf8");
+  const raw = await fs.readFile(configFile, 'utf8');
   const parsed = TOML.parse(raw) as any;
   const providers = Object.entries(parsed.providers ?? {}).map(([id, value]) => ({
     id,
     ...(value as Record<string, unknown>)
   })) as ProviderDefinition[];
-  const models = Object.entries(parsed.models ?? {}).map(([id, value]) => ({
-    id,
-    ...(value as Record<string, unknown>)
-  })) as ModelProfile[];
+  const models = Object.entries(parsed.models ?? {}).map(([id, value]) => {
+    const entry = value as Record<string, unknown>;
+    const role =
+      entry.role === 'image' || entry.role === 'video' || entry.role === 'reasoning'
+        ? entry.role
+        : undefined;
+    return {
+      id,
+      ...entry,
+      role
+    };
+  }) as ModelProfile[];
+
+  const image = readModalityDefaults(parsed.multimodal?.image, 'image', models);
+  const video = readModalityDefaults(parsed.multimodal?.video, 'video', models);
 
   return {
-    defaultModel: parsed.defaultModel ?? "mock-codexh",
-    defaultProvider: parsed.defaultProvider ?? "mock",
+    defaultModel: parsed.defaultModel ?? 'mock-codexh',
+    defaultProvider: parsed.defaultProvider ?? 'mock',
     providers,
     models,
     routing: parsed.routing ?? {},
+    multimodal: { image, video },
     desktop: {
-      theme: parsed.desktop?.theme ?? "system",
-      approvals: parsed.desktop?.approvals ?? "prompt",
+      theme: parsed.desktop?.theme ?? 'system',
+      approvals: parsed.desktop?.approvals ?? 'prompt',
       inAppBrowser: parsed.desktop?.inAppBrowser ?? true
     },
     mcpServers: ((parsed.mcpServers ?? []) as Array<Record<string, unknown>>).map((item) => ({
       id: String(item.id),
       name: String(item.name ?? item.id),
-      command: typeof item.command === "string" ? item.command : undefined,
+      command: typeof item.command === 'string' ? item.command : undefined,
       args: Array.isArray(item.args) ? item.args.map(String) : undefined,
       env: item.env as Record<string, string> | undefined,
-      cwd: typeof item.cwd === "string" ? item.cwd : undefined,
-      url: typeof item.url === "string" ? item.url : undefined,
-      transport: typeof item.transport === "string" ? item.transport : undefined,
-      source: "config",
+      cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
+      url: typeof item.url === 'string' ? item.url : undefined,
+      transport: typeof item.transport === 'string' ? item.transport : undefined,
+      source: 'config',
       enabled: item.enabled !== false
     })) satisfies McpServerConfig[]
   };
@@ -212,6 +309,7 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     defaultModel: config.defaultModel,
     defaultProvider: config.defaultProvider,
     routing: config.routing,
+    multimodal: config.multimodal,
     desktop: config.desktop,
     providers: Object.fromEntries(config.providers.map((provider) => [provider.id, provider])),
     models: Object.fromEntries(config.models.map((model) => [model.id, model])),
@@ -1541,6 +1639,7 @@ async function seedSystemSkills(skillsSystemDir: string): Promise<void> {
   const seeds = [
     {
       dir: path.join(skillsSystemDir, "programming", "plan-and-patch"),
+      force: false,
       skill: `---
 name: plan-and-patch
 description: Use this skill when you need to inspect a repository, make careful code edits, and verify the result.
@@ -1565,6 +1664,7 @@ dependencies:
     },
     {
       dir: path.join(skillsSystemDir, "office", "artifact-writer"),
+      force: false,
       skill: `---
 name: artifact-writer
 description: Use this skill when the user asks for a deliverable file such as markdown, JSON, CSV, DOCX, PPTX, XLSX, or PDF.
@@ -1581,6 +1681,7 @@ policy:
     },
     {
       dir: path.join(skillsSystemDir, "platform", "knowledge-importer"),
+      force: false,
       skill: `---
 name: knowledge-importer
 description: Use this skill when the user wants to import local documents into the knowledge base and build an OKF bundle.
@@ -1593,15 +1694,95 @@ Import documents progressively, preserve source mapping, and rely on index.md be
 policy:
   allow_implicit_invocation: true
 `
+    },
+    {
+      dir: path.join(skillsSystemDir, "generate_image"),
+      force: true,
+      skill: `---
+name: generate_image
+description: Use this skill whenever the user asks to generate, draw, create, or edit an image / 图片 / 插画 / 封面图.
+domain: 多媒体
+metadata:
+  short-description: Call image.generate with the configured default image model
+---
+# Generate Image
+
+When the user wants an image, do **not** invent a picture or claim you generated one in text.
+
+## Required workflow
+1. Call \`skills.load\` with \`skill_id: generate_image\` if you have not loaded it yet.
+2. Call the built-in function \`image.generate\` with a concrete \`prompt\`.
+3. The runtime will use the **default image model** from **设置 → 多模态** (not the chat reasoning model).
+4. After the tool succeeds, briefly confirm the image was generated. The UI will show the image attachment.
+
+## Prompt tips
+- Include subject, composition, style, lighting, and constraints.
+- Prefer a clear English or Chinese prompt; keep it specific.
+- For edits, describe the change relative to the previous image in the prompt text.
+
+## If the tool is unavailable
+Tell the user to open **设置 → 多模态**, enable image generation, add an image model, and set a default. Do not fabricate image files.
+`,
+      meta: `interface:
+  display_name: Generate Image
+  short_description: Generate images via image.generate and the default multimodal image model
+  default_prompt: Load generate_image, then call image.generate with a detailed prompt.
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: builtin
+      value: image.generate
+`
+    },
+    {
+      dir: path.join(skillsSystemDir, "generate_video"),
+      force: true,
+      skill: `---
+name: generate_video
+description: Use this skill whenever the user asks to generate, create, or produce a video / 视频 / 短片 / 文生视频.
+domain: 多媒体
+metadata:
+  short-description: Call video.generate with the configured default video model
+---
+# Generate Video
+
+When the user wants a video, do **not** invent a video file or claim you generated one in text.
+
+## Required workflow
+1. Call \`skills.load\` with \`skill_id: generate_video\` if you have not loaded it yet.
+2. Call the built-in function \`video.generate\` with a concrete \`prompt\`.
+3. The runtime will use the **default video model** from **设置 → 多模态** (not the chat reasoning model).
+4. After the tool succeeds, briefly confirm the video was generated. The UI will show the file entry.
+
+## Prompt tips
+- Include subject, motion, camera, scene, style, and duration constraints.
+- Prefer a clear English or Chinese prompt; keep it specific.
+
+## If the tool is unavailable
+Tell the user to open **设置 → 多模态**, enable video generation, add a video model, and set a default. Do not fabricate video files.
+`,
+      meta: `interface:
+  display_name: Generate Video
+  short_description: Generate videos via video.generate and the default multimodal video model
+  default_prompt: Load generate_video, then call video.generate with a detailed prompt.
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: builtin
+      value: video.generate
+`
     }
   ];
 
   for (const seed of seeds) {
-    if (await exists(path.join(seed.dir, "SKILL.md"))) {
+    const skillPath = path.join(seed.dir, "SKILL.md");
+    if (!seed.force && (await exists(skillPath))) {
       continue;
     }
     await fs.mkdir(path.join(seed.dir, "agents"), { recursive: true });
-    await fs.writeFile(path.join(seed.dir, "SKILL.md"), seed.skill, "utf8");
+    await fs.writeFile(skillPath, seed.skill, "utf8");
     await fs.writeFile(path.join(seed.dir, "agents", "openai.yaml"), seed.meta, "utf8");
   }
 }

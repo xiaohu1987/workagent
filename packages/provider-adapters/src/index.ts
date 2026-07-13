@@ -15,6 +15,7 @@ import type {
 export interface ProviderAdapter {
   runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision>;
   generateImage?(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<{ data: Uint8Array; mimeType: string }>;
+  generateVideo?(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<{ data: Uint8Array; mimeType: string }>;
 }
 
 export class ProviderFactory {

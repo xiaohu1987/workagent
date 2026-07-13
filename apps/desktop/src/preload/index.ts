@@ -32,6 +32,8 @@ const api = {
     ipcRenderer.invoke("attachments:import", payload),
   previewAttachment: (payload: { threadId: string; absolutePath: string }) =>
     ipcRenderer.invoke("attachments:preview", payload),
+  getAttachmentMediaUrl: (payload: { threadId: string; absolutePath: string }) =>
+    ipcRenderer.invoke("attachments:media-url", payload),
   previewLocalImage: (payload: { absolutePath: string }) =>
     ipcRenderer.invoke("attachments:preview-local", payload),
   rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) =>

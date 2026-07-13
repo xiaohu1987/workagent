@@ -36,12 +36,11 @@ if not defined ELECTRON_EXE (
 
 if not exist "%cd%\tmp" mkdir "%cd%\tmp"
 set "USER_DATA_DIR=%cd%\tmp\electron-profile"
-set "DIST_MAIN=%cd%\dist\main\index.js"
-set "DIST_PRELOAD=%cd%\dist\preload\index.cjs"
-set "DIST_RENDERER_DIR=%cd%\dist\renderer"
+set "DIST_DIR=%cd%\dist"
+set "DIST_MAIN=%DIST_DIR%\main\index.js"
+set "DIST_PRELOAD=%DIST_DIR%\preload\index.cjs"
+set "DIST_RENDERER_DIR=%DIST_DIR%\renderer"
 set "DIST_RENDERER_INDEX=%DIST_RENDERER_DIR%\index.html"
-
-set "BUILD_REASON=always rebuild before launch"
 
 :build
 if not exist "%EVITE_CLI%" (
@@ -61,14 +60,26 @@ if defined NODE_PATH (
   set "NODE_PATH=%EVITE_LOCAL_NODE_MODULES%;%EVITE_PNPM_NODE_MODULES%;%cd%\node_modules\.pnpm\node_modules"
 )
 
-echo [1/2] Building codexh... (%BUILD_REASON%)
+echo [1/3] Cleaning previous dist...
+if exist "%DIST_DIR%" (
+  rmdir /s /q "%DIST_DIR%"
+  if exist "%DIST_DIR%" (
+    echo ERROR: failed to remove old dist folder. Close any process locking files under dist and try again.
+    pause
+    exit /b 1
+  )
+)
+
+echo [2/3] Building fresh dist...
 node "%EVITE_CLI%" build --config apps\desktop\electron.vite.config.ts
 if errorlevel 1 goto :build_failed
 if not exist "%DIST_MAIN%" goto :error
+if not exist "%DIST_PRELOAD%" goto :error
+if not exist "%DIST_RENDERER_INDEX%" goto :error
 goto :launch
 
 :launch
-echo [2/2] Launching codexh...
+echo [3/3] Launching codexh with freshly built dist...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$target = [System.IO.Path]::GetFullPath('%ELECTRON_EXE%');" ^
   "$running = Get-CimInstance Win32_Process -Filter \"Name = 'electron.exe'\" | Where-Object { $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq $target) };" ^
@@ -86,6 +97,6 @@ exit /b 1
 
 :error
 echo.
-echo ERROR: startup failed.
+echo ERROR: startup failed. Fresh dist artifacts are incomplete.
 pause
 exit /b 1

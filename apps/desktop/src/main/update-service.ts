@@ -14,6 +14,7 @@ export interface UpdateState {
   changelog?: string;
   downloadUrl?: string;
   insecureTransport?: boolean;
+  missingSha256?: boolean;
   progress?: number;
   error?: string;
   isPackaged: boolean;
@@ -23,6 +24,9 @@ interface UpdateManifest {
   version_code?: unknown;
   download_url?: unknown;
   sha256?: unknown;
+  hash?: unknown;
+  checksum?: unknown;
+  file_sha256?: unknown;
   changelog?: unknown;
 }
 
@@ -69,23 +73,25 @@ export class UpdateService {
       const manifest = await response.json() as UpdateManifest;
       const remoteVersion = readVersion(manifest.version_code);
       const downloadUrl = readDownloadUrl(manifest.download_url);
-      const sha256 = readSha256(manifest.sha256);
+      const sha256 = readSha256(manifest.sha256 ?? manifest.hash ?? manifest.checksum ?? manifest.file_sha256);
       const changelog = typeof manifest.changelog === "string" ? manifest.changelog.trim() : "";
       const insecureTransport = new URL(downloadUrl).protocol === "http:" || new URL(VERSION_ENDPOINT).protocol === "http:";
+      const missingSha256 = sha256 === null;
 
       if (!isVersionGreater(remoteVersion, this.#state.currentVersion)) {
         this.#expectedSha256 = null;
         this.#downloadedInstaller = null;
-        this.#setState({ phase: "up-to-date", remoteVersion, changelog, downloadUrl, insecureTransport, error: undefined });
+        this.#setState({ phase: "up-to-date", remoteVersion, changelog, downloadUrl, insecureTransport, missingSha256, error: undefined });
         await this.options.log("update.not_available", { currentVersion: this.#state.currentVersion, remoteVersion });
         return this.getState();
       }
 
       this.#expectedSha256 = sha256;
       this.#downloadedInstaller = null;
-      this.#setState({ phase: "available", remoteVersion, changelog, downloadUrl, insecureTransport, error: undefined, progress: undefined });
-      await this.options.log("update.available", { currentVersion: this.#state.currentVersion, remoteVersion, insecureTransport });
-      if (!insecureTransport && this.options.isPackaged) {
+      this.#setState({ phase: "available", remoteVersion, changelog, downloadUrl, insecureTransport, missingSha256, error: undefined, progress: undefined });
+      await this.options.log("update.available", { currentVersion: this.#state.currentVersion, remoteVersion, insecureTransport, missingSha256 });
+      // 仅在 HTTPS 且具备 sha256 时自动下载，避免未校验安装包静默落地。
+      if (!insecureTransport && !missingSha256 && this.options.isPackaged) {
         void this.download(false);
       }
       return this.getState();
@@ -103,11 +109,13 @@ export class UpdateService {
 
   public async download(confirmInsecureHttp: boolean): Promise<UpdateState> {
     if (!this.options.isPackaged) throw new Error("开发模式只能检查更新，不能下载或覆盖安装。");
-    if (this.#state.phase !== "available" || !this.#state.downloadUrl || !this.#expectedSha256 || !this.#state.remoteVersion) {
-      throw new Error("当前没有可下载的已校验更新。");
+    if (this.#state.phase !== "available" || !this.#state.downloadUrl || !this.#state.remoteVersion) {
+      throw new Error("当前没有可下载的更新。");
     }
-    if (this.#state.insecureTransport && !confirmInsecureHttp) {
-      throw new Error("当前更新源使用不安全 HTTP，需确认后才可下载。");
+    if ((this.#state.insecureTransport || this.#state.missingSha256) && !confirmInsecureHttp) {
+      throw new Error(this.#state.missingSha256
+        ? "更新清单未提供 sha256，需确认后才可下载未校验安装包。"
+        : "当前更新源使用不安全 HTTP，需确认后才可下载。");
     }
 
     const controller = new AbortController();
@@ -147,11 +155,16 @@ export class UpdateService {
 
       if (received === 0) throw new Error("下载的安装包为空。");
       const actualSha256 = hash.digest("hex");
-      if (actualSha256 !== this.#expectedSha256) throw new Error("安装包 SHA-256 校验失败，已拒绝安装。");
+      if (this.#expectedSha256 && actualSha256 !== this.#expectedSha256) {
+        throw new Error("安装包 SHA-256 校验失败，已拒绝安装。");
+      }
       await fsp.rename(partial, target);
       this.#downloadedInstaller = target;
       this.#setState({ phase: "downloaded", progress: 100, error: undefined });
-      await this.options.log("update.download_verified", { remoteVersion: this.#state.remoteVersion, bytes: received });
+      await this.options.log(
+        this.#expectedSha256 ? "update.download_verified" : "update.download_unverified",
+        { remoteVersion: this.#state.remoteVersion, bytes: received, sha256: actualSha256 }
+      );
       return this.getState();
     } catch (error) {
       await fsp.rm(partial, { force: true }).catch(() => undefined);
@@ -209,11 +222,11 @@ function readDownloadUrl(value: unknown): string {
   return url.toString();
 }
 
-function readSha256(value: unknown): string {
-  if (typeof value !== "string" || !/^[a-f0-9]{64}$/i.test(value.trim())) {
-    throw new Error("更新服务未返回有效的 sha256，无法安全安装更新。");
-  }
-  return value.trim().toLowerCase();
+function readSha256(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().replace(/^sha-?256\s*[:=]?\s*/i, "");
+  if (!/^[a-f0-9]{64}$/i.test(normalized)) return null;
+  return normalized.toLowerCase();
 }
 
 function quoteForCmd(value: string): string {

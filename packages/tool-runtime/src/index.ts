@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import type {
   ApprovalMode,
   ArtifactRecord,
+  MessageAttachment,
   BrowserTabRecord,
   KnowledgeBaseRecord,
   RuntimeToolCall,
@@ -20,6 +21,7 @@ export interface ToolRuntimeContext {
   appHome: string;
   threadId: string;
   turnRunId: string;
+  toolCallId?: string;
   approvalMode: ApprovalMode;
   browserTabs: BrowserTabRecord[];
   knowledgeBases: KnowledgeBaseRecord[];
@@ -69,6 +71,37 @@ export interface ToolRuntimeContext {
     artifact: ArtifactRecord;
   }>;
   getThreadOutputDir: () => Promise<string>;
+  /**
+   * Generate an image with the app's configured default image model.
+   * Returns null-shaped errors via thrown Error or { ok:false } from the tool handler.
+   */
+  generateImageWithDefaultModel?: (input: {
+    prompt: string;
+    toolCallId?: string | null;
+  }) => Promise<{
+    fileName: string;
+    absolutePath: string;
+    mimeType: string;
+    modelId: string;
+    providerId: string;
+    modelDisplayName: string;
+    attachment: MessageAttachment;
+    artifact: ArtifactRecord;
+  }>;
+  generateVideoWithDefaultModel?: (input: {
+    prompt: string;
+    toolCallId?: string | null;
+  }) => Promise<{
+    fileName: string;
+    absolutePath: string;
+    mimeType: string;
+    modelId: string;
+    providerId: string;
+    modelDisplayName: string;
+    attachment: MessageAttachment;
+    artifact: ArtifactRecord;
+  }>;
+  abortSignal?: AbortSignal;
   listMcpResources: (server?: string) => Promise<any[]>;
   listMcpResourceTemplates: (server?: string) => Promise<any[]>;
   listMcpTools: (server?: string) => Promise<Array<{ server: string; name: string; description: string; inputSchema: Record<string, unknown> }>>;
@@ -936,6 +969,130 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         json: screenshot,
         artifacts: [screenshot.artifact]
       };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "image.generate",
+      description:
+        "Generate an image with the app's configured default image model from Settings → Multimodal. Use when the user asks to create, draw, or generate a picture.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "Detailed English or Chinese image prompt: subject, composition, style, lighting, and constraints."
+          }
+        },
+        required: ["prompt"]
+      },
+      riskLevel: "medium",
+      parallelSafe: false
+    },
+    async (args, ctx) => {
+      const prompt = String(args.prompt ?? "").trim();
+      if (!prompt) {
+        return { ok: false, content: "prompt 不能为空。请提供具体的生图描述。" };
+      }
+      if (!ctx.generateImageWithDefaultModel) {
+        return {
+          ok: false,
+          content:
+            "当前会话未接入图片生成。请到「设置 → 多模态」启用图片生成，并指定默认图片模型后再试。"
+        };
+      }
+      try {
+        const result = await ctx.generateImageWithDefaultModel({
+          prompt,
+          toolCallId: ctx.toolCallId ?? null
+        });
+        return {
+          ok: true,
+          content:
+            `已使用默认图片模型 ${result.modelDisplayName} (${result.modelId}) 生成图片。\n` +
+            `文件：${result.fileName}\n路径：${result.absolutePath}`,
+          json: {
+            fileName: result.fileName,
+            absolutePath: result.absolutePath,
+            mimeType: result.mimeType,
+            modelId: result.modelId,
+            providerId: result.providerId,
+            modelDisplayName: result.modelDisplayName,
+            attachment: result.attachment,
+            artifactId: result.artifact.id
+          },
+          artifacts: [result.artifact]
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          content: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
+  );
+
+  runtime.register(
+    {
+      name: "video.generate",
+      description:
+        "Generate a video with the app's configured default video model from Settings → Multimodal. Use when the user asks to create or generate a video.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "Detailed English or Chinese video prompt: subject, motion, scene, camera, style, and duration constraints."
+          }
+        },
+        required: ["prompt"]
+      },
+      riskLevel: "medium",
+      parallelSafe: false
+    },
+    async (args, ctx) => {
+      const prompt = String(args.prompt ?? "").trim();
+      if (!prompt) {
+        return { ok: false, content: "prompt 不能为空。请提供具体的视频描述。" };
+      }
+      if (!ctx.generateVideoWithDefaultModel) {
+        return {
+          ok: false,
+          content:
+            "当前会话未接入视频生成。请到「设置 → 多模态」启用视频生成，并指定默认视频模型后再试。"
+        };
+      }
+      try {
+        const result = await ctx.generateVideoWithDefaultModel({
+          prompt,
+          toolCallId: ctx.toolCallId ?? null
+        });
+        return {
+          ok: true,
+          content:
+            `已使用默认视频模型 ${result.modelDisplayName} (${result.modelId}) 生成视频。\n` +
+            `文件：${result.fileName}\n路径：${result.absolutePath}`,
+          json: {
+            fileName: result.fileName,
+            absolutePath: result.absolutePath,
+            mimeType: result.mimeType,
+            modelId: result.modelId,
+            providerId: result.providerId,
+            modelDisplayName: result.modelDisplayName,
+            attachment: result.attachment,
+            artifactId: result.artifact.id
+          },
+          artifacts: [result.artifact]
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          content: error instanceof Error ? error.message : String(error)
+        };
+      }
     }
   );
 

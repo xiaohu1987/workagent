@@ -30,6 +30,8 @@ const CHINESE_SKILL_DESCRIPTIONS: Record<string, string> = {
   "file-protocol": "生成和校验可下载的结构化文件输出，避免只在聊天中粘贴内容。",
   "finishing-a-development-branch": "在开发完成后指导合并、创建 PR 或清理分支等收尾操作。",
   imagegen: "生成或编辑位图图像，包括插画、纹理、产品图和透明背景素材。",
+  generate_image: "当用户要画图/生成图片时，加载本技能并调用 image.generate，使用设置里的默认图片模型。",
+  generate_video: "当用户要生成视频时，加载本技能并调用 video.generate，使用设置里的默认视频模型。",
   "image-gen-ops": "处理图像生成接口调用、参数模板、结果解析和渲染输出。",
   "knowledge-importer": "把本地文档导入知识库并构建 OKF 知识包。",
   "model-config-guard": "检查模型供应商、接口格式、输入输出能力和启用状态的配置一致性。",

@@ -8,6 +8,7 @@ import type {
   McpServerConfig,
   MessageRecord,
   ModelProfile,
+  ProviderDefinition,
   ProviderTurnDecision,
   ProviderTurnInput,
   QueuedMessageRecord,
@@ -36,9 +37,11 @@ import {
   nextStageAfterConfirmation,
   parseGpaState
 } from "./gpa";
+import { resolveMultimodalTurnRequest } from "./multimodal-intent";
 import type { GpaStage, GpaState } from "@shared-types";
 
 export { parseGpaState } from "./gpa";
+export { detectMultimodalIntent, resolveMultimodalTurnRequest } from "./multimodal-intent";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
 export const MODEL_DECISION_TIMEOUT_MS = 90_000;
@@ -483,14 +486,26 @@ class ThreadSessionRuntime {
       status: "running",
       updatedAt: new Date().toISOString()
     });
+    const priorMessages = await this.services.persistence.listMessages(this.threadId);
     await this.recordMessage("user", displayContent ?? initialInput, turn.id, attachments.length > 0 ? { attachments } : undefined);
 
-    if (model.supportsImageGeneration) {
-      await this.runImageGeneration({
+    const multimodalRequest = resolveMultimodalTurnRequest({
+      currentInput: initialInput,
+      attachments,
+      priorMessages: priorMessages.map((message) => ({ role: message.role, content: message.content }))
+    });
+    if (multimodalRequest) {
+      if (multimodalRequest.viaRetry) {
+        await this.services.log("multimodal.retry", this.threadId, {
+          turnRunId: turn.id,
+          intent: multimodalRequest.intent,
+          promptPreview: multimodalRequest.prompt.slice(0, 200)
+        });
+      }
+      await this.runMultimodalIntentTurn({
+        intent: multimodalRequest.intent,
         turnId: turn.id,
-        model,
-        provider,
-        prompt: initialInput,
+        prompt: multimodalRequest.prompt,
         abortController
       });
       this.#activeTurnRunId = null;
@@ -613,7 +628,9 @@ class ThreadSessionRuntime {
           knowledgeContext,
           workflowPackContext,
           skillDependencyWarnings,
-          knowledgeEnabled
+          knowledgeEnabled,
+          tools.some((tool) => tool.name === "image.generate"),
+          tools.some((tool) => tool.name === "video.generate")
         );
         const adapter = this.services.providerFactory.create(provider);
         let streamedVisibleContent = "";
@@ -1041,6 +1058,7 @@ class ThreadSessionRuntime {
               appHome: "",
               threadId: this.threadId,
               turnRunId: turn.id,
+              toolCallId: toolRecord.id,
               approvalMode: this.services.config.desktop.approvals,
               browserTabs,
               knowledgeBases: visibleKnowledgeBases,
@@ -1086,6 +1104,25 @@ class ThreadSessionRuntime {
               captureBrowserScreenshot: (tabId) => this.services.captureBrowserScreenshot(this.threadId, tabId, turn.id),
               captureBrowserSnapshot: (tabId) => this.services.captureBrowserSnapshot(this.threadId, tabId, turn.id),
               getThreadOutputDir: () => this.services.getThreadOutputDir(this.threadId),
+              abortSignal: abortController.signal,
+              generateImageWithDefaultModel: async ({ prompt, toolCallId }) => {
+                const generated = await this.createGeneratedImageArtifact({
+                  turnId: turn.id,
+                  prompt,
+                  toolCallId: toolCallId ?? toolRecord.id,
+                  abortSignal: abortController.signal
+                });
+                return generated;
+              },
+              generateVideoWithDefaultModel: async ({ prompt, toolCallId }) => {
+                const generated = await this.createGeneratedVideoArtifact({
+                  turnId: turn.id,
+                  prompt,
+                  toolCallId: toolCallId ?? toolRecord.id,
+                  abortSignal: abortController.signal
+                });
+                return generated;
+              },
               listMcpResources: async (server) => {
                 if (server) {
                   assertAccessibleMcpServer(server, accessibleMcpServerIds);
@@ -1124,7 +1161,9 @@ class ThreadSessionRuntime {
               deferredToolSpecs: mcpTools,
               hiddenToolNames: [
                 ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read"]),
-                ...(this.#gpa.stage === "off" ? ["request_user_input"] : [])
+                ...(this.#gpa.stage === "off" ? ["request_user_input"] : []),
+                ...(resolveDefaultModalityModel(this.services.config, "image") ? [] : ["image.generate"]),
+                ...(resolveDefaultModalityModel(this.services.config, "video") ? [] : ["video.generate"])
               ],
               loadSkill: (skillId) =>
                 this.services.skills.loadInstructions(skillId, availableSkillIds)
@@ -1190,6 +1229,26 @@ class ThreadSessionRuntime {
             toolCallId: toolCall.id,
             toolResultOk: result.ok
           });
+          if (toolCall.name === "image.generate" && result.ok) {
+            const attachment = result.json?.attachment as MessageAttachment | undefined;
+            const artifactId = typeof result.json?.artifactId === "string" ? result.json.artifactId : undefined;
+            if (attachment) {
+              await this.recordMessage("assistant", "已生成图片。", turn.id, {
+                attachments: [attachment],
+                artifactId
+              });
+            }
+          }
+          if (toolCall.name === "video.generate" && result.ok) {
+            const attachment = result.json?.attachment as MessageAttachment | undefined;
+            const artifactId = typeof result.json?.artifactId === "string" ? result.json.artifactId : undefined;
+            if (attachment) {
+              await this.recordMessage("assistant", "已生成视频。", turn.id, {
+                attachments: [attachment],
+                artifactId
+              });
+            }
+          }
           if (toolCall.name === "request_user_input" && result.ok) {
             reevaluateAfterUserInput = true;
             break;
@@ -1359,64 +1418,344 @@ class ThreadSessionRuntime {
     const mcpTools = await this.services.mcp.listToolSpecs(accessibleMcpServerIds);
     const { direct } = this.services.toolRuntime.listToolSpecs(mcpTools);
     const gpaEnabled = this.#gpa.stage !== "off";
+    const imageReady = !!resolveDefaultModalityModel(this.services.config, "image");
+    const videoReady = !!resolveDefaultModalityModel(this.services.config, "video");
     const withKnowledge = knowledgeEnabled
       ? direct
       : direct.filter((tool) => tool.name !== "knowledge.search" && tool.name !== "knowledge.read");
+    const withMedia = withKnowledge.filter((tool) => {
+      if (tool.name === "image.generate") return imageReady;
+      if (tool.name === "video.generate") return videoReady;
+      return true;
+    });
     return {
       tools: !agentToolsEnabled
         ? []
         : gpaEnabled
-        ? withKnowledge
-        : withKnowledge.filter((tool) => tool.name !== "request_user_input"),
+        ? withMedia
+        : withMedia.filter((tool) => tool.name !== "request_user_input"),
       mcpTools
+    };
+  }
+
+  private async runMultimodalIntentTurn(input: {
+    intent: "image" | "video";
+    turnId: string;
+    prompt: string;
+    abortController: AbortController;
+  }): Promise<void> {
+    const label = input.intent === "image" ? "图片" : "视频";
+    const modality = this.services.config.multimodal?.[input.intent];
+    if (modality && modality.enabled === false) {
+      await this.finishWithFriendlyTip(
+        input.turnId,
+        `${label}生成已关闭。请到「设置 → 多模态」开启${label}生成；开启后直接回复「再试试」即可继续。`
+      );
+      return;
+    }
+
+    const target = input.intent === "image"
+      ? resolveDefaultModalityModel(this.services.config, "image")
+      : resolveDefaultModalityModel(this.services.config, "video");
+
+    if (!target) {
+      const hasRoleModels = this.services.config.models.some((model) => model.role === input.intent);
+      await this.finishWithFriendlyTip(
+        input.turnId,
+        hasRoleModels
+          ? `尚未设置默认${label}模型。请到「设置 → 多模态」指定默认${label}模型；设置后直接回复「再试试」即可继续。`
+          : `尚未配置${label}模型。请先在「供应商设置」添加模型，再到「设置 → 多模态」加入并设为默认；完成后直接回复「再试试」即可继续。`
+      );
+      return;
+    }
+
+    if (input.intent === "image") {
+      await this.runImageGeneration({
+        turnId: input.turnId,
+        model: target.model,
+        provider: target.provider,
+        prompt: input.prompt,
+        abortController: input.abortController
+      });
+      return;
+    }
+
+    await this.runVideoGeneration({
+      turnId: input.turnId,
+      model: target.model,
+      provider: target.provider,
+      prompt: input.prompt,
+      abortController: input.abortController
+    });
+  }
+
+  private async finishWithFriendlyTip(turnId: string, message: string): Promise<void> {
+    const completedAt = new Date().toISOString();
+    await this.recordMessage("assistant", message, turnId);
+    await this.services.persistence.finishTurn(turnId, { status: "completed", completedAt, errorMessage: null });
+    const thread = await this.services.persistence.updateThread(this.threadId, { status: "completed", updatedAt: completedAt });
+    await this.services.emit({
+      type: "assistant.completed",
+      threadId: this.threadId,
+      payload: { turnRunId: turnId },
+      createdAt: completedAt
+    });
+    await this.services.emit({ type: "thread.updated", threadId: this.threadId, payload: { thread }, createdAt: completedAt });
+  }
+
+  private async createGeneratedImageArtifact(input: {
+    turnId: string;
+    prompt: string;
+    toolCallId?: string | null;
+    abortSignal?: AbortSignal;
+  }): Promise<{
+    fileName: string;
+    absolutePath: string;
+    mimeType: string;
+    modelId: string;
+    providerId: string;
+    modelDisplayName: string;
+    attachment: MessageAttachment;
+    artifact: ArtifactRecord;
+  }> {
+    const target = resolveDefaultModalityModel(this.services.config, "image");
+    if (!target) {
+      const hasRoleModels = this.services.config.models.some((model) => model.role === "image");
+      throw new Error(
+        hasRoleModels
+          ? "尚未设置默认图片模型。请到「设置 → 多模态」指定一个默认图片模型后再试。"
+          : "尚未配置图片模型。请先在「供应商设置」添加模型，再到「设置 → 多模态」加入图片模型并设为默认。"
+      );
+    }
+    if (this.services.config.multimodal?.image?.enabled === false) {
+      throw new Error("图片生成已关闭。可到「设置 → 多模态」开启图片生成功能后再试。");
+    }
+
+    const adapter = this.services.providerFactory.create(target.provider);
+    if (!adapter.generateImage) {
+      throw new Error("当前默认图片供应商不支持 OpenAI 兼容图片生成接口。请确认中转提供 /images/generations。");
+    }
+    const image = await waitForAbort(adapter.generateImage({
+      model: target.model,
+      prompt: input.prompt,
+      abortSignal: input.abortSignal
+    }), input.abortSignal ?? new AbortController().signal);
+
+    const outputDir = await this.services.getThreadOutputDir(this.threadId);
+    await fs.mkdir(outputDir, { recursive: true });
+    const fileName = `generated-${Date.now()}-${randomUUID().slice(0, 8)}.${imageExtensionForMime(image.mimeType)}`;
+    const absolutePath = path.join(outputDir, fileName);
+    await fs.writeFile(absolutePath, image.data);
+    const attachment: MessageAttachment = {
+      id: randomUUID(),
+      kind: "image",
+      name: fileName,
+      mimeType: image.mimeType,
+      absolutePath,
+      sizeBytes: image.data.byteLength,
+      source: "generated"
+    };
+    const artifact = await this.services.persistence.addArtifact({
+      threadId: this.threadId,
+      turnRunId: input.turnId,
+      messageId: null,
+      toolCallId: input.toolCallId ?? null,
+      artifactKind: "generated-image",
+      displayName: fileName,
+      absolutePath,
+      relativePath: fileName,
+      mimeType: image.mimeType,
+      sizeBytes: image.data.byteLength,
+      sha256: createHash("sha256").update(image.data).digest("hex"),
+      sourceKind: "image-generation",
+      isUserVisible: true,
+      status: "ready"
+    });
+    await this.services.log("image.generate", this.threadId, {
+      turnRunId: input.turnId,
+      toolCallId: input.toolCallId ?? null,
+      modelId: target.model.id,
+      providerId: target.provider.id,
+      fileName,
+      promptPreview: input.prompt.slice(0, 200)
+    });
+    return {
+      fileName,
+      absolutePath,
+      mimeType: image.mimeType,
+      modelId: target.model.id,
+      providerId: target.provider.id,
+      modelDisplayName: target.model.displayName || target.model.id,
+      attachment,
+      artifact
+    };
+  }
+
+  private async createGeneratedVideoArtifact(input: {
+    turnId: string;
+    prompt: string;
+    toolCallId?: string | null;
+    abortSignal?: AbortSignal;
+  }): Promise<{
+    fileName: string;
+    absolutePath: string;
+    mimeType: string;
+    modelId: string;
+    providerId: string;
+    modelDisplayName: string;
+    attachment: MessageAttachment;
+    artifact: ArtifactRecord;
+  }> {
+    const target = resolveDefaultModalityModel(this.services.config, "video");
+    if (!target) {
+      const hasRoleModels = this.services.config.models.some((model) => model.role === "video");
+      throw new Error(
+        hasRoleModels
+          ? "尚未设置默认视频模型。请到「设置 → 多模态」指定一个默认视频模型后再试。"
+          : "尚未配置视频模型。请先在「供应商设置」添加模型，再到「设置 → 多模态」加入视频模型并设为默认。"
+      );
+    }
+    if (this.services.config.multimodal?.video?.enabled === false) {
+      throw new Error("视频生成已关闭。可到「设置 → 多模态」开启视频生成功能后再试。");
+    }
+
+    const adapter = this.services.providerFactory.create(target.provider);
+    if (!adapter.generateVideo) {
+      throw new Error("当前默认视频供应商尚未接入视频生成接口。请确认服务端已提供兼容的视频生成能力。");
+    }
+    const video = await waitForAbort(adapter.generateVideo({
+      model: target.model,
+      prompt: input.prompt,
+      abortSignal: input.abortSignal
+    }), input.abortSignal ?? new AbortController().signal);
+
+    const outputDir = await this.services.getThreadOutputDir(this.threadId);
+    await fs.mkdir(outputDir, { recursive: true });
+    const fileName = `generated-${Date.now()}-${randomUUID().slice(0, 8)}.${videoExtensionForMime(video.mimeType)}`;
+    const absolutePath = path.join(outputDir, fileName);
+    await fs.writeFile(absolutePath, video.data);
+    const attachment: MessageAttachment = {
+      id: randomUUID(),
+      kind: "video",
+      name: fileName,
+      mimeType: video.mimeType,
+      absolutePath,
+      sizeBytes: video.data.byteLength,
+      source: "generated"
+    };
+    const artifact = await this.services.persistence.addArtifact({
+      threadId: this.threadId,
+      turnRunId: input.turnId,
+      messageId: null,
+      toolCallId: input.toolCallId ?? null,
+      artifactKind: "generated-video",
+      displayName: fileName,
+      absolutePath,
+      relativePath: fileName,
+      mimeType: video.mimeType,
+      sizeBytes: video.data.byteLength,
+      sha256: createHash("sha256").update(video.data).digest("hex"),
+      sourceKind: "video-generation",
+      isUserVisible: true,
+      status: "ready"
+    });
+    await this.services.log("video.generate", this.threadId, {
+      turnRunId: input.turnId,
+      toolCallId: input.toolCallId ?? null,
+      modelId: target.model.id,
+      providerId: target.provider.id,
+      fileName,
+      promptPreview: input.prompt.slice(0, 200)
+    });
+    return {
+      fileName,
+      absolutePath,
+      mimeType: video.mimeType,
+      modelId: target.model.id,
+      providerId: target.provider.id,
+      modelDisplayName: target.model.displayName || target.model.id,
+      attachment,
+      artifact
     };
   }
 
   private async runImageGeneration(input: {
     turnId: string;
     model: ModelProfile;
-    provider: ReturnType<typeof resolveProvider>;
+    provider: ProviderDefinition;
     prompt: string;
     abortController: AbortController;
   }): Promise<void> {
-    const completedAt = new Date().toISOString();
+    const startedAt = new Date().toISOString();
     try {
-      const adapter = this.services.providerFactory.create(input.provider);
-      if (!adapter.generateImage) {
-        throw new Error("The selected provider does not support the OpenAI-compatible image generation API.");
-      }
-      const image = await waitForAbort(adapter.generateImage({
-        model: input.model,
+      void input.model;
+      void input.provider;
+      const generated = await this.createGeneratedImageArtifact({
+        turnId: input.turnId,
         prompt: input.prompt,
         abortSignal: input.abortController.signal
-      }), input.abortController.signal);
-      const outputDir = await this.services.getThreadOutputDir(this.threadId);
-      await fs.mkdir(outputDir, { recursive: true });
-      const fileName = `generated-${Date.now()}-${randomUUID().slice(0, 8)}.${imageExtensionForMime(image.mimeType)}`;
-      const absolutePath = path.join(outputDir, fileName);
-      await fs.writeFile(absolutePath, image.data);
-      const attachment: MessageAttachment = {
-        id: randomUUID(), kind: "image", name: fileName, mimeType: image.mimeType,
-        absolutePath, sizeBytes: image.data.byteLength, source: "generated"
-      };
-      const artifact = await this.services.persistence.addArtifact({
-        threadId: this.threadId, turnRunId: input.turnId, messageId: null, toolCallId: null,
-        artifactKind: "generated-image", displayName: fileName, absolutePath, relativePath: fileName,
-        mimeType: image.mimeType, sizeBytes: image.data.byteLength,
-        sha256: createHash("sha256").update(image.data).digest("hex"), sourceKind: "image-generation",
-        isUserVisible: true, status: "ready"
       });
-      const message = await this.recordMessage("assistant", "已生成图片。", input.turnId, { attachments: [attachment], artifactId: artifact.id });
+      const completedAt = new Date().toISOString();
+      const message = await this.recordMessage("assistant", "已生成图片。", input.turnId, {
+        attachments: [generated.attachment],
+        artifactId: generated.artifact.id
+      });
       await this.services.persistence.finishTurn(input.turnId, { status: "completed", completedAt, errorMessage: null });
       const thread = await this.services.persistence.updateThread(this.threadId, { status: "completed", updatedAt: completedAt });
       await this.services.emit({ type: "assistant.completed", threadId: this.threadId, payload: { turnRunId: input.turnId, messageId: message.id }, createdAt: completedAt });
       await this.services.emit({ type: "thread.updated", threadId: this.threadId, payload: { thread }, createdAt: completedAt });
     } catch (error) {
+      const completedAt = new Date().toISOString();
       const reason = error instanceof Error ? error.message : String(error);
       await this.recordMessage("assistant", `图片生成失败：${reason}`, input.turnId);
       await this.services.persistence.finishTurn(input.turnId, { status: "failed", completedAt, errorMessage: reason });
       const thread = await this.services.persistence.updateThread(this.threadId, { status: "failed", updatedAt: completedAt });
       await this.services.emit({ type: "thread.updated", threadId: this.threadId, payload: { thread }, createdAt: completedAt });
+      await this.services.log("image.generate_failed", this.threadId, {
+        turnRunId: input.turnId,
+        startedAt,
+        error: reason
+      });
+    }
+  }
+
+  private async runVideoGeneration(input: {
+    turnId: string;
+    model: ModelProfile;
+    provider: ProviderDefinition;
+    prompt: string;
+    abortController: AbortController;
+  }): Promise<void> {
+    const startedAt = new Date().toISOString();
+    try {
+      void input.model;
+      void input.provider;
+      const generated = await this.createGeneratedVideoArtifact({
+        turnId: input.turnId,
+        prompt: input.prompt,
+        abortSignal: input.abortController.signal
+      });
+      const completedAt = new Date().toISOString();
+      const message = await this.recordMessage("assistant", "已生成视频。", input.turnId, {
+        attachments: [generated.attachment],
+        artifactId: generated.artifact.id
+      });
+      await this.services.persistence.finishTurn(input.turnId, { status: "completed", completedAt, errorMessage: null });
+      const thread = await this.services.persistence.updateThread(this.threadId, { status: "completed", updatedAt: completedAt });
+      await this.services.emit({ type: "assistant.completed", threadId: this.threadId, payload: { turnRunId: input.turnId, messageId: message.id }, createdAt: completedAt });
+      await this.services.emit({ type: "thread.updated", threadId: this.threadId, payload: { thread }, createdAt: completedAt });
+    } catch (error) {
+      const completedAt = new Date().toISOString();
+      const reason = error instanceof Error ? error.message : String(error);
+      await this.recordMessage("assistant", `视频生成失败：${reason}`, input.turnId);
+      await this.services.persistence.finishTurn(input.turnId, { status: "failed", completedAt, errorMessage: reason });
+      const thread = await this.services.persistence.updateThread(this.threadId, { status: "failed", updatedAt: completedAt });
+      await this.services.emit({ type: "thread.updated", threadId: this.threadId, payload: { thread }, createdAt: completedAt });
+      await this.services.log("video.generate_failed", this.threadId, {
+        turnRunId: input.turnId,
+        startedAt,
+        error: reason
+      });
     }
   }
 
@@ -1804,16 +2143,38 @@ function buildRuntimePrompt(
   knowledgeContext: string | null,
   workflowPackContext: string | null,
   skillDependencyWarnings: string[],
-  knowledgeEnabled: boolean
+  knowledgeEnabled: boolean,
+  imageGenerateAvailable = false,
+  videoGenerateAvailable = false
 ): RuntimePromptBundle {
   const blocks = [
     "You are codexh, a desktop agent for project and chat workflows.",
     `Current local date: ${formatRuntimeDate(new Date())}. Use this date for time-sensitive queries. Do not add, infer, or reuse a year that the user did not request.`,
     "Prefer progressive disclosure: inspect facts before making edits.",
     "When a tool can gather needed facts, call it instead of guessing.",
-    "Before responding, decide whether an available Skill is the best fit. When it is, call skills.load with that skill_id before following its instructions. Use Function Calling for Skills and external tools rather than merely claiming a Skill was used.",
+    "Before responding, decide whether an available Skill is the best fit. When it is, call skills.load with that skill_id before following its instructions. Use Function Calling for Skills and external tools rather than merely claiming a Skill was used."
+  ];
+  if (imageGenerateAvailable) {
+    blocks.push(
+      "When the user asks to generate, draw, or create an image, load the generate_image skill and call image.generate. That tool uses the default image model from Settings → Multimodal, not the chat reasoning model. Never claim an image was created without a successful image.generate result."
+    );
+  }
+  if (videoGenerateAvailable) {
+    blocks.push(
+      "When the user asks to generate or create a video, load the generate_video skill and call video.generate. That tool uses the default video model from Settings → Multimodal, not the chat reasoning model. Never claim a video was created without a successful video.generate result."
+    );
+  }
+  blocks.push(
     "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
-    "For browser automation, call browser.inspect_page before browser.click, browser.fill, browser.select_option, or browser.press_key. Use only element ids returned by the latest inspection, then inspect again after navigation or page changes. Never guess selectors or claim a browser action succeeded without a tool result.",
+    "For browser automation, call browser.inspect_page before browser.click, browser.fill, browser.select_option, or browser.press_key. Use only element ids returned by the latest inspection, then inspect again after navigation or page changes. Never guess selectors or claim a browser action succeeded without a tool result."
+  );
+  if (knowledgeEnabled) {
+    blocks.push(
+      "For local knowledge questions, call knowledge.search first. It returns ranked document chunks with source_path and locator; use knowledge.read only for the relevant chunk. Cite the source file and locator in your answer when you rely on retrieved material. Never use fs.read_file on a knowledge Bundle or index path. If search returns no results, refine the query once or explain that no matching local material was found; do not repeat the same progress reply."
+    );
+  }
+  blocks.push(
+    "When using text extracted from a browser page, cite the page title or URL in your answer. The chat will show the page source automatically.",
     "Respond as an IDE software engineering agent using an event stream format.",
     "Your visible output is consumed by a renderer that understands structured event blocks.",
     "Prefer XML-like event envelopes when possible: <event type=\"commentary\">...</event>.",
@@ -1821,11 +2182,7 @@ function buildRuntimePrompt(
     "Before substantial work emit 1-2 sentences of commentary. After each tool use, summarize with tool_result. When surfacing files, use file_view or file_change. Use test_result for validation. End with a concise final covering result, verification, and risks.",
     "Do not expose chain-of-thought. Do not fabricate tool usage, file changes, or verification.",
     `Context window: ${model.contextWindow}.`
-  ];
-  if (knowledgeEnabled) {
-    blocks.splice(5, 0, "For local knowledge questions, call knowledge.search first. It returns ranked document chunks with source_path and locator; use knowledge.read only for the relevant chunk. Cite the source file and locator in your answer when you rely on retrieved material. Never use fs.read_file on a knowledge Bundle or index path. If search returns no results, refine the query once or explain that no matching local material was found; do not repeat the same progress reply.");
-  }
-  blocks.splice(6, 0, "When using text extracted from a browser page, cite the page title or URL in your answer. The chat will show the page source automatically.");
+  );
   if (skillContext?.text) {
     blocks.push(skillContext.text);
   }
@@ -1996,6 +2353,13 @@ function imageExtensionForMime(mimeType: string): string {
   return "png";
 }
 
+function videoExtensionForMime(mimeType: string): string {
+  if (mimeType.includes("webm")) return "webm";
+  if (mimeType.includes("quicktime")) return "mov";
+  if (mimeType.includes("x-matroska") || mimeType.includes("mkv")) return "mkv";
+  return "mp4";
+}
+
 function truncateToRuntimeTokenBudget(content: string, tokenBudget: number): string {
   const maximumCharacters = Math.max(0, Math.floor(tokenBudget * 2.8));
   if (content.length <= maximumCharacters) {
@@ -2023,6 +2387,36 @@ function resolveProvider(config: AppConfig, providerId: string) {
     throw new Error(`Unknown provider: ${providerId}`);
   }
   return provider;
+}
+
+function resolveDefaultModalityModel(
+  config: AppConfig,
+  role: "image" | "video"
+): { provider: ProviderDefinition; model: ModelProfile } | null {
+  const modality = config.multimodal?.[role];
+  if (!modality || modality.enabled === false) {
+    return null;
+  }
+  const providerId = modality.defaultProviderId?.trim();
+  const modelId = modality.defaultModelId?.trim();
+  if (!providerId || !modelId) {
+    return null;
+  }
+  const model = config.models.find(
+    (entry) => entry.id === modelId && entry.providerId === providerId && entry.role === role
+  );
+  const provider = config.providers.find((entry) => entry.id === providerId);
+  if (!model || !provider) {
+    return null;
+  }
+  return {
+    provider,
+    model: {
+      ...model,
+      supportsImageGeneration: role === "image",
+      supportsVideoGeneration: role === "video"
+    }
+  };
 }
 
 function assertAccessibleMcpServer(serverId: string, accessibleServerIds: string[]): void {

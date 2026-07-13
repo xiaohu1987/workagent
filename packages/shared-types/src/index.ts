@@ -373,7 +373,12 @@ export interface ModelProfile {
   supportsParallelToolCalls: boolean;
   supportsJsonOutput: boolean;
   supportsMultimodalInput: boolean;
+  /** Multimodal assignment. Omitted means unassigned (not shown in chat dropdown). */
+  role?: "reasoning" | "image" | "video";
+  /** @deprecated Prefer role === "image". Kept for config migration. */
   supportsImageGeneration?: boolean;
+  /** @deprecated Prefer role === "video". Kept for config migration. */
+  supportsVideoGeneration?: boolean;
   /** Result of the last real function-calling protocol check for this model. */
   agentCapability?: "unknown" | "verified" | "unsupported";
   agentCapabilityCheckedAt?: string;
@@ -381,6 +386,14 @@ export interface ModelProfile {
   supportsReasoningSummary: boolean;
   defaultTemperature?: number;
   defaultMaxOutputTokens?: number;
+}
+
+/** Image or video modality defaults and feature switch. */
+export interface MultimodalModalityDefaults {
+  /** When false, Agent will not generate this modality even if intent matches. */
+  enabled: boolean;
+  defaultProviderId?: string;
+  defaultModelId?: string;
 }
 
 export interface AppConfig {
@@ -392,6 +405,10 @@ export interface AppConfig {
     plannerModelId?: string;
     executorModelId?: string;
     summarizerModelId?: string;
+  };
+  multimodal: {
+    image: MultimodalModalityDefaults;
+    video: MultimodalModalityDefaults;
   };
   desktop: {
     theme: "light" | "dark" | "system";
@@ -422,7 +439,7 @@ export interface ProviderTurnDecision {
 
 export interface MessageAttachment {
   id: string;
-  kind: "image" | "file";
+  kind: "image" | "video" | "file";
   name: string;
   mimeType: string;
   absolutePath: string;
