@@ -15,6 +15,7 @@ import type {
   UserInputQuestion
 } from "@shared-types";
 import { applyCodexPatch } from "./handlers/applyPatch";
+import { astDiffSources, isAstSupportedPath } from "./ast";
 
 export interface ToolRuntimeContext {
   cwd: string;
@@ -135,8 +136,21 @@ const TOOL_ALIASES: Record<string, string> = {
   list_directory: "fs.read_directory",
   write_file: "fs.write_file",
   applypatch: "apply_patch",
-  execute_command: "shell.exec"
+  execute_command: "shell.exec",
+  image_gen: "image.generate",
+  imagegen: "image.generate",
+  "image-gen": "image.generate",
+  generate_image: "image.generate",
+  video_gen: "video.generate",
+  videogen: "video.generate",
+  "video-gen": "video.generate",
+  generate_video: "video.generate"
 };
+
+export function canonicalizeToolName(name: string): string {
+  const trimmed = name.trim();
+  return TOOL_ALIASES[trimmed] ?? TOOL_ALIASES[trimmed.toLowerCase()] ?? trimmed;
+}
 
 export class ToolRuntime {
   readonly #registry = new Map<string, ToolRegistration>();
@@ -177,6 +191,7 @@ export class ToolRuntime {
   ): Promise<ToolResult> {
     let registration =
       this.#registry.get(call.name) ||
+      this.#registry.get(canonicalizeToolName(call.name)) ||
       this.#registry.get(call.name.replace(/^([^:]+)\./, "$1:"));
     if (!registration && TOOL_ALIASES[call.name]) {
       registration = this.#registry.get(TOOL_ALIASES[call.name]);
@@ -430,6 +445,52 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
+    spec(
+      "code.ast_diff",
+      "Compare two versions of a source file at the AST/entity level (functions, classes, methods). Pass path; optionally against another file path. Without against, compares the working tree file to git HEAD (or empty if untracked).",
+      ["path"],
+      "low"
+    ),
+    async (args, ctx) => {
+      const relativePath = String(args.path ?? "");
+      const filePath = resolveFromCwd(ctx.cwd, relativePath);
+      const after = await fs.readFile(filePath, "utf8");
+      let before = "";
+      let againstLabel = "empty";
+
+      if (typeof args.against === "string" && args.against.trim()) {
+        const againstPath = resolveFromCwd(ctx.cwd, String(args.against));
+        before = await fs.readFile(againstPath, "utf8");
+        againstLabel = String(args.against);
+      } else {
+        try {
+          const posixPath = relativePath.replace(/\\/g, "/");
+          before = (await runShell(`git show HEAD:${escapeDoubleQuotes(posixPath)}`, ctx)).output;
+          againstLabel = "HEAD";
+        } catch {
+          before = "";
+          againstLabel = "empty";
+        }
+      }
+
+      const result = await astDiffSources(before, after, relativePath);
+      const header = `AST diff ${relativePath} vs ${againstLabel} (${result.language ?? "unsupported"})`;
+      const content = `${header}\n${result.summary}`;
+      return {
+        ok: true,
+        content,
+        json: {
+          path: relativePath,
+          against: againstLabel,
+          language: result.language,
+          entities: result.entities,
+          summary: result.summary
+        }
+      };
+    }
+  );
+
+  runtime.register(
     spec("shell.exec", "Run a shell command inside the current workspace.", ["command"], "high"),
     async (args, ctx) => {
       const command = String(args.command ?? "");
@@ -469,8 +530,25 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "补丁应用被拒绝。" };
       }
-      const touched = await applyCodexPatch(patchText, ctx.cwd);
-      return { ok: true, content: touched.join("\n"), json: { touched } };
+      const result = await applyCodexPatch(patchText, ctx.cwd);
+      const symbolLines = result.changes
+        .flatMap((change) =>
+          (change.symbols ?? []).map(
+            (symbol) => `${change.path}: ${symbol.change} ${symbol.kind} ${symbol.name}`
+          )
+        )
+        .slice(0, 40);
+      const content = [
+        result.touched.join("\n"),
+        symbolLines.length > 0 ? `Entity changes:\n${symbolLines.join("\n")}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      return {
+        ok: true,
+        content,
+        json: { touched: result.touched, changes: result.changes }
+      };
     }
   );
 
@@ -486,7 +564,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     spec("git.diff", "Read git diff for the current repository.", [], "low"),
     async (_args, ctx) => {
       const output = (await runShell("git diff --no-ext-diff", ctx)).output;
-      return { ok: true, content: output, json: { output } };
+      const astSummary = await buildGitDiffAstSummary(ctx, output);
+      return {
+        ok: true,
+        content: output,
+        json: { output, astSummary: astSummary.length > 0 ? astSummary : undefined }
+      };
     }
   );
 
@@ -1281,6 +1364,48 @@ function escapePosixShell(value: string): string {
 
 function escapeDoubleQuotes(value: string): string {
   return value.replace(/"/g, '\\"');
+}
+
+async function buildGitDiffAstSummary(
+  ctx: ToolRuntimeContext,
+  diffOutput: string
+): Promise<Array<{ path: string; language: string | null; entities: unknown[]; summary: string }>> {
+  const paths = new Set<string>();
+  for (const line of diffOutput.split(/\r?\n/)) {
+    const match = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (match) {
+      paths.add(match[2]);
+    }
+  }
+
+  const summaries: Array<{ path: string; language: string | null; entities: unknown[]; summary: string }> = [];
+  for (const relativePath of paths) {
+    if (!isAstSupportedPath(relativePath)) {
+      continue;
+    }
+    try {
+      const after = await fs.readFile(resolveFromCwd(ctx.cwd, relativePath), "utf8");
+      let before = "";
+      try {
+        before = (await runShell(`git show HEAD:${escapeDoubleQuotes(relativePath)}`, ctx)).output;
+      } catch {
+        before = "";
+      }
+      const result = await astDiffSources(before, after, relativePath);
+      if (result.entities.length === 0) {
+        continue;
+      }
+      summaries.push({
+        path: relativePath,
+        language: result.language,
+        entities: result.entities,
+        summary: result.summary
+      });
+    } catch {
+      // skip unreadable files
+    }
+  }
+  return summaries;
 }
 
 async function runShell(command: string, ctx: ToolRuntimeContext): Promise<TerminalCommandResult> {

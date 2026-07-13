@@ -1,3 +1,5 @@
+export { modelJsonCandidates, tryParseModelJson } from "./model-json";
+
 export type ThreadMode = "project" | "chat";
 export type WorkspaceKind = "project" | "projectless";
 export type GpaStage = "off" | "goal" | "plan" | "act";
@@ -396,6 +398,44 @@ export interface MultimodalModalityDefaults {
   defaultModelId?: string;
 }
 
+export interface RuntimeTimeoutSettings {
+  modelDecisionMs: number;
+  recoveryModelDecisionMs: number;
+  modelTimeoutRetries: number;
+  multimodalIntentClassifyMs: number;
+  modelTestMs: number;
+  videoGenerationMs: number;
+  videoPollIntervalMs: number;
+}
+
+export const DEFAULT_RUNTIME_TIMEOUTS: RuntimeTimeoutSettings = {
+  modelDecisionMs: 90_000,
+  recoveryModelDecisionMs: 20_000,
+  modelTimeoutRetries: 5,
+  multimodalIntentClassifyMs: 20_000,
+  modelTestMs: 30_000,
+  videoGenerationMs: 10 * 60_000,
+  videoPollIntervalMs: 5_000
+};
+
+export function normalizeRuntimeTimeouts(value?: Partial<RuntimeTimeoutSettings> | null): RuntimeTimeoutSettings {
+  const source = value ?? {};
+  const nonNegativeNumber = (input: unknown, fallback: number) => {
+    const numeric = typeof input === "number" && Number.isFinite(input) ? Math.round(input) : fallback;
+    return Math.max(0, numeric);
+  };
+
+  return {
+    modelDecisionMs: nonNegativeNumber(source.modelDecisionMs, DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs),
+    recoveryModelDecisionMs: nonNegativeNumber(source.recoveryModelDecisionMs, DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs),
+    modelTimeoutRetries: nonNegativeNumber(source.modelTimeoutRetries, DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries),
+    multimodalIntentClassifyMs: nonNegativeNumber(source.multimodalIntentClassifyMs, DEFAULT_RUNTIME_TIMEOUTS.multimodalIntentClassifyMs),
+    modelTestMs: nonNegativeNumber(source.modelTestMs, DEFAULT_RUNTIME_TIMEOUTS.modelTestMs),
+    videoGenerationMs: nonNegativeNumber(source.videoGenerationMs, DEFAULT_RUNTIME_TIMEOUTS.videoGenerationMs),
+    videoPollIntervalMs: nonNegativeNumber(source.videoPollIntervalMs, DEFAULT_RUNTIME_TIMEOUTS.videoPollIntervalMs)
+  };
+}
+
 export interface AppConfig {
   defaultModel: string;
   defaultProvider: string;
@@ -415,6 +455,7 @@ export interface AppConfig {
     approvals: ApprovalMode;
     inAppBrowser: boolean;
   };
+  timeouts: RuntimeTimeoutSettings;
   mcpServers: McpServerConfig[];
 }
 

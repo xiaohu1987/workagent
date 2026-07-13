@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, protocol, screen, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, shell, Tray } from "electron";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -20,6 +20,10 @@ protocol.registerSchemesAsPrivileged([
     }
   }
 ]);
+
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.codexh.desktop");
+}
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -114,6 +118,35 @@ function createTray(): void {
   );
   tray.on("click", () => showMainWindow());
   tray.on("double-click", () => showMainWindow());
+  if (process.platform === "win32") {
+    tray.on("balloon-click", () => showMainWindow());
+  }
+}
+
+function notifyMinimizedToTray(): void {
+  const title = "CodeXH";
+  const body = "应用已最小化到系统托盘，不会退出。点击托盘图标可重新打开。";
+  const iconPath = resolveTrayIconPath();
+
+  if (Notification.isSupported()) {
+    const notification = new Notification({
+      title,
+      body,
+      ...(iconPath ? { icon: iconPath } : {}),
+      silent: false
+    });
+    notification.on("click", () => showMainWindow());
+    notification.show();
+    return;
+  }
+
+  if (process.platform === "win32") {
+    tray?.displayBalloon({
+      title,
+      content: body,
+      ...(iconPath ? { icon: iconPath } : { iconType: "info" })
+    });
+  }
 }
 
 async function createWindow(): Promise<void> {
@@ -182,6 +215,7 @@ async function createWindow(): Promise<void> {
 
     event.preventDefault();
     mainWindow?.hide();
+    notifyMinimizedToTray();
   });
   registerIpc();
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
@@ -222,6 +256,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:set-pinned", (_event, payload: { threadId: string; isPinned: boolean }) =>
     backend.setThreadPinned(payload.threadId, payload.isPinned)
   );
+  ipcMain.handle("threads:rename", (_event, payload: { threadId: string; title: string }) =>
+    backend.renameThread(payload.threadId, payload.title)
+  );
   ipcMain.handle("projects:choose-directory", async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({
       defaultPath: defaultPath || undefined,
@@ -242,7 +279,16 @@ function registerIpc(): void {
     return result.canceled ? [] : result.filePaths;
   });
   ipcMain.handle("knowledge:choose-files", async () => {
-    const result = await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] });
+    const result = await dialog.showOpenDialog({
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        {
+          name: "知识库文档",
+          extensions: ["md", "txt", "json", "html", "htm", "csv", "xlsx", "xls", "docx", "pdf", "pptx"]
+        },
+        { name: "所有文件", extensions: ["*"] }
+      ]
+    });
     return result.canceled ? [] : result.filePaths;
   });
   ipcMain.handle("knowledge:choose-folders", async () => {

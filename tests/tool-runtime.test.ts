@@ -2,7 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import fs from "node:fs/promises";
 import os from "node:os";
-import { buildCodeSearchCommand, ToolRuntime, type ToolRuntimeContext } from "@tool-runtime";
+import { buildCodeSearchCommand, ToolRuntime, canonicalizeToolName, type ToolRuntimeContext } from "@tool-runtime";
+
+describe("canonicalizeToolName", () => {
+  it("maps common image/video aliases to builtin multimodal tools", () => {
+    expect(canonicalizeToolName("image_gen")).toBe("image.generate");
+    expect(canonicalizeToolName("imagegen")).toBe("image.generate");
+    expect(canonicalizeToolName("generate_image")).toBe("image.generate");
+    expect(canonicalizeToolName("video_gen")).toBe("video.generate");
+    expect(canonicalizeToolName("image.generate")).toBe("image.generate");
+  });
+});
 
 describe("ToolRuntime", () => {
   it("normalizes up to three GPA user-input questions into one structured tool result", async () => {

@@ -5,6 +5,8 @@ const api = {
   searchThreads: (query: string) => ipcRenderer.invoke("threads:search", query),
   setThreadPinned: (payload: { threadId: string; isPinned: boolean }) =>
     ipcRenderer.invoke("threads:set-pinned", payload),
+  renameThread: (payload: { threadId: string; title: string }) =>
+    ipcRenderer.invoke("threads:rename", payload),
   createThread: (payload: {
     title: string;
     mode: "project" | "chat";

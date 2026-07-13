@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
-import { app, BrowserWindow, shell, webContents } from "electron";
+import { app, BrowserWindow, net, shell, webContents } from "electron";
 import type { WebContents } from "electron";
 import type {
   AttachmentImportInput,
@@ -30,6 +30,7 @@ import type {
   UserInputQuestion,
   UserInputPrompt
 } from "@shared-types";
+import { normalizeRuntimeTimeouts } from "@shared-types";
 import { AgentRuntimeService, parseGpaState } from "@agent-runtime";
 import { BrowserRuntime, loadPage, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument } from "@knowledge-runtime";
@@ -83,7 +84,10 @@ export class DesktopBackend {
   readonly #sessionApprovedThreadIds = new Set<string>();
   readonly #skills = new SkillsManager();
   readonly #toolRuntime = new ToolRuntime();
-  readonly #providerFactory = new ProviderFactory();
+  readonly #providerFactory = new ProviderFactory({
+    // Use Chromium networking so media CDN downloads follow the same system proxy as the browser.
+    fetch: (input, init) => net.fetch(input as string | GlobalRequest, init)
+  });
   // The right-side browser is rendered by Chromium. Use the same engine for tool
   // extraction so sites that block raw HTTP clients do not return a challenge page.
   readonly #browser = new BrowserRuntime((target) => this.loadBrowserPage(target));
@@ -217,6 +221,21 @@ export class DesktopBackend {
       isPinned,
       pinnedAt: isPinned ? new Date().toISOString() : null
     });
+    await this.emit({
+      type: "thread.updated",
+      threadId,
+      payload: { thread: updated },
+      createdAt: new Date().toISOString()
+    });
+    return updated;
+  }
+
+  public async renameThread(threadId: string, title: string): Promise<ThreadRecord> {
+    const nextTitle = title.trim();
+    if (!nextTitle) {
+      throw new Error("任务名称不能为空。");
+    }
+    const updated = this.#db.updateThread(threadId, { title: nextTitle });
     await this.emit({
       type: "thread.updated",
       threadId,
@@ -557,10 +576,9 @@ export class DesktopBackend {
 
   public async interruptThread(threadId: string): Promise<void> {
     this.#runtime.interrupt(threadId);
-    const thread = this.#db.getThread(threadId);
-    if (thread.status !== "running" && thread.status !== "waiting") {
-      return;
-    }
+    // Always force the persisted execution state idle. The turn may still be in
+    // "preparing" (DB still idle/completed) when the user hits Stop; skipping
+    // cleanup here leaves the UI and queue believing work is still running.
     const updated = this.#db.interruptThreadExecution(threadId);
     await this.emit({
       type: "thread.updated",
@@ -636,7 +654,9 @@ export class DesktopBackend {
     const startedAt = performance.now();
     const adapter = this.#providerFactory.create(input.provider);
     const timeout = new AbortController();
-    const timeoutId = setTimeout(() => timeout.abort(), 30_000);
+    const timeoutId = this.#config.timeouts.modelTestMs > 0
+      ? setTimeout(() => timeout.abort(), this.#config.timeouts.modelTestMs)
+      : null;
 
     try {
       if (input.model.supportsImageGeneration) {
@@ -750,7 +770,7 @@ export class DesktopBackend {
       }
       throw error;
     } finally {
-      clearTimeout(timeoutId);
+      if (timeoutId) clearTimeout(timeoutId);
     }
   }
 
@@ -837,6 +857,7 @@ export class DesktopBackend {
       video: { ...normalized.multimodal.video }
     };
     this.#config.desktop = { ...normalized.desktop };
+    this.#config.timeouts = { ...normalized.timeouts };
     this.#config.mcpServers = normalized.mcpServers.map((server) => ({
       ...server,
       source: "config",
@@ -2149,7 +2170,8 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     multimodal: {
       image: normalizeMultimodalDefaults(config.multimodal?.image, nextModels, "image"),
       video: normalizeMultimodalDefaults(config.multimodal?.video, nextModels, "video")
-    }
+    },
+    timeouts: normalizeRuntimeTimeouts(config.timeouts)
   };
 }
 

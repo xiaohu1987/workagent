@@ -21,6 +21,19 @@ export function isThreadExecutionInProgress(status?: ThreadRecord["status"] | nu
   return status === "running" || status === "waiting";
 }
 
+/** Whether the chat should show the live "执行中/正在思考" processing UI. */
+export function shouldShowTaskProcessing(
+  status: ThreadRecord["status"] | null | undefined,
+  isPreparing: boolean
+): boolean {
+  if (isThreadExecutionInProgress(status)) {
+    return true;
+  }
+  // Allow the brief preparing overlay before the backend flips to running.
+  // Never keep "执行中" alive from stale runtimeProgress after stop/complete.
+  return isPreparing;
+}
+
 export function getHistoryItemAffordance(status?: ThreadRecord["status"] | null): HistoryItemAffordance {
   if (status === "waiting") {
     return {

@@ -35,4 +35,36 @@ describe("queued messages", () => {
     expect(db.deleteQueuedMessage("thread-1", second.id)).toBe(true);
     expect(db.listQueuedMessages("thread-1").map((item) => item.id)).toEqual([first.id]);
   });
+
+  it("keeps a newly enqueued message claimable after an interrupted dispatch", async () => {
+    const db = await createDatabase();
+    const thread = db.createThread({
+      title: "queue interrupt",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock",
+      providerId: "mock"
+    });
+    db.updateThread(thread.id, { status: "running" });
+    const interrupted = db.enqueueQueuedMessage({
+      threadId: thread.id,
+      content: "running turn",
+      displayContent: "running turn",
+      attachments: []
+    });
+    expect(db.claimNextQueuedMessage(thread.id)?.id).toBe(interrupted.id);
+
+    db.interruptThreadExecution(thread.id);
+    db.completeQueuedMessage(interrupted.id);
+
+    const next = db.enqueueQueuedMessage({
+      threadId: thread.id,
+      content: "after stop",
+      displayContent: "after stop",
+      attachments: []
+    });
+    expect(db.getThread(thread.id).status).toBe("idle");
+    expect(db.claimNextQueuedMessage(thread.id)?.id).toBe(next.id);
+  });
 });

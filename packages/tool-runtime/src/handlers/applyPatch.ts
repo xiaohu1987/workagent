@@ -1,5 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  applyLocatedHunk,
+  astDiffSources,
+  countHunkEdits,
+  extractSymbols,
+  languageFromPath,
+  locateHunk,
+  type EntityChange
+} from "../ast";
 
 type PatchOperation =
   | {
@@ -20,9 +29,26 @@ type PatchOperation =
       }>;
     };
 
-export async function applyCodexPatch(patchText: string, rootDir: string): Promise<string[]> {
+export type PatchApplyMode = "ast" | "text";
+
+export interface PatchFileChange {
+  path: string;
+  action: "add" | "update" | "delete";
+  symbols?: Array<{ name: string; kind: string; change: EntityChange["change"] }>;
+  additions: number;
+  deletions: number;
+  applyMode: PatchApplyMode;
+}
+
+export interface ApplyPatchResult {
+  touched: string[];
+  changes: PatchFileChange[];
+}
+
+export async function applyCodexPatch(patchText: string, rootDir: string): Promise<ApplyPatchResult> {
   const operations = parsePatch(patchText);
   const touched: string[] = [];
+  const changes: PatchFileChange[] = [];
 
   for (const operation of operations) {
     if (operation.type === "add") {
@@ -30,29 +56,84 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, operation.content, "utf8");
       touched.push(filePath);
+      const language = languageFromPath(operation.file);
+      let symbols: PatchFileChange["symbols"];
+      if (language) {
+        const extracted = await extractSymbols(operation.content, language);
+        symbols = extracted.map((symbol) => ({
+          name: symbol.name,
+          kind: symbol.kind,
+          change: "added" as const
+        }));
+      }
+      changes.push({
+        path: operation.file,
+        action: "add",
+        symbols,
+        additions: operation.content.split("\n").filter((line) => line.length > 0).length,
+        deletions: 0,
+        applyMode: language ? "ast" : "text"
+      });
       continue;
     }
 
     if (operation.type === "delete") {
       const filePath = resolveWorkspacePath(rootDir, operation.file);
+      let symbols: PatchFileChange["symbols"];
+      const language = languageFromPath(operation.file);
+      try {
+        const previous = await fs.readFile(filePath, "utf8");
+        if (language) {
+          const extracted = await extractSymbols(previous, language);
+          symbols = extracted.map((symbol) => ({
+            name: symbol.name,
+            kind: symbol.kind,
+            change: "removed" as const
+          }));
+        }
+      } catch {
+        // file may already be missing
+      }
       await fs.rm(filePath, { recursive: true, force: true });
       touched.push(filePath);
+      changes.push({
+        path: operation.file,
+        action: "delete",
+        symbols,
+        additions: 0,
+        deletions: 0,
+        applyMode: language ? "ast" : "text"
+      });
       continue;
     }
 
     const sourcePath = resolveWorkspacePath(rootDir, operation.file);
     const nextPath = resolveWorkspacePath(rootDir, operation.moveTo ?? operation.file);
     const current = await fs.readFile(sourcePath, "utf8");
-    const updated = applyHunks(current, operation.hunks);
+    const applied = await applyHunks(current, operation.hunks, operation.file);
     await fs.mkdir(path.dirname(nextPath), { recursive: true });
-    await fs.writeFile(nextPath, updated, "utf8");
+    await fs.writeFile(nextPath, applied.content, "utf8");
     if (operation.moveTo && nextPath !== sourcePath) {
       await fs.rm(sourcePath, { force: true });
     }
     touched.push(nextPath);
+
+    const entityDiff = await astDiffSources(current, applied.content, operation.file);
+    changes.push({
+      path: operation.moveTo ?? operation.file,
+      action: "update",
+      symbols: entityDiff.entities.map((entity) => ({
+        name: entity.name,
+        kind: entity.kind,
+        change: entity.change
+      })),
+      additions: applied.additions,
+      deletions: applied.deletions,
+      applyMode: applied.applyMode
+    });
   }
 
-  return touched;
+  return { touched, changes };
 }
 
 function resolveWorkspacePath(rootDir: string, targetPath: string): string {
@@ -141,33 +222,41 @@ function parsePatch(patchText: string): PatchOperation[] {
   return operations;
 }
 
-function applyHunks(
+async function applyHunks(
   original: string,
-  hunks: Array<{
-    lines: string[];
-  }>
-): string {
+  hunks: Array<{ lines: string[] }>,
+  filePath: string
+): Promise<{ content: string; additions: number; deletions: number; applyMode: PatchApplyMode }> {
   let current = original.split("\n");
+  // Preserve trailing newline semantics: split keeps final empty string when file ends with \n
+  let additions = 0;
+  let deletions = 0;
+  let applyMode: PatchApplyMode = "text";
+
+  const language = languageFromPath(filePath);
+  let symbols = language ? await extractSymbols(original, language) : null;
 
   for (const hunk of hunks) {
-    const contextLines = hunk.lines.filter((line) => line.startsWith(" ")).map((line) => line.slice(1));
-    const removalLines = hunk.lines.filter((line) => line.startsWith("-")).map((line) => line.slice(1));
-    const additionLines = hunk.lines.filter((line) => line.startsWith("+")).map((line) => line.slice(1));
-    const anchor = contextLines[0] ?? removalLines[0];
-    let anchorIndex = anchor ? current.findIndex((line) => line === anchor) : current.length;
-    if (anchorIndex === -1) {
-      anchorIndex = current.length;
-    }
+    const counts = countHunkEdits(hunk);
+    additions += counts.additions;
+    deletions += counts.deletions;
 
-    if (removalLines.length > 0) {
-      const removalStart = anchor ? current.findIndex((line) => line === anchor) : current.length;
-      if (removalStart >= 0) {
-        current.splice(removalStart, removalLines.length, ...additionLines);
-      }
-    } else {
-      current.splice(anchorIndex + (anchor ? 1 : 0), 0, ...additionLines);
+    const location = locateHunk(current, hunk, symbols);
+    if (location.mode === "ast") {
+      applyMode = "ast";
+    }
+    current = applyLocatedHunk(current, location);
+
+    // Re-extract symbols after each hunk so later hunks see updated spans
+    if (language) {
+      symbols = await extractSymbols(current.join("\n"), language);
     }
   }
 
-  return current.join("\n");
+  return {
+    content: current.join("\n"),
+    additions,
+    deletions,
+    applyMode: language ? applyMode : "text"
+  };
 }

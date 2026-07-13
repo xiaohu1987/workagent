@@ -4,7 +4,8 @@ import {
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
   getHistoryItemAffordance,
-  isThreadExecutionInProgress
+  isThreadExecutionInProgress,
+  shouldShowTaskProcessing
 } from "../apps/desktop/src/renderer/thread-ui-state";
 import {
   getToolProcessingLabel,
@@ -18,6 +19,15 @@ describe("thread UI state helpers", () => {
     expect(isThreadExecutionInProgress("waiting")).toBe(true);
     expect(isThreadExecutionInProgress("completed")).toBe(false);
     expect(isThreadExecutionInProgress(null)).toBe(false);
+  });
+
+  it("does not keep processing UI from stale progress after stop", () => {
+    expect(shouldShowTaskProcessing("running", false)).toBe(true);
+    expect(shouldShowTaskProcessing("waiting", false)).toBe(true);
+    expect(shouldShowTaskProcessing("idle", true)).toBe(true);
+    expect(shouldShowTaskProcessing("idle", false)).toBe(false);
+    expect(shouldShowTaskProcessing("completed", false)).toBe(false);
+    expect(shouldShowTaskProcessing("failed", false)).toBe(false);
   });
 
   it("shows a spinner affordance for executing history items", () => {

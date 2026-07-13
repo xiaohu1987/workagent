@@ -24,10 +24,11 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, ProviderFactory } from "@provider-adapters";
+import { DEFAULT_RUNTIME_TIMEOUTS } from "@shared-types";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
-import { ToolRuntime } from "@tool-runtime";
+import { ToolRuntime, canonicalizeToolName } from "@tool-runtime";
 import {
   buildGpaSystemDirective,
   DEFAULT_GPA_STATE,
@@ -37,17 +38,27 @@ import {
   nextStageAfterConfirmation,
   parseGpaState
 } from "./gpa";
-import { resolveMultimodalTurnRequest } from "./multimodal-intent";
+import {
+  buildMultimodalIntentClassifySystemPrompt,
+  buildMultimodalIntentClassifyTranscript,
+  parseMultimodalIntentClassification,
+  type MultimodalIntentClassification
+} from "./multimodal-intent";
 import type { GpaStage, GpaState } from "@shared-types";
 
 export { parseGpaState } from "./gpa";
-export { detectMultimodalIntent, resolveMultimodalTurnRequest } from "./multimodal-intent";
+export {
+  detectMultimodalIntent,
+  parseMultimodalIntentClassification,
+  buildMultimodalIntentClassifySystemPrompt,
+  buildMultimodalIntentClassifyTranscript
+} from "./multimodal-intent";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
-export const MODEL_DECISION_TIMEOUT_MS = 90_000;
-export const MAX_MODEL_TIMEOUT_RETRIES = 5;
+export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs;
+export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
 export const MAX_AGENT_PROTOCOL_FAILURES = 2;
-export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 20_000;
+export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.8;
 export const CONTEXT_COMPACTION_TARGET = 0.6;
 
@@ -228,7 +239,7 @@ function waitForAbortOrTimeout<T>(
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
+    const timer = timeoutMs > 0 ? setTimeout(() => {
       if (settled) {
         return;
       }
@@ -236,14 +247,14 @@ function waitForAbortOrTimeout<T>(
       signal.removeEventListener("abort", onAbort);
       onTimeout?.();
       reject(new ModelDecisionTimeoutError(timeoutMs));
-    }, timeoutMs);
+    }, timeoutMs) : null;
 
     const finish = (callback: () => void) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
       callback();
     };
@@ -452,9 +463,8 @@ class ThreadSessionRuntime {
       ? await this.services.buildKnowledgeContext(this.threadId)
       : null;
     const workflowPackContext = await this.services.buildWorkflowPackContext(this.threadId);
-    // Older configurations predate agentCapability. Preserve their existing
-    // tool-enabled behavior and only block a model after an explicit failed
-    // verification or a runtime incompatibility downgrade.
+    // Tool availability follows the model profile's tool-calling flag only.
+    // Runtime protocol failures must not permanently disable tools or force a model switch.
     const agentToolsEnabled = isAgentToolEnabled(model);
     const { tools, mcpTools } = await this.buildVisibleTools(
       accessibleMcpServerIds,
@@ -482,58 +492,54 @@ class ThreadSessionRuntime {
     const abortController = new AbortController();
     this.#abortController = abortController;
     this.#activeTurnRunId = turn.id;
-    await this.services.persistence.updateThread(this.threadId, {
-      status: "running",
-      updatedAt: new Date().toISOString()
-    });
-    const priorMessages = await this.services.persistence.listMessages(this.threadId);
-    await this.recordMessage("user", displayContent ?? initialInput, turn.id, attachments.length > 0 ? { attachments } : undefined);
-
-    const multimodalRequest = resolveMultimodalTurnRequest({
-      currentInput: initialInput,
-      attachments,
-      priorMessages: priorMessages.map((message) => ({ role: message.role, content: message.content }))
-    });
-    if (multimodalRequest) {
-      if (multimodalRequest.viaRetry) {
-        await this.services.log("multimodal.retry", this.threadId, {
-          turnRunId: turn.id,
-          intent: multimodalRequest.intent,
-          promptPreview: multimodalRequest.prompt.slice(0, 200)
-        });
-      }
-      await this.runMultimodalIntentTurn({
-        intent: multimodalRequest.intent,
-        turnId: turn.id,
-        prompt: multimodalRequest.prompt,
-        abortController
-      });
-      this.#activeTurnRunId = null;
-      if (this.#abortController === abortController) this.#abortController = null;
-      return;
-    }
-
-    const history = await this.services.persistence.listMessages(this.threadId);
-
-    // 简短确认语（确认/OK/开始等）按 doc/GPA.md 推进阶段：GOAL→PLAN→ACT
-    await this.#ensureGpa();
-    if (
-      detectGpaConfirmation(initialInput) &&
-      (this.#gpa.stage === "goal" || this.#gpa.stage === "plan")
-    ) {
-      const advanced = nextStageAfterConfirmation(this.#gpa.stage);
-      await this.#commitGpa({
-        ...this.#gpa,
-        stage: advanced,
-        awaitingConfirmation: null,
+    try {
+      await this.services.persistence.updateThread(this.threadId, {
+        status: "running",
         updatedAt: new Date().toISOString()
       });
-    }
+      const priorMessages = await this.services.persistence.listMessages(this.threadId);
+      await this.recordMessage("user", displayContent ?? initialInput, turn.id, attachments.length > 0 ? { attachments } : undefined);
 
-    let interruptedVisibleContent = "";
+      const multimodalClassification = await this.classifyMultimodalIntent({
+        currentInput: initialInput,
+        attachments,
+        priorMessages: priorMessages.map((message) => ({ role: message.role, content: message.content })),
+        model,
+        provider,
+        abortController,
+        turnId: turn.id
+      });
+      if (multimodalClassification.intent === "image" || multimodalClassification.intent === "video") {
+        await this.runMultimodalIntentTurn({
+          intent: multimodalClassification.intent,
+          turnId: turn.id,
+          prompt: multimodalClassification.prompt,
+          abortController
+        });
+        return;
+      }
 
-    try {
-      let transcript = compactTranscript(history);
+      const history = await this.services.persistence.listMessages(this.threadId);
+
+      // 简短确认语（确认/OK/开始等）按 doc/GPA.md 推进阶段：GOAL→PLAN→ACT
+      await this.#ensureGpa();
+      if (
+        detectGpaConfirmation(initialInput) &&
+        (this.#gpa.stage === "goal" || this.#gpa.stage === "plan")
+      ) {
+        const advanced = nextStageAfterConfirmation(this.#gpa.stage);
+        await this.#commitGpa({
+          ...this.#gpa,
+          stage: advanced,
+          awaitingConfirmation: null,
+          updatedAt: new Date().toISOString()
+        });
+      }
+
+      let interruptedVisibleContent = "";
+
+      try {
+        let transcript = compactTranscript(history);
       let hasExecutedToolCall = false;
       const successfulToolCallFingerprints = new Set<string>();
       const failedToolCallFingerprints = new Map<string, number>();
@@ -554,15 +560,13 @@ class ThreadSessionRuntime {
         throw new AgentModelCompatibilityError(
           model.displayName,
           0,
-          model.agentCapability === "unsupported"
-            ? model.agentCapabilityReason ?? "This model is marked incompatible with Agent tool calling."
-            : "Tool calling is disabled for this model. Enable it or select a different model for GPA."
+          "Tool calling is disabled for this model. Enable tool calling in model settings to use GPA."
         );
       }
 
       const registerAgentProtocolFailure = async (reason: string) => {
         agentProtocolFailureAttempts += 1;
-        const incompatible = agentProtocolFailureAttempts >= MAX_AGENT_PROTOCOL_FAILURES;
+        const exhausted = agentProtocolFailureAttempts >= MAX_AGENT_PROTOCOL_FAILURES;
         await this.services.log("agent.model_protocol_failure", this.threadId, {
           turnRunId: turn.id,
           modelId: model.id,
@@ -570,11 +574,11 @@ class ThreadSessionRuntime {
           attempt: agentProtocolFailureAttempts,
           maxAttempts: MAX_AGENT_PROTOCOL_FAILURES,
           reason,
-          incompatible
+          incompatible: false,
+          exhausted
         });
-        if (incompatible) {
-          await this.services.markModelAgentIncompatible(this.threadId, model.id, reason);
-          throw new AgentModelCompatibilityError(model.displayName, agentProtocolFailureAttempts, reason);
+        if (exhausted) {
+          throw new Error(`Agent decision protocol failed repeatedly: ${reason}`);
         }
       };
 
@@ -653,8 +657,8 @@ class ThreadSessionRuntime {
           });
         }
         const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
-          ? RECOVERY_MODEL_DECISION_TIMEOUT_MS
-          : MODEL_DECISION_TIMEOUT_MS;
+          ? this.services.config.timeouts.recoveryModelDecisionMs
+          : this.services.config.timeouts.modelDecisionMs;
         let decision: ProviderTurnDecision;
         try {
           decision = await waitForAbortOrTimeout(
@@ -687,19 +691,19 @@ class ThreadSessionRuntime {
             throw error;
           }
 
+          // Timeouts use their own retry budget. Do not fold them into agent
+          // protocol failures, or a 2-strike protocol limit will abort before
+          // the configured modelTimeoutRetries can finish.
           modelTimeoutAttempts += 1;
-          if (requiresAgentDecisionProtocol()) {
-            await registerAgentProtocolFailure(
-              "The model did not return an Agent decision before the response timeout."
-            );
-          }
-          const retrying = modelTimeoutAttempts <= MAX_MODEL_TIMEOUT_RETRIES;
+          const maxTimeoutRetries = this.services.config.timeouts.modelTimeoutRetries;
+          const retrying = modelTimeoutAttempts <= maxTimeoutRetries;
           await this.services.log("provider.turn_timeout", this.threadId, {
             turnRunId: turn.id,
             timeoutMs: decisionTimeoutMs,
             attempt: modelTimeoutAttempts,
-            maxRetries: MAX_MODEL_TIMEOUT_RETRIES,
-            retrying
+            maxRetries: maxTimeoutRetries,
+            retrying,
+            reason: "The model did not return an Agent decision before the response timeout."
           });
 
           if (!retrying) {
@@ -711,7 +715,7 @@ class ThreadSessionRuntime {
             threadId: this.threadId,
             payload: {
               attempt: modelTimeoutAttempts,
-              maxAttempts: MAX_MODEL_TIMEOUT_RETRIES,
+              maxAttempts: maxTimeoutRetries,
               reason: "model_timeout"
             },
             createdAt: new Date().toISOString()
@@ -963,10 +967,14 @@ class ThreadSessionRuntime {
         }
 
         let reevaluateAfterUserInput = false;
-        for (const toolCall of decision.toolCalls) {
+        for (const rawToolCall of decision.toolCalls) {
           if (abortController.signal.aborted) {
             throw new Error("Turn interrupted.");
           }
+          const toolCall = {
+            ...rawToolCall,
+            name: canonicalizeToolName(rawToolCall.name)
+          };
           const toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
           const toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
           const duplicateCreatedFile = getAddedPatchFiles(toolCall.arguments).find((filePath) =>
@@ -1376,36 +1384,82 @@ class ThreadSessionRuntime {
           payload: { thread: updatedThread },
           createdAt: completedAt
         });
-        return;
+      } else {
+        const completedAt = new Date().toISOString();
+        await this.services.log("turn.failed", this.threadId, {
+          turnRunId: turn.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        await this.recordMessage("assistant", buildRuntimeFailureRecoveryMessage(error), turn.id);
+        await this.services.persistence.finishTurn(turn.id, {
+          status: "failed",
+          completedAt,
+          errorMessage: error instanceof Error ? error.message : String(error)
+        });
+        const updatedThread = await this.services.persistence.updateThread(this.threadId, {
+          status: "failed",
+          updatedAt: completedAt
+        });
+        await this.#clearGpaAfterExecution(true);
+        await this.services.emit({
+          type: "thread.updated",
+          threadId: this.threadId,
+          payload: { thread: updatedThread },
+          createdAt: completedAt
+        });
       }
-      const completedAt = new Date().toISOString();
-      await this.services.log("turn.failed", this.threadId, {
-        turnRunId: turn.id,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      await this.recordMessage("assistant", buildRuntimeFailureRecoveryMessage(error), turn.id);
-      await this.services.persistence.finishTurn(turn.id, {
-        status: "failed",
-        completedAt,
-        errorMessage: error instanceof Error ? error.message : String(error)
-      });
-      const updatedThread = await this.services.persistence.updateThread(this.threadId, {
-        status: "failed",
-        updatedAt: completedAt
-      });
-      await this.#clearGpaAfterExecution(true);
-      await this.services.emit({
-        type: "thread.updated",
-        threadId: this.threadId,
-        payload: { thread: updatedThread },
-        createdAt: completedAt
-      });
-      return;
+    }
+    } catch (error) {
+      if (abortController.signal.aborted) {
+        const completedAt = new Date().toISOString();
+        await this.services.persistence.finishTurn(turn.id, {
+          status: "interrupted",
+          completedAt,
+          errorMessage: null
+        });
+        const updatedThread = await this.services.persistence.updateThread(this.threadId, {
+          status: "idle",
+          updatedAt: completedAt
+        });
+        await this.#clearGpaAfterExecution(true);
+        await this.services.emit({
+          type: "thread.updated",
+          threadId: this.threadId,
+          payload: { thread: updatedThread },
+          createdAt: completedAt
+        });
+      } else {
+        const completedAt = new Date().toISOString();
+        await this.services.log("turn.failed", this.threadId, {
+          turnRunId: turn.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        await this.recordMessage("assistant", buildRuntimeFailureRecoveryMessage(error), turn.id);
+        await this.services.persistence.finishTurn(turn.id, {
+          status: "failed",
+          completedAt,
+          errorMessage: error instanceof Error ? error.message : String(error)
+        });
+        const updatedThread = await this.services.persistence.updateThread(this.threadId, {
+          status: "failed",
+          updatedAt: completedAt
+        });
+        await this.#clearGpaAfterExecution(true);
+        await this.services.emit({
+          type: "thread.updated",
+          threadId: this.threadId,
+          payload: { thread: updatedThread },
+          createdAt: completedAt
+        });
+      }
     } finally {
       this.#activeTurnRunId = null;
       if (this.#abortController === abortController) {
         this.#abortController = null;
       }
+      // Wakeups that arrived while this turn was active may have no-op'd.
+      // Re-check the queue so a message sent right after Stop is not stuck.
+      this.submit({ type: "queue_wakeup" });
     }
   }
 
@@ -1436,6 +1490,68 @@ class ThreadSessionRuntime {
         : withMedia.filter((tool) => tool.name !== "request_user_input"),
       mcpTools
     };
+  }
+
+  private async classifyMultimodalIntent(input: {
+    currentInput: string;
+    attachments: MessageAttachment[];
+    priorMessages: Array<{ role: string; content: string }>;
+    model: ModelProfile;
+    provider: ProviderDefinition;
+    abortController: AbortController;
+    turnId: string;
+  }): Promise<MultimodalIntentClassification> {
+    const fallback: MultimodalIntentClassification = { intent: "none", prompt: "", parseOk: false };
+    try {
+      const adapter = this.services.providerFactory.create(input.provider);
+      const classifyAbort = createChildAbortController(input.abortController.signal);
+      const decision = await waitForAbortOrTimeout(
+        adapter.runTurn({
+          systemPrompt: buildMultimodalIntentClassifySystemPrompt(),
+          transcript: buildMultimodalIntentClassifyTranscript({
+            priorMessages: input.priorMessages,
+            currentInput: input.currentInput,
+            attachments: input.attachments
+          }),
+          availableTools: [],
+          model: input.model,
+          provider: input.provider,
+          stream: false,
+          abortSignal: classifyAbort.signal
+        }),
+        input.abortController.signal,
+        this.services.config.timeouts.multimodalIntentClassifyMs,
+        () => classifyAbort.abort()
+      );
+
+      const raw =
+        typeof decision.assistantMessage === "string" && decision.assistantMessage.trim()
+          ? decision.assistantMessage
+          : "";
+      const classification = parseMultimodalIntentClassification(raw);
+      await this.services.log("multimodal.intent_classify", this.threadId, {
+        turnRunId: input.turnId,
+        intent: classification.intent,
+        parseOk: classification.parseOk,
+        viaModel: true,
+        promptPreview: classification.prompt.slice(0, 200),
+        rawPreview: raw.slice(0, 240)
+      });
+      return classification;
+    } catch (error) {
+      if (input.abortController.signal.aborted) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      await this.services.log("multimodal.intent_classify", this.threadId, {
+        turnRunId: input.turnId,
+        intent: "none",
+        parseOk: false,
+        viaModel: true,
+        failed: true,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+      return fallback;
+    }
   }
 
   private async runMultimodalIntentTurn(input: {
@@ -1626,7 +1742,9 @@ class ThreadSessionRuntime {
     const video = await waitForAbort(adapter.generateVideo({
       model: target.model,
       prompt: input.prompt,
-      abortSignal: input.abortSignal
+      abortSignal: input.abortSignal,
+      timeoutMs: this.services.config.timeouts.videoGenerationMs,
+      pollIntervalMs: this.services.config.timeouts.videoPollIntervalMs
     }), input.abortSignal ?? new AbortController().signal);
 
     const outputDir = await this.services.getThreadOutputDir(this.threadId);
@@ -1747,14 +1865,18 @@ class ThreadSessionRuntime {
     } catch (error) {
       const completedAt = new Date().toISOString();
       const reason = error instanceof Error ? error.message : String(error);
-      await this.recordMessage("assistant", `视频生成失败：${reason}`, input.turnId);
+      const assistantContent = isGeneratedVideoDownloadError(error)
+        ? reason
+        : `视频生成失败：${reason}`;
+      await this.recordMessage("assistant", assistantContent, input.turnId);
       await this.services.persistence.finishTurn(input.turnId, { status: "failed", completedAt, errorMessage: reason });
       const thread = await this.services.persistence.updateThread(this.threadId, { status: "failed", updatedAt: completedAt });
       await this.services.emit({ type: "thread.updated", threadId: this.threadId, payload: { thread }, createdAt: completedAt });
       await this.services.log("video.generate_failed", this.threadId, {
         turnRunId: input.turnId,
         startedAt,
-        error: reason
+        error: reason,
+        ...(isGeneratedVideoDownloadError(error) ? { videoUrl: error.videoUrl, stage: "download" } : {})
       });
     }
   }
@@ -1885,19 +2007,27 @@ export function buildRepeatedTaskRecoveryMessage(input: {
 export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
   if (error instanceof AgentModelCompatibilityError) {
     return [
-      "任务已停止：当前模型无法稳定返回 Agent 所需的可执行决策。",
+      "任务已停止：当前模型未开启工具调用，无法执行 Agent 决策。",
       `模型：${error.modelName}`,
-      `已连续出现 ${error.failures} 次协议失败：${error.lastReason}`,
-      "请在模型选择中切换到支持工具调用或结构化 JSON 输出的模型后，再重新执行 GPA/Agent 任务。普通聊天仍可继续使用当前模型。",
+      `原因：${error.lastReason}`,
+      "请在模型设置中开启工具调用后重试。普通聊天仍可继续使用当前模型。",
       "为避免误执行，系统没有根据普通文本猜测命令或文件修改；已完成的工具结果和项目文件会被保留。"
     ].join("\n");
   }
 
   if (error instanceof ModelDecisionTimeoutError) {
     return [
-      "任务暂时停止：模型在限定时间内没有返回可执行决策。",
-      "建议：确认当前模型和服务地址可用后重试；也可以切换到响应更快、支持工具调用的模型。",
+      "任务暂时停止：模型在限定时间内没有返回可执行决策，已自动重试多次仍未成功。",
+      "建议：确认当前模型和服务地址可用后重试。",
       "项目文件没有被未经验证地修改，已有的工具结果和日志会保留供下一次任务继续使用。"
+    ].join("\n");
+  }
+
+  if (error instanceof Error && error.message.startsWith("Agent decision protocol failed repeatedly:")) {
+    return [
+      "任务暂时停止：模型连续多次未能返回可执行的 Agent 决策。",
+      `原因：${error.message.replace(/^Agent decision protocol failed repeatedly:\s*/, "")}`,
+      "建议：稍后重试，或检查当前模型服务是否可用。已完成的工具结果和项目文件会被保留。"
     ].join("\n");
   }
 
@@ -2044,7 +2174,7 @@ export function prioritizeUserInputToolCall(calls: RuntimeToolCall[]): RuntimeTo
 }
 
 export function isAgentToolEnabled(model: ModelProfile): boolean {
-  return model.supportsToolCalling && model.agentCapability !== "unsupported";
+  return model.supportsToolCalling === true;
 }
 
 export function formatAvailableTools(
@@ -2156,12 +2286,12 @@ function buildRuntimePrompt(
   ];
   if (imageGenerateAvailable) {
     blocks.push(
-      "When the user asks to generate, draw, or create an image, load the generate_image skill and call image.generate. That tool uses the default image model from Settings → Multimodal, not the chat reasoning model. Never claim an image was created without a successful image.generate result."
+      "When the user asks to generate, draw, recreate, or vary an image (including follow-ups like 再换一张/再来一张), load the generate_image skill and call image.generate. That tool uses the default image model from Settings → Multimodal, not the chat reasoning model. Never call image_gen, imagegen, or any invented image tool name. Never claim an image was created without a successful image.generate result."
     );
   }
   if (videoGenerateAvailable) {
     blocks.push(
-      "When the user asks to generate or create a video, load the generate_video skill and call video.generate. That tool uses the default video model from Settings → Multimodal, not the chat reasoning model. Never claim a video was created without a successful video.generate result."
+      "When the user asks to generate or recreate a video, load the generate_video skill and call video.generate. That tool uses the default video model from Settings → Multimodal, not the chat reasoning model. Never call video_gen, videogen, or any invented video tool name. Never claim a video was created without a successful video.generate result."
     );
   }
   blocks.push(

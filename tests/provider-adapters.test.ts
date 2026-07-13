@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, nativeToolName, ProviderFactory } from "@provider-adapters";
+import { buildDecisionSystemPrompt, nativeToolName, parseDecisionFromText, ProviderFactory } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -617,6 +617,137 @@ describe("native provider tool protocols", () => {
   });
 });
 
+describe("OpenAiCompatibleProvider video generation", () => {
+  const provider: ProviderDefinition = {
+    id: "company-gateway",
+    type: "openai-compatible",
+    baseUrl: "https://gateway.example/v1",
+    apiKey: "secret"
+  };
+  const model: ModelProfile = {
+    id: "grok-imagine-video-1.5",
+    providerId: "company-gateway",
+    displayName: "grok-imagine-video-1.5",
+    contextWindow: 128_000,
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    supportsParallelToolCalls: true,
+    supportsJsonOutput: true,
+    supportsMultimodalInput: true,
+    supportsVideoGeneration: true,
+    role: "video",
+    supportsReasoningSummary: false,
+    defaultTemperature: 0.2,
+    defaultMaxOutputTokens: 4096
+  };
+
+  it("creates, polls, and downloads an async video generation result", async () => {
+    const bytes = new Uint8Array([0, 0, 0, 1, 2, 3]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/videos/generations")) {
+        return new Response(JSON.stringify({ request_id: "req-123" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.endsWith("/videos/req-123")) {
+        return new Response(
+          JSON.stringify({
+            status: "done",
+            video: { url: "https://cdn.example/video.mp4", duration: 5 }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://cdn.example/video.mp4") {
+        return new Response(bytes, {
+          status: 200,
+          headers: { "Content-Type": "video/mp4" }
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: TimerHandler) => {
+      if (typeof handler === "function") {
+        handler();
+      }
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+
+    try {
+      const adapter = new ProviderFactory().create(provider);
+      expect(adapter.generateVideo).toBeTypeOf("function");
+      const result = await adapter.generateVideo!({
+        model,
+        prompt: "a red cube rotating slowly"
+      });
+
+      expect(result.mimeType).toBe("video/mp4");
+      expect(Array.from(result.data)).toEqual(Array.from(bytes));
+      expect(fetchMock.mock.calls[0]?.[0]).toBe("https://gateway.example/v1/videos/generations");
+      const createInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+      expect(JSON.parse(String(createInit.body))).toMatchObject({
+        model: "grok-imagine-video-1.5",
+        prompt: "a red cube rotating slowly"
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("reports generation success with download URL when CDN fetch fails", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/videos/generations")) {
+        return new Response(JSON.stringify({ request_id: "req-456" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.endsWith("/videos/req-456")) {
+        return new Response(
+          JSON.stringify({
+            status: "done",
+            video: { url: "https://vidgen.example/video.mp4", duration: 5 }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://vidgen.example/video.mp4") {
+        throw new TypeError("fetch failed");
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: TimerHandler) => {
+      if (typeof handler === "function") {
+        handler();
+      }
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+
+    try {
+      const adapter = new ProviderFactory().create(provider);
+      await expect(adapter.generateVideo!({
+        model,
+        prompt: "a cat dancing"
+      })).rejects.toMatchObject({
+        code: "VIDEO_DOWNLOAD_FAILED",
+        videoUrl: "https://vidgen.example/video.mp4",
+        message: expect.stringContaining("视频生成成功，但下载失败")
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+});
+
 describe("decision system prompt", () => {
   it("directs file creation through apply_patch rather than an invented tool", () => {
     const prompt = buildDecisionSystemPrompt({
@@ -639,5 +770,66 @@ describe("decision system prompt", () => {
     expect(prompt).toContain("Do not repeat it");
     expect(prompt).toContain("goal_completed");
     expect(prompt).toContain("shell.exec");
+  });
+});
+
+describe("parseDecisionFromText", () => {
+  it("keeps lightweight multimodal intent JSON as assistant text", () => {
+    const decision = parseDecisionFromText(
+      '{"intent":"image","prompt":"生成一张二次元美女跳舞的图片"}'
+    );
+
+    expect(decision.isStructured).toBe(false);
+    expect(decision.assistantMessage).toBe(
+      '{"intent":"image","prompt":"生成一张二次元美女跳舞的图片"}'
+    );
+    expect(decision.toolCalls).toEqual([]);
+  });
+
+  it("still parses Agent decision envelopes and aliases image_gen", () => {
+    const decision = parseDecisionFromText(
+      JSON.stringify({
+        assistant_message: "generating",
+        tool_calls: [{ name: "image_gen", arguments: { prompt: "a cat" } }],
+        end_turn: false,
+        goal_completed: false
+      })
+    );
+
+    expect(decision.isStructured).toBe(true);
+    expect(decision.assistantMessage).toBe("generating");
+    expect(decision.toolCalls[0]?.name).toBe("image.generate");
+    expect(decision.toolCalls[0]?.arguments).toEqual({ prompt: "a cat" });
+  });
+
+  it("repairs malformed decision envelopes before applying the existing tool checks", () => {
+    const decision = parseDecisionFromText(
+      "{assistant_message: 'Inspecting files', tool_calls: [{name: 'fs.read_directory', arguments: {path: '.',},},], end_turn: false"
+    );
+
+    expect(decision).toMatchObject({
+      assistantMessage: "Inspecting files",
+      toolCalls: [{ name: "fs.read_directory", arguments: { path: "." } }],
+      endTurn: false,
+      isStructured: true
+    });
+  });
+
+  it("repairs tagged JSON and XML tool arguments returned as text", () => {
+    const tagged = parseDecisionFromText(
+      "<tool_calls>[{name: 'fs.read_file', arguments: '{path: \\\"README.md\\\",}',}]</tool_calls>"
+    );
+    const xml = parseDecisionFromText(
+      "<tool_calls><invoke name=\"fs.read_file\"><parameter name=\"arguments\">{path: 'package.json',}</parameter></invoke></tool_calls>"
+    );
+
+    expect(tagged.toolCalls).toMatchObject([{ name: "fs.read_file", arguments: { path: "README.md" } }]);
+    expect(xml.toolCalls).toMatchObject([{ name: "fs.read_file", arguments: { path: "package.json" } }]);
+  });
+
+  it("keeps unrepairable text protocols unstructured and prevents tool execution", () => {
+    const decision = parseDecisionFromText("<tool_calls>{not valid</tool_calls>");
+
+    expect(decision).toMatchObject({ isStructured: false, toolCalls: [] });
   });
 });

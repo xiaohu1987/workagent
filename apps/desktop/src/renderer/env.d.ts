@@ -17,6 +17,7 @@ declare global {
       listThreads: () => Promise<any[]>;
       searchThreads: (query: string) => Promise<Array<{ thread: ThreadRecord; snippet: string | null; score: number }>>;
       setThreadPinned: (payload: { threadId: string; isPinned: boolean }) => Promise<ThreadRecord>;
+      renameThread: (payload: { threadId: string; title: string }) => Promise<ThreadRecord>;
       createThread: (payload: {
         title: string;
         mode: "project" | "chat";

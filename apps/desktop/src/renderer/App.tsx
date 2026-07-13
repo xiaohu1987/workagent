@@ -25,15 +25,17 @@ import type {
   ToolCallRecord,
   UserInputPrompt
 } from "@shared-types";
+import { DEFAULT_RUNTIME_TIMEOUTS } from "@shared-types";
 import {
   canDeleteThread,
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
   getHistoryItemAffordance,
-  isThreadExecutionInProgress
+  isThreadExecutionInProgress,
+  shouldShowTaskProcessing
 } from "./thread-ui-state";
 
-type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "update";
+type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "timeouts" | "update";
 type RightWorkspaceTab = "preview" | "terminal" | "browser" | "files";
 type ResizePane = "sidebar" | "right-workspace";
 
@@ -236,8 +238,9 @@ type FileChangeSummaryItem = {
   action: FileChangeAction;
   additions: number;
   deletions: number;
-  kind?: "generated-image" | "generated-video" | "patch";
+  kind?: "generated-image" | "generated-video" | "generated-file" | "patch";
   description?: string;
+  symbols?: Array<{ name: string; kind: string; change: string }>;
 };
 
 type ConversationTurnItem = {
@@ -274,6 +277,7 @@ type RuntimeActivityEntry =
 
 type RuntimeActivity = {
   threadId: string;
+  startedAt: string;
   entries: RuntimeActivityEntry[];
 };
 
@@ -293,6 +297,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "skills", label: "Skill 管理", hint: "已加载技能与来源范围" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
+  { id: "timeouts", label: "超时设置", hint: "模型请求、重试和视频生成的等待时间" },
   { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
 ];
 
@@ -386,12 +391,15 @@ export function App() {
   const selectedThreadIdRef = useRef<string | null>(null);
   const pendingUserMessagesRef = useRef<Record<string, MessageRecord[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
+  /** After Stop, ignore late runtime events that would revive the "执行中" UI. */
+  const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null);
   const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
+  const [completedTurnTimers, setCompletedTurnTimers] = useState<Record<string, { startedAt: string; completedAt: string }>>({});
   const [expandedRuntimeThreads, setExpandedRuntimeThreads] = useState<Record<string, boolean>>({});
   const [input, setInput] = useState("");
   const [isHistorySearchOpen, setIsHistorySearchOpen] = useState(false);
@@ -399,6 +407,8 @@ export function App() {
   const [historySearchResults, setHistorySearchResults] = useState<HistorySearchResult[]>([]);
   const [isHistorySearchLoading, setIsHistorySearchLoading] = useState(false);
   const [historyContextMenu, setHistoryContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
+  const [renamingHistoryThread, setRenamingHistoryThread] = useState<{ id: string; title: string } | null>(null);
+  const skipHistoryRenameCommitRef = useRef(false);
   const [editingUserMessage, setEditingUserMessage] = useState<{ id: string; content: string } | null>(null);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [isContextReportOpen, setIsContextReportOpen] = useState(false);
@@ -680,10 +690,17 @@ export function App() {
 
   function startRuntimeActivity(threadId: string) {
     const createdAt = new Date().toISOString();
+    setCompletedTurnTimers((current) => {
+      if (!current[threadId]) return current;
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
     setRuntimeActivities((current) => ({
       ...current,
       [threadId]: {
         threadId,
+        startedAt: createdAt,
         entries: [{ id: `submitted-${createdAt}`, kind: "status", label: "消息已发送，正在准备任务", createdAt }]
       }
     }));
@@ -692,13 +709,14 @@ export function App() {
 
   function appendRuntimeStatus(threadId: string, label: string, createdAt = new Date().toISOString()) {
     setRuntimeActivities((current) => {
-      const activity = current[threadId] ?? { threadId, entries: [] };
+      const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       const last = activity.entries.at(-1);
       if (last?.kind === "status" && last.label === label) return current;
       return {
         ...current,
         [threadId]: {
           ...activity,
+          startedAt: activity.startedAt ?? createdAt,
           entries: [...activity.entries, { id: `status-${createdAt}-${label}`, kind: "status", label, createdAt }]
         }
       };
@@ -712,11 +730,12 @@ export function App() {
     createdAt = new Date().toISOString()
   ) {
     setRuntimeActivities((current) => {
-      const activity = current[threadId] ?? { threadId, entries: [] };
+      const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       return {
         ...current,
         [threadId]: {
           ...activity,
+          startedAt: activity.startedAt ?? createdAt,
           entries: [...activity.entries, { id: `output-${createdAt}`, kind: "output", label, content, createdAt }]
         }
       };
@@ -725,7 +744,11 @@ export function App() {
 
   function upsertRuntimeTool(threadId: string, toolCall: ToolCallRecord) {
     setRuntimeActivities((current) => {
-      const activity = current[threadId] ?? { threadId, entries: [] };
+      const activity = current[threadId] ?? {
+        threadId,
+        startedAt: toolCall.startedAt || new Date().toISOString(),
+        entries: []
+      };
       const existingIndex = activity.entries.findIndex((entry) => entry.kind === "tool" && entry.toolCall.id === toolCall.id);
       const entries = existingIndex < 0
         ? [...activity.entries, { id: `tool-${toolCall.id}`, kind: "tool" as const, toolCall }]
@@ -733,7 +756,14 @@ export function App() {
           ? { id: entry.id, kind: "tool" as const, toolCall }
           : entry
         );
-      return { ...current, [threadId]: { ...activity, entries } };
+      return {
+        ...current,
+        [threadId]: {
+          ...activity,
+          startedAt: activity.startedAt ?? toolCall.startedAt ?? new Date().toISOString(),
+          entries
+        }
+      };
     });
   }
 
@@ -761,12 +791,23 @@ export function App() {
   }
 
   function clearRuntimeActivity(threadId: string) {
+    let captured: RuntimeActivity | undefined;
     setRuntimeActivities((current) => {
-      if (!current[threadId]) return current;
+      captured = current[threadId];
+      if (!captured) return current;
       const next = { ...current };
       delete next[threadId];
       return next;
     });
+    if (captured) {
+      const startedAt = captured.startedAt || getRuntimeActivityStartedAt(captured.entries);
+      if (startedAt) {
+        setCompletedTurnTimers((timers) => ({
+          ...timers,
+          [threadId]: { startedAt, completedAt: new Date().toISOString() }
+        }));
+      }
+    }
     setExpandedRuntimeThreads((current) => {
       if (!(threadId in current)) return current;
       const next = { ...current };
@@ -851,6 +892,9 @@ export function App() {
         typed.payload?.toolCallId &&
         typed.payload?.toolName
       ) {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
         setActiveToolCall({
           threadId: typed.threadId,
           toolCallId: typed.payload.toolCallId,
@@ -885,17 +929,22 @@ export function App() {
             typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null,
             typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString()
           );
-          appendRuntimeStatus(runtimeThreadId, "工具已完成，正在整理结果", typed.createdAt);
-          setRuntimeProgress((current) =>
-            current?.threadId === runtimeThreadId
-              ? { ...current, phase: "thinking", runtimeObserved: true }
-              : current
-          );
+          if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
+            appendRuntimeStatus(runtimeThreadId, "工具已完成，正在整理结果", typed.createdAt);
+            setRuntimeProgress((current) =>
+              current?.threadId === runtimeThreadId
+                ? { ...current, phase: "thinking", runtimeObserved: true }
+                : current
+            );
+          }
         }
         return;
       }
       if (typed.type === "assistant.delta" && typed.threadId && typed.payload?.turnRunId) {
         const threadId = typed.threadId;
+        if (suppressRuntimeProgressRef.current[threadId]) {
+          return;
+        }
         const payload = typed.payload;
         const turnRunId = payload.turnRunId as string;
         setStreamingAssistants((current) => ({
@@ -912,6 +961,9 @@ export function App() {
         return;
       }
       if (typed.type === "assistant.execution_output" && typed.threadId && typed.payload?.content) {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
         appendRuntimeOutput(
           typed.threadId,
           typed.payload.title ?? "待整理的模型执行输出",
@@ -923,6 +975,9 @@ export function App() {
         return;
       }
       if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "model_timeout") {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
         const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
         const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 5;
         appendRuntimeStatus(typed.threadId, `模型响应超时，正在重试 (${attempt}/${maxAttempts})`, typed.createdAt);
@@ -931,22 +986,29 @@ export function App() {
       }
       if (typed.type === "message.created" && typed.threadId && typed.payload?.message?.role === "user") {
         const runtimeThreadId = typed.threadId;
-        appendRuntimeStatus(runtimeThreadId, "正在理解任务", typed.createdAt);
-        setRuntimeProgress((current) =>
-          current?.threadId === runtimeThreadId
-            ? { ...current, phase: "thinking", runtimeObserved: true }
-            : current
-        );
+        if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
+          appendRuntimeStatus(runtimeThreadId, "正在理解任务", typed.createdAt);
+          setRuntimeProgress((current) =>
+            current?.threadId === runtimeThreadId
+              ? { ...current, phase: "thinking", runtimeObserved: true }
+              : current
+          );
+        }
       }
       if (typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
         const runtimeThreadId = typed.threadId;
         const status = typed.payload.thread.status;
         setRuntimeProgress((current) => {
           if (!current || current.threadId !== runtimeThreadId) return current;
-          if (status === "running") return { ...current, phase: "thinking", runtimeObserved: true };
-          return current.runtimeObserved ? null : current;
+          if (suppressRuntimeProgressRef.current[runtimeThreadId]) {
+            return null;
+          }
+          if (status === "running" || status === "waiting") {
+            return { ...current, phase: "thinking", runtimeObserved: true };
+          }
+          return null;
         });
-        if (status !== "running") {
+        if (status !== "running" && status !== "waiting") {
           clearRuntimeActivity(runtimeThreadId);
         }
       }
@@ -1223,9 +1285,11 @@ export function App() {
     ? runtimeProgress
     : null;
   const activeRuntimeActivity = activeRuntimeThreadId ? runtimeActivities[activeRuntimeThreadId] ?? null : null;
+  const completedTurnTimer = activeRuntimeThreadId ? completedTurnTimers[activeRuntimeThreadId] ?? null : null;
   const isRuntimeActivityExpanded = activeRuntimeThreadId ? !!expandedRuntimeThreads[activeRuntimeThreadId] : false;
-  const isTaskProcessing = selectedThreadStatus === "running" || !!localRuntimeProgress;
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
+  // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
+  const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
   const taskProcessingLabel = useMemo(
     () =>
       activeToolCall?.threadId === activeSnapshotThreadId
@@ -1265,9 +1329,6 @@ export function App() {
     [composerModelId, composerModels]
   );
   const composerSupportsMultimodalInput = selectedComposerModel?.supportsMultimodalInput ?? false;
-  const composerSupportsAgentTools =
-    selectedComposerModel?.supportsToolCalling === true &&
-    selectedComposerModel.agentCapability !== "unsupported";
   const composerProviderOptions = useMemo<ComposerSelectOption[]>(
     () =>
       composerProviders.map((provider) => ({
@@ -1356,6 +1417,8 @@ export function App() {
         return "MCP 管理";
       case "knowledge":
         return "知识库";
+      case "timeouts":
+        return "Timeout Settings";
       case "update":
         return "应用更新";
       default:
@@ -1904,6 +1967,7 @@ export function App() {
       ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments)
       : null;
     if (!options?.internal && !queueingBehindActiveTask) {
+      suppressRuntimeProgressRef.current[threadId] = false;
       startRuntimeActivity(threadId);
       setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
     }
@@ -2039,6 +2103,9 @@ export function App() {
       return;
     }
 
+    // Block late tool/retry/delta events from flipping the UI back to "执行中".
+    suppressRuntimeProgressRef.current[threadId] = true;
+
     // Switch the control back immediately. The subsequent refresh reconciles
     // the optimistic state with the persisted runtime state.
     const updatedAt = new Date().toISOString();
@@ -2049,9 +2116,29 @@ export function App() {
     );
     setSnapshot((current) =>
       current?.thread.id === threadId
-        ? { ...current, thread: { ...current.thread, status: "idle", updatedAt } }
+        ? {
+            ...current,
+            thread: { ...current.thread, status: "idle", updatedAt },
+            toolCalls: current.toolCalls.map((toolCall) =>
+              toolCall.status === "pending" || toolCall.status === "running"
+                ? { ...toolCall, status: "failed", completedAt: updatedAt }
+                : toolCall
+            )
+          }
         : current
     );
+    setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+    setActiveToolCall((current) => current?.threadId === threadId ? null : current);
+    setStreamingAssistants((current) => {
+      const next = { ...current };
+      for (const [turnRunId, assistant] of Object.entries(next)) {
+        if (assistant.threadId === threadId) {
+          delete next[turnRunId];
+        }
+      }
+      return next;
+    });
+    clearRuntimeActivity(threadId);
 
     try {
       await window.codexh.interruptThread(threadId);
@@ -2126,6 +2213,7 @@ export function App() {
         threadId: selectedThreadId ?? undefined
       });
       setKnowledgeSources([]);
+      setKnowledgeName("Imported Knowledge");
       await Promise.all([refreshSnapshot(selectedThreadId), refreshKnowledgeBases()]);
       showNotice("知识库已导入", { tone: "success" });
     } catch (error) {
@@ -2159,6 +2247,40 @@ export function App() {
     }
   }
 
+  function beginRenameHistoryThread(thread: ThreadRecord) {
+    skipHistoryRenameCommitRef.current = false;
+    setRenamingHistoryThread({ id: thread.id, title: thread.title });
+  }
+
+  function cancelRenameHistoryThread() {
+    skipHistoryRenameCommitRef.current = true;
+    setRenamingHistoryThread(null);
+  }
+
+  async function commitRenameHistoryThread(nextTitleInput?: string) {
+    if (skipHistoryRenameCommitRef.current) {
+      skipHistoryRenameCommitRef.current = false;
+      return;
+    }
+    if (!renamingHistoryThread) return;
+    const threadId = renamingHistoryThread.id;
+    const nextTitle = (nextTitleInput ?? renamingHistoryThread.title).trim();
+    const current = threads.find((thread) => thread.id === threadId);
+    setRenamingHistoryThread(null);
+    if (!current || !nextTitle || nextTitle === current.title) {
+      return;
+    }
+    try {
+      await window.codexh.renameThread({ threadId, title: nextTitle });
+      await refreshThreads();
+      showNotice("任务已重命名。", { tone: "success" });
+    } catch (error) {
+      showNotice("重命名失败。", {
+        message: error instanceof Error ? error.message : "请稍后重试。"
+      });
+    }
+  }
+
   async function setKnowledgeEnabled(knowledgeEnabled: boolean) {
     setGpaState((prev) => ({ ...prev, knowledgeEnabled }));
     setGpaMenuOpen(false);
@@ -2173,13 +2295,21 @@ export function App() {
       ? await window.codexh.chooseKnowledgeFiles()
       : await window.codexh.chooseKnowledgeFolders();
     if (paths.length === 0) return;
-    setKnowledgeSources((current) => {
-      const existing = new Set(current.map((source) => source.path.toLowerCase()));
-      const additions = paths
-        .filter((sourcePath) => !existing.has(sourcePath.toLowerCase()))
-        .map((sourcePath) => ({ path: sourcePath, kind: kind === "files" ? "file" : "folder" } satisfies KnowledgeSourceAttachment));
-      return [...current, ...additions];
-    });
+
+    const existing = new Set(knowledgeSources.map((source) => source.path.toLowerCase()));
+    const additions = paths
+      .filter((sourcePath) => !existing.has(sourcePath.toLowerCase()))
+      .map((sourcePath) => ({
+        path: sourcePath,
+        kind: kind === "files" ? "file" : "folder"
+      } satisfies KnowledgeSourceAttachment));
+    if (additions.length === 0) return;
+
+    const wasEmpty = knowledgeSources.length === 0;
+    setKnowledgeSources([...knowledgeSources, ...additions]);
+    if (wasEmpty) {
+      setKnowledgeName(getKnowledgeDefaultName(additions[0]));
+    }
   }
 
   function removeKnowledgeSource(sourcePath: string) {
@@ -2431,6 +2561,26 @@ export function App() {
     setMultimodalPickerSelected([]);
     setNewModelId("");
     setNewModelDisplayName("");
+  }
+
+  function updateTimeoutDraft(key: keyof AppConfig["timeouts"], rawValue: string) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) return;
+
+    setConfigDraft((current) => {
+      if (!current) return current;
+      const next = cloneConfig(current);
+      next.timeouts[key] = key === "modelTimeoutRetries"
+        ? Math.round(value)
+        : Math.round(value * 1_000);
+      return normalizeDraftConfig(next);
+    });
+  }
+
+  function resetTimeoutDraft() {
+    setConfigDraft((current) => current
+      ? { ...cloneConfig(current), timeouts: { ...DEFAULT_RUNTIME_TIMEOUTS } }
+      : current);
   }
 
   function updateProviderDraft(providerId: string, patch: Partial<ProviderDefinition>) {
@@ -3013,6 +3163,7 @@ export function App() {
               threads.map((thread) => {
                 const historyItemAffordance = getHistoryItemAffordance(thread.status);
                 const isThreadRunning = historyItemAffordance.kind === "running-indicator";
+                const isRenaming = renamingHistoryThread?.id === thread.id;
 
                 return (
                   <div
@@ -3025,17 +3176,43 @@ export function App() {
                       setHistoryContextMenu({ x: event.clientX, y: event.clientY, thread });
                     }}
                   >
-                    <button
-                      type="button"
-                      className="history-item-main"
-                      onClick={() => {
-                        void openThread(thread.id, { scrollToLatest: true });
-                      }}
-                    >
-                      <span className="history-item-label">{thread.title}</span>
-                      {thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}
-                    </button>
-                    {!isThreadRunning && (
+                    {isRenaming ? (
+                      <input
+                        className="history-item-rename-input"
+                        autoFocus
+                        value={renamingHistoryThread.title}
+                        aria-label="重命名任务"
+                        onFocus={(event) => event.currentTarget.select()}
+                        onChange={(event) => {
+                          setRenamingHistoryThread({ id: thread.id, title: event.target.value });
+                        }}
+                        onBlur={(event) => {
+                          void commitRenameHistoryThread(event.currentTarget.value);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            event.currentTarget.blur();
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            cancelRenameHistoryThread();
+                          }
+                        }}
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="history-item-main"
+                        onClick={() => {
+                          void openThread(thread.id, { scrollToLatest: true });
+                        }}
+                      >
+                        <span className="history-item-label">{thread.title}</span>
+                        {thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}
+                      </button>
+                    )}
+                    {!isThreadRunning && !isRenaming && (
                       <button
                         type="button"
                         className="history-item-delete"
@@ -3060,12 +3237,20 @@ export function App() {
               x={historyContextMenu.x}
               y={historyContextMenu.y}
               onClose={() => setHistoryContextMenu(null)}
-              actions={[{
-                id: "toggle-history-pin",
-                label: historyContextMenu.thread.isPinned ? "取消置顶" : "置顶任务",
-                icon: <IconPin />,
-                onSelect: () => void toggleThreadPinned(historyContextMenu.thread)
-              }]}
+              actions={[
+                {
+                  id: "rename-history-thread",
+                  label: "重命名",
+                  icon: <IconRename />,
+                  onSelect: () => beginRenameHistoryThread(historyContextMenu.thread)
+                },
+                {
+                  id: "toggle-history-pin",
+                  label: historyContextMenu.thread.isPinned ? "取消置顶" : "置顶任务",
+                  icon: <IconPin />,
+                  onSelect: () => void toggleThreadPinned(historyContextMenu.thread)
+                }
+              ]}
             />
           ) : null}
         </div>
@@ -3249,6 +3434,11 @@ export function App() {
                 {isTaskProcessing ? (
                   <RuntimeActivityPanel
                     label={taskProcessingLabel}
+                    startedAt={
+                      activeRuntimeActivity?.startedAt
+                      ?? (activeRuntimeActivity ? getRuntimeActivityStartedAt(activeRuntimeActivity.entries) : undefined)
+                    }
+                    active
                     entries={activeRuntimeActivity?.entries ?? []}
                     expanded={isRuntimeActivityExpanded}
                     onToggle={() => {
@@ -3258,6 +3448,11 @@ export function App() {
                         [activeRuntimeThreadId]: !current[activeRuntimeThreadId]
                       }));
                     }}
+                  />
+                ) : completedTurnTimer ? (
+                  <TurnElapsedBanner
+                    startedAt={completedTurnTimer.startedAt}
+                    completedAt={completedTurnTimer.completedAt}
                   />
                 ) : null}
               </div>
@@ -4004,6 +4199,38 @@ export function App() {
                 </div>
               ) : null}
 
+              {settingsTab === "timeouts" ? (
+                <div className="settings-section">
+                  {configDraft ? (
+                    <>
+                      <div className="config-block">
+                        <div className="section-copy section-copy-with-action">
+                          <div>
+                            <strong>模型与媒体超时</strong>
+                            <span>单位为秒。保存后对新发起的请求生效，正在执行的请求不会被改写。</span>
+                          </div>
+                          <button className="button ghost" type="button" onClick={resetTimeoutDraft}>恢复默认</button>
+                        </div>
+                        <div className="provider-detail-grid timeout-settings-grid">
+                          <label className="settings-field"><span>模型决策超时</span><input type="number" step="1" value={configDraft.timeouts.modelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("modelDecisionMs", event.target.value)} /></label>
+                          <label className="settings-field"><span>恢复请求超时</span><input type="number" step="1" value={configDraft.timeouts.recoveryModelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("recoveryModelDecisionMs", event.target.value)} /></label>
+                          <label className="settings-field"><span>模型超时重试次数</span><input type="number" step="1" value={configDraft.timeouts.modelTimeoutRetries} onChange={(event) => updateTimeoutDraft("modelTimeoutRetries", event.target.value)} /></label>
+                          <label className="settings-field"><span>多模态意图分类超时</span><input type="number" step="1" value={configDraft.timeouts.multimodalIntentClassifyMs / 1_000} onChange={(event) => updateTimeoutDraft("multimodalIntentClassifyMs", event.target.value)} /></label>
+                          <label className="settings-field"><span>模型连接测试超时</span><input type="number" step="1" value={configDraft.timeouts.modelTestMs / 1_000} onChange={(event) => updateTimeoutDraft("modelTestMs", event.target.value)} /></label>
+                          <label className="settings-field"><span>视频生成总超时</span><input type="number" step="1" value={configDraft.timeouts.videoGenerationMs / 1_000} onChange={(event) => updateTimeoutDraft("videoGenerationMs", event.target.value)} /></label>
+                          <label className="settings-field"><span>视频状态轮询间隔</span><input type="number" step="1" value={configDraft.timeouts.videoPollIntervalMs / 1_000} onChange={(event) => updateTimeoutDraft("videoPollIntervalMs", event.target.value)} /></label>
+                        </div>
+                        <span className="timeout-settings-note">填 0 表示不设置超时；所有正整数均可保存。</span>
+                      </div>
+                      <div className="settings-save-row">
+                        <span className="subtle-inline">图片生成与视频下载没有固定超时，只会在任务被取消时中断。</span>
+                        <button className="button warm" onClick={() => void saveConfigDraft()}>保存</button>
+                      </div>
+                    </>
+                  ) : <div className="config-block"><div className="detail-empty">正在加载超时配置...</div></div>}
+                </div>
+              ) : null}
+
               {settingsTab === "update" ? (
                 <div className="settings-section">
                   <div className="config-block update-settings-panel">
@@ -4058,7 +4285,10 @@ export function App() {
                   <div className="config-block">
                     <div className="section-copy">
                       <strong>导入知识库</strong>
-                      <span>按行填写本地文档路径，导入后会生成 OKF Bundle 并绑定到当前线程。</span>
+                      <span>选择本地文件或文件夹导入，导入后会生成 OKF Bundle 并绑定到当前线程。</span>
+                      <span className="knowledge-format-hint">
+                        可导入格式：md、txt、json、html/htm、csv、xlsx/xls、docx、pdf、pptx。选择文件夹时会递归扫描，并跳过隐藏或不支持的文件。
+                      </span>
                     </div>
                     <input
                       value={knowledgeName}
@@ -4629,9 +4859,11 @@ export function App() {
                   const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
                   const currentRoleLabel = model.role === "reasoning"
                     ? "已在推理"
-                    : model.role === "video"
-                      ? "已在视频"
-                      : null;
+                    : model.role === "image"
+                      ? "已在图片"
+                      : model.role === "video"
+                        ? "已在视频"
+                        : null;
                   return (
                     <label key={key} className={`fetch-models-item multimodal-picker-item ${checked ? "is-checked" : ""}`}>
                       <input type="checkbox" checked={checked} onChange={() => setMultimodalPickerSelected((current) =>
@@ -4823,8 +5055,7 @@ export function App() {
                   className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
                   role="menuitem"
                   onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  disabled={!composerSupportsAgentTools || gpaState.stage !== "off"}
-                  title={!composerSupportsAgentTools ? "当前模型不支持或已被标记为不兼容 Agent 工具调用，请在设置中测试或切换模型。" : undefined}
+                  disabled={gpaState.stage !== "off"}
                   onClick={() => void enableGpaMode()}
                 >
                   <span className="gpa-popover-item-icon" aria-hidden><IconGpa /></span>
@@ -6480,9 +6711,18 @@ function buildTimelineEntries(
 ): TimelineEntry[] {
   const filesByTurn = collectFileChangesByTurn(toolCalls, workspaceRoot);
   for (const artifact of artifacts) {
-    if (artifact.artifactKind !== "generated-image" && artifact.artifactKind !== "generated-video") continue;
+    if (
+      artifact.artifactKind !== "generated-image" &&
+      artifact.artifactKind !== "generated-video" &&
+      artifact.artifactKind !== "browser-screenshot" &&
+      artifact.artifactKind !== "browser-snapshot" &&
+      artifact.artifactKind !== "knowledge-index"
+    ) {
+      continue;
+    }
     const turnRunId = artifact.turnRunId ?? `artifact-${artifact.id}`;
     const isVideo = artifact.artifactKind === "generated-video";
+    const isImage = artifact.artifactKind === "generated-image" || artifact.artifactKind === "browser-screenshot";
     filesByTurn.set(turnRunId, [
       ...(filesByTurn.get(turnRunId) ?? []),
       {
@@ -6491,8 +6731,12 @@ function buildTimelineEntries(
         action: "created",
         additions: 0,
         deletions: 0,
-        kind: isVideo ? "generated-video" : "generated-image",
-        description: isVideo ? "生成的视频" : "生成的图片"
+        kind: isVideo ? "generated-video" : isImage ? "generated-image" : "generated-file",
+        description: getGeneratedFileDescription(
+          artifact.relativePath ?? artifact.displayName,
+          isVideo ? "generated-video" : isImage ? "generated-image" : "generated-file",
+          artifact.artifactKind
+        )
       }
     ]);
   }
@@ -6521,22 +6765,23 @@ function buildTimelineEntries(
       toolCall
     }));
 
-  const fileSummaryEntries: TimelineEntry[] = isTaskExecutionFinished(threadStatus)
-    ? [...filesByTurn.entries()].map(([turnRunId, files]) => ({
-        kind: "file-summary",
-        id: `file-summary-${turnRunId}`,
-        createdAt: getTurnSummaryCreatedAt(turnRunId, messages, toolCalls),
-        files
-      }))
-    : [];
+  // While a thread is running, only suppress the in-progress turn's file summary.
+  // Prior turns' "主要改动文件" must stay visible.
+  const activeTurnRunId = isThreadExecutionInProgress(threadStatus ?? null)
+    ? [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null
+    : null;
+  const fileSummaryEntries: TimelineEntry[] = [...filesByTurn.entries()]
+    .filter(([turnRunId]) => !(activeTurnRunId && turnRunId === activeTurnRunId))
+    .map(([turnRunId, files]) => ({
+      kind: "file-summary",
+      id: `file-summary-${turnRunId}`,
+      createdAt: getTurnSummaryCreatedAt(turnRunId, messages, toolCalls),
+      files
+    }));
   const sortedEntries = [...messageEntries, ...toolEntries, ...fileSummaryEntries].sort(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
   );
   return collapseDirectoryReadMessages(sortedEntries);
-}
-
-function isTaskExecutionFinished(status: ThreadRecord["status"] | null | undefined): boolean {
-  return status === "completed" || status === "failed";
 }
 
 function getTurnSummaryCreatedAt(
@@ -6665,15 +6910,70 @@ function getToolFileChanges(
 
   const result = parseTimelineJson(toolCall.resultJson);
   const resultJson = result.json as Record<string, unknown> | undefined;
+
   if (toolCall.toolName === "apply_patch") {
+    const structured = Array.isArray(resultJson?.changes) ? resultJson.changes : null;
+    if (structured) {
+      const touched = Array.isArray(resultJson?.touched) ? resultJson.touched : [];
+      return structured.map((raw, index) => {
+        const change = raw as Record<string, unknown>;
+        const actionRaw = String(change.action ?? "update");
+        const action: FileChangeAction =
+          actionRaw === "add" ? "created" : actionRaw === "delete" ? "deleted" : "modified";
+        const symbols = Array.isArray(change.symbols)
+          ? (change.symbols as Array<Record<string, unknown>>)
+              .map((symbol) => ({
+                name: String(symbol.name ?? ""),
+                kind: String(symbol.kind ?? "symbol"),
+                change: String(symbol.change ?? "modified")
+              }))
+              .filter((symbol) => symbol.name)
+          : undefined;
+        return decorateGeneratedFileChange({
+          path: toWorkspaceRelativePath(String(change.path ?? ""), workspaceRoot),
+          absolutePath: typeof touched[index] === "string" ? touched[index] : undefined,
+          action,
+          additions: Number(change.additions ?? 0),
+          deletions: Number(change.deletions ?? 0),
+          symbols
+        });
+      });
+    }
+
     const changes = parsePatchFileChanges(String(input.patch ?? ""), workspaceRoot);
     const touched = Array.isArray(resultJson?.touched)
       ? resultJson.touched
       : Array.isArray(result.touched) ? result.touched : [];
-    return changes.map((change, index) => ({
+    return changes.map((change, index) => decorateGeneratedFileChange({
       ...change,
       absolutePath: typeof touched[index] === "string" ? touched[index] : undefined
     }));
+  }
+
+  if (toolCall.toolName === "code.ast_diff") {
+    const path = typeof resultJson?.path === "string"
+      ? resultJson.path
+      : typeof input.path === "string" ? input.path : "";
+    const entities = Array.isArray(resultJson?.entities) ? resultJson.entities : [];
+    const symbols = entities
+      .map((raw) => {
+        const entity = raw as Record<string, unknown>;
+        return {
+          name: String(entity.name ?? ""),
+          kind: String(entity.kind ?? "symbol"),
+          change: String(entity.change ?? "modified")
+        };
+      })
+      .filter((symbol) => symbol.name);
+    return path
+      ? [{
+          path: toWorkspaceRelativePath(path, workspaceRoot),
+          action: "modified" as const,
+          additions: symbols.filter((symbol) => symbol.change === "added").length,
+          deletions: symbols.filter((symbol) => symbol.change === "removed").length,
+          symbols
+        }]
+      : [];
   }
 
   if (toolCall.toolName === "fs.write_file") {
@@ -6682,7 +6982,13 @@ function getToolFileChanges(
       ? resultJson.path
       : typeof result.path === "string" ? result.path : undefined;
     return path
-      ? [{ path: toWorkspaceRelativePath(path, workspaceRoot), absolutePath, action: "modified", additions: 0, deletions: 0 }]
+      ? [decorateGeneratedFileChange({
+          path: toWorkspaceRelativePath(path, workspaceRoot),
+          absolutePath,
+          action: "created",
+          additions: 0,
+          deletions: 0
+        })]
       : [];
   }
 
@@ -6718,7 +7024,7 @@ function parsePatchFileChanges(patch: string, workspaceRoot?: string | null): Fi
     }
   }
 
-  return files;
+  return files.map((file) => decorateGeneratedFileChange(file));
 }
 
 function mergeFileChange(existing: FileChangeSummaryItem | undefined, next: FileChangeSummaryItem): FileChangeSummaryItem {
@@ -6726,12 +7032,20 @@ function mergeFileChange(existing: FileChangeSummaryItem | undefined, next: File
     return next;
   }
 
+  const symbolMap = new Map<string, { name: string; kind: string; change: string }>();
+  for (const symbol of [...(existing.symbols ?? []), ...(next.symbols ?? [])]) {
+    symbolMap.set(`${symbol.change}:${symbol.kind}:${symbol.name}`, symbol);
+  }
+
   return {
     path: next.path,
     absolutePath: next.absolutePath ?? existing.absolutePath,
     action: existing.action === "created" && next.action === "modified" ? "created" : next.action,
     additions: existing.additions + next.additions,
-    deletions: existing.deletions + next.deletions
+    deletions: existing.deletions + next.deletions,
+    kind: next.kind ?? existing.kind,
+    description: next.description ?? existing.description,
+    symbols: symbolMap.size > 0 ? [...symbolMap.values()] : undefined
   };
 }
 
@@ -6753,8 +7067,8 @@ function FileChangeSummary({
   files: FileChangeSummaryItem[];
   onOpenFolder: (filePath: string) => void;
 }) {
-  const generatedFiles = files.filter((file) => file.kind === "generated-image" || file.kind === "generated-video");
-  const otherFiles = files.filter((file) => file.kind !== "generated-image" && file.kind !== "generated-video");
+  const generatedFiles = files.filter(isGeneratedFileListItem);
+  const otherFiles = files.filter((file) => !isGeneratedFileListItem(file));
   const additions = otherFiles.reduce((total, file) => total + file.additions, 0);
   const deletions = otherFiles.reduce((total, file) => total + file.deletions, 0);
   const hasLineCounts = additions > 0 || deletions > 0;
@@ -6773,10 +7087,13 @@ function FileChangeSummary({
                   onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
                   title="打开所在文件夹"
                 >
-                  {file.path}
+                  {getFileLeafName(file.path)}
                 </button>
                 <span className="generated-file-sep" aria-hidden="true">—</span>
-                <span className="generated-file-desc">{file.description ?? (file.kind === "generated-video" ? "生成的视频" : "生成的图片")}</span>
+                <span className="generated-file-desc">
+                  {file.description
+                    ?? getGeneratedFileDescription(file.path, file.kind, undefined, file.action)}
+                </span>
               </li>
             ))}
           </ul>
@@ -6804,6 +7121,16 @@ function FileChangeSummary({
                 <div className="file-change-row-copy">
                   <strong>{getFileLeafName(file.path)}</strong>
                   <code>{getFileParentPath(file.path)}</code>
+                  {file.symbols && file.symbols.length > 0 ? (
+                    <ul className="file-change-symbol-list">
+                      {file.symbols.slice(0, 8).map((symbol) => (
+                        <li key={`${symbol.change}-${symbol.kind}-${symbol.name}`}>
+                          {formatSymbolChange(symbol.change)} {symbol.kind} {symbol.name}
+                        </li>
+                      ))}
+                      {file.symbols.length > 8 ? <li>…另有 {file.symbols.length - 8} 项</li> : null}
+                    </ul>
+                  ) : null}
                 </div>
                 <div className="file-change-row-meta">
                   <span className={`file-change-row-badge ${getFileChangeActionClass(file.action)}`}>
@@ -6831,6 +7158,51 @@ function FileChangeSummary({
       ) : null}
     </>
   );
+}
+
+function isGeneratedFileListItem(file: FileChangeSummaryItem): boolean {
+  return file.kind === "generated-image"
+    || file.kind === "generated-video"
+    || file.kind === "generated-file"
+    || file.action === "created";
+}
+
+function decorateGeneratedFileChange(file: FileChangeSummaryItem): FileChangeSummaryItem {
+  if (file.kind === "generated-image" || file.kind === "generated-video" || file.kind === "generated-file") {
+    return {
+      ...file,
+      description: file.description ?? getGeneratedFileDescription(file.path, file.kind)
+    };
+  }
+  if (file.action !== "created") {
+    return file;
+  }
+  return {
+    ...file,
+    kind: "generated-file",
+    description: file.description ?? getGeneratedFileDescription(file.path, "generated-file", undefined, file.action)
+  };
+}
+
+function getGeneratedFileDescription(
+  path: string,
+  kind?: FileChangeSummaryItem["kind"],
+  artifactKind?: string,
+  action?: FileChangeAction
+): string {
+  if (artifactKind === "browser-screenshot") return "浏览器截图";
+  if (artifactKind === "browser-snapshot") return "浏览器快照";
+  if (artifactKind === "knowledge-index") return "知识库索引";
+  if (kind === "generated-video") return "生成的视频";
+  if (kind === "generated-image") return "生成的图片";
+
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  if (["md", "markdown", "txt", "docx", "pdf"].includes(extension)) return "生成的文档";
+  if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"].includes(extension)) return "生成的图片";
+  if (["mp4", "webm", "mov"].includes(extension)) return "生成的视频";
+  if (["json", "csv", "yaml", "yml", "toml", "xlsx", "xls"].includes(extension)) return "生成的数据文件";
+  if (action === "created" || kind === "generated-file") return "生成的文件";
+  return "生成的文件";
 }
 
 function buildConversationTurnItems(
@@ -6883,7 +7255,11 @@ function ConversationTurnRail({ turns }: { turns: ConversationTurnItem[] }) {
               <span className="conversation-turn-preview-copy">{preview}</span>
               {turn.files.length > 0 ? (
                 <span className="conversation-turn-preview-files">
-                  {turn.files.slice(0, 3).map((file) => <code key={file.path}>{file.path}</code>)}
+                  {turn.files.slice(0, 3).map((file) => (
+                    <span key={file.path} className="conversation-turn-preview-file">
+                      {getFileLeafName(file.path)}
+                    </span>
+                  ))}
                   {turn.files.length > 3 ? <em>+{turn.files.length - 3}</em> : null}
                 </span>
               ) : null}
@@ -6940,6 +7316,13 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 function getFileLeafName(filePath: string) {
   return filePath.split(/[\\/]/).pop() || filePath;
+}
+
+function getKnowledgeDefaultName(source: KnowledgeSourceAttachment) {
+  const leaf = getFileLeafName(source.path.replace(/[\\/]+$/, "")) || source.path;
+  if (source.kind === "folder") return leaf;
+  const extensionIndex = leaf.lastIndexOf(".");
+  return extensionIndex > 0 ? leaf.slice(0, extensionIndex) : leaf;
 }
 
 function getFileParentPath(filePath: string) {
@@ -7005,21 +7388,84 @@ export function getToolProcessingLabel(toolName: string): string {
   return "正在调用工具";
 }
 
+function getRuntimeActivityStartedAt(entries: RuntimeActivityEntry[]): string | undefined {
+  for (const entry of entries) {
+    if (entry.kind === "tool") {
+      if (entry.toolCall.startedAt) return entry.toolCall.startedAt;
+      continue;
+    }
+    if (entry.createdAt) return entry.createdAt;
+  }
+  return undefined;
+}
+
+function useElapsedClock(startedAt: string | null | undefined, active: boolean, completedAt?: string | null) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active || !startedAt || completedAt) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [active, startedAt, completedAt]);
+
+  if (!startedAt) return 0;
+  const end = completedAt ? Date.parse(completedAt) : now;
+  return Math.max(0, end - Date.parse(startedAt));
+}
+
+function formatElapsedClock(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function TurnElapsedBanner({
+  startedAt,
+  completedAt,
+  active = false
+}: {
+  startedAt: string;
+  completedAt?: string | null;
+  active?: boolean;
+}) {
+  const elapsedMs = useElapsedClock(startedAt, active, completedAt);
+  return (
+    <div className={`turn-elapsed-banner ${active ? "active" : "completed"}`} aria-live="polite">
+      <span className="turn-elapsed-label">已处理 {formatElapsedClock(elapsedMs)}</span>
+      <div className="turn-elapsed-track" aria-hidden="true">
+        <span className="turn-elapsed-bar" />
+      </div>
+    </div>
+  );
+}
+
 function RuntimeActivityPanel({
   label,
+  startedAt,
+  active,
   entries,
   expanded,
   onToggle
 }: {
   label: string;
+  startedAt?: string;
+  active?: boolean;
   entries: RuntimeActivityEntry[];
   expanded: boolean;
   onToggle: () => void;
 }) {
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
   const detailEntries = [...entries].reverse();
+  const resolvedStartedAt = startedAt || getRuntimeActivityStartedAt(entries);
   return (
     <section className={`runtime-activity-panel ${expanded ? "expanded" : ""}`} aria-live="polite">
+      {resolvedStartedAt ? (
+        <TurnElapsedBanner startedAt={resolvedStartedAt} active={active !== false} />
+      ) : null}
       <button
         type="button"
         className="runtime-activity-toggle"
@@ -8422,6 +8868,7 @@ function renderFileChangeBody(block: ChatEventBlock, key: string) {
   let summary = sections.summary ?? "";
   let diff = sections.diff ?? "";
   let remainder = sections.body;
+  const entitiesSection = sections.entities ?? sections.symbols ?? "";
 
   if (!diff) {
     const extracted = splitDiffFromContent(remainder);
@@ -8430,13 +8877,49 @@ function renderFileChangeBody(block: ChatEventBlock, key: string) {
     remainder = extracted.remainder;
   }
 
+  const entityLines = (entitiesSection || extractEntityLines(summary) || extractEntityLines(remainder))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- ") || /^(added|removed|modified|renamed)\b/i.test(line));
+
   return (
     <div className="event-stack">
       {summary ? renderMarkdownDocument(summary, `${key}-summary`, "event-markdown event-summary-markdown") : null}
-      {remainder ? renderMarkdownDocument(remainder, `${key}-details`, "event-markdown") : null}
+      {entityLines.length > 0 ? (
+        <ul className="event-entity-list">
+          {entityLines.slice(0, 24).map((line) => (
+            <li key={`${key}-${line}`}>{line.replace(/^- /, "")}</li>
+          ))}
+        </ul>
+      ) : null}
+      {remainder && remainder !== entitiesSection ? renderMarkdownDocument(remainder, `${key}-details`, "event-markdown") : null}
       {diff ? renderMonoShell(diff, `${key}-diff`, "event-mono event-diff") : null}
     </div>
   );
+}
+
+function extractEntityLines(text: string): string {
+  if (!text) {
+    return "";
+  }
+  const lines = text.split(/\r?\n/).filter((line) =>
+    /^\s*-\s+(added|removed|modified|renamed)\b/i.test(line) ||
+    /^\s*(added|removed|modified|renamed)\s+\w+/i.test(line)
+  );
+  return lines.join("\n");
+}
+
+function formatSymbolChange(change: string): string {
+  switch (change) {
+    case "added":
+      return "added";
+    case "removed":
+      return "removed";
+    case "renamed":
+      return "renamed";
+    default:
+      return "modified";
+  }
 }
 
 function renderTestResultBody(block: ChatEventBlock, key: string) {
@@ -8613,7 +9096,7 @@ function parseNamedSections(content: string) {
   };
 
   for (const line of content.split("\n")) {
-    const match = line.match(/^(summary|preview|diff|details|notes):\s*(.*)$/i);
+    const match = line.match(/^(summary|preview|diff|details|notes|entities|symbols):\s*(.*)$/i);
     if (match) {
       current = match[1].toLowerCase();
       if (match[2]) {
@@ -8633,7 +9116,9 @@ function parseNamedSections(content: string) {
     preview: (sections.get("preview") ?? []).join("\n").trim(),
     diff: (sections.get("diff") ?? []).join("\n").trim(),
     details: (sections.get("details") ?? []).join("\n").trim(),
-    notes: (sections.get("notes") ?? []).join("\n").trim()
+    notes: (sections.get("notes") ?? []).join("\n").trim(),
+    entities: (sections.get("entities") ?? []).join("\n").trim(),
+    symbols: (sections.get("symbols") ?? []).join("\n").trim()
   };
 }
 
@@ -9271,6 +9756,7 @@ function cloneConfig(config: AppConfig): AppConfig {
       }
     },
     desktop: { ...config.desktop },
+    timeouts: { ...config.timeouts },
     mcpServers: config.mcpServers.map((server) => ({
       ...server,
       args: server.args ? [...server.args] : undefined,
@@ -9696,6 +10182,15 @@ function IconPin() {
       <path d="m7 9 8 8" />
       <path d="M14.5 4.5 19 9l-3 1.5-3.5 3.5L11 17l-4-4 3-1.5 3.5-3.5z" />
       <path d="m7 17-3 3" />
+    </SvgIcon>
+  );
+}
+
+function IconRename() {
+  return (
+    <SvgIcon>
+      <path d="M4 20h4L18.5 9.5a1.5 1.5 0 0 0 0-2.12L16.62 5.5a1.5 1.5 0 0 0-2.12 0L4 16v4z" />
+      <path d="m13.5 6.5 4 4" />
     </SvgIcon>
   );
 }

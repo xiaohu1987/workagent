@@ -4,6 +4,7 @@ tmp/
 build/
 release/
 log/
+.tmp-wts/
 
 *.log
 coverage/
@@ -13,3 +14,6 @@ Thumbs.db
 
 .idea/
 .vscode/
+
+# Fetched at package time via scripts/fetch-tree-sitter-grammars.mjs
+assets/tree-sitter-grammars/*.wasm

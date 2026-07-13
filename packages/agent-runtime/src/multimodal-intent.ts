@@ -1,174 +1,150 @@
-import type { MessageAttachment } from "@shared-types";
+import { modelJsonCandidates, tryParseModelJson } from "@shared-types";
+import type { MessageAttachment, MessageRole } from "@shared-types";
 
 export type MultimodalIntent = "image" | "video" | null;
 
-const IMAGE_PATTERNS: RegExp[] = [
-  /生图/,
-  /文生图/,
-  /帮我画/,
-  /请画/,
-  /画一张/,
-  /画一幅/,
-  /画个/,
-  /生成图片/,
-  /生成一张图/,
-  /生成一幅图/,
-  /出一张图/,
-  /做一张图/,
-  // 允许中间插入修饰词，例如：生成一张性感美女图片 / 生成一整美女出浴图
-  /生成.{0,24}图/,
-  /画.{0,16}图/,
-  /做.{0,16}(一张|一幅|个)?.{0,12}图/,
-  /来一张图/,
-  /给我.{0,12}图/,
-  /出一张.{0,16}图/,
-  /text[\s-]?to[\s-]?image/i,
-  /\bgenerate\s+(an?\s+)?image\b/i,
-  /\bdraw\s+(an?\s+)?image\b/i,
-  /\bcreate\s+(an?\s+)?image\b/i
-];
+export type MultimodalIntentKind = "image" | "video" | "none";
 
-const VIDEO_PATTERNS: RegExp[] = [
-  /生成视频/,
-  /做个视频/,
-  /做一段视频/,
-  /文生视频/,
-  /出一段视频/,
-  /帮我生成视频/,
-  /生成.{0,16}视频/,
-  /text[\s-]?to[\s-]?video/i,
-  /\bgenerate\s+(an?\s+)?video\b/i,
-  /\bcreate\s+(an?\s+)?video\b/i
-];
+export type MultimodalIntentClassification = {
+  intent: MultimodalIntentKind;
+  prompt: string;
+  parseOk: boolean;
+};
 
-const IMAGE_EDIT_HINTS: RegExp[] = [
-  /改图/,
-  /修图/,
-  /重绘/,
-  /基于这[张幅]图/,
-  /根据这[张幅]图/,
-  /把这[张幅]图/,
-  /把上[一1]张图/,
-  /上一张图/,
-  /把图中/,
-  /把图里/,
-  /图中的.{0,20}改/,
-  /图里的.{0,20}改/
-];
+export const MULTIMODAL_INTENT_CLASSIFY_TIMEOUT_MS = 20_000;
+export const MULTIMODAL_INTENT_CONTEXT_MESSAGES = 8;
 
-/** Short follow-ups after a multimodal tip, e.g. “开启了 你再试试”. */
-const MULTIMODAL_RETRY_CONFIRMATIONS: RegExp[] = [
-  /^(开启了|已开启|打开了|已打开|好了|可以了|行了|继续|再试|再试试|再试一次|重新生成|重试)[.!！。…\s]*$/i,
-  /开启了.{0,12}再试/,
-  /已开启.{0,12}(再试|继续)/,
-  /打开了.{0,12}(再试|继续)/,
-  /再试(试|一次)/,
-  /^(ok|okay|done)[.!！。\s]*$/i
-];
+/**
+ * System prompt for a lightweight multimodal intent call.
+ * The model must return only a small JSON object — not the Agent decision envelope.
+ */
+export function buildMultimodalIntentClassifySystemPrompt(): string {
+  return [
+    "You classify whether the latest user message is asking to generate or regenerate an image or a video.",
+    "Reply with ONLY one JSON object and no other text:",
+    '{"intent":"image"|"video"|"none","prompt":"..."}',
+    "",
+    "Rules:",
+    '- intent="image" when the user wants a new image, another variation, redraw, restyle, or image edit that should produce a new image.',
+    '- intent="video" when the user wants a new video or another video variation.',
+    '- intent="none" for ordinary chat, coding, Q&A, or anything that is not image/video generation.',
+    '- When intent is image or video, prompt MUST be a complete text prompt suitable to send directly to an image/video model.',
+    '- Follow-ups like "再换一张", "换一张", "再来一张", "换个风格", "重新生成", "再试一次", "开启了你再试试": reuse the latest prior image/video generation request from conversation context, and revise the prompt only if the user added new constraints.',
+    "- If the latest assistant tip said image/video generation is disabled or missing a default model, and the user confirms retry, reuse the original generation request as prompt.",
+    '- When intent is "none", set prompt to an empty string.',
+    "- Do not call tools. Do not wrap the JSON in an Agent decision envelope."
+  ].join("\n");
+}
 
+export function buildMultimodalIntentClassifyTranscript(input: {
+  priorMessages: Array<{ role: string; content: string }>;
+  currentInput: string;
+  attachments?: MessageAttachment[];
+}): Array<{ role: MessageRole; content: string }> {
+  const recent = input.priorMessages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .slice(-MULTIMODAL_INTENT_CONTEXT_MESSAGES)
+    .map((message) => ({
+      role: message.role as MessageRole,
+      content: truncateForClassify(message.content)
+    }));
+
+  const attachmentNote = describeAttachments(input.attachments ?? []);
+  const current = input.currentInput.trim();
+  const content = attachmentNote
+    ? `${current}${current ? "\n" : ""}${attachmentNote}`
+    : current || attachmentNote;
+
+  return [
+    ...recent,
+    {
+      role: "user",
+      content: content || "(empty message)"
+    }
+  ];
+}
+
+export function parseMultimodalIntentClassification(raw: string): MultimodalIntentClassification {
+  const text = stripCodeFences(raw.trim());
+  if (!text) {
+    return { intent: "none", prompt: "", parseOk: false };
+  }
+
+  const candidates = modelJsonCandidates(text);
+
+  for (const candidate of candidates) {
+    const parsed = tryParseModelJson(candidate);
+    if (!isRecord(parsed)) continue;
+    const fromNested =
+      typeof parsed.assistant_message === "string"
+        ? tryParseIntentObject(parsed.assistant_message)
+        : null;
+    const result = fromNested ?? normalizeIntentObject(parsed);
+    if (result) return result;
+  }
+
+  return { intent: "none", prompt: "", parseOk: false };
+}
+
+function tryParseIntentObject(raw: string): MultimodalIntentClassification | null {
+  const text = stripCodeFences(raw.trim());
+  for (const candidate of modelJsonCandidates(text)) {
+    const parsed = tryParseModelJson(candidate);
+    if (isRecord(parsed)) {
+      return normalizeIntentObject(parsed);
+    }
+  }
+  return null;
+}
+
+function normalizeIntentObject(parsed: Record<string, unknown>): MultimodalIntentClassification | null {
+  const intentRaw = typeof parsed.intent === "string" ? parsed.intent.trim().toLowerCase() : "";
+  if (intentRaw !== "image" && intentRaw !== "video" && intentRaw !== "none") {
+    return null;
+  }
+  const prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
+  if ((intentRaw === "image" || intentRaw === "video") && !prompt) {
+    return { intent: "none", prompt: "", parseOk: false };
+  }
+  return {
+    intent: intentRaw,
+    prompt: intentRaw === "none" ? "" : prompt,
+    parseOk: true
+  };
+}
+
+function stripCodeFences(text: string): string {
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fenced?.[1]?.trim() ?? text;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function truncateForClassify(content: string, maxChars = 600): string {
+  const trimmed = content.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars)}…`;
+}
+
+function describeAttachments(attachments: MessageAttachment[]): string {
+  if (attachments.length === 0) return "";
+  const kinds = attachments.map((item) => item.kind).join(", ");
+  return `[attachments: ${kinds}]`;
+}
+
+/** @deprecated Prefer model-based classification. Kept for debug/tests only. */
 export function detectMultimodalIntent(
   input: string,
   attachments: MessageAttachment[] = []
 ): MultimodalIntent {
   const text = input.trim();
-  if (!text && attachments.length === 0) {
-    return null;
-  }
-
-  if (VIDEO_PATTERNS.some((pattern) => pattern.test(text))) {
-    return "video";
-  }
-  if (IMAGE_PATTERNS.some((pattern) => pattern.test(text))) {
-    return "image";
-  }
-
-  const hasImageAttachment = attachments.some((item) => item.kind === "image");
-  if (IMAGE_EDIT_HINTS.some((pattern) => pattern.test(text))) {
-    // 继续改图：有附图，或对话里明确指向上一张图
-    if (hasImageAttachment || /上[一1]张图|把图中|把图里|图中的|图里的/.test(text)) {
-      return "image";
-    }
-  }
-
-  return null;
-}
-
-export function detectMultimodalRetryConfirmation(input: string): boolean {
-  const text = input.trim();
-  if (!text || text.length > 40) return false;
-  return MULTIMODAL_RETRY_CONFIRMATIONS.some((pattern) => pattern.test(text));
-}
-
-export function detectMultimodalTipIntent(content: string): MultimodalIntent {
-  const text = content.trim();
-  if (/视频生成已关闭|尚未(?:设置|配置)?默认视频|尚未配置视频|默认视频模型/.test(text)) {
-    return "video";
-  }
-  if (/图片生成已关闭|尚未(?:设置|配置)?默认图片|尚未配置图片|默认图片模型/.test(text)) {
+  if (!text && attachments.length === 0) return null;
+  if (/视频|video/i.test(text) && /生成|做|出|create|generate/i.test(text)) return "video";
+  if (/图|画|image|draw/i.test(text) && /生成|画|做|出|create|generate|draw/i.test(text)) return "image";
+  if (attachments.some((item) => item.kind === "image") && /改|修|重绘|图中|图里/.test(text)) {
     return "image";
   }
   return null;
-}
-
-/**
- * Resolve multimodal routing for this turn.
- * - Direct keyword/intent match on the current message
- * - Or a short confirmation that retries the previous multimodal request after a tip
- */
-export function resolveMultimodalTurnRequest(input: {
-  currentInput: string;
-  attachments?: MessageAttachment[];
-  priorMessages: Array<{ role: string; content: string }>;
-}): { intent: "image" | "video"; prompt: string; viaRetry: boolean } | null {
-  const direct = detectMultimodalIntent(input.currentInput, input.attachments ?? []);
-  if (direct) {
-    return { intent: direct, prompt: input.currentInput.trim(), viaRetry: false };
-  }
-
-  if (!detectMultimodalRetryConfirmation(input.currentInput)) {
-    return null;
-  }
-
-  const prior = input.priorMessages;
-  for (let index = prior.length - 1; index >= 0; index -= 1) {
-    const message = prior[index];
-    if (message.role !== "assistant") continue;
-    const tipIntent = detectMultimodalTipIntent(message.content);
-    if (!tipIntent) {
-      if (/已生成(?:图片|视频)/.test(message.content)) {
-        return null;
-      }
-      continue;
-    }
-    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      const candidate = prior[cursor];
-      if (candidate.role !== "user") continue;
-      const intent = detectMultimodalIntent(candidate.content, []) ?? tipIntent;
-      return {
-        intent,
-        prompt: candidate.content.trim(),
-        viaRetry: true
-      };
-    }
-    return null;
-  }
-
-  return null;
-}
-
-export function describeMultimodalIntentMatch(input: string): {
-  intent: MultimodalIntent;
-  matchedPattern: string | null;
-} {
-  const text = input.trim();
-  for (const pattern of VIDEO_PATTERNS) {
-    if (pattern.test(text)) return { intent: "video", matchedPattern: String(pattern) };
-  }
-  for (const pattern of IMAGE_PATTERNS) {
-    if (pattern.test(text)) return { intent: "image", matchedPattern: String(pattern) };
-  }
-  for (const pattern of IMAGE_EDIT_HINTS) {
-    if (pattern.test(text)) return { intent: "image", matchedPattern: String(pattern) };
-  }
-  return { intent: null, matchedPattern: null };
 }

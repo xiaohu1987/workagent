@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
+import { normalizeRuntimeTimeouts } from "@shared-types";
 import type {
   AppConfig,
   ApprovalResolutionMode,
@@ -173,6 +174,7 @@ export function defaultConfig(): AppConfig {
       approvals: "prompt",
       inAppBrowser: true
     },
+    timeouts: normalizeRuntimeTimeouts(),
     mcpServers: []
   };
 }
@@ -289,6 +291,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       approvals: parsed.desktop?.approvals ?? 'prompt',
       inAppBrowser: parsed.desktop?.inAppBrowser ?? true
     },
+    timeouts: normalizeRuntimeTimeouts(parsed.timeouts),
     mcpServers: ((parsed.mcpServers ?? []) as Array<Record<string, unknown>>).map((item) => ({
       id: String(item.id),
       name: String(item.name ?? item.id),
@@ -311,6 +314,7 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     routing: config.routing,
     multimodal: config.multimodal,
     desktop: config.desktop,
+    timeouts: normalizeRuntimeTimeouts(config.timeouts),
     providers: Object.fromEntries(config.providers.map((provider) => [provider.id, provider])),
     models: Object.fromEntries(config.models.map((model) => [model.id, model])),
     mcpServers: config.mcpServers.map((server) => ({

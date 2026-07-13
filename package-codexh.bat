@@ -5,6 +5,10 @@ title CodeXH Windows package
 cd /d "%~dp0"
 
 if not defined ELECTRON_BUILDER_BINARIES_MIRROR set "ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/"
+if not defined ELECTRON_BUILDER_CACHE (
+  set "ELECTRON_BUILDER_CACHE=%cd%\tmp\electron-builder-cache"
+  set "USING_PROJECT_BUILDER_CACHE=1"
+)
 
 set "NODE_EXE="
 for /f "delims=" %%I in ('dir /b /s "%USERPROFILE%\.cache\codex-runtimes\*\dependencies\node\bin\node.exe" 2^>nul') do set "NODE_EXE=%%I"
@@ -85,7 +89,15 @@ if errorlevel 1 goto :failed
 
 echo [5/5] Creating NSIS installer...
 "%NODE_EXE%" "%BUILDER_CLI%" --win nsis
+if not errorlevel 1 goto :package_complete
+
+if not defined USING_PROJECT_BUILDER_CACHE goto :failed
+echo Packaging tool download failed. Clearing the project cache and retrying once...
+if exist "%ELECTRON_BUILDER_CACHE%" rmdir /s /q "%ELECTRON_BUILDER_CACHE%"
+"%NODE_EXE%" "%BUILDER_CLI%" --win nsis
 if errorlevel 1 goto :failed
+
+:package_complete
 
 set "INSTALLER="
 for %%F in ("%cd%\release\*.exe") do set "INSTALLER=%%~fF"
@@ -96,7 +108,7 @@ if not defined INSTALLER (
 )
 
 set "SHA256="
-for /f "tokens=1" %%H in ('certutil -hashfile "%INSTALLER%" SHA256 ^| findstr /r "^[0-9A-F][0-9A-F]"') do set "SHA256=%%H"
+for /f "skip=1 tokens=1" %%H in ('certutil -hashfile "%INSTALLER%" SHA256') do if not defined SHA256 set "SHA256=%%H"
 
 echo.
 echo Package completed.

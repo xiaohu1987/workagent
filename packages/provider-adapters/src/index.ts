@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { modelJsonCandidates, tryParseModelJson } from "@shared-types";
 import type {
   MessageAttachment,
   ModelProfile,
@@ -15,10 +16,27 @@ import type {
 export interface ProviderAdapter {
   runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision>;
   generateImage?(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<{ data: Uint8Array; mimeType: string }>;
-  generateVideo?(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<{ data: Uint8Array; mimeType: string }>;
+  generateVideo?(input: {
+    model: ModelProfile;
+    prompt: string;
+    abortSignal?: AbortSignal;
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+  }): Promise<{ data: Uint8Array; mimeType: string }>;
 }
 
+export type ProviderFetch = (
+  input: RequestInfo | URL,
+  init?: RequestInit
+) => Promise<Response>;
+
 export class ProviderFactory {
+  readonly #fetch: ProviderFetch;
+
+  public constructor(options?: { fetch?: ProviderFetch }) {
+    this.#fetch = options?.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  }
+
   public create(provider: ProviderDefinition): ProviderAdapter {
     switch (provider.type) {
       case "mock":
@@ -32,7 +50,7 @@ export class ProviderFactory {
       case "vllm":
       case "gateway":
       case "openai-compatible":
-        return new OpenAiCompatibleProvider(provider);
+        return new OpenAiCompatibleProvider(provider, { fetch: this.#fetch });
       default:
         return assertNever(provider.type);
     }
@@ -107,8 +125,13 @@ class MockProvider implements ProviderAdapter {
 
 class OpenAiCompatibleProvider implements ProviderAdapter {
   readonly #client: OpenAI;
+  readonly #fetch: ProviderFetch;
 
-  public constructor(private readonly provider: ProviderDefinition) {
+  public constructor(
+    private readonly provider: ProviderDefinition,
+    options?: { fetch?: ProviderFetch }
+  ) {
+    this.#fetch = options?.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.#client = new OpenAI({
       apiKey: resolveApiKey(provider),
       baseURL: provider.baseUrl,
@@ -204,7 +227,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       return { data: Buffer.from(image.b64_json, "base64"), mimeType: "image/png" };
     }
     if (image?.url) {
-      const downloaded = await fetch(image.url, { signal: input.abortSignal });
+      const downloaded = await this.#fetch(image.url, { signal: input.abortSignal });
       if (!downloaded.ok) throw new Error(`Image download failed: HTTP ${downloaded.status}`);
       return {
         data: new Uint8Array(await downloaded.arrayBuffer()),
@@ -212,6 +235,84 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       };
     }
     throw new Error("The image generation service returned no image data.");
+  }
+
+  public async generateVideo(input: {
+    model: ModelProfile;
+    prompt: string;
+    abortSignal?: AbortSignal;
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+  }) {
+    const baseUrl = normalizeProviderBaseUrl(this.provider.baseUrl);
+    if (!baseUrl) {
+      throw new Error(`Provider ${this.provider.id} is missing baseUrl for video generation.`);
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${resolveApiKey(this.provider)}`,
+      "Content-Type": "application/json",
+      ...(this.provider.headers ?? {})
+    };
+
+    const createResponse = await this.#fetch(`${baseUrl}/videos/generations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: input.model.id,
+        prompt: input.prompt,
+        duration: 5,
+        aspect_ratio: "16:9",
+        resolution: "480p"
+      }),
+      signal: input.abortSignal
+    });
+    const createPayload = await readJsonResponse(createResponse, "Video generation request");
+    const syncVideo = extractGeneratedVideoPayload(createPayload);
+    if (syncVideo) {
+      return downloadGeneratedVideo(syncVideo, input.abortSignal, this.#fetch);
+    }
+
+    const requestId = extractVideoRequestId(createPayload);
+    if (!requestId) {
+      throw new Error("The video generation service did not return a request id or video payload.");
+    }
+
+    const startedAt = Date.now();
+    const timeoutMs = input.timeoutMs ?? VIDEO_GENERATION_TIMEOUT_MS;
+    const pollIntervalMs = input.pollIntervalMs ?? VIDEO_GENERATION_POLL_INTERVAL_MS;
+    while (timeoutMs === 0 || Date.now() - startedAt < timeoutMs) {
+      throwIfAborted(input.abortSignal);
+      await sleep(pollIntervalMs, input.abortSignal);
+
+      const statusResponse = await this.#fetch(`${baseUrl}/videos/${encodeURIComponent(requestId)}`, {
+        headers: {
+          Authorization: headers.Authorization,
+          ...(this.provider.headers ?? {})
+        },
+        signal: input.abortSignal
+      });
+      const statusPayload = await readJsonResponse(statusResponse, "Video generation status");
+      const status = typeof statusPayload.status === "string" ? statusPayload.status.toLowerCase() : "";
+
+      if (status === "done" || status === "completed" || status === "succeeded" || status === "success") {
+        const video = extractGeneratedVideoPayload(statusPayload);
+        if (!video) {
+          throw new Error("The video generation service finished without a downloadable video.");
+        }
+        return downloadGeneratedVideo(video, input.abortSignal, this.#fetch);
+      }
+
+      if (status === "failed" || status === "error") {
+        throw new Error(extractVideoErrorMessage(statusPayload) || "Video generation failed.");
+      }
+
+      if (status === "expired") {
+        throw new Error("Video generation request expired before completion.");
+      }
+    }
+
+    throw new Error("Video generation timed out while waiting for the provider result.");
   }
 }
 
@@ -416,6 +517,194 @@ function resolveApiKey(provider: ProviderDefinition): string {
   throw new Error(`Provider ${provider.id} is missing apiKey or apiKeyEnv.`);
 }
 
+const VIDEO_GENERATION_POLL_INTERVAL_MS = 5_000;
+const VIDEO_GENERATION_TIMEOUT_MS = 10 * 60_000;
+
+function normalizeProviderBaseUrl(baseUrl: string | undefined): string | null {
+  if (!baseUrl?.trim()) {
+    return null;
+  }
+  return baseUrl.trim().replace(/\/$/, "");
+}
+
+async function readJsonResponse(response: Response, label: string): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  let payload: unknown = null;
+  if (text.trim()) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = null;
+    }
+  }
+
+  if (!response.ok) {
+    const detail =
+      (payload && typeof payload === "object" && !Array.isArray(payload)
+        ? extractVideoErrorMessage(payload as Record<string, unknown>)
+        : null) ||
+      text.trim() ||
+      response.statusText;
+    throw new Error(`${label} failed: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`);
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error(`${label} returned an unexpected response.`);
+  }
+
+  return payload as Record<string, unknown>;
+}
+
+function extractVideoRequestId(payload: Record<string, unknown>): string | null {
+  for (const key of ["request_id", "id", "task_id", "taskId", "requestId"] as const) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  const data = payload.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    return extractVideoRequestId(data as Record<string, unknown>);
+  }
+
+  return null;
+}
+
+function extractGeneratedVideoPayload(payload: Record<string, unknown>): { url?: string; b64?: string; mimeType?: string } | null {
+  const directUrl = readString(payload.url) ?? readString(payload.video_url) ?? readString(payload.videoUrl);
+  const directB64 = readString(payload.b64_json) ?? readString(payload.b64Json) ?? readString(payload.base64);
+  if (directUrl || directB64) {
+    return { url: directUrl ?? undefined, b64: directB64 ?? undefined, mimeType: readString(payload.mime_type) ?? readString(payload.mimeType) ?? undefined };
+  }
+
+  const video = payload.video;
+  if (video && typeof video === "object" && !Array.isArray(video)) {
+    const nested = extractGeneratedVideoPayload(video as Record<string, unknown>);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  const data = payload.data;
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const nested = extractGeneratedVideoPayload(item as Record<string, unknown>);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+  } else if (data && typeof data === "object") {
+    return extractGeneratedVideoPayload(data as Record<string, unknown>);
+  }
+
+  return null;
+}
+
+function extractVideoErrorMessage(payload: Record<string, unknown>): string | null {
+  const error = payload.error;
+  if (typeof error === "string" && error.trim()) {
+    return error.trim();
+  }
+  if (error && typeof error === "object" && !Array.isArray(error)) {
+    const message = readString((error as Record<string, unknown>).message);
+    if (message) {
+      return message;
+    }
+  }
+  return readString(payload.message) ?? readString(payload.detail) ?? null;
+}
+
+async function downloadGeneratedVideo(
+  video: { url?: string; b64?: string; mimeType?: string },
+  abortSignal?: AbortSignal,
+  fetchImpl: ProviderFetch = (input, init) => globalThis.fetch(input, init)
+): Promise<{ data: Uint8Array; mimeType: string }> {
+  if (video.b64) {
+    return {
+      data: Buffer.from(video.b64, "base64"),
+      mimeType: video.mimeType || "video/mp4"
+    };
+  }
+
+  if (!video.url) {
+    throw new Error("The video generation service returned no video data.");
+  }
+
+  let downloaded: Response;
+  try {
+    downloaded = await fetchImpl(video.url, { signal: abortSignal });
+  } catch (error) {
+    throwIfAborted(abortSignal);
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new GeneratedVideoDownloadError(video.url, detail);
+  }
+
+  if (!downloaded.ok) {
+    throw new GeneratedVideoDownloadError(video.url, `HTTP ${downloaded.status}`);
+  }
+
+  return {
+    data: new Uint8Array(await downloaded.arrayBuffer()),
+    mimeType: downloaded.headers.get("content-type")?.split(";")[0] || video.mimeType || "video/mp4"
+  };
+}
+
+export class GeneratedVideoDownloadError extends Error {
+  readonly code = "VIDEO_DOWNLOAD_FAILED" as const;
+  readonly videoUrl: string;
+
+  constructor(videoUrl: string, detail?: string) {
+    const suffix = detail?.trim() ? `（${detail.trim()}）` : "";
+    super(`视频生成成功，但下载失败${suffix}。请用下面的地址自行下载：\n${videoUrl}`);
+    this.name = "GeneratedVideoDownloadError";
+    this.videoUrl = videoUrl;
+  }
+}
+
+export function isGeneratedVideoDownloadError(error: unknown): error is GeneratedVideoDownloadError {
+  return (
+    error instanceof GeneratedVideoDownloadError ||
+    (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "VIDEO_DOWNLOAD_FAILED" &&
+      "videoUrl" in error &&
+      typeof (error as { videoUrl?: unknown }).videoUrl === "string" &&
+      "message" in error &&
+      typeof (error as { message?: unknown }).message === "string"
+    )
+  );
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error("Video generation aborted.");
+  }
+}
+
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason instanceof Error ? signal.reason : new Error("Video generation aborted."));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
   const messages: Array<{
     role: "system" | "user" | "assistant" | "tool";
@@ -570,13 +859,16 @@ async function buildGeminiContents(input: ProviderTurnInput): Promise<any[]> {
   return contents;
 }
 
-function parseDecisionFromText(text: string): ProviderTurnDecision {
+export function parseDecisionFromText(text: string): ProviderTurnDecision {
   const taggedToolCalls = tryParseTaggedToolCalls(text);
   if (taggedToolCalls) {
     const assistantMessage = stripTaggedToolCalls(text).trim();
     return {
       assistantMessage: assistantMessage || undefined,
-      toolCalls: taggedToolCalls,
+      toolCalls: taggedToolCalls.map((call) => ({
+        ...call,
+        name: canonicalizeProviderToolName(call.name)
+      })),
       endTurn: false,
       goalCompleted: false,
       isStructured: true
@@ -595,7 +887,7 @@ function parseDecisionFromText(text: string): ProviderTurnDecision {
             )
             .map((call) => ({
               id: crypto.randomUUID(),
-              name: call.name,
+              name: canonicalizeProviderToolName(call.name),
               arguments: call.arguments ?? {}
             }))
         : [],
@@ -743,12 +1035,8 @@ function tryParseTaggedToolCalls(text: string): ProviderTurnDecision["toolCalls"
 }
 
 function tryParseTaggedJsonToolCalls(payload: string): ProviderTurnDecision["toolCalls"] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payload);
-  } catch {
-    return null;
-  }
+  const parsed = tryParseModelJson(payload);
+  if (!parsed) return null;
 
   const rawCalls = Array.isArray(parsed) ? parsed : [parsed];
   const toolCalls = rawCalls.flatMap((rawCall) => normalizeTaggedToolCall(rawCall));
@@ -772,14 +1060,11 @@ function tryParseTaggedInvokeToolCalls(payload: string): ProviderTurnDecision["t
     const rawArguments = parameters.find((parameter) => readXmlAttribute(parameter[1] ?? "", "name") === "arguments")?.[2]?.trim();
     let argumentsJson: Record<string, unknown> = {};
     if (rawArguments) {
-      try {
-        const parsedArguments = JSON.parse(rawArguments);
-        if (parsedArguments && typeof parsedArguments === "object" && !Array.isArray(parsedArguments)) {
-          argumentsJson = parsedArguments as Record<string, unknown>;
-        }
-      } catch {
+      const parsedArguments = tryParseModelJson(rawArguments);
+      if (!parsedArguments || typeof parsedArguments !== "object" || Array.isArray(parsedArguments)) {
         return [];
       }
+      argumentsJson = parsedArguments as Record<string, unknown>;
     }
 
     return [{ id: crypto.randomUUID(), name, arguments: argumentsJson }];
@@ -808,17 +1093,18 @@ function normalizeTaggedToolCall(rawCall: unknown): ProviderTurnDecision["toolCa
   if (rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)) {
     argumentsJson = rawArguments as Record<string, unknown>;
   } else if (typeof rawArguments === "string") {
-    try {
-      const parsedArguments = JSON.parse(rawArguments);
-      if (parsedArguments && typeof parsedArguments === "object" && !Array.isArray(parsedArguments)) {
-        argumentsJson = parsedArguments as Record<string, unknown>;
-      }
-    } catch {
+    const parsedArguments = tryParseModelJson(rawArguments);
+    if (!parsedArguments || typeof parsedArguments !== "object" || Array.isArray(parsedArguments)) {
       return [];
     }
+    argumentsJson = parsedArguments as Record<string, unknown>;
   }
 
-  return [{ id: crypto.randomUUID(), name, arguments: argumentsJson }];
+  return [{
+    id: crypto.randomUUID(),
+    name: canonicalizeProviderToolName(String(name)),
+    arguments: argumentsJson
+  }];
 }
 
 function readXmlAttribute(source: string, name: string): string | null {
@@ -854,17 +1140,46 @@ function stripPartialToolTagPrefix(text: string): string {
 
 function tryParseJsonDecision(text: string): Record<string, any> | null {
   const fenced = text.match(/```json\s*([\s\S]*?)```/i)?.[1] ?? text;
-  const firstBrace = fenced.indexOf("{");
-  const lastBrace = fenced.lastIndexOf("}");
-  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
-    return null;
+  for (const candidate of modelJsonCandidates(fenced)) {
+    const parsed = tryParseModelJson(candidate);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      continue;
+    }
+    // Do not treat lightweight payloads (e.g. multimodal intent {intent,prompt})
+    // as Agent decision envelopes — that strips assistantMessage to empty.
+    if (!looksLikeAgentDecisionEnvelope(parsed as Record<string, unknown>)) {
+      continue;
+    }
+    return parsed as Record<string, any>;
   }
+  return null;
+}
 
-  try {
-    return JSON.parse(fenced.slice(firstBrace, lastBrace + 1));
-  } catch {
-    return null;
-  }
+function looksLikeAgentDecisionEnvelope(parsed: Record<string, unknown>): boolean {
+  return (
+    "assistant_message" in parsed ||
+    "tool_calls" in parsed ||
+    "end_turn" in parsed ||
+    "goal_completed" in parsed ||
+    "clarification" in parsed ||
+    "reasoning_summary" in parsed
+  );
+}
+
+const PROVIDER_TOOL_NAME_ALIASES: Record<string, string> = {
+  image_gen: "image.generate",
+  imagegen: "image.generate",
+  "image-gen": "image.generate",
+  generate_image: "image.generate",
+  video_gen: "video.generate",
+  videogen: "video.generate",
+  "video-gen": "video.generate",
+  generate_video: "video.generate"
+};
+
+function canonicalizeProviderToolName(name: string): string {
+  const trimmed = name.trim();
+  return PROVIDER_TOOL_NAME_ALIASES[trimmed] ?? PROVIDER_TOOL_NAME_ALIASES[trimmed.toLowerCase()] ?? trimmed;
 }
 
 function assertNever(_value: ProviderType): never {
@@ -886,6 +1201,7 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
     "When shell.exec is listed, it is the command execution tool. Do not state that command execution is unavailable; call shell.exec with {\"command\": \"...\"} instead.",
     "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",
     "For apply_patch, send arguments.patch with this exact raw grammar: *** Begin Patch\\n*** Add File: relative/path.ext\\n+content\\n*** End Patch. Do not send a Git diff, file_path, or patch_content.",
+    "When reviewing or comparing code structure (functions/classes/methods), prefer code.ast_diff with {\"path\": \"relative/file\"} (optional against). Still use apply_patch for writes.",
     "To inspect the selected project folder, call fs.read_directory with { path: \".\" }. Never call read or use Unix paths such as /home.",
     "A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with apply_patch in the very next tool call.",
     "After an Add File patch succeeds, never use Add File for that path again in the same task. Read it and use Update File only if a follow-up edit is necessary.",

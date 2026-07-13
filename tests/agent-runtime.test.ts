@@ -15,7 +15,11 @@ import {
   isAgentToolEnabled,
   prioritizeUserInputToolCall,
   MAX_REPEATED_TASK_FAILURES,
-  parseGpaState
+  MAX_MODEL_TIMEOUT_RETRIES,
+  parseGpaState,
+  parseMultimodalIntentClassification,
+  buildMultimodalIntentClassifySystemPrompt,
+  buildMultimodalIntentClassifyTranscript
 } from "@agent-runtime";
 
 describe("createToolCallFingerprint", () => {
@@ -70,14 +74,30 @@ describe("ACT execution recovery", () => {
 });
 
 describe("Agent model compatibility failures", () => {
-  it("tells the user to switch models instead of leaving an Agent task retrying", () => {
+  it("explains tool calling must be enabled without forcing a model switch", () => {
     const message = buildRuntimeFailureRecoveryMessage(
-      new AgentModelCompatibilityError("Unreliable Model", 2, "invalid JSON decision")
+      new AgentModelCompatibilityError("Unreliable Model", 2, "Tool calling is disabled for this model.")
     );
 
     expect(message).toContain("Unreliable Model");
-    expect(message).toContain("切换");
-    expect(message).toContain("结构化 JSON");
+    expect(message).toContain("开启工具调用");
+    expect(message).not.toContain("切换到支持工具调用");
+  });
+
+  it("keeps protocol exhaustion recoverable without telling the user to switch models", () => {
+    const message = buildRuntimeFailureRecoveryMessage(
+      new Error("Agent decision protocol failed repeatedly: invalid JSON decision")
+    );
+
+    expect(message).toContain("invalid JSON decision");
+    expect(message).toContain("稍后重试");
+    expect(message).not.toContain("切换");
+  });
+});
+
+describe("model decision timeout retries", () => {
+  it("defaults to five automatic timeout retries before stopping", () => {
+    expect(MAX_MODEL_TIMEOUT_RETRIES).toBe(5);
   });
 });
 
@@ -99,8 +119,8 @@ describe("Agent capability compatibility", () => {
     expect(isAgentToolEnabled(baseModel)).toBe(true);
   });
 
-  it("disables tools only after an explicit incompatibility result", () => {
-    expect(isAgentToolEnabled({ ...baseModel, agentCapability: "unsupported" })).toBe(false);
+  it("does not disable tools after a runtime capability downgrade", () => {
+    expect(isAgentToolEnabled({ ...baseModel, agentCapability: "unsupported" })).toBe(true);
     expect(isAgentToolEnabled({ ...baseModel, supportsToolCalling: false })).toBe(false);
   });
 });
@@ -314,5 +334,70 @@ describe("GPA access state", () => {
 
   it("defaults full access to disabled for existing tasks", () => {
     expect(parseGpaState(null).fullAccess).toBe(false);
+  });
+});
+
+describe("multimodal intent classification", () => {
+  it("parses plain intent JSON and fenced payloads", () => {
+    expect(
+      parseMultimodalIntentClassification(
+        '{"intent":"image","prompt":"生成一张二次元美女跳舞的图片"}'
+      )
+    ).toEqual({
+      intent: "image",
+      prompt: "生成一张二次元美女跳舞的图片",
+      parseOk: true
+    });
+
+    expect(
+      parseMultimodalIntentClassification(`\`\`\`json
+{"intent":"video","prompt":"美女跳舞"}
+\`\`\``)
+    ).toEqual({
+      intent: "video",
+      prompt: "美女跳舞",
+      parseOk: true
+    });
+  });
+
+  it("treats missing prompt or invalid payload as none without crashing", () => {
+    expect(parseMultimodalIntentClassification('{"intent":"image","prompt":""}')).toEqual({
+      intent: "none",
+      prompt: "",
+      parseOk: false
+    });
+    expect(parseMultimodalIntentClassification("今天星期几")).toEqual({
+      intent: "none",
+      prompt: "",
+      parseOk: false
+    });
+    expect(parseMultimodalIntentClassification('{"intent":"none","prompt":""}')).toEqual({
+      intent: "none",
+      prompt: "",
+      parseOk: true
+    });
+  });
+
+  it("parses intent JSON that previously would be swallowed by Agent decision parsing", () => {
+    const raw = '{"intent":"image","prompt":"生成一张二次元美女跳舞的图片"}';
+    // Simulate provider parse keeping lightweight JSON as assistant text
+    expect(parseMultimodalIntentClassification(raw)).toEqual({
+      intent: "image",
+      prompt: "生成一张二次元美女跳舞的图片",
+      parseOk: true
+    });
+  });
+
+  it("repairs malformed model intent JSON before validating its fields", () => {
+    expect(parseMultimodalIntentClassification("{intent: 'image', prompt: 'city skyline',}")).toEqual({
+      intent: "image",
+      prompt: "city skyline",
+      parseOk: true
+    });
+    expect(parseMultimodalIntentClassification("{intent: 'video', prompt: 'short clip'")).toEqual({
+      intent: "video",
+      prompt: "short clip",
+      parseOk: true
+    });
   });
 });
