@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
   createToolCallFingerprint,
+  classifySuccessfulToolEvidence,
+  validateActCompletion,
+  buildActCompletionRecoveryInstruction,
+  isProgressOnlyAssistantMessage,
   buildExecutionRecoveryInstruction,
   buildStrategySwitchInstruction,
   buildRepeatedTaskRecoveryMessage,
   buildRuntimeFailureRecoveryMessage,
+  buildRuntimeTranscript,
   AgentModelCompatibilityError,
   compactTranscriptForContext,
   CONTEXT_COMPACTION_THRESHOLD,
   shouldFinishGpaAnalysisTurn,
+  parseGpaPlanTasks,
+  buildGpaTextClarificationQuestions,
   getAddedPatchFiles,
   getToolCallTaskKey,
+  retargetStaleBrowserObservationToolCall,
   formatAvailableTools,
   isAgentToolEnabled,
   prioritizeUserInputToolCall,
@@ -55,6 +63,29 @@ describe("createToolCallFingerprint", () => {
         patch: "*** Begin Patch\n*** Add File: js/renderer.js\n+export {}\n*** Add File: css/game.css\n+.game {}\n*** End Patch"
       })
     ).toEqual(["js/renderer.js", "css/game.css"]);
+  });
+});
+
+describe("stale browser tab recovery", () => {
+  const tabs = [
+    { id: "old-tab", threadId: "thread", title: "Old", url: "http://127.0.0.1:8000", isActive: false, createdAt: "now", updatedAt: "now" },
+    { id: "active-tab", threadId: "thread", title: "Current", url: "http://127.0.0.1:8000", isActive: true, createdAt: "now", updatedAt: "now" }
+  ];
+
+  it("retargets repeated read-only browser operations to the active tab", () => {
+    const retargeted = retargetStaleBrowserObservationToolCall(
+      { id: "call", name: "browser.inspect_page", arguments: { tabId: "old-tab" } },
+      tabs
+    );
+
+    expect(retargeted?.arguments.tabId).toBe("active-tab");
+  });
+
+  it("does not retarget browser actions with side effects", () => {
+    expect(retargetStaleBrowserObservationToolCall(
+      { id: "call", name: "browser.click", arguments: { tabId: "old-tab", elementId: "xh-1" } },
+      tabs
+    )).toBeNull();
   });
 });
 
@@ -126,6 +157,16 @@ describe("Agent capability compatibility", () => {
 });
 
 describe("context compaction", () => {
+  it("keeps the full persisted history for context compaction instead of silently dropping older messages", () => {
+    const history = Array.from({ length: 25 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "tool" as const,
+      content: `message ${index}`,
+      metadataJson: null
+    }));
+
+    expect(buildRuntimeTranscript(history as any)).toHaveLength(25);
+  });
+
   it("compresses the transcript before it reaches the model context limit", () => {
     const transcript = Array.from({ length: 20 }, (_, index) => ({
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
@@ -133,7 +174,7 @@ describe("context compaction", () => {
     }));
     const result = compactTranscriptForContext(transcript, 2_000, "system instructions");
 
-    expect(CONTEXT_COMPACTION_THRESHOLD).toBe(0.8);
+    expect(CONTEXT_COMPACTION_THRESHOLD).toBe(0.9);
     expect(result.compacted).toBe(true);
     expect(result.afterTokens).toBeLessThan(result.beforeTokens);
     expect(result.transcript.length).toBeLessThan(transcript.length);
@@ -146,6 +187,21 @@ describe("context compaction", () => {
 
     expect(result.compacted).toBe(false);
     expect(result.transcript).toBe(transcript);
+  });
+
+  it.each([64_000, 128_000])("uses 90 percent of a %i-token model window as the threshold", (contextWindow) => {
+    const thresholdTokens = Math.floor(contextWindow * CONTEXT_COMPACTION_THRESHOLD);
+    const belowThreshold = [{
+      role: "user" as const,
+      content: "x".repeat(Math.floor((thresholdTokens - 1) * 2.8))
+    }];
+    const atThreshold = [{
+      role: "user" as const,
+      content: "x".repeat(Math.ceil(thresholdTokens * 2.8))
+    }];
+
+    expect(compactTranscriptForContext(belowThreshold, contextWindow, "").compacted).toBe(false);
+    expect(compactTranscriptForContext(atThreshold, contextWindow, "").compacted).toBe(true);
   });
 
   it("keeps recent native tool-call metadata during compaction", () => {
@@ -245,6 +301,281 @@ describe("GPA analysis turn completion", () => {
         toolCalls: [{ id: "call-1", name: "fs.read_directory", arguments: { path: "." } }]
       })
     ).toBe(false);
+  });
+});
+
+describe("GPA ACT completion evidence", () => {
+  const planTasks = [{ id: "T1", title: "Create the game", done: false }];
+
+  it("rejects an empty-directory read followed by a claimed completion", () => {
+    const observation = classifySuccessfulToolEvidence({
+      toolCallId: "read-empty",
+      toolName: "fs.read_directory",
+      hasPriorDelivery: false
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "好的，计划已确认。开始实施！正在获取数据。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [{ taskId: "T1", toolCallId: "read-empty", kind: "observation" }]
+      },
+      planTasks,
+      successfulEvidence: [observation]
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.missingDelivery).toBe(true);
+    expect(result.missingVerification).toBe(true);
+    expect(result.reasons).toContain("The assistant message is progress commentary, not a final summary.");
+  });
+
+  it("accepts completed plan tasks backed by verified delivery and verification calls", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-1",
+      toolRecordId: "record-patch-1",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\index.html"]
+    });
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "test-1",
+      toolName: "shell.exec",
+      hasPriorDelivery: true
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "游戏已经实现并通过测试。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "record-patch-1", kind: "delivery" },
+          { taskId: "T1", toolCallId: "test-1", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, verification]
+    });
+
+    expect(result).toMatchObject({
+      valid: true,
+      missingTaskIds: [],
+      missingEvidenceTaskIds: [],
+      missingDelivery: false,
+      missingVerification: false
+    });
+  });
+
+  it("requires desktop and mobile browser evidence for frontend GPA work", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-ui",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\src\\App.tsx"]
+    });
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "assert-desktop",
+      toolName: "browser.assert_page",
+      hasPriorDelivery: true
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "界面已实现，并通过桌面截图视觉检查。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-ui", kind: "delivery" },
+          { taskId: "T1", toolCallId: "assert-desktop", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, verification],
+      browserVerification: {
+        desktopOnly: false,
+        canvasRequired: false,
+        desktopAssertionCount: 1,
+        mobileAssertionCount: 0,
+        desktopScreenshotCount: 1,
+        mobileScreenshotCount: 0,
+        screenshotAttachmentCount: 1,
+        modelSupportsMultimodalInput: true
+      }
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.missingBrowserVerification).toEqual(["mobile page assertions", "mobile screenshot"]);
+  });
+
+  it("accepts deterministic browser verification for a non-multimodal model when disclosed", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-ui",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\index.html"]
+    });
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "assert-page",
+      toolName: "browser.assert_page",
+      hasPriorDelivery: true
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "页面实现并通过确定性断言。未执行视觉模型检查（model_not_multimodal）。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-ui", kind: "delivery" },
+          { taskId: "T1", toolCallId: "assert-page", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, verification],
+      browserVerification: {
+        desktopOnly: false,
+        canvasRequired: false,
+        desktopAssertionCount: 1,
+        mobileAssertionCount: 1,
+        desktopScreenshotCount: 1,
+        mobileScreenshotCount: 1,
+        screenshotAttachmentCount: 0,
+        modelSupportsMultimodalInput: false,
+        visualSkippedReason: "model_not_multimodal"
+      }
+    });
+
+    expect(result.valid).toBe(true);
+  });
+
+  it("does not count a file mutation as delivery when its target path was not verified", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-missing",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: []
+    });
+
+    expect(delivery.kinds).not.toContain("delivery");
+  });
+
+  it("rejects unknown or mismatched evidence references", () => {
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "任务已完成。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [{ taskId: "T1", toolCallId: "missing", kind: "delivery" }]
+      },
+      planTasks,
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.invalidEvidenceToolCallIds).toEqual(["missing"]);
+    expect(result.missingEvidenceTaskIds).toEqual(["T1"]);
+  });
+
+  it("builds a concrete next step instead of accepting progress prose", () => {
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "接下来我会创建文件。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      planTasks,
+      successfulEvidence: []
+    });
+    const instruction = buildActCompletionRecoveryInstruction(result);
+
+    expect(isProgressOnlyAssistantMessage("<event type=\"commentary\">正在读取文件</event>")).toBe(true);
+    expect(isProgressOnlyAssistantMessage("任务已经完成并通过全部测试。")).toBe(false);
+    expect(instruction).toContain("Call the next delivery tool now");
+    expect(instruction).toContain("completed_task_ids");
+  });
+});
+
+describe("GPA plan validation", () => {
+  it("extracts visible task lines before allowing a PLAN confirmation", () => {
+    expect(parseGpaPlanTasks("T1: Create the game board\nT2: Add battle actions")).toEqual([
+      { id: "T1", title: "Create the game board", done: false },
+      { id: "T2", title: "Add battle actions", done: false }
+    ]);
+  });
+
+  it("prefers Markdown T-task headings over numbered acceptance criteria", () => {
+    const content = [
+      "### T1: 获取宝可梦图鉴数据",
+      "### T2: 实现属性克制表",
+      "## 验收标准",
+      "1. 图鉴中可查看 151 只宝可梦",
+      "2. 对战支持属性克制"
+    ].join("\n");
+
+    expect(parseGpaPlanTasks(content)).toEqual([
+      { id: "T1", title: "获取宝可梦图鉴数据", done: false },
+      { id: "T2", title: "实现属性克制表", done: false }
+    ]);
+  });
+
+  it("promotes numbered unresolved PLAN questions into four input-card questions", () => {
+    const content = [
+      "⏳ 请确认计划：特别需要确认：",
+      "1. 技术栈是否同意使用纯前端 HTML/CSS/JS？",
+      "2. 数据范围是否只限初代 151 只？",
+      "3. 队伍选择是「玩家 vs AI」还是「玩家 vs 玩家（同屏）」？",
+      "4. 是否需要添加宝可梦配招（技能）系统，还是简化为「使用本系最强攻击」？"
+    ].join("\n");
+    const questions = buildGpaTextClarificationQuestions("plan", content);
+
+    expect(questions).toHaveLength(4);
+    expect(questions[0]).toMatchObject({
+      prompt: "技术栈是否同意使用纯前端 HTML/CSS/JS？",
+      options: [expect.objectContaining({ id: "yes" }), expect.objectContaining({ id: "no" })]
+    });
+    expect(questions[2]?.options?.map((option) => option.label)).toEqual([
+      "玩家 vs AI",
+      "玩家 vs 玩家（同屏）"
+    ]);
+    expect(questions[3]?.options?.map((option) => option.label)).toEqual([
+      "添加宝可梦配招（技能）系统",
+      "使用本系最强攻击"
+    ]);
+  });
+
+  it("does not promote an ordinary PLAN confirmation without explicit questions", () => {
+    expect(
+      buildGpaTextClarificationQuestions("plan", "请确认计划，确认后进入执行阶段。")
+    ).toEqual([]);
+  });
+
+  it("rejects prose that does not contain an executable task list", () => {
+    expect(parseGpaPlanTasks("I will create a complete game and test it.")).toEqual([]);
+  });
+
+  it("does not restore a stale PLAN confirmation without plan tasks", () => {
+    expect(
+      parseGpaState(JSON.stringify({
+        stage: "plan",
+        fullAccess: false,
+        awaitingConfirmation: "plan",
+        planTasks: [],
+        updatedAt: "2026-07-13T12:20:20.652Z"
+      }))
+    ).toMatchObject({ stage: "plan", awaitingConfirmation: null, planTasks: [] });
   });
 });
 

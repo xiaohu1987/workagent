@@ -15,8 +15,13 @@ describe("canonicalizeToolName", () => {
 });
 
 describe("ToolRuntime", () => {
-  it("normalizes up to three GPA user-input questions into one structured tool result", async () => {
-    const requestUserInput = vi.fn().mockResolvedValue({ approach: "recommended", scope: "minimal" });
+  it("normalizes up to four GPA user-input questions into one structured tool result", async () => {
+    const requestUserInput = vi.fn().mockResolvedValue({
+      approach: "recommended",
+      scope: "minimal",
+      battle: "ai",
+      moves: "simple"
+    });
     const runtime = new ToolRuntime();
 
     const result = await runtime.execute(
@@ -40,6 +45,18 @@ describe("ToolRuntime", () => {
               label: "Scope",
               prompt: "Which scope should be used?",
               options: [{ id: "minimal", label: "Minimal", description: "Core workflow only" }]
+            },
+            {
+              id: "battle",
+              label: "Battle mode",
+              prompt: "Which battle mode should be used?",
+              options: [{ id: "ai", label: "Player vs AI" }]
+            },
+            {
+              id: "moves",
+              label: "Move system",
+              prompt: "Which move system should be used?",
+              options: [{ id: "simple", label: "Simplified moves" }]
             }
           ]
         }
@@ -50,13 +67,17 @@ describe("ToolRuntime", () => {
     expect(requestUserInput).toHaveBeenCalledWith(expect.objectContaining({
       questions: [
         expect.objectContaining({ id: "approach", allowFreeText: true }),
-        expect.objectContaining({ id: "scope", allowFreeText: true })
+        expect.objectContaining({ id: "scope", allowFreeText: true }),
+        expect.objectContaining({ id: "battle", allowFreeText: true }),
+        expect.objectContaining({ id: "moves", allowFreeText: true })
       ]
     }));
     expect(result.json).toMatchObject({
       selections: [
         { answer: "Use the recommended approach" },
-        { answer: "Minimal" }
+        { answer: "Minimal" },
+        { answer: "Player vs AI" },
+        { answer: "Simplified moves" }
       ]
     });
   });
@@ -302,6 +323,96 @@ describe("ToolRuntime", () => {
     expect(scrollBrowserPage).toHaveBeenCalledWith("tab-1", 480);
     expect(invalid).toMatchObject({ ok: false });
     expect(invalid.content).toContain("arguments.deltaY must be a number");
+  });
+
+  it("sets verification viewports and returns screenshot attachments", async () => {
+    const runtime = new ToolRuntime();
+    const setBrowserViewport = vi.fn().mockResolvedValue({
+      tabId: "tab-1",
+      viewport: { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }
+    });
+    const captureBrowserScreenshot = vi.fn().mockResolvedValue({
+      title: "Preview",
+      url: "http://127.0.0.1:3000",
+      filePath: "C:\\output\\browser\\preview.png",
+      width: 390,
+      height: 844,
+      viewport: { width: 390, height: 844, deviceScaleFactor: 1, mobile: true },
+      fullPage: false,
+      capturedAt: "2026-07-13T00:00:00.000Z",
+      attachment: {
+        id: "attachment-1",
+        kind: "image",
+        name: "preview.png",
+        mimeType: "image/png",
+        absolutePath: "C:\\output\\browser\\preview.png",
+        sizeBytes: 1234,
+        width: 390,
+        height: 844,
+        source: "generated"
+      },
+      artifact: {
+        id: "artifact-1",
+        threadId: "thread-1",
+        turnRunId: "turn-1",
+        messageId: null,
+        toolCallId: null,
+        artifactKind: "browser-screenshot",
+        displayName: "preview.png",
+        absolutePath: "C:\\output\\browser\\preview.png",
+        relativePath: "browser\\preview.png",
+        mimeType: "image/png",
+        sizeBytes: 1234,
+        sha256: "hash",
+        sourceKind: "browser",
+        isUserVisible: true,
+        status: "ready",
+        createdAt: "2026-07-13T00:00:00.000Z"
+      }
+    });
+    const emitBrowserVerificationEvent = vi.fn().mockResolvedValue(undefined);
+    const context = {
+      cwd: process.cwd(),
+      setBrowserViewport,
+      captureBrowserScreenshot,
+      emitBrowserVerificationEvent
+    } as unknown as ToolRuntimeContext;
+
+    const viewport = await runtime.execute({
+      id: "viewport-mobile",
+      name: "browser.set_viewport",
+      arguments: { tabId: "tab-1", width: 390, height: 844 }
+    }, context);
+    const screenshot = await runtime.execute({
+      id: "screenshot-mobile",
+      name: "browser.capture_screenshot",
+      arguments: { tabId: "tab-1" }
+    }, context);
+
+    expect(viewport.ok).toBe(true);
+    expect(setBrowserViewport).toHaveBeenCalledWith("tab-1", expect.objectContaining({ width: 390, height: 844, mobile: true }));
+    expect(screenshot.attachments).toEqual([expect.objectContaining({ kind: "image", width: 390, height: 844 })]);
+    expect(screenshot.artifacts).toHaveLength(1);
+    expect(emitBrowserVerificationEvent).toHaveBeenCalledWith("browser.screenshot_attached", expect.objectContaining({ tabId: "tab-1" }));
+  });
+
+  it("fails browser.assert_page when a deterministic assertion fails", async () => {
+    const runtime = new ToolRuntime();
+    const assertBrowserPage = vi.fn().mockResolvedValue({
+      title: "Preview",
+      url: "http://127.0.0.1:3000",
+      viewport: { width: 1440, height: 900 },
+      passed: false,
+      results: [{ check: { type: "text", value: "Ready" }, passed: false, message: "text did not match" }]
+    });
+    const result = await runtime.execute({
+      id: "assert-page",
+      name: "browser.assert_page",
+      arguments: { tabId: "tab-1", checks: [{ type: "text", value: "Ready" }] }
+    }, { cwd: process.cwd(), assertBrowserPage } as unknown as ToolRuntimeContext);
+
+    expect(result.ok).toBe(false);
+    expect(result.json).toMatchObject({ passed: false });
   });
 
   it("makes an empty directory an explicit successful result", async () => {

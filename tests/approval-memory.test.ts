@@ -61,3 +61,35 @@ describe("approval persistence", () => {
     expect(remembered?.projectId).toBe("project-1");
   });
 });
+
+describe("context compaction persistence", () => {
+  it("returns the latest compaction payload for a thread snapshot", async () => {
+    const tempDir = await makeTempDir();
+    const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));
+    databases.push(db);
+
+    db.addRuntimeEvent({
+      type: "agent.context_compacted",
+      threadId: "thread-1",
+      payload: {
+        turnRunId: "turn-1",
+        contextWindow: 128_000,
+        threshold: 0.9,
+        target: 0.6,
+        beforeTokens: 349_625,
+        afterTokens: 38_287,
+        messagesBefore: 21,
+        messagesAfter: 9
+      },
+      createdAt: "2026-07-13T12:22:56.900Z"
+    });
+
+    expect(db.getLatestContextCompaction("thread-1")).toMatchObject({
+      turnRunId: "turn-1",
+      beforeTokens: 349_625,
+      afterTokens: 38_287,
+      messagesAfter: 9,
+      createdAt: "2026-07-13T12:22:56.900Z"
+    });
+  });
+});

@@ -9,6 +9,7 @@ describe("TerminalRuntime local servers", () => {
   it("detects foreground local development server commands", () => {
     expect(isLocalServerCommand("npx http-server -p 8000 -c-1")).toBe(true);
     expect(isLocalServerCommand("python -m http.server 8000")).toBe(true);
+    expect(isLocalServerCommand("python -c \"import socketserver; httpd = socketserver.TCPServer(('127.0.0.1', 8080), h); httpd.serve_forever()\"")).toBe(true);
     expect(isLocalServerCommand("pnpm dev")).toBe(true);
     expect(isLocalServerCommand("Start-Process python -ArgumentList '-m http.server 8000'")).toBe(false);
     expect(isLocalServerCommand("git status --short")).toBe(false);

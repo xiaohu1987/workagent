@@ -6,6 +6,7 @@ import type {
   AppConfig,
   ApprovalRequest,
   ArtifactRecord,
+  ContextCompactionRecord,
   GpaStage,
   GpaState,
   KnowledgeBaseSummary,
@@ -124,6 +125,7 @@ type ContextUsage = {
   usedTokens: number;
   percentage: number;
   segments: ContextUsageSegment[];
+  compaction: ContextCompactionRecord | null;
 };
 
 type WorkspaceContextMenuAction = {
@@ -262,6 +264,7 @@ type ActiveToolCall = {
   threadId: string;
   toolCallId: string;
   toolName: string;
+  argumentsJson: string;
 };
 
 type RuntimeProgress = {
@@ -395,6 +398,7 @@ export function App() {
   const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
+  const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null);
@@ -849,6 +853,14 @@ export function App() {
           agentCapabilityReason?: string;
           data?: string;
           sessionId?: string;
+          contextWindow?: number;
+          beforeTokens?: number;
+          afterTokens?: number;
+          messagesBefore?: number;
+          messagesAfter?: number;
+          viewport?: { width?: number; height?: number };
+          passed?: boolean;
+          tabs?: RuntimeThreadSnapshot["browserTabs"];
         };
       };
       const currentSelectedThreadId = selectedThreadIdRef.current;
@@ -882,9 +894,26 @@ export function App() {
         setConfig(updateCapability);
         setConfigDraft(updateCapability);
       }
-      if (typed.type === "browser.updated" && typed.threadId === currentSelectedThreadId) {
-        setRightWorkspaceTab("browser");
-        setIsTerminalOpen(true);
+      if (typed.type === "browser.verification_started" && typed.threadId) {
+        const viewport = typed.payload?.viewport as { width?: number; height?: number } | undefined;
+        const mode = (viewport?.width ?? 1440) <= 500 ? "手机" : "桌面";
+        appendRuntimeStatus(typed.threadId, `正在验证页面 · ${mode} ${viewport?.width ?? 1440}×${viewport?.height ?? 900}`, typed.createdAt);
+        setRuntimeProgress({ threadId: typed.threadId, phase: "tool", runtimeObserved: true });
+        return;
+      }
+      if (typed.type === "browser.updated" && typed.threadId) {
+        const browserThreadId = typed.threadId;
+        void window.codexh.getThreadSnapshot(browserThreadId).then((next: RuntimeThreadSnapshot) => {
+          setBrowserTabsByThread((current) => ({ ...current, [browserThreadId]: next.browserTabs }));
+        }).catch(() => undefined);
+      }
+      if (typed.type === "browser.assertion_completed" && typed.threadId) {
+        appendRuntimeStatus(typed.threadId, typed.payload?.passed === false ? "页面断言未通过，正在修复" : "页面断言已通过", typed.createdAt);
+        return;
+      }
+      if (typed.type === "browser.screenshot_attached" && typed.threadId) {
+        appendRuntimeStatus(typed.threadId, "页面截图已保存，正在检查视觉结果", typed.createdAt);
+        return;
       }
       if (
         typed.type === "tool.started" &&
@@ -898,7 +927,8 @@ export function App() {
         setActiveToolCall({
           threadId: typed.threadId,
           toolCallId: typed.payload.toolCallId,
-          toolName: typed.payload.toolName
+          toolName: typed.payload.toolName,
+          argumentsJson: typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}"
         });
         upsertRuntimeTool(typed.threadId, {
           id: typed.payload.toolCallId,
@@ -913,6 +943,14 @@ export function App() {
           startedAt: typeof typed.payload.startedAt === "string" ? typed.payload.startedAt : typed.createdAt ?? new Date().toISOString(),
           completedAt: null
         });
+        appendRuntimeStatus(
+          typed.threadId,
+          getToolProcessingLabel(
+            typed.payload.toolName,
+            typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}"
+          ),
+          typed.createdAt
+        );
         setRuntimeProgress({ threadId: typed.threadId, phase: "tool", runtimeObserved: true });
         return;
       }
@@ -983,6 +1021,11 @@ export function App() {
         appendRuntimeStatus(typed.threadId, `模型响应超时，正在重试 (${attempt}/${maxAttempts})`, typed.createdAt);
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
+      }
+      if (typed.type === "agent.context_compacted" && typed.threadId) {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          appendRuntimeStatus(typed.threadId, "上下文已自动压缩", typed.createdAt);
+        }
       }
       if (typed.type === "message.created" && typed.threadId && typed.payload?.message?.role === "user") {
         const runtimeThreadId = typed.threadId;
@@ -1293,7 +1336,7 @@ export function App() {
   const taskProcessingLabel = useMemo(
     () =>
       activeToolCall?.threadId === activeSnapshotThreadId
-        ? getToolProcessingLabel(activeToolCall.toolName)
+        ? getToolProcessingLabel(activeToolCall.toolName, activeToolCall.argumentsJson)
         : activeStreamingAssistant
           ? "正在生成回复"
           : isPreparingRuntime
@@ -1388,6 +1431,14 @@ export function App() {
 
     return targetModel.displayName?.trim() || targetModel.id;
   }, [config, composerModelId, composerProviderId, selectedThread]);
+  const latestTurnRunId = useMemo(
+    () => [...selectedMessages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null,
+    [selectedMessages]
+  );
+  const activeContextCompaction =
+    snapshot?.contextCompaction?.turnRunId === latestTurnRunId
+      ? snapshot.contextCompaction
+      : null;
   const contextUsage = useMemo(() => {
     const targetProviderId = selectedThread?.providerId ?? composerProviderId ?? config?.defaultProvider;
     const targetModelId = selectedThread?.modelId ?? composerModelId ?? config?.defaultModel;
@@ -1402,9 +1453,10 @@ export function App() {
       gpaStage: gpaState.stage,
       selectedSkillCount: selectedThread?.selectedSkillIds.length ?? 0,
       mcpServerCount: config?.mcpServers.length ?? 0,
-      pendingInput: `${input}\n${formatComposerAttachments(composerAttachments)}`
+      pendingInput: `${input}\n${formatComposerAttachments(composerAttachments)}`,
+      compaction: activeContextCompaction
     });
-  }, [composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.toolCalls]);
+  }, [activeContextCompaction, composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.toolCalls]);
   const settingsTitle = useMemo(() => {
     switch (settingsTab) {
       case "provider":
@@ -1685,6 +1737,7 @@ export function App() {
         ...next,
         messages: remaining.length > 0 ? [...next.messages, ...remaining] : next.messages
       });
+      setBrowserTabsByThread((current) => ({ ...current, [threadId]: next.browserTabs }));
       if (next.gpa) {
         setGpaState(next.gpa);
         setGpaComposerSelected(next.gpa.stage !== "off");
@@ -2054,13 +2107,13 @@ export function App() {
     if (gpaState.awaitingConfirmation === "goal") {
       await sendMessage(
         "[internal:gpa-confirm] Continue with the confirmed goal. Produce the PLAN task list and acceptance criteria.",
-        "plan",
+        undefined,
         { internal: true }
       );
     } else if (gpaState.awaitingConfirmation === "plan") {
       await sendMessage(
         "[internal:gpa-confirm] The plan is confirmed. Enter ACT and implement the planned tasks.",
-        "act",
+        undefined,
         { internal: true }
       );
     }
@@ -3368,7 +3421,6 @@ export function App() {
               <div className="welcome-empty-state" />
             ) : (
               <div ref={chatTranscriptRef} className="chat-transcript task-timeline">
-                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
                 {timelineEntries.map((entry) =>
                   entry.kind === "message" ? (
                     renderTranscriptMessage(entry.message, activeAssistantLabel, {
@@ -3392,6 +3444,7 @@ export function App() {
                     <ExecutionStep key={entry.id} toolCall={entry.toolCall} />
                   )
                 )}
+                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -3423,6 +3476,9 @@ export function App() {
                     onRevisionSubmit={() => void submitGpaRevision()}
                   />
                 ) : null}
+                {activeContextCompaction ? (
+                  <ContextCompactionNotice compaction={activeContextCompaction} />
+                ) : null}
                 {activeStreamingAssistant ? (
                   <section className="streaming-assistant" aria-live="polite">
                     {renderStreamingAssistant(
@@ -3440,6 +3496,7 @@ export function App() {
                     }
                     active
                     entries={activeRuntimeActivity?.entries ?? []}
+                    screenshots={getRuntimeBrowserScreenshotPaths(activeRuntimeActivity?.entries ?? [], snapshot?.artifacts ?? [])}
                     expanded={isRuntimeActivityExpanded}
                     onToggle={() => {
                       if (!activeRuntimeThreadId) return;
@@ -3448,6 +3505,10 @@ export function App() {
                         [activeRuntimeThreadId]: !current[activeRuntimeThreadId]
                       }));
                     }}
+                    onShowBrowser={(snapshot?.browserTabs.length ?? 0) > 0 ? () => {
+                      setRightWorkspaceTab("browser");
+                      setIsTerminalOpen(true);
+                    } : undefined}
                   />
                 ) : completedTurnTimer ? (
                   <TurnElapsedBanner
@@ -3648,8 +3709,8 @@ export function App() {
         />
       ) : null}
 
-      {isTerminalOpen ? (
-        <RightWorkspacePanel
+      <RightWorkspacePanel
+          hidden={!isTerminalOpen}
           activeTab={rightWorkspaceTab}
           onTabChange={setRightWorkspaceTab}
           onHide={() => setIsTerminalOpen(false)}
@@ -3690,12 +3751,9 @@ export function App() {
               };
             });
           }}
-          browserTabs={snapshot?.browserTabs ?? []}
-          onCloseBrowserTab={(tabId) => {
-            if (!selectedThreadId) {
-              return;
-            }
-            void window.codexh.closeBrowserTab({ threadId: selectedThreadId, tabId });
+          browserTabsByThread={browserTabsByThread}
+          onCloseBrowserTab={(threadId, tabId) => {
+            void window.codexh.closeBrowserTab({ threadId, tabId });
           }}
           threadId={selectedThreadId}
           terminalTabs={currentTerminalTabs}
@@ -3764,7 +3822,6 @@ export function App() {
           }}
           hasThread={Boolean(selectedThreadId)}
         />
-      ) : null}
 
       {isSettingsOpen ? (
         <div
@@ -4207,7 +4264,7 @@ export function App() {
                         <div className="section-copy section-copy-with-action">
                           <div>
                             <strong>模型与媒体超时</strong>
-                            <span>单位为秒。保存后对新发起的请求生效，正在执行的请求不会被改写。</span>
+                            <span>单位为秒。保存后立即写入运行时；已经发出的单次请求沿用原超时，下一次重试读取新配置。</span>
                           </div>
                           <button className="button ghost" type="button" onClick={resetTimeoutDraft}>恢复默认</button>
                         </div>
@@ -4220,7 +4277,7 @@ export function App() {
                           <label className="settings-field"><span>视频生成总超时</span><input type="number" step="1" value={configDraft.timeouts.videoGenerationMs / 1_000} onChange={(event) => updateTimeoutDraft("videoGenerationMs", event.target.value)} /></label>
                           <label className="settings-field"><span>视频状态轮询间隔</span><input type="number" step="1" value={configDraft.timeouts.videoPollIntervalMs / 1_000} onChange={(event) => updateTimeoutDraft("videoPollIntervalMs", event.target.value)} /></label>
                         </div>
-                        <span className="timeout-settings-note">填 0 表示不设置超时；所有正整数均可保存。</span>
+                        <span className="timeout-settings-note">“模型超时重试次数”只控制模型响应超时，不控制工具执行失败；同一工具连续失败会单独询问是否继续。</span>
                       </div>
                       <div className="settings-save-row">
                         <span className="subtle-inline">图片生成与视频下载没有固定超时，只会在任务被取消时中断。</span>
@@ -5098,6 +5155,7 @@ function PanelResizeHandle({
 }
 
 function RightWorkspacePanel({
+  hidden,
   activeTab,
   onTabChange,
   onHide,
@@ -5111,7 +5169,7 @@ function RightWorkspacePanel({
   onSelectProjectFile,
   onSelectPreviewTab,
   onClosePreviewTab,
-  browserTabs,
+  browserTabsByThread,
   onCloseBrowserTab,
   threadId,
   terminalTabs,
@@ -5128,6 +5186,7 @@ function RightWorkspacePanel({
   onCloseTerminalTab,
   hasThread
 }: {
+  hidden: boolean;
   activeTab: RightWorkspaceTab;
   onTabChange: (tab: RightWorkspaceTab) => void;
   onHide: () => void;
@@ -5141,8 +5200,8 @@ function RightWorkspacePanel({
   onSelectProjectFile: (path: string) => void;
   onSelectPreviewTab: (path: string) => void;
   onClosePreviewTab: (path: string) => void;
-  browserTabs: RuntimeThreadSnapshot["browserTabs"];
-  onCloseBrowserTab: (tabId: string) => void;
+  browserTabsByThread: Record<string, RuntimeThreadSnapshot["browserTabs"]>;
+  onCloseBrowserTab: (threadId: string, tabId: string) => void;
   threadId: string | null;
   terminalTabs: TerminalWorkspaceTab[];
   activeTerminalSessionId: string | null;
@@ -5159,7 +5218,7 @@ function RightWorkspacePanel({
   hasThread: boolean;
 }) {
   return (
-    <aside className="right-workspace-panel" aria-label="右侧工作区">
+    <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="右侧工作区" aria-hidden={hidden}>
       <header className="right-workspace-header">
         <nav className="right-workspace-tabs" aria-label="工作区标签">
           <WorkspaceTabButton active={activeTab === "files"} label="文件夹" onClick={() => onTabChange("files")}>
@@ -5215,12 +5274,17 @@ function RightWorkspacePanel({
             hasThread={hasThread}
           />
         ) : null}
-        {activeTab === "browser" ? (
+        {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
           <BrowserWorkspace
-            tabs={browserTabs}
-            threadId={threadId}
-            onCloseTab={onCloseBrowserTab}
+            key={browserThreadId}
+            tabs={tabs}
+            threadId={browserThreadId}
+            onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
+            visible={!hidden && activeTab === "browser" && browserThreadId === threadId}
           />
+        ) : null)}
+        {activeTab === "browser" && threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
+          <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" />
         ) : null}
         {activeTab === "files" ? (
           <ProjectFilesWorkspace
@@ -5769,19 +5833,44 @@ export function buildContextUsage(input: {
   selectedSkillCount: number;
   mcpServerCount: number;
   pendingInput: string;
+  compaction?: ContextCompactionRecord | null;
 }): ContextUsage {
-  const conversationText = [
-    ...input.messages.map((message) => message.content),
-    ...input.toolCalls.map((toolCall) => `${toolCall.argumentsJson}\n${toolCall.resultJson ?? ""}`),
-    input.pendingInput
-  ].join("\n");
-  const segments: ContextUsageSegment[] = [
+  const fixedSegments: ContextUsageSegment[] = [
     { id: "system", label: "系统提示", tokens: 1_200, color: "#a8a8a8" },
     { id: "tools", label: "工具定义", tokens: 900 + input.mcpServerCount * 240, color: "#9988ef" },
     { id: "rules", label: "规则", tokens: input.gpaStage === "off" ? 240 : 980, color: "#4fba7b" },
     { id: "skills", label: "技能", tokens: input.selectedSkillCount * 520, color: "#efb35c" },
-    { id: "mcp", label: "MCP 与动态工具", tokens: input.mcpServerCount * 360, color: "#bf98bd" },
-    { id: "conversation", label: "对话与工具结果", tokens: Math.max(1, estimateContextTokens(conversationText)), color: "#e28b85" }
+    { id: "mcp", label: "MCP 与动态工具", tokens: input.mcpServerCount * 360, color: "#bf98bd" }
+  ];
+  const fixedTokens = fixedSegments.reduce((total, segment) => total + segment.tokens, 0);
+  const compactedAt = input.compaction ? Date.parse(input.compaction.createdAt) : Number.NaN;
+  const conversationText = input.compaction
+    ? [
+        ...input.messages
+          .filter((message) => Date.parse(message.createdAt) > compactedAt)
+          .map((message) => message.content),
+        ...input.toolCalls
+          .filter((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt) > compactedAt)
+          .map((toolCall) => `${toolCall.argumentsJson}\n${toolCall.resultJson ?? ""}`),
+        input.pendingInput
+      ].join("\n")
+    : [
+        ...input.messages.map((message) => message.content),
+        ...input.toolCalls.map((toolCall) => `${toolCall.argumentsJson}\n${toolCall.resultJson ?? ""}`),
+        input.pendingInput
+      ].join("\n");
+  const recentTokens = Math.max(0, estimateContextTokens(conversationText));
+  const conversationTokens = input.compaction
+    ? Math.max(1, input.compaction.afterTokens - fixedTokens) + recentTokens
+    : Math.max(1, recentTokens);
+  const segments: ContextUsageSegment[] = [
+    ...fixedSegments,
+    {
+      id: "conversation",
+      label: input.compaction ? "压缩后的对话与工具结果" : "对话与工具结果",
+      tokens: conversationTokens,
+      color: "#e28b85"
+    }
   ];
   const usedTokens = segments.reduce((total, segment) => total + segment.tokens, 0);
   const contextWindow = Math.max(1, input.contextWindow);
@@ -5789,7 +5878,8 @@ export function buildContextUsage(input: {
     contextWindow,
     usedTokens,
     percentage: Math.min(100, Math.round((usedTokens / contextWindow) * 100)),
-    segments
+    segments,
+    compaction: input.compaction ?? null
   };
 }
 
@@ -6086,42 +6176,21 @@ function renderCodePreviewLine(line: string, keyPrefix: string): ReactNode[] {
 function BrowserWorkspace({
   tabs,
   threadId,
-  onCloseTab
+  onCloseTab,
+  visible
 }: {
   tabs: RuntimeThreadSnapshot["browserTabs"];
   threadId: string | null;
   onCloseTab: (tabId: string) => void;
+  visible: boolean;
 }) {
   const activeTab = tabs.find((tab) => tab.isActive) ?? tabs[0];
-  const webviewRef = useRef<BrowserWebviewElement | null>(null);
-  useEffect(() => {
-    const view = webviewRef.current;
-    if (!view || !activeTab || !threadId) return;
-
-    const register = () => {
-      const webContentsId = view.getWebContentsId();
-      void window.codexh.registerBrowserWebContents({ threadId, tabId: activeTab.id, webContentsId })
-        .then(() => window.codexh.syncBrowserWebContents({ threadId, tabId: activeTab.id }))
-        .catch(() => undefined);
-    };
-    const sync = () => void window.codexh.syncBrowserWebContents({ threadId, tabId: activeTab.id }).catch(() => undefined);
-    view.addEventListener("dom-ready", register);
-    view.addEventListener("did-navigate", sync);
-    view.addEventListener("did-navigate-in-page", sync);
-    view.addEventListener("page-title-updated", sync);
-    return () => {
-      view.removeEventListener("dom-ready", register);
-      view.removeEventListener("did-navigate", sync);
-      view.removeEventListener("did-navigate-in-page", sync);
-      view.removeEventListener("page-title-updated", sync);
-    };
-  }, [activeTab?.id, activeTab?.url, threadId]);
   if (!activeTab || !threadId) {
-    return <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" />;
+    return visible ? <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" /> : null;
   }
 
   return (
-    <section className="browser-workspace" aria-label="浏览器">
+    <section className={`browser-workspace ${visible ? "is-visible" : "is-background"}`} aria-label="浏览器">
       <WorkspaceSubtabStrip
         items={tabs.map((tab) => ({
           id: tab.id,
@@ -6134,15 +6203,62 @@ function BrowserWorkspace({
         }))}
       />
       <div className="browser-location" title={activeTab.url}>{activeTab.url}</div>
+      <div className="browser-page-stack">
+        {tabs.map((tab) => (
+          <BrowserTabWebview
+            key={tab.id}
+            tab={tab}
+            threadId={threadId}
+            visible={visible && tab.id === activeTab.id}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function BrowserTabWebview({
+  tab,
+  threadId,
+  visible
+}: {
+  tab: RuntimeThreadSnapshot["browserTabs"][number];
+  threadId: string;
+  visible: boolean;
+}) {
+  const webviewRef = useRef<BrowserWebviewElement | null>(null);
+  useEffect(() => {
+    const view = webviewRef.current;
+    if (!view) return;
+    const register = () => {
+      const webContentsId = view.getWebContentsId();
+      void window.codexh.registerBrowserWebContents({ threadId, tabId: tab.id, webContentsId })
+        .then(() => window.codexh.syncBrowserWebContents({ threadId, tabId: tab.id }))
+        .catch(() => undefined);
+    };
+    const sync = () => void window.codexh.syncBrowserWebContents({ threadId, tabId: tab.id }).catch(() => undefined);
+    view.addEventListener("dom-ready", register);
+    view.addEventListener("did-navigate", sync);
+    view.addEventListener("did-navigate-in-page", sync);
+    view.addEventListener("page-title-updated", sync);
+    return () => {
+      view.removeEventListener("dom-ready", register);
+      view.removeEventListener("did-navigate", sync);
+      view.removeEventListener("did-navigate-in-page", sync);
+      view.removeEventListener("page-title-updated", sync);
+    };
+  }, [tab.id, threadId]);
+
+  return (
+    <div className={`browser-page-host ${visible ? "is-visible" : "is-background"}`}>
       {createElement("webview", {
-        key: `${activeTab.id}:${activeTab.url}`,
         ref: webviewRef,
         className: "browser-frame",
-        src: activeTab.url,
+        src: tab.url,
         webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
-        title: activeTab.title || "任务浏览器"
+        title: tab.title || "任务浏览器"
       })}
-    </section>
+    </div>
   );
 }
 
@@ -6330,6 +6446,23 @@ type ComposerModelGroup = {
   models: Array<{ id: string; label: string; supportsMultimodalInput: boolean }>;
 };
 
+function ContextCompactionNotice({ compaction }: { compaction: ContextCompactionRecord }) {
+  return (
+    <details className="context-compaction-notice">
+      <summary>
+        <span className="context-compaction-icon" aria-hidden="true">↳</span>
+        <strong>上下文已自动压缩</strong>
+        <span>{formatTokenCount(compaction.beforeTokens)} → {formatTokenCount(compaction.afterTokens)}</span>
+      </summary>
+      <div className="context-compaction-detail">
+        <span>消息 {compaction.messagesBefore} → {compaction.messagesAfter}</span>
+        <span>占用约 {Math.round((compaction.afterTokens / Math.max(1, compaction.contextWindow)) * 100)}%</span>
+        <span>{new Date(compaction.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</span>
+      </div>
+    </details>
+  );
+}
+
 function ContextUsageControl({
   usage,
   open,
@@ -6387,7 +6520,7 @@ function ContextUsageReport({ usage, onClose }: { usage: ContextUsage; onClose: 
       <header>
         <div>
           <strong>上下文占用</strong>
-          <span>本地估算</span>
+          <span>{usage.compaction ? "压缩后估算" : "本地估算"}</span>
         </div>
         <button type="button" title="关闭" aria-label="关闭上下文详情" onClick={onClose}>
           <IconClose />
@@ -6397,6 +6530,12 @@ function ContextUsageReport({ usage, onClose }: { usage: ContextUsage; onClose: 
         <span>{usage.percentage}% 已用</span>
         <strong>约 {formatTokenCount(usage.usedTokens)} / {formatTokenCount(usage.contextWindow)} tokens</strong>
       </div>
+      {usage.compaction ? (
+        <div className="context-usage-compaction">
+          <span>压缩前 {formatTokenCount(usage.compaction.beforeTokens)}</span>
+          <strong>压缩后 {formatTokenCount(usage.compaction.afterTokens)}</strong>
+        </div>
+      ) : null}
       <div className="context-usage-bar" aria-hidden="true">
         {usage.segments.map((segment) => (
           <i
@@ -7331,7 +7470,7 @@ function getFileParentPath(filePath: string) {
   return index === -1 ? "./" : normalized.slice(0, index + 1);
 }
 
-function PlanTimeline({ state }: { state: GpaState }) {
+export function buildPlanTimelineItems(state: GpaState) {
   const phases: Array<{ id: Exclude<GpaStage, "off">; label: string }> = [
     { id: "goal", label: "Inspect and clarify the goal" },
     { id: "plan", label: "Build an executable plan" },
@@ -7339,53 +7478,93 @@ function PlanTimeline({ state }: { state: GpaState }) {
   ];
   const order: Record<Exclude<GpaStage, "off">, number> = { goal: 0, plan: 1, act: 2 };
   const current = order[state.stage as Exclude<GpaStage, "off">] ?? 0;
-  const items: Array<{ id: string; label: string; status: "pending" | "in_progress" | "completed" }> = state.planTasks.length
-    ? state.planTasks.map((task) => ({ id: task.id, label: task.title, status: task.done ? "completed" : "pending" as const }))
+  const currentTaskIndex = state.planTasks.findIndex((task) => !task.done);
+  return state.planTasks.length
+    ? state.planTasks.map((task, index) => ({
+        id: task.id,
+        label: task.title,
+        status: task.done ? "completed" as const : index === currentTaskIndex ? "in_progress" as const : "pending" as const
+      }))
     : phases.map((phase, index) => ({
         id: phase.id,
         label: phase.label,
         status: index < current ? "completed" : index === current ? "in_progress" : "pending" as const
       }));
+}
+
+function PlanTimeline({ state }: { state: GpaState }) {
+  const items = buildPlanTimelineItems(state);
+  const currentItem = items.find((item) => item.status === "in_progress") ?? items.at(-1);
 
   return (
     <section className="plan-timeline" aria-label="Updated Plan">
-      <div className="plan-timeline-title"><span>●</span><strong>Updated Plan</strong></div>
-      <div className="plan-timeline-list">
-        {items.map((item) => <PlanItem key={item.id} label={item.label} status={item.status} />)}
-      </div>
+      <details className="plan-timeline-details">
+        <summary className="plan-timeline-summary">
+          <span className="plan-timeline-title"><span>●</span><strong>Updated Plan</strong></span>
+          {currentItem ? (
+            <span className={`plan-timeline-current ${currentItem.status}`}>
+              <StatusIcon status={currentItem.status} />
+              <span>{currentItem.label}</span>
+            </span>
+          ) : null}
+          <span className="plan-timeline-chevron" aria-hidden="true" />
+        </summary>
+        <div className="plan-timeline-list">
+          {items.map((item) => <PlanItem key={item.id} label={item.label} status={item.status} />)}
+        </div>
+      </details>
     </section>
   );
 }
 
-export function getToolProcessingLabel(toolName: string): string {
+export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): string {
+  const input = parseTimelineJson(argumentsJson);
+  const rawTarget = input.command ?? input.path ?? input.filePath ?? input.query ?? input.pattern ?? input.url;
+  const target = typeof rawTarget === "string" ? compactRuntimeTarget(rawTarget) : "";
+  if (toolName === "apply_patch") {
+    const file = parsePatchFileChanges(String(input.patch ?? ""))[0]?.path;
+    return file ? `正在修改 ${compactRuntimeTarget(file)}` : "正在写入文件";
+  }
   if (toolName === "fs.read_file" || toolName === "knowledge.read" || toolName === "read_mcp_resource") {
-    return "正在读取文件";
+    return target ? `正在读取 ${target}` : "正在读取文件";
   }
   if (toolName === "fs.read_directory" || toolName === "list_mcp_resources" || toolName === "list_mcp_resource_templates") {
-    return "正在读取目录";
+    return target ? `正在查看 ${target}` : "正在读取目录";
   }
   if (toolName === "fs.write_file" || toolName === "apply_patch") {
-    return "正在写入文件";
+    return target ? `正在写入 ${target}` : "正在写入文件";
   }
   if (toolName === "code.search" || toolName === "knowledge.search") {
-    return "正在搜索代码";
+    return target ? `正在搜索 ${target}` : "正在搜索代码";
   }
   if (toolName === "web_search.search_query") {
-    return "正在搜索网络";
+    return target ? `正在搜索 ${target}` : "正在搜索网络";
   }
+  if (toolName === "browser.set_viewport") {
+    const width = Number(input.width ?? 1440);
+    const height = Number(input.height ?? 900);
+    return `正在验证页面 · ${width <= 500 ? "手机" : "桌面"} ${width}×${height}`;
+  }
+  if (toolName === "browser.assert_page") return "正在执行页面断言";
+  if (toolName === "browser.capture_screenshot") return "正在截取页面验证图";
   if (toolName.startsWith("browser.") || toolName === "web_search.open_page") {
-    return "正在操作浏览器";
+    return target ? `正在打开 ${target}` : "正在操作浏览器";
   }
   if (toolName.startsWith("git.")) {
     return toolName === "git.commit" ? "正在创建提交" : "正在检查 Git 状态";
   }
   if (toolName === "shell.exec") {
-    return "正在执行命令";
+    return target ? `正在运行 ${target}` : "正在执行命令";
   }
   if (toolName === "multi_agents.spawn") {
     return "正在启动子任务";
   }
   return "正在调用工具";
+}
+
+function compactRuntimeTarget(value: string): string {
+  const singleLine = value.replace(/\s+/g, " ").trim();
+  return singleLine.length > 88 ? `${singleLine.slice(0, 85)}...` : singleLine;
 }
 
 function getRuntimeActivityStartedAt(entries: RuntimeActivityEntry[]): string | undefined {
@@ -7397,6 +7576,23 @@ function getRuntimeActivityStartedAt(entries: RuntimeActivityEntry[]): string | 
     if (entry.createdAt) return entry.createdAt;
   }
   return undefined;
+}
+
+function getRuntimeBrowserScreenshotPaths(entries: RuntimeActivityEntry[], artifacts: ArtifactRecord[]): string[] {
+  const turnRunIds = new Set(
+    entries.filter((entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool")
+      .map((entry) => entry.toolCall.turnRunId)
+  );
+  const paths = artifacts
+    .filter((artifact) => artifact.artifactKind === "browser-screenshot" && turnRunIds.has(artifact.turnRunId))
+    .map((artifact) => artifact.absolutePath);
+  for (const entry of entries) {
+    if (entry.kind !== "tool" || entry.toolCall.toolName !== "browser.capture_screenshot") continue;
+    const result = parseTimelineJson(entry.toolCall.resultJson);
+    const json = result.json && typeof result.json === "object" ? result.json as Record<string, unknown> : {};
+    if (typeof json.filePath === "string") paths.push(json.filePath);
+  }
+  return [...new Set(paths)];
 }
 
 function useElapsedClock(startedAt: string | null | undefined, active: boolean, completedAt?: string | null) {
@@ -7448,18 +7644,26 @@ function RuntimeActivityPanel({
   startedAt,
   active,
   entries,
+  screenshots,
   expanded,
-  onToggle
+  onToggle,
+  onShowBrowser
 }: {
   label: string;
   startedAt?: string;
   active?: boolean;
   entries: RuntimeActivityEntry[];
+  screenshots: string[];
   expanded: boolean;
   onToggle: () => void;
+  onShowBrowser?: () => void;
 }) {
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
-  const detailEntries = [...entries].reverse();
+  const latestTool = [...entries].reverse().find((entry) => entry.kind === "tool");
+  const latestOutput = [...entries].reverse().find((entry) => entry.kind === "output");
+  const completedToolCount = entries.filter(
+    (entry) => entry.kind === "tool" && entry.toolCall.status === "completed"
+  ).length;
   const resolvedStartedAt = startedAt || getRuntimeActivityStartedAt(entries);
   return (
     <section className={`runtime-activity-panel ${expanded ? "expanded" : ""}`} aria-live="polite">
@@ -7476,27 +7680,36 @@ function RuntimeActivityPanel({
         <span>{label}</span>
         <span className="runtime-activity-chevron" aria-hidden="true" />
       </button>
+      {onShowBrowser ? (
+        <button type="button" className="runtime-show-browser" onClick={onShowBrowser}>
+          <IconGlobe />
+          <span>显示页面</span>
+        </button>
+      ) : null}
       {expanded ? (
         <div className="runtime-activity-details">
-          {detailEntries.length > 0 ? detailEntries.map((entry) => {
-            if (entry.kind === "tool") {
-              return <ToolActivityRow key={entry.id} toolCall={entry.toolCall} compact />;
-            }
-            if (entry.kind === "output") {
-              return <RuntimeActivityOutputRow key={entry.id} label={entry.label} content={entry.content} />;
-            }
-            return (
-              <div key={entry.id} className="runtime-activity-status-row">
-                <span className="runtime-activity-status-dot" aria-hidden="true" />
-                <span>{entry.label}</span>
-              </div>
-            );
-          }) : (
-            <div className="runtime-activity-status-row current">
-              <span className="runtime-activity-status-dot" aria-hidden="true" />
-              <span>{latestStatus?.label ?? label}</span>
+          <div className="runtime-activity-status-row current">
+            <span className="runtime-activity-status-dot" aria-hidden="true" />
+            <span>{latestStatus?.label ?? label}</span>
+          </div>
+          {completedToolCount > 0 ? (
+            <div className="runtime-activity-status-row summary">
+              <span className="runtime-activity-status-check" aria-hidden="true">✓</span>
+              <span>已完成 {completedToolCount} 个工具操作</span>
             </div>
-          )}
+          ) : null}
+          {latestTool?.kind === "tool" ? (
+            <ToolActivityRow key={latestTool.id} toolCall={latestTool.toolCall} compact />
+          ) : null}
+          {latestOutput?.kind === "output" ? (
+            <RuntimeActivityOutputRow key={latestOutput.id} label={latestOutput.label} content={latestOutput.content} />
+          ) : null}
+          {screenshots.length > 0 ? (
+            <div className="runtime-browser-screenshots">
+              <span>页面验证截图 · {screenshots.length}</span>
+              <MessageDetectedMediaGallery content={screenshots.join("\n")} />
+            </div>
+          ) : null}
         </div>
       ) : null}
     </section>
@@ -8440,7 +8653,10 @@ function MessageMediaLightbox({ preview, onClose }: { preview: MessageMediaPrevi
           <span title={preview.name}>{preview.name}</span>
           <div>
             {preview.localPath ? (
-              <button type="button" title="打开本地文件" aria-label="打开本地文件" onClick={() => void window.codexh.openPath(preview.localPath!)}><IconFolder /></button>
+              <>
+                <button type="button" title="打开原图" aria-label="打开原图" onClick={() => void window.codexh.openPath(preview.localPath!)}><IconEye /></button>
+                <button type="button" title="打开所在文件夹" aria-label="打开所在文件夹" onClick={() => void window.codexh.openFolder(preview.localPath!)}><IconFolder /></button>
+              </>
             ) : null}
             {preview.url ? (
               <button type="button" title="打开网页" aria-label="打开网页" onClick={() => void window.codexh.openExternal(preview.url!)}><IconGlobe /></button>

@@ -299,6 +299,48 @@
 }
 
 .plan-timeline-title > span { color: #60a5fa; }
+.plan-timeline-details { min-width: 0; }
+
+.plan-timeline-summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.plan-timeline-summary::-webkit-details-marker { display: none; }
+
+.plan-timeline-current {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  color: #c8d2df;
+  font-size: 12px;
+}
+
+.plan-timeline-current > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-timeline-current.completed { color: #7f8fa1; }
+
+.plan-timeline-chevron {
+  width: 7px;
+  height: 7px;
+  margin-right: 2px;
+  border-right: 1px solid #8795a8;
+  border-bottom: 1px solid #8795a8;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 140ms ease;
+}
+
+.plan-timeline-details[open] .plan-timeline-chevron { transform: rotate(225deg) translateY(-2px); }
 .plan-timeline-list { display: grid; gap: 5px; margin-top: 8px; }
 
 .plan-timeline-item {

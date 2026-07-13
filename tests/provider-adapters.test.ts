@@ -53,6 +53,28 @@ describe("native tool names", () => {
   });
 });
 
+describe("completion evidence parsing", () => {
+  it("parses GPA task ids and tool-backed evidence from a final decision", () => {
+    const decision = parseDecisionFromText(JSON.stringify({
+      assistant_message: "Done",
+      tool_calls: [],
+      end_turn: true,
+      goal_completed: true,
+      completed_task_ids: ["t1", "T2"],
+      completion_evidence: [
+        { task_id: "t1", tool_call_id: "patch-1", kind: "delivery" },
+        { task_id: "T2", tool_call_id: "test-1", kind: "verification" }
+      ]
+    }));
+
+    expect(decision.completedTaskIds).toEqual(["T1", "T2"]);
+    expect(decision.completionEvidence).toEqual([
+      { taskId: "T1", toolCallId: "patch-1", kind: "delivery" },
+      { taskId: "T2", toolCallId: "test-1", kind: "verification" }
+    ]);
+  });
+});
+
 describe("OpenAiCompatibleProvider", () => {
   beforeEach(() => {
     mocks.chatCreate.mockReset();

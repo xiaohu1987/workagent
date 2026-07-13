@@ -11,6 +11,7 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   BrowserTabRecord,
+  ContextCompactionRecord,
   KnowledgeBaseRecord,
   KnowledgeBaseSummary,
   KnowledgeConcept,
@@ -1538,6 +1539,23 @@ export class DatabaseService {
     this.#db
       .prepare("INSERT INTO runtime_events (id, type, thread_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), event.type, event.threadId ?? null, JSON.stringify(event.payload), event.createdAt);
+  }
+
+  public getLatestContextCompaction(threadId: string): ContextCompactionRecord | null {
+    const row = this.#db
+      .prepare(
+        "SELECT payload_json, created_at FROM runtime_events WHERE thread_id = ? AND type = 'agent.context_compacted' ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(threadId) as { payload_json: string; created_at: string } | undefined;
+    if (!row) return null;
+
+    try {
+      const payload = JSON.parse(row.payload_json) as Omit<ContextCompactionRecord, "createdAt">;
+      if (!payload.turnRunId || !Number.isFinite(payload.afterTokens)) return null;
+      return { ...payload, createdAt: row.created_at };
+    } catch {
+      return null;
+    }
   }
 
   public upsertPlugin(plugin: PluginRecord, sourceHash?: string | null): PluginRecord {

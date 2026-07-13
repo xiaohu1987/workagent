@@ -57,4 +57,22 @@ describe("BrowserRuntime", () => {
     expect(snapshot.filePath.endsWith(".html")).toBe(true);
     expect(html).toContain("capture me");
   });
+
+  it("closes task tabs while preserving tabs that were already open", async () => {
+    const browser = new BrowserRuntime();
+    const threadId = "thread-cleanup";
+    const existing = await browser.openTab(
+      threadId,
+      "data:text/html,<html><head><title>User tab</title></head><body>keep</body></html>"
+    );
+    const taskTab = await browser.openTab(
+      threadId,
+      "data:text/html,<html><head><title>Agent tab</title></head><body>release</body></html>"
+    );
+
+    browser.closeTab(threadId, taskTab.tab.id);
+
+    expect(browser.listTabs(threadId).map((tab) => tab.id)).toEqual([existing.tab.id]);
+    expect(browser.listTabs(threadId)[0]?.isActive).toBe(true);
+  });
 });

@@ -231,7 +231,8 @@ function findLocalServerUrl(value: string): string | undefined {
 }
 
 function inferLocalServerUrl(command: string): string | undefined {
-  const port = command.match(/(?:--port|-p|http\.server)\s+(\d{2,5})\b/i)?.[1];
+  const port = command.match(/(?:--port|-p|http\.server)\s+(\d{2,5})\b/i)?.[1]
+    ?? command.match(/\b(?:tcpserver|httpserver)\s*\(\s*\(\s*['\"](?:127\.0\.0\.1|localhost|::1)['\"]\s*,\s*(\d{2,5})\b/i)?.[1];
   return port ? `http://127.0.0.1:${port}` : undefined;
 }
 
@@ -240,7 +241,9 @@ export function isLocalServerCommand(command: string): boolean {
   if (normalized.includes("start-process") || /(?:^|\s)(?:start|nohup)\s/.test(normalized)) {
     return false;
   }
-  return /\b(?:http-server|vite|webpack-dev-server|next\s+dev|npm\s+run\s+dev|pnpm\s+dev|yarn\s+dev|python(?:3)?\s+-m\s+http\.server)\b/.test(normalized);
+  const knownServer = /\b(?:http-server|vite|webpack-dev-server|next\s+dev|npm\s+run\s+dev|pnpm\s+dev|yarn\s+dev|python(?:3)?\s+-m\s+http\.server)\b/.test(normalized);
+  const inlinePythonServer = /\bpython(?:3)?(?:\.exe)?\s+-c\b[\s\S]*\b(?:http\.server|socketserver|tcpserver|httpserver|serve_forever)\b/.test(normalized);
+  return knownServer || inlinePythonServer;
 }
 
 export function buildBackgroundLaunchCommand(command: string, cwd: string): string {

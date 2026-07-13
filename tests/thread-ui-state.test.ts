@@ -105,6 +105,16 @@ describe("tool processing labels", () => {
     expect(getToolProcessingLabel("browser.open_tab")).toBe("正在操作浏览器");
     expect(getToolProcessingLabel("web_search.search_query")).toBe("正在搜索网络");
   });
+
+  it("includes the current command or target in the running status", () => {
+    expect(getToolProcessingLabel("shell.exec", JSON.stringify({ command: "pnpm build" }))).toBe("正在运行 pnpm build");
+    expect(getToolProcessingLabel("fs.read_file", JSON.stringify({ path: "src/App.tsx" }))).toBe("正在读取 src/App.tsx");
+    expect(
+      getToolProcessingLabel("apply_patch", JSON.stringify({
+        patch: "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"
+      }))
+    ).toBe("正在修改 src/App.tsx");
+  });
 });
 
 describe("file write transcript filtering", () => {

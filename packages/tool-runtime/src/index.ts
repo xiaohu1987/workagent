@@ -5,6 +5,9 @@ import { spawn } from "node:child_process";
 import type {
   ApprovalMode,
   ArtifactRecord,
+  BrowserAssertionCheck,
+  BrowserAssertionResult,
+  BrowserViewport,
   MessageAttachment,
   BrowserTabRecord,
   KnowledgeBaseRecord,
@@ -63,7 +66,27 @@ export interface ToolRuntimeContext {
   scrollBrowserPage: (tabId: string, deltaY: number) => Promise<any>;
   pressBrowserKey: (tabId: string, key: string) => Promise<any>;
   waitForBrowserPage: (tabId: string, input: { text?: string; elementId?: string; timeoutMs?: number }) => Promise<any>;
-  captureBrowserScreenshot: (tabId: string) => Promise<{ title: string; url: string; filePath: string; artifact: ArtifactRecord }>;
+  setBrowserViewport: (tabId: string, viewport: BrowserViewport | null) => Promise<any>;
+  assertBrowserPage: (tabId: string, checks: BrowserAssertionCheck[]) => Promise<{
+    title: string;
+    url: string;
+    viewport: BrowserViewport;
+    passed: boolean;
+    results: BrowserAssertionResult[];
+  }>;
+  captureBrowserScreenshot: (tabId: string, fullPage?: boolean) => Promise<{
+    title: string;
+    url: string;
+    filePath: string;
+    width: number;
+    height: number;
+    viewport: BrowserViewport;
+    fullPage: boolean;
+    capturedAt: string;
+    attachment: MessageAttachment;
+    artifact: ArtifactRecord;
+  }>;
+  emitBrowserVerificationEvent?: (type: "browser.verification_started" | "browser.assertion_completed" | "browser.screenshot_attached" | "browser.verification_completed", payload: Record<string, unknown>) => Promise<void>;
   captureBrowserSnapshot: (tabId: string) => Promise<{
     filePath: string;
     title: string;
@@ -808,7 +831,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     {
       name: "request_user_input",
-      description: "Request user input for one to three short, material decisions and wait for the response. Use only when the task cannot safely proceed without the user's choice. Provide 2-3 mutually exclusive options for each question; free-form input is available automatically.",
+      description: "Request user input for one to four short, material decisions and wait for the response. Use only when the task cannot safely proceed without the user's choice. Provide 2-3 mutually exclusive options for each question; free-form input is available automatically.",
       inputSchema: {
         type: "object",
         properties: {
@@ -854,7 +877,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         return { ok: false, content: "request_user_input is only available while GPA mode is active." };
       }
 
-      const rawQuestions = Array.isArray(args.questions) ? args.questions.slice(0, 3) : [];
+      const rawQuestions = Array.isArray(args.questions) ? args.questions.slice(0, 4) : [];
       const questions = rawQuestions.map((question, index) => ({
         id: String((question as any).id ?? `q${index + 1}`),
         label: String((question as any).label ?? `Q${index + 1}`),
@@ -872,7 +895,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         allowFreeText: true
       }));
       if (questions.length === 0 || questions.some((question) => question.options.length === 0)) {
-        return { ok: false, content: "request_user_input requires one to three questions with non-empty options." };
+        return { ok: false, content: "request_user_input requires one to four questions with non-empty options." };
       }
       const answers = await ctx.requestUserInput({
         title: String(args.title ?? "Need input"),
@@ -1043,14 +1066,90 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("browser.capture_screenshot", "Capture the visible browser tab as a PNG artifact.", ["tabId"], "low"),
+    {
+      name: "browser.set_viewport",
+      description: "Set the browser verification viewport without reopening the current tab. Use 1440x900 for desktop and 390x844 for mobile. Set reset=true to restore the default.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string" },
+          width: { type: "number", minimum: 320, maximum: 3840 },
+          height: { type: "number", minimum: 320, maximum: 2160 },
+          reset: { type: "boolean" }
+        },
+        required: ["tabId"]
+      },
+      riskLevel: "low"
+    },
     async (args, ctx) => {
-      const screenshot = await ctx.captureBrowserScreenshot(String(args.tabId ?? ""));
+      const tabId = String(args.tabId ?? "");
+      const reset = args.reset === true;
+      const viewport = reset ? null : {
+        width: Number(args.width ?? 1440),
+        height: Number(args.height ?? 900),
+        deviceScaleFactor: 1,
+        mobile: Number(args.width ?? 1440) <= 500
+      };
+      const result = await ctx.setBrowserViewport(tabId, viewport);
+      await ctx.emitBrowserVerificationEvent?.("browser.verification_started", { tabId, viewport: result.viewport });
+      return { ok: true, content: JSON.stringify(result), json: result };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "browser.assert_page",
+      description: "Run deterministic assertions against the current rendered browser page. Checks support url, title, text, element, images_loaded, no_horizontal_overflow, canvas_nonblank, and no_severe_console_errors.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string" },
+          checks: { type: "array", minItems: 1, items: { type: "object" } }
+        },
+        required: ["tabId", "checks"]
+      },
+      riskLevel: "low"
+    },
+    async (args, ctx) => {
+      const tabId = String(args.tabId ?? "");
+      const checks = Array.isArray(args.checks) ? args.checks as BrowserAssertionCheck[] : [];
+      const result = await ctx.assertBrowserPage(tabId, checks);
+      await ctx.emitBrowserVerificationEvent?.("browser.assertion_completed", { tabId, ...result });
+      return { ok: result.passed, content: JSON.stringify(result), json: result };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "browser.capture_screenshot",
+      description: "Capture the current rendered browser page as a PNG verification artifact and image attachment.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string" },
+          fullPage: { type: "boolean" }
+        },
+        required: ["tabId"]
+      },
+      riskLevel: "low"
+    },
+    async (args, ctx) => {
+      const screenshot = await ctx.captureBrowserScreenshot(String(args.tabId ?? ""), args.fullPage === true);
+      await ctx.emitBrowserVerificationEvent?.("browser.screenshot_attached", {
+        tabId: String(args.tabId ?? ""),
+        artifact: screenshot.artifact,
+        attachment: screenshot.attachment,
+        viewport: screenshot.viewport,
+        width: screenshot.width,
+        height: screenshot.height,
+        fullPage: screenshot.fullPage
+      });
       return {
         ok: true,
         content: `${screenshot.title}\n${screenshot.filePath}`,
         json: screenshot,
-        artifacts: [screenshot.artifact]
+        artifacts: [screenshot.artifact],
+        attachments: [screenshot.attachment]
       };
     }
   );

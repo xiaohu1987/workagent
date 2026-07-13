@@ -1,4 +1,4 @@
-import type { GpaStage, GpaState, ProviderTurnDecision } from "@shared-types";
+import type { GpaStage, GpaState, UserInputOption, UserInputQuestion } from "@shared-types";
 
 export const DEFAULT_GPA_STATE: GpaState = {
   stage: "off",
@@ -30,12 +30,19 @@ export function parseGpaState(json: string | null | undefined): GpaState {
       parsed.stage === "goal" || parsed.stage === "plan" || parsed.stage === "act"
         ? parsed.stage
         : "off";
+    const planTasks = Array.isArray(parsed.planTasks) ? parsed.planTasks : [];
+    // A PLAN confirmation is meaningful only after a visible, parsed task list
+    // has been persisted. Clear stale states written by older runtimes.
+    const awaitingConfirmation =
+      parsed.awaitingConfirmation === "plan" && planTasks.length === 0
+        ? null
+        : parsed.awaitingConfirmation ?? null;
     return {
       stage,
       fullAccess: parsed.fullAccess === true,
       knowledgeEnabled: parsed.knowledgeEnabled === true,
-      awaitingConfirmation: parsed.awaitingConfirmation ?? null,
-      planTasks: Array.isArray(parsed.planTasks) ? parsed.planTasks : [],
+      awaitingConfirmation,
+      planTasks,
       updatedAt: parsed.updatedAt ?? new Date().toISOString()
     };
   } catch {
@@ -84,7 +91,8 @@ export function buildGpaSystemDirective(state: GpaState): string {
       "3) 自检：对照验收标准逐项检查（标准1 ✅/❌ …），不达标不得标完成；",
       "4) 记录：输出 `✅ 任务 {ID} 完成`、交付物摘要、遇到的问题与解决方案、对后续任务的影响；",
       "5) 汇报：输出当前任务结果与下一步计划；如需用户决策，列出明确选项；",
-      "6) 停止并上报：需求变更/范围蔓延、技术方案不可行/阻塞、自检未通过且无法自行修复、需要用户做选型/优先级决策。"
+      "6) 停止并上报：需求变更/范围蔓延、技术方案不可行/阻塞、自检未通过且无法自行修复、需要用户做选型/优先级决策。",
+      "7) 最终完成时必须返回 completed_task_ids，覆盖已确认 PLAN 的全部任务；completion_evidence 必须按任务引用真实成功的 tool_call_id，并区分 observation、delivery、verification。没有交付和验证证据时不得声明 goal_completed。"
     ].join("\n")
   };
 
@@ -116,42 +124,114 @@ export function nextStageAfterConfirmation(stage: GpaStage): GpaStage {
   return stage;
 }
 
-/** Converts explicit prose about unresolved GPA decisions into a safe input card. */
-export function buildGpaTextClarificationFallback(
+/** Extracts user-visible GPA plan tasks from the PLAN response. */
+export function parseGpaPlanTasks(content: string): GpaState["planTasks"] {
+  const tasks: GpaState["planTasks"] = [];
+  const seenIds = new Set<string>();
+  const lines = content.split(/\r?\n/);
+
+  const appendTask = (idValue: string, titleValue: string) => {
+    const id = idValue.toUpperCase();
+    const title = titleValue
+      .replace(/\*\*/g, "")
+      .replace(/`/g, "")
+      .trim();
+    if (!title || seenIds.has(id)) return;
+    seenIds.add(id);
+    tasks.push({ id, title: title.slice(0, 180), done: false });
+  };
+
+  // Prefer explicit T-ids, including Markdown headings such as `### T1:`.
+  for (const line of lines) {
+    const match = line.match(/^\s*(?:#{1,6}\s*)?(?:[-*+]\s*)?(T\d+)\s*[:：.\-]\s*(.+?)\s*$/i);
+    if (!match) continue;
+    appendTask(match[1], match[2]);
+    if (tasks.length >= 20) break;
+  }
+
+  // Keep compatibility with simple numbered plans, but never mix acceptance
+  // criteria into a plan that already provided explicit T-ids.
+  if (tasks.length === 0) {
+    for (const line of lines) {
+      const match = line.match(/^\s*(?:[-*+]\s*)?(\d+)\s*[.)、]\s*(.+?)\s*$/);
+      if (!match) continue;
+      appendTask(`T${match[1]}`, match[2]);
+      if (tasks.length >= 20) break;
+    }
+  }
+
+  return tasks;
+}
+
+function clarificationOptions(question: string): UserInputOption[] {
+  const addOrSimplify = question.match(
+    /是否(?:需要)?(.+?)[，,]\s*还是(?:简化为)?\s*[「“"]?(.+?)[」”"]?\s*[？?]$/
+  );
+  if (addOrSimplify) {
+    return [
+      { id: "option_1", label: addOrSimplify[1].trim(), recommended: true },
+      { id: "option_2", label: addOrSimplify[2].trim() }
+    ];
+  }
+
+  const eitherOr = question.match(
+    /(?:选择是|采用|是)\s*[「“"]?(.+?)[」”"]?\s*还是\s*[「“"]?(.+?)[」”"]?\s*[？?]$/
+  );
+  if (eitherOr) {
+    return [
+      { id: "option_1", label: eitherOr[1].trim(), recommended: true },
+      { id: "option_2", label: eitherOr[2].trim() }
+    ];
+  }
+
+  const yesOrNo = question.match(/是否(.+?)[？?]$/);
+  if (yesOrNo) {
+    const proposal = yesOrNo[1].trim();
+    return [
+      {
+        id: "yes",
+        label: proposal.startsWith("同意") ? proposal : `是，${proposal.replace(/^只限/, "仅限")}`,
+        recommended: true
+      },
+      { id: "no", label: "否，我来指定其他方案" }
+    ];
+  }
+
+  return [
+    { id: "recommended", label: "按推荐方案继续", recommended: true },
+    { id: "custom", label: "我来补充具体要求" }
+  ];
+}
+
+/** Promotes numbered questions embedded in GOAL/PLAN prose into input cards. */
+export function buildGpaTextClarificationQuestions(
   stage: GpaStage,
   assistantMessage: string | undefined
-): ProviderTurnDecision["clarification"] | undefined {
+): UserInputQuestion[] {
   if ((stage !== "goal" && stage !== "plan") || !assistantMessage) {
-    return undefined;
+    return [];
+  }
+  if (!/(?:特别需要确认|需要确认|请确认以下|待确认|需要你确认|需要您确认)/i.test(assistantMessage)) {
+    return [];
   }
 
-  const text = assistantMessage.replace(/\s+/g, " ");
-  const hasUnresolvedDecision =
-    /(?:\u672a\u6307\u5b9a|\u672a\u660e\u786e|\u672a\u786e\u8ba4|\u5f85\u786e\u8ba4|\u9700\u8981(?:\u5148)?(?:\u786e\u8ba4|\u660e\u786e|\u8865\u5145)|\u9700\u8981\u4f60\u786e\u8ba4|\u9700\u8981\u4f60\u8865\u5145|\u5173\u952e(?:\u95ee\u9898|\u4fe1\u606f|\u51b3\u7b56)|(?:need|needs|require|requires)\s+(?:your\s+)?(?:confirmation|input|decision)|(?:not\s+specified|to\s+be\s+confirmed))/i.test(text);
-  if (!hasUnresolvedDecision) {
-    return undefined;
-  }
+  const questions = assistantMessage
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const match = line.match(/^\s*(?:[-*+]\s*)?(?:\d+[.、)]\s*)?(.{3,}?[？?])\s*$/);
+      return match ? [match[1].trim()] : [];
+    })
+    .slice(0, 4);
 
-  const isTechnical = /(?:\u6280\u672f\u6808|\u524d\u7aef|\u540e\u7aef|\u6570\u636e\u5e93|\u67b6\u6784|framework|database|stack)/i.test(text);
-  return isTechnical
-    ? {
-        title: "\u6280\u672f\u65b9\u6848\u5f85\u786e\u8ba4",
-        question: "\u5f53\u524d\u76ee\u6807\u6216\u8ba1\u5212\u5305\u542b\u672a\u6307\u5b9a\u7684\u6280\u672f\u65b9\u6848\u3002\u8bf7\u8bf4\u660e\u4f60\u7684\u504f\u597d\uff0c\u6216\u9009\u62e9\u4e00\u4e2a\u7ee7\u7eed\u65b9\u5f0f\u3002",
-        options: [
-          { id: "provide_requirements", label: "\u6211\u6765\u6307\u5b9a\u6280\u672f\u6808", description: "\u586b\u5199\u524d\u7aef\u3001\u540e\u7aef\u3001\u6570\u636e\u5e93\u6216\u90e8\u7f72\u8981\u6c42\u3002", recommended: true },
-          { id: "web_mvp", label: "\u6309\u901a\u7528 Web MVP \u5b9e\u73b0", description: "\u4f7f\u7528\u6210\u719f\u7684 Web \u6280\u672f\u6808\uff0c\u4f18\u5148\u4ea4\u4ed8\u53ef\u8fd0\u884c\u7248\u672c\u3002" },
-          { id: "prototype", label: "\u5148\u505a\u672c\u5730\u6f14\u793a\u7248", description: "\u4ec5\u5b9e\u73b0\u6838\u5fc3\u754c\u9762\u548c\u6d41\u7a0b\uff0c\u4e0d\u63a5\u5165\u771f\u5b9e\u670d\u52a1\u3002" }
-        ],
-        allowFreeText: true
-      }
-    : {
-        title: "\u5173\u952e\u9700\u6c42\u5f85\u786e\u8ba4",
-        question: "\u5f53\u524d\u76ee\u6807\u6216\u8ba1\u5212\u5b58\u5728\u4f1a\u5f71\u54cd\u8303\u56f4\u6216\u9a8c\u6536\u7684\u672a\u51b3\u9879\u3002\u8bf7\u8865\u5145\u4f60\u7684\u8981\u6c42\uff0c\u6216\u9009\u62e9\u7ee7\u7eed\u65b9\u5f0f\u3002",
-        options: [
-          { id: "provide_requirements", label: "\u6211\u6765\u8865\u5145\u8981\u6c42", description: "\u8bf4\u660e\u8303\u56f4\u3001\u4f18\u5148\u7ea7\u6216\u9a8c\u6536\u6807\u51c6\u3002", recommended: true },
-          { id: "recommended_scope", label: "\u6309\u63a8\u8350\u8303\u56f4\u89c4\u5212", description: "\u4f18\u5148\u5b8c\u6210\u6838\u5fc3\u529f\u80fd\u548c\u53ef\u9a8c\u8bc1\u4ea4\u4ed8\u7269\u3002" },
-          { id: "continue_assumptions", label: "\u6309\u9ed8\u8ba4\u5047\u8bbe\u7ee7\u7eed", description: "\u7531 Agent \u8bb0\u5f55\u5408\u7406\u5047\u8bbe\u540e\u7ee7\u7eed\u3002" }
-        ],
-        allowFreeText: true
-      };
+  return questions.map((question, index) => ({
+    id: `gpa_text_clarification_${index + 1}`,
+    label: question.replace(/[？?]$/, "").slice(0, 48),
+    prompt: question,
+    options: clarificationOptions(question),
+    allowFreeText: true
+  }));
+}
+
+export function canEnterGpaAct(state: GpaState): boolean {
+  return state.stage === "plan" && state.planTasks.length > 0;
 }

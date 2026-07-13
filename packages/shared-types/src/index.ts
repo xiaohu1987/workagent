@@ -124,7 +124,47 @@ export interface ToolResult {
   content: string;
   json?: Record<string, unknown>;
   artifacts?: ArtifactRecord[];
+  /** Transient rich tool output for the next model turn. It is not a visible chat message. */
+  attachments?: MessageAttachment[];
   followUpMessage?: string;
+}
+
+export interface BrowserViewport {
+  width: number;
+  height: number;
+  deviceScaleFactor?: number;
+  mobile?: boolean;
+}
+
+export type BrowserAssertionCheck =
+  | { type: "url"; value: string; match?: "equals" | "includes" | "regex" }
+  | { type: "title"; value: string; match?: "equals" | "includes" | "regex" }
+  | { type: "text"; value: string; match?: "equals" | "includes" | "regex" }
+  | { type: "element"; selector: string; state?: "exists" | "visible" | "enabled" | "selected" }
+  | { type: "images_loaded" }
+  | { type: "no_horizontal_overflow" }
+  | { type: "canvas_nonblank"; selector?: string; minOpaquePixels?: number; minColors?: number }
+  | { type: "no_severe_console_errors" };
+
+export interface BrowserAssertionResult {
+  check: BrowserAssertionCheck;
+  passed: boolean;
+  message: string;
+  actual?: unknown;
+}
+
+export interface BrowserVerificationRecord {
+  threadId: string;
+  turnRunId: string;
+  tabId: string;
+  viewport: BrowserViewport;
+  assertions: BrowserAssertionResult[];
+  screenshotArtifact?: ArtifactRecord;
+  screenshotAttachment?: MessageAttachment;
+  visualStatus: "pending" | "inspected" | "skipped";
+  visualSkippedReason?: "model_not_multimodal";
+  completedAt?: string;
+  failureReason?: string;
 }
 
 export interface RuntimeToolCall {
@@ -473,9 +513,21 @@ export interface ProviderTurnDecision {
   endTurn: boolean;
   /** Explicit provider declaration that every deliverable in the user goal is complete. */
   goalCompleted: boolean;
+  /** GPA plan task ids that the provider declares complete in the final ACT response. */
+  completedTaskIds?: string[];
+  /** Tool-backed evidence for completed GPA plan tasks. */
+  completionEvidence?: CompletionEvidenceReference[];
   /** True only when the provider response matched the runtime JSON envelope. */
   isStructured: boolean;
   reasoningSummary?: string;
+}
+
+export type CompletionEvidenceKind = "observation" | "delivery" | "verification";
+
+export interface CompletionEvidenceReference {
+  taskId: string;
+  toolCallId: string;
+  kind: CompletionEvidenceKind;
 }
 
 export interface MessageAttachment {
@@ -555,6 +607,7 @@ export interface RuntimeEvent {
     | "assistant.completed"
     | "assistant.execution_output"
     | "agent.retrying"
+    | "agent.context_compacted"
     | "queue.updated"
     | "turn.updated"
     | "tool.started"
@@ -564,11 +617,27 @@ export interface RuntimeEvent {
     | "user-input.requested"
     | "knowledge.imported"
     | "browser.updated"
+    | "browser.verification_started"
+    | "browser.assertion_completed"
+    | "browser.screenshot_attached"
+    | "browser.verification_completed"
     | "gpa.updated"
     | "model.capability.updated"
     | "terminal.output";
   threadId?: string;
   payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface ContextCompactionRecord {
+  turnRunId: string;
+  contextWindow: number;
+  threshold: number;
+  target: number;
+  beforeTokens: number;
+  afterTokens: number;
+  messagesBefore: number;
+  messagesAfter: number;
   createdAt: string;
 }
 
@@ -593,6 +662,7 @@ export interface RuntimeThreadSnapshot {
     binding: ProjectPluginBinding | null;
   }>;
   toolCalls: ToolCallRecord[];
+  contextCompaction: ContextCompactionRecord | null;
   gpa: GpaState | null;
 }
 

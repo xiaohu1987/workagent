@@ -9,7 +9,10 @@ import type {
   AttachmentImportInput,
   AppConfig,
   ArtifactRecord,
+  BrowserAssertionCheck,
+  BrowserAssertionResult,
   BrowserTabRecord,
+  BrowserViewport,
   GpaStage,
   GpaState,
   KnowledgeBaseRecord,
@@ -95,6 +98,9 @@ export class DesktopBackend {
   readonly #terminal = new TerminalRuntime();
   readonly #openedLocalUrls = new Set<string>();
   readonly #browserContents = new Map<string, WebContents>();
+  readonly #browserViewports = new Map<string, BrowserViewport>();
+  readonly #browserConsoleErrors = new Map<string, Array<{ message: string; sourceId?: string; line?: number }>>();
+  readonly #browserDebuggerOwned = new Set<string>();
 
   #layout!: HomeLayout;
   #db!: DatabaseService;
@@ -168,6 +174,7 @@ export class DesktopBackend {
       findInPage: async (url, pattern) => this.findInPage(url, pattern),
       listBrowserTabs: async (threadId) => this.#db.listBrowserTabs(threadId),
       openBrowserTab: async (threadId, url) => this.openBrowserTab(threadId, url),
+      closeBrowserTabs: async (threadId, tabIds) => this.closeBrowserTabs(threadId, tabIds),
       navigateBrowserTab: async (threadId, tabId, url) => this.navigateBrowserTab(threadId, tabId, url),
       reloadBrowserTab: async (threadId, tabId) => this.reloadBrowserTab(threadId, tabId),
       goBackBrowserTab: async (threadId, tabId) => this.goBackBrowserTab(threadId, tabId),
@@ -182,7 +189,9 @@ export class DesktopBackend {
       scrollBrowserPage: async (threadId, tabId, deltaY) => this.scrollBrowserPage(threadId, tabId, deltaY),
       pressBrowserKey: async (threadId, tabId, key) => this.pressBrowserKey(threadId, tabId, key),
       waitForBrowserPage: async (threadId, tabId, input) => this.waitForBrowserPage(threadId, tabId, input),
-      captureBrowserScreenshot: async (threadId, tabId, turnRunId) => this.captureBrowserScreenshot(threadId, tabId, turnRunId),
+      setBrowserViewport: async (threadId, tabId, viewport) => this.setBrowserViewport(threadId, tabId, viewport),
+      assertBrowserPage: async (threadId, tabId, checks) => this.assertBrowserPage(threadId, tabId, checks),
+      captureBrowserScreenshot: async (threadId, tabId, turnRunId, fullPage) => this.captureBrowserScreenshot(threadId, tabId, turnRunId, fullPage),
       captureBrowserSnapshot: async (threadId, tabId, turnRunId) =>
         this.captureBrowserSnapshot(threadId, tabId, turnRunId),
       getThreadOutputDir: async (threadId) => this.getThreadOutputDir(threadId),
@@ -384,6 +393,7 @@ export class DesktopBackend {
       browserTabs: this.#db.listBrowserTabs(threadId),
       projectPlugins: this.listProjectPluginsForThread(thread),
       toolCalls: this.#db.listToolCalls(threadId),
+      contextCompaction: this.#db.getLatestContextCompaction(threadId),
       gpa: this.getGpaState(threadId)
     };
   }
@@ -865,6 +875,12 @@ export class DesktopBackend {
     }));
 
     await saveConfig(this.#layout.configFile, this.#config);
+    await this.#logs.append("config.timeouts_updated", {
+      modelDecisionMs: this.#config.timeouts.modelDecisionMs,
+      recoveryModelDecisionMs: this.#config.timeouts.recoveryModelDecisionMs,
+      modelTimeoutRetries: this.#config.timeouts.modelTimeoutRetries,
+      effective: "immediate"
+    });
     for (const thread of this.#db.listThreads()) {
       const selection = resolveThreadModelSelection(this.#config, thread.providerId, thread.modelId);
       if (selection.providerId === thread.providerId && selection.modelId === thread.modelId) {
@@ -1058,6 +1074,7 @@ export class DesktopBackend {
   }
 
   public async closeBrowserTab(threadId: string, tabId: string) {
+    this.releaseBrowserTabContents(threadId, tabId);
     const tabs = this.#browser.closeTab(threadId, tabId);
     this.persistBrowserTabs(threadId);
     await this.emit({
@@ -1067,6 +1084,27 @@ export class DesktopBackend {
       createdAt: new Date().toISOString()
     });
     return tabs;
+  }
+
+  public async closeBrowserTabs(threadId: string, tabIds: string[]): Promise<void> {
+    const existingIds = new Set(this.#browser.listTabs(threadId).map((tab) => tab.id));
+    const closedTabIds: string[] = [];
+    for (const tabId of new Set(tabIds)) {
+      if (!existingIds.has(tabId)) continue;
+      this.releaseBrowserTabContents(threadId, tabId);
+      this.#browser.closeTab(threadId, tabId);
+      existingIds.delete(tabId);
+      closedTabIds.push(tabId);
+    }
+    if (closedTabIds.length === 0) return;
+
+    this.persistBrowserTabs(threadId);
+    await this.emit({
+      type: "browser.updated",
+      threadId,
+      payload: { action: "task-cleanup", closedTabIds, tabs: this.#browser.listTabs(threadId) },
+      createdAt: new Date().toISOString()
+    });
   }
 
   public async readBrowserPageText(threadId: string, tabId: string) {
@@ -1088,11 +1126,169 @@ export class DesktopBackend {
       throw new Error("Browser page is not available for automation.");
     }
     const key = this.browserContentsKey(threadId, tabId);
+    const previous = this.#browserContents.get(key);
+    if (previous === contents) return;
     this.#browserContents.set(key, contents);
+    this.#browserConsoleErrors.set(key, []);
     contents.setWindowOpenHandler(() => ({ action: "deny" }));
-    contents.once("destroyed", () => {
-      if (this.#browserContents.get(key) === contents) this.#browserContents.delete(key);
+    contents.on("console-message", (...args: unknown[]) => {
+      const details = typeof args[1] === "object" && args[1] !== null
+        ? args[1] as { level?: string; message?: string; sourceId?: string; lineNumber?: number }
+        : null;
+      const numericLevel = typeof args[1] === "number" ? args[1] : 0;
+      const level = details?.level ?? (numericLevel >= 3 ? "error" : "info");
+      if (level !== "error") return;
+      const errors = this.#browserConsoleErrors.get(key) ?? [];
+      errors.push({
+        message: details?.message ?? String(args[2] ?? "Unknown console error"),
+        sourceId: details?.sourceId ?? (typeof args[4] === "string" ? args[4] : undefined),
+        line: details?.lineNumber ?? (typeof args[3] === "number" ? args[3] : undefined)
+      });
+      this.#browserConsoleErrors.set(key, errors.slice(-100));
     });
+    contents.on("did-start-navigation", () => this.#browserConsoleErrors.set(key, []));
+    contents.once("destroyed", () => {
+      if (this.#browserContents.get(key) === contents) {
+        this.#browserContents.delete(key);
+        this.#browserViewports.delete(key);
+        this.#browserConsoleErrors.delete(key);
+        this.#browserDebuggerOwned.delete(key);
+      }
+    });
+  }
+
+  public async setBrowserViewport(threadId: string, tabId: string, viewport: BrowserViewport | null) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    const key = this.browserContentsKey(threadId, tabId);
+    if (viewport === null) {
+      if (contents.debugger.isAttached()) {
+        await contents.debugger.sendCommand("Emulation.clearDeviceMetricsOverride");
+      }
+      this.#browserViewports.delete(key);
+      if (this.#browserDebuggerOwned.delete(key) && contents.debugger.isAttached()) contents.debugger.detach();
+      await this.emit({
+        type: "browser.verification_completed",
+        threadId,
+        payload: { tabId, viewportRestored: true },
+        createdAt: new Date().toISOString()
+      });
+      return { tabId, viewport: this.defaultBrowserViewport(contents), restored: true };
+    }
+
+    const normalized = normalizeBrowserViewport(viewport);
+    if (!contents.debugger.isAttached()) {
+      contents.debugger.attach("1.3");
+      this.#browserDebuggerOwned.add(key);
+    }
+    await contents.debugger.sendCommand("Emulation.setDeviceMetricsOverride", {
+      width: normalized.width,
+      height: normalized.height,
+      deviceScaleFactor: normalized.deviceScaleFactor ?? 1,
+      mobile: normalized.mobile ?? normalized.width <= 500
+    });
+    this.#browserViewports.set(key, normalized);
+    return { tabId, viewport: normalized, restored: false };
+  }
+
+  public async assertBrowserPage(threadId: string, tabId: string, checks: BrowserAssertionCheck[]) {
+    const contents = await this.requireBrowserContents(threadId, tabId);
+    const key = this.browserContentsKey(threadId, tabId);
+    const safeChecks = normalizeBrowserAssertionChecks(checks);
+    const pageResults = await contents.executeJavaScript(`
+      (() => {
+        const checks = ${JSON.stringify(safeChecks)};
+        const matchValue = (actual, expected, mode = 'includes') => {
+          if (mode === 'equals') return actual === expected;
+          if (mode === 'regex') {
+            try { return new RegExp(expected).test(actual); } catch { return false; }
+          }
+          return actual.includes(expected);
+        };
+        const visible = (element) => {
+          if (!element) return false;
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+        };
+        return checks.filter((check) => check.type !== 'no_severe_console_errors').map((check) => {
+          try {
+            if (check.type === 'url' || check.type === 'title' || check.type === 'text') {
+              const actual = check.type === 'url' ? location.href : check.type === 'title' ? document.title : (document.body?.innerText || '');
+              const passed = matchValue(actual, check.value, check.match);
+              return { check, passed, message: passed ? check.type + ' matched' : check.type + ' did not match', actual: actual.slice(0, 1000) };
+            }
+            if (check.type === 'element') {
+              const element = document.querySelector(check.selector);
+              const state = check.state || 'visible';
+              const passed = state === 'exists' ? Boolean(element)
+                : state === 'visible' ? visible(element)
+                : state === 'enabled' ? Boolean(element && visible(element) && !element.disabled && element.getAttribute('aria-disabled') !== 'true')
+                : Boolean(element && (element.checked || element.selected || element.getAttribute('aria-selected') === 'true'));
+              return { check, passed, message: passed ? 'element ' + state : 'element is not ' + state, actual: element ? element.tagName.toLowerCase() : null };
+            }
+            if (check.type === 'images_loaded') {
+              const images = [...document.images];
+              const broken = images.filter((image) => !image.complete || image.naturalWidth <= 0).map((image) => image.currentSrc || image.src).slice(0, 20);
+              return { check, passed: broken.length === 0, message: broken.length === 0 ? 'all images loaded' : broken.length + ' image(s) failed to load', actual: { total: images.length, broken } };
+            }
+            if (check.type === 'no_horizontal_overflow') {
+              const actual = { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth };
+              const passed = actual.scrollWidth <= actual.clientWidth + 1;
+              return { check, passed, message: passed ? 'no horizontal overflow' : 'page has horizontal overflow', actual };
+            }
+            if (check.type === 'canvas_nonblank') {
+              const canvases = check.selector ? [...document.querySelectorAll(check.selector)] : [...document.querySelectorAll('canvas')];
+              let opaquePixels = 0;
+              const colors = new Set();
+              for (const canvas of canvases) {
+                const context = canvas.getContext('2d', { willReadFrequently: true });
+                if (canvas.width <= 0 || canvas.height <= 0) continue;
+                const sampleWidth = Math.min(canvas.width, 256);
+                const sampleHeight = Math.min(canvas.height, 256);
+                let data;
+                if (context) {
+                  data = context.getImageData(0, 0, sampleWidth, sampleHeight).data;
+                } else {
+                  const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+                  if (!gl) continue;
+                  data = new Uint8Array(sampleWidth * sampleHeight * 4);
+                  gl.readPixels(0, 0, sampleWidth, sampleHeight, gl.RGBA, gl.UNSIGNED_BYTE, data);
+                }
+                const step = Math.max(4, Math.floor(data.length / (16000 * 4)) * 4);
+                for (let index = 0; index < data.length; index += step) {
+                  if (data[index + 3] > 8) opaquePixels += 1;
+                  colors.add(data[index] + ',' + data[index + 1] + ',' + data[index + 2] + ',' + data[index + 3]);
+                }
+              }
+              const passed = canvases.length > 0 && opaquePixels >= (check.minOpaquePixels || 24) && colors.size >= (check.minColors || 2);
+              return { check, passed, message: passed ? 'canvas contains rendered pixels' : 'canvas is blank, transparent, or unavailable', actual: { canvases: canvases.length, opaquePixels, colors: colors.size } };
+            }
+            return { check, passed: false, message: 'unsupported assertion check' };
+          } catch (error) {
+            return { check, passed: false, message: error instanceof Error ? error.message : String(error) };
+          }
+        });
+      })()
+    `, true) as BrowserAssertionResult[];
+    const results = [...pageResults];
+    for (const check of safeChecks.filter((item) => item.type === "no_severe_console_errors")) {
+      const errors = this.#browserConsoleErrors.get(key) ?? [];
+      results.push({
+        check,
+        passed: errors.length === 0,
+        message: errors.length === 0 ? "no severe console errors" : `${errors.length} severe console error(s)`,
+        actual: errors
+      });
+    }
+    const title = contents.getTitle() || contents.getURL();
+    const url = contents.getURL();
+    return {
+      title,
+      url,
+      viewport: this.#browserViewports.get(key) ?? this.defaultBrowserViewport(contents),
+      passed: results.length > 0 && results.every((result) => result.passed),
+      results
+    };
   }
 
   public async syncBrowserWebContents(input: { threadId: string; tabId: string }): Promise<BrowserTabRecord> {
@@ -1261,6 +1457,21 @@ export class DesktopBackend {
     return `${threadId}:${tabId}`;
   }
 
+  private releaseBrowserTabContents(threadId: string, tabId: string): void {
+    const key = this.browserContentsKey(threadId, tabId);
+    const contents = this.#browserContents.get(key);
+    this.#browserContents.delete(key);
+    this.#browserViewports.delete(key);
+    this.#browserConsoleErrors.delete(key);
+    this.#browserDebuggerOwned.delete(key);
+    if (contents && !contents.isDestroyed()) contents.close();
+  }
+
+  private defaultBrowserViewport(contents: WebContents): BrowserViewport {
+    const size = BrowserWindow.fromWebContents(contents)?.getContentBounds();
+    return { width: Math.max(1, size?.width ?? 1440), height: Math.max(1, size?.height ?? 900), deviceScaleFactor: 1, mobile: false };
+  }
+
   private async requireBrowserContents(threadId: string, tabId: string): Promise<WebContents> {
     const key = this.browserContentsKey(threadId, tabId);
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -1349,16 +1560,45 @@ export class DesktopBackend {
     return { ...snapshot, artifact };
   }
 
-  public async captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string) {
+  public async captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string, fullPage = false) {
     const contents = await this.requireBrowserContents(threadId, tabId);
+    const key = this.browserContentsKey(threadId, tabId);
     const outputDir = await this.getThreadOutputDir(threadId);
     const browserDir = path.join(outputDir, "browser");
     await fs.mkdir(browserDir, { recursive: true });
     const title = contents.getTitle() || "browser-page";
     const fileName = `${title.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "page"}-${Date.now()}.png`;
     const filePath = path.join(browserDir, fileName);
-    const image = await contents.capturePage();
-    await fs.writeFile(filePath, image.toPNG());
+    let png: Buffer;
+    if (fullPage) {
+      let attachedHere = false;
+      if (!contents.debugger.isAttached()) {
+        contents.debugger.attach("1.3");
+        attachedHere = true;
+      }
+      try {
+        const metrics = await contents.debugger.sendCommand("Page.getLayoutMetrics") as { cssContentSize?: { width: number; height: number } };
+        const contentSize = metrics.cssContentSize ?? { width: 1440, height: 900 };
+        const captured = await contents.debugger.sendCommand("Page.captureScreenshot", {
+          format: "png",
+          captureBeyondViewport: true,
+          fromSurface: true,
+          clip: {
+            x: 0,
+            y: 0,
+            width: Math.min(16384, Math.max(1, contentSize.width)),
+            height: Math.min(16384, Math.max(1, contentSize.height)),
+            scale: 1
+          }
+        }) as { data: string };
+        png = Buffer.from(captured.data, "base64");
+      } finally {
+        if (attachedHere && contents.debugger.isAttached()) contents.debugger.detach();
+      }
+    } else {
+      png = (await contents.capturePage()).toPNG();
+    }
+    await fs.writeFile(filePath, png);
     const stats = await fs.stat(filePath);
     const artifact = this.#db.addArtifact({
       threadId,
@@ -1376,7 +1616,31 @@ export class DesktopBackend {
       isUserVisible: true,
       status: "ready"
     });
-    return { title, url: contents.getURL(), filePath, artifact };
+    const dimensions = readPngDimensions(png);
+    const capturedAt = new Date().toISOString();
+    const attachment: MessageAttachment = {
+      id: randomUUID(),
+      kind: "image",
+      name: fileName,
+      mimeType: "image/png",
+      absolutePath: filePath,
+      sizeBytes: stats.size,
+      width: dimensions.width,
+      height: dimensions.height,
+      source: "generated"
+    };
+    return {
+      title,
+      url: contents.getURL(),
+      filePath,
+      width: dimensions.width,
+      height: dimensions.height,
+      viewport: this.#browserViewports.get(key) ?? this.defaultBrowserViewport(contents),
+      fullPage,
+      capturedAt,
+      attachment,
+      artifact
+    };
   }
 
   public async importKnowledge(input: {
@@ -2285,6 +2549,48 @@ function extensionForMimeType(mimeType: string): string {
 async function fileSha256(filePath: string): Promise<string> {
   const buffer = await fs.readFile(filePath);
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+function normalizeBrowserViewport(viewport: BrowserViewport): BrowserViewport {
+  const width = Math.min(3840, Math.max(320, Math.round(Number(viewport.width) || 1440)));
+  const height = Math.min(2160, Math.max(320, Math.round(Number(viewport.height) || 900)));
+  return {
+    width,
+    height,
+    deviceScaleFactor: Math.min(3, Math.max(1, Number(viewport.deviceScaleFactor) || 1)),
+    mobile: viewport.mobile ?? width <= 500
+  };
+}
+
+function normalizeBrowserAssertionChecks(checks: BrowserAssertionCheck[]): BrowserAssertionCheck[] {
+  const normalized: BrowserAssertionCheck[] = [];
+  for (const check of checks.slice(0, 40)) {
+    if (!check || typeof check !== "object" || typeof check.type !== "string") continue;
+    if (check.type === "url" || check.type === "title" || check.type === "text") {
+      if (typeof check.value !== "string" || check.value.length === 0 || check.value.length > 500) continue;
+      normalized.push({ ...check, match: check.match ?? "includes" });
+      continue;
+    }
+    if (check.type === "element") {
+      if (typeof check.selector !== "string" || check.selector.length === 0 || check.selector.length > 500) continue;
+      normalized.push({ ...check, state: check.state ?? "visible" });
+      continue;
+    }
+    if (
+      check.type === "images_loaded" ||
+      check.type === "no_horizontal_overflow" ||
+      check.type === "canvas_nonblank" ||
+      check.type === "no_severe_console_errors"
+    ) normalized.push(check);
+  }
+  return normalized;
+}
+
+function readPngDimensions(buffer: Buffer): { width: number; height: number } {
+  if (buffer.length < 24 || buffer.toString("ascii", 1, 4) !== "PNG") {
+    throw new Error("Browser screenshot is not a valid PNG image.");
+  }
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
 }
 
 function resolveProjectKnowledgeBundleRoot(

@@ -354,6 +354,10 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
       isStructured: false
     };
   }
+  const structuredDecision = parseDecisionFromText(text);
+  if (structuredDecision.isStructured) {
+    return structuredDecision;
+  }
   return {
     assistantMessage: text,
     toolCalls: [],
@@ -750,7 +754,7 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
     });
   }
 
-  return messages;
+  return mergeAdjacentProviderMessages(messages, "content");
 }
 
 function normalizeOpenAiCompatibleRole(role: ProviderTurnInput["transcript"][number]["role"]) {
@@ -810,7 +814,7 @@ async function buildAnthropicMessages(input: ProviderTurnInput): Promise<any[]> 
       )
     });
   }
-  return messages;
+  return mergeAdjacentProviderMessages(messages, "content");
 }
 
 async function buildGeminiContents(input: ProviderTurnInput): Promise<any[]> {
@@ -856,7 +860,24 @@ async function buildGeminiContents(input: ProviderTurnInput): Promise<any[]> {
       )
     });
   }
-  return contents;
+  return mergeAdjacentProviderMessages(contents, "parts");
+}
+
+function mergeAdjacentProviderMessages(messages: any[], contentKey: "content" | "parts"): any[] {
+  const merged: any[] = [];
+  for (const message of messages) {
+    const previous = merged[merged.length - 1];
+    if (
+      previous?.role === message.role &&
+      Array.isArray(previous[contentKey]) &&
+      Array.isArray(message[contentKey])
+    ) {
+      previous[contentKey] = [...previous[contentKey], ...message[contentKey]];
+    } else {
+      merged.push(message);
+    }
+  }
+  return merged;
 }
 
 export function parseDecisionFromText(text: string): ProviderTurnDecision {
@@ -893,6 +914,10 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
         : [],
       endTurn: parsed.end_turn !== false,
       goalCompleted: parsed.goal_completed === true,
+      completedTaskIds: parseCompletedTaskIds(parsed.completed_task_ids ?? parsed.completedTaskIds),
+      completionEvidence: parseCompletionEvidence(
+        parsed.completion_evidence ?? parsed.completionEvidence
+      ),
       isStructured: true,
       reasoningSummary:
         typeof parsed.reasoning_summary === "string" ? parsed.reasoning_summary : undefined
@@ -906,6 +931,57 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
     goalCompleted: false,
     isStructured: false
   };
+}
+
+function parseCompletedTaskIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const ids = [...new Set(
+    value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim().toUpperCase())
+      .filter(Boolean)
+  )];
+  return ids.length > 0 ? ids : undefined;
+}
+
+function parseCompletionEvidence(
+  value: unknown
+): ProviderTurnDecision["completionEvidence"] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const evidence = value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    const taskId = typeof record.task_id === "string"
+      ? record.task_id
+      : typeof record.taskId === "string"
+        ? record.taskId
+        : "";
+    const toolCallId = typeof record.tool_call_id === "string"
+      ? record.tool_call_id
+      : typeof record.toolCallId === "string"
+        ? record.toolCallId
+        : "";
+    const kind = record.kind;
+    if (
+      !taskId.trim() ||
+      !toolCallId.trim() ||
+      (kind !== "observation" && kind !== "delivery" && kind !== "verification")
+    ) {
+      return [];
+    }
+    return [{
+      taskId: taskId.trim().toUpperCase(),
+      toolCallId: toolCallId.trim(),
+      kind: kind as "observation" | "delivery" | "verification"
+    }];
+  });
+  return evidence.length > 0 ? evidence : undefined;
 }
 
 function extractVisibleStreamText(text: string): string {
@@ -1161,6 +1237,10 @@ function looksLikeAgentDecisionEnvelope(parsed: Record<string, unknown>): boolea
     "tool_calls" in parsed ||
     "end_turn" in parsed ||
     "goal_completed" in parsed ||
+    "completed_task_ids" in parsed ||
+    "completedTaskIds" in parsed ||
+    "completion_evidence" in parsed ||
+    "completionEvidence" in parsed ||
     "clarification" in parsed ||
     "reasoning_summary" in parsed
   );
@@ -1190,12 +1270,13 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
   return [
     "You are codexh, a desktop agent.",
     "When native function tools are provided, invoke them through the provider tool-call channel; never serialize a tool call into assistant text.",
-    "With native function tools, return normal assistant text only after the entire original user goal is complete and verified. If more work is needed, call the next provided tool instead of returning a progress promise.",
+    "With native function tools, call tools through the provider channel. When the entire original goal is complete, return the final JSON decision envelope described below; if more work is needed, call the next tool instead of returning a progress promise.",
     "When no native tools are provided, return exactly one valid JSON object and no text outside that JSON object.",
-    "The JSON fallback keys are: assistant_message, tool_calls, end_turn, goal_completed, reasoning_summary.",
+    "The JSON decision keys are: assistant_message, tool_calls, end_turn, goal_completed, completed_task_ids, completion_evidence, reasoning_summary.",
     "assistant_message is visible to the user: write concise Markdown or one short progress update before tool calls.",
     "Never expose private chain-of-thought; reasoning_summary is internal only and must never be rendered.",
     "tool_calls must be an array of { name, arguments }.",
+    "For GPA ACT final responses, completed_task_ids must list every completed PLAN task id. completion_evidence must be an array of { task_id, tool_call_id, kind }, where kind is observation, delivery, or verification and tool_call_id comes from an actual successful tool result.",
     "When request_user_input is listed, use that tool for a material user decision instead of placing questions in assistant_message. Do not call tools that were not listed.",
     "Only call tools that were provided in the tool list.",
     "When shell.exec is listed, it is the command execution tool. Do not state that command execution is unavailable; call shell.exec with {\"command\": \"...\"} instead.",

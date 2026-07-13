@@ -4,6 +4,10 @@ import path from "node:path";
 import type {
   AppConfig,
   ArtifactRecord,
+  BrowserTabRecord,
+  BrowserAssertionCheck,
+  BrowserViewport,
+  CompletionEvidenceKind,
   MessageAttachment,
   McpServerConfig,
   MessageRecord,
@@ -31,11 +35,13 @@ import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName } from "@tool-runtime";
 import {
   buildGpaSystemDirective,
+  buildGpaTextClarificationQuestions,
   DEFAULT_GPA_STATE,
   detectGpaConfirmation,
   gpaStageAllowsTools,
   gpaStageLabel,
   nextStageAfterConfirmation,
+  parseGpaPlanTasks,
   parseGpaState
 } from "./gpa";
 import {
@@ -46,7 +52,12 @@ import {
 } from "./multimodal-intent";
 import type { GpaStage, GpaState } from "@shared-types";
 
-export { parseGpaState } from "./gpa";
+export {
+  buildGpaTextClarificationQuestions,
+  canEnterGpaAct,
+  parseGpaPlanTasks,
+  parseGpaState
+} from "./gpa";
 export {
   detectMultimodalIntent,
   parseMultimodalIntentClassification,
@@ -59,7 +70,7 @@ export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionM
 export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
 export const MAX_AGENT_PROTOCOL_FAILURES = 2;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs;
-export const CONTEXT_COMPACTION_THRESHOLD = 0.8;
+export const CONTEXT_COMPACTION_THRESHOLD = 0.9;
 export const CONTEXT_COMPACTION_TARGET = 0.6;
 
 type Submission =
@@ -79,6 +90,52 @@ type BrowserSourceReference = {
   title: string;
   url: string;
 };
+
+export interface SuccessfulToolEvidence {
+  toolCallId: string;
+  toolRecordId?: string;
+  toolName: string;
+  kinds: CompletionEvidenceKind[];
+  verifiedPaths?: string[];
+}
+
+export interface ActCompletionValidationResult {
+  valid: boolean;
+  reasons: string[];
+  missingTaskIds: string[];
+  missingEvidenceTaskIds: string[];
+  invalidEvidenceToolCallIds: string[];
+  missingDelivery: boolean;
+  missingVerification: boolean;
+  missingBrowserVerification?: string[];
+}
+
+interface BrowserVerificationEvidenceState {
+  required: boolean;
+  canvasRequired: boolean;
+  desktopAssertions: Set<string>;
+  mobileAssertions: Set<string>;
+  desktopScreenshots: Set<string>;
+  mobileScreenshots: Set<string>;
+  screenshotAttachmentsSent: Set<string>;
+  tabIds: Set<string>;
+  visualSkippedReason?: "model_not_multimodal";
+  operationIndex?: number;
+  latestFrontendDeliveryIndex?: number;
+  latestPageLoadIndex?: number;
+}
+
+interface BrowserCompletionRequirement {
+  desktopOnly: boolean;
+  canvasRequired: boolean;
+  desktopAssertionCount: number;
+  mobileAssertionCount: number;
+  desktopScreenshotCount: number;
+  mobileScreenshotCount: number;
+  screenshotAttachmentCount: number;
+  modelSupportsMultimodalInput: boolean;
+  visualSkippedReason?: "model_not_multimodal";
+}
 
 interface RuntimePersistence {
   getThread(threadId: string): Promise<ThreadRecord>;
@@ -139,6 +196,7 @@ interface RuntimeServices {
   findInPage(url: string, pattern: string): Promise<string[]>;
   listBrowserTabs(threadId: string): Promise<any[]>;
   openBrowserTab(threadId: string, url: string): Promise<any>;
+  closeBrowserTabs(threadId: string, tabIds: string[]): Promise<void>;
   navigateBrowserTab(threadId: string, tabId: string, url: string): Promise<any>;
   reloadBrowserTab(threadId: string, tabId: string): Promise<any>;
   goBackBrowserTab(threadId: string, tabId: string): Promise<any>;
@@ -153,7 +211,9 @@ interface RuntimeServices {
   scrollBrowserPage(threadId: string, tabId: string, deltaY: number): Promise<any>;
   pressBrowserKey(threadId: string, tabId: string, key: string): Promise<any>;
   waitForBrowserPage(threadId: string, tabId: string, input: { text?: string; elementId?: string; timeoutMs?: number }): Promise<any>;
-  captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string): Promise<any>;
+  setBrowserViewport(threadId: string, tabId: string, viewport: BrowserViewport | null): Promise<any>;
+  assertBrowserPage(threadId: string, tabId: string, checks: BrowserAssertionCheck[]): Promise<any>;
+  captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string, fullPage?: boolean): Promise<any>;
   captureBrowserSnapshot(threadId: string, tabId: string, turnRunId: string): Promise<any>;
   getThreadOutputDir(threadId: string): Promise<string>;
   listMcpResources(server?: string): Promise<any[]>;
@@ -354,10 +414,24 @@ class ThreadSessionRuntime {
 
   public async setGpaStage(stage: GpaStage): Promise<void> {
     await this.#ensureGpa();
+    // ACT is reached only through a confirmed PLAN. Keeping this check in the
+    // runtime prevents an outdated renderer or IPC caller from bypassing GPA.
+    if (
+      stage === "act" &&
+      (this.#gpa.stage !== "plan" || this.#gpa.planTasks.length === 0)
+    ) {
+      await this.services.log("gpa.act_transition_rejected", this.threadId, {
+        currentStage: this.#gpa.stage,
+        planTaskCount: this.#gpa.planTasks.length,
+        reason: "ACT requires a confirmed, validated PLAN."
+      });
+      return;
+    }
     await this.#commitGpa({
       ...this.#gpa,
       stage,
       awaitingConfirmation: null,
+      planTasks: stage === "goal" || stage === "off" ? [] : this.#gpa.planTasks,
       updatedAt: new Date().toISOString()
     });
   }
@@ -490,6 +564,31 @@ class ThreadSessionRuntime {
     });
 
     const abortController = new AbortController();
+    const agentOpenedBrowserTabIds = new Set<string>();
+    const browserVerificationEvidence: BrowserVerificationEvidenceState = {
+      required: false,
+      canvasRequired: false,
+      desktopAssertions: new Set(),
+      mobileAssertions: new Set(),
+      desktopScreenshots: new Set(),
+      mobileScreenshots: new Set(),
+      screenshotAttachmentsSent: new Set(),
+      tabIds: new Set(),
+      visualSkippedReason: model.supportsMultimodalInput ? undefined : "model_not_multimodal"
+    };
+    const trackOpenedBrowserTabs = async <T>(operation: () => Promise<T>): Promise<T> => {
+      const before = new Set(
+        (await this.services.listBrowserTabs(this.threadId)).map((tab: { id: string }) => tab.id)
+      );
+      try {
+        return await operation();
+      } finally {
+        const after = await this.services.listBrowserTabs(this.threadId);
+        for (const tab of after) {
+          if (!before.has(tab.id)) agentOpenedBrowserTabIds.add(tab.id);
+        }
+      }
+    };
     this.#abortController = abortController;
     this.#activeTurnRunId = turn.id;
     try {
@@ -523,25 +622,38 @@ class ThreadSessionRuntime {
 
       // 简短确认语（确认/OK/开始等）按 doc/GPA.md 推进阶段：GOAL→PLAN→ACT
       await this.#ensureGpa();
+      const isInternalGpaConfirmation = initialInput.startsWith("[internal:gpa-confirm]");
       if (
-        detectGpaConfirmation(initialInput) &&
+        (isInternalGpaConfirmation || detectGpaConfirmation(initialInput)) &&
         (this.#gpa.stage === "goal" || this.#gpa.stage === "plan")
       ) {
-        const advanced = nextStageAfterConfirmation(this.#gpa.stage);
-        await this.#commitGpa({
-          ...this.#gpa,
-          stage: advanced,
-          awaitingConfirmation: null,
-          updatedAt: new Date().toISOString()
-        });
+        // PLAN must be visible and have parsed tasks before ACT can ever run.
+        // This guard also protects existing UI clients that might submit a stale
+        // plan confirmation after a malformed model response.
+        if (this.#gpa.stage === "plan" && this.#gpa.planTasks.length === 0) {
+          await this.services.log("gpa.plan_confirmation_rejected", this.threadId, {
+            turnRunId: turn.id,
+            reason: "No validated plan tasks were persisted."
+          });
+        } else {
+          const advanced = nextStageAfterConfirmation(this.#gpa.stage);
+          await this.#commitGpa({
+            ...this.#gpa,
+            stage: advanced,
+            awaitingConfirmation: null,
+            updatedAt: new Date().toISOString()
+          });
+        }
       }
 
       let interruptedVisibleContent = "";
 
       try {
-        let transcript = compactTranscript(history);
+        let transcript = buildRuntimeTranscript(history);
       let hasExecutedToolCall = false;
       const successfulToolCallFingerprints = new Set<string>();
+      const successfulToolEvidence: SuccessfulToolEvidence[] = [];
+      const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
       const knowledgeSources = new Map<string, KnowledgeSourceReference>();
@@ -550,10 +662,16 @@ class ThreadSessionRuntime {
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
+      const readRepeatedTaskFailure = () => repeatedTaskFailure as {
+        taskKey: string;
+        attempts: number;
+        lastError: string;
+      } | null;
       let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
       let agentProtocolFailureAttempts = 0;
+      let gpaAnalysisValidationAttempts = 0;
       const requiresAgentDecisionProtocol = () => this.#gpa.stage === "off" || this.#gpa.stage === "act";
 
       if (this.#gpa.stage !== "off" && !agentToolsEnabled) {
@@ -625,6 +743,32 @@ class ThreadSessionRuntime {
         return bootstrapWorkspace;
       };
 
+      const compactTranscriptForModel = async (systemPrompt: string) => {
+        const compaction = compactTranscriptForContext(transcript, model.contextWindow, systemPrompt);
+        if (!compaction.compacted) {
+          return;
+        }
+
+        transcript = compaction.transcript;
+        const compactionPayload = {
+          turnRunId: turn.id,
+          contextWindow: model.contextWindow,
+          threshold: CONTEXT_COMPACTION_THRESHOLD,
+          target: CONTEXT_COMPACTION_TARGET,
+          beforeTokens: compaction.beforeTokens,
+          afterTokens: compaction.afterTokens,
+          messagesBefore: compaction.messagesBefore,
+          messagesAfter: transcript.length
+        };
+        await this.services.log("agent.context_compacted", this.threadId, compactionPayload);
+        await this.services.emit({
+          type: "agent.context_compacted",
+          threadId: this.threadId,
+          payload: compactionPayload,
+          createdAt: new Date().toISOString()
+        });
+      };
+
       while (!repeatedTaskFailure) {
         const prompt = buildRuntimePrompt(
           model,
@@ -641,21 +785,8 @@ class ThreadSessionRuntime {
         const modelTurnAbortController = createChildAbortController(abortController.signal);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa) || ""
-        }\n\n${availableToolsPrompt}`;
-        const compaction = compactTranscriptForContext(transcript, model.contextWindow, systemPrompt);
-        if (compaction.compacted) {
-          transcript = compaction.transcript;
-          await this.services.log("agent.context_compacted", this.threadId, {
-            turnRunId: turn.id,
-            contextWindow: model.contextWindow,
-            threshold: CONTEXT_COMPACTION_THRESHOLD,
-            target: CONTEXT_COMPACTION_TARGET,
-            beforeTokens: compaction.beforeTokens,
-            afterTokens: compaction.afterTokens,
-            messagesBefore: compaction.messagesBefore,
-            messagesAfter: transcript.length
-          });
-        }
+        }${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${availableToolsPrompt}`;
+        await compactTranscriptForModel(systemPrompt);
         const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
           ? this.services.config.timeouts.recoveryModelDecisionMs
           : this.services.config.timeouts.modelDecisionMs;
@@ -734,6 +865,30 @@ class ThreadSessionRuntime {
           throw new Error("Turn interrupted.");
         }
 
+        const textClarificationQuestions =
+          !decision.clarification &&
+          !decision.toolCalls.some((call) => call.name === "request_user_input")
+            ? buildGpaTextClarificationQuestions(this.#gpa.stage, decision.assistantMessage)
+            : [];
+        if (textClarificationQuestions.length > 0) {
+          await this.services.log("gpa.text_clarification_promoted", this.threadId, {
+            turnRunId: turn.id,
+            stage: this.#gpa.stage,
+            questionCount: textClarificationQuestions.length
+          });
+          decision.toolCalls = [{
+            id: randomUUID(),
+            name: "request_user_input",
+            arguments: {
+              title: this.#gpa.stage === "plan" ? "计划细节待确认" : "目标细节待确认",
+              questions: textClarificationQuestions
+            }
+          }];
+          decision.assistantMessage = undefined;
+          decision.endTurn = false;
+          decision.goalCompleted = false;
+        }
+
         if (decision.clarification && this.#gpa.stage !== "off") {
           const clarification = decision.clarification;
           // Compatibility bridge for adapters that still return the legacy
@@ -774,15 +929,24 @@ class ThreadSessionRuntime {
 
         if (!decision.isStructured) {
           if (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") {
-            await this.services.persistence.finishTurn(turn.id, {
-              status: "completed",
-              completedAt: new Date().toISOString()
+            gpaAnalysisValidationAttempts += 1;
+            await this.services.log("gpa.analysis_output_invalid", this.threadId, {
+              turnRunId: turn.id,
+              stage: this.#gpa.stage,
+              attempt: gpaAnalysisValidationAttempts,
+              reason: "The model did not return a valid structured decision envelope."
             });
-            terminalThread = await this.services.persistence.updateThread(this.threadId, {
-              status: "completed",
-              updatedAt: new Date().toISOString()
+            if (gpaAnalysisValidationAttempts >= MAX_AGENT_PROTOCOL_FAILURES) {
+              throw new Error(
+                "GPA analysis failed: the model did not return a valid visible response. Please switch to a model that supports structured GPA output and try again."
+              );
+            }
+            transcript.push({
+              role: "user",
+              content:
+                "Return a valid structured GPA response now. Do not call tools. Your assistant_message must contain the complete user-visible analysis for this stage."
             });
-            break;
+            continue;
           }
           const bootstrapWorkspace = await recoverActExecution(
             "The response was not a valid JSON decision envelope."
@@ -837,37 +1001,6 @@ class ThreadSessionRuntime {
           };
         }
 
-        if (
-          this.#gpa.stage === "act" &&
-          hasExecutedToolCall &&
-          decision.toolCalls.length === 0 &&
-          decision.endTurn &&
-          !decision.goalCompleted
-        ) {
-          prematureCompletionAttempts += 1;
-          if (prematureCompletionAttempts >= MAX_REPEATED_TASK_FAILURES) {
-            repeatedTaskFailure = {
-              taskKey: "goal-completion-verification",
-              attempts: prematureCompletionAttempts,
-              lastError:
-                "The model repeatedly attempted to end the task without declaring that the original goal was complete."
-            };
-            break;
-          }
-          await this.services.log("turn.premature_completion_blocked", this.threadId, {
-            turnRunId: turn.id,
-            attempts: prematureCompletionAttempts,
-            originalGoal: initialInput
-          });
-          transcript.push({
-            role: "user",
-            content:
-              "The original user goal is not proven complete. Do not end the task after a single subtask. " +
-              "Continue implementing and verifying every requested deliverable. Return goal_completed: true only in the final response after all work is complete."
-          });
-          continue;
-        }
-
         const originalToolCallCount = decision.toolCalls.length;
         decision.toolCalls = prioritizeUserInputToolCall(decision.toolCalls);
         if (decision.toolCalls.length !== originalToolCallCount) {
@@ -890,6 +1023,139 @@ class ThreadSessionRuntime {
         }
 
         const assistantMessage = decision.assistantMessage?.trim();
+        if (
+          this.#gpa.stage === "act" &&
+          decision.toolCalls.length === 0 &&
+          decision.endTurn
+        ) {
+          const completionValidation = validateActCompletion({
+            decision,
+            planTasks: this.#gpa.planTasks,
+            successfulEvidence: successfulToolEvidence,
+            browserVerification: browserVerificationEvidence.required ? {
+              desktopOnly: desktopOnlyBrowserVerification,
+              canvasRequired: browserVerificationEvidence.canvasRequired,
+              desktopAssertionCount: browserVerificationEvidence.desktopAssertions.size,
+              mobileAssertionCount: browserVerificationEvidence.mobileAssertions.size,
+              desktopScreenshotCount: browserVerificationEvidence.desktopScreenshots.size,
+              mobileScreenshotCount: browserVerificationEvidence.mobileScreenshots.size,
+              screenshotAttachmentCount: browserVerificationEvidence.screenshotAttachmentsSent.size,
+              modelSupportsMultimodalInput: model.supportsMultimodalInput,
+              visualSkippedReason: browserVerificationEvidence.visualSkippedReason
+            } : undefined
+          });
+          if (!completionValidation.valid) {
+            prematureCompletionAttempts += 1;
+            if (assistantMessage) {
+              await this.services.emit({
+                type: "assistant.execution_output",
+                threadId: this.threadId,
+                payload: {
+                  turnRunId: turn.id,
+                  title: "未通过完成校验的执行输出",
+                  content: assistantMessage
+                },
+                createdAt: new Date().toISOString()
+              });
+            }
+            await this.services.log("turn.completion_evidence_rejected", this.threadId, {
+              turnRunId: turn.id,
+              attempt: prematureCompletionAttempts,
+              reasons: completionValidation.reasons,
+              missingTaskIds: completionValidation.missingTaskIds,
+              missingEvidenceTaskIds: completionValidation.missingEvidenceTaskIds,
+              invalidEvidenceToolCallIds: completionValidation.invalidEvidenceToolCallIds,
+              missingDelivery: completionValidation.missingDelivery,
+              missingVerification: completionValidation.missingVerification,
+              missingBrowserVerification: completionValidation.missingBrowserVerification,
+              successfulEvidence: successfulToolEvidence.map((item) => ({
+                toolCallId: item.toolCallId,
+                toolName: item.toolName,
+                kinds: item.kinds,
+                verifiedPaths: item.verifiedPaths
+              }))
+            });
+
+            const recoveryInstruction = buildActCompletionRecoveryInstruction(completionValidation);
+            if (prematureCompletionAttempts >= MAX_REPEATED_TASK_FAILURES) {
+              const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+                title: "任务完成条件尚未满足",
+                kind: "generic",
+                allowSkip: false,
+                questions: [{
+                  id: "recovery",
+                  label: "是否继续处理？",
+                  prompt: `模型已连续 ${prematureCompletionAttempts} 次尝试提前结束，但仍缺少可验证的交付或验证证据。`,
+                  options: [
+                    {
+                      id: "continue",
+                      label: "继续尝试",
+                      description: "保持 GPA ACT，要求模型根据缺失证据继续执行。",
+                      recommended: true
+                    },
+                    {
+                      id: "stop",
+                      label: "停止任务",
+                      description: "停止当前任务并保留已有工具结果。"
+                    }
+                  ]
+                }]
+              });
+              if (answers.recovery === "continue") {
+                prematureCompletionAttempts = 0;
+                transcript.push({ role: "user", content: recoveryInstruction });
+                await this.services.log("turn.completion_evidence_retry_continued", this.threadId, {
+                  turnRunId: turn.id
+                });
+                continue;
+              }
+              repeatedTaskFailure = {
+                taskKey: "goal-completion-verification",
+                attempts: prematureCompletionAttempts,
+                lastError: completionValidation.reasons.join(" ")
+              };
+              break;
+            }
+            transcript.push({ role: "user", content: recoveryInstruction });
+            continue;
+          }
+          await this.services.log("turn.completion_evidence_accepted", this.threadId, {
+            turnRunId: turn.id,
+            completedTaskIds: decision.completedTaskIds,
+            evidenceCount: decision.completionEvidence?.length ?? 0
+          });
+        }
+        const parsedPlanTasks = this.#gpa.stage === "plan"
+          ? parseGpaPlanTasks(assistantMessage ?? "")
+          : [];
+        if (
+          (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") &&
+          decision.toolCalls.length === 0 &&
+          decision.endTurn &&
+          (!assistantMessage || (this.#gpa.stage === "plan" && parsedPlanTasks.length === 0))
+        ) {
+          gpaAnalysisValidationAttempts += 1;
+          await this.services.log("gpa.analysis_output_invalid", this.threadId, {
+            turnRunId: turn.id,
+            stage: this.#gpa.stage,
+            attempt: gpaAnalysisValidationAttempts,
+            hasAssistantMessage: Boolean(assistantMessage),
+            parsedTaskCount: parsedPlanTasks.length
+          });
+          if (gpaAnalysisValidationAttempts >= MAX_AGENT_PROTOCOL_FAILURES) {
+            throw new Error(
+              `GPA ${this.#gpa.stage.toUpperCase()} failed: the model did not return a valid visible response. Please switch to a model that supports structured GPA output and try again.`
+            );
+          }
+          transcript.push({
+            role: "user",
+            content:
+              this.#gpa.stage === "plan"
+                ? "Your previous PLAN response was not shown because it did not contain a valid task list. Return a user-visible PLAN now. Include at least one task on its own line using exactly `T1: task title` (then T2, T3 as needed), plus acceptance criteria. Do not call tools."
+                : "Your previous GOAL response was not shown because it was empty. Return a complete, user-visible GOAL analysis with the objective, acceptance criteria, constraints, and any needed clarification. Do not call tools."
+          });
+          continue;
+        }
         const deferredExecutionPayload = assistantMessage && isDeferredExecutionPayload(assistantMessage);
         if (deferredExecutionPayload) {
           await this.services.emit({
@@ -942,6 +1208,14 @@ class ThreadSessionRuntime {
               turn.id,
               Object.keys(sourceMetadata).length > 0 ? sourceMetadata : undefined
             );
+            if (this.#gpa.stage === "plan" && parsedPlanTasks.length > 0) {
+              await this.#commitGpa({
+                ...this.#gpa,
+                planTasks: parsedPlanTasks,
+                awaitingConfirmation: null,
+                updatedAt: new Date().toISOString()
+              });
+            }
             transcript.push({ role: "assistant", content: assistantMessage.content });
             if (streamedVisibleContent) {
               await this.services.emit({
@@ -971,12 +1245,13 @@ class ThreadSessionRuntime {
           if (abortController.signal.aborted) {
             throw new Error("Turn interrupted.");
           }
-          const toolCall = {
+          let toolCall = {
             ...rawToolCall,
             name: canonicalizeToolName(rawToolCall.name)
           };
-          const toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
-          const toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+          let toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
+          let toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+          const browserTabs = await this.services.listBrowserTabs(this.threadId);
           const duplicateCreatedFile = getAddedPatchFiles(toolCall.arguments).find((filePath) =>
             successfullyCreatedFiles.has(filePath)
           );
@@ -997,17 +1272,30 @@ class ThreadSessionRuntime {
             continue;
           }
           if (successfulToolCallFingerprints.has(toolCallFingerprint)) {
-            const lastError =
-              `The identical tool call ${toolCall.name} already completed successfully earlier in this task.`;
-            const correction =
-              `${lastError} ` +
-              "Do not repeat it. Use its result to continue the task, choose a different tool, or return a completed decision.";
+            const retargetedToolCall = retargetStaleBrowserObservationToolCall(toolCall, browserTabs);
+            if (retargetedToolCall) {
+              toolCall = retargetedToolCall;
+              toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
+              toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+              await this.services.log("tool.browser_tab_retargeted", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                previousTabId: rawToolCall.arguments.tabId,
+                activeTabId: toolCall.arguments.tabId
+              });
+            } else {
+              const lastError =
+                `The identical tool call ${toolCall.name} already completed successfully earlier in this task.`;
+              const correction =
+                `${lastError} ` +
+                "Do not repeat it. Use its result to continue the task, choose a different tool, or return a completed decision.";
             transcript.push({ role: "user", content: correction });
-            await registerTaskFailure(toolTaskKey, lastError, "tool.duplicate_call_blocked");
-            if (repeatedTaskFailure) {
-              break;
+              await registerTaskFailure(toolTaskKey, lastError, "tool.duplicate_call_blocked");
+              if (repeatedTaskFailure) {
+                break;
+              }
+              continue;
             }
-            continue;
           }
           const failedCallAttempts = failedToolCallFingerprints.get(toolCallFingerprint) ?? 0;
           if (failedCallAttempts >= 2) {
@@ -1028,7 +1316,6 @@ class ThreadSessionRuntime {
             }
             continue;
           }
-          const browserTabs = await this.services.listBrowserTabs(this.threadId);
           const toolRecord = await this.services.persistence.recordToolCall({
             threadId: this.threadId,
             turnRunId: turn.id,
@@ -1085,16 +1372,22 @@ class ThreadSessionRuntime {
                   title: input.title,
                   kind: isGpaClarification ? "gpa_plan_clarification" : "generic",
                   allowSkip: false,
-                  questions: input.questions.slice(0, 3)
+                  questions: input.questions.slice(0, 4)
                 });
               },
               requestUserInputEnabled: this.#gpa.stage !== "off",
               spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
-              webSearch: (query) => this.services.webSearch(this.threadId, query),
-              openPage: (url) => this.services.openPage(this.threadId, url),
+              webSearch: (query) => trackOpenedBrowserTabs(
+                () => this.services.webSearch(this.threadId, query)
+              ),
+              openPage: (url) => trackOpenedBrowserTabs(
+                () => this.services.openPage(this.threadId, url)
+              ),
               findInPage: this.services.findInPage,
               listBrowserTabs: () => this.services.listBrowserTabs(this.threadId),
-              openBrowserTab: (url) => this.services.openBrowserTab(this.threadId, url),
+              openBrowserTab: (url) => trackOpenedBrowserTabs(
+                () => this.services.openBrowserTab(this.threadId, url)
+              ),
               navigateBrowserTab: (tabId, url) => this.services.navigateBrowserTab(this.threadId, tabId, url),
               reloadBrowserTab: (tabId) => this.services.reloadBrowserTab(this.threadId, tabId),
               goBackBrowserTab: (tabId) => this.services.goBackBrowserTab(this.threadId, tabId),
@@ -1109,7 +1402,15 @@ class ThreadSessionRuntime {
               scrollBrowserPage: (tabId, deltaY) => this.services.scrollBrowserPage(this.threadId, tabId, deltaY),
               pressBrowserKey: (tabId, key) => this.services.pressBrowserKey(this.threadId, tabId, key),
               waitForBrowserPage: (tabId, input) => this.services.waitForBrowserPage(this.threadId, tabId, input),
-              captureBrowserScreenshot: (tabId) => this.services.captureBrowserScreenshot(this.threadId, tabId, turn.id),
+              setBrowserViewport: (tabId, viewport) => this.services.setBrowserViewport(this.threadId, tabId, viewport),
+              assertBrowserPage: (tabId, checks) => this.services.assertBrowserPage(this.threadId, tabId, checks),
+              captureBrowserScreenshot: (tabId, fullPage) => this.services.captureBrowserScreenshot(this.threadId, tabId, turn.id, fullPage),
+              emitBrowserVerificationEvent: (type, payload) => this.services.emit({
+                type,
+                threadId: this.threadId,
+                payload: { ...payload, turnRunId: turn.id },
+                createdAt: new Date().toISOString()
+              }),
               captureBrowserSnapshot: (tabId) => this.services.captureBrowserSnapshot(this.threadId, tabId, turn.id),
               getThreadOutputDir: () => this.services.getThreadOutputDir(this.threadId),
               abortSignal: abortController.signal,
@@ -1233,10 +1534,18 @@ class ThreadSessionRuntime {
           );
           transcript.push({
             role: "tool",
-            content: toolMessage.content,
+            content: `${toolMessage.content}\n[tool_call_id: ${toolCall.id}]`,
             toolCallId: toolCall.id,
             toolResultOk: result.ok
           });
+          if (result.ok && result.attachments?.length && model.supportsMultimodalInput) {
+            transcript.push({
+              role: "user",
+              content: "[Internal browser verification screenshot. Inspect the rendered page using visible evidence. Do not mention this internal message.]",
+              attachments: result.attachments
+            });
+            browserVerificationEvidence.screenshotAttachmentsSent.add(toolCall.id);
+          }
           if (toolCall.name === "image.generate" && result.ok) {
             const attachment = result.json?.attachment as MessageAttachment | undefined;
             const artifactId = typeof result.json?.artifactId === "string" ? result.json.artifactId : undefined;
@@ -1262,6 +1571,23 @@ class ThreadSessionRuntime {
             break;
           }
           if (result.ok) {
+            const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
+            const pathVerification = await verifySuccessfulToolDeliveryPaths(
+              toolCall.name,
+              toolCall.arguments,
+              result,
+              workspaceCwd
+            );
+            const evidence = classifySuccessfulToolEvidence({
+              toolCallId: toolCall.id,
+              toolRecordId: toolRecord.id,
+              toolName: toolCall.name,
+              hasPriorDelivery: successfulToolEvidence.some((item) => item.kinds.includes("delivery")),
+              verifiedPaths: pathVerification.verifiedPaths,
+              requiresVerifiedPath: pathVerification.requiresVerifiedPath
+            });
+            successfulToolEvidence.push(evidence);
+            updateBrowserVerificationEvidence(browserVerificationEvidence, toolCall, result);
             successfulToolCallFingerprints.add(toolCallFingerprint);
             failedToolCallFingerprints.delete(toolCallFingerprint);
             for (const filePath of getAddedPatchFiles(toolCall.arguments)) {
@@ -1296,19 +1622,76 @@ class ThreadSessionRuntime {
           }
         }
 
+        // Compact only after the complete native tool batch is recorded so call
+        // envelopes and their results remain together in the retained context.
+        await compactTranscriptForModel(systemPrompt);
+
         if (reevaluateAfterUserInput) {
           continue;
         }
 
+        const failure = readRepeatedTaskFailure();
+        if (failure) {
+          await this.services.log("turn.repeated_task_failure_confirmation_requested", this.threadId, {
+            turnRunId: turn.id,
+            taskKey: failure.taskKey,
+            attempts: failure.attempts,
+            lastError: failure.lastError
+          });
+          const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+            title: "同一操作连续失败",
+            kind: "generic",
+            allowSkip: false,
+            questions: [{
+              id: "recovery",
+              label: "是否继续处理？",
+              prompt:
+                `操作 ${failure.taskKey} 已连续失败 ${failure.attempts} 次。最后结果：${failure.lastError.slice(0, 500)}`,
+              options: [
+                {
+                  id: "continue",
+                  label: "继续尝试",
+                  description: "保留当前任务；Agent 会先检查前置条件并改用不同方案。",
+                  recommended: true
+                },
+                {
+                  id: "stop",
+                  label: "结束任务",
+                  description: "停止当前任务，并保留已完成的工作和失败记录。"
+                }
+              ]
+            }]
+          });
+
+          if (answers.recovery === "continue") {
+            taskFailureCounts.clear();
+            failedToolCallFingerprints.clear();
+            repeatedTaskFailure = null;
+            executionRecoveryAttempts = 0;
+            await this.services.log("turn.repeated_task_failure_continued", this.threadId, {
+              turnRunId: turn.id,
+              taskKey: failure.taskKey,
+              previousAttempts: failure.attempts
+            });
+            transcript.push({
+              role: "user",
+              content:
+                "The user explicitly chose to continue after repeated failures. Do not repeat the same failed tool call unchanged. First inspect the target, path, permissions, or command preconditions, then use a materially different patch, command, or approach. Continue the original task after obtaining new evidence."
+            });
+            continue;
+          }
+        }
+
       }
 
-      if (repeatedTaskFailure) {
+      const terminalRepeatedTaskFailure = readRepeatedTaskFailure();
+      if (terminalRepeatedTaskFailure) {
         const errorMessage =
-          `The same task (${repeatedTaskFailure.taskKey}) failed ${repeatedTaskFailure.attempts} consecutive times. ` +
-          `Last error: ${repeatedTaskFailure.lastError}`;
+          `The same task (${terminalRepeatedTaskFailure.taskKey}) failed ${terminalRepeatedTaskFailure.attempts} consecutive times. ` +
+          `Last error: ${terminalRepeatedTaskFailure.lastError}`;
         await this.recordMessage(
           "assistant",
-          buildRepeatedTaskRecoveryMessage(repeatedTaskFailure),
+          buildRepeatedTaskRecoveryMessage(terminalRepeatedTaskFailure),
           turn.id
         );
         await this.services.persistence.finishTurn(turn.id, {
@@ -1322,9 +1705,9 @@ class ThreadSessionRuntime {
         });
         await this.services.log("turn.repeated_task_failure", this.threadId, {
           turnRunId: turn.id,
-          taskKey: repeatedTaskFailure.taskKey,
-          attempts: repeatedTaskFailure.attempts,
-          lastError: repeatedTaskFailure.lastError
+          taskKey: terminalRepeatedTaskFailure.taskKey,
+          attempts: terminalRepeatedTaskFailure.attempts,
+          lastError: terminalRepeatedTaskFailure.lastError
         });
       }
 
@@ -1339,7 +1722,10 @@ class ThreadSessionRuntime {
       }
 
       // GOAL/PLAN 阶段产出后，置为等待用户确认；ACT 阶段不挂起
-      if (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") {
+      if (
+        this.#gpa.stage === "goal" ||
+        (this.#gpa.stage === "plan" && this.#gpa.planTasks.length > 0)
+      ) {
         if (this.#gpa.awaitingConfirmation !== this.#gpa.stage) {
           await this.#commitGpa({
             ...this.#gpa,
@@ -1453,6 +1839,35 @@ class ThreadSessionRuntime {
         });
       }
     } finally {
+      for (const tabId of browserVerificationEvidence.tabIds) {
+        if (agentOpenedBrowserTabIds.has(tabId)) continue;
+        try {
+          await this.services.setBrowserViewport(this.threadId, tabId, null);
+        } catch (error) {
+          await this.services.log("browser.viewport_restore_failed", this.threadId, {
+            turnRunId: turn.id,
+            tabId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+      if (agentOpenedBrowserTabIds.size > 0) {
+        const tabIds = [...agentOpenedBrowserTabIds];
+        try {
+          await this.services.closeBrowserTabs(this.threadId, tabIds);
+          await this.services.log("browser.task_tabs_released", this.threadId, {
+            turnRunId: turn.id,
+            tabIds,
+            count: tabIds.length
+          });
+        } catch (error) {
+          await this.services.log("browser.task_tabs_release_failed", this.threadId, {
+            turnRunId: turn.id,
+            tabIds,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
       this.#activeTurnRunId = null;
       if (this.#abortController === abortController) {
         this.#abortController = null;
@@ -1908,6 +2323,30 @@ export function createToolCallFingerprint(name: string, argumentsJson: Record<st
   return `${name}:${stableSerialize(argumentsJson)}`;
 }
 
+const RETARGETABLE_BROWSER_OBSERVATION_TOOLS = new Set([
+  "browser.inspect_page",
+  "browser.read_page_text",
+  "browser.reload"
+]);
+
+export function retargetStaleBrowserObservationToolCall(
+  toolCall: RuntimeToolCall,
+  browserTabs: BrowserTabRecord[]
+): RuntimeToolCall | null {
+  if (!RETARGETABLE_BROWSER_OBSERVATION_TOOLS.has(toolCall.name)) {
+    return null;
+  }
+  const requestedTabId = typeof toolCall.arguments.tabId === "string" ? toolCall.arguments.tabId : "";
+  const activeTab = browserTabs.find((tab) => tab.isActive);
+  if (!requestedTabId || !activeTab || activeTab.id === requestedTabId) {
+    return null;
+  }
+  return {
+    ...toolCall,
+    arguments: { ...toolCall.arguments, tabId: activeTab.id }
+  };
+}
+
 export function shouldFinishGpaAnalysisTurn(
   stage: GpaStage,
   decision: Pick<ProviderTurnDecision, "isStructured" | "toolCalls">
@@ -1917,6 +2356,344 @@ export function shouldFinishGpaAnalysisTurn(
     decision.isStructured &&
     decision.toolCalls.length === 0
   );
+}
+
+const OBSERVATION_TOOL_NAMES = new Set([
+  "fs.read_file",
+  "fs.read_directory",
+  "code.search",
+  "code.ast_diff",
+  "git.status",
+  "git.diff",
+  "knowledge.search",
+  "knowledge.read",
+  "web_search.search_query",
+  "web_search.open_page",
+  "web_search.find_in_page",
+  "browser.list_tabs",
+  "browser.read_page_text",
+  "browser.inspect_page",
+  "browser.wait_for",
+  "list_mcp_resources",
+  "list_mcp_resource_templates",
+  "read_mcp_resource",
+  "mcp.list_tools"
+]);
+
+const DELIVERY_TOOL_NAMES = new Set([
+  "apply_patch",
+  "fs.write_file",
+  "git.commit",
+  "git.worktree_add",
+  "git.worktree_remove",
+  "browser.click",
+  "browser.fill",
+  "browser.select_option",
+  "browser.press_key",
+  "mcp.call"
+]);
+
+const SELF_VERIFYING_ARTIFACT_TOOLS = new Set([
+  "image.generate",
+  "video.generate"
+]);
+
+const POST_DELIVERY_VERIFICATION_TOOLS = new Set([
+  "fs.read_file",
+  "fs.read_directory",
+  "code.ast_diff",
+  "git.status",
+  "git.diff",
+  "shell.exec",
+  "browser.read_page_text",
+  "browser.inspect_page",
+  "browser.wait_for",
+  "browser.assert_page",
+  "browser.capture_snapshot",
+  "browser.capture_screenshot"
+]);
+
+const FRONTEND_DELIVERY_EXTENSIONS = new Set([
+  ".html", ".htm", ".css", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte"
+]);
+
+function buildBrowserVerificationDirective(stage: GpaStage): string {
+  if (stage !== "act") return "";
+  return [
+    "\n\nFrontend verification policy:",
+    "After changing HTML, CSS, JavaScript, JSX, TSX, Vue, Svelte, Canvas, or other browser-rendered resources, you must verify the current result in the app browser before completing.",
+    "Use the same tab and follow: reload/open page -> browser.set_viewport -> browser.assert_page -> browser.capture_screenshot.",
+    "Verify desktop 1440x900 and mobile 390x844 unless the user explicitly requested a desktop-only page.",
+    "Assertions must include relevant text/elements, images_loaded, no_horizontal_overflow, no_severe_console_errors, and canvas_nonblank for Canvas/game work.",
+    "A screenshot from before the latest file change is invalid. If the model supports images, inspect the screenshot attachment before claiming visual quality.",
+    "If the model does not support images, rely on deterministic assertions and explicitly state `未执行视觉模型检查（model_not_multimodal）` in the final summary."
+  ].join(" ");
+}
+
+function updateBrowserVerificationEvidence(
+  state: BrowserVerificationEvidenceState,
+  toolCall: RuntimeToolCall,
+  result: ToolResult
+): void {
+  state.operationIndex = (state.operationIndex ?? 0) + 1;
+  const operationIndex = state.operationIndex;
+  const touchedPaths = getDeliveredFilePaths(toolCall.name, toolCall.arguments, result);
+  const frontendPaths = touchedPaths.filter((filePath) => FRONTEND_DELIVERY_EXTENSIONS.has(path.extname(filePath).toLowerCase()));
+  if (frontendPaths.length > 0) {
+    state.required = true;
+    state.latestFrontendDeliveryIndex = operationIndex;
+    state.desktopAssertions.clear();
+    state.mobileAssertions.clear();
+    state.desktopScreenshots.clear();
+    state.mobileScreenshots.clear();
+    state.screenshotAttachmentsSent.clear();
+    const payload = JSON.stringify(toolCall.arguments);
+    if (/canvas|getContext\s*\(|three(?:\.js)?|pixi|phaser|game/i.test(payload)) state.canvasRequired = true;
+  }
+
+  if (["browser.open_tab", "browser.navigate", "browser.reload"].includes(toolCall.name)) {
+    state.latestPageLoadIndex = operationIndex;
+  }
+  const currentDelivery = state.latestFrontendDeliveryIndex ?? 0;
+  const pageIsFresh = (state.latestPageLoadIndex ?? 0) >= currentDelivery;
+  if (!state.required || !pageIsFresh) return;
+
+  const tabId = typeof toolCall.arguments.tabId === "string" ? toolCall.arguments.tabId : "";
+  if (tabId) state.tabIds.add(tabId);
+
+  const viewport = result.json?.viewport as BrowserViewport | undefined;
+  const bucket = viewport && viewport.width <= 500 ? "mobile" : "desktop";
+  if (toolCall.name === "browser.assert_page" && result.json?.passed === true) {
+    const results = Array.isArray(result.json.results) ? result.json.results as Array<{ check?: { type?: string }; passed?: boolean }> : [];
+    if (state.canvasRequired && !results.some((entry) => entry.check?.type === "canvas_nonblank" && entry.passed === true)) return;
+    (bucket === "mobile" ? state.mobileAssertions : state.desktopAssertions).add(toolCall.id);
+  }
+  if (toolCall.name === "browser.capture_screenshot") {
+    const width = Number(result.json?.width ?? 0);
+    const height = Number(result.json?.height ?? 0);
+    if (width > 0 && height > 0 && result.attachments?.some((attachment) => attachment.kind === "image")) {
+      (bucket === "mobile" ? state.mobileScreenshots : state.desktopScreenshots).add(toolCall.id);
+    }
+  }
+}
+
+function getDeliveredFilePaths(
+  toolName: string,
+  args: Record<string, unknown>,
+  result: ToolResult
+): string[] {
+  if (toolName === "apply_patch") {
+    const patch = [args.patch, args.patch_content, args.patchText].find((value): value is string => typeof value === "string") ?? "";
+    return [...patch.matchAll(/^\*\*\* (?:Add|Update) File: (.+)$/gm)].map((match) => match[1].trim());
+  }
+  if (toolName === "fs.write_file") {
+    const candidate = typeof result.json?.path === "string" ? result.json.path : typeof args.path === "string" ? args.path : "";
+    return candidate ? [candidate] : [];
+  }
+  return [];
+}
+
+export function classifySuccessfulToolEvidence(input: {
+  toolCallId: string;
+  toolRecordId?: string;
+  toolName: string;
+  hasPriorDelivery: boolean;
+  verifiedPaths?: string[];
+  requiresVerifiedPath?: boolean;
+}): SuccessfulToolEvidence {
+  const kinds = new Set<CompletionEvidenceKind>();
+  if (OBSERVATION_TOOL_NAMES.has(input.toolName)) {
+    kinds.add("observation");
+  }
+  if (
+    DELIVERY_TOOL_NAMES.has(input.toolName) &&
+    (!input.requiresVerifiedPath || (input.verifiedPaths?.length ?? 0) > 0)
+  ) {
+    kinds.add("delivery");
+  }
+  if (SELF_VERIFYING_ARTIFACT_TOOLS.has(input.toolName)) {
+    kinds.add("delivery");
+    kinds.add("verification");
+  }
+  if (input.hasPriorDelivery && POST_DELIVERY_VERIFICATION_TOOLS.has(input.toolName)) {
+    kinds.add("verification");
+  }
+  return {
+    toolCallId: input.toolCallId,
+    toolRecordId: input.toolRecordId,
+    toolName: input.toolName,
+    kinds: [...kinds],
+    verifiedPaths: input.verifiedPaths
+  };
+}
+
+export function validateActCompletion(input: {
+  decision: Pick<
+    ProviderTurnDecision,
+    "assistantMessage" | "toolCalls" | "endTurn" | "goalCompleted" |
+    "completedTaskIds" | "completionEvidence"
+  >;
+  planTasks: GpaState["planTasks"];
+  successfulEvidence: SuccessfulToolEvidence[];
+  browserVerification?: BrowserCompletionRequirement;
+}): ActCompletionValidationResult {
+  const reasons: string[] = [];
+  const planTaskIds = input.planTasks.map((task) => task.id.toUpperCase());
+  const completedTaskIds = new Set(
+    (input.decision.completedTaskIds ?? []).map((id) => id.toUpperCase())
+  );
+  const missingTaskIds = planTaskIds.filter((id) => !completedTaskIds.has(id));
+  const evidenceById = new Map<string, SuccessfulToolEvidence>();
+  for (const evidence of input.successfulEvidence) {
+    evidenceById.set(evidence.toolCallId, evidence);
+    if (evidence.toolRecordId) {
+      evidenceById.set(evidence.toolRecordId, evidence);
+    }
+  }
+
+  const validEvidenceByTask = new Map<string, SuccessfulToolEvidence[]>();
+  const invalidEvidenceToolCallIds = new Set<string>();
+  for (const reference of input.decision.completionEvidence ?? []) {
+    const actual = evidenceById.get(reference.toolCallId);
+    if (!actual || !actual.kinds.includes(reference.kind)) {
+      invalidEvidenceToolCallIds.add(reference.toolCallId);
+      continue;
+    }
+    const taskId = reference.taskId.toUpperCase();
+    const current = validEvidenceByTask.get(taskId) ?? [];
+    current.push(actual);
+    validEvidenceByTask.set(taskId, current);
+  }
+
+  const missingEvidenceTaskIds = planTaskIds.filter(
+    (id) => (validEvidenceByTask.get(id)?.length ?? 0) === 0
+  );
+  const referencedEvidence = [...validEvidenceByTask.values()].flat();
+  const missingDelivery = !referencedEvidence.some((item) => item.kinds.includes("delivery"));
+  const missingVerification = !referencedEvidence.some((item) => item.kinds.includes("verification"));
+  const missingBrowserVerification: string[] = [];
+  const browser = input.browserVerification;
+  if (browser) {
+    if (browser.desktopAssertionCount === 0) missingBrowserVerification.push("desktop page assertions");
+    if (browser.desktopScreenshotCount === 0) missingBrowserVerification.push("desktop screenshot");
+    if (!browser.desktopOnly && browser.mobileAssertionCount === 0) missingBrowserVerification.push("mobile page assertions");
+    if (!browser.desktopOnly && browser.mobileScreenshotCount === 0) missingBrowserVerification.push("mobile screenshot");
+    if (browser.modelSupportsMultimodalInput && browser.screenshotAttachmentCount === 0) {
+      missingBrowserVerification.push("screenshot visual context");
+    }
+    if (
+      browser.modelSupportsMultimodalInput &&
+      !/(?:截图|视觉|screenshot|visual)/i.test(input.decision.assistantMessage ?? "")
+    ) {
+      missingBrowserVerification.push("final screenshot inspection result");
+    }
+    if (!browser.modelSupportsMultimodalInput && browser.visualSkippedReason !== "model_not_multimodal") {
+      missingBrowserVerification.push("visual skip reason");
+    }
+    if (
+      !browser.modelSupportsMultimodalInput &&
+      !/(?:未执行视觉模型检查|model_not_multimodal|visual model check was not performed)/i.test(input.decision.assistantMessage ?? "")
+    ) {
+      missingBrowserVerification.push("final visual-skip disclosure");
+    }
+  }
+
+  if (!input.decision.endTurn) reasons.push("The model did not end the turn.");
+  if (input.decision.toolCalls.length > 0) reasons.push("Tool calls are still pending.");
+  if (!input.decision.goalCompleted) reasons.push("The model did not declare the original goal complete.");
+  if (!input.decision.assistantMessage?.trim()) reasons.push("The final user-visible summary is empty.");
+  if (isProgressOnlyAssistantMessage(input.decision.assistantMessage ?? "")) {
+    reasons.push("The assistant message is progress commentary, not a final summary.");
+  }
+  if (planTaskIds.length === 0) reasons.push("The confirmed GPA plan has no validated tasks.");
+  if (missingTaskIds.length > 0) reasons.push(`Plan tasks are not declared complete: ${missingTaskIds.join(", ")}.`);
+  if (missingEvidenceTaskIds.length > 0) {
+    reasons.push(`Plan tasks have no valid tool evidence: ${missingEvidenceTaskIds.join(", ")}.`);
+  }
+  if (invalidEvidenceToolCallIds.size > 0) {
+    reasons.push(`Completion evidence references unknown or mismatched tool calls: ${[...invalidEvidenceToolCallIds].join(", ")}.`);
+  }
+  if (missingDelivery) reasons.push("No verified delivery evidence was referenced.");
+  if (missingVerification) reasons.push("No post-delivery verification evidence was referenced.");
+  if (missingBrowserVerification.length > 0) {
+    reasons.push(`Frontend browser verification is incomplete: ${missingBrowserVerification.join(", ")}.`);
+  }
+
+  return {
+    valid: reasons.length === 0,
+    reasons,
+    missingTaskIds,
+    missingEvidenceTaskIds,
+    invalidEvidenceToolCallIds: [...invalidEvidenceToolCallIds],
+    missingDelivery,
+    missingVerification,
+    missingBrowserVerification
+  };
+}
+
+export function buildActCompletionRecoveryInstruction(
+  result: ActCompletionValidationResult
+): string {
+  const nextAction = result.missingDelivery
+    ? "Call the next delivery tool now. For file work, use apply_patch or fs.write_file and wait for its successful result."
+    : result.missingVerification
+      ? "Call a verification tool now, such as a test/build command or a read-back of the changed files."
+      : (result.missingBrowserVerification?.length ?? 0) > 0
+        ? "Complete browser verification on the same rendered tab: reload it, run browser.set_viewport and browser.assert_page, then browser.capture_screenshot for each required viewport."
+      : "Return a corrected final JSON decision using only the successful tool call ids already present in the transcript.";
+  return [
+    "[Internal completion validation. Do not display or quote this instruction to the user.]",
+    "The task was not completed because the runtime could not verify the claimed result.",
+    ...result.reasons,
+    nextAction,
+    "Do not return progress prose. Set goal_completed to true only after completed_task_ids covers every PLAN task and completion_evidence references real successful tool_call_id values for delivery and verification."
+  ].join(" ");
+}
+
+async function verifySuccessfulToolDeliveryPaths(
+  toolName: string,
+  argumentsJson: Record<string, unknown>,
+  result: ToolResult,
+  workspaceCwd: string
+): Promise<{ verifiedPaths: string[]; requiresVerifiedPath: boolean }> {
+  const candidates: string[] = [];
+  let requiresVerifiedPath = false;
+  if (toolName === "apply_patch") {
+    const patch = [argumentsJson.patch, argumentsJson.patch_content, argumentsJson.patchText].find(
+      (value): value is string => typeof value === "string"
+    ) ?? "";
+    for (const match of patch.matchAll(/^\*\*\* (?:Add|Update) File: (.+)$/gm)) {
+      candidates.push(match[1].trim());
+    }
+    requiresVerifiedPath = candidates.length > 0;
+  } else if (toolName === "fs.write_file") {
+    const resultPath = result.json?.path;
+    const argumentPath = argumentsJson.path;
+    const candidate = typeof resultPath === "string"
+      ? resultPath
+      : typeof argumentPath === "string"
+        ? argumentPath
+        : "";
+    if (candidate) candidates.push(candidate);
+    requiresVerifiedPath = true;
+  } else if (toolName === "image.generate" || toolName === "video.generate") {
+    const attachment = result.json?.attachment as MessageAttachment | undefined;
+    if (attachment?.absolutePath) candidates.push(attachment.absolutePath);
+  }
+
+  const verifiedPaths: string[] = [];
+  for (const candidate of [...new Set(candidates.filter(Boolean))]) {
+    const absolutePath = path.isAbsolute(candidate)
+      ? path.normalize(candidate)
+      : path.resolve(workspaceCwd, candidate);
+    try {
+      await fs.access(absolutePath);
+      verifiedPaths.push(absolutePath);
+    } catch {
+      // A claimed file delivery is not evidence until the path exists on disk.
+    }
+  }
+  return { verifiedPaths, requiresVerifiedPath };
 }
 
 export function getToolCallTaskKey(name: string, argumentsJson: Record<string, unknown>): string {
@@ -2120,10 +2897,26 @@ export class AgentModelCompatibilityError extends Error {
   }
 }
 
+export function isProgressOnlyAssistantMessage(content: string): boolean {
+  const normalized = content.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return false;
+  }
+  if (/<event\s+type=["']commentary["'][^>]*>/i.test(normalized) &&
+      !/<event\s+type=["']final["'][^>]*>/i.test(normalized)) {
+    return true;
+  }
+  return /^(?:(?:好的|好)[，,。!！\s]*)?(?:计划已确认|开始实施|开始执行|正在|接下来|下一步|准备(?:开始)?|我(?:将|会|先)|先(?:来|从)|starting\b|working\s+on\b|fetching\b|next\s+i\s+will\b|i\s+will\b)/i.test(normalized);
+}
+
 function isDeferredExecutionPayload(content: string): boolean {
   const trimmed = content.trim();
   if (!trimmed) {
     return false;
+  }
+
+  if (isProgressOnlyAssistantMessage(trimmed)) {
+    return true;
   }
 
   if (/^<\/?tool_(?:calls|result)\b/i.test(trimmed)) {
@@ -2341,10 +3134,8 @@ function formatRuntimeDate(date: Date): string {
   }).format(date);
 }
 
-function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {
-  const maxMessages = 24;
-  const visible = messages.slice(-maxMessages);
-  return visible.map((message) => ({
+export function buildRuntimeTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {
+  return messages.map((message) => ({
     role: message.role,
     content: message.content,
     attachments: getMessageAttachments(message)
