@@ -18,7 +18,26 @@ import type {
   UserInputQuestion
 } from "@shared-types";
 import { applyCodexPatch } from "./handlers/applyPatch";
-import { astDiffSources, isAstSupportedPath } from "./ast";
+import { astDiffSources, extractSymbols, isAstSupportedPath, languageFromPath } from "./ast";
+import { prepareShellCommandForWebFrontend } from "./web-shell-policy";
+import {
+  pageForModel,
+  truncatePageText
+} from "./browser-page-sanitize";
+
+export {
+  isPythonScaffoldingCommand,
+  isWebFrontendTaskText,
+  prepareShellCommandForWebFrontend,
+  rewritePythonHttpServer,
+  WEB_FRONTEND_PYTHON_BLOCK_MESSAGE
+} from "./web-shell-policy";
+export {
+  BROWSER_PAGE_TEXT_LIMIT,
+  pageForModel,
+  sanitizeBrowserToolJson,
+  truncatePageText
+} from "./browser-page-sanitize";
 
 export interface ToolRuntimeContext {
   cwd: string;
@@ -46,12 +65,18 @@ export interface ToolRuntimeContext {
     questions: UserInputQuestion[];
   }) => Promise<Record<string, string>>;
   requestUserInputEnabled?: boolean;
+  /** When true, block Python scaffolding for HTML/CSS/JS delivery tasks. */
+  webFrontendGuard?: boolean;
   spawnChildAgent: (input: { prompt: string; role: string; modelId?: string }) => Promise<string>;
   webSearch: (query: string) => Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage: (url: string) => Promise<{ title: string; url: string; text: string }>;
   findInPage: (url: string, pattern: string) => Promise<string[]>;
   listBrowserTabs: () => Promise<BrowserTabRecord[]>;
-  openBrowserTab: (url: string) => Promise<{ tab: BrowserTabRecord; page: { title: string; url: string; text: string } }>;
+  openBrowserTab: (url: string) => Promise<{
+    tab: BrowserTabRecord;
+    page: { title: string; url: string; text: string };
+    reused?: boolean;
+  }>;
   navigateBrowserTab: (tabId: string, url: string) => Promise<{ tab: BrowserTabRecord; page: { title: string; url: string; text: string } }>;
   reloadBrowserTab: (tabId: string) => Promise<{ tab: BrowserTabRecord; page: { title: string; url: string; text: string } }>;
   goBackBrowserTab: (tabId: string) => Promise<{ tab: BrowserTabRecord; page: { title: string; url: string; text: string } }>;
@@ -412,11 +437,92 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("fs.read_file", "Read a UTF-8 text file from disk.", ["path"], "low"),
+    {
+      name: "fs.read_file",
+      description:
+        "Read a UTF-8 text file from disk. Optional offset (1-based line) and limit (line count) return a numbered slice. For large files prefer code.outline first.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          offset: { type: "number", description: "1-based start line (optional)" },
+          limit: { type: "number", description: "Max lines to return (optional)" }
+        },
+        required: ["path"]
+      },
+      riskLevel: "low",
+      parallelSafe: true
+    },
     async (args, ctx) => {
       const filePath = resolveFromCwd(ctx.cwd, String(args.path));
       const content = await ctx.readFile(filePath);
-      return { ok: true, content, json: { path: filePath, content } };
+      const lines = content.split(/\r?\n/);
+      const totalLines = lines.length;
+      const rawOffset = Number(args.offset);
+      const rawLimit = Number(args.limit);
+      const hasSlice =
+        (Number.isFinite(rawOffset) && rawOffset >= 1) ||
+        (Number.isFinite(rawLimit) && rawLimit > 0);
+      if (!hasSlice) {
+        return { ok: true, content, json: { path: filePath, content, totalLines } };
+      }
+      const startLine = Number.isFinite(rawOffset) && rawOffset >= 1 ? Math.floor(rawOffset) : 1;
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : totalLines;
+      const slice = lines.slice(startLine - 1, startLine - 1 + limit);
+      const endLine = startLine - 1 + slice.length;
+      const numbered = slice
+        .map((line, index) => `${String(startLine + index).padStart(6, " ")}|${line}`)
+        .join("\n");
+      const header = `File ${filePath} lines ${startLine}-${endLine} of ${totalLines}`;
+      return {
+        ok: true,
+        content: `${header}\n${numbered}`,
+        json: { path: filePath, totalLines, startLine, endLine, content: numbered }
+      };
+    }
+  );
+
+  runtime.register(
+    spec(
+      "code.outline",
+      "List code symbols (functions/classes) with line ranges for a source file. Use before reading large files.",
+      ["path"],
+      "low"
+    ),
+    async (args, ctx) => {
+      const relativePath = String(args.path ?? "");
+      const filePath = resolveFromCwd(ctx.cwd, relativePath);
+      const language = languageFromPath(filePath);
+      if (!language) {
+        return {
+          ok: false,
+          content: `Unsupported language for outline: ${relativePath || filePath}`
+        };
+      }
+      const source = await ctx.readFile(filePath);
+      const symbols = await extractSymbols(source, language);
+      const lines = symbols.map(
+        (symbol) =>
+          `${symbol.kind} ${symbol.name} @${symbol.startLine}-${symbol.endLine}`
+      );
+      const content =
+        lines.length > 0
+          ? `Outline ${relativePath || filePath} (${language})\n${lines.join("\n")}`
+          : `Outline ${relativePath || filePath} (${language}): no symbols found.`;
+      return {
+        ok: true,
+        content,
+        json: {
+          path: relativePath || filePath,
+          language,
+          symbols: symbols.map((symbol) => ({
+            name: symbol.name,
+            kind: symbol.kind,
+            startLine: symbol.startLine,
+            endLine: symbol.endLine
+          }))
+        }
+      };
     }
   );
 
@@ -440,8 +546,22 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "写入文件被拒绝。" };
       }
+      let before = "";
+      try {
+        before = await ctx.readFile(filePath);
+      } catch {
+        // A new file has no prior text snapshot.
+      }
       await ctx.writeFile(filePath, content);
-      return { ok: true, content: `Wrote ${filePath}`, json: { path: filePath } };
+      const relativePath = path.relative(ctx.cwd, filePath).split(path.sep).join("/");
+      return {
+        ok: true,
+        content: `Wrote ${filePath}`,
+        json: {
+          path: filePath,
+          snapshots: [createTextSnapshot(relativePath, before, content)]
+        }
+      };
     }
   );
 
@@ -516,7 +636,20 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("shell.exec", "Run a shell command inside the current workspace.", ["command"], "high"),
     async (args, ctx) => {
-      const command = String(args.command ?? "");
+      let command = String(args.command ?? "");
+      if (ctx.webFrontendGuard) {
+        const prepared = prepareShellCommandForWebFrontend(command);
+        if (!prepared.ok) {
+          return { ok: false, content: prepared.error ?? "Command blocked for web frontend task." };
+        }
+        command = prepared.command;
+      } else {
+        // Always prefer http-server over python -m http.server when present.
+        const prepared = prepareShellCommandForWebFrontend(command);
+        if (prepared.rewritten) {
+          command = prepared.command;
+        }
+      }
       const approved = await ctx.requestApproval({
         title: "执行命令",
         description: command,
@@ -570,28 +703,56 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       return {
         ok: true,
         content,
-        json: { touched: result.touched, changes: result.changes }
+        json: { touched: result.touched, changes: result.changes, snapshots: result.snapshots }
       };
     }
   );
 
   runtime.register(
-    spec("git.status", "Read git status for the current repository.", [], "low"),
+    spec(
+      "git.status",
+      "Read git status for the current repository. Returns a clear notice when the workspace is not a git repo.",
+      [],
+      "low"
+    ),
     async (_args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return gitNotRepositoryResult();
+      }
       const output = (await runShell("git status --short --branch", ctx)).output;
-      return { ok: true, content: output, json: { output } };
+      return { ok: true, content: output, json: { output, isGitRepository: true } };
     }
   );
 
   runtime.register(
-    spec("git.diff", "Read git diff for the current repository.", [], "low"),
+    spec(
+      "git.diff",
+      "Read git diff for the current repository. Returns a clear notice when the workspace is not a git repo.",
+      [],
+      "low"
+    ),
     async (_args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return gitNotRepositoryResult();
+      }
       const output = (await runShell("git diff --no-ext-diff", ctx)).output;
       const astSummary = await buildGitDiffAstSummary(ctx, output);
+      const astText =
+        astSummary.length > 0
+          ? `\n\nAST entity summary:\n${astSummary
+              .map((entry) => `${entry.path}\n${entry.summary}`)
+              .join("\n\n")}`
+          : "";
       return {
         ok: true,
-        content: output,
-        json: { output, astSummary: astSummary.length > 0 ? astSummary : undefined }
+        content: `${output}${astText}`,
+        json: {
+          output,
+          isGitRepository: true,
+          astSummary: astSummary.length > 0 ? astSummary : undefined
+        }
       };
     }
   );
@@ -599,6 +760,10 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("git.commit", "Create a git commit with a message.", ["message"], "high"),
     async (args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return { ...gitNotRepositoryResult(), ok: false };
+      }
       const message = String(args.message ?? "");
       const approved = await ctx.requestApproval({
         title: "创建提交",
@@ -617,14 +782,22 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("git.worktree_list", "List git worktrees for the current repository.", [], "low"),
     async (_args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return gitNotRepositoryResult();
+      }
       const output = (await runShell("git worktree list --porcelain", ctx)).output;
-      return { ok: true, content: output, json: { output } };
+      return { ok: true, content: output, json: { output, isGitRepository: true } };
     }
   );
 
   runtime.register(
     spec("git.worktree_add", "Create a git worktree for a branch.", ["path", "branch"], "high"),
     async (args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return { ...gitNotRepositoryResult(), ok: false };
+      }
       const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
       const branch = String(args.branch ?? "");
       const base = typeof args.base === "string" ? args.base : "HEAD";
@@ -646,6 +819,10 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("git.worktree_remove", "Remove a git worktree path.", ["path"], "high"),
     async (args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return { ...gitNotRepositoryResult(), ok: false };
+      }
       const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
       const command = `git worktree remove "${escapeDoubleQuotes(targetPath)}" --force`;
       const approved = await ctx.requestApproval({
@@ -706,7 +883,9 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     spec("web_search.open_page", "Open a web page and extract text.", ["url"], "medium"),
     async (args, ctx) => {
       const page = await ctx.openPage(String(args.url ?? ""));
-      return { ok: true, content: page.text, json: page };
+      const forModel = pageForModel(page) ?? { text: "" };
+      const text = truncatePageText(String(forModel.text ?? ""));
+      return { ok: true, content: text, json: forModel };
     }
   );
 
@@ -734,8 +913,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       const result = await ctx.openBrowserTab(url);
       return {
         ok: true,
-        content: `${result.tab.title}\n${result.tab.url}`,
-        json: result
+        content: `${result.tab.title}\n${result.tab.url}${result.reused ? "\n(reused existing tab)" : ""}`,
+        json: {
+          tab: result.tab,
+          page: pageForModel(result.page),
+          reused: result.reused === true
+        }
       };
     }
   );
@@ -758,7 +941,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       return {
         ok: true,
         content: `${result.tab.title}\n${result.tab.url}`,
-        json: result
+        json: { tab: result.tab, page: pageForModel(result.page) }
       };
     }
   );
@@ -767,7 +950,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     spec("browser.reload", "Reload a browser tab.", ["tabId"], "low"),
     async (args, ctx) => {
       const result = await ctx.reloadBrowserTab(String(args.tabId ?? ""));
-      return { ok: true, content: result.page.text, json: result };
+      const text = truncatePageText(result.page.text ?? "");
+      return {
+        ok: true,
+        content: text,
+        json: { tab: result.tab, page: pageForModel(result.page) }
+      };
     }
   );
 
@@ -775,7 +963,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     spec("browser.go_back", "Go back in a browser tab history.", ["tabId"], "low"),
     async (args, ctx) => {
       const result = await ctx.goBackBrowserTab(String(args.tabId ?? ""));
-      return { ok: true, content: result.page.text, json: result };
+      const text = truncatePageText(result.page.text ?? "");
+      return {
+        ok: true,
+        content: text,
+        json: { tab: result.tab, page: pageForModel(result.page) }
+      };
     }
   );
 
@@ -783,7 +976,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     spec("browser.go_forward", "Go forward in a browser tab history.", ["tabId"], "low"),
     async (args, ctx) => {
       const result = await ctx.goForwardBrowserTab(String(args.tabId ?? ""));
-      return { ok: true, content: result.page.text, json: result };
+      const text = truncatePageText(result.page.text ?? "");
+      return {
+        ok: true,
+        content: text,
+        json: { tab: result.tab, page: pageForModel(result.page) }
+      };
     }
   );
 
@@ -811,7 +1009,9 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     spec("browser.read_page_text", "Read the current text content of a browser tab.", ["tabId"], "low"),
     async (args, ctx) => {
       const page = await ctx.readBrowserPageText(String(args.tabId ?? ""));
-      return { ok: true, content: page.text, json: page };
+      const forModel = pageForModel(page) ?? { text: "" };
+      const text = truncatePageText(String(forModel.text ?? ""));
+      return { ok: true, content: text, json: forModel };
     }
   );
 
@@ -1374,6 +1574,18 @@ function resolveFromCwd(cwd: string, targetPath: string): string {
   return resolveWorkspacePath(cwd, targetPath);
 }
 
+const FILE_SNAPSHOT_TEXT_LIMIT = 512_000;
+
+function createTextSnapshot(path: string, before: string, after: string) {
+  return {
+    path: path.replace(/\\/g, "/"),
+    before: before.slice(0, FILE_SNAPSHOT_TEXT_LIMIT),
+    after: after.slice(0, FILE_SNAPSHOT_TEXT_LIMIT),
+    beforeTruncated: before.length > FILE_SNAPSHOT_TEXT_LIMIT,
+    afterTruncated: after.length > FILE_SNAPSHOT_TEXT_LIMIT
+  };
+}
+
 function normalizeApplyPatchInput(args: Record<string, unknown>): string {
   const value = args.patch ?? args.patch_content ?? args.patchText;
   if (typeof value !== "string") {
@@ -1505,6 +1717,29 @@ async function buildGitDiffAstSummary(
     }
   }
   return summaries;
+}
+
+async function probeGitRepository(ctx: ToolRuntimeContext): Promise<{ isGitRepository: boolean }> {
+  try {
+    const output = (await runShell("git rev-parse --is-inside-work-tree", ctx)).output.trim().toLowerCase();
+    return { isGitRepository: output === "true" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not a git repository/i.test(message)) {
+      return { isGitRepository: false };
+    }
+    // Unexpected git failures still mean we should not pretend this is a repo.
+    return { isGitRepository: false };
+  }
+}
+
+function gitNotRepositoryResult(): ToolResult {
+  return {
+    ok: true,
+    content:
+      "当前工作区不是 git 仓库（未找到 .git）。请改用 fs/code 工具查看项目文件，或先在该目录执行 git init。",
+    json: { isGitRepository: false }
+  };
 }
 
 async function runShell(command: string, ctx: ToolRuntimeContext): Promise<TerminalCommandResult> {

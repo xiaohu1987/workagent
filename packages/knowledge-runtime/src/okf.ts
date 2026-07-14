@@ -27,7 +27,10 @@ export async function buildOkfBundle(options: BuildOkfBundleOptions): Promise<Ok
 
   for (const [index, document] of options.documents.entries()) {
     const conceptId = `${options.knowledgeBaseId}-concept-${index + 1}`;
-    const bundleRelativePath = path.join("references", `${safeFileStem(document.title)}.md`);
+    const fileStem = `${safeFileStem(document.title) || "document"}-${index + 1}`;
+    const sourceRelativePath = path.join("source_docs", `${fileStem}.md`);
+    const sourceDocumentPath = path.join(options.bundleRoot, sourceRelativePath);
+    const bundleRelativePath = path.join("references", `${fileStem}.md`);
     const conceptPath = path.join(options.bundleRoot, bundleRelativePath);
     const description = summarize(document.body);
     const concept = {
@@ -52,6 +55,7 @@ export async function buildOkfBundle(options: BuildOkfBundleOptions): Promise<Ok
       `tags: [${concept.tags.map((tag) => yamlEscape(tag)).join(", ")}]`,
       `timestamp: ${now}`,
       `source_path: ${yamlEscape(concept.sourcePath)}`,
+      `local_markdown_path: ${yamlEscape(sourceRelativePath.replace(/\\/g, "/"))}`,
       `source_hash: ${document.sourceHash}`,
       `import_run_id: ${options.importRunId}`,
       'okf_version: "0.1"',
@@ -61,6 +65,20 @@ export async function buildOkfBundle(options: BuildOkfBundleOptions): Promise<Ok
       ""
     ].join("\n");
 
+    const sourceMarkdown = [
+      "---",
+      `title: ${yamlEscape(document.title)}`,
+      `source_path: ${yamlEscape(document.sourcePath)}`,
+      `source_hash: ${document.sourceHash}`,
+      `import_run_id: ${options.importRunId}`,
+      'format: "downloaded-markdown"',
+      "---",
+      "",
+      document.body,
+      ""
+    ].join("\n");
+
+    await fs.writeFile(sourceDocumentPath, sourceMarkdown, "utf8");
     await fs.writeFile(conceptPath, frontmatter, "utf8");
     concepts.push(concept);
   }

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { rewritePythonHttpServer } from "@tool-runtime";
 
 type TerminalSession = {
   threadId: string;
@@ -96,11 +97,20 @@ export class TerminalRuntime {
     }
     session.onOutput = onOutput;
 
-    const effectiveCommand = redirectStaticHtmlLaunch(command) ?? command;
-    const redirectedStaticFileLaunch = effectiveCommand !== command;
+    const effectiveCommand =
+      redirectStaticHtmlLaunch(command) ??
+      (() => {
+        const rewritten = rewritePythonHttpServer(command);
+        return rewritten !== command ? rewritten : command;
+      })();
+    const redirectedStaticFileLaunch = effectiveCommand !== command && Boolean(redirectStaticHtmlLaunch(command));
+    const redirectedPythonHttpServer =
+      effectiveCommand !== command && !redirectedStaticFileLaunch;
     this.#publish(session, `PS ${cwd}> ${effectiveCommand}\n`);
     if (redirectedStaticFileLaunch) {
       this.#publish(session, "Redirected static file launch to a local HTTP server.\n");
+    } else if (redirectedPythonHttpServer) {
+      this.#publish(session, "Redirected python -m http.server to npx http-server.\n");
     }
     const executable = process.platform === "win32" ? "powershell.exe" : "sh";
     const backgrounded = process.platform === "win32" && isLocalServerCommand(effectiveCommand);

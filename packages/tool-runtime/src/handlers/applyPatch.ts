@@ -43,12 +43,20 @@ export interface PatchFileChange {
 export interface ApplyPatchResult {
   touched: string[];
   changes: PatchFileChange[];
+  snapshots: Array<{
+    path: string;
+    before: string;
+    after: string;
+    beforeTruncated: boolean;
+    afterTruncated: boolean;
+  }>;
 }
 
 export async function applyCodexPatch(patchText: string, rootDir: string): Promise<ApplyPatchResult> {
   const operations = parsePatch(patchText);
   const touched: string[] = [];
   const changes: PatchFileChange[] = [];
+  const snapshots: ApplyPatchResult["snapshots"] = [];
 
   for (const operation of operations) {
     if (operation.type === "add") {
@@ -56,6 +64,7 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, operation.content, "utf8");
       touched.push(filePath);
+      snapshots.push(createSnapshot(operation.file, "", operation.content));
       const language = languageFromPath(operation.file);
       let symbols: PatchFileChange["symbols"];
       if (language) {
@@ -83,6 +92,7 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
       const language = languageFromPath(operation.file);
       try {
         const previous = await fs.readFile(filePath, "utf8");
+        snapshots.push(createSnapshot(operation.file, previous, ""));
         if (language) {
           const extracted = await extractSymbols(previous, language);
           symbols = extracted.map((symbol) => ({
@@ -93,6 +103,7 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
         }
       } catch {
         // file may already be missing
+        snapshots.push(createSnapshot(operation.file, "", ""));
       }
       await fs.rm(filePath, { recursive: true, force: true });
       touched.push(filePath);
@@ -117,6 +128,7 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
       await fs.rm(sourcePath, { force: true });
     }
     touched.push(nextPath);
+    snapshots.push(createSnapshot(operation.moveTo ?? operation.file, current, applied.content));
 
     const entityDiff = await astDiffSources(current, applied.content, operation.file);
     changes.push({
@@ -133,7 +145,19 @@ export async function applyCodexPatch(patchText: string, rootDir: string): Promi
     });
   }
 
-  return { touched, changes };
+  return { touched, changes, snapshots };
+}
+
+const SNAPSHOT_TEXT_LIMIT = 512_000;
+
+function createSnapshot(path: string, before: string, after: string): ApplyPatchResult["snapshots"][number] {
+  return {
+    path: path.replace(/\\/g, "/"),
+    before: before.slice(0, SNAPSHOT_TEXT_LIMIT),
+    after: after.slice(0, SNAPSHOT_TEXT_LIMIT),
+    beforeTruncated: before.length > SNAPSHOT_TEXT_LIMIT,
+    afterTruncated: after.length > SNAPSHOT_TEXT_LIMIT
+  };
 }
 
 function resolveWorkspacePath(rootDir: string, targetPath: string): string {

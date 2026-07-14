@@ -32,18 +32,32 @@ import { DEFAULT_RUNTIME_TIMEOUTS } from "@shared-types";
 import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
-import { ToolRuntime, canonicalizeToolName } from "@tool-runtime";
+import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
 import {
+  applyCompletedPlanTasks,
+  buildGpaRiskClarificationQuestions,
   buildGpaSystemDirective,
   buildGpaTextClarificationQuestions,
+  canStartGpaStage,
   DEFAULT_GPA_STATE,
   detectGpaConfirmation,
   gpaStageAllowsTools,
   gpaStageLabel,
+  parseGpaCompletedTaskDeclarations,
   nextStageAfterConfirmation,
+  parseEmbeddedRequestUserInput,
   parseGpaPlanTasks,
   parseGpaState
 } from "./gpa";
+import {
+  buildGpaPlanFileResumeDirective,
+  GPA_PLAN_RELATIVE_PATH,
+  gpaPlanHasIncompleteTasks,
+  readGpaPlanFile,
+  writeGpaPlanFile,
+  type GpaPlanFileDocument,
+  type GpaPlanFileStatus
+} from "./gpa-plan-file";
 import {
   buildMultimodalIntentClassifySystemPrompt,
   buildMultimodalIntentClassifyTranscript,
@@ -53,11 +67,27 @@ import {
 import type { GpaStage, GpaState } from "@shared-types";
 
 export {
+  applyCompletedPlanTasks,
+  buildGpaRiskClarificationQuestions,
   buildGpaTextClarificationQuestions,
   canEnterGpaAct,
+  canStartGpaStage,
+  parseEmbeddedRequestUserInput,
+  parseGpaCompletedTaskDeclarations,
   parseGpaPlanTasks,
   parseGpaState
 } from "./gpa";
+export {
+  buildGpaPlanFileResumeDirective,
+  formatGpaPlanMarkdown,
+  GPA_PLAN_RELATIVE_PATH,
+  gpaPlanHasIncompleteTasks,
+  parseGpaPlanMarkdown,
+  resolveGpaPlanFilePath,
+  toGpaPlanResumePreview,
+  type GpaPlanResumePreview,
+  type GpaPlanFileDocument
+} from "./gpa-plan-file";
 export {
   detectMultimodalIntent,
   parseMultimodalIntentClassification,
@@ -70,8 +100,8 @@ export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionM
 export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
 export const MAX_AGENT_PROTOCOL_FAILURES = 2;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs;
-export const CONTEXT_COMPACTION_THRESHOLD = 0.9;
-export const CONTEXT_COMPACTION_TARGET = 0.6;
+export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
+export const CONTEXT_COMPACTION_TARGET = 0.45;
 
 type Submission =
   | { type: "queue_wakeup" }
@@ -97,6 +127,13 @@ export interface SuccessfulToolEvidence {
   toolName: string;
   kinds: CompletionEvidenceKind[];
   verifiedPaths?: string[];
+}
+
+export interface GpaPlanProgressResolution {
+  completedTaskIds: string[];
+  inferredTaskIds: string[];
+  declarations: Array<{ taskIds: string[]; text: string }>;
+  hasSuccessfulToolEvidence: boolean;
 }
 
 export interface ActCompletionValidationResult {
@@ -398,9 +435,95 @@ class ThreadSessionRuntime {
     });
   }
 
-  async #clearGpaAfterExecution(force = false): Promise<void> {
+  async #projectCwd(): Promise<string | null> {
+    const thread = await this.services.persistence.getThread(this.threadId);
+    return thread.mode === "project" && thread.cwd ? thread.cwd : null;
+  }
+
+  async #persistGpaPlanFile(input: {
+    status: GpaPlanFileStatus;
+    tasks?: GpaState["planTasks"];
+    body?: string;
+  }): Promise<void> {
+    const cwd = await this.#projectCwd();
+    if (!cwd) {
+      return;
+    }
+    const tasks = input.tasks ?? this.#gpa.planTasks;
+    if (tasks.length === 0) {
+      return;
+    }
+    let body = input.body;
+    if (body === undefined) {
+      const existing = await readGpaPlanFile(cwd);
+      body = existing?.body;
+    }
+    const filePath = await writeGpaPlanFile(cwd, {
+      status: input.status,
+      threadId: this.threadId,
+      updatedAt: new Date().toISOString(),
+      tasks,
+      body
+    });
+    await this.services.log("gpa.plan_file_written", this.threadId, {
+      filePath,
+      status: input.status,
+      taskCount: tasks.length,
+      doneCount: tasks.filter((task) => task.done).length
+    });
+  }
+
+  async #tryRestoreGpaPlanFromFile(preferredStage: GpaStage): Promise<boolean> {
+    if (preferredStage === "off") {
+      return false;
+    }
+    const cwd = await this.#projectCwd();
+    if (!cwd) {
+      return false;
+    }
+    const existing = await readGpaPlanFile(cwd);
+    if (!existing || existing.status === "completed" || existing.tasks.length === 0) {
+      return false;
+    }
+    if (!existing.tasks.some((task) => !task.done) && existing.status !== "awaiting_confirmation") {
+      return false;
+    }
+
+    if (existing.status === "awaiting_confirmation") {
+      await this.#commitGpa({
+        ...this.#gpa,
+        stage: "plan",
+        awaitingConfirmation: "plan",
+        planTasks: existing.tasks,
+        updatedAt: new Date().toISOString()
+      });
+    } else {
+      await this.#commitGpa({
+        ...this.#gpa,
+        stage: "act",
+        awaitingConfirmation: null,
+        planTasks: existing.tasks,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    await this.services.log("gpa.plan_restored_from_file", this.threadId, {
+      filePath: path.join(cwd, GPA_PLAN_RELATIVE_PATH),
+      status: existing.status,
+      restoredStage: this.#gpa.stage,
+      taskCount: existing.tasks.length,
+      pendingTaskIds: existing.tasks.filter((task) => !task.done).map((task) => task.id),
+      requestedStage: preferredStage
+    });
+    return true;
+  }
+
+  async #clearGpaAfterExecution(force = false, markPlanCompleted = false): Promise<void> {
     if (this.#gpa.stage === "off" || (!force && this.#gpa.stage !== "act")) {
       return;
+    }
+
+    if (markPlanCompleted || this.#gpa.planTasks.every((task) => task.done)) {
+      await this.#persistGpaPlanFile({ status: "completed", tasks: this.#gpa.planTasks.map((task) => ({ ...task, done: true })) });
     }
 
     await this.#commitGpa({
@@ -414,6 +537,21 @@ class ThreadSessionRuntime {
 
   public async setGpaStage(stage: GpaStage): Promise<void> {
     await this.#ensureGpa();
+    // GPA is a project-workspace workflow. Chat threads can only turn it off.
+    const thread = await this.services.persistence.getThread(this.threadId);
+    if (!canStartGpaStage(thread.mode, stage)) {
+      await this.services.log("gpa.stage_rejected", this.threadId, {
+        requestedStage: stage,
+        currentStage: this.#gpa.stage,
+        threadMode: thread.mode,
+        reason: "GPA can only start in project mode."
+      });
+      return;
+    }
+    if (stage === this.#gpa.stage) {
+      return;
+    }
+    // Resume is explicit via restoreGpaPlanFromFile / UI flows.
     // ACT is reached only through a confirmed PLAN. Keeping this check in the
     // runtime prevents an outdated renderer or IPC caller from bypassing GPA.
     if (
@@ -434,6 +572,53 @@ class ThreadSessionRuntime {
       planTasks: stage === "goal" || stage === "off" ? [] : this.#gpa.planTasks,
       updatedAt: new Date().toISOString()
     });
+  }
+
+  public async peekGpaPlanFile(): Promise<GpaPlanFileDocument | null> {
+    const cwd = await this.#projectCwd();
+    if (!cwd) {
+      return null;
+    }
+    const existing = await readGpaPlanFile(cwd);
+    return gpaPlanHasIncompleteTasks(existing) ? existing : null;
+  }
+
+  public async restoreGpaPlanFromFile(): Promise<GpaState | null> {
+    await this.#ensureGpa();
+    const restored = await this.#tryRestoreGpaPlanFromFile(this.#gpa.stage === "off" ? "act" : this.#gpa.stage);
+    if (!restored) {
+      return null;
+    }
+    // Bind the on-disk plan to this thread so later continues count as same-session.
+    await this.#persistGpaPlanFile({
+      status: this.#gpa.stage === "plan" ? "awaiting_confirmation" : "in_progress",
+      tasks: this.#gpa.planTasks
+    });
+    return this.#gpa;
+  }
+
+  public async abandonGpaPlanFile(): Promise<boolean> {
+    const cwd = await this.#projectCwd();
+    if (!cwd) {
+      return false;
+    }
+    const existing = await readGpaPlanFile(cwd);
+    if (!existing || existing.status === "completed" || existing.status === "abandoned") {
+      return false;
+    }
+    await writeGpaPlanFile(cwd, {
+      status: "abandoned",
+      threadId: existing.threadId || this.threadId,
+      updatedAt: new Date().toISOString(),
+      tasks: existing.tasks,
+      body: existing.body
+    });
+    await this.services.log("gpa.plan_file_abandoned", this.threadId, {
+      previousStatus: existing.status,
+      taskCount: existing.tasks.length,
+      pendingTaskIds: existing.tasks.filter((task) => !task.done).map((task) => task.id)
+    });
+    return true;
   }
 
   public async setGpaFullAccess(fullAccess: boolean): Promise<void> {
@@ -512,43 +697,68 @@ class ThreadSessionRuntime {
     const accessibleMcpServerIds = await this.services.getAccessibleMcpServerIdsForThread(
       this.threadId
     );
+    const selectedMcpServerIds = extractSelectedMcpServerIds(initialInput).filter((serverId) =>
+      accessibleMcpServerIds.includes(serverId)
+    );
+    const activeMcpServerIds = selectedMcpServerIds.length > 0
+      ? selectedMcpServerIds
+      : accessibleMcpServerIds;
     const visibleKnowledgeBases = knowledgeEnabled
       ? await this.services.listKnowledgeBases(this.threadId)
       : [];
     const visibleKnowledgeBaseIds = visibleKnowledgeBases.map((entry: { id: string }) => entry.id);
     const model = resolveModel(this.services.config, thread.modelId);
     const provider = resolveProvider(this.services.config, thread.providerId);
+    const skillSelectionQuery = [
+      initialInput,
+      this.#gpa.planTasks.map((task) => task.title).join("\n")
+    ]
+      .filter(Boolean)
+      .join("\n");
     const selectedSkills = this.services.skills.selectForThread({
       explicitSkillIds: thread.selectedSkillIds,
-      query: initialInput,
+      query: skillSelectionQuery,
       allowedPluginIds: enabledPluginIds
     });
     const availableSkills = this.services.skills.listForThread(enabledPluginIds);
+    const recommendedSkillIds = selectedSkills
+      .filter((skill) => !thread.selectedSkillIds.includes(skill.id))
+      .slice(0, 3)
+      .map((skill) => skill.id);
     const skillContext = this.services.skills.buildContext(availableSkills, {
-      explicitSkillIds: thread.selectedSkillIds
+      explicitSkillIds: thread.selectedSkillIds,
+      recommendedSkillIds
     });
     const availableSkillIds = availableSkills.map((skill) => skill.id);
     const skillDependencyWarnings = buildSkillDependencyWarnings(
       selectedSkills,
       this.services.mcp.listConfigs(),
-      accessibleMcpServerIds
+      activeMcpServerIds
     );
     const knowledgeContext = knowledgeEnabled
       ? await this.services.buildKnowledgeContext(this.threadId)
       : null;
     const workflowPackContext = await this.services.buildWorkflowPackContext(this.threadId);
+    // Detect after we have history later; provisional from input + plan titles.
+    let webFrontendGuard =
+      this.#gpa.stage === "act" &&
+      (isWebFrontendTaskText(initialInput) ||
+        isWebFrontendTaskText(this.#gpa.planTasks.map((task) => task.title).join("\n")));
     // Tool availability follows the model profile's tool-calling flag only.
     // Runtime protocol failures must not permanently disable tools or force a model switch.
     const agentToolsEnabled = isAgentToolEnabled(model);
     const { tools, mcpTools } = await this.buildVisibleTools(
-      accessibleMcpServerIds,
+      activeMcpServerIds,
       knowledgeEnabled,
       agentToolsEnabled
     );
+    const selectedMcpToolsOnly = selectedMcpServerIds.length > 0
+      ? tools.filter((tool) => tool.name === "mcp.list_tools" || tool.name === "mcp.call")
+      : tools;
     // Native provider APIs already receive full function schemas. Repeating them
     // in the system prompt wastes context and can make weaker models emit text
     // tool payloads instead of using the provider tool-call channel.
-    const availableToolsPrompt = formatAvailableTools(tools, {
+    const availableToolsPrompt = formatAvailableTools(selectedMcpToolsOnly, {
       includeSchemas: !agentToolsEnabled
     });
     const turn = await this.services.persistence.startTurn({
@@ -643,8 +853,17 @@ class ThreadSessionRuntime {
             awaitingConfirmation: null,
             updatedAt: new Date().toISOString()
           });
+          if (advanced === "act" && this.#gpa.planTasks.length > 0) {
+            await this.#persistGpaPlanFile({ status: "in_progress" });
+          }
         }
       }
+
+      webFrontendGuard =
+        this.#gpa.stage === "act" &&
+        (webFrontendGuard ||
+          isWebFrontendTaskText(history.map((message) => message.content).join("\n")) ||
+          isWebFrontendTaskText(this.#gpa.planTasks.map((task) => task.title).join("\n")));
 
       let interruptedVisibleContent = "";
 
@@ -659,6 +878,8 @@ class ThreadSessionRuntime {
       const knowledgeSources = new Map<string, KnowledgeSourceReference>();
       const browserSources = new Map<string, BrowserSourceReference>();
       const visibleAssistantMessages = new Set<string>();
+      const loadedSkillIds = new Set<string>(thread.selectedSkillIds);
+      let skillForceReminderIssued = false;
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
@@ -672,7 +893,30 @@ class ThreadSessionRuntime {
       let modelTimeoutAttempts = 0;
       let agentProtocolFailureAttempts = 0;
       let gpaAnalysisValidationAttempts = 0;
+      let gpaPlanProgressReminderIssued = false;
+      let gpaActCompletedSuccessfully = false;
       const requiresAgentDecisionProtocol = () => this.#gpa.stage === "off" || this.#gpa.stage === "act";
+
+      if (this.#gpa.stage === "act" && this.#gpa.planTasks.length === 0) {
+        await this.#tryRestoreGpaPlanFromFile("act");
+      }
+
+      let gpaPlanResumeDirective = "";
+      if (this.#gpa.stage === "act" && this.#gpa.planTasks.some((task) => !task.done)) {
+        const cwd = await this.#projectCwd();
+        const planFile = cwd ? await readGpaPlanFile(cwd) : null;
+        if (planFile && gpaPlanHasIncompleteTasks(planFile)) {
+          gpaPlanResumeDirective = buildGpaPlanFileResumeDirective(planFile);
+        } else if (this.#gpa.planTasks.length > 0) {
+          gpaPlanResumeDirective = buildGpaPlanFileResumeDirective({
+            status: "in_progress",
+            threadId: this.threadId,
+            updatedAt: new Date().toISOString(),
+            tasks: this.#gpa.planTasks,
+            body: ""
+          });
+        }
+      }
 
       if (this.#gpa.stage !== "off" && !agentToolsEnabled) {
         throw new AgentModelCompatibilityError(
@@ -777,15 +1021,17 @@ class ThreadSessionRuntime {
           workflowPackContext,
           skillDependencyWarnings,
           knowledgeEnabled,
-          tools.some((tool) => tool.name === "image.generate"),
-          tools.some((tool) => tool.name === "video.generate")
+          selectedMcpToolsOnly.some((tool) => tool.name === "image.generate"),
+          selectedMcpToolsOnly.some((tool) => tool.name === "video.generate"),
+          availableSkills.filter((skill) => recommendedSkillIds.includes(skill.id)),
+          selectedMcpServerIds
         );
         const adapter = this.services.providerFactory.create(provider);
         let streamedVisibleContent = "";
         const modelTurnAbortController = createChildAbortController(abortController.signal);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
-          buildGpaSystemDirective(this.#gpa) || ""
-        }${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${availableToolsPrompt}`;
+          buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${availableToolsPrompt}`;
         await compactTranscriptForModel(systemPrompt);
         const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
           ? this.services.config.timeouts.recoveryModelDecisionMs
@@ -796,7 +1042,7 @@ class ThreadSessionRuntime {
             adapter.runTurn({
               systemPrompt,
               transcript,
-              availableTools: tools,
+              availableTools: selectedMcpToolsOnly,
               model,
               provider,
               stream: model.supportsStreaming,
@@ -865,28 +1111,98 @@ class ThreadSessionRuntime {
           throw new Error("Turn interrupted.");
         }
 
-        const textClarificationQuestions =
+        const planProgress = this.#gpa.stage === "act"
+          ? resolveGpaPlanProgress({
+              reportedTaskIds: decision.completedTaskIds,
+              assistantMessage: decision.assistantMessage,
+              planTasks: this.#gpa.planTasks,
+              successfulEvidence: successfulToolEvidence
+            })
+          : null;
+        if (planProgress && planProgress.completedTaskIds.length > 0) {
+          const progressed = applyCompletedPlanTasks(
+            this.#gpa,
+            planProgress.completedTaskIds
+          );
+          if (progressed !== this.#gpa) {
+            await this.#commitGpa({
+              ...progressed,
+              updatedAt: new Date().toISOString()
+            });
+            await this.#persistGpaPlanFile({ status: "in_progress", tasks: progressed.planTasks });
+          }
+          if (planProgress.inferredTaskIds.length > 0) {
+            await this.services.log("gpa.plan_progress_inferred", this.threadId, {
+              turnRunId: turn.id,
+              taskIds: planProgress.inferredTaskIds,
+              declarations: planProgress.declarations,
+              successfulToolCallIds: successfulToolEvidence
+                .filter((item) => item.kinds.length > 0)
+                .map((item) => item.toolCallId)
+            });
+          }
+        } else if (
+          planProgress &&
+          planProgress.declarations.length > 0 &&
+          !gpaPlanProgressReminderIssued
+        ) {
+          gpaPlanProgressReminderIssued = true;
+          transcript.push({
+            role: "user",
+            content: buildGpaPlanProgressRecoveryInstruction(planProgress.declarations)
+          });
+          await this.services.log("gpa.plan_progress_unverified", this.threadId, {
+            turnRunId: turn.id,
+            declarations: planProgress.declarations,
+            hasSuccessfulToolEvidence: planProgress.hasSuccessfulToolEvidence
+          });
+        }
+
+        if (
           !decision.clarification &&
           !decision.toolCalls.some((call) => call.name === "request_user_input")
-            ? buildGpaTextClarificationQuestions(this.#gpa.stage, decision.assistantMessage)
-            : [];
-        if (textClarificationQuestions.length > 0) {
-          await this.services.log("gpa.text_clarification_promoted", this.threadId, {
-            turnRunId: turn.id,
-            stage: this.#gpa.stage,
-            questionCount: textClarificationQuestions.length
-          });
-          decision.toolCalls = [{
-            id: randomUUID(),
-            name: "request_user_input",
-            arguments: {
-              title: this.#gpa.stage === "plan" ? "计划细节待确认" : "目标细节待确认",
-              questions: textClarificationQuestions
-            }
-          }];
-          decision.assistantMessage = undefined;
-          decision.endTurn = false;
-          decision.goalCompleted = false;
+        ) {
+          const embeddedInput = parseEmbeddedRequestUserInput(decision.assistantMessage);
+          const textClarificationQuestions = embeddedInput
+            ? []
+            : buildGpaTextClarificationQuestions(this.#gpa.stage, decision.assistantMessage);
+          const riskClarificationQuestions =
+            embeddedInput || textClarificationQuestions.length > 0
+              ? []
+              : buildGpaRiskClarificationQuestions(this.#gpa.stage, decision.assistantMessage);
+          const promotedQuestions =
+            embeddedInput?.questions ??
+            (textClarificationQuestions.length > 0
+              ? textClarificationQuestions
+              : riskClarificationQuestions);
+          if (promotedQuestions.length > 0) {
+            await this.services.log("gpa.text_clarification_promoted", this.threadId, {
+              turnRunId: turn.id,
+              stage: this.#gpa.stage,
+              questionCount: promotedQuestions.length,
+              source: embeddedInput
+                ? "embedded_xml"
+                : textClarificationQuestions.length > 0
+                  ? "numbered_questions"
+                  : "risk_defaults"
+            });
+            decision.toolCalls = [{
+              id: randomUUID(),
+              name: "request_user_input",
+              arguments: {
+                title:
+                  embeddedInput?.title ??
+                  (this.#gpa.stage === "plan" ? "计划细节待确认" : "目标细节待确认"),
+                questions: promotedQuestions
+              }
+            }];
+            // Keep the visible analysis; only strip the unparsed XML markup.
+            decision.assistantMessage = embeddedInput
+              ? embeddedInput.cleanedContent || undefined
+              : decision.assistantMessage;
+            decision.endTurn = false;
+            decision.goalCompleted = false;
+          }
         }
 
         if (decision.clarification && this.#gpa.stage !== "off") {
@@ -1011,6 +1327,45 @@ class ThreadSessionRuntime {
           });
         }
 
+        if (
+          this.#gpa.stage === "act" &&
+          recommendedSkillIds.length > 0 &&
+          !skillForceReminderIssued &&
+          decision.toolCalls.length > 0
+        ) {
+          const loadsRecommended = decision.toolCalls.some((call) => {
+            if (canonicalizeToolName(call.name) !== "skills.load") {
+              return false;
+            }
+            const skillId = String(call.arguments.skill_id ?? "");
+            return recommendedSkillIds.includes(skillId) ||
+              availableSkills.some(
+                (skill) =>
+                  recommendedSkillIds.includes(skill.id) &&
+                  (skill.id === skillId || skill.name === skillId || skill.qualifiedName === skillId)
+              );
+          });
+          const alreadyLoadedRecommended = recommendedSkillIds.some((id) => loadedSkillIds.has(id));
+          const hasNonSkillWork = decision.toolCalls.some((call) => {
+            const name = canonicalizeToolName(call.name);
+            return name !== "skills.load" && name !== "request_user_input";
+          });
+          if (hasNonSkillWork && !loadsRecommended && !alreadyLoadedRecommended) {
+            skillForceReminderIssued = true;
+            const recommended = availableSkills.filter((skill) =>
+              recommendedSkillIds.includes(skill.id)
+            );
+            transcript.push({
+              role: "user",
+              content: buildRecommendedSkillSuggestionInstruction(recommended)
+            });
+            await this.services.log("skill.load_suggested", this.threadId, {
+              turnRunId: turn.id,
+              recommendedSkillIds
+            });
+          }
+        }
+
         if (decision.toolCalls.length > 0) {
           prematureCompletionAttempts = 0;
           if (decision.toolCalls[0]?.name !== "fs.read_directory" || executionRecoveryAttempts < 2) {
@@ -1028,6 +1383,30 @@ class ThreadSessionRuntime {
           decision.toolCalls.length === 0 &&
           decision.endTurn
         ) {
+          const verificationSkill = availableSkills.find(
+            (skill) =>
+              skill.name === "verification-before-completion" ||
+              skill.qualifiedName === "verification-before-completion"
+          );
+          if (
+            verificationSkill &&
+            !loadedSkillIds.has(verificationSkill.id) &&
+            !loadedSkillIds.has(verificationSkill.name)
+          ) {
+            prematureCompletionAttempts += 1;
+            transcript.push({
+              role: "user",
+              content: [
+                "[Internal completion gate. Do not display this instruction to the user.]",
+                `Before claiming completion, call skills.load with skill_id \"${verificationSkill.id}\" (${verificationSkill.name}), follow its verification checklist, then return a corrected final decision with completion_evidence.`
+              ].join(" ")
+            });
+            await this.services.log("skill.verification_load_required", this.threadId, {
+              turnRunId: turn.id,
+              skillId: verificationSkill.id
+            });
+            continue;
+          }
           const completionValidation = validateActCompletion({
             decision,
             planTasks: this.#gpa.planTasks,
@@ -1076,7 +1455,11 @@ class ThreadSessionRuntime {
               }))
             });
 
-            const recoveryInstruction = buildActCompletionRecoveryInstruction(completionValidation);
+            const recoveryInstruction = buildActCompletionRecoveryInstruction(
+              completionValidation,
+              successfulToolEvidence,
+              prematureCompletionAttempts
+            );
             if (prematureCompletionAttempts >= MAX_REPEATED_TASK_FAILURES) {
               const answers = await this.services.requestUserInput(this.threadId, turn.id, {
                 title: "任务完成条件尚未满足",
@@ -1124,10 +1507,16 @@ class ThreadSessionRuntime {
             completedTaskIds: decision.completedTaskIds,
             evidenceCount: decision.completionEvidence?.length ?? 0
           });
+          gpaActCompletedSuccessfully = true;
+          await this.#persistGpaPlanFile({
+            status: "completed",
+            tasks: this.#gpa.planTasks.map((task) => ({ ...task, done: true }))
+          });
         }
         const parsedPlanTasks = this.#gpa.stage === "plan"
           ? parseGpaPlanTasks(assistantMessage ?? "")
           : [];
+        let effectivePlanTasks = parsedPlanTasks;
         if (
           (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") &&
           decision.toolCalls.length === 0 &&
@@ -1143,20 +1532,53 @@ class ThreadSessionRuntime {
             parsedTaskCount: parsedPlanTasks.length
           });
           if (gpaAnalysisValidationAttempts >= MAX_AGENT_PROTOCOL_FAILURES) {
-            throw new Error(
-              `GPA ${this.#gpa.stage.toUpperCase()} failed: the model did not return a valid visible response. Please switch to a model that supports structured GPA output and try again.`
-            );
+            // PLAN format failures should not hard-stop the whole project turn.
+            // Fall back to a confirmable single-task plan so the user can continue into ACT.
+            if (this.#gpa.stage === "plan") {
+              effectivePlanTasks = [
+                { id: "T1", title: "按已确认目标继续完成项目", done: false }
+              ];
+              const fallbackPlan = [
+                "模型未产出标准任务列表（需要 `T1:` / `T2:` 这类格式），已自动生成可确认的回退计划。",
+                "你可以直接确认后进入执行；也可以先关掉 GPA，普通发消息继续改代码。",
+                "",
+                "T1: 按已确认目标继续完成项目",
+                "",
+                "验收标准：对照当前项目状态完成目标，并验证可运行。",
+                "",
+                "⏳ 等待确认"
+              ].join("\n");
+              decision = {
+                ...decision,
+                assistantMessage: fallbackPlan,
+                toolCalls: [],
+                endTurn: true,
+                goalCompleted: false,
+                isStructured: true
+              };
+              await this.services.log("gpa.plan_fallback_applied", this.threadId, {
+                turnRunId: turn.id,
+                attempt: gpaAnalysisValidationAttempts,
+                fallbackTaskCount: effectivePlanTasks.length
+              });
+            } else {
+              throw new Error(
+                `GPA ${this.#gpa.stage.toUpperCase()} failed: the model did not return a valid visible response. Please switch to a model that supports structured GPA output and try again.`
+              );
+            }
+          } else {
+            transcript.push({
+              role: "user",
+              content:
+                this.#gpa.stage === "plan"
+                  ? "Your previous PLAN response was not shown because it did not contain a valid task list. Return a user-visible PLAN now. Include at least one task on its own line using exactly `T1: task title` (then T2, T3 as needed), plus acceptance criteria. Do not call tools."
+                  : "Your previous GOAL response was not shown because it was empty. Return a complete, user-visible GOAL analysis with the objective, acceptance criteria, constraints, and any needed clarification. Do not call tools."
+            });
+            continue;
           }
-          transcript.push({
-            role: "user",
-            content:
-              this.#gpa.stage === "plan"
-                ? "Your previous PLAN response was not shown because it did not contain a valid task list. Return a user-visible PLAN now. Include at least one task on its own line using exactly `T1: task title` (then T2, T3 as needed), plus acceptance criteria. Do not call tools."
-                : "Your previous GOAL response was not shown because it was empty. Return a complete, user-visible GOAL analysis with the objective, acceptance criteria, constraints, and any needed clarification. Do not call tools."
-          });
-          continue;
         }
-        const deferredExecutionPayload = assistantMessage && isDeferredExecutionPayload(assistantMessage);
+        const deferredExecutionPayload =
+          Boolean(decision.assistantMessage) && isDeferredExecutionPayload(decision.assistantMessage);
         if (deferredExecutionPayload) {
           await this.services.emit({
             type: "assistant.execution_output",
@@ -1188,9 +1610,18 @@ class ThreadSessionRuntime {
             decision.goalCompleted = false;
             continue;
           }
-        } else if (decision.toolCalls.length > 0) {
+        } else if (
+          decision.toolCalls.length > 0 &&
+          !(
+            (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") &&
+            decision.toolCalls.length === 1 &&
+            decision.toolCalls[0]?.name === "request_user_input"
+          )
+        ) {
           // Progress prose belongs to the execution panel while tools are still
           // running. Only a validated final response is written to the chat.
+          // Exception: GPA analysis may keep its visible write-up while waiting
+          // on a clarification card.
           decision.assistantMessage = undefined;
         }
 
@@ -1208,12 +1639,17 @@ class ThreadSessionRuntime {
               turn.id,
               Object.keys(sourceMetadata).length > 0 ? sourceMetadata : undefined
             );
-            if (this.#gpa.stage === "plan" && parsedPlanTasks.length > 0) {
+            if (this.#gpa.stage === "plan" && effectivePlanTasks.length > 0) {
               await this.#commitGpa({
                 ...this.#gpa,
-                planTasks: parsedPlanTasks,
+                planTasks: effectivePlanTasks,
                 awaitingConfirmation: null,
                 updatedAt: new Date().toISOString()
+              });
+              await this.#persistGpaPlanFile({
+                status: "awaiting_confirmation",
+                tasks: effectivePlanTasks,
+                body: assistantMessage.content
               });
             }
             transcript.push({ role: "assistant", content: assistantMessage.content });
@@ -1363,8 +1799,21 @@ class ThreadSessionRuntime {
               listFiles: this.services.listFiles,
               readFile: this.services.readFile,
               writeFile: this.services.writeFile,
-              runTerminalCommand: (command) =>
-                this.services.runTerminalCommand(this.threadId, workspaceCwd, command),
+              runTerminalCommand: async (command) => {
+                if (webFrontendGuard) {
+                  const prepared = prepareShellCommandForWebFrontend(command);
+                  if (!prepared.ok) {
+                    throw new Error(prepared.error ?? "Command blocked for web frontend task.");
+                  }
+                  command = prepared.command;
+                } else {
+                  const prepared = prepareShellCommandForWebFrontend(command);
+                  if (prepared.rewritten) {
+                    command = prepared.command;
+                  }
+                }
+                return this.services.runTerminalCommand(this.threadId, workspaceCwd, command);
+              },
               requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
               requestUserInput: (input) => {
                 const isGpaClarification = this.#gpa.stage !== "off";
@@ -1376,6 +1825,7 @@ class ThreadSessionRuntime {
                 });
               },
               requestUserInputEnabled: this.#gpa.stage !== "off",
+              webFrontendGuard,
               spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
               webSearch: (query) => trackOpenedBrowserTabs(
                 () => this.services.webSearch(this.threadId, query)
@@ -1434,37 +1884,37 @@ class ThreadSessionRuntime {
               },
               listMcpResources: async (server) => {
                 if (server) {
-                  assertAccessibleMcpServer(server, accessibleMcpServerIds);
+                  assertAccessibleMcpServer(server, activeMcpServerIds);
                   return this.services.listMcpResources(server);
                 }
                 return (await this.services.listMcpResources()).filter((resource) =>
-                  accessibleMcpServerIds.includes(resource.server)
+                  activeMcpServerIds.includes(resource.server)
                 );
               },
               listMcpResourceTemplates: async (server) => {
                 if (server) {
-                  assertAccessibleMcpServer(server, accessibleMcpServerIds);
+                  assertAccessibleMcpServer(server, activeMcpServerIds);
                   return this.services.listMcpResourceTemplates(server);
                 }
                 return (await this.services.listMcpResourceTemplates()).filter((template) =>
-                  accessibleMcpServerIds.includes(template.server)
+                  activeMcpServerIds.includes(template.server)
                 );
               },
               listMcpTools: async (server) => {
                 if (server) {
-                  assertAccessibleMcpServer(server, accessibleMcpServerIds);
+                  assertAccessibleMcpServer(server, activeMcpServerIds);
                   return this.services.listMcpTools(server);
                 }
                 return (await this.services.listMcpTools()).filter((tool) =>
-                  accessibleMcpServerIds.includes(tool.server)
+                  activeMcpServerIds.includes(tool.server)
                 );
               },
               readMcpResource: async (server, uri) => {
-                assertAccessibleMcpServer(server, accessibleMcpServerIds);
+                assertAccessibleMcpServer(server, activeMcpServerIds);
                 return this.services.readMcpResource(server, uri);
               },
               callMcpTool: async (server, tool, argumentsJson) => {
-                assertAccessibleMcpServer(server, accessibleMcpServerIds);
+                assertAccessibleMcpServer(server, activeMcpServerIds);
                 return this.services.callMcpTool(server, tool, argumentsJson);
               },
               deferredToolSpecs: mcpTools,
@@ -1499,7 +1949,8 @@ class ThreadSessionRuntime {
           }
 
           const completedAt = new Date().toISOString();
-          const resultJson = JSON.stringify(result);
+          const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result);
+          const resultJson = JSON.stringify(sanitizedResult);
           const status = result.ok ? "completed" : "failed";
           await this.services.persistence.finishToolCall(toolRecord.id, {
             status,
@@ -1523,12 +1974,13 @@ class ThreadSessionRuntime {
 
           if (result.ok) {
             collectKnowledgeSources(toolCall.name, result, visibleKnowledgeBases, knowledgeSources);
-            collectBrowserSources(toolCall.name, result, browserSources);
+            collectBrowserSources(toolCall.name, sanitizedResult, browserSources);
           }
 
+          const modelContent = summarizeToolResultForModel(toolCall.name, sanitizedResult);
           const toolMessage = await this.recordMessage(
             "tool",
-            `${toolCall.name}\n${result.content}`,
+            `${toolCall.name}\n${modelContent}`,
             turn.id,
             { toolCallId: toolRecord.id }
           );
@@ -1590,6 +2042,37 @@ class ThreadSessionRuntime {
             updateBrowserVerificationEvidence(browserVerificationEvidence, toolCall, result);
             successfulToolCallFingerprints.add(toolCallFingerprint);
             failedToolCallFingerprints.delete(toolCallFingerprint);
+            if (
+              toolCall.name === "browser.navigate" ||
+              toolCall.name === "browser.reload" ||
+              evidence.kinds.includes("delivery")
+            ) {
+              clearBrowserObservationFingerprints(successfulToolCallFingerprints);
+            }
+            if (toolCall.name === "skills.load") {
+              const skillId = String(toolCall.arguments.skill_id ?? "");
+              if (skillId) {
+                loadedSkillIds.add(skillId);
+              }
+              const loadedName = typeof sanitizedResult.json?.skill === "string"
+                ? sanitizedResult.json.skill
+                : null;
+              if (loadedName) {
+                loadedSkillIds.add(loadedName);
+              }
+              const matched = availableSkills.find(
+                (skill) =>
+                  skill.id === skillId ||
+                  skill.name === skillId ||
+                  skill.qualifiedName === skillId ||
+                  skill.qualifiedName === loadedName ||
+                  skill.name === loadedName
+              );
+              if (matched) {
+                loadedSkillIds.add(matched.id);
+                loadedSkillIds.add(matched.name);
+              }
+            }
             for (const filePath of getAddedPatchFiles(toolCall.arguments)) {
               successfullyCreatedFiles.add(filePath);
             }
@@ -1712,7 +2195,7 @@ class ThreadSessionRuntime {
       }
 
       if (terminalThread) {
-        await this.#clearGpaAfterExecution();
+        await this.#clearGpaAfterExecution(false, gpaActCompletedSuccessfully);
         await this.services.emit({
           type: "thread.updated",
           threadId: this.threadId,
@@ -2363,6 +2846,7 @@ const OBSERVATION_TOOL_NAMES = new Set([
   "fs.read_directory",
   "code.search",
   "code.ast_diff",
+  "code.outline",
   "git.status",
   "git.diff",
   "knowledge.search",
@@ -2421,11 +2905,11 @@ function buildBrowserVerificationDirective(stage: GpaStage): string {
   if (stage !== "act") return "";
   return [
     "\n\nFrontend verification policy:",
-    "After changing HTML, CSS, JavaScript, JSX, TSX, Vue, Svelte, Canvas, or other browser-rendered resources, you must verify the current result in the app browser before completing.",
-    "Use the same tab and follow: reload/open page -> browser.set_viewport -> browser.assert_page -> browser.capture_screenshot.",
-    "Verify desktop 1440x900 and mobile 390x844 unless the user explicitly requested a desktop-only page.",
-    "Assertions must include relevant text/elements, images_loaded, no_horizontal_overflow, no_severe_console_errors, and canvas_nonblank for Canvas/game work.",
-    "A screenshot from before the latest file change is invalid. If the model supports images, inspect the screenshot attachment before claiming visual quality.",
+    "Preferred order: locate with fs/code tools, write changes with apply_patch or fs.write_file, then verify in the app browser when the task is browser-rendered.",
+    "After changing HTML, CSS, JavaScript, JSX, TSX, Vue, Svelte, Canvas, or other browser-rendered resources, gather verification evidence before completing (assert_page and/or capture_screenshot on a fresh page load).",
+    "Desktop ~1440x900 and mobile ~390x844 are recommended unless the user asked for desktop-only.",
+    "Useful checks include relevant text/elements, images_loaded, no_horizontal_overflow, no_severe_console_errors, and canvas_nonblank for Canvas/game work.",
+    "A screenshot from before the latest file change is weak evidence. If the model supports images, inspect the screenshot attachment before claiming visual quality.",
     "If the model does not support images, rely on deterministic assertions and explicitly state `未执行视觉模型检查（model_not_multimodal）` in the final summary."
   ].join(" ");
 }
@@ -2525,6 +3009,55 @@ export function classifySuccessfulToolEvidence(input: {
     kinds: [...kinds],
     verifiedPaths: input.verifiedPaths
   };
+}
+
+/**
+ * Resolves ACT progress without treating ordinary commentary as task completion.
+ * Provider-reported ids always win; text is considered only when the provider
+ * omitted the structured field and this turn already has successful tool output.
+ */
+export function resolveGpaPlanProgress(input: {
+  reportedTaskIds?: string[];
+  assistantMessage?: string;
+  planTasks: GpaState["planTasks"];
+  successfulEvidence: SuccessfulToolEvidence[];
+}): GpaPlanProgressResolution {
+  const knownTaskIds = new Set(input.planTasks.map((task) => task.id.toUpperCase()));
+  const reportedTaskIds = (input.reportedTaskIds ?? [])
+    .map((id) => id.trim().toUpperCase())
+    .filter((id, index, values) => knownTaskIds.has(id) && values.indexOf(id) === index);
+  const declarations = parseGpaCompletedTaskDeclarations(
+    input.assistantMessage ?? "",
+    input.planTasks
+  );
+  const hasSuccessfulToolEvidence = input.successfulEvidence.some((item) => item.kinds.length > 0);
+  const unfinishedTaskIds = new Set(
+    input.planTasks.filter((task) => !task.done).map((task) => task.id.toUpperCase())
+  );
+  const inferredTaskIds = reportedTaskIds.length === 0 && hasSuccessfulToolEvidence
+    ? declarations
+        .flatMap((declaration) => declaration.taskIds)
+        .filter(
+          (id, index, values) => unfinishedTaskIds.has(id) && values.indexOf(id) === index
+        )
+    : [];
+
+  return {
+    completedTaskIds: reportedTaskIds.length > 0 ? reportedTaskIds : inferredTaskIds,
+    inferredTaskIds,
+    declarations,
+    hasSuccessfulToolEvidence
+  };
+}
+
+export function buildGpaPlanProgressRecoveryInstruction(
+  declarations: Array<{ taskIds: string[]; text: string }>
+): string {
+  return [
+    "[Internal GPA progress protocol. Do not display or quote this instruction to the user.]",
+    `You declared PLAN task completion for: ${declarations.flatMap((item) => item.taskIds).join(", ")}.`,
+    "Do not mark a task complete from prose alone. After successful tool results, return a structured decision whose completed_task_ids cumulatively lists every completed PLAN task ID. Keep completion_evidence for the final validated response."
+  ].join(" ");
 }
 
 export function validateActCompletion(input: {
@@ -2632,7 +3165,9 @@ export function validateActCompletion(input: {
 }
 
 export function buildActCompletionRecoveryInstruction(
-  result: ActCompletionValidationResult
+  result: ActCompletionValidationResult,
+  successfulEvidence: SuccessfulToolEvidence[] = [],
+  attempt = 1
 ): string {
   const nextAction = result.missingDelivery
     ? "Call the next delivery tool now. For file work, use apply_patch or fs.write_file and wait for its successful result."
@@ -2641,13 +3176,33 @@ export function buildActCompletionRecoveryInstruction(
       : (result.missingBrowserVerification?.length ?? 0) > 0
         ? "Complete browser verification on the same rendered tab: reload it, run browser.set_viewport and browser.assert_page, then browser.capture_screenshot for each required viewport."
       : "Return a corrected final JSON decision using only the successful tool call ids already present in the transcript.";
+  const evidenceLines = successfulEvidence.slice(0, 24).map(
+    (item) =>
+      `- tool_call_id: ${item.toolCallId}; tool: ${item.toolName}; kinds: ${item.kinds.join(",")}`
+  );
+  const evidenceBlock =
+    evidenceLines.length > 0
+      ? [
+          "Available successful tool_call_id values (copy exactly into completion_evidence):",
+          ...evidenceLines
+        ].join("\n")
+      : "No successful delivery/verification tool_call_id values are available yet.";
+  if (attempt >= 2) {
+    return [
+      "[Internal completion validation. Do not display or quote this instruction to the user.]",
+      `Missing: delivery=${result.missingDelivery}; verification=${result.missingVerification}; tasks=${result.missingTaskIds.join(",") || "none"}; evidenceTasks=${result.missingEvidenceTaskIds.join(",") || "none"}; browser=${(result.missingBrowserVerification ?? []).join(",") || "none"}.`,
+      evidenceBlock,
+      nextAction
+    ].join("\n");
+  }
   return [
     "[Internal completion validation. Do not display or quote this instruction to the user.]",
     "The task was not completed because the runtime could not verify the claimed result.",
     ...result.reasons,
+    evidenceBlock,
     nextAction,
     "Do not return progress prose. Set goal_completed to true only after completed_task_ids covers every PLAN task and completion_evidence references real successful tool_call_id values for delivery and verification."
-  ].join(" ");
+  ].join("\n");
 }
 
 async function verifySuccessfulToolDeliveryPaths(
@@ -2858,6 +3413,21 @@ export class AgentRuntimeService {
     await runtime.setGpaStage(stage);
   }
 
+  public async peekGpaPlanFile(threadId: string) {
+    const runtime = this.ensureThread(threadId);
+    return runtime.peekGpaPlanFile();
+  }
+
+  public async restoreGpaPlanFromFile(threadId: string) {
+    const runtime = this.ensureThread(threadId);
+    return runtime.restoreGpaPlanFromFile();
+  }
+
+  public async abandonGpaPlanFile(threadId: string) {
+    const runtime = this.ensureThread(threadId);
+    return runtime.abandonGpaPlanFile();
+  }
+
   public async setGpaFullAccess(threadId: string, fullAccess: boolean): Promise<void> {
     const runtime = this.ensureThread(threadId);
     await runtime.setGpaFullAccess(fullAccess);
@@ -2970,6 +3540,15 @@ export function isAgentToolEnabled(model: ModelProfile): boolean {
   return model.supportsToolCalling === true;
 }
 
+export function extractSelectedMcpServerIds(input: string): string[] {
+  const serverIds = new Set<string>();
+  const pattern = /\[Selected MCP server\]\s*\r?\n\s*id:\s*([^\s\r\n]+)/gi;
+  for (const match of input.matchAll(pattern)) {
+    serverIds.add(match[1]);
+  }
+  return [...serverIds];
+}
+
 export function formatAvailableTools(
   tools: ToolSpecDefinition[],
   options: { includeSchemas?: boolean } = {}
@@ -3068,7 +3647,9 @@ function buildRuntimePrompt(
   skillDependencyWarnings: string[],
   knowledgeEnabled: boolean,
   imageGenerateAvailable = false,
-  videoGenerateAvailable = false
+  videoGenerateAvailable = false,
+  recommendedSkills: Array<{ id: string; qualifiedName: string; domain?: string }> = [],
+  selectedMcpServerIds: string[] = []
 ): RuntimePromptBundle {
   const blocks = [
     "You are codexh, a desktop agent for project and chat workflows.",
@@ -3087,8 +3668,22 @@ function buildRuntimePrompt(
       "When the user asks to generate or recreate a video, load the generate_video skill and call video.generate. That tool uses the default video model from Settings → Multimodal, not the chat reasoning model. Never call video_gen, videogen, or any invented video tool name. Never claim a video was created without a successful video.generate result."
     );
   }
+  if (recommendedSkills.length > 0) {
+    const lines = recommendedSkills.map(
+      (skill) =>
+        `- skill_id: ${skill.id}; domain: ${skill.domain ?? "通用"}; name: ${skill.qualifiedName}`
+    );
+    blocks.push(
+      [
+        "Recommended skills for this task (domain-matched). You MUST call skills.load for each relevant recommended skill before executing related work:",
+        ...lines
+      ].join("\n")
+    );
+  }
   blocks.push(
-    "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
+    selectedMcpServerIds.length > 0
+      ? `The user explicitly selected MCP server(s): ${selectedMcpServerIds.join(", ")}. This request requires an MCP-backed answer. First call mcp.list_tools with the selected server id, then call mcp.call with a discovered tool before answering. Do not use filesystem, browser, web-search, or knowledge tools for the initial lookup.`
+      : "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
     "For browser automation, call browser.inspect_page before browser.click, browser.fill, browser.select_option, or browser.press_key. Use only element ids returned by the latest inspection, then inspect again after navigation or page changes. Never guess selectors or claim a browser action succeeded without a tool result."
   );
   if (knowledgeEnabled) {
@@ -3184,7 +3779,7 @@ export function compactTranscriptForContext(
   // A native function-call assistant message and every following tool result
   // form one protocol unit. Do not leave tool results in the context after
   // truncating their originating call envelope.
-  const recentMessages = selectProtocolSafeRecentMessages(transcript, 8);
+  const recentMessages = selectProtocolSafeRecentMessages(transcript, 6);
   const earlierMessages = transcript.slice(0, Math.max(0, transcript.length - recentMessages.length));
   const summaryBudget = Math.max(120, Math.floor(targetTranscriptTokens * 0.3));
   const recentBudget = Math.max(
@@ -3232,7 +3827,14 @@ function buildCompactedTranscriptSummary(
 }
 
 function estimateRuntimeTranscriptTokens(transcript: ProviderTurnInput["transcript"]): number {
-  return transcript.reduce((total, message) => total + estimateRuntimeTokens(message.content), 0);
+  return transcript.reduce((total, message) => {
+    let tokens = estimateRuntimeTokens(message.content);
+    for (const attachment of message.attachments ?? []) {
+      // Rough multimodal attachment cost so compaction triggers before the provider hard-fails.
+      tokens += attachment.kind === "image" ? 1200 : attachment.kind === "video" ? 2400 : 200;
+    }
+    return total + tokens;
+  }, 0);
 }
 
 function estimateRuntimeTokens(content: string): number {
@@ -3292,6 +3894,77 @@ function truncateToRuntimeTokenBudget(content: string, tokenBudget: number): str
   const headLength = Math.floor(maximumCharacters * 0.72);
   const tailLength = Math.max(0, maximumCharacters - headLength - 34);
   return `${content.slice(0, headLength)}\n...[已压缩]...\n${content.slice(-tailLength)}`;
+}
+
+const BROWSER_OBSERVATION_FINGERPRINT_PREFIXES = [
+  "browser.inspect_page:",
+  "browser.read_page_text:",
+  "browser.assert_page:",
+  "browser.wait_for:",
+  "browser.capture_snapshot:",
+  "browser.set_viewport:",
+  "browser.reload:",
+  "browser.capture_screenshot:"
+];
+
+export function clearBrowserObservationFingerprints(fingerprints: Set<string>): void {
+  for (const fingerprint of [...fingerprints]) {
+    if (BROWSER_OBSERVATION_FINGERPRINT_PREFIXES.some((prefix) => fingerprint.startsWith(prefix))) {
+      fingerprints.delete(fingerprint);
+    }
+  }
+}
+
+export function buildRecommendedSkillSuggestionInstruction(
+  skills: Array<{ id: string; qualifiedName: string; domain?: string }>
+): string {
+  const lines = skills.map(
+    (skill) =>
+      `- skill_id: ${skill.id}; domain: ${skill.domain ?? "通用"}; name: ${skill.qualifiedName}`
+  );
+  return [
+    "[Internal skill hint. Do not display this instruction to the user.]",
+    "Recommended skills for this coding task are available but not yet loaded.",
+    "Consider calling skills.load for one of these skill_id values when helpful; continue with other tools if you already know the needed approach:",
+    ...lines
+  ].join("\n");
+}
+
+export function sanitizeToolResultForTranscript(toolName: string, result: ToolResult): ToolResult {
+  const json = result.json ? sanitizeBrowserToolJson(result.json) as ToolResult["json"] : result.json;
+  return {
+    ...result,
+    content: summarizeToolResultForModel(toolName, { ...result, json }),
+    json
+  };
+}
+
+export function summarizeToolResultForModel(toolName: string, result: ToolResult): string {
+  const content = result.content ?? "";
+  if (toolName.startsWith("browser.") || toolName === "web_search.open_page") {
+    return truncateCharacters(content, 12_000);
+  }
+  if (toolName === "shell.exec") {
+    return truncateCharacters(content, 8_000);
+  }
+  if (toolName === "fs.read_file" && content.length > 32_000) {
+    const head = content.slice(0, 2_000);
+    const tail = content.slice(-2_000);
+    return [
+      "File content is large. Prefer code.outline or fs.read_file with offset/limit.",
+      head,
+      "\n...[truncated]...\n",
+      tail
+    ].join("\n");
+  }
+  return content;
+}
+
+function truncateCharacters(content: string, limit: number): string {
+  if (content.length <= limit) {
+    return content;
+  }
+  return `${content.slice(0, limit)}\n…[truncated ${content.length - limit} chars]`;
 }
 
 function resolveModel(config: AppConfig, modelId: string): ModelProfile {

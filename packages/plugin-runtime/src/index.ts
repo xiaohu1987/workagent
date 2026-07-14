@@ -545,6 +545,7 @@ function normalizeMcpServerConfig(
   return {
     id: `${document.pluginId}:${slugify(serverName)}`,
     name: serverName,
+    description: typeof typed.description === "string" ? typed.description : undefined,
     command,
     args: Array.isArray(typed.args) ? typed.args.map(String) : undefined,
     env: normalizeEnv(typed.env),

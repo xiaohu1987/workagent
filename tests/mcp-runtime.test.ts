@@ -47,4 +47,23 @@ describe("McpManager", () => {
       expect.objectContaining({ serverId: "stocks", state: "connected" })
     ]);
   });
+
+  it("tests a connected server even when optional resource discovery is unsupported", async () => {
+    const client: McpClient = {
+      listTools: vi.fn().mockResolvedValue({
+        tools: [{ name: "market_cap", inputSchema: { type: "object" } }]
+      }),
+      listResources: vi.fn().mockRejectedValue(new Error("Method not found")),
+      listResourceTemplates: vi.fn().mockRejectedValue(new Error("Method not found")),
+      close: vi.fn()
+    };
+    const manager = new McpManager([], vi.fn().mockResolvedValue(client));
+
+    await expect(manager.testConfig(baseConfig)).resolves.toEqual({
+      tools: [expect.objectContaining({ server: "stocks", name: "market_cap" })],
+      resources: [],
+      resourceTemplates: []
+    });
+    expect(client.close).toHaveBeenCalledTimes(1);
+  });
 });

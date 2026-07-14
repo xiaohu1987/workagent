@@ -75,4 +75,52 @@ describe("BrowserRuntime", () => {
     expect(browser.listTabs(threadId).map((tab) => tab.id)).toEqual([existing.tab.id]);
     expect(browser.listTabs(threadId)[0]?.isActive).toBe(true);
   });
+
+  it("reuses an existing same-origin tab instead of opening another", async () => {
+    const browser = new BrowserRuntime(async (target) => ({
+      title: new URL(target).pathname || "page",
+      url: target,
+      text: "ok",
+      html: "<html></html>",
+      fetchedAt: new Date().toISOString()
+    }));
+    const threadId = "thread-reuse";
+    const first = await browser.openTab(threadId, "http://127.0.0.1:8765/");
+    const second = await browser.openTab(threadId, "http://127.0.0.1:8765/?v=2");
+
+    expect(second.reused).toBe(true);
+    expect(second.tab.id).toBe(first.tab.id);
+    expect(browser.listTabs(threadId)).toHaveLength(1);
+    expect(second.tab.url).toContain("v=2");
+  });
+
+  it("caps agent tabs at three per thread", async () => {
+    const browser = new BrowserRuntime(async (target) => ({
+      title: target,
+      url: target,
+      text: "ok",
+      html: "<html></html>",
+      fetchedAt: new Date().toISOString()
+    }));
+    const threadId = "thread-cap";
+    await browser.openTab(threadId, "http://a.test/");
+    await browser.openTab(threadId, "http://b.test/");
+    await browser.openTab(threadId, "http://c.test/");
+    await browser.openTab(threadId, "http://d.test/");
+
+    expect(browser.listTabs(threadId)).toHaveLength(3);
+    expect(browser.listTabs(threadId).map((tab) => tab.url)).toEqual([
+      "http://d.test/",
+      "http://c.test/",
+      "http://b.test/"
+    ]);
+  });
+
+  it("does not fall back to full HTML when page text is empty", async () => {
+    const { loadPage } = await import("@browser-runtime");
+    const page = await loadPage("data:text/html,<html><body><div></div></body></html>");
+    expect(page.html.length).toBeGreaterThan(0);
+    expect(page.text).toBe("(no readable text)");
+    expect(page.text.includes("<html")).toBe(false);
+  });
 });

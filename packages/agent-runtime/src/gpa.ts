@@ -1,3 +1,4 @@
+import * as cheerio from "cheerio";
 import type { GpaStage, GpaState, UserInputOption, UserInputQuestion } from "@shared-types";
 
 export const DEFAULT_GPA_STATE: GpaState = {
@@ -58,7 +59,76 @@ export function gpaStageAllowsTools(state: GpaState): boolean {
   return state.stage === "off" || state.stage === "act";
 }
 
-export function buildGpaSystemDirective(state: GpaState): string {
+/** Marks matching plan tasks as done; returns the same state reference when unchanged. */
+export function applyCompletedPlanTasks(state: GpaState, completedTaskIds: string[]): GpaState {
+  if (!completedTaskIds.length || !state.planTasks.length) {
+    return state;
+  }
+  const completed = new Set(
+    completedTaskIds.map((id) => id.trim().toUpperCase()).filter(Boolean)
+  );
+  let changed = false;
+  const planTasks = state.planTasks.map((task) => {
+    if (!completed.has(task.id.toUpperCase()) || task.done) {
+      return task;
+    }
+    changed = true;
+    return { ...task, done: true };
+  });
+  return changed ? { ...state, planTasks } : state;
+}
+
+export interface GpaCompletedTaskDeclaration {
+  taskIds: string[];
+  text: string;
+}
+
+/**
+ * Finds explicit ACT progress statements such as `T1 completed` or
+ * `任务 T2 和 T3 已完成`. Generic progress prose is intentionally ignored.
+ *
+ * Intentionally does NOT treat bare 实现/验证/处理 as completion — those words
+ * appear in "开始实现…" / "剩余任务是验证…" and must not mark plan tasks done.
+ */
+export function parseGpaCompletedTaskDeclarations(
+  content: string,
+  planTasks: GpaState["planTasks"]
+): GpaCompletedTaskDeclaration[] {
+  if (!content.trim() || planTasks.length === 0) {
+    return [];
+  }
+
+  const knownTaskIds = new Set(planTasks.map((task) => task.id.toUpperCase()));
+  // Require an explicit "done" signal: completed/finished/done/implemented/verified,
+  // or 完成/已完成/已实现/已验证. Bare 实现/验证 alone is too common in future-tense ACT prose.
+  const completion =
+    /(?:\b(?:complete(?:d)?|finished|done|implemented|verified)\b|(?:\u2705|\u2611\ufe0f?)|(?:\u5df2\s*)?(?:\u5b8c\u6210)|(?:\u5df2\s*(?:\u5b9e\u73b0|\u9a8c\u8bc1|\u5904\u7406)))/i;
+  const negatedCompletion =
+    /(?:(?:\u5c1a)?\u672a|\u672a\u80fd|not|incomplete|pending|todo|remaining|\u5269\u4f59)\s*(?:\u5b8c\u6210|\u5b9e\u73b0|\u9a8c\u8bc1|\u5904\u7406|\u4efb\u52a1|complete(?:d)?|finished|done|implemented|verified)?/i;
+  const futureIntent =
+    /(?:\u5f00\u59cb|\u51c6\u5907|\u5373\u5c06|\u63a5\u4e0b\u6765|\u8986\u76d6|\b(?:starting|going to|about to|will|covering|implementing|verifying)\b)/i;
+  const declarations: GpaCompletedTaskDeclaration[] = [];
+
+  for (const rawSegment of content.split(/[\r\n\u3002\uff01!?;\uff1b]+/)) {
+    const text = rawSegment.trim();
+    if (!text || !completion.test(text) || negatedCompletion.test(text) || futureIntent.test(text)) {
+      continue;
+    }
+    const taskIds = [...text.matchAll(/\bT\s*(\d+)\b/gi)]
+      .map((match) => `T${match[1]}`.toUpperCase())
+      .filter((id, index, values) => knownTaskIds.has(id) && values.indexOf(id) === index);
+    if (taskIds.length > 0) {
+      declarations.push({ taskIds, text });
+    }
+  }
+
+  return declarations;
+}
+
+export function buildGpaSystemDirective(
+  state: GpaState,
+  options?: { webFrontendTask?: boolean }
+): string {
   if (state.stage === "off") {
     return "";
   }
@@ -92,7 +162,8 @@ export function buildGpaSystemDirective(state: GpaState): string {
       "4) 记录：输出 `✅ 任务 {ID} 完成`、交付物摘要、遇到的问题与解决方案、对后续任务的影响；",
       "5) 汇报：输出当前任务结果与下一步计划；如需用户决策，列出明确选项；",
       "6) 停止并上报：需求变更/范围蔓延、技术方案不可行/阻塞、自检未通过且无法自行修复、需要用户做选型/优先级决策。",
-      "7) 最终完成时必须返回 completed_task_ids，覆盖已确认 PLAN 的全部任务；completion_evidence 必须按任务引用真实成功的 tool_call_id，并区分 observation、delivery、verification。没有交付和验证证据时不得声明 goal_completed。"
+      "7) 每完成一个计划任务，必须在本轮 decision 的 completed_task_ids 中累计已完成的全部任务 ID（不要攒到最后才一次性提交）。",
+      "8) 最终完成时必须返回 completed_task_ids，覆盖已确认 PLAN 的全部任务；completion_evidence 必须按任务引用真实成功的 tool_call_id，并区分 observation、delivery、verification。没有交付和验证证据时不得声明 goal_completed。"
     ].join("\n")
   };
 
@@ -100,9 +171,23 @@ export function buildGpaSystemDirective(state: GpaState): string {
     ? "\nFor GPA analysis, the only permitted tool is request_user_input. If technology, scope, priority, irreversible impact, or acceptance criteria cannot be safely resolved from the available context, call request_user_input once with one to three short questions and options. Do not put questions in assistant_message and do not use a clarification field. After its tool result, incorporate every answer and continue the same analysis stage."
     : "";
   const actClarificationRule = state.stage === "act"
-    ? "\n7) Before any write, command, or external side effect, if a material decision cannot be verified with the available context or tools, call request_user_input with one to three concise questions and options. Never ask for facts that tools can determine. After its tool result, continue from the verified context; revise the plan only when the answers materially change it."
+    ? "\n9) Before any write, command, or external side effect, if a material decision cannot be verified with the available context or tools, call request_user_input with one to three concise questions and options. Never ask for facts that tools can determine. After its tool result, continue from the verified context; revise the plan only when the answers materially change it."
     : "";
-  return `${header}\n\n${rules[state.stage]}${analysisClarificationRule}${actClarificationRule}`;
+  const webFrontendRule = state.stage === "act" && options?.webFrontendTask
+    ? "\n【网页/前端任务约束】禁止用 Python（python -c / *.py）生成或改写 HTML/CSS/JS。请使用 apply_patch 或 fs.write_file。优先顺序建议：先用 fs/code 定位并写出改动，再按需预览验证；完成前须有浏览器断言/截图等验证证据。"
+    : "";
+  return `${header}\n\n${rules[state.stage]}${analysisClarificationRule}${actClarificationRule}${webFrontendRule}`;
+}
+
+/** GPA workflow is project-workspace only; chat threads may only turn it off. */
+export function canStartGpaStage(
+  threadMode: string | null | undefined,
+  stage: GpaStage
+): boolean {
+  if (stage === "off") {
+    return true;
+  }
+  return threadMode === "project";
 }
 
 /** 识别用户以简短确认语推进阶段（与「确认」按钮的长指令区分，避免误触发） */
@@ -160,6 +245,18 @@ export function parseGpaPlanTasks(content: string): GpaState["planTasks"] {
     }
   }
 
+  // Chinese labels such as `任务1：` / `步骤2：` used by some local models.
+  if (tasks.length === 0) {
+    for (const line of lines) {
+      const match = line.match(
+        /^\s*(?:#{1,6}\s*)?(?:[-*+]\s*)?(?:任务|步骤|计划)\s*(\d+)\s*[:：.\-、]\s*(.+?)\s*$/i
+      );
+      if (!match) continue;
+      appendTask(`T${match[1]}`, match[2]);
+      if (tasks.length >= 20) break;
+    }
+  }
+
   return tasks;
 }
 
@@ -203,6 +300,116 @@ function clarificationOptions(question: string): UserInputOption[] {
   ];
 }
 
+export interface EmbeddedRequestUserInput {
+  title: string;
+  questions: UserInputQuestion[];
+  /** Assistant prose with the embedded XML/tool markup removed. */
+  cleanedContent: string;
+}
+
+function splitOptionLabels(raw: string): string[] {
+  return raw
+    .split(/[、,，;/|]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function readCheerioAttr(
+  element: cheerio.Cheerio<cheerio.Element>,
+  ...names: string[]
+): string {
+  for (const name of names) {
+    const value = element.attr(name)?.trim();
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+/**
+ * Models sometimes paste `<request_user_input>` XML into assistant_message
+ * instead of issuing a real tool call. Recover those into structured questions
+ * with cheerio (tolerant HTML/XML fragment parsing).
+ */
+export function parseEmbeddedRequestUserInput(
+  assistantMessage: string | undefined
+): EmbeddedRequestUserInput | null {
+  if (!assistantMessage || !/<request_user_input\b/i.test(assistantMessage)) {
+    return null;
+  }
+
+  // Isolate the tool-shaped fragment so surrounding Markdown is not rewritten.
+  const blockMatch = assistantMessage.match(
+    /<request_user_input\b[\s\S]*?<\/request_user_input>/i
+  );
+  if (!blockMatch) {
+    return null;
+  }
+
+  const $ = cheerio.load(blockMatch[0], {
+    xml: {
+      xmlMode: true,
+      decodeEntities: true
+    }
+  });
+  const root = $("request_user_input").first();
+  if (root.length === 0) {
+    return null;
+  }
+
+  const title = readCheerioAttr(root, "title") || "需要确认几个设计选项";
+  const questions: UserInputQuestion[] = [];
+
+  root.find("question").each((index, node) => {
+    if (questions.length >= 4) {
+      return false;
+    }
+    const question = $(node);
+    const id = readCheerioAttr(question, "id") || `q${index + 1}`;
+    const label = readCheerioAttr(question, "label") || `选项 ${index + 1}`;
+    const prompt = readCheerioAttr(question, "prompt") || label;
+    const nestedOptions = question
+      .find("option")
+      .toArray()
+      .map((optionNode) => {
+        const option = $(optionNode);
+        return readCheerioAttr(option, "label") || option.text().trim();
+      })
+      .filter(Boolean);
+    const optionLabels =
+      nestedOptions.length > 0
+        ? nestedOptions.slice(0, 4)
+        : splitOptionLabels(readCheerioAttr(question, "options"));
+    if (!prompt || optionLabels.length === 0) {
+      return;
+    }
+    questions.push({
+      id,
+      label: label.slice(0, 48),
+      prompt,
+      options: optionLabels.map((optionLabel, optionIndex) => ({
+        id: `option_${optionIndex + 1}`,
+        label: optionLabel,
+        recommended: optionIndex === 0
+      })),
+      allowFreeText: true
+    });
+  });
+
+  if (questions.length === 0) {
+    return null;
+  }
+
+  const cleanedContent = assistantMessage
+    .replace(blockMatch[0], "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return { title, questions, cleanedContent };
+}
+
 /** Promotes numbered questions embedded in GOAL/PLAN prose into input cards. */
 export function buildGpaTextClarificationQuestions(
   stage: GpaStage,
@@ -230,6 +437,79 @@ export function buildGpaTextClarificationQuestions(
     options: clarificationOptions(question),
     allowFreeText: true
   }));
+}
+
+/**
+ * PLAN often lists risks with predetermined mitigations and silent defaults.
+ * Promote those into an explicit confirmation card so users can challenge them.
+ */
+export function buildGpaRiskClarificationQuestions(
+  stage: GpaStage,
+  assistantMessage: string | undefined
+): UserInputQuestion[] {
+  if (stage !== "plan" || !assistantMessage) {
+    return [];
+  }
+  if (!/(?:风险点|⚠️\s*风险|风险\s*[&＆]\s*预案)/i.test(assistantMessage)) {
+    return [];
+  }
+
+  const questions: UserInputQuestion[] = [];
+  const defaultSection = assistantMessage.match(
+    /技术选型[（(]?默认[）)]?[\s\S]{0,600}?(?=\n#{1,3}\s|\n---|\n```|$)/i
+  )?.[0];
+  if (defaultSection) {
+    const defaults = [...defaultSection.matchAll(/^\s*[-*+]\s*\*\*(.+?)\*\*\s*[:：]\s*(.+?)\s*$/gm)]
+      .map((match) => ({ label: match[1].trim(), value: match[2].replace(/\*\*/g, "").trim() }))
+      .filter((item) => item.label && item.value)
+      .slice(0, 3);
+    for (const [index, item] of defaults.entries()) {
+      questions.push({
+        id: `gpa_default_${index + 1}`,
+        label: item.label.slice(0, 48),
+        prompt: `${item.label}是否按默认「${item.value}」执行？`,
+        options: [
+          { id: "accept", label: `是，采用「${item.value}」`, recommended: true },
+          { id: "custom", label: "否，我来指定其他方案" }
+        ],
+        allowFreeText: true
+      });
+    }
+  }
+
+  const riskRows = [...assistantMessage.matchAll(
+    /^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|$/gm
+  )]
+    .map((match) => ({
+      risk: match[1].replace(/\*\*/g, "").trim(),
+      impact: match[2].replace(/\*\*/g, "").trim(),
+      plan: match[3].replace(/\*\*/g, "").replace(/`/g, "").trim()
+    }))
+    .filter((row) =>
+      row.risk &&
+      row.plan &&
+      !/^(?:-+:?|风险|影响|预案)$/i.test(row.risk) &&
+      !/^(?:-+:?|影响)$/i.test(row.impact)
+    )
+    .slice(0, 2);
+
+  if (riskRows.length > 0 && questions.length < 4) {
+    const summary = riskRows
+      .map((row) => `${row.risk} → ${row.plan}`)
+      .join("；");
+    questions.push({
+      id: "gpa_risk_mitigation",
+      label: "风险应对预案",
+      prompt: `是否接受以下风险应对预案？${summary}`,
+      options: [
+        { id: "accept", label: "接受这些预案，按此执行", recommended: true },
+        { id: "revise", label: "需要调整风险应对方案" }
+      ],
+      allowFreeText: true
+    });
+  }
+
+  return questions.slice(0, 4);
 }
 
 export function canEnterGpaAct(state: GpaState): boolean {

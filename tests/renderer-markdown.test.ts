@@ -1,14 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProjectFileTree,
+  buildFileSnapshotDiff,
+  getProjectFileChangeKinds,
   buildContextUsage,
   buildPlanTimelineItems,
+  extractMessageMediaReferences,
   formatComposerAttachments,
+  highlightMarkdownCode,
   parseMarkdownBlocks,
   resolveProjectFilePath
 } from "../apps/desktop/src/renderer/App";
 
 describe("parseMarkdownBlocks", () => {
+  it("highlights fenced C# code and escapes source HTML", () => {
+    const highlighted = highlightMarkdownCode('string title = "<script>";', "csharp");
+
+    expect(highlighted).toContain("hljs-");
+    expect(highlighted).toContain("&lt;script&gt;");
+  });
+
+  it("does not interpret an HTTP image URL as a Windows local path", () => {
+    const url = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png";
+
+    expect(extractMessageMediaReferences(url)).toEqual([{ source: url, kind: "url" }]);
+  });
+
   it("marks the first incomplete plan task as in progress", () => {
     const items = buildPlanTimelineItems({
       stage: "act",
@@ -162,5 +179,87 @@ describe("parseMarkdownBlocks", () => {
     expect(usage.compaction?.threshold).toBe(0.9);
     expect(usage.compaction?.beforeTokens).toBe(349_625);
     expect(usage.segments.map((segment) => segment.label)).toContain("压缩后的对话与工具结果");
+  });
+
+  it("uses one normalized path for Windows file-tree entries", () => {
+    const tree = buildProjectFileTree([
+      { path: "src\\tools\\e2e_battle.py", kind: "file" }
+    ]);
+
+    expect(tree[0]?.path).toBe("src");
+    expect(tree[0]?.children[0]?.path).toBe("src/tools");
+    expect(tree[0]?.children[0]?.children[0]?.path).toBe("src/tools/e2e_battle.py");
+  });
+
+  it("renders snapshot changes with removed and added lines", () => {
+    expect(buildFileSnapshotDiff("first\nold\nlast", "first\nnew\nlast")).toEqual([
+      { kind: "context", content: "first" },
+      { kind: "removed", content: "old" },
+      { kind: "added", content: "new" },
+      { kind: "context", content: "last" }
+    ]);
+  });
+
+  it("uses Git-like file states from task snapshots", () => {
+    const changes = getProjectFileChangeKinds([
+      {
+        status: "completed",
+        resultJson: JSON.stringify({
+          json: {
+            snapshots: [
+              { path: "new.ts", before: "", after: "export {};" },
+              { path: "src/app.ts", before: "old", after: "new" },
+              { path: "old.ts", before: "old", after: "" }
+            ]
+          }
+        })
+      } as any
+    ]);
+
+    expect(changes.get("new.ts")).toBe("added");
+    expect(changes.get("src/app.ts")).toBe("modified");
+    expect(changes.get("old.ts")).toBe("deleted");
+  });
+
+  it("keeps the compacted baseline after a later turn is added", () => {
+    const usage = buildContextUsage({
+      contextWindow: 128_000,
+      messages: [
+        { content: "old history".repeat(100_000), createdAt: "2026-07-13T12:00:00.000Z", turnRunId: "turn-1" } as any,
+        { content: "new request", createdAt: "2026-07-13T12:30:00.000Z", turnRunId: "turn-2" } as any
+      ],
+      toolCalls: [],
+      gpaStage: "act",
+      selectedSkillCount: 0,
+      mcpServerCount: 0,
+      pendingInput: "",
+      compaction: {
+        turnRunId: "turn-1",
+        contextWindow: 128_000,
+        threshold: 0.9,
+        target: 0.6,
+        beforeTokens: 349_625,
+        afterTokens: 38_287,
+        messagesBefore: 21,
+        messagesAfter: 9,
+        createdAt: "2026-07-13T12:22:56.900Z"
+      }
+    });
+
+    expect(usage.usedTokens).toBeLessThan(40_000);
+  });
+
+  it("does not count persisted tool results twice", () => {
+    const usage = buildContextUsage({
+      contextWindow: 10_000,
+      messages: [{ content: "tool output".repeat(1_000) } as any],
+      toolCalls: [{ argumentsJson: "{}", resultJson: "tool output".repeat(1_000) } as any],
+      gpaStage: "off",
+      selectedSkillCount: 0,
+      mcpServerCount: 0,
+      pendingInput: ""
+    });
+
+    expect(usage.segments.find((segment) => segment.id === "conversation")?.tokens).toBeLessThan(4_000);
   });
 });

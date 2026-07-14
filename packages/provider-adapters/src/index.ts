@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import * as cheerio from "cheerio";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { modelJsonCandidates, tryParseModelJson } from "@shared-types";
@@ -896,6 +897,24 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
     };
   }
 
+  const embeddedUserInput = tryParseStandaloneRequestUserInput(text);
+  if (embeddedUserInput) {
+    return {
+      assistantMessage: embeddedUserInput.cleanedContent || undefined,
+      toolCalls: [{
+        id: crypto.randomUUID(),
+        name: "request_user_input",
+        arguments: {
+          title: embeddedUserInput.title,
+          questions: embeddedUserInput.questions
+        }
+      }],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    };
+  }
+
   const parsed = tryParseJsonDecision(text);
   if (parsed) {
     return {
@@ -1110,6 +1129,94 @@ function tryParseTaggedToolCalls(text: string): ProviderTurnDecision["toolCalls"
   return tryParseTaggedJsonToolCalls(payload) ?? tryParseTaggedInvokeToolCalls(payload);
 }
 
+type StandaloneRequestUserInput = {
+  title: string;
+  questions: Array<{
+    id: string;
+    label: string;
+    prompt: string;
+    options: Array<{ id: string; label: string; recommended?: boolean }>;
+    allowFreeText: boolean;
+  }>;
+  cleanedContent: string;
+};
+
+function tryParseStandaloneRequestUserInput(text: string): StandaloneRequestUserInput | null {
+  const blockMatch = text.match(/<request_user_input\b[\s\S]*?<\/request_user_input\s*>/i);
+  if (!blockMatch) {
+    return null;
+  }
+
+  const fragment = blockMatch[0];
+  const $ = cheerio.load(fragment, {
+    xml: {
+      xmlMode: true,
+      decodeEntities: true
+    }
+  });
+  const root = $("request_user_input").first();
+  if (root.length === 0) {
+    return null;
+  }
+
+  const readAttribute = (element: cheerio.Cheerio<cheerio.Element>, name: string): string =>
+    element.attr(name)?.trim() ?? "";
+  const splitOptions = (value: string): string[] => value
+    .split(/[、,，;/|]/)
+    .map((option) => option.trim())
+    .filter(Boolean)
+    .slice(0, 4);
+
+  const questions: StandaloneRequestUserInput["questions"] = [];
+  root.find("question").each((index, node) => {
+    if (questions.length >= 4) {
+      return false;
+    }
+    const question = $(node);
+    const id = readAttribute(question, "id") || `q${index + 1}`;
+    const label = readAttribute(question, "label") || `Q${index + 1}`;
+    const prompt = readAttribute(question, "prompt") || label;
+    const nestedOptions = question
+      .find("option")
+      .toArray()
+      .map((optionNode) => {
+        const option = $(optionNode);
+        return readAttribute(option, "label") || option.text().trim();
+      })
+      .filter(Boolean);
+    const optionLabels = nestedOptions.length > 0
+      ? nestedOptions.slice(0, 4)
+      : splitOptions(readAttribute(question, "options"));
+    if (!prompt || optionLabels.length === 0) {
+      return;
+    }
+    questions.push({
+      id,
+      label: label.slice(0, 48),
+      prompt,
+      options: optionLabels.map((option, optionIndex) => ({
+        id: `option_${optionIndex + 1}`,
+        label: option,
+        recommended: optionIndex === 0
+      })),
+      allowFreeText: true
+    });
+  });
+
+  if (questions.length === 0) {
+    return null;
+  }
+
+  return {
+    title: readAttribute(root, "title") || "需要确认几个选项",
+    questions,
+    cleanedContent: text
+      .replace(fragment, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  };
+}
+
 function tryParseTaggedJsonToolCalls(payload: string): ProviderTurnDecision["toolCalls"] | null {
   const parsed = tryParseModelJson(payload);
   if (!parsed) return null;
@@ -1283,6 +1390,7 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
     "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",
     "For apply_patch, send arguments.patch with this exact raw grammar: *** Begin Patch\\n*** Add File: relative/path.ext\\n+content\\n*** End Patch. Do not send a Git diff, file_path, or patch_content.",
     "When reviewing or comparing code structure (functions/classes/methods), prefer code.ast_diff with {\"path\": \"relative/file\"} (optional against). Still use apply_patch for writes.",
+    "For large source files, call code.outline first, then fs.read_file with optional {\"offset\": startLine, \"limit\": lineCount} instead of reading the entire file.",
     "To inspect the selected project folder, call fs.read_directory with { path: \".\" }. Never call read or use Unix paths such as /home.",
     "A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with apply_patch in the very next tool call.",
     "After an Add File patch succeeds, never use Add File for that path again in the same task. Read it and use Update File only if a follow-up edit is necessary.",

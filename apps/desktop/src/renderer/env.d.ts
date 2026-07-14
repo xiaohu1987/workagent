@@ -59,6 +59,13 @@ declare global {
       openFolder: (targetPath: string) => Promise<string>;
       openFileLocation: (payload: { threadId: string; path: string }) => Promise<string>;
       listSkills: (cwd?: string | null) => Promise<any[]>;
+      getSkillUsageStats: () => Promise<Array<{
+        skillId: string;
+        callCount: number;
+        successCount: number;
+        successRate: number;
+        lastUsedAt: string | null;
+      }>>;
       listPlugins: () => Promise<any[]>;
       installPlugin: (source: string) => Promise<any>;
       setProjectPluginEnabled: (payload: {
@@ -76,7 +83,7 @@ declare global {
         apiKeyEnv?: string;
         type?: string;
         id?: string;
-      }) => Promise<Array<{ id: string; displayName?: string }>>;
+      }) => Promise<Array<{ id: string; displayName?: string; contextWindow?: number }>>;
       testProviderModel: (payload: {
         provider: ProviderDefinition;
         model: ModelProfile;
@@ -84,6 +91,7 @@ declare global {
         latencyMs: number;
         outputTokens: number;
         tokensPerSecond: number;
+        contextWindow?: number;
         agentCapability: "verified" | "unsupported";
         agentCapabilityReason?: string;
       }>;
@@ -92,6 +100,7 @@ declare global {
         modelId: string;
         agentCapability: "verified" | "unsupported";
         agentCapabilityReason?: string;
+        contextWindow?: number;
       }) => Promise<ModelProfile>;
       getUpdateState: () => Promise<UpdateState | null>;
       checkForUpdates: () => Promise<UpdateState>;
@@ -101,7 +110,12 @@ declare global {
       importKnowledge: (payload: {
         displayName: string;
         scope: "global" | "project" | "imported";
-        sourcePaths: string[];
+        sourcePaths?: string[];
+        sources?: Array<
+          | { kind: "file" | "folder"; path: string }
+          | { kind: "url"; url: string }
+          | { kind: "browser"; url: string; threadId: string; tabId: string }
+        >;
         threadId?: string;
       }) => Promise<any>;
       listKnowledgeBases: () => Promise<any[]>;
@@ -123,6 +137,20 @@ declare global {
       ) => Promise<void>;
       answerPrompt: (id: string, answers: Record<string, string>) => Promise<void>;
       getGpaState: (threadId: string) => Promise<any>;
+      getProjectGpaPlan: (threadId: string) => Promise<{
+        status: "awaiting_confirmation" | "in_progress" | "completed" | "abandoned";
+        sourceThreadId: string;
+        currentThreadId: string;
+        sameSession: boolean;
+        updatedAt: string;
+        tasks: Array<{ id: string; title: string; done: boolean }>;
+        body: string;
+        doneCount: number;
+        pendingCount: number;
+        pendingTasks: Array<{ id: string; title: string; done: boolean }>;
+      } | null>;
+      restoreProjectGpaPlan: (threadId: string) => Promise<any>;
+      abandonProjectGpaPlan: (threadId: string) => Promise<boolean>;
       setGpaStage: (payload: {
         threadId: string;
         stage: "off" | "goal" | "plan" | "act";

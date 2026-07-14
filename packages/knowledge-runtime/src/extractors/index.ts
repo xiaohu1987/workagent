@@ -13,8 +13,17 @@ export interface ExtractedDocument {
 }
 
 export async function extractDocument(sourcePath: string): Promise<ExtractedDocument> {
-  const extension = path.extname(sourcePath).toLowerCase();
   const raw = await fs.readFile(sourcePath);
+  return extractDocumentBuffer(raw, sourcePath);
+}
+
+export async function extractDocumentBuffer(
+  raw: Buffer,
+  sourcePath: string,
+  options: { mimeHint?: string; title?: string; extension?: string } = {}
+): Promise<ExtractedDocument> {
+  const sourceFilePath = /^https?:\/\//i.test(sourcePath) ? new URL(sourcePath).pathname : sourcePath;
+  const extension = (options.extension || path.extname(sourceFilePath)).toLowerCase();
   const sourceHash = createHash("sha256").update(raw).digest("hex");
 
   let body = "";
@@ -31,8 +40,7 @@ export async function extractDocument(sourcePath: string): Promise<ExtractedDocu
       break;
     case ".html":
     case ".htm": {
-      const $ = cheerio.load(raw.toString("utf8"));
-      body = $.text().replace(/\s+/g, " ").trim();
+      body = extractHtmlReadableText(raw.toString("utf8"));
       mimeHint = "text/html";
       break;
     }
@@ -83,12 +91,51 @@ export async function extractDocument(sourcePath: string): Promise<ExtractedDocu
   }
 
   return {
-    title: path.basename(sourcePath, extension),
+    title: options.title?.trim() || path.basename(sourceFilePath, extension),
     body: body.trim(),
     sourcePath,
     sourceHash,
-    mimeHint
+    mimeHint: options.mimeHint || mimeHint
   };
+}
+
+export function extractHtmlReadableText(html: string): string {
+  const $ = cheerio.load(html);
+  $("script, style, noscript, template, svg").remove();
+
+  $("table").each((_index, table) => {
+    const rows = $(table).find("tr").toArray().map((row) =>
+      $(row).find("th, td").toArray().map((cell) =>
+        $(cell).text().replace(/\s+/g, " ").trim().replace(/\|/g, "\\|")
+      )
+    ).filter((row) => row.length > 0);
+    if (rows.length === 0) {
+      $(table).remove();
+      return;
+    }
+    const width = Math.max(...rows.map((row) => row.length));
+    const normalized = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill("")]);
+    const markdown = [
+      `| ${normalized[0].join(" | ")} |`,
+      `| ${Array(width).fill("---").join(" | ")} |`,
+      ...normalized.slice(1).map((row) => `| ${row.join(" | ")} |`)
+    ].join("\n");
+    $(table).replaceWith(`\n\n${markdown}\n\n`);
+  });
+
+  $("br").replaceWith("\n");
+  $("h1, h2, h3, h4, h5, h6, p, div, section, article, header, footer, main, aside, li, pre, blockquote")
+    .each((_index, element) => {
+      $(element).before("\n\n");
+      $(element).after("\n\n");
+    });
+
+  return $("body").text()
+    .replace(/\r\n/g, "\n")
+    .replace(/[\t ]+\n/g, "\n")
+    .replace(/\n[\t ]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 async function extractPptxText(buffer: Buffer): Promise<string> {

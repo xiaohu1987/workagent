@@ -55,6 +55,7 @@ const api = {
   openFileLocation: (payload: { threadId: string; path: string }) =>
     ipcRenderer.invoke("threads:open-file-location", payload),
   listSkills: (cwd?: string | null) => ipcRenderer.invoke("skills:list", cwd),
+  getSkillUsageStats: () => ipcRenderer.invoke("skills:usage-stats"),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),
   setProjectPluginEnabled: (payload: { threadId: string; pluginId: string; enabled: boolean }) =>
@@ -76,7 +77,12 @@ const api = {
   importKnowledge: (payload: {
     displayName: string;
     scope: "global" | "project" | "imported";
-    sourcePaths: string[];
+    sourcePaths?: string[];
+    sources?: Array<
+      | { kind: "file" | "folder"; path: string }
+      | { kind: "url"; url: string }
+      | { kind: "browser"; url: string; threadId: string; tabId: string }
+    >;
     threadId?: string;
   }) => ipcRenderer.invoke("knowledge:import", payload),
   listKnowledgeBases: () => ipcRenderer.invoke("knowledge:list"),
@@ -108,6 +114,9 @@ const api = {
   answerPrompt: (id: string, answers: Record<string, string>) =>
     ipcRenderer.invoke("prompt:answer", { id, answers }),
   getGpaState: (threadId: string) => ipcRenderer.invoke("gpa:state", threadId),
+  getProjectGpaPlan: (threadId: string) => ipcRenderer.invoke("gpa:project-plan", threadId),
+  restoreProjectGpaPlan: (threadId: string) => ipcRenderer.invoke("gpa:restore-plan", threadId),
+  abandonProjectGpaPlan: (threadId: string) => ipcRenderer.invoke("gpa:abandon-plan", threadId),
   setGpaStage: (payload: { threadId: string; stage: "off" | "goal" | "plan" | "act" }) =>
     ipcRenderer.invoke("gpa:set-stage", payload),
   setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) =>
@@ -120,7 +129,7 @@ const api = {
     apiKeyEnv?: string;
     type?: "mock" | "openai-compatible" | "anthropic" | "gemini" | "openrouter" | "ollama" | "vllm" | "gateway";
     id?: string;
-  }) => ipcRenderer.invoke("models:fetch", payload),
+  }) => ipcRenderer.invoke("models:fetch", payload) as Promise<Array<{ id: string; displayName?: string; contextWindow?: number }>>,
   testProviderModel: (payload: {
     provider: unknown;
     model: unknown;

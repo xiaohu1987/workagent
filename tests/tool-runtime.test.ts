@@ -527,4 +527,93 @@ describe("ToolRuntime", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("supports fs.read_file offset/limit and code.outline", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const runtime = new ToolRuntime();
+    const filePath = path.join(root, "sample.js");
+    await fs.writeFile(
+      filePath,
+      ["function alpha() {}", "function beta() {}", "function gamma() {}"].join("\n"),
+      "utf8"
+    );
+    const context = {
+      cwd: root,
+      readFile: (target: string) => fs.readFile(target, "utf8")
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const slice = await runtime.execute(
+        {
+          id: "read-slice",
+          name: "fs.read_file",
+          arguments: { path: "sample.js", offset: 2, limit: 1 }
+        },
+        context
+      );
+      expect(slice.ok).toBe(true);
+      expect(slice.content).toContain("lines 2-2 of 3");
+      expect(slice.content).toContain("function beta()");
+      expect(slice.json).toMatchObject({ startLine: 2, endLine: 2, totalLines: 3 });
+
+      const outline = await runtime.execute(
+        {
+          id: "outline",
+          name: "code.outline",
+          arguments: { path: "sample.js" }
+        },
+        context
+      );
+      expect(outline.ok).toBe(true);
+      expect(outline.content).toContain("function alpha");
+      expect(outline.content).toContain("function beta");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("browser page sanitize", () => {
+  it("strips html and truncates text for model payloads", async () => {
+    const { pageForModel, sanitizeBrowserToolJson } = await import("@tool-runtime");
+    const page = pageForModel({
+      title: "Demo",
+      url: "http://127.0.0.1/",
+      text: "x".repeat(20_000),
+      html: "<html><body>huge</body></html>"
+    });
+    expect(page).toBeTruthy();
+    expect(page?.html).toBeUndefined();
+    expect(String(page?.text).length).toBeLessThan(20_000);
+    expect(String(page?.text)).toContain("truncated");
+
+    const sanitized = sanitizeBrowserToolJson({
+      tab: { id: "1" },
+      page: {
+        title: "Demo",
+        url: "http://127.0.0.1/",
+        text: "hello",
+        html: "<html></html>"
+      }
+    }) as { page: { html?: string; text: string } };
+    expect(sanitized.page.html).toBeUndefined();
+    expect(sanitized.page.text).toBe("hello");
+  });
+
+  it("returns a clear notice for git.status when the workspace is not a git repo", async () => {
+    const runTerminalCommand = vi.fn().mockRejectedValue(
+      new Error("fatal: not a git repository (or any of the parent directories): .git")
+    );
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "git-status", name: "git.status", arguments: {} },
+      { cwd: process.cwd(), runTerminalCommand } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("不是 git 仓库");
+    expect(result.json).toMatchObject({ isGitRepository: false });
+    expect(runTerminalCommand).toHaveBeenCalledWith("git rev-parse --is-inside-work-tree");
+    expect(runTerminalCommand).not.toHaveBeenCalledWith("git status --short --branch");
+  });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createToolCallFingerprint,
   classifySuccessfulToolEvidence,
+  buildGpaPlanProgressRecoveryInstruction,
   validateActCompletion,
   buildActCompletionRecoveryInstruction,
   isProgressOnlyAssistantMessage,
@@ -15,19 +16,33 @@ import {
   CONTEXT_COMPACTION_THRESHOLD,
   shouldFinishGpaAnalysisTurn,
   parseGpaPlanTasks,
+  buildGpaRiskClarificationQuestions,
   buildGpaTextClarificationQuestions,
+  parseEmbeddedRequestUserInput,
   getAddedPatchFiles,
   getToolCallTaskKey,
   retargetStaleBrowserObservationToolCall,
   formatAvailableTools,
+  extractSelectedMcpServerIds,
   isAgentToolEnabled,
   prioritizeUserInputToolCall,
   MAX_REPEATED_TASK_FAILURES,
   MAX_MODEL_TIMEOUT_RETRIES,
   parseGpaState,
+  parseGpaCompletedTaskDeclarations,
+  applyCompletedPlanTasks,
+  resolveGpaPlanProgress,
   parseMultimodalIntentClassification,
   buildMultimodalIntentClassifySystemPrompt,
-  buildMultimodalIntentClassifyTranscript
+  buildMultimodalIntentClassifyTranscript,
+  canStartGpaStage,
+  buildRecommendedSkillSuggestionInstruction,
+  formatGpaPlanMarkdown,
+  parseGpaPlanMarkdown,
+  gpaPlanHasIncompleteTasks,
+  buildGpaPlanFileResumeDirective,
+  GPA_PLAN_RELATIVE_PATH,
+  toGpaPlanResumePreview
 } from "@agent-runtime";
 
 describe("createToolCallFingerprint", () => {
@@ -63,6 +78,13 @@ describe("createToolCallFingerprint", () => {
         patch: "*** Begin Patch\n*** Add File: js/renderer.js\n+export {}\n*** Add File: css/game.css\n+.game {}\n*** End Patch"
       })
     ).toEqual(["js/renderer.js", "css/game.css"]);
+  });
+});
+
+describe("selected MCP server parsing", () => {
+  it("preserves the explicit MCP server ids carried by a composer message", () => {
+    expect(extractSelectedMcpServerIds("[Selected MCP server]\nid: internal-search\nSearch")).toEqual(["internal-search"]);
+    expect(extractSelectedMcpServerIds("ordinary message")).toEqual([]);
   });
 });
 
@@ -174,7 +196,7 @@ describe("context compaction", () => {
     }));
     const result = compactTranscriptForContext(transcript, 2_000, "system instructions");
 
-    expect(CONTEXT_COMPACTION_THRESHOLD).toBe(0.9);
+    expect(CONTEXT_COMPACTION_THRESHOLD).toBe(0.75);
     expect(result.compacted).toBe(true);
     expect(result.afterTokens).toBeLessThan(result.beforeTokens);
     expect(result.transcript.length).toBeLessThan(transcript.length);
@@ -189,7 +211,7 @@ describe("context compaction", () => {
     expect(result.transcript).toBe(transcript);
   });
 
-  it.each([64_000, 128_000])("uses 90 percent of a %i-token model window as the threshold", (contextWindow) => {
+  it.each([64_000, 128_000])("uses 75 percent of a %i-token model window as the threshold", (contextWindow) => {
     const thresholdTokens = Math.floor(contextWindow * CONTEXT_COMPACTION_THRESHOLD);
     const belowThreshold = [{
       role: "user" as const,
@@ -506,6 +528,30 @@ describe("GPA ACT completion evidence", () => {
     expect(instruction).toContain("Call the next delivery tool now");
     expect(instruction).toContain("completed_task_ids");
   });
+
+  it("includes successful tool_call_id inventory in recovery instructions", () => {
+    const instruction = buildActCompletionRecoveryInstruction(
+      {
+        valid: false,
+        reasons: ["missing delivery"],
+        missingTaskIds: ["T1"],
+        missingEvidenceTaskIds: ["T1"],
+        invalidEvidenceToolCallIds: [],
+        missingDelivery: true,
+        missingVerification: true
+      },
+      [
+        {
+          toolCallId: "call-1",
+          toolName: "apply_patch",
+          kinds: ["delivery"]
+        }
+      ],
+      2
+    );
+    expect(instruction).toContain("call-1");
+    expect(instruction).toContain("apply_patch");
+  });
 });
 
 describe("GPA plan validation", () => {
@@ -513,6 +559,16 @@ describe("GPA plan validation", () => {
     expect(parseGpaPlanTasks("T1: Create the game board\nT2: Add battle actions")).toEqual([
       { id: "T1", title: "Create the game board", done: false },
       { id: "T2", title: "Add battle actions", done: false }
+    ]);
+  });
+
+  it("extracts Chinese 任务/步骤 labeled plans", () => {
+    expect(
+      parseGpaPlanTasks("任务1：查看现有代码\n步骤2：补齐对战流程\n计划3：验证可运行")
+    ).toEqual([
+      { id: "T1", title: "查看现有代码", done: false },
+      { id: "T2", title: "补齐对战流程", done: false },
+      { id: "T3", title: "验证可运行", done: false }
     ]);
   });
 
@@ -562,6 +618,82 @@ describe("GPA plan validation", () => {
     ).toEqual([]);
   });
 
+  it("parses embedded request_user_input XML from GOAL prose", () => {
+    const content = [
+      "### 4. 需要您确认的澄清问题",
+      "",
+      '<request_user_input title="宝可梦小游戏：需要确认几个设计选项">',
+      '<question id="pokemon_count" label="宝可梦数量" prompt="图鉴里需要多少只宝可梦？" options="6只（精简版）、9只（中等）、12只（丰富版）"></question>',
+      '<question id="battle_style" label="对战交互风格" prompt="对战的交互方式偏好？" options="纯文本/日志式（简单快速）、带简易动画/血条（视觉更好）"></question>',
+      '<question id="art_style" label="美术风格" prompt="宝可梦用什么方式展示？" options="纯文字+emoji、CSS像素风格小图标、ASCII艺术字符"></question>',
+      "</request_user_input>",
+      "",
+      "⏳ 请确认上述目标与选项"
+    ].join("\n");
+
+    const parsed = parseEmbeddedRequestUserInput(content);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.title).toBe("宝可梦小游戏：需要确认几个设计选项");
+    expect(parsed?.questions).toHaveLength(3);
+    expect(parsed?.questions[0]).toMatchObject({
+      id: "pokemon_count",
+      label: "宝可梦数量",
+      prompt: "图鉴里需要多少只宝可梦？"
+    });
+    expect(parsed?.questions[0]?.options?.map((option) => option.label)).toEqual([
+      "6只（精简版）",
+      "9只（中等）",
+      "12只（丰富版）"
+    ]);
+    expect(parsed?.cleanedContent).toContain("需要您确认的澄清问题");
+    expect(parsed?.cleanedContent).not.toContain("<request_user_input");
+  });
+
+  it("parses nested option tags with cheerio", () => {
+    const content = [
+      '<request_user_input title="风格确认">',
+      '  <question id="style" label="美术" prompt="用哪种展示方式？">',
+      "    <option>纯文字+emoji</option>",
+      "    <option label=\"CSS像素风格小图标\" />",
+      "    <option>ASCII艺术字符</option>",
+      "  </question>",
+      "</request_user_input>"
+    ].join("\n");
+
+    const parsed = parseEmbeddedRequestUserInput(content);
+    expect(parsed?.questions).toHaveLength(1);
+    expect(parsed?.questions[0]?.options?.map((option) => option.label)).toEqual([
+      "纯文字+emoji",
+      "CSS像素风格小图标",
+      "ASCII艺术字符"
+    ]);
+  });
+
+  it("promotes PLAN risk mitigations and silent defaults into clarification questions", () => {
+    const content = [
+      "### 技术选型（默认）",
+      "- **宝可梦数量**: 6 只（覆盖多种属性，快速上手）",
+      "- **对战风格**: 日志式 + HP 血条（视觉清晰且实现简洁）",
+      "- **美术风格**: emoji + CSS 卡片样式（无需图片资源，干净可看）",
+      "",
+      "### ⚠️ 风险点 & 预案",
+      "",
+      "| 风险 | 影响 | 预案 |",
+      "|------|------|------|",
+      "| 战斗动画/日志不同步 | 用户体验差 | 用 setTimeout 按序打印日志 |",
+      "| 选队逻辑冲突 | 同一宝可梦被两边选 | 维护全局 selectedSet |",
+      "| 伤害公式不平衡 | 战斗太快结束或打不死 | 测试后调整系数 |"
+    ].join("\n");
+
+    const questions = buildGpaRiskClarificationQuestions("plan", content);
+    expect(questions.length).toBeGreaterThanOrEqual(2);
+    expect(questions[0]).toMatchObject({
+      id: "gpa_default_1",
+      label: "宝可梦数量"
+    });
+    expect(questions.some((question) => question.id === "gpa_risk_mitigation")).toBe(true);
+  });
+
   it("rejects prose that does not contain an executable task list", () => {
     expect(parseGpaPlanTasks("I will create a complete game and test it.")).toEqual([]);
   });
@@ -576,6 +708,121 @@ describe("GPA plan validation", () => {
         updatedAt: "2026-07-13T12:20:20.652Z"
       }))
     ).toMatchObject({ stage: "plan", awaitingConfirmation: null, planTasks: [] });
+  });
+
+  it("marks completed plan tasks as done during ACT progress", () => {
+    const state = parseGpaState(JSON.stringify({
+      stage: "act",
+      fullAccess: false,
+      knowledgeEnabled: false,
+      awaitingConfirmation: null,
+      planTasks: [
+        { id: "T1", title: "Create index.html", done: false },
+        { id: "T2", title: "Add styles", done: false }
+      ],
+      updatedAt: "2026-07-14T01:00:00.000Z"
+    }));
+    const next = applyCompletedPlanTasks(state, ["T1"]);
+    expect(next.planTasks[0]?.done).toBe(true);
+    expect(next.planTasks[1]?.done).toBe(false);
+    expect(applyCompletedPlanTasks(next, ["T1"])).toBe(next);
+  });
+
+  it("parses explicit Chinese and English completed task declarations", () => {
+    const tasks = [
+      { id: "T1", title: "Inspect files", done: false },
+      { id: "T2", title: "Update runtime", done: false },
+      { id: "T3", title: "Run tests", done: false }
+    ];
+
+    expect(parseGpaCompletedTaskDeclarations("任务 T1 完成。T2&T3 completed.", tasks)).toEqual([
+      { taskIds: ["T1"], text: "任务 T1 完成" },
+      { taskIds: ["T2", "T3"], text: "T2&T3 completed." }
+    ]);
+    expect(parseGpaCompletedTaskDeclarations("完成 T2 和 T3", tasks)).toEqual([
+      { taskIds: ["T2", "T3"], text: "完成 T2 和 T3" }
+    ]);
+  });
+
+  it("does not parse generic, pending, or negated ACT commentary as completion", () => {
+    const tasks = [{ id: "T1", title: "Inspect files", done: false }];
+
+    expect(parseGpaCompletedTaskDeclarations("代码分析完成，正在处理任务。", tasks)).toEqual([]);
+    expect(parseGpaCompletedTaskDeclarations("T1 尚未完成，仍待处理。", tasks)).toEqual([]);
+    expect(parseGpaCompletedTaskDeclarations("T9 completed", tasks)).toEqual([]);
+  });
+
+  it("does not treat future-tense 实现/验证/覆盖 prose as task completion", () => {
+    const tasks = [
+      { id: "T1", title: "API", done: false },
+      { id: "T3", title: "Player moves", done: false },
+      { id: "T5", title: "Web page", done: false }
+    ];
+
+    expect(
+      parseGpaCompletedTaskDeclarations(
+        "已确认计划与空项目，开始实现完整的中文单页宝可梦对战游戏，覆盖 T1–T5",
+        tasks
+      )
+    ).toEqual([]);
+    expect(
+      parseGpaCompletedTaskDeclarations("剩余任务是 T3：验证玩家手动放技能与 AI 自动出招", tasks)
+    ).toEqual([]);
+    expect(
+      parseGpaCompletedTaskDeclarations("按计划继续执行：先检查现有实现，再验证 T2–T4 是否达标", [
+        { id: "T2", title: "Team", done: false },
+        { id: "T4", title: "Damage", done: false }
+      ])
+    ).toEqual([]);
+    expect(parseGpaCompletedTaskDeclarations("✅ 任务 T3 完成", tasks)).toEqual([
+      { taskIds: ["T3"], text: "✅ 任务 T3 完成" }
+    ]);
+    expect(parseGpaCompletedTaskDeclarations("T1 已验证，可以继续。", tasks)).toEqual([
+      { taskIds: ["T1"], text: "T1 已验证，可以继续" }
+    ]);
+  });
+
+  it("infers task progress only from explicit declarations after successful tool evidence", () => {
+    const tasks = [
+      { id: "T1", title: "Inspect files", done: false },
+      { id: "T2", title: "Update runtime", done: false }
+    ];
+    const evidence = [
+      { toolCallId: "read-1", toolName: "fs.read_file", kinds: ["observation" as const] }
+    ];
+
+    expect(resolveGpaPlanProgress({
+      assistantMessage: "任务 T1 完成",
+      planTasks: tasks,
+      successfulEvidence: evidence
+    })).toMatchObject({ completedTaskIds: ["T1"], inferredTaskIds: ["T1"] });
+    expect(resolveGpaPlanProgress({
+      assistantMessage: "任务 T1 完成",
+      planTasks: tasks,
+      successfulEvidence: []
+    })).toMatchObject({ completedTaskIds: [], inferredTaskIds: [] });
+    expect(resolveGpaPlanProgress({
+      assistantMessage: "任务 T1 完成",
+      planTasks: [{ ...tasks[0], done: true }, tasks[1]],
+      successfulEvidence: evidence
+    })).toMatchObject({ completedTaskIds: [], inferredTaskIds: [] });
+  });
+
+  it("keeps structured task ids authoritative over inferred declarations", () => {
+    const progress = resolveGpaPlanProgress({
+      reportedTaskIds: ["T1", "t1", "unknown"],
+      assistantMessage: "T2 completed",
+      planTasks: [
+        { id: "T1", title: "Inspect files", done: false },
+        { id: "T2", title: "Update runtime", done: false }
+      ],
+      successfulEvidence: [
+        { toolCallId: "read-1", toolName: "fs.read_file", kinds: ["observation"] }
+      ]
+    });
+
+    expect(progress).toMatchObject({ completedTaskIds: ["T1"], inferredTaskIds: [] });
+    expect(buildGpaPlanProgressRecoveryInstruction(progress.declarations)).toContain("completed_task_ids");
   });
 });
 
@@ -730,5 +977,102 @@ describe("multimodal intent classification", () => {
       prompt: "short clip",
       parseOk: true
     });
+  });
+});
+
+describe("GPA project-mode entry", () => {
+  it("allows turning GPA off on any thread mode", () => {
+    expect(canStartGpaStage("chat", "off")).toBe(true);
+    expect(canStartGpaStage("project", "off")).toBe(true);
+    expect(canStartGpaStage(undefined, "off")).toBe(true);
+  });
+
+  it("only allows starting GPA stages on project threads", () => {
+    expect(canStartGpaStage("project", "goal")).toBe(true);
+    expect(canStartGpaStage("project", "plan")).toBe(true);
+    expect(canStartGpaStage("project", "act")).toBe(true);
+    expect(canStartGpaStage("chat", "goal")).toBe(false);
+    expect(canStartGpaStage("chat", "plan")).toBe(false);
+    expect(canStartGpaStage("chat", "act")).toBe(false);
+  });
+});
+
+describe("GPA soft skill suggestion", () => {
+  it("suggests recommended skills without requiring a hard gate", () => {
+    const text = buildRecommendedSkillSuggestionInstruction([
+      { id: "skill-1", qualifiedName: "frontend-design", domain: "前端" }
+    ]);
+    expect(text).toContain("Consider calling skills.load");
+    expect(text).toContain("skill-1");
+    expect(text).not.toContain("before other tools");
+  });
+});describe("GPA plan markdown file", () => {
+  it("round-trips tasks and status through markdown", () => {
+    const markdown = formatGpaPlanMarkdown({
+      status: "in_progress",
+      threadId: "thread-1",
+      updatedAt: "2026-07-14T00:00:00.000Z",
+      tasks: [
+        { id: "T1", title: "梳理结构", done: true },
+        { id: "T2", title: "补齐对战", done: false }
+      ],
+      body: "T1: 梳理结构\nT2: 补齐对战"
+    });
+
+    expect(GPA_PLAN_RELATIVE_PATH.replace(/\\/g, "/")).toContain(".codexh/gpa-plan.md");
+    expect(markdown).toContain("**status**: `in_progress`");
+    expect(markdown).toContain("- [x] **T1** 梳理结构");
+    expect(markdown).toContain("- [ ] **T2** 补齐对战");
+
+    const parsed = parseGpaPlanMarkdown(markdown);
+    expect(parsed).toEqual({
+      status: "in_progress",
+      threadId: "thread-1",
+      updatedAt: "2026-07-14T00:00:00.000Z",
+      tasks: [
+        { id: "T1", title: "梳理结构", done: true },
+        { id: "T2", title: "补齐对战", done: false }
+      ],
+      body: "T1: 梳理结构\nT2: 补齐对战"
+    });
+    expect(gpaPlanHasIncompleteTasks(parsed)).toBe(true);
+  });
+
+  it("builds a resume directive that avoids re-planning", () => {
+    const text = buildGpaPlanFileResumeDirective({
+      status: "in_progress",
+      threadId: "thread-1",
+      updatedAt: "2026-07-14T00:00:00.000Z",
+      tasks: [
+        { id: "T1", title: "done task", done: true },
+        { id: "T3", title: "fix remaining bugs", done: false }
+      ],
+      body: ""
+    });
+    expect(text).toContain(GPA_PLAN_RELATIVE_PATH);
+    expect(text).toContain("Do not restart GOAL/PLAN");
+    expect(text).toContain("T3: fix remaining bugs");
+    expect(text).not.toContain("T1:");
+  });
+});
+
+describe("GPA plan resume preview", () => {
+  it("marks same-session when thread ids match", () => {
+    const preview = toGpaPlanResumePreview(
+      {
+        status: "in_progress",
+        threadId: "thread-a",
+        updatedAt: "2026-07-14T00:00:00.000Z",
+        tasks: [
+          { id: "T1", title: "done", done: true },
+          { id: "T2", title: "todo", done: false }
+        ],
+        body: ""
+      },
+      "thread-a"
+    );
+    expect(preview.sameSession).toBe(true);
+    expect(preview.pendingCount).toBe(1);
+    expect(preview.doneCount).toBe(1);
   });
 });

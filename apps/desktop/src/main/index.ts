@@ -363,6 +363,7 @@ function registerIpc(): void {
     await backend.reloadSkills(cwd);
     return backend.listSkills();
   });
+  ipcMain.handle("skills:usage-stats", () => backend.getSkillUsageStats());
   ipcMain.handle("plugins:list", () => backend.listPlugins());
   ipcMain.handle("plugins:install", (_event, source: string) => backend.installPlugin(source));
   ipcMain.handle("plugins:set-enabled", (_event, payload) =>
@@ -412,6 +413,9 @@ function registerIpc(): void {
   ipcMain.handle("gpa:set-stage", (_event, payload: { threadId: string; stage: string }) =>
     backend.setGpaStage(payload.threadId, payload.stage as "off" | "goal" | "plan" | "act")
   );
+  ipcMain.handle("gpa:project-plan", (_event, threadId: string) => backend.getProjectGpaPlan(threadId));
+  ipcMain.handle("gpa:restore-plan", (_event, threadId: string) => backend.restoreProjectGpaPlan(threadId));
+  ipcMain.handle("gpa:abandon-plan", (_event, threadId: string) => backend.abandonProjectGpaPlan(threadId));
   ipcMain.handle("gpa:set-full-access", (_event, payload: { threadId: string; fullAccess: boolean }) =>
     backend.setGpaFullAccess(payload.threadId, payload.fullAccess)
   );

@@ -374,6 +374,21 @@
   background: #101720;
 }
 
+.gpa-confirmation.stage-goal {
+  border-color: rgba(245, 183, 52, 0.34);
+  background: #18160f;
+}
+
+.gpa-confirmation.stage-plan {
+  border-color: rgba(96, 165, 250, 0.34);
+  background: #101720;
+}
+
+.gpa-confirmation.gpa-resume-retry {
+  border-color: rgba(248, 113, 113, 0.42);
+  background: #1a1113;
+}
+
 .gpa-confirmation-copy {
   display: grid;
   gap: 3px;
@@ -462,6 +477,32 @@
 .gpa-confirmation-button.primary:hover:not(:disabled) {
   border-color: #60a5fa;
   background: rgba(37, 99, 235, 0.76);
+}
+
+.gpa-confirmation-button.primary.stage-goal {
+  border-color: rgba(245, 183, 52, 0.76);
+  color: #fff4c7;
+  background: rgba(180, 116, 10, 0.68);
+}
+
+.gpa-confirmation-button.primary.stage-goal:hover:not(:disabled) {
+  border-color: #f5c451;
+  background: rgba(202, 138, 4, 0.86);
+}
+
+.gpa-confirmation-button.primary.stage-plan {
+  border-color: rgba(96, 165, 250, 0.72);
+  color: #dcecff;
+  background: rgba(37, 99, 235, 0.68);
+}
+
+.gpa-confirmation-button.primary.stage-plan:hover:not(:disabled) {
+  border-color: #79b8ff;
+  background: rgba(37, 99, 235, 0.86);
+}
+
+.gpa-confirmation-button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .gpa-confirmation-button:disabled {

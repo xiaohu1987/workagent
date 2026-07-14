@@ -248,19 +248,57 @@ function resolveSkillDomain(input: {
     return "第三方/插件";
   }
   if (input.scope === "system") {
+    // Keep programming system skills distinguishable from generic system helpers.
+    const source = `${input.name} ${input.description}`.toLowerCase();
+    if (/(plan-and-patch|patch|programming|repo|code)/.test(source)) {
+      return "编程";
+    }
     return "系统";
   }
 
   const declared = input.frontmatter.domain ?? input.frontmatter.category;
   if (typeof declared === "string" && declared.trim()) {
-    return declared.trim();
+    return normalizeSkillDomain(declared.trim(), input.name, input.description);
   }
   const tags = input.frontmatter.tags;
   if (Array.isArray(tags) && typeof tags[0] === "string" && tags[0].trim()) {
-    return tags[0].trim();
+    return normalizeSkillDomain(tags[0].trim(), input.name, input.description);
   }
 
-  const source = `${input.name} ${input.description}`.toLowerCase();
+  return normalizeSkillDomain("通用", input.name, input.description);
+}
+
+/** Canonicalize skill category/domain labels used by ranking. */
+export function normalizeSkillDomain(
+  declared: string,
+  name = "",
+  description = ""
+): string {
+  const trimmed = declared.trim();
+  if (trimmed === "质量保障") {
+    return "测试";
+  }
+  if (trimmed === "输出与文件") {
+    return "前端";
+  }
+
+  const identity = `${name} ${description}`.toLowerCase();
+  if (
+    /(plan-and-patch|verification-before-completion|systematic-debugging|test-driven-development|executing-plans|writing-plans)/.test(
+      identity
+    )
+  ) {
+    if (/(verification|debug|testing|tdd|test)/.test(identity)) {
+      return "测试";
+    }
+    return "编程";
+  }
+
+  if (trimmed && trimmed !== "通用") {
+    return trimmed;
+  }
+
+  const source = `${trimmed} ${identity}`;
   if (/(react|vue|frontend|css|ui|design|前端|界面)/.test(source)) return "前端";
   if (/(test|testing|vitest|playwright|测试)/.test(source)) return "测试";
   if (/(git|pr|review|commit|github|代码审查)/.test(source)) return "代码协作";

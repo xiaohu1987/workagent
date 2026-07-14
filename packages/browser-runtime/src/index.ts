@@ -20,14 +20,54 @@ interface BrowserTabSession {
   historyIndex: number;
 }
 
+export const MAX_BROWSER_TABS_PER_THREAD = 3;
+
+export function browserTabOriginKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "about:") {
+      return `about:${parsed.pathname || "blank"}`;
+    }
+    // data: URLs are opaque payloads; only exact URL reuse is safe.
+    if (parsed.protocol === "data:") {
+      return url;
+    }
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return url.split(/[?#]/)[0] ?? url;
+  }
+}
+
 export class BrowserRuntime {
   readonly #tabsByThread = new Map<string, BrowserTabSession[]>();
 
   public constructor(private readonly pageLoader: PageLoader = loadPage) {}
 
-  public async openTab(threadId: string, target: string): Promise<{ tab: BrowserTabRecord; page: PageSnapshot }> {
+  public async openTab(
+    threadId: string,
+    target: string
+  ): Promise<{ tab: BrowserTabRecord; page: PageSnapshot; reused: boolean }> {
+    const tabs = this.#tabsByThread.get(threadId) ?? [];
+    const provisionalOrigin = browserTabOriginKey(target);
+    const reusable = tabs.find((session) =>
+      browserTabOriginKey(session.record.url) === provisionalOrigin
+    );
+    if (reusable) {
+      const navigated = await this.navigate(threadId, reusable.record.id, target);
+      return { ...navigated, reused: true };
+    }
+
     const page = await this.pageLoader(target);
     const now = new Date().toISOString();
+    const loadedOrigin = browserTabOriginKey(page.url);
+    const reuseAfterLoad = tabs.find((session) =>
+      browserTabOriginKey(session.record.url) === loadedOrigin
+    );
+    if (reuseAfterLoad) {
+      const navigated = await this.navigate(threadId, reuseAfterLoad.record.id, target);
+      return { ...navigated, reused: true };
+    }
+
     const tab: BrowserTabRecord = {
       id: randomUUID(),
       threadId,
@@ -43,15 +83,19 @@ export class BrowserRuntime {
       historyIndex: 0
     };
 
-    const tabs = this.#tabsByThread.get(threadId) ?? [];
     for (const existing of tabs) {
       existing.record.isActive = false;
       existing.record.updatedAt = now;
     }
     tabs.unshift(session);
-    this.#tabsByThread.set(threadId, tabs);
 
-    return { tab, page };
+    while (tabs.length > MAX_BROWSER_TABS_PER_THREAD) {
+      const oldest = tabs.pop();
+      if (!oldest) break;
+    }
+
+    this.#tabsByThread.set(threadId, tabs);
+    return { tab, page, reused: false };
   }
 
   public async navigate(threadId: string, tabId: string, target: string): Promise<{ tab: BrowserTabRecord; page: PageSnapshot }> {
@@ -252,7 +296,7 @@ export async function loadPage(target: string): Promise<PageSnapshot> {
   const html = resolved.html;
   const $ = cheerio.load(html);
   const title = $("title").text().trim() || resolved.url;
-  const text = $.text().replace(/\s+/g, " ").trim() || html;
+  const text = $.text().replace(/\s+/g, " ").trim() || "(no readable text)";
   return {
     title,
     url: resolved.url,

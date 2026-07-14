@@ -297,6 +297,14 @@ export interface AvailableSkillsContext {
   warning?: string;
 }
 
+export interface SkillUsageStats {
+  skillId: string;
+  callCount: number;
+  successCount: number;
+  successRate: number;
+  lastUsedAt: string | null;
+}
+
 export interface KnowledgeConcept {
   id: string;
   knowledgeBaseId: string;
@@ -383,6 +391,7 @@ export interface ProjectPluginBinding {
 export interface McpServerConfig {
   id: string;
   name: string;
+  description?: string;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -560,6 +569,12 @@ export interface KnowledgeDocumentRecord {
   updatedAt: string;
 }
 
+export type KnowledgeImportSource =
+  | { kind: "file"; path: string }
+  | { kind: "folder"; path: string }
+  | { kind: "url"; url: string }
+  | { kind: "browser"; url: string; threadId: string; tabId: string };
+
 export interface KnowledgeChunkRecord {
   id: string;
   knowledgeBaseId: string;
@@ -615,6 +630,7 @@ export interface RuntimeEvent {
     | "approval.requested"
     | "approval.resolved"
     | "user-input.requested"
+    | "user-input.resolved"
     | "knowledge.imported"
     | "browser.updated"
     | "browser.verification_started"

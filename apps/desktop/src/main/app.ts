@@ -19,6 +19,7 @@ import type {
   KnowledgeChunkRecord,
   KnowledgeBaseSummary,
   KnowledgeDocumentRecord,
+  KnowledgeImportSource,
   MessageRecord,
   MessageAttachment,
   McpServerConfig,
@@ -34,9 +35,9 @@ import type {
   UserInputPrompt
 } from "@shared-types";
 import { normalizeRuntimeTimeouts } from "@shared-types";
-import { AgentRuntimeService, parseGpaState } from "@agent-runtime";
+import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@agent-runtime";
 import { BrowserRuntime, loadPage, type PageSnapshot } from "@browser-runtime";
-import { buildOkfBundle, extractDocument } from "@knowledge-runtime";
+import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
 import { hashDirectory, PluginRuntime } from "@plugin-runtime";
 import { ProviderFactory } from "@provider-adapters";
@@ -342,7 +343,11 @@ export class DesktopBackend {
         if (ignored.has(entry.name) || entry.isSymbolicLink() || files.length >= 2_000) {
           continue;
         }
-        const relativePath = relativeDirectory ? path.join(relativeDirectory, entry.name) : entry.name;
+        // The renderer stores tree paths with forward slashes on every platform.
+        // Returning the same canonical form prevents a refresh from losing selection on Windows.
+        const relativePath = (relativeDirectory ? path.join(relativeDirectory, entry.name) : entry.name)
+          .split(path.sep)
+          .join("/");
         const absolutePath = path.join(directory, entry.name);
         if (entry.isDirectory()) {
           files.push({ path: relativePath, kind: "directory" });
@@ -405,6 +410,27 @@ export class DesktopBackend {
 
   public async setGpaStage(threadId: string, stage: GpaStage): Promise<void> {
     await this.#runtime.setGpaStage(threadId, stage);
+  }
+
+  public async getProjectGpaPlan(threadId: string) {
+    const thread = this.#db.getThread(threadId);
+    if (thread.mode !== "project" || !thread.cwd) {
+      return null;
+    }
+    const doc = await this.#runtime.peekGpaPlanFile(threadId);
+    if (!doc) {
+      return null;
+    }
+    return toGpaPlanResumePreview(doc, threadId);
+  }
+
+  public async restoreProjectGpaPlan(threadId: string) {
+    const restored = await this.#runtime.restoreGpaPlanFromFile(threadId);
+    return restored ?? this.getGpaState(threadId);
+  }
+
+  public async abandonProjectGpaPlan(threadId: string): Promise<boolean> {
+    return this.#runtime.abandonGpaPlanFile(threadId);
   }
 
   public async setGpaFullAccess(threadId: string, fullAccess: boolean): Promise<void> {
@@ -589,6 +615,12 @@ export class DesktopBackend {
     // Always force the persisted execution state idle. The turn may still be in
     // "preparing" (DB still idle/completed) when the user hits Stop; skipping
     // cleanup here leaves the UI and queue believing work is still running.
+    for (const [promptId] of [...this.#promptResolvers.entries()]) {
+      const record = this.#db.getUserPrompt(promptId);
+      if (record?.threadId === threadId) {
+        this.#promptResolvers.delete(promptId);
+      }
+    }
     const updated = this.#db.interruptThreadExecution(threadId);
     await this.emit({
       type: "thread.updated",
@@ -602,6 +634,10 @@ export class DesktopBackend {
     return this.#skills.list();
   }
 
+  public getSkillUsageStats() {
+    return this.#db.aggregateSkillUsageStats();
+  }
+
   public async reloadSkills(cwd?: string | null): Promise<void> {
     await this.refreshSkills(cwd);
   }
@@ -612,7 +648,7 @@ export class DesktopBackend {
     apiKeyEnv?: string;
     type?: ProviderDefinition["type"];
     id?: string;
-  }): Promise<{ id: string; displayName?: string }[]> {
+  }): Promise<{ id: string; displayName?: string; contextWindow?: number }[]> {
     const baseUrl = (input.baseUrl ?? "").trim().replace(/\/+$/, "");
     const apiKey = resolveFetchedApiKey(input);
     if (!baseUrl) {
@@ -634,8 +670,8 @@ export class DesktopBackend {
       throw new Error(`获取模型失败 (${response.status}): ${text.slice(0, 200)}`);
     }
     const payload = (await response.json()) as {
-      data?: Array<{ id: string; display_name?: string; name?: string; owned_by?: string }>;
-      models?: Array<{ id: string; display_name?: string; name?: string }>;
+      data?: Array<{ id: string; display_name?: string; name?: string; owned_by?: string; context_window?: number; contextWindow?: number; context_length?: number; max_context_length?: number; max_input_tokens?: number }>;
+      models?: Array<{ id: string; display_name?: string; name?: string; context_window?: number; contextWindow?: number; context_length?: number; max_context_length?: number; max_input_tokens?: number }>;
     };
     const list = Array.isArray(payload.data)
       ? payload.data
@@ -645,10 +681,18 @@ export class DesktopBackend {
     if (list.length === 0) {
       throw new Error("接口未返回任何模型");
     }
-    return list.map((entry) => ({
-      id: entry.id,
-      displayName: entry.display_name ?? entry.name ?? entry.id
-    }));
+    return list.map((entry) => {
+      const rawContextWindow = entry.context_window ?? entry.contextWindow ?? entry.context_length ?? entry.max_context_length ?? entry.max_input_tokens;
+      const numericContextWindow = Number(rawContextWindow);
+      const contextWindow = Number.isFinite(numericContextWindow) && numericContextWindow > 0
+        ? Math.floor(numericContextWindow)
+        : undefined;
+      return {
+        id: entry.id,
+        displayName: entry.display_name ?? entry.name ?? entry.id,
+        ...(contextWindow ? { contextWindow } : {})
+      };
+    });
   }
 
   public async testProviderModel(input: {
@@ -658,11 +702,21 @@ export class DesktopBackend {
     latencyMs: number;
     outputTokens: number;
     tokensPerSecond: number;
+    contextWindow?: number;
     agentCapability: "verified" | "unsupported";
     agentCapabilityReason?: string;
   }> {
     const startedAt = performance.now();
     const adapter = this.#providerFactory.create(input.provider);
+    const detectedContextWindow = this.fetchProviderModels({
+      baseUrl: input.provider.baseUrl,
+      apiKey: input.provider.apiKey,
+      apiKeyEnv: input.provider.apiKeyEnv,
+      type: input.provider.type,
+      id: input.provider.id
+    })
+      .then((models) => models.find((model) => model.id === input.model.id)?.contextWindow)
+      .catch(() => undefined);
     const timeout = new AbortController();
     const timeoutId = this.#config.timeouts.modelTestMs > 0
       ? setTimeout(() => timeout.abort(), this.#config.timeouts.modelTestMs)
@@ -684,6 +738,7 @@ export class DesktopBackend {
           latencyMs,
           outputTokens: 0,
           tokensPerSecond: 0,
+          contextWindow: await detectedContextWindow,
           agentCapability: "unsupported",
           agentCapabilityReason: "Image-generation models do not run Agent tools."
         };
@@ -771,6 +826,7 @@ export class DesktopBackend {
         latencyMs,
         outputTokens,
         tokensPerSecond: Number((outputTokens / (latencyMs / 1_000)).toFixed(2)),
+        contextWindow: await detectedContextWindow,
         agentCapability,
         agentCapabilityReason
       };
@@ -801,6 +857,7 @@ export class DesktopBackend {
     modelId: string;
     agentCapability: "verified" | "unsupported";
     agentCapabilityReason?: string;
+    contextWindow?: number;
   }): Promise<ModelProfile> {
     const model = this.#config.models.find(
       (entry) => entry.id === input.modelId && entry.providerId === input.providerId
@@ -812,12 +869,16 @@ export class DesktopBackend {
     model.agentCapability = input.agentCapability;
     model.agentCapabilityCheckedAt = new Date().toISOString();
     model.agentCapabilityReason = input.agentCapabilityReason;
+    if (Number.isFinite(input.contextWindow) && (input.contextWindow ?? 0) >= 1_024) {
+      model.contextWindow = Math.floor(input.contextWindow!);
+    }
     await saveConfig(this.#layout.configFile, this.#config);
     await this.#logs.append("model.agent_capability_saved", {
       modelId: model.id,
       providerId: model.providerId,
       agentCapability: model.agentCapability,
-      agentCapabilityReason: model.agentCapabilityReason
+      agentCapabilityReason: model.agentCapabilityReason,
+      contextWindow: input.contextWindow
     });
     return { ...model };
   }
@@ -1294,6 +1355,10 @@ export class DesktopBackend {
   public async syncBrowserWebContents(input: { threadId: string; tabId: string }): Promise<BrowserTabRecord> {
     const contents = await this.requireBrowserContents(input.threadId, input.tabId);
     const page = await this.readVisibleBrowserPage(contents, false);
+    const existing = this.#browser.listTabs(input.threadId).find((tab) => tab.id === input.tabId);
+    if (existing && existing.url === page.url && existing.title === page.title) {
+      return existing;
+    }
     const tab = this.#browser.syncTab(input.threadId, input.tabId, page);
     this.persistBrowserTabs(input.threadId);
     await this.emit({
@@ -1646,7 +1711,8 @@ export class DesktopBackend {
   public async importKnowledge(input: {
     displayName: string;
     scope: "global" | "project" | "imported";
-    sourcePaths: string[];
+    sourcePaths?: string[];
+    sources?: KnowledgeImportSource[];
     threadId?: string;
   }): Promise<KnowledgeImportSummary> {
     const thread = input.threadId ? this.#db.getThread(input.threadId) : null;
@@ -1659,6 +1725,9 @@ export class DesktopBackend {
       throw new Error("Project-scoped knowledge imports require a project thread.");
     }
 
+    const sources = normalizeKnowledgeImportSources(input.sources, input.sourcePaths);
+    if (sources.length === 0) throw new Error("Please add at least one local document or URL.");
+
     const knowledgeBase = this.#db.createKnowledgeBase({
       scope: input.scope,
       projectId,
@@ -1668,10 +1737,13 @@ export class DesktopBackend {
       status: "importing"
     });
     try {
-      const sourcePaths = await expandKnowledgeSources(input.sourcePaths);
-      // Keep the user's original folders so manual refresh can discover added files.
-      const importRunId = this.#db.createKnowledgeImportRun(knowledgeBase.id, input.sourcePaths);
-      const documents = await Promise.all(sourcePaths.map((sourcePath) => extractDocument(sourcePath)));
+      // Keep the original sources so refresh can re-fetch URLs and discover local folder changes.
+      const importRunId = this.#db.createKnowledgeImportRun(knowledgeBase.id, sources);
+      const documents = await this.extractKnowledgeSourceDocuments(sources);
+      const displayName = resolveKnowledgeImportDisplayName(input.displayName, sources, documents);
+      if (displayName !== knowledgeBase.displayName) {
+        this.#db.updateKnowledgeBase(knowledgeBase.id, { displayName });
+      }
       const built = await buildOkfBundle({
         bundleRoot: knowledgeBase.bundleRoot,
         knowledgeBaseId: knowledgeBase.id,
@@ -1692,7 +1764,7 @@ export class DesktopBackend {
         messageId: null,
         toolCallId: null,
         artifactKind: "knowledge-index",
-        displayName: `${input.displayName} index.md`,
+        displayName: `${displayName} index.md`,
         absolutePath: built.indexPath,
         relativePath: "index.md",
         mimeType: "text/markdown",
@@ -1749,15 +1821,14 @@ export class DesktopBackend {
     this.#db.updateKnowledgeBase(knowledgeBaseId, { status: "importing" });
     try {
       const selectedSources = this.#db.listLatestKnowledgeImportSources(knowledgeBaseId);
-      const sourcePaths = await expandKnowledgeSources(selectedSources, { allowEmpty: true });
-      const currentPaths = new Set(sourcePaths);
+      const documents = await this.extractKnowledgeSourceDocuments(selectedSources, { allowEmptyLocal: true });
+      const currentPaths = new Set(documents.map((document) => document.sourcePath));
       const existing = new Map(this.#db.listKnowledgeDocuments(knowledgeBaseId).map((document) => [document.sourcePath, document]));
       for (const document of existing.values()) {
         if (!currentPaths.has(document.sourcePath)) this.#db.markKnowledgeDocumentMissing(document.id);
       }
-      for (const sourcePath of sourcePaths) {
-        const document = await extractDocument(sourcePath);
-        const previous = existing.get(sourcePath);
+      for (const document of documents) {
+        const previous = existing.get(document.sourcePath);
         if (!previous || previous.sourceHash !== document.sourceHash || previous.status !== "ready") {
           this.storeKnowledgeDocument(knowledgeBaseId, document);
         }
@@ -1777,6 +1848,80 @@ export class DesktopBackend {
     if (!knowledgeBase) return;
     await fs.rm(knowledgeBase.bundleRoot, { recursive: true, force: true });
     this.#db.deleteKnowledgeBase(knowledgeBaseId);
+  }
+
+  private async extractKnowledgeSourceDocuments(
+    sources: KnowledgeImportSource[],
+    options: { allowEmptyLocal?: boolean } = {}
+  ): Promise<ExtractedDocument[]> {
+    const documents: ExtractedDocument[] = [];
+    for (const source of sources) {
+      if (source.kind === "file" || source.kind === "folder") {
+        const paths = await expandKnowledgeSources([source.path], { allowEmpty: options.allowEmptyLocal });
+        for (const sourcePath of paths) documents.push(await extractDocument(sourcePath));
+        continue;
+      }
+      if (source.kind === "url") {
+        documents.push(await this.extractRemoteKnowledgeDocument(source.url));
+        continue;
+      }
+      documents.push(await this.extractBrowserKnowledgeDocument(source));
+    }
+    if (documents.length === 0) throw new Error("No readable knowledge documents were found.");
+    return documents;
+  }
+
+  private async extractRemoteKnowledgeDocument(rawUrl: string): Promise<ExtractedDocument> {
+    const url = normalizeKnowledgeUrl(rawUrl);
+    const response = await fetch(url, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(20_000),
+      headers: { Accept: "text/html,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,*/*;q=0.5" }
+    });
+    if (!response.ok) throw new Error(`Unable to fetch ${url} (${response.status}).`);
+    const contentLength = Number(response.headers.get("content-length") ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > 20 * 1024 * 1024) throw new Error("Remote document exceeds the 20 MB import limit.");
+    const finalUrl = response.url || url;
+    const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.toLowerCase() ?? "";
+    if (contentType.includes("text/html") || /\.(?:html?|aspx?|php)(?:$|[?#])/i.test(finalUrl)) {
+      await response.body?.cancel();
+      const page = await this.loadBrowserPage(finalUrl);
+      const body = extractHtmlReadableText(page.html) || page.text.trim();
+      if (!body) throw new Error("The page did not contain readable text. Sign in through the Browser workspace and import the current page instead.");
+      if (body.length > 2_000_000) throw new Error("Rendered page text exceeds the 2 MB import limit.");
+      return {
+        title: page.title,
+        body,
+        sourcePath: page.url,
+        sourceHash: createHash("sha256").update(body).digest("hex"),
+        mimeHint: "text/html"
+      };
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    if (data.byteLength > 20 * 1024 * 1024) throw new Error("Remote document exceeds the 20 MB import limit.");
+    const document = await extractDocumentBuffer(data, finalUrl, {
+      mimeHint: contentType || undefined,
+      extension: knowledgeExtensionForMimeType(contentType)
+    });
+    if (!document.body) throw new Error("The remote document did not contain readable text.");
+    return document;
+  }
+
+  private async extractBrowserKnowledgeDocument(source: Extract<KnowledgeImportSource, { kind: "browser" }>): Promise<ExtractedDocument> {
+    const contents = await this.requireBrowserContents(source.threadId, source.tabId).catch(() => {
+      throw new Error("Open this source in the Browser workspace, sign in if needed, then retry the import.");
+    });
+    const page = await this.readVisibleBrowserPage(contents, true);
+    const body = extractHtmlReadableText(page.html) || page.text.trim();
+    if (!body) throw new Error("The current browser page did not contain readable text. Complete login and wait for the document to load.");
+    if (body.length > 2_000_000) throw new Error("Rendered page text exceeds the 2 MB import limit.");
+    return {
+      title: page.title,
+      body,
+      sourcePath: page.url || source.url,
+      sourceHash: createHash("sha256").update(body).digest("hex"),
+      mimeHint: "text/html"
+    };
   }
 
   private storeKnowledgeDocument(
@@ -1866,6 +2011,13 @@ export class DesktopBackend {
     this.#db.resolveUserPrompt(id, answers);
     this.#db.finishTurn(prompt.turnRunId, { status: "running" });
     const updatedThread = this.#db.updateThread(prompt.threadId, { status: "running" });
+    const answeredPrompt = this.#db.getUserPrompt(id);
+    await this.emit({
+      type: "user-input.resolved",
+      threadId: prompt.threadId,
+      payload: { prompt: answeredPrompt },
+      createdAt: new Date().toISOString()
+    });
     await this.emit({
       type: "thread.updated",
       threadId: prompt.threadId,
@@ -2223,6 +2375,7 @@ export class DesktopBackend {
     }
 
     this.#mcp.setConfigs([...effectiveServers.values()]);
+    await this.#mcp.refresh();
   }
 
   private listProjectPluginsForThread(thread: ThreadRecord): Array<{
@@ -2676,6 +2829,83 @@ function splitKnowledgeDocument(body: string, maximumCharacters = 2_400): string
 function getChunkLocator(content: string, chunkIndex: number): string {
   const heading = content.match(/^\s*#{1,6}\s+(.+)$/m)?.[1]?.trim();
   return heading ? `${heading} · Chunk ${chunkIndex + 1}` : `Chunk ${chunkIndex + 1}`;
+}
+
+function normalizeKnowledgeImportSources(
+  sources: KnowledgeImportSource[] | undefined,
+  legacyPaths: string[] | undefined
+): KnowledgeImportSource[] {
+  const normalized = sources?.length
+    ? sources
+    : (legacyPaths ?? []).map((path) => ({ kind: "file" as const, path }));
+  const seen = new Set<string>();
+  return normalized.flatMap((source): KnowledgeImportSource[] => {
+    if (source.kind === "url") {
+      const url = normalizeKnowledgeUrl(source.url);
+      const key = `url:${url}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ kind: "url", url }];
+    }
+    if (source.kind === "browser") {
+      const url = normalizeKnowledgeUrl(source.url);
+      const key = `browser:${source.threadId}:${source.tabId}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ ...source, url }];
+    }
+    const pathKey = `${source.kind}:${path.resolve(source.path).toLowerCase()}`;
+    if (seen.has(pathKey)) return [];
+    seen.add(pathKey);
+    return [{ ...source, path: source.path }];
+  });
+}
+
+function resolveKnowledgeImportDisplayName(
+  requestedName: string,
+  sources: KnowledgeImportSource[],
+  documents: ExtractedDocument[]
+): string {
+  const trimmed = requestedName.trim();
+  const webSources = sources.filter((source) => source.kind === "url" || source.kind === "browser");
+  if (webSources.length !== 1 || documents.length !== 1) {
+    return trimmed || "Imported Knowledge";
+  }
+  const defaultNames = new Set(["", "Imported Knowledge"]);
+  try {
+    defaultNames.add(new URL(webSources[0].url).hostname);
+  } catch {
+    // URL validation runs before this point; retain the supplied name as a fallback.
+  }
+  const pageTitle = documents[0].title.trim();
+  return defaultNames.has(trimmed) && pageTitle ? pageTitle : trimmed || "Imported Knowledge";
+}
+
+function normalizeKnowledgeUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("Knowledge URLs must be valid http or https addresses.");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Knowledge URLs only support http and https.");
+  }
+  return url.toString();
+}
+
+function knowledgeExtensionForMimeType(mimeType: string): string | undefined {
+  switch (mimeType) {
+    case "application/pdf": return ".pdf";
+    case "application/json": return ".json";
+    case "text/plain": return ".txt";
+    case "text/csv": return ".csv";
+    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document": return ".docx";
+    case "application/vnd.openxmlformats-officedocument.presentationml.presentation": return ".pptx";
+    case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": return ".xlsx";
+    case "application/vnd.ms-excel": return ".xls";
+    default: return undefined;
+  }
 }
 
 async function expandKnowledgeSources(

@@ -17,6 +17,7 @@ import type {
   KnowledgeConcept,
   KnowledgeChunkRecord,
   KnowledgeDocumentRecord,
+  KnowledgeImportSource,
   McpServerConfig,
   MessageAttachment,
   MessageRecord,
@@ -296,6 +297,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     mcpServers: ((parsed.mcpServers ?? []) as Array<Record<string, unknown>>).map((item) => ({
       id: String(item.id),
       name: String(item.name ?? item.id),
+      description: typeof item.description === 'string' ? item.description : undefined,
       command: typeof item.command === 'string' ? item.command : undefined,
       args: Array.isArray(item.args) ? item.args.map(String) : undefined,
       env: item.env as Record<string, string> | undefined,
@@ -321,6 +323,7 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     mcpServers: config.mcpServers.map((server) => ({
       id: server.id,
       name: server.name,
+      description: server.description,
       command: server.command,
       args: server.args,
       env: server.env,
@@ -761,6 +764,13 @@ export class DatabaseService {
            WHERE thread_id = ? AND status IN ('pending', 'running')`
         )
         .run(completedAt, threadId);
+      this.#db
+        .prepare(
+          `UPDATE user_input_prompts
+           SET status = 'cancelled', answered_at = ?
+           WHERE thread_id = ? AND status = 'pending'`
+        )
+        .run(completedAt, threadId);
       const thread = this.updateThread(threadId, { status: "idle", updatedAt: completedAt });
       this.#db.exec("COMMIT");
       return thread;
@@ -1045,6 +1055,55 @@ export class DatabaseService {
       }));
   }
 
+  public aggregateSkillUsageStats(): Array<{
+    skillId: string;
+    callCount: number;
+    successCount: number;
+    successRate: number;
+    lastUsedAt: string | null;
+  }> {
+    const rows = this.#db
+      .prepare(
+        `SELECT COALESCE(
+                  NULLIF(TRIM(json_extract(result_json, '$.json.skill')), ''),
+                  json_extract(arguments_json, '$.skill_id')
+                ) AS skill_id,
+                COUNT(*) AS call_count,
+                SUM(CASE WHEN status = 'completed'
+                  AND COALESCE(json_extract(result_json, '$.ok'), 1) != 0 THEN 1 ELSE 0 END) AS success_count,
+                MAX(completed_at) AS last_used_at
+         FROM tool_calls
+         WHERE tool_name = 'skills.load'
+           AND COALESCE(
+             NULLIF(TRIM(json_extract(result_json, '$.json.skill')), ''),
+             json_extract(arguments_json, '$.skill_id')
+           ) IS NOT NULL
+           AND TRIM(COALESCE(
+             NULLIF(TRIM(json_extract(result_json, '$.json.skill')), ''),
+             json_extract(arguments_json, '$.skill_id')
+           )) != ''
+         GROUP BY skill_id`
+      )
+      .all() as Array<{
+      skill_id: string;
+      call_count: number | bigint;
+      success_count: number | bigint;
+      last_used_at: string | null;
+    }>;
+
+    return rows.map((row) => {
+      const callCount = Number(row.call_count) || 0;
+      const successCount = Number(row.success_count) || 0;
+      return {
+        skillId: String(row.skill_id),
+        callCount,
+        successCount,
+        successRate: callCount > 0 ? successCount / callCount : 0,
+        lastUsedAt: row.last_used_at ?? null
+      };
+    });
+  }
+
   public createApproval(
     input: Omit<ApprovalRequest, "id" | "createdAt" | "resolutionMode" | "resolvedAt">
   ): ApprovalRequest {
@@ -1205,6 +1264,23 @@ export class DatabaseService {
       .run(JSON.stringify(answers), nowIso(), id);
   }
 
+  public cancelPendingUserPrompts(threadId: string, turnRunId?: string): number {
+    if (turnRunId) {
+      const result = this.#db
+        .prepare(
+          "UPDATE user_input_prompts SET status = 'cancelled', answered_at = ? WHERE thread_id = ? AND turn_run_id = ? AND status = 'pending'"
+        )
+        .run(nowIso(), threadId, turnRunId);
+      return Number(result.changes ?? 0);
+    }
+    const result = this.#db
+      .prepare(
+        "UPDATE user_input_prompts SET status = 'cancelled', answered_at = ? WHERE thread_id = ? AND status = 'pending'"
+      )
+      .run(nowIso(), threadId);
+    return Number(result.changes ?? 0);
+  }
+
   public listUserPrompts(threadId: string): UserInputPrompt[] {
     return this.#db
       .prepare("SELECT * FROM user_input_prompts WHERE thread_id = ? ORDER BY created_at DESC")
@@ -1356,24 +1432,37 @@ export class DatabaseService {
     }));
   }
 
-  public createKnowledgeImportRun(knowledgeBaseId: string, sourcePaths: string[]): string {
+  public createKnowledgeImportRun(knowledgeBaseId: string, sources: KnowledgeImportSource[]): string {
     const id = randomUUID();
     this.#db
       .prepare(
         "INSERT INTO knowledge_import_runs (id, knowledge_base_id, source_paths_json, created_at) VALUES (?, ?, ?, ?)"
       )
-      .run(id, knowledgeBaseId, JSON.stringify(sourcePaths), nowIso());
+      .run(id, knowledgeBaseId, JSON.stringify(sources), nowIso());
     return id;
   }
 
-  public listLatestKnowledgeImportSources(knowledgeBaseId: string): string[] {
+  public listLatestKnowledgeImportSources(knowledgeBaseId: string): KnowledgeImportSource[] {
     const row = this.#db.prepare(
       "SELECT source_paths_json FROM knowledge_import_runs WHERE knowledge_base_id = ? ORDER BY created_at DESC LIMIT 1"
     ).get(knowledgeBaseId) as { source_paths_json?: string } | undefined;
     if (!row?.source_paths_json) return [];
     try {
-      const paths = JSON.parse(row.source_paths_json);
-      return Array.isArray(paths) ? paths.filter((item): item is string => typeof item === "string") : [];
+      const sources = JSON.parse(row.source_paths_json);
+      if (!Array.isArray(sources)) return [];
+      return sources.flatMap((source): KnowledgeImportSource[] => {
+        if (typeof source === "string") return [{ kind: "file", path: source }];
+        if (!source || typeof source !== "object") return [];
+        const value = source as Partial<KnowledgeImportSource>;
+        if ((value.kind === "file" || value.kind === "folder") && typeof value.path === "string") {
+          return [{ kind: value.kind, path: value.path }];
+        }
+        if (value.kind === "url" && typeof value.url === "string") return [{ kind: "url", url: value.url }];
+        if (value.kind === "browser" && typeof value.url === "string" && typeof value.threadId === "string" && typeof value.tabId === "string") {
+          return [{ kind: "browser", url: value.url, threadId: value.threadId, tabId: value.tabId }];
+        }
+        return [];
+      });
     } catch {
       return [];
     }

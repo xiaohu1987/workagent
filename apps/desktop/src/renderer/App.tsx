@@ -1,6 +1,22 @@
 import { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
+import hljs from "highlight.js/lib/core";
+import bash from "highlight.js/lib/languages/bash";
+import csharp from "highlight.js/lib/languages/csharp";
+import css from "highlight.js/lib/languages/css";
+import diff from "highlight.js/lib/languages/diff";
+import go from "highlight.js/lib/languages/go";
+import java from "highlight.js/lib/languages/java";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import markdown from "highlight.js/lib/languages/markdown";
+import python from "highlight.js/lib/languages/python";
+import rust from "highlight.js/lib/languages/rust";
+import sql from "highlight.js/lib/languages/sql";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
 import "./timeline.css";
 import type {
   AppConfig,
@@ -11,6 +27,7 @@ import type {
   GpaState,
   KnowledgeBaseSummary,
   KnowledgeDocumentRecord,
+  KnowledgeImportSource,
   KnowledgeScope,
   MessageAttachment,
   MessageRecord,
@@ -22,6 +39,7 @@ import type {
   ProviderType,
   RuntimeThreadSnapshot,
   SkillMetadata,
+  SkillUsageStats,
   ThreadRecord,
   ToolCallRecord,
   UserInputPrompt
@@ -38,6 +56,48 @@ import {
 
 type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "timeouts" | "update";
 type RightWorkspaceTab = "preview" | "terminal" | "browser" | "files";
+
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("csharp", csharp);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("diff", diff);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("java", java);
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("yaml", yaml);
+
+const CODE_LANGUAGE_ALIASES: Record<string, string> = {
+  "c#": "csharp",
+  cs: "csharp",
+  csharp: "csharp",
+  sh: "bash",
+  shell: "bash",
+  js: "javascript",
+  jsx: "javascript",
+  ts: "typescript",
+  tsx: "typescript",
+  html: "xml",
+  svg: "xml",
+  yml: "yaml",
+  md: "markdown"
+};
+
+const SKILL_SORT_OPTIONS = [
+  { value: "name", label: "\u540d\u79f0" },
+  { value: "calls", label: "\u8c03\u7528\u6b21\u6570" },
+  { value: "success", label: "\u6210\u529f\u7387" }
+] as const;
+
+function getSkillSortLabel(value: "name" | "calls" | "success"): string {
+  return SKILL_SORT_OPTIONS.find((option) => option.value === value)?.label ?? SKILL_SORT_OPTIONS[0].label;
+}
 type ResizePane = "sidebar" | "right-workspace";
 
 type UpdateState = {
@@ -69,6 +129,19 @@ type ProjectFileTreeNode = {
 type PreviewCacheEntry = {
   content: string;
   truncated: boolean;
+};
+
+type FileSnapshot = {
+  path: string;
+  before: string;
+  after: string;
+  beforeTruncated: boolean;
+  afterTruncated: boolean;
+};
+
+type FileSnapshotDiffLine = {
+  kind: "context" | "removed" | "added";
+  content: string;
 };
 
 type ComposerAttachment =
@@ -108,10 +181,7 @@ type MessageBrowserSource = {
   url: string;
 };
 
-type KnowledgeSourceAttachment = {
-  path: string;
-  kind: "file" | "folder";
-};
+type KnowledgeSourceAttachment = KnowledgeImportSource;
 
 type ContextUsageSegment = {
   id: string;
@@ -218,6 +288,30 @@ type AppNotice = {
   tone: AppNoticeTone;
 };
 
+type GpaPlanResumePreview = {
+  status: "awaiting_confirmation" | "in_progress" | "completed" | "abandoned";
+  sourceThreadId: string;
+  currentThreadId: string;
+  sameSession: boolean;
+  updatedAt: string;
+  tasks: Array<{ id: string; title: string; done: boolean }>;
+  body: string;
+  doneCount: number;
+  pendingCount: number;
+  pendingTasks: Array<{ id: string; title: string; done: boolean }>;
+};
+
+type GpaPlanResumeDialogState = {
+  step: "ask" | "review";
+  plan: GpaPlanResumePreview;
+  threadId: string;
+};
+
+type GpaPlanResumeRetryPrompt = {
+  plan: GpaPlanResumePreview;
+  threadId: string;
+};
+
 type ModelTestResult = {
   latencyMs: number;
   outputTokens: number;
@@ -230,7 +324,8 @@ type TimelineEntry =
   | { kind: "message"; id: string; createdAt: string; message: MessageRecord }
   | { kind: "tool"; id: string; createdAt: string; toolCall: ToolCallRecord }
   | { kind: "file-summary"; id: string; createdAt: string; files: FileChangeSummaryItem[] }
-  | { kind: "directory-read-group"; id: string; createdAt: string; directory: string; count: number };
+  | { kind: "directory-read-group"; id: string; createdAt: string; directory: string; count: number }
+  | { kind: "user-input"; id: string; createdAt: string; prompt: UserInputPrompt };
 
 type FileChangeAction = "created" | "modified" | "deleted";
 
@@ -417,6 +512,11 @@ export function App() {
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [isContextReportOpen, setIsContextReportOpen] = useState(false);
   const [skills, setSkills] = useState<SkillMetadata[]>([]);
+  const [skillUsageStats, setSkillUsageStats] = useState<SkillUsageStats[]>([]);
+  const [skillsSearchQuery, setSkillsSearchQuery] = useState("");
+  const [skillsSortMode, setSkillsSortMode] = useState<"name" | "calls" | "success">("name");
+  const [skillsSortOpen, setSkillsSortOpen] = useState(false);
+  const skillsSortMenuRef = useRef<HTMLDivElement | null>(null);
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
   const [gpaState, setGpaState] = useState<GpaState>({
     stage: "off",
@@ -435,13 +535,34 @@ export function App() {
   const [gpaRevisionOpen, setGpaRevisionOpen] = useState(false);
   const [gpaRevisionDraft, setGpaRevisionDraft] = useState("");
   const [gpaRevisionSubmitting, setGpaRevisionSubmitting] = useState(false);
+  const [gpaConfirmationSubmitting, setGpaConfirmationSubmitting] = useState(false);
+  const [gpaPlanResumeDialog, setGpaPlanResumeDialog] = useState<GpaPlanResumeDialogState | null>(null);
+  const [gpaPlanResumeBusy, setGpaPlanResumeBusy] = useState(false);
+  const [gpaPlanResumeRetryPrompt, setGpaPlanResumeRetryPrompt] = useState<GpaPlanResumeRetryPrompt | null>(null);
+  const gpaSameSessionAutoResumeRef = useRef<Set<string>>(new Set());
+  const gpaPlanResumeDismissedRef = useRef<Set<string>>(new Set());
+  const gpaPlanResumeAttemptRef = useRef<Map<string, GpaPlanResumePreview>>(new Map());
+  const gpaPlanResumeRetryRequiredRef = useRef<Set<string>>(new Set());
   const gpaRevisionRef = useRef<HTMLTextAreaElement | null>(null);
+  const gpaConfirmationPendingStageRef = useRef<Exclude<GpaStage, "off" | "act"> | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [updateConfirmDialog, setUpdateConfirmDialog] = useState<null | {
+    kind: "download" | "install";
+    title: string;
+    message: string;
+    details: string[];
+  }>(null);
   const [mcpRuntimeServers, setMcpRuntimeServers] = useState<McpRuntimeServer[]>([]);
   const [editingMcpServerId, setEditingMcpServerId] = useState<string | null>(null);
   const [testingMcpServerId, setTestingMcpServerId] = useState<string | null>(null);
+  const [isMcpCreateOpen, setIsMcpCreateOpen] = useState(false);
+  const [mcpCreateMode, setMcpCreateMode] = useState<"form" | "json">("form");
+  const [mcpCreateDraft, setMcpCreateDraft] = useState<McpServerConfig | null>(null);
+  const [mcpCreateError, setMcpCreateError] = useState<string | null>(null);
+  const [mcpJsonDraft, setMcpJsonDraft] = useState("");
+  const [mcpJsonError, setMcpJsonError] = useState<string | null>(null);
   const [mcpTestResults, setMcpTestResults] = useState<Record<string, { tools: Array<{ name: string; description: string }>; resources: Array<{ uri: string; name: string }>; resourceTemplates: Array<{ uriTemplate: string; name: string }> }>>({});
   const [settingsProviderId, setSettingsProviderId] = useState<string | null>(null);
   const [providerSecretDrafts, setProviderSecretDrafts] = useState<Record<string, string>>({});
@@ -450,7 +571,7 @@ export function App() {
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [testingModelKey, setTestingModelKey] = useState<string | null>(null);
   const [modelTestResults, setModelTestResults] = useState<Record<string, ModelTestResult>>({});
-  const [fetchedModels, setFetchedModels] = useState<{ id: string; displayName?: string }[]>([]);
+  const [fetchedModels, setFetchedModels] = useState<{ id: string; displayName?: string; contextWindow?: number }[]>([]);
   const [showFetchedModels, setShowFetchedModels] = useState(false);
   const [selectedFetchedModelIds, setSelectedFetchedModelIds] = useState<string[]>([]);
   const [fetchedModelsTarget, setFetchedModelsTarget] = useState<"provider">("provider");
@@ -459,11 +580,14 @@ export function App() {
   const [composerProviderId, setComposerProviderId] = useState("");
   const [composerModelId, setComposerModelId] = useState("");
   const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSourceAttachment[]>([]);
+  const [knowledgeUrlInput, setKnowledgeUrlInput] = useState("");
+  const [isKnowledgeUrlEditorOpen, setIsKnowledgeUrlEditorOpen] = useState(false);
   const [knowledgeName, setKnowledgeName] = useState("Imported Knowledge");
   const [knowledgeScope, setKnowledgeScope] = useState<KnowledgeScope>("global");
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([]);
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<Record<string, KnowledgeDocumentRecord[]>>({});
   const [knowledgeBusyId, setKnowledgeBusyId] = useState<string | null>(null);
+  const [isKnowledgeImporting, setIsKnowledgeImporting] = useState(false);
   const [pluginSource, setPluginSource] = useState("https://github.com/obra/superpowers");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
@@ -598,6 +722,7 @@ export function App() {
     selectedThreadId && selectedProjectFile
       ? projectFilePreviewsByThread[selectedThreadId]?.[selectedProjectFile] ?? null
       : null;
+  const projectToolCalls = snapshot?.thread.id === selectedThreadId ? snapshot.toolCalls : [];
 
   function ensureThreadTerminalTabs(threadId: string) {
     setTerminalTabsByThread((current) => {
@@ -874,9 +999,32 @@ export function App() {
         return;
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
+        if (
+          gpaConfirmationPendingStageRef.current &&
+          typed.payload.gpa.awaitingConfirmation !== gpaConfirmationPendingStageRef.current
+        ) {
+          gpaConfirmationPendingStageRef.current = null;
+          setGpaConfirmationSubmitting(false);
+        }
         setGpaState(typed.payload.gpa);
         setGpaComposerSelected(typed.payload.gpa.stage !== "off");
         return;
+      }
+      if (typed.type === "user-input.resolved" && typed.threadId && typed.payload?.prompt) {
+        const resolvedPrompt = typed.payload.prompt as UserInputPrompt;
+        setSnapshot((current) => {
+          if (!current || current.thread.id !== typed.threadId) {
+            return current;
+          }
+          return {
+            ...current,
+            prompts: current.prompts.map((prompt) =>
+              prompt.id === resolvedPrompt.id
+                ? { ...prompt, ...resolvedPrompt, status: "answered" as const }
+                : prompt
+            )
+          };
+        });
       }
       if (typed.type === "model.capability.updated" && typed.payload?.modelId) {
         const modelId = typed.payload.modelId;
@@ -943,6 +1091,26 @@ export function App() {
           startedAt: typeof typed.payload.startedAt === "string" ? typed.payload.startedAt : typed.createdAt ?? new Date().toISOString(),
           completedAt: null
         });
+        setSnapshot((current) => {
+          if (!current || current.thread.id !== typed.threadId) return current;
+          const startedTool: ToolCallRecord = {
+            id: typed.payload?.toolCallId ?? "",
+            threadId: typed.threadId ?? "",
+            turnRunId: typeof typed.payload?.turnRunId === "string" ? typed.payload.turnRunId : "",
+            toolName: typed.payload?.toolName ?? "",
+            argumentsJson: typeof typed.payload?.argumentsJson === "string" ? typed.payload.argumentsJson : "{}",
+            resultJson: null,
+            status: "running",
+            riskLevel: typed.payload?.riskLevel ?? "medium",
+            approvalMode: typed.payload?.approvalMode ?? "prompt",
+            startedAt: typeof typed.payload?.startedAt === "string" ? typed.payload.startedAt : typed.createdAt ?? new Date().toISOString(),
+            completedAt: null
+          };
+          return {
+            ...current,
+            toolCalls: [...current.toolCalls.filter((tool) => tool.id !== startedTool.id), startedTool]
+          };
+        });
         appendRuntimeStatus(
           typed.threadId,
           getToolProcessingLabel(
@@ -967,6 +1135,23 @@ export function App() {
             typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null,
             typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString()
           );
+          setSnapshot((current) => {
+            if (!current || current.thread.id !== runtimeThreadId) return current;
+            return {
+              ...current,
+              toolCalls: current.toolCalls.map((tool) => tool.id === typed.payload?.toolCallId
+                ? {
+                    ...tool,
+                    status: typed.payload?.status === "failed" ? "failed" : "completed",
+                    resultJson: typeof typed.payload?.resultJson === "string" ? typed.payload.resultJson : null,
+                    completedAt: typeof typed.payload?.completedAt === "string"
+                      ? typed.payload.completedAt
+                      : typed.createdAt ?? new Date().toISOString()
+                  }
+                : tool
+              )
+            };
+          });
           if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
             appendRuntimeStatus(runtimeThreadId, "工具已完成，正在整理结果", typed.createdAt);
             setRuntimeProgress((current) =>
@@ -1041,6 +1226,14 @@ export function App() {
       if (typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
         const runtimeThreadId = typed.threadId;
         const status = typed.payload.thread.status;
+        const resumePlan = gpaPlanResumeAttemptRef.current.get(runtimeThreadId);
+        if (status === "failed" && resumePlan) {
+          gpaPlanResumeAttemptRef.current.delete(runtimeThreadId);
+          gpaPlanResumeRetryRequiredRef.current.add(runtimeThreadId);
+        } else if (status === "completed" && resumePlan) {
+          gpaPlanResumeAttemptRef.current.delete(runtimeThreadId);
+          gpaPlanResumeRetryRequiredRef.current.delete(runtimeThreadId);
+        }
         setRuntimeProgress((current) => {
           if (!current || current.threadId !== runtimeThreadId) return current;
           if (suppressRuntimeProgressRef.current[runtimeThreadId]) {
@@ -1144,11 +1337,12 @@ export function App() {
       setActivePreviewPathByThread((current) => {
         const nextDefault = entries.find((entry) => entry.kind === "file")?.path ?? null;
         const existing = current[selectedThreadId];
+        const existingPath = existing?.replace(/\\/g, "/");
         return {
           ...current,
           [selectedThreadId]:
-            existing && entries.some((entry) => entry.path === existing && entry.kind === "file")
-              ? existing
+            existingPath && entries.some((entry) => entry.path.replace(/\\/g, "/") === existingPath && entry.kind === "file")
+              ? existingPath
               : nextDefault
         };
       });
@@ -1215,7 +1409,7 @@ export function App() {
   }, [selectedProjectFile, selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !notice) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !notice) {
       return;
     }
 
@@ -1223,6 +1417,16 @@ export function App() {
       if (event.key === "Escape") {
         if (notice) {
           dismissNotice(notice.id);
+          return;
+        }
+
+        if (updateConfirmDialog) {
+          setUpdateConfirmDialog(null);
+          return;
+        }
+
+        if (gpaPlanResumeDialog && !gpaPlanResumeBusy) {
+          void dismissGpaPlanResumeDialog();
           return;
         }
 
@@ -1237,7 +1441,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isProjectCreateOpen, isSettingsOpen, notice]);
+  }, [gpaPlanResumeBusy, gpaPlanResumeDialog, isProjectCreateOpen, isSettingsOpen, notice, updateConfirmDialog]);
 
   useEffect(() => {
     if (!notice || isNoticeHovered) {
@@ -1273,6 +1477,77 @@ export function App() {
     }
   }, [isSettingsOpen, settingsTab, selectedThread?.cwd]);
 
+  const visibleSkills = useMemo(() => {
+    const query = skillsSearchQuery.trim().toLowerCase();
+    const statsByKey = new Map<string, SkillUsageStats>();
+    for (const stats of skillUsageStats) {
+      statsByKey.set(stats.skillId, stats);
+    }
+    const resolveStats = (skill: SkillMetadata): SkillUsageStats =>
+      statsByKey.get(skill.id) ??
+      statsByKey.get(skill.qualifiedName) ??
+      statsByKey.get(skill.name) ?? {
+        skillId: skill.id,
+        callCount: 0,
+        successCount: 0,
+        successRate: 0,
+        lastUsedAt: null
+      };
+
+    const filtered = skills.filter((skill) => {
+      if (!query) return true;
+      const haystack = [
+        skill.displayName ?? "",
+        skill.qualifiedName,
+        skill.name,
+        skill.domain ?? "",
+        skill.description
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+
+    return filtered
+      .map((skill) => ({ skill, stats: resolveStats(skill) }))
+      .sort((left, right) => {
+        if (skillsSortMode === "calls") {
+          if (right.stats.callCount !== left.stats.callCount) {
+            return right.stats.callCount - left.stats.callCount;
+          }
+          if (left.stats.callCount === 0 && right.stats.callCount === 0) {
+            return (left.skill.displayName ?? left.skill.qualifiedName).localeCompare(
+              right.skill.displayName ?? right.skill.qualifiedName
+            );
+          }
+        }
+        if (skillsSortMode === "success") {
+          const leftRate = left.stats.callCount > 0 ? left.stats.successRate : -1;
+          const rightRate = right.stats.callCount > 0 ? right.stats.successRate : -1;
+          if (rightRate !== leftRate) {
+            return rightRate - leftRate;
+          }
+          if (right.stats.callCount !== left.stats.callCount) {
+            return right.stats.callCount - left.stats.callCount;
+          }
+        }
+        return (left.skill.displayName ?? left.skill.qualifiedName).localeCompare(
+          right.skill.displayName ?? right.skill.qualifiedName
+        );
+      });
+  }, [skillUsageStats, skills, skillsSearchQuery, skillsSortMode]);
+
+  useEffect(() => {
+    if (!skillsSortOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!skillsSortMenuRef.current?.contains(event.target as Node)) {
+        setSkillsSortOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [skillsSortOpen]);
+
   useEffect(() => {
     if (isSettingsOpen && settingsTab === "knowledge") void refreshKnowledgeBases();
   }, [isSettingsOpen, settingsTab]);
@@ -1284,10 +1559,20 @@ export function App() {
     [snapshot]
   );
   const pendingPrompts = useMemo(
-    () => (snapshot?.prompts ?? []).filter((item) => item.status === "pending"),
+    () =>
+      (snapshot?.prompts ?? []).filter(
+        (item) => item.status === "pending" && snapshot?.thread.status === "waiting"
+      ),
     [snapshot]
   );
   const userInputPrompts = snapshot?.prompts ?? [];
+  const timelinePrompts = useMemo(
+    () =>
+      userInputPrompts.filter(
+        (prompt) => !pendingPrompts.some((pending) => pending.id === prompt.id)
+      ),
+    [pendingPrompts, userInputPrompts]
+  );
   const canImportProjectKnowledge = selectedThread?.mode === "project" && !!selectedThread.cwd;
   const workflowBindings = snapshot?.projectPlugins ?? [];
   const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
@@ -1298,8 +1583,23 @@ export function App() {
     [activeSnapshotThreadStatus, selectedMessages]
   );
   const timelineEntries = useMemo(
-    () => buildTimelineEntries(visibleMessages, snapshot?.toolCalls ?? [], snapshot?.artifacts ?? [], selectedThread?.cwd, selectedThreadStatus),
-    [selectedThread?.cwd, selectedThreadStatus, snapshot?.artifacts, snapshot?.toolCalls, visibleMessages]
+    () =>
+      buildTimelineEntries(
+        visibleMessages,
+        snapshot?.toolCalls ?? [],
+        snapshot?.artifacts ?? [],
+        selectedThread?.cwd,
+        selectedThreadStatus,
+        timelinePrompts
+      ),
+    [
+      selectedThread?.cwd,
+      selectedThreadStatus,
+      snapshot?.artifacts,
+      snapshot?.toolCalls,
+      timelinePrompts,
+      visibleMessages
+    ]
   );
   const conversationTurns = useMemo(
     () => buildConversationTurnItems(visibleMessages, snapshot?.toolCalls ?? [], selectedThread?.cwd),
@@ -1431,14 +1731,7 @@ export function App() {
 
     return targetModel.displayName?.trim() || targetModel.id;
   }, [config, composerModelId, composerProviderId, selectedThread]);
-  const latestTurnRunId = useMemo(
-    () => [...selectedMessages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null,
-    [selectedMessages]
-  );
-  const activeContextCompaction =
-    snapshot?.contextCompaction?.turnRunId === latestTurnRunId
-      ? snapshot.contextCompaction
-      : null;
+  const activeContextCompaction = snapshot?.contextCompaction ?? null;
   const contextUsage = useMemo(() => {
     const targetProviderId = selectedThread?.providerId ?? composerProviderId ?? config?.defaultProvider;
     const targetModelId = selectedThread?.modelId ?? composerModelId ?? config?.defaultModel;
@@ -1739,8 +2032,17 @@ export function App() {
       });
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: next.browserTabs }));
       if (next.gpa) {
-        setGpaState(next.gpa);
-        setGpaComposerSelected(next.gpa.stage !== "off");
+        const gpa =
+          next.thread.mode !== "project" && next.gpa.stage !== "off"
+            ? {
+                ...next.gpa,
+                stage: "off" as const,
+                awaitingConfirmation: null,
+                planTasks: []
+              }
+            : next.gpa;
+        setGpaState(gpa);
+        setGpaComposerSelected(gpa.stage !== "off");
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1785,10 +2087,92 @@ export function App() {
 
     selectThreadId(threadId);
     await refreshSnapshot(threadId);
+    // Switching chats must never auto-start GPA. Same-session incomplete plans only
+    // restore the GPA chip/timeline; the user continues explicitly via GPA or send.
+    await softRestoreSameSessionGpaPlan(threadId);
   }
 
+  async function softRestoreSameSessionGpaPlan(threadId: string): Promise<void> {
+    const plan = (await window.codexh.getProjectGpaPlan(threadId)) as GpaPlanResumePreview | null;
+    if (!plan?.sameSession) {
+      return;
+    }
+    const snapshotGpa = (await window.codexh.getGpaState(threadId)) as GpaState;
+    if (snapshotGpa.stage !== "off" && snapshotGpa.planTasks.length > 0) {
+      setGpaComposerSelected(true);
+      return;
+    }
+    const restored = (await window.codexh.restoreProjectGpaPlan(threadId)) as GpaState;
+    setGpaState(restored);
+    setGpaComposerSelected(true);
+    await refreshSnapshot(threadId);
+  }
+
+  async function resumeGpaPlanExecution(threadId: string, plan: GpaPlanResumePreview) {
+    const restored = (await window.codexh.restoreProjectGpaPlan(threadId)) as GpaState;
+    setGpaState(restored);
+    setGpaComposerSelected(true);
+    await refreshSnapshot(threadId);
+    if (plan.status === "in_progress" && plan.pendingCount > 0) {
+      gpaPlanResumeAttemptRef.current.set(threadId, plan);
+      await sendMessage(
+        "[internal:gpa-resume] Continue the remaining incomplete GPA plan tasks from .codexh/gpa-plan.md. Do not restart GOAL/PLAN analysis. Execute the next unfinished task and keep updating completed_task_ids.",
+        restored.stage === "act" ? "act" : undefined,
+        {
+          internal: true,
+          displayContent: `继续执行剩余的 GPA 计划任务（还剩 ${plan.pendingCount} 项）`
+        }
+      );
+    }
+  }
+
+  async function maybeHandleIncompleteGpaPlan(
+    threadId: string,
+    options?: { preferAutoSameSession?: boolean; forcePrompt?: boolean }
+  ): Promise<boolean> {
+    const plan = (await window.codexh.getProjectGpaPlan(threadId)) as GpaPlanResumePreview | null;
+    if (!plan) {
+      return false;
+    }
+    const [snapshotGpa, threadSnapshot] = await Promise.all([
+      window.codexh.getGpaState(threadId) as Promise<GpaState>,
+      window.codexh.getThreadSnapshot(threadId) as Promise<RuntimeThreadSnapshot>
+    ]);
+    const dismissKey = `${threadId}:${plan.updatedAt}`;
+    if (!options?.forcePrompt && gpaPlanResumeDismissedRef.current.has(dismissKey)) {
+      return false;
+    }
+    const failedWithPendingGpaPlan =
+      threadSnapshot.thread.status === "failed" &&
+      plan.status === "in_progress" &&
+      plan.pendingCount > 0;
+    if (gpaPlanResumeRetryRequiredRef.current.has(threadId) || failedWithPendingGpaPlan) {
+      gpaPlanResumeRetryRequiredRef.current.add(threadId);
+      setGpaPlanResumeRetryPrompt({ threadId, plan });
+      return true;
+    }
+    if (snapshotGpa.stage !== "off" && snapshotGpa.planTasks.length > 0) {
+      setGpaComposerSelected(true);
+      return false;
+    }
+    if (plan.sameSession && options?.preferAutoSameSession) {
+      await resumeGpaPlanExecution(threadId, plan);
+      showNotice("已继续未完成的 GPA 计划", {
+        message: `剩余 ${plan.pendingCount} 项任务，已自动开启 GPA。`,
+        tone: "success"
+      });
+      return true;
+    }
+    setGpaPlanResumeDialog({ step: "ask", plan, threadId });
+    return true;
+  }
   async function refreshSkills() {
-    setSkills((await window.codexh.listSkills(selectedThread?.cwd)) as SkillMetadata[]);
+    const [nextSkills, nextStats] = await Promise.all([
+      window.codexh.listSkills(selectedThread?.cwd) as Promise<SkillMetadata[]>,
+      window.codexh.getSkillUsageStats() as Promise<SkillUsageStats[]>
+    ]);
+    setSkills(nextSkills);
+    setSkillUsageStats(nextStats);
   }
 
   async function refreshPlugins() {
@@ -1861,6 +2245,7 @@ export function App() {
     selectThreadId(thread.id);
     await refreshAll();
     await refreshSnapshot(thread.id);
+    await maybeHandleIncompleteGpaPlan(thread.id, { preferAutoSameSession: false });
   }
 
   async function chooseProjectFolder() {
@@ -1941,7 +2326,7 @@ export function App() {
   async function sendMessage(
     forcedContent?: string,
     stageOverride?: GpaStage,
-    options?: { internal?: boolean }
+    options?: { internal?: boolean; displayContent?: string }
   ) {
     const inputContent = (forcedContent ?? input.trim()).trim();
     if (!inputContent && (forcedContent || composerAttachments.length === 0)) {
@@ -1989,7 +2374,18 @@ export function App() {
 
     const stage = stageOverride ?? gpaState.stage;
     if (stage !== "off") {
-      await window.codexh.setGpaStage({ threadId, stage });
+      const targetThread = threads.find((thread) => thread.id === threadId) ?? selectedThread;
+      if (targetThread?.mode !== "project") {
+        showNotice("GPA 仅支持项目模式", {
+          message: "当前不是项目对话，已按普通聊天发送；请新建项目后再开启 GPA。"
+        });
+        setGpaComposerSelected(false);
+        if (gpaState.stage !== "off") {
+          setGpaState((prev) => ({ ...prev, stage: "off", awaitingConfirmation: null, planTasks: [] }));
+        }
+      } else {
+        await window.codexh.setGpaStage({ threadId, stage });
+      }
     }
     if (gpaState.fullAccess) {
       await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
@@ -2014,7 +2410,10 @@ export function App() {
     }
     const raw = (forcedContent ?? [inputContent, formatComposerAttachments(composerAttachments.filter((attachment) => attachment.kind !== "file" && attachment.kind !== "image"))]
       .filter(Boolean).join("\n\n")).trim();
-    const displayContent = forcedContent ?? inputContent;
+    const displayContent = options?.displayContent
+      ?? (options?.internal && raw.startsWith("[internal:")
+        ? "继续"
+        : forcedContent ?? inputContent);
     const queueingBehindActiveTask = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime;
     const optimisticMessage = !options?.internal && !queueingBehindActiveTask
       ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments)
@@ -2093,6 +2492,12 @@ export function App() {
   }
 
   async function handleGpaStageSelect(stage: GpaStage) {
+    if (stage !== "off" && selectedThread?.mode !== "project") {
+      showNotice("GPA 仅支持项目模式", {
+        message: "请先新建或打开一个项目对话，再开启 Goal-Plan-Act 工作流。"
+      });
+      return;
+    }
     setGpaState((prev) => ({ ...prev, stage, awaitingConfirmation: null }));
     setGpaComposerSelected(stage !== "off");
     setGpaMenuOpen(false);
@@ -2104,19 +2509,27 @@ export function App() {
   }
 
   async function confirmGpaStage() {
-    if (gpaState.awaitingConfirmation === "goal") {
-      await sendMessage(
-        "[internal:gpa-confirm] Continue with the confirmed goal. Produce the PLAN task list and acceptance criteria.",
-        undefined,
-        { internal: true }
-      );
-    } else if (gpaState.awaitingConfirmation === "plan") {
-      await sendMessage(
-        "[internal:gpa-confirm] The plan is confirmed. Enter ACT and implement the planned tasks.",
-        undefined,
-        { internal: true }
-      );
-    }
+    const stage = gpaState.awaitingConfirmation;
+    if ((stage !== "goal" && stage !== "plan") || gpaConfirmationPendingStageRef.current) return;
+
+    // The message is queued asynchronously; hide the card before another click can enqueue a duplicate confirmation.
+    gpaConfirmationPendingStageRef.current = stage;
+    setGpaConfirmationSubmitting(true);
+    setGpaState((current) => current.awaitingConfirmation === stage
+      ? { ...current, awaitingConfirmation: null }
+      : current
+    );
+
+    await sendMessage(
+      stage === "goal"
+        ? "[internal:gpa-confirm] Continue with the confirmed goal. Produce the PLAN task list and acceptance criteria."
+        : "[internal:gpa-confirm] The plan is confirmed. Enter ACT and implement the planned tasks.",
+      undefined,
+      {
+        internal: true,
+        displayContent: stage === "goal" ? "已确认目标，开始制定计划" : "已确认计划，开始执行"
+      }
+    );
   }
 
   function openGpaRevision() {
@@ -2206,15 +2619,117 @@ export function App() {
   }
 
   async function enableGpaMode() {
-    if (gpaState.stage !== "off") {
-      setGpaComposerSelected(true);
+    if (selectedThread?.mode !== "project") {
+      showNotice("GPA 仅支持项目模式", {
+        message: "请先新建或打开一个项目对话，再开启 Goal-Plan-Act 工作流。"
+      });
       setGpaMenuOpen(false);
       setGpaMenuPos(null);
+      return;
+    }
+    setGpaMenuOpen(false);
+    setGpaMenuPos(null);
+    if (selectedThreadId) {
+      try {
+        const handled = await maybeHandleIncompleteGpaPlan(selectedThreadId, {
+          preferAutoSameSession: true,
+          forcePrompt: true
+        });
+        if (handled) {
+          return;
+        }
+      } catch (error) {
+        showNotice("检查 GPA 计划失败", {
+          message: error instanceof Error ? error.message : String(error)
+        });
+        return;
+      }
+    }
+    if (gpaState.stage !== "off") {
+      setGpaComposerSelected(true);
+      showNotice("GPA 已开启", {
+        message: `当前处于${gpaModeLabel(gpaState.stage)}阶段。`,
+        tone: "success"
+      });
       return;
     }
     await handleGpaStageSelect("goal");
   }
 
+  async function dismissGpaPlanResumeDialog(options?: { abandon?: boolean }) {
+    const dialog = gpaPlanResumeDialog;
+    if (!dialog) {
+      setGpaPlanResumeDialog(null);
+      return;
+    }
+    const shouldAbandon = options?.abandon ?? dialog.step === "ask";
+    if (shouldAbandon) {
+      try {
+        await window.codexh.abandonProjectGpaPlan(dialog.threadId);
+        showNotice("已废弃未完成的 GPA 计划", {
+          message: "下次打开此项目时不会再询问。需要时可重新开启 GPA 生成新计划。",
+          tone: "success"
+        });
+      } catch (error) {
+        showNotice("废弃计划失败", {
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    setGpaPlanResumeDialog(null);
+  }
+
+  async function acceptGpaPlanResumeAsk() {
+    setGpaPlanResumeDialog((current) => current ? { ...current, step: "review" } : null);
+  }
+
+  async function confirmGpaPlanResumeExecution() {
+    if (!gpaPlanResumeDialog) {
+      return;
+    }
+    const { threadId, plan } = gpaPlanResumeDialog;
+    setGpaPlanResumeBusy(true);
+    try {
+      gpaSameSessionAutoResumeRef.current.add(threadId);
+      setGpaPlanResumeDialog(null);
+      await resumeGpaPlanExecution(threadId, plan);
+      showNotice("已继续未完成的 GPA 计划", {
+        message: `剩余 ${plan.pendingCount} 项，开始执行。`,
+        tone: "success"
+      });
+    } catch (error) {
+      showNotice("继续 GPA 计划失败", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setGpaPlanResumeBusy(false);
+    }
+  }
+
+  async function confirmGpaPlanResumeRetry() {
+    const prompt = gpaPlanResumeRetryPrompt;
+    if (!prompt) {
+      return;
+    }
+    setGpaPlanResumeBusy(true);
+    try {
+      gpaPlanResumeRetryRequiredRef.current.delete(prompt.threadId);
+      setGpaPlanResumeRetryPrompt(null);
+      await resumeGpaPlanExecution(prompt.threadId, prompt.plan);
+      showNotice("已继续未完成的 GPA 计划", {
+        message: `剩余 ${prompt.plan.pendingCount} 项，开始执行。`,
+        tone: "success"
+      });
+    } catch (error) {
+      gpaPlanResumeRetryRequiredRef.current.add(prompt.threadId);
+      setGpaPlanResumeRetryPrompt(prompt);
+      showNotice("继续 GPA 计划失败", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setGpaPlanResumeBusy(false);
+    }
+  }
   async function setFullAccess(fullAccess: boolean) {
     setGpaState((prev) => ({ ...prev, fullAccess }));
     setGpaMenuOpen(false);
@@ -2251,35 +2766,57 @@ export function App() {
       return;
     }
 
-    const sourcePaths = knowledgeSources.map((source) => source.path);
-
-    if (sourcePaths.length === 0) {
-      showNotice("请至少填写一个本地文档路径。");
+    if (knowledgeSources.length === 0) {
+      showNotice("请至少添加一个本地文档、URL 或浏览器页面。");
       return;
     }
 
+    setIsKnowledgeImporting(true);
     try {
       await window.codexh.importKnowledge({
         displayName: knowledgeName.trim() || "Imported Knowledge",
         scope: knowledgeScope,
-        sourcePaths,
+        sources: knowledgeSources,
         threadId: selectedThreadId ?? undefined
       });
       setKnowledgeSources([]);
+      setKnowledgeUrlInput("");
       setKnowledgeName("Imported Knowledge");
       await Promise.all([refreshSnapshot(selectedThreadId), refreshKnowledgeBases()]);
       showNotice("知识库已导入", { tone: "success" });
     } catch (error) {
       showNotice("知识库导入失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsKnowledgeImporting(false);
     }
   }
 
   async function answerPendingPrompt(prompt: UserInputPrompt, answers: Record<string, string>) {
     setResolvingPromptId(prompt.id);
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== prompt.threadId) {
+        return current;
+      }
+      return {
+        ...current,
+        thread: { ...current.thread, status: "running" },
+        prompts: current.prompts.map((item) =>
+          item.id === prompt.id
+            ? {
+                ...item,
+                status: "answered" as const,
+                answers,
+                answeredAt: new Date().toISOString()
+              }
+            : item
+        )
+      };
+    });
     try {
       await window.codexh.answerPrompt(prompt.id, answers);
       await refreshSnapshot(prompt.threadId);
     } catch (error) {
+      await refreshSnapshot(prompt.threadId);
       showNotice("提交选择失败。", {
         message: error instanceof Error ? error.message : "请重新开始任务后再试。"
       });
@@ -2349,9 +2886,9 @@ export function App() {
       : await window.codexh.chooseKnowledgeFolders();
     if (paths.length === 0) return;
 
-    const existing = new Set(knowledgeSources.map((source) => source.path.toLowerCase()));
+    const existing = new Set(knowledgeSources.map(knowledgeSourceKey));
     const additions = paths
-      .filter((sourcePath) => !existing.has(sourcePath.toLowerCase()))
+      .filter((sourcePath) => !existing.has(`${kind === "files" ? "file" : "folder"}:${sourcePath.toLowerCase()}`))
       .map((sourcePath) => ({
         path: sourcePath,
         kind: kind === "files" ? "file" : "folder"
@@ -2366,7 +2903,34 @@ export function App() {
   }
 
   function removeKnowledgeSource(sourcePath: string) {
-    setKnowledgeSources((current) => current.filter((source) => source.path !== sourcePath));
+    setKnowledgeSources((current) => current.filter((source) => knowledgeSourceKey(source) !== sourcePath));
+  }
+
+  function addKnowledgeUrls(): boolean {
+    const urls = knowledgeUrlInput.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    if (urls.length === 0) return false;
+    const existing = new Set(knowledgeSources.map(knowledgeSourceKey));
+    const additions: KnowledgeImportSource[] = [];
+    for (const value of urls) {
+      try {
+        const url = new URL(value);
+        if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error();
+        const source: KnowledgeImportSource = { kind: "url", url: url.toString() };
+        if (!existing.has(knowledgeSourceKey(source))) {
+          existing.add(knowledgeSourceKey(source));
+          additions.push(source);
+        }
+      } catch {
+        showNotice("链接格式无效", { message: `仅支持 http/https：${value}` });
+        return false;
+      }
+    }
+    setKnowledgeSources((current) => [...current, ...additions]);
+    setKnowledgeUrlInput("");
+    if (knowledgeSources.length === 0 && additions[0]?.kind === "url") {
+      setKnowledgeName(new URL(additions[0].url).hostname);
+    }
+    return true;
   }
 
   async function refreshKnowledgeBases() {
@@ -2478,19 +3042,56 @@ export function App() {
   }
 
   function addMcpServer() {
-    setConfigDraft((current) => {
-      if (!current) return current;
-      const next = cloneConfig(current);
-      let index = next.mcpServers.length + 1;
-      let id = `mcp-${index}`;
-      while (next.mcpServers.some((server) => server.id === id)) {
-        index += 1;
-        id = `mcp-${index}`;
-      }
-      next.mcpServers.push({ id, name: `MCP 服务 ${index}`, transport: "stdio", command: "", args: [], enabled: true });
-      setEditingMcpServerId(id);
-      return next;
-    });
+    if (!configDraft) return;
+    const id = createAvailableMcpId(configDraft.mcpServers);
+    setMcpCreateDraft({ id, name: "", transport: "stdio", command: "", args: [], enabled: true, source: "config" });
+    setMcpCreateMode("form");
+    setMcpCreateError(null);
+    setMcpJsonDraft("");
+    setMcpJsonError(null);
+    setIsMcpCreateOpen(true);
+  }
+
+  function closeMcpCreateSheet() {
+    setIsMcpCreateOpen(false);
+    setMcpCreateDraft(null);
+    setMcpCreateError(null);
+    setMcpJsonError(null);
+  }
+
+  function confirmMcpCreate() {
+    if (!configDraft) return;
+
+    if (mcpCreateMode === "form") {
+      if (!mcpCreateDraft) return;
+      const id = mcpCreateDraft.id.trim();
+      const name = mcpCreateDraft.name.trim();
+      const isStdio = (mcpCreateDraft.transport ?? "stdio") === "stdio";
+      if (!id) return setMcpCreateError("请填写服务 ID。");
+      if (!name) return setMcpCreateError("请填写服务名称。");
+      if (configDraft.mcpServers.some((server) => server.id === id)) return setMcpCreateError(`服务 ID 已存在：${id}`);
+      if (isStdio && !mcpCreateDraft.command?.trim()) return setMcpCreateError("stdio 服务需要填写命令。");
+      if (!isStdio && !mcpCreateDraft.url?.trim()) return setMcpCreateError("SSE/HTTP 服务需要填写 URL。");
+
+      const server = { ...mcpCreateDraft, id, name };
+      setConfigDraft((current) => current ? { ...cloneConfig(current), mcpServers: [...current.mcpServers, server] } : current);
+      closeMcpCreateSheet();
+      showNotice("MCP 服务已加入草稿", { tone: "success", message: "请点击保存使配置生效。" });
+      return;
+    }
+
+    try {
+      const servers = parseMcpJsonConfig(mcpJsonDraft);
+      if (!servers.length) throw new Error("JSON 中没有可添加的 MCP 服务。");
+      const existingIds = new Set(configDraft.mcpServers.map((server) => server.id));
+      const duplicate = servers.find((server) => existingIds.has(server.id));
+      if (duplicate) throw new Error(`服务 ID 已存在：${duplicate.id}`);
+      setConfigDraft((current) => current ? { ...cloneConfig(current), mcpServers: [...current.mcpServers, ...servers] } : current);
+      closeMcpCreateSheet();
+      showNotice(`已加入 ${servers.length} 个 MCP 服务`, { tone: "success", message: "请点击保存使配置生效。" });
+    } catch (error) {
+      setMcpJsonError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function removeMcpServer(id: string) {
@@ -2788,9 +3389,10 @@ export function App() {
         skipped += 1;
         continue;
       }
-      nextDraft.models.push(
-        createModelProfile(settingsProvider.id, candidate.id, candidate.displayName ?? candidate.id)
-      );
+      nextDraft.models.push({
+        ...createModelProfile(settingsProvider.id, candidate.id, candidate.displayName ?? candidate.id),
+        ...(candidate.contextWindow ? { contextWindow: candidate.contextWindow } : {})
+      });
       existing.add(candidate.id);
       added += 1;
     }
@@ -2990,7 +3592,8 @@ export function App() {
       const capabilityPatch = {
         agentCapability: result.agentCapability,
         agentCapabilityCheckedAt: new Date().toISOString(),
-        agentCapabilityReason: result.agentCapabilityReason
+        agentCapabilityReason: result.agentCapabilityReason,
+        ...(result.contextWindow ? { contextWindow: result.contextWindow } : {})
       };
       updateModelDraft(model.id, capabilityPatch);
       try {
@@ -2998,7 +3601,8 @@ export function App() {
           providerId: provider.id,
           modelId: model.id,
           agentCapability: result.agentCapability,
-          agentCapabilityReason: result.agentCapabilityReason
+          agentCapabilityReason: result.agentCapabilityReason,
+          contextWindow: result.contextWindow
         });
         setConfig((current) => current
           ? {
@@ -3047,28 +3651,56 @@ export function App() {
     if (!updateState) return;
     const needsConfirm = updateState.insecureTransport === true || updateState.missingSha256 === true;
     if (needsConfirm) {
-      const reasons = [
+      const details = [
         updateState.insecureTransport ? "更新源使用 HTTP，可能被篡改" : null,
         updateState.missingSha256 ? "更新清单未提供 sha256，无法校验安装包完整性" : null
-      ].filter(Boolean).join("；");
-      if (!window.confirm(`${reasons}。仍要继续下载吗？`)) return;
+      ].filter((entry): entry is string => Boolean(entry));
+      setUpdateConfirmDialog({
+        kind: "download",
+        title: "确认下载更新",
+        message: "当前更新源存在安全风险，仍要继续下载吗？",
+        details
+      });
+      return;
     }
+    await proceedDownloadUpdate(false);
+  }
+
+  async function proceedDownloadUpdate(confirmInsecureHttp: boolean) {
     try {
-      setUpdateState(await window.codexh.downloadUpdate({ confirmInsecureHttp: needsConfirm }));
+      setUpdateConfirmDialog(null);
+      setUpdateState(await window.codexh.downloadUpdate({ confirmInsecureHttp }));
     } catch (error) {
       showNotice("下载更新失败", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
   async function installDownloadedUpdate() {
-    if (!window.confirm("安装更新会关闭 CodeXH 并覆盖当前版本，是否继续？")) return;
+    setUpdateConfirmDialog({
+      kind: "install",
+      title: "确认安装更新",
+      message: "安装更新会关闭 CodeXH 并覆盖当前版本，是否继续？",
+      details: ["本地聊天、项目、知识库和日志会保留。"]
+    });
+  }
+
+  async function proceedInstallUpdate() {
     try {
+      setUpdateConfirmDialog(null);
       await window.codexh.installUpdate();
     } catch (error) {
       showNotice("暂时无法安装更新", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
+  async function confirmUpdateDialog() {
+    if (!updateConfirmDialog) return;
+    if (updateConfirmDialog.kind === "download") {
+      await proceedDownloadUpdate(true);
+      return;
+    }
+    await proceedInstallUpdate();
+  }
   async function updateComposerSelection(providerId: string, modelId: string) {
     setComposerProviderId(providerId);
     setComposerModelId(modelId);
@@ -3374,14 +4006,14 @@ export function App() {
             <button
               type="button"
               className="workspace-control-button"
-              title="显示终端"
-              aria-label="显示终端"
+              title="显示右侧文件工作区"
+              aria-label="显示右侧文件工作区"
               onClick={() => {
                 setRightWorkspaceTab("files");
                 setIsTerminalOpen(true);
               }}
             >
-              <IconTerminal />
+              <IconFolder />
             </button>
           </div>
         ) : null}
@@ -3440,11 +4072,18 @@ export function App() {
                     />
                   ) : entry.kind === "directory-read-group" ? (
                     <DirectoryReadGroup key={entry.id} directory={entry.directory} count={entry.count} />
+                  ) : entry.kind === "user-input" ? (
+                    <UserInputPromptCard
+                      key={entry.id}
+                      prompt={entry.prompt}
+                      resolving={false}
+                      canAnswer={false}
+                      onAnswer={() => undefined}
+                    />
                   ) : (
                     <ExecutionStep key={entry.id} toolCall={entry.toolCall} />
                   )
                 )}
-                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -3453,7 +4092,7 @@ export function App() {
                     onResolve={(decision, mode) => void resolvePendingApproval(approval.id, decision, mode)}
                   />
                 ))}
-                {userInputPrompts.map((prompt) => (
+                {pendingPrompts.map((prompt) => (
                   <UserInputPromptCard
                     key={prompt.id}
                     prompt={prompt}
@@ -3462,10 +4101,10 @@ export function App() {
                     onAnswer={(answers) => void answerPendingPrompt(prompt, answers)}
                   />
                 ))}
-                {gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan" ? (
+                {(gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan") && !gpaConfirmationSubmitting ? (
                   <GpaConfirmationCard
                     stage={gpaState.awaitingConfirmation}
-                    disabled={gpaRevisionSubmitting}
+                    disabled={gpaRevisionSubmitting || gpaConfirmationSubmitting}
                     isEditing={gpaRevisionOpen}
                     revisionDraft={gpaRevisionDraft}
                     revisionRef={gpaRevisionRef}
@@ -3474,6 +4113,14 @@ export function App() {
                     onRevisionChange={setGpaRevisionDraft}
                     onRevisionCancel={cancelGpaRevision}
                     onRevisionSubmit={() => void submitGpaRevision()}
+                  />
+                ) : null}
+                {gpaPlanResumeRetryPrompt?.threadId === selectedThreadId ? (
+                  <GpaPlanResumeRetryConfirmationCard
+                    pendingCount={gpaPlanResumeRetryPrompt.plan.pendingCount}
+                    disabled={gpaPlanResumeBusy}
+                    onDismiss={() => setGpaPlanResumeRetryPrompt(null)}
+                    onConfirm={() => void confirmGpaPlanResumeRetry()}
                   />
                 ) : null}
                 {activeContextCompaction ? (
@@ -3521,26 +4168,45 @@ export function App() {
           </div>
 
           <footer
-            className={`composer-shell ${queuedMessages.length > 0 ? "has-queue" : ""}`}
-            style={queuedMessages.length > 0
-              ? {
-                  "--queued-message-space": `${48 + queuedMessages.length * 40}px`,
-                  "--queued-message-scroll-offset": `${3 + queuedMessages.length * 40}px`
-                } as CSSProperties
-              : undefined}
+            className={[
+              "composer-shell",
+              queuedMessages.length > 0 ? "has-queue" : "",
+              gpaState.stage !== "off" ? "has-plan" : ""
+            ].filter(Boolean).join(" ")}
+            style={(() => {
+              const hasPlan = gpaState.stage !== "off";
+              const queueCount = queuedMessages.length;
+              if (!hasPlan && queueCount === 0) return undefined;
+              const planSpace = hasPlan ? 40 : 0;
+              const queueSpace = queueCount > 0 ? queueCount * 40 : 0;
+              const stackGap = hasPlan && queueCount > 0 ? 6 : 0;
+              const floatSpace = 6 + planSpace + stackGap + queueSpace + 8;
+              return {
+                "--queued-message-space": `${Math.max(48, floatSpace)}px`,
+                "--queued-message-scroll-offset": `${Math.max(3, floatSpace - 5)}px`
+              } as CSSProperties;
+            })()}
           >
-            {queuedMessages.length > 0 ? (
-              <QueuedMessageList
-                messages={queuedMessages}
-                hasProject={!!selectedProjectCwd}
-                deletingId={deletingQueuedMessageId}
-                onDelete={(id) => void deleteQueuedMessage(id)}
-              />
+            {gpaState.stage !== "off" || queuedMessages.length > 0 ? (
+              <div
+                className={`composer-float-stack ${selectedProjectCwd ? "has-project" : ""}`}
+                aria-label="输入框上方浮层"
+              >
+                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
+                {queuedMessages.length > 0 ? (
+                  <QueuedMessageList
+                    messages={queuedMessages}
+                    hasProject={!!selectedProjectCwd}
+                    deletingId={deletingQueuedMessageId}
+                    onDelete={(id) => void deleteQueuedMessage(id)}
+                  />
+                ) : null}
+              </div>
             ) : null}
             {!showWelcome && !isTranscriptAtLatest ? (
               <button
                 type="button"
-                className={`scroll-to-latest-button ${queuedMessages.length > 0 ? "with-queue" : ""}`}
+                className={`scroll-to-latest-button ${queuedMessages.length > 0 || gpaState.stage !== "off" ? "with-queue" : ""}`}
                 title="定位到最新消息"
                 aria-label="定位到最新消息"
                 onClick={() => scrollTranscriptToLatest("smooth")}
@@ -3654,9 +4320,9 @@ export function App() {
                     </span>
                   ) : null}
                   {gpaComposerSelected && gpaState.stage !== "off" ? (
-                    <span className="composer-mode-chip composer-mode-chip-gpa" title={`GPA 当前阶段：${gpaModeLabel(gpaState.stage)}`}>
+                    <span className={`composer-mode-chip composer-mode-chip-gpa composer-mode-chip-gpa-${gpaState.stage}`} title={`GPA 当前阶段：${gpaModeLabel(gpaState.stage)}`}>
                       <IconGpa />
-                      <span>开启 GPA</span>
+                      <span>{gpaModeLabel(gpaState.stage)}</span>
                       <button
                         className="composer-mode-chip-remove"
                         type="button"
@@ -3721,6 +4387,7 @@ export function App() {
           previewTabs={previewTabs}
           selectedProjectFile={selectedProjectFile}
           projectFilePreview={projectFilePreview}
+          projectToolCalls={projectToolCalls}
           onSelectProjectFile={openProjectPreview}
           onSelectPreviewTab={(path) => {
             if (!selectedThreadId) {
@@ -4037,6 +4704,10 @@ export function App() {
                                             输出 {modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].outputTokens} Tokens
                                             <i aria-hidden="true">·</i>
                                             {formatTokensPerSecond(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].tokensPerSecond)}
+                                            <i aria-hidden="true">&#183;</i>
+                                            {modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].contextWindow
+                                              ? `上下文 ${formatTokenCount(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].contextWindow!)} Tokens`
+                                              : "上下文未返回"}
                                           </span>
                                         ) : null}
                                         <span
@@ -4057,6 +4728,18 @@ export function App() {
                                         </span>
                                       </div>
                                       <div className="provider-model-actions">
+                                        <label className="model-context-window-field" title="模型上下文窗口，单位为 tokens">
+                                          <span>上下文</span>
+                                          <input
+                                            type="number"
+                                            min={1_024}
+                                            step={1_024}
+                                            value={model.contextWindow}
+                                            onChange={(event) => updateModelDraft(model.id, {
+                                              contextWindow: Math.max(1_024, Math.floor(Number(event.target.value) || 128_000))
+                                            })}
+                                          />
+                                        </label>
                                         <label className="model-capability-toggle" title="启用后，此模型可以接收文件、文件夹和图片附件。">
                                           <input
                                             type="checkbox"
@@ -4310,12 +4993,6 @@ export function App() {
                       {updateState?.remoteVersion ? <><span>最新版本</span><strong>{updateState.remoteVersion}</strong></> : null}
                       {updateState ? <span className={`update-phase ${updateState.phase}`}>{formatUpdatePhase(updateState.phase)}</span> : null}
                     </div>
-                    {updateState?.insecureTransport ? (
-                      <div className="update-security-warning">当前更新源使用 HTTP。下载前会要求确认，建议服务端升级为 HTTPS。</div>
-                    ) : null}
-                    {updateState?.missingSha256 ? (
-                      <div className="update-security-warning">更新清单未提供 sha256。下载前会要求确认，建议服务端补齐校验值。</div>
-                    ) : null}
                     {updateState?.changelog ? <pre className="update-changelog">{updateState.changelog}</pre> : null}
                     {updateState?.phase === "downloading" ? (
                       <div className="update-progress"><span style={{ width: `${updateState.progress ?? 0}%` }} /></div>
@@ -4338,97 +5015,98 @@ export function App() {
               ) : null}
 
               {settingsTab === "knowledge" ? (
-                <div className="settings-section">
-                  <div className="config-block">
-                    <div className="section-copy">
-                      <strong>导入知识库</strong>
-                      <span>选择本地文件或文件夹导入，导入后会生成 OKF Bundle 并绑定到当前线程。</span>
-                      <span className="knowledge-format-hint">
-                        可导入格式：md、txt、json、html/htm、csv、xlsx/xls、docx、pdf、pptx。选择文件夹时会递归扫描，并跳过隐藏或不支持的文件。
-                      </span>
+                <div className="settings-section knowledge-settings-section">
+                  <div className={`config-block knowledge-import-panel ${isKnowledgeImporting ? "is-importing" : ""}`}>
+                    <div className="section-copy section-copy-row knowledge-import-heading">
+                      <div>
+                        <strong>新建知识库</strong>
+                        <span>从本地文件、网页或当前浏览器页面创建可检索资料。</span>
+                      </div>
+                      <span className="knowledge-source-count">{knowledgeSources.length} 个来源</span>
                     </div>
-                    <input
-                      value={knowledgeName}
-                      onChange={(event) => setKnowledgeName(event.target.value)}
-                      placeholder="知识库名称"
-                    />
-                    <select
-                      value={knowledgeScope}
-                      onChange={(event) => setKnowledgeScope(event.target.value as KnowledgeScope)}
-                    >
-                      <option value="global">全局知识库</option>
-                      <option value="project">项目知识库</option>
-                      <option value="imported">仅当前会话导入</option>
-                    </select>
-                    <div className="knowledge-source-list" aria-label="待导入附件">
-                      {knowledgeSources.length ? knowledgeSources.map((source) => (
-                        <div key={source.path} className={`knowledge-source-item ${source.kind}`}>
-                          <span className="knowledge-source-icon" aria-hidden>
-                            {source.kind === "folder" ? <IconFolder /> : <IconFile />}
-                          </span>
-                          <code title={source.path}>{source.path}</code>
-                          <button
-                            type="button"
-                            className="knowledge-source-remove"
-                            onClick={() => removeKnowledgeSource(source.path)}
-                            title="移除附件"
-                            aria-label={`移除 ${source.path}`}
-                          >
-                            <IconClose />
-                          </button>
+                    <div className="knowledge-import-layout">
+                      <section className="knowledge-import-column knowledge-import-details" aria-label="知识库基本信息">
+                        <div className="knowledge-column-heading"><span>01</span><strong>基本信息</strong></div>
+                        <label className="settings-field">
+                          <span>名称</span>
+                          <input value={knowledgeName} onChange={(event) => setKnowledgeName(event.target.value)} placeholder="知识库名称" />
+                        </label>
+                        <label className="settings-field">
+                          <span>可见范围</span>
+                          <select value={knowledgeScope} onChange={(event) => setKnowledgeScope(event.target.value as KnowledgeScope)}>
+                            <option value="global">全局知识库</option>
+                            <option value="project">项目知识库</option>
+                            <option value="imported">仅当前会话导入</option>
+                          </select>
+                        </label>
+                        {knowledgeScope === "project" && !canImportProjectKnowledge ? <div className="knowledge-scope-warning">项目知识库需要先切换到项目聊天。</div> : null}
+                        <details className="knowledge-format-details">
+                          <summary>支持的文件格式</summary>
+                          <span>md、txt、json、html、csv、xlsx、xls、docx、pdf、pptx</span>
+                        </details>
+                      </section>
+                      <section className="knowledge-import-column knowledge-import-sources" aria-label="知识库来源">
+                        <div className="knowledge-column-heading"><span>02</span><strong>添加来源</strong></div>
+                        {isKnowledgeUrlEditorOpen ? (
+                          <div className="knowledge-url-editor">
+                            <textarea autoFocus value={knowledgeUrlInput} onChange={(event) => setKnowledgeUrlInput(event.target.value)} placeholder="粘贴 URL，每行一个" rows={2} />
+                            <div className="knowledge-url-editor-actions">
+                              <button className="button ghost" type="button" onClick={() => { setKnowledgeUrlInput(""); setIsKnowledgeUrlEditorOpen(false); }}>取消</button>
+                              <button className="button primary" type="button" onClick={() => { if (addKnowledgeUrls()) setIsKnowledgeUrlEditorOpen(false); }} disabled={!knowledgeUrlInput.trim()}>确定</button>
+                            </div>
+                          </div>
+                        ) : null}
+                        <div className="knowledge-source-toolbar">
+                          <button className="button ghost" type="button" onClick={() => void chooseKnowledgeSources("files")}><IconFile />文件</button>
+                          <button className="button ghost" type="button" onClick={() => void chooseKnowledgeSources("folders")}><IconFolder />文件夹</button>
+                          <button className="button ghost" type="button" onClick={() => setIsKnowledgeUrlEditorOpen(true)}><IconPlus />添加 URL</button>
                         </div>
-                      )) : (
-                        <div className="knowledge-source-empty">选择文件或文件夹后会显示在这里。</div>
-                      )}
+                        <div className="knowledge-source-list" aria-label="待导入来源">
+                          {knowledgeSources.length ? knowledgeSources.map((source) => (
+                            <div key={knowledgeSourceKey(source)} className={`knowledge-source-item ${source.kind}`}>
+                              <span className="knowledge-source-icon" aria-hidden>{source.kind === "folder" ? <IconFolder /> : source.kind === "file" ? <IconFile /> : <IconGlobe />}</span>
+                              <code title={source.kind === "file" || source.kind === "folder" ? source.path : source.url}>{source.kind === "file" || source.kind === "folder" ? source.path : source.url}</code>
+                              <button type="button" className="knowledge-source-remove" onClick={() => removeKnowledgeSource(knowledgeSourceKey(source))} title="移除来源" aria-label="移除来源"><IconClose /></button>
+                            </div>
+                          )) : <div className="knowledge-source-empty">尚未添加来源</div>}
+                        </div>
+                      </section>
                     </div>
-                    {knowledgeScope === "project" && !canImportProjectKnowledge ? (
-                      <div className="detail-empty">项目知识库需要先选中一个项目模式线程。</div>
+                    <div className="knowledge-import-footer">
+                      <span>{knowledgeSources.length ? `将处理 ${knowledgeSources.length} 个来源` : "添加来源后即可导入"}</span>
+                      <button className="button primary" onClick={() => void importKnowledge()} disabled={isKnowledgeImporting || knowledgeSources.length === 0 || (knowledgeScope === "project" && !canImportProjectKnowledge)}>
+                        {isKnowledgeImporting ? <><IconSpinner />正在导入...</> : "导入并生成 Bundle"}
+                      </button>
+                    </div>
+                    {isKnowledgeImporting ? (
+                      <div className="knowledge-import-progress" role="status" aria-live="polite">
+                        <IconSpinner />
+                        <span>正在抓取网页内容并建立知识索引...</span>
+                      </div>
                     ) : null}
-                    <div className="action-row">
-                      <button
-                        className="button ghost"
-                        onClick={() => void chooseKnowledgeSources("files")}
-                      >
-                        <IconFile />
-                        选择文件
-                      </button>
-                      <button
-                        className="button ghost"
-                        onClick={() => void chooseKnowledgeSources("folders")}
-                      >
-                        <IconFolder />
-                        选择文件夹
-                      </button>
-                      <button
-                        className="button primary"
-                        onClick={() => void importKnowledge()}
-                        disabled={knowledgeScope === "project" && !canImportProjectKnowledge}
-                      >
-                        导入并生成 Bundle
-                      </button>
-                      {knowledgeScope === "project" && !canImportProjectKnowledge ? (
-                        <span className="action-disabled-hint">需先切换到项目聊天</span>
-                      ) : null}
-                    </div>
                   </div>
 
-                  <div className="config-block">
-                    <div className="section-copy">
-                      <strong>当前线程已绑定</strong>
-                      <span>这里显示当前线程可见的知识库集合。</span>
+                  <div className="config-block knowledge-binding-panel">
+                    <div className="section-copy section-copy-row">
+                      <div>
+                        <strong>当前任务可用</strong>
+                        <span>当前任务会自动检索这些知识库。</span>
+                      </div>
+                      <span className="knowledge-source-count">{snapshot?.knowledgeBases.length ?? 0}</span>
                     </div>
-                    <div className="stack-list">
+                    <div className="knowledge-binding-list">
                       {snapshot?.knowledgeBases.length ? (
                         snapshot.knowledgeBases.map((knowledgeBase) => (
-                          <article key={knowledgeBase.id} className="stack-card compact">
-                            <strong>{knowledgeBase.displayName}</strong>
-                            <span>
-                              {knowledgeBase.scope} · {knowledgeBase.bundleRoot}
-                            </span>
+                          <article key={knowledgeBase.id} className="knowledge-binding-item">
+                            <span className="knowledge-binding-icon" aria-hidden><IconKnowledge /></span>
+                            <div>
+                              <strong>{knowledgeBase.displayName}</strong>
+                              <span>{formatKnowledgeScope(knowledgeBase.scope)}</span>
+                            </div>
                           </article>
                         ))
                       ) : (
-                        <div className="detail-empty">当前线程还没有绑定知识库。</div>
+                        <div className="knowledge-binding-empty">当前任务还没有可用知识库</div>
                       )}
                     </div>
                   </div>
@@ -4495,27 +5173,99 @@ export function App() {
 
               {settingsTab === "skills" ? (
                 <div className="settings-section">
-                  <div className="config-block">
+                  <div className="config-block skills-config-block">
                     <div className="section-copy">
                       <strong>已加载 Skills</strong>
-                      <span>展示当前应用可见的技能清单、作用域和实际路径。</span>
+                      <span>展示当前应用可见的技能清单、作用域、领域与调用统计。</span>
                     </div>
-                    <div className="stack-list">
-                      {skills.map((skill) => (
-                        <article key={skill.id} className="stack-card">
-                          <div className="stack-card-header">
-                            <strong>{skill.displayName ?? skill.qualifiedName}</strong>
-                            <div className="skill-metadata-pills">
-                              <span className="pill">{skill.pluginId ? "插件" : skill.scope}</span>
-                              {skill.scope === "user" && !skill.pluginId ? (
-                                <span className="pill skill-domain-pill">领域：{skill.domain ?? "通用"}</span>
-                              ) : null}
+                    <div className="skills-toolbar">
+                      <div className="skills-search-wrap">
+                        <span className="skills-search-icon" aria-hidden><IconSearch /></span>
+                        <input
+                          className="skills-search-input"
+                          type="search"
+                          value={skillsSearchQuery}
+                          onChange={(event) => setSkillsSearchQuery(event.target.value)}
+                          placeholder="搜索名称 / 领域 / 描述"
+                        />
+                      </div>
+                      <div className="skills-sort-control" ref={skillsSortMenuRef}>
+                        <span>排序</span>
+                        <div className="skills-sort-menu">
+                          <button
+                            type="button"
+                            className={`skills-sort-trigger${skillsSortOpen ? " is-open" : ""}`}
+                            aria-haspopup="listbox"
+                            aria-expanded={skillsSortOpen}
+                            onClick={() => setSkillsSortOpen((current) => !current)}
+                          >
+                            <span>{getSkillSortLabel(skillsSortMode)}</span>
+                            <IconChevronDown />
+                          </button>
+                          {skillsSortOpen ? (
+                            <div className="skills-sort-popover" role="listbox">
+                              {SKILL_SORT_OPTIONS.map(({ value, label }) => (
+                                <button
+                                  key={value}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={skillsSortMode === value}
+                                  className={`skills-sort-option${skillsSortMode === value ? " is-selected" : ""}`}
+                                  onClick={() => {
+                                    setSkillsSortMode(value);
+                                    setSkillsSortOpen(false);
+                                  }}
+                                >
+                                  <span>{label}</span>
+                                  {skillsSortMode === value ? <IconCheck /> : null}
+                                </button>
+                              ))}
                             </div>
-                          </div>
-                          <p>{skill.description}</p>
-                          <span>{skill.skillPath}</span>
-                        </article>
-                      ))}
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="skills-list">
+                      {visibleSkills.length ? visibleSkills.map(({ skill, stats }) => {
+                        const scopeLabel = skill.pluginId ? "插件" : skill.scope;
+                        const scopeClass = skill.pluginId
+                          ? "plugin"
+                          : skill.scope === "system"
+                            ? "system"
+                            : skill.scope === "repo"
+                              ? "repo"
+                              : "user";
+                        const successLabel = stats.callCount > 0
+                          ? `${Math.round(stats.successRate * 100)}%`
+                          : "—";
+                        return (
+                          <article key={skill.id} className="skill-row">
+                            <div className="skill-row-main">
+                              <div className="skill-row-title">
+                                <span className="skill-row-icon" aria-hidden><IconSkills /></span>
+                                <strong title={skill.displayName ?? skill.qualifiedName}>
+                                  {skill.displayName ?? skill.qualifiedName}
+                                </strong>
+                                <span className={`skill-scope-pill ${scopeClass}`}>{scopeLabel}</span>
+                                <span className="skill-domain-chip">{skill.domain ?? "通用"}</span>
+                              </div>
+                              <p className="skill-row-desc" title={skill.description}>{skill.description}</p>
+                              <div className="skill-row-meta">
+                                <span className={`skill-stat ${stats.callCount > 0 ? "is-hot" : ""}`}>
+                                  调用 {stats.callCount}
+                                </span>
+                                <span className={`skill-stat ${stats.callCount > 0 && stats.successRate >= 0.9 ? "is-good" : ""}`}>
+                                  成功 {successLabel}
+                                </span>
+                                <span className="skill-stat">
+                                  {stats.lastUsedAt ? formatRelativeTime(stats.lastUsedAt) : "未使用"}
+                                </span>
+                                <span className="skill-row-path" title={skill.skillPath}>{skill.skillPath}</span>
+                              </div>
+                            </div>
+                          </article>
+                        );
+                      }) : <div className="detail-empty">{skillsSearchQuery.trim() ? "没有匹配的 Skill。" : "尚未加载 Skills。"}</div>}
                     </div>
                   </div>
                 </div>
@@ -4572,33 +5322,45 @@ export function App() {
               ) : null}
 
               {settingsTab === "mcp" ? (
-                <div className="settings-section">
-                  <div className="config-block">
+                <div className="settings-section mcp-settings-section">
+                  <div className="config-block mcp-service-config">
                     <div className="section-copy-with-action">
                       <div>
                         <strong>MCP 服务</strong>
-                        <span>配置、测试和管理全局 MCP 服务。模型会在任务中动态发现已启用服务的工具。</span>
+                        <span>按需编辑、测试和管理已载入的服务。</span>
                       </div>
                       <button className="button primary" type="button" onClick={addMcpServer} disabled={!configDraft}>添加服务</button>
                     </div>
-                    <div className="stack-list">
+                    <div className="mcp-server-list">
                       {configDraft?.mcpServers.length ? configDraft.mcpServers.map((server) => {
                         const runtime = mcpRuntimeServers.find((item) => item.id === server.id);
                         const isEditing = editingMcpServerId === server.id;
                         const testResult = mcpTestResults[server.id];
                         const isStdio = (server.transport ?? "stdio") === "stdio";
+                        const transport = server.transport ?? "stdio";
+                        const transportLabel = transport === "streamable_http" ? "HTTP" : transport === "sse" ? "SSE" : "stdio";
+                        const statusState = (runtime?.status.state ?? (server.enabled ? "idle" : "disabled")).toLowerCase();
                         return (
-                          <article key={server.id} className="stack-card mcp-settings-card">
-                            <div className="stack-card-header">
-                              <div className="mcp-server-heading">
-                                <strong>{server.name || server.id}</strong>
-                                {!isEditing ? <span>{server.command ?? server.url ?? server.id}</span> : null}
+                          <article key={server.id} className={`mcp-server-row ${isEditing ? "is-editing" : ""} ${server.enabled ? "is-enabled" : "is-disabled"}`}>
+                            <div className="mcp-server-row-top">
+                              <div className="mcp-server-row-main">
+                                <div className="mcp-server-row-title">
+                                  <span className="mcp-server-row-icon" aria-hidden><IconMcp /></span>
+                                  <strong>{server.name || server.id}</strong>
+                                  <span className={`mcp-transport-pill ${transport}`}>{transportLabel}</span>
+                                  <span className={`mcp-status-pill ${statusState}`}>{statusState}</span>
+                                </div>
+                                {!isEditing ? (
+                                  <span className="mcp-server-row-target" title={server.command ?? server.url ?? server.id}>
+                                    {server.command ?? server.url ?? server.id}
+                                  </span>
+                                ) : null}
                               </div>
-                              <div className="action-row">
-                                <span className="pill">{runtime?.status.state ?? (server.enabled ? "idle" : "disabled")}</span>
-                                <label className="model-capability-toggle">
+                              <div className="mcp-server-row-side">
+                                <label className={`mcp-enable-switch ${server.enabled ? "is-on" : ""}`}>
                                   <input type="checkbox" checked={server.enabled} onChange={(event) => updateMcpServerDraft(server.id, { enabled: event.target.checked })} />
-                                  <span>{server.enabled ? "启用" : "停用"}</span>
+                                  <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
+                                  <span className="mcp-enable-label">{server.enabled ? "启用" : "停用"}</span>
                                 </label>
                               </div>
                             </div>
@@ -4607,20 +5369,20 @@ export function App() {
                               <div className="mcp-editor-grid">
                                 <label className="settings-field"><span>名称</span><input value={server.name} onChange={(event) => updateMcpServerDraft(server.id, { name: event.target.value })} /></label>
                                 <label className="settings-field"><span>ID</span><input value={server.id} onChange={(event) => updateMcpServerDraft(server.id, { id: event.target.value.trim() })} /></label>
+                                <label className="settings-field full"><span>描述</span><input value={server.description ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { description: event.target.value || undefined })} /></label>
                                 <label className="settings-field"><span>传输方式</span><select value={server.transport ?? "stdio"} onChange={(event) => updateMcpServerDraft(server.id, { transport: event.target.value, command: event.target.value === "stdio" ? server.command : undefined, url: event.target.value === "stdio" ? undefined : server.url })}><option value="stdio">stdio</option><option value="sse">SSE</option><option value="streamable_http">HTTP</option></select></label>
                                 {isStdio ? <>
-                                  <label className="settings-field"><span>命令</span><input value={server.command ?? ""} placeholder="npx" onChange={(event) => updateMcpServerDraft(server.id, { command: event.target.value })} /></label>
+                                  <label className="settings-field full"><span>命令</span><input value={server.command ?? ""} placeholder="npx" onChange={(event) => updateMcpServerDraft(server.id, { command: event.target.value })} /></label>
                                   <label className="settings-field"><span>参数（每行一个）</span><textarea value={(server.args ?? []).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { args: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} /></label>
-                                  <label className="settings-field"><span>工作目录</span><input value={server.cwd ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { cwd: event.target.value || undefined })} /></label>
-                                  <label className="settings-field"><span>环境变量（KEY=VALUE，每行一个）</span><textarea value={Object.entries(server.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { env: parseMcpEnvironment(event.target.value) })} /></label>
-                                </> : <label className="settings-field"><span>服务 URL</span><input value={server.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => updateMcpServerDraft(server.id, { url: event.target.value })} /></label>}
+                                  <label className="settings-field"><span>环境变量（KEY=VALUE）</span><textarea value={Object.entries(server.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { env: parseMcpEnvironment(event.target.value) })} /></label>
+                                </> : <label className="settings-field full"><span>服务 URL</span><input value={server.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => updateMcpServerDraft(server.id, { url: event.target.value })} /></label>}
                               </div>
                             ) : null}
-                            <div className="action-row mcp-actions">
+                            <div className="mcp-server-row-actions">
                               <button className="button secondary" type="button" onClick={() => setEditingMcpServerId(isEditing ? null : server.id)}>{isEditing ? "收起" : "编辑"}</button>
                               <button className="button secondary" type="button" disabled={testingMcpServerId === server.id} onClick={() => void testMcpServer(server)}>{testingMcpServerId === server.id ? "测试中" : "测试连接"}</button>
                               <button className="button ghost" type="button" onClick={() => removeMcpServer(server.id)}>删除</button>
-                              {testResult ? <span className="subtle-inline">工具 {testResult.tools.length} · 资源 {testResult.resources.length} · 模板 {testResult.resourceTemplates.length}</span> : null}
+                              {testResult ? <span className="mcp-test-summary">工具 {testResult.tools.length} · 资源 {testResult.resources.length} · 模板 {testResult.resourceTemplates.length}</span> : null}
                             </div>
                             {testResult ? <details className="mcp-test-details"><summary>查看发现的能力</summary><div>{testResult.tools.map((tool) => <span key={tool.name}>{tool.name} {tool.description}</span>)}</div><div>{testResult.resources.map((resource) => <span key={resource.uri}>{resource.name}: {resource.uri}</span>)}</div><div>{testResult.resourceTemplates.map((template) => <span key={template.uriTemplate}>{template.name}: {template.uriTemplate}</span>)}</div></details> : null}
                           </article>
@@ -4628,10 +5390,25 @@ export function App() {
                       }) : <div className="detail-empty">尚未配置 MCP 服务。</div>}
                     </div>
                   </div>
-                  <div className="config-block">
+                  <div className="config-block mcp-plugin-config">
                     <div className="section-copy"><strong>插件提供的 MCP 服务</strong><span>由插件清单管理，只能通过项目插件启用状态控制。</span></div>
-                    <div className="stack-list">
-                      {mcpRuntimeServers.filter((server) => server.source === "plugin").length ? mcpRuntimeServers.filter((server) => server.source === "plugin").map((server) => <article key={server.id} className="stack-card compact"><div className="stack-card-header"><strong>{server.name}</strong><span className="pill">{server.status.state}</span></div><span>{server.command ?? server.url ?? server.id}</span>{server.status.error ? <p className="mcp-error">{server.status.error}</p> : null}</article>) : <div className="detail-empty">没有插件提供的 MCP 服务。</div>}
+                    <div className="mcp-server-list">
+                      {mcpRuntimeServers.filter((server) => server.source === "plugin").length ? mcpRuntimeServers.filter((server) => server.source === "plugin").map((server) => (
+                        <article key={server.id} className="mcp-server-row is-plugin">
+                          <div className="mcp-server-row-top">
+                            <div className="mcp-server-row-main">
+                              <div className="mcp-server-row-title">
+                                <span className="mcp-server-row-icon" aria-hidden><IconMcp /></span>
+                                <strong>{server.name}</strong>
+                                <span className="mcp-transport-pill plugin">plugin</span>
+                                <span className={`mcp-status-pill ${String(server.status.state).toLowerCase()}`}>{server.status.state}</span>
+                              </div>
+                              <span className="mcp-server-row-target">{server.command ?? server.url ?? server.id}</span>
+                            </div>
+                          </div>
+                          {server.status.error ? <p className="mcp-error">{server.status.error}</p> : null}
+                        </article>
+                      )) : <div className="detail-empty">没有插件提供的 MCP 服务。</div>}
                     </div>
                   </div>
                   <div className="settings-save-row"><span className="subtle-inline">保存后立即重建已变更的 MCP 连接。</span><button className="button warm" onClick={() => void saveConfigDraft()} disabled={!configDraft}>保存</button></div>
@@ -4738,6 +5515,107 @@ export function App() {
         </div>
       ) : null}
 
+      {isMcpCreateOpen && mcpCreateDraft ? (
+        <div
+          className="project-sheet-overlay mcp-create-overlay"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) closeMcpCreateSheet();
+          }}
+        >
+          <div className="project-sheet mcp-create-sheet" role="dialog" aria-modal="true" aria-labelledby="mcp-create-title">
+            <div className="project-sheet-header">
+              <div className="project-sheet-copy">
+                <strong id="mcp-create-title">新增 MCP 服务</strong>
+                <span>选择填写方式，加入后在管理页统一保存。</span>
+              </div>
+              <button className="project-sheet-close" type="button" onClick={closeMcpCreateSheet} title="关闭" aria-label="关闭">
+                <IconClose />
+              </button>
+            </div>
+
+            <div className="mcp-create-mode" role="tablist" aria-label="MCP 配置方式">
+              <button type="button" role="tab" aria-selected={mcpCreateMode === "form"} className={mcpCreateMode === "form" ? "active" : ""} onClick={() => { setMcpCreateMode("form"); setMcpJsonError(null); }}>控件填写</button>
+              <button type="button" role="tab" aria-selected={mcpCreateMode === "json"} className={mcpCreateMode === "json" ? "active" : ""} onClick={() => {
+                setMcpCreateMode("json");
+                setMcpCreateError(null);
+                if (!mcpJsonDraft) setMcpJsonDraft(JSON.stringify(serializeMcpJsonConfig([mcpCreateDraft]), null, 2));
+              }}>JSON 配置</button>
+            </div>
+
+            <div className="mcp-create-body">
+              {mcpCreateMode === "form" ? (
+                <div className="mcp-editor-grid mcp-create-form">
+                  <label className="settings-field"><span>名称</span><input autoFocus value={mcpCreateDraft.name} placeholder="例如：网页检索" onChange={(event) => { setMcpCreateDraft({ ...mcpCreateDraft, name: event.target.value }); setMcpCreateError(null); }} /></label>
+                  <label className="settings-field"><span>ID</span><input value={mcpCreateDraft.id} onChange={(event) => { setMcpCreateDraft({ ...mcpCreateDraft, id: event.target.value }); setMcpCreateError(null); }} /></label>
+                  <label className="settings-field full"><span>描述</span><input value={mcpCreateDraft.description ?? ""} placeholder="可选" onChange={(event) => setMcpCreateDraft({ ...mcpCreateDraft, description: event.target.value || undefined })} /></label>
+                  <div className="settings-field mcp-transport-field">
+                    <span>传输方式</span>
+                    <div className="mcp-transport-options" role="radiogroup" aria-label="传输方式">
+                      {[
+                        ["stdio", "stdio", "本地进程"],
+                        ["sse", "SSE", "事件流"],
+                        ["streamable_http", "HTTP", "流式 HTTP"]
+                      ].map(([transport, label, hint]) => {
+                        const selected = (mcpCreateDraft.transport ?? "stdio") === transport;
+                        return (
+                          <button
+                            key={transport}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            className={selected ? "is-selected" : ""}
+                            onClick={() => {
+                              setMcpCreateDraft({
+                                ...mcpCreateDraft,
+                                transport,
+                                command: transport === "stdio" ? mcpCreateDraft.command : undefined,
+                                url: transport === "stdio" ? undefined : mcpCreateDraft.url
+                              });
+                              setMcpCreateError(null);
+                            }}
+                          >
+                            <strong>{label}</strong>
+                            <small>{hint}</small>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="settings-field mcp-create-enabled">
+                    <span>状态</span>
+                    <label className={`mcp-enable-switch ${mcpCreateDraft.enabled !== false ? "is-on" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={mcpCreateDraft.enabled !== false}
+                        onChange={(event) => setMcpCreateDraft({ ...mcpCreateDraft, enabled: event.target.checked })}
+                      />
+                      <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
+                      <span className="mcp-enable-label">{mcpCreateDraft.enabled !== false ? "已启用" : "已停用"}</span>
+                    </label>
+                  </div>
+                  {(mcpCreateDraft.transport ?? "stdio") === "stdio" ? <>
+                    <label className="settings-field full"><span>命令</span><input value={mcpCreateDraft.command ?? ""} placeholder="npx" onChange={(event) => { setMcpCreateDraft({ ...mcpCreateDraft, command: event.target.value }); setMcpCreateError(null); }} /></label>
+                    <label className="settings-field"><span>参数（每行一个）</span><textarea value={(mcpCreateDraft.args ?? []).join("\n")} onChange={(event) => setMcpCreateDraft({ ...mcpCreateDraft, args: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} /></label>
+                    <label className="settings-field"><span>环境变量（KEY=VALUE）</span><textarea value={Object.entries(mcpCreateDraft.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => setMcpCreateDraft({ ...mcpCreateDraft, env: parseMcpEnvironment(event.target.value) })} /></label>
+                  </> : <label className="settings-field full"><span>服务 URL</span><input value={mcpCreateDraft.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => { setMcpCreateDraft({ ...mcpCreateDraft, url: event.target.value }); setMcpCreateError(null); }} /></label>}
+                  {mcpCreateError ? <p className="mcp-error full">{mcpCreateError}</p> : null}
+                </div>
+              ) : (
+                <div className="mcp-create-json">
+                  <textarea className="mcp-json-input" autoFocus value={mcpJsonDraft} spellCheck={false} onChange={(event) => { setMcpJsonDraft(event.target.value); setMcpJsonError(null); }} />
+                  {mcpJsonError ? <p className="mcp-error">{mcpJsonError}</p> : null}
+                </div>
+              )}
+            </div>
+
+            <div className="project-sheet-actions">
+              <button className="button ghost" type="button" onClick={closeMcpCreateSheet}>取消</button>
+              <button className="button warm" type="button" onClick={confirmMcpCreate} disabled={mcpCreateMode === "json" && !mcpJsonDraft.trim()}>添加到列表</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {isProjectCreateOpen ? (
         <div
           className="project-sheet-overlay"
@@ -4786,6 +5664,138 @@ export function App() {
                 disabled={!projectPathDraft || isPickingProjectFolder}
               >
                 创建
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {gpaPlanResumeDialog ? (
+        <div
+          className="project-sheet-overlay"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !gpaPlanResumeBusy) {
+              void dismissGpaPlanResumeDialog();
+            }
+          }}
+        >
+          <div className="project-sheet gpa-plan-resume-sheet">
+            <div className="project-sheet-header">
+              <div className="project-sheet-copy">
+                <strong>
+                  {gpaPlanResumeDialog.step === "ask" ? "发现未完成的 GPA 计划" : "确认继续剩余任务"}
+                </strong>
+                <span>
+                  {gpaPlanResumeDialog.step === "ask"
+                    ? "此项目有一份未完成的计划。是否继续完成？"
+                    : `已完成 ${gpaPlanResumeDialog.plan.doneCount} / ${gpaPlanResumeDialog.plan.tasks.length}，剩余 ${gpaPlanResumeDialog.plan.pendingCount} 项。`}
+                </span>
+              </div>
+              <button
+                className="project-sheet-close"
+                onClick={() => void dismissGpaPlanResumeDialog()}
+                title="关闭"
+                disabled={gpaPlanResumeBusy}
+              >
+                <IconClose />
+              </button>
+            </div>
+
+            {gpaPlanResumeDialog.step === "review" ? (
+              <div className="gpa-plan-resume-body">
+                <div className="gpa-plan-resume-progress">
+                  {gpaPlanResumeDialog.plan.tasks.map((task) => (
+                    <div
+                      key={task.id}
+                      className={`gpa-plan-resume-task ${task.done ? "is-done" : "is-pending"}`}
+                    >
+                      <span aria-hidden="true">{task.done ? "✓" : "○"}</span>
+                      <strong>{task.id}</strong>
+                      <span>{task.title}</span>
+                    </div>
+                  ))}
+                </div>
+                {gpaPlanResumeDialog.plan.body ? (
+                  <pre className="gpa-plan-resume-markdown">{gpaPlanResumeDialog.plan.body.slice(0, 4000)}</pre>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className="project-sheet-actions">
+              <button
+                className="button ghost"
+                type="button"
+                disabled={gpaPlanResumeBusy}
+                onClick={() =>
+                  void dismissGpaPlanResumeDialog({
+                    abandon: gpaPlanResumeDialog.step === "ask"
+                  })
+                }
+              >
+                {gpaPlanResumeDialog.step === "ask" ? "否，废弃此计划" : "取消"}
+              </button>
+              {gpaPlanResumeDialog.step === "ask" ? (
+                <button className="button warm" type="button" onClick={() => void acceptGpaPlanResumeAsk()}>
+                  是，查看计划
+                </button>
+              ) : (
+                <button
+                  className="button warm"
+                  type="button"
+                  disabled={gpaPlanResumeBusy}
+                  onClick={() => void confirmGpaPlanResumeExecution()}
+                >
+                  {gpaPlanResumeBusy ? "正在继续..." : "继续执行剩余步骤"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {updateConfirmDialog ? (
+        <div
+          className="project-sheet-overlay"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setUpdateConfirmDialog(null);
+            }
+          }}
+        >
+          <div
+            className="project-sheet confirm-sheet delete-confirm-sheet update-confirm-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="update-confirm-title"
+          >
+            <div className="project-sheet-header delete-confirm-header">
+              <button
+                className="project-sheet-close"
+                type="button"
+                onClick={() => setUpdateConfirmDialog(null)}
+                title="关闭"
+                aria-label="关闭"
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="confirm-sheet-body delete-confirm-body update-confirm-body">
+              <strong id="update-confirm-title">{updateConfirmDialog.title}</strong>
+              <p>{updateConfirmDialog.message}</p>
+              {updateConfirmDialog.details.length > 0 ? (
+                <ul className="update-confirm-details">
+                  {updateConfirmDialog.details.map((detail) => (
+                    <li key={detail}>{detail}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+            <div className="project-sheet-actions">
+              <button className="button ghost" type="button" onClick={() => setUpdateConfirmDialog(null)}>
+                取消
+              </button>
+              <button className="button warm" type="button" onClick={() => void confirmUpdateDialog()}>
+                {updateConfirmDialog.kind === "download" ? "继续下载" : "立即安装并重启"}
               </button>
             </div>
           </div>
@@ -5112,13 +6122,20 @@ export function App() {
                   className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
                   role="menuitem"
                   onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  disabled={gpaState.stage !== "off"}
+                  disabled={selectedThread?.mode !== "project"}
+                  title={selectedThread?.mode !== "project" ? "仅项目模式可开启 GPA" : gpaState.stage !== "off" ? "检查 GPA 状态" : undefined}
                   onClick={() => void enableGpaMode()}
                 >
                   <span className="gpa-popover-item-icon" aria-hidden><IconGpa /></span>
                   <span className="gpa-popover-item-copy">
-                    <span className="gpa-popover-item-title">开启 GPA</span>
-                    <span className="gpa-popover-item-hint">目标、计划、执行三阶段工作流</span>
+                    <span className="gpa-popover-item-title">{gpaState.stage !== "off" ? "GPA 已开启" : "开启 GPA"}</span>
+                    <span className="gpa-popover-item-hint">
+                      {selectedThread?.mode === "project"
+                        ? gpaState.stage !== "off"
+                          ? `当前处于${gpaModeLabel(gpaState.stage)}阶段，点击检查状态`
+                          : "目标、计划、执行三阶段工作流"
+                        : "仅项目对话可用，请先新建项目"}
+                    </span>
                   </span>
                   {gpaState.stage !== "off" ? <span className="gpa-popover-item-check">已开启</span> : null}
                 </button>
@@ -5166,6 +6183,7 @@ function RightWorkspacePanel({
   previewTabs,
   selectedProjectFile,
   projectFilePreview,
+  projectToolCalls,
   onSelectProjectFile,
   onSelectPreviewTab,
   onClosePreviewTab,
@@ -5197,6 +6215,7 @@ function RightWorkspacePanel({
   previewTabs: string[];
   selectedProjectFile: string | null;
   projectFilePreview: PreviewCacheEntry | null;
+  projectToolCalls: ToolCallRecord[];
   onSelectProjectFile: (path: string) => void;
   onSelectPreviewTab: (path: string) => void;
   onClosePreviewTab: (path: string) => void;
@@ -5251,6 +6270,7 @@ function RightWorkspacePanel({
             tabs={previewTabs}
             selectedPath={selectedProjectFile}
             preview={projectFilePreview}
+            toolCalls={projectToolCalls}
             loading={projectFilesLoading}
             onSelectTab={onSelectPreviewTab}
             onCloseTab={onClosePreviewTab}
@@ -5289,6 +6309,7 @@ function RightWorkspacePanel({
         {activeTab === "files" ? (
           <ProjectFilesWorkspace
             files={projectFiles}
+            toolCalls={projectToolCalls}
             loading={projectFilesLoading}
             selectedPath={selectedProjectFile}
             onSelect={onSelectProjectFile}
@@ -5581,6 +6602,7 @@ function LegacyProjectPreviewWorkspace({
 
 function ProjectFilesWorkspace({
   files,
+  toolCalls,
   loading,
   selectedPath,
   onSelect,
@@ -5588,6 +6610,7 @@ function ProjectFilesWorkspace({
   onAddAttachment
 }: {
   files: ProjectFileEntry[];
+  toolCalls: ToolCallRecord[];
   loading: boolean;
   selectedPath: string | null;
   onSelect: (path: string) => void;
@@ -5598,6 +6621,7 @@ function ProjectFilesWorkspace({
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: ProjectFileTreeNode } | null>(null);
   const tree = useMemo(() => buildProjectFileTree(files), [files]);
+  const changeKinds = useMemo(() => getProjectFileChangeKinds(toolCalls), [toolCalls]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
 
   useEffect(() => {
@@ -5631,6 +6655,7 @@ function ProjectFilesWorkspace({
           query={normalizedQuery}
           expandedPaths={expandedPaths}
           selectedPath={selectedPath}
+          changeKinds={changeKinds}
           onToggle={(path) => {
             setExpandedPaths((current) => {
               const next = new Set(current);
@@ -5684,6 +6709,7 @@ function ProjectFileTreeRows({
   query,
   expandedPaths,
   selectedPath,
+  changeKinds,
   onToggle,
   onSelect,
   onContextMenu
@@ -5693,6 +6719,7 @@ function ProjectFileTreeRows({
   query: string;
   expandedPaths: Set<string>;
   selectedPath: string | null;
+  changeKinds: Map<string, ProjectFileChangeKind>;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
   onContextMenu: (event: React.MouseEvent<HTMLButtonElement>, node: ProjectFileTreeNode) => void;
@@ -5705,11 +6732,12 @@ function ProjectFileTreeRows({
 
     const isDirectory = node.kind === "directory";
     const isExpanded = query.length > 0 || expandedPaths.has(node.path);
+    const changeKind = getProjectFileNodeChangeKind(node, changeKinds);
     return (
       <div key={`${node.kind}:${node.path}`} className="project-file-tree-item">
         <button
           type="button"
-          className={`project-file-row ${isDirectory ? "directory" : "file"} ${selectedPath === node.path ? "selected" : ""}`}
+          className={`project-file-row ${isDirectory ? "directory" : "file"} ${changeKind ? `changed-${changeKind}` : ""} ${selectedPath === node.path ? "selected" : ""}`}
           style={{ "--project-file-depth": depth } as React.CSSProperties}
           role="treeitem"
           aria-level={depth + 1}
@@ -5726,6 +6754,7 @@ function ProjectFileTreeRows({
             {isDirectory ? <IconFolder /> : <IconFile />}
           </span>
           <span>{node.name}</span>
+          {changeKind ? <em className="project-file-change-badge" aria-label={projectFileChangeLabel(changeKind)}>{projectFileChangeBadge(changeKind)}</em> : null}
         </button>
         {isDirectory && isExpanded ? (
           <ProjectFileTreeRows
@@ -5734,6 +6763,7 @@ function ProjectFileTreeRows({
             query={query}
             expandedPaths={expandedPaths}
             selectedPath={selectedPath}
+            changeKinds={changeKinds}
             onToggle={onToggle}
             onSelect={onSelect}
             onContextMenu={onContextMenu}
@@ -5815,7 +6845,12 @@ export function formatComposerAttachments(attachments: ComposerAttachment[]): st
         return `[Selected Skill]\n${attachment.label}: ${attachment.description}`;
       }
       if (attachment.kind === "mcp") {
-        return `[Selected MCP server]\n${attachment.label}: ${attachment.description}. Prefer this server when its tools are relevant.`;
+        return [
+          "[Selected MCP server]",
+          `id: ${attachment.serverId}`,
+          `${attachment.label}: ${attachment.description}`,
+          "This request requires querying this MCP server before answering."
+        ].join("\n");
       }
       if (attachment.kind === "image") {
         return `[Attached image]\n${attachment.path}\nUse the image attachment as visual reference when the selected model supports image input.`;
@@ -5851,12 +6886,12 @@ export function buildContextUsage(input: {
           .map((message) => message.content),
         ...input.toolCalls
           .filter((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt) > compactedAt)
-          .map((toolCall) => `${toolCall.argumentsJson}\n${toolCall.resultJson ?? ""}`),
+          .map((toolCall) => toolCall.argumentsJson),
         input.pendingInput
       ].join("\n")
     : [
         ...input.messages.map((message) => message.content),
-        ...input.toolCalls.map((toolCall) => `${toolCall.argumentsJson}\n${toolCall.resultJson ?? ""}`),
+        ...input.toolCalls.map((toolCall) => toolCall.argumentsJson),
         input.pendingInput
       ].join("\n");
   const recentTokens = Math.max(0, estimateContextTokens(conversationText));
@@ -6027,6 +7062,7 @@ function ProjectPreviewWorkspace({
   tabs,
   selectedPath,
   preview,
+  toolCalls,
   loading,
   onSelectTab,
   onCloseTab,
@@ -6035,12 +7071,14 @@ function ProjectPreviewWorkspace({
   tabs: string[];
   selectedPath: string | null;
   preview: PreviewCacheEntry | null;
+  toolCalls: ToolCallRecord[];
   loading: boolean;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
 }) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
+  const [viewMode, setViewMode] = useState<"content" | "diff">("content");
   if (tabs.length === 0) {
     return loading ? (
       <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取项目文件..." />
@@ -6053,6 +7091,8 @@ function ProjectPreviewWorkspace({
   if (!currentPath) {
     return <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="从工作区目录树中选择文件" />;
   }
+  const snapshot = getLatestFileSnapshot(toolCalls, currentPath);
+  const diffLines = snapshot ? buildFileSnapshotDiff(snapshot.before, snapshot.after) : [];
 
   return (
     <section className="project-preview-workspace" aria-label="文件查看">
@@ -6075,8 +7115,35 @@ function ProjectPreviewWorkspace({
             {segment}
           </span>
         ))}
+        <div className="project-preview-mode-switch" role="group" aria-label="文件查看模式">
+          <button
+            type="button"
+            className={viewMode === "content" ? "active" : ""}
+            onClick={() => setViewMode("content")}
+          >内容</button>
+          <button
+            type="button"
+            className={viewMode === "diff" ? "active" : ""}
+            onClick={() => setViewMode("diff")}
+          >Diff</button>
+        </div>
       </header>
-      {preview ? (
+      {viewMode === "diff" ? (
+        snapshot ? (
+          <>
+            <ol className="project-preview-code project-preview-diff" aria-label={`${currentPath} 快照 Diff`}>
+              {diffLines.map((line, index) => (
+                <li key={`${currentPath}-diff-${index}`} className={`is-${line.kind}`}>
+                  <code>{line.kind === "context" ? " " : line.kind === "added" ? "+" : "-"} {line.content}</code>
+                </li>
+              ))}
+            </ol>
+            {snapshot.beforeTruncated || snapshot.afterTruncated ? <div className="project-preview-note">快照内容过长，仅显示前 512 KB。</div> : null}
+          </>
+        ) : (
+          <WorkspaceEmptyState icon={<IconEye />} title="暂无快照 Diff" message="此文件还没有本任务保存的修改前后快照。" />
+        )
+      ) : preview ? (
         <>
           <ol
             className="project-preview-code"
@@ -6173,6 +7240,55 @@ function renderCodePreviewLine(line: string, keyPrefix: string): ReactNode[] {
   return tokens;
 }
 
+export function getLatestFileSnapshot(toolCalls: ToolCallRecord[], selectedPath: string): FileSnapshot | null {
+  const normalizedPath = selectedPath.replace(/\\/g, "/");
+  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+    const toolCall = toolCalls[index];
+    if (toolCall?.status !== "completed") continue;
+    const result = parseTimelineJson(toolCall.resultJson);
+    const json = result.json;
+    if (!json || typeof json !== "object") continue;
+    const snapshots = (json as Record<string, unknown>).snapshots;
+    if (!Array.isArray(snapshots)) continue;
+    const snapshot = snapshots.find((candidate): candidate is FileSnapshot => {
+      if (!candidate || typeof candidate !== "object") return false;
+      const value = candidate as Record<string, unknown>;
+      return value.path === normalizedPath && typeof value.before === "string" && typeof value.after === "string";
+    });
+    if (snapshot) {
+      return {
+        ...snapshot,
+        beforeTruncated: snapshot.beforeTruncated === true,
+        afterTruncated: snapshot.afterTruncated === true
+      };
+    }
+  }
+  return null;
+}
+
+export function buildFileSnapshotDiff(before: string, after: string): FileSnapshotDiffLine[] {
+  const beforeLines = before.split(/\r?\n/);
+  const afterLines = after.split(/\r?\n/);
+  let prefix = 0;
+  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) {
+    prefix += 1;
+  }
+  let suffix = 0;
+  while (
+    suffix < beforeLines.length - prefix &&
+    suffix < afterLines.length - prefix &&
+    beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  return [
+    ...beforeLines.slice(0, prefix).map((content) => ({ kind: "context" as const, content })),
+    ...beforeLines.slice(prefix, beforeLines.length - suffix).map((content) => ({ kind: "removed" as const, content })),
+    ...afterLines.slice(prefix, afterLines.length - suffix).map((content) => ({ kind: "added" as const, content })),
+    ...beforeLines.slice(beforeLines.length - suffix).map((content) => ({ kind: "context" as const, content }))
+  ];
+}
+
 function BrowserWorkspace({
   tabs,
   threadId,
@@ -6227,21 +7343,34 @@ function BrowserTabWebview({
   visible: boolean;
 }) {
   const webviewRef = useRef<BrowserWebviewElement | null>(null);
+  const syncTimerRef = useRef<number | null>(null);
   useEffect(() => {
     const view = webviewRef.current;
     if (!view) return;
+    const sync = () => {
+      if (syncTimerRef.current !== null) {
+        window.clearTimeout(syncTimerRef.current);
+      }
+      syncTimerRef.current = window.setTimeout(() => {
+        syncTimerRef.current = null;
+        void window.codexh.syncBrowserWebContents({ threadId, tabId: tab.id }).catch(() => undefined);
+      }, 180);
+    };
     const register = () => {
       const webContentsId = view.getWebContentsId();
       void window.codexh.registerBrowserWebContents({ threadId, tabId: tab.id, webContentsId })
-        .then(() => window.codexh.syncBrowserWebContents({ threadId, tabId: tab.id }))
+        .then(sync)
         .catch(() => undefined);
     };
-    const sync = () => void window.codexh.syncBrowserWebContents({ threadId, tabId: tab.id }).catch(() => undefined);
     view.addEventListener("dom-ready", register);
     view.addEventListener("did-navigate", sync);
     view.addEventListener("did-navigate-in-page", sync);
     view.addEventListener("page-title-updated", sync);
     return () => {
+      if (syncTimerRef.current !== null) {
+        window.clearTimeout(syncTimerRef.current);
+        syncTimerRef.current = null;
+      }
       view.removeEventListener("dom-ready", register);
       view.removeEventListener("did-navigate", sync);
       view.removeEventListener("did-navigate-in-page", sync);
@@ -6846,7 +7975,8 @@ function buildTimelineEntries(
   toolCalls: ToolCallRecord[],
   artifacts: ArtifactRecord[],
   workspaceRoot?: string | null,
-  threadStatus?: ThreadRecord["status"] | null
+  threadStatus?: ThreadRecord["status"] | null,
+  prompts: UserInputPrompt[] = []
 ): TimelineEntry[] {
   const filesByTurn = collectFileChangesByTurn(toolCalls, workspaceRoot);
   for (const artifact of artifacts) {
@@ -6914,10 +8044,16 @@ function buildTimelineEntries(
     .map(([turnRunId, files]) => ({
       kind: "file-summary",
       id: `file-summary-${turnRunId}`,
-      createdAt: getTurnSummaryCreatedAt(turnRunId, messages, toolCalls),
+      createdAt: getTurnSummaryCreatedAt(turnRunId, messages, toolCalls, artifacts),
       files
     }));
-  const sortedEntries = [...messageEntries, ...toolEntries, ...fileSummaryEntries].sort(
+  const promptEntries: TimelineEntry[] = prompts.map((prompt) => ({
+    kind: "user-input",
+    id: `user-input-${prompt.id}`,
+    createdAt: prompt.answeredAt ?? prompt.createdAt,
+    prompt
+  }));
+  const sortedEntries = [...messageEntries, ...toolEntries, ...fileSummaryEntries, ...promptEntries].sort(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
   );
   return collapseDirectoryReadMessages(sortedEntries);
@@ -6926,7 +8062,8 @@ function buildTimelineEntries(
 function getTurnSummaryCreatedAt(
   turnRunId: string,
   messages: MessageRecord[],
-  toolCalls: ToolCallRecord[]
+  toolCalls: ToolCallRecord[],
+  artifacts: ArtifactRecord[] = []
 ): string {
   const timestamps = [
     ...messages
@@ -6934,7 +8071,12 @@ function getTurnSummaryCreatedAt(
       .map((message) => Date.parse(message.createdAt)),
     ...toolCalls
       .filter((toolCall) => toolCall.turnRunId === turnRunId)
-      .map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt))
+      .map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt)),
+    // Knowledge-index / orphan artifacts have no turnRunId; keep them anchored to
+    // artifact.createdAt so they don't float to the bottom on every rerender.
+    ...artifacts
+      .filter((artifact) => (artifact.turnRunId ?? `artifact-${artifact.id}`) === turnRunId)
+      .map((artifact) => Date.parse(artifact.createdAt))
   ].filter(Number.isFinite);
   const latest = timestamps.length > 0 ? Math.max(...timestamps) : Date.now();
   return new Date(latest + 1).toISOString();
@@ -7206,104 +8348,52 @@ function FileChangeSummary({
   files: FileChangeSummaryItem[];
   onOpenFolder: (filePath: string) => void;
 }) {
-  const generatedFiles = files.filter(isGeneratedFileListItem);
-  const otherFiles = files.filter((file) => !isGeneratedFileListItem(file));
-  const additions = otherFiles.reduce((total, file) => total + file.additions, 0);
-  const deletions = otherFiles.reduce((total, file) => total + file.deletions, 0);
-  const hasLineCounts = additions > 0 || deletions > 0;
+  if (files.length === 0) {
+    return null;
+  }
 
   return (
-    <>
-      {generatedFiles.length > 0 ? (
-        <section className="generated-file-list" aria-label="主要改动文件">
-          <h3 className="generated-file-list-title">主要改动文件</h3>
-          <ul className="generated-file-list-items">
-            {generatedFiles.map((file) => (
-              <li key={file.path} className="generated-file-list-item">
-                <button
-                  type="button"
-                  className="generated-file-path"
-                  onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
-                  title="打开所在文件夹"
-                >
-                  {getFileLeafName(file.path)}
-                </button>
-                <span className="generated-file-sep" aria-hidden="true">—</span>
-                <span className="generated-file-desc">
-                  {file.description
-                    ?? getGeneratedFileDescription(file.path, file.kind, undefined, file.action)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      {otherFiles.length > 0 ? (
-        <section className="file-change-summary" aria-label={`已编辑 ${otherFiles.length} 个文件`}>
-          <div className="file-change-summary-head">
-            <span className="file-change-summary-icon" aria-hidden><IconFileChanges /></span>
-            <div className="file-change-summary-title">
-              <strong>已编辑 {otherFiles.length} 个文件</strong>
-              {hasLineCounts ? (
-                <span className="file-change-summary-counts">
-                  <b>+{additions}</b>
-                  <i>-{deletions}</i>
-                </span>
-              ) : null}
-            </div>
-          </div>
-          <div className="file-change-summary-list">
-            {otherFiles.map((file) => (
-              <div key={file.path} className="file-change-summary-row">
-                <span className="file-change-row-icon" aria-hidden><IconFile /></span>
-                <div className="file-change-row-copy">
-                  <strong>{getFileLeafName(file.path)}</strong>
-                  <code>{getFileParentPath(file.path)}</code>
-                  {file.symbols && file.symbols.length > 0 ? (
-                    <ul className="file-change-symbol-list">
-                      {file.symbols.slice(0, 8).map((symbol) => (
-                        <li key={`${symbol.change}-${symbol.kind}-${symbol.name}`}>
-                          {formatSymbolChange(symbol.change)} {symbol.kind} {symbol.name}
-                        </li>
-                      ))}
-                      {file.symbols.length > 8 ? <li>…另有 {file.symbols.length - 8} 项</li> : null}
-                    </ul>
-                  ) : null}
-                </div>
-                <div className="file-change-row-meta">
-                  <span className={`file-change-row-badge ${getFileChangeActionClass(file.action)}`}>
-                    {formatFileChangeAction(file.action)}
-                  </span>
-                  {file.additions || file.deletions ? (
-                    <span className="file-change-row-counts">
-                      {file.additions ? <b>+{file.additions}</b> : null}
-                      {file.deletions ? <i>-{file.deletions}</i> : null}
-                    </span>
-                  ) : null}
-                  <button
-                    className="file-change-open-folder"
-                    onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
-                    title="打开所在文件夹"
-                    aria-label={`打开 ${file.path} 所在文件夹`}
-                  >
-                    <IconFolder />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
-    </>
+    <section className="generated-file-list" aria-label="主要改动文件">
+      <h3 className="generated-file-list-title">主要改动文件</h3>
+      <ul className="generated-file-list-items">
+        {files.map((file) => (
+          <li key={file.path} className="generated-file-list-item">
+            <button
+              type="button"
+              className="generated-file-path"
+              onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
+              title="打开所在文件夹"
+            >
+              {getFileLeafName(file.path)}
+            </button>
+            <span className="generated-file-sep" aria-hidden="true">—</span>
+            <span className="generated-file-desc">{getMainChangedFileDescription(file)}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
-function isGeneratedFileListItem(file: FileChangeSummaryItem): boolean {
-  return file.kind === "generated-image"
-    || file.kind === "generated-video"
-    || file.kind === "generated-file"
-    || file.action === "created";
+function getMainChangedFileDescription(file: FileChangeSummaryItem): string {
+  if (file.description) {
+    return file.description;
+  }
+  if (file.action === "created" || file.kind) {
+    return getGeneratedFileDescription(file.path, file.kind, undefined, file.action);
+  }
+
+  const symbols = file.symbols?.slice(0, 3).map((symbol) => symbol.name).filter(Boolean) ?? [];
+  const changeLabel = file.action === "deleted"
+    ? "已删除"
+    : symbols.length > 0
+      ? `修改 ${symbols.join("、")}`
+      : "已修改";
+  const lineCounts = [
+    file.additions > 0 ? `+${file.additions}` : "",
+    file.deletions > 0 ? `-${file.deletions}` : ""
+  ].filter(Boolean).join(" ");
+  return lineCounts ? `${changeLabel}（${lineCounts}）` : changeLabel;
 }
 
 function decorateGeneratedFileChange(file: FileChangeSummaryItem): FileChangeSummaryItem {
@@ -7458,10 +8548,19 @@ function getFileLeafName(filePath: string) {
 }
 
 function getKnowledgeDefaultName(source: KnowledgeSourceAttachment) {
+  if (source.kind === "url" || source.kind === "browser") {
+    return new URL(source.url).hostname;
+  }
   const leaf = getFileLeafName(source.path.replace(/[\\/]+$/, "")) || source.path;
   if (source.kind === "folder") return leaf;
   const extensionIndex = leaf.lastIndexOf(".");
   return extensionIndex > 0 ? leaf.slice(0, extensionIndex) : leaf;
+}
+
+function knowledgeSourceKey(source: KnowledgeSourceAttachment): string {
+  if (source.kind === "url") return `url:${source.url.toLowerCase()}`;
+  if (source.kind === "browser") return `browser:${source.threadId}:${source.tabId}`;
+  return `${source.kind}:${source.path.toLowerCase()}`;
 }
 
 function getFileParentPath(filePath: string) {
@@ -7493,26 +8592,35 @@ export function buildPlanTimelineItems(state: GpaState) {
 }
 
 function PlanTimeline({ state }: { state: GpaState }) {
+  const [expanded, setExpanded] = useState(false);
   const items = buildPlanTimelineItems(state);
   const currentItem = items.find((item) => item.status === "in_progress") ?? items.at(-1);
 
   return (
-    <section className="plan-timeline" aria-label="Updated Plan">
-      <details className="plan-timeline-details">
-        <summary className="plan-timeline-summary">
-          <span className="plan-timeline-title"><span>●</span><strong>Updated Plan</strong></span>
-          {currentItem ? (
-            <span className={`plan-timeline-current ${currentItem.status}`}>
-              <StatusIcon status={currentItem.status} />
-              <span>{currentItem.label}</span>
-            </span>
-          ) : null}
-          <span className="plan-timeline-chevron" aria-hidden="true" />
-        </summary>
-        <div className="plan-timeline-list">
-          {items.map((item) => <PlanItem key={item.id} label={item.label} status={item.status} />)}
+    <section className={`composer-plan ${expanded ? "is-expanded" : ""}`} aria-label="Updated Plan">
+      <button
+        type="button"
+        className="composer-plan-summary"
+        aria-expanded={expanded}
+        title={expanded ? "收起计划" : "向上展开查看全部计划"}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="composer-plan-title"><span>●</span><strong>Updated Plan</strong></span>
+        {currentItem ? (
+          <span className={`composer-plan-current ${currentItem.status}`}>
+            <StatusIcon status={currentItem.status} />
+            <span>{currentItem.label}</span>
+          </span>
+        ) : null}
+        <span className="composer-plan-chevron" aria-hidden="true" />
+      </button>
+      {expanded ? (
+        <div className="composer-plan-panel" role="region" aria-label="全部计划">
+          <div className="composer-plan-list">
+            {items.map((item) => <PlanItem key={item.id} label={item.label} status={item.status} />)}
+          </div>
         </div>
-      </details>
+      ) : null}
     </section>
   );
 }
@@ -7740,9 +8848,17 @@ function QueuedMessageList({
   deletingId: string | null;
   onDelete: (id: string) => void;
 }) {
+  const visible = messages.filter(
+    (message) =>
+      !message.content.trimStart().startsWith("[internal:") &&
+      !message.displayContent.trimStart().startsWith("[internal:")
+  );
+  if (visible.length === 0) {
+    return null;
+  }
   return (
     <section className={`composer-queue ${hasProject ? "has-project" : ""}`} aria-label="排队消息">
-      {messages.map((message) => (
+      {visible.map((message) => (
         <div key={message.id} className="composer-queue-item">
           <span className="composer-queue-label">排队中</span>
           <span className="composer-queue-preview" title={message.displayContent}>{message.displayContent}</span>
@@ -7830,7 +8946,7 @@ function GpaConfirmationCard({
   }
 
   return (
-    <section className="gpa-confirmation" aria-label={title}>
+    <section className={`gpa-confirmation stage-${stage}`} aria-label={title}>
       <div className="gpa-confirmation-copy">
         <strong>{title}</strong>
         <span>{description}</span>
@@ -7839,8 +8955,37 @@ function GpaConfirmationCard({
         <button className="gpa-confirmation-button secondary" type="button" onClick={onRevise} disabled={disabled}>
           修改
         </button>
-        <button className="gpa-confirmation-button primary" type="button" onClick={onConfirm} disabled={disabled}>
+        <button className={`gpa-confirmation-button primary stage-${stage}`} type="button" onClick={onConfirm} disabled={disabled}>
           {confirmLabel}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function GpaPlanResumeRetryConfirmationCard({
+  pendingCount,
+  disabled,
+  onDismiss,
+  onConfirm
+}: {
+  pendingCount: number;
+  disabled: boolean;
+  onDismiss: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <section className="gpa-confirmation gpa-resume-retry" aria-label="确认继续 GPA 计划">
+      <div className="gpa-confirmation-copy">
+        <strong>GPA 计划执行失败</strong>
+        <span>请先重新选择可用模型，确认后继续剩余 {pendingCount} 项任务。</span>
+      </div>
+      <div className="gpa-confirmation-actions">
+        <button className="gpa-confirmation-button secondary" type="button" onClick={onDismiss} disabled={disabled}>
+          暂不继续
+        </button>
+        <button className="gpa-confirmation-button primary" type="button" onClick={onConfirm} disabled={disabled}>
+          {disabled ? "正在继续..." : "确认继续"}
         </button>
       </div>
     </section>
@@ -8723,7 +9868,7 @@ function DetectedMessageImage({ reference, onPreview }: { reference: MessageMedi
   );
 }
 
-function extractMessageMediaReferences(content: string): MessageMediaReference[] {
+export function extractMessageMediaReferences(content: string): MessageMediaReference[] {
   const matches: MessageMediaReference[] = [];
   const seen = new Set<string>();
   const add = (source: string, kind: MessageMediaReference["kind"]) => {
@@ -8734,8 +9879,10 @@ function extractMessageMediaReferences(content: string): MessageMediaReference[]
   };
   const localPattern = /[a-zA-Z]:[\\/][^\r\n<>"|?*]+?\.(?:png|jpe?g|gif|webp|bmp)/gi;
   const urlPattern = /https?:\/\/[^\s<>()]+?\.(?:png|jpe?g|gif|webp|bmp)(?:\?[^\s<>()]*)?/gi;
-  for (const match of content.matchAll(localPattern)) add(match[0], "local");
   for (const match of content.matchAll(urlPattern)) add(match[0], "url");
+  // A URL contains the substring "s://", which otherwise looks like a Windows drive path.
+  const contentWithoutUrls = content.replace(urlPattern, " ");
+  for (const match of contentWithoutUrls.matchAll(localPattern)) add(match[0], "local");
   return matches;
 }
 
@@ -9400,7 +10547,7 @@ function filterTranscriptMessages(messages: MessageRecord[], threadStatus?: Thre
   const hasAnyOutcome = hasStandaloneOutcome || turnIdsWithOutcome.size > 0;
 
   const filteredMessages = messages.filter((message) => {
-    if (message.content.startsWith("[internal:gpa-confirm]")) {
+    if (message.content.trimStart().startsWith("[internal:")) {
       return false;
     }
 
@@ -9537,9 +10684,18 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
         <div key={key} className="markdown-code-block">
           <CopyTextButton content={block.content} />
           {block.language ? <div className="markdown-code-label">{block.language}</div> : null}
-          <pre>
-            <code>{block.content}</code>
-          </pre>
+          <div className="markdown-code-scroll" role="region" aria-label={`${block.language ?? "代码"} 代码块`}>
+            <ol className="markdown-code-lines">
+              {block.content.split("\n").map((line, lineIndex) => (
+                <li key={`${key}-line-${lineIndex}`}>
+                  <code
+                    className="hljs"
+                    dangerouslySetInnerHTML={{ __html: highlightMarkdownCode(line, block.language) }}
+                  />
+                </li>
+              ))}
+            </ol>
+          </div>
         </div>
       );
     case "table":
@@ -9570,6 +10726,63 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
     default:
       return null;
   }
+}
+
+type ProjectFileChangeKind = "added" | "modified" | "deleted";
+
+export function getProjectFileChangeKinds(toolCalls: ToolCallRecord[]): Map<string, ProjectFileChangeKind> {
+  const changes = new Map<string, ProjectFileChangeKind>();
+  for (const toolCall of toolCalls) {
+    if (toolCall.status !== "completed") continue;
+    const result = parseTimelineJson(toolCall.resultJson);
+    const json = result.json;
+    if (!json || typeof json !== "object") continue;
+    const snapshots = (json as Record<string, unknown>).snapshots;
+    if (!Array.isArray(snapshots)) continue;
+    for (const snapshot of snapshots) {
+      if (!snapshot || typeof snapshot !== "object") continue;
+      const value = snapshot as Record<string, unknown>;
+      if (typeof value.path !== "string" || typeof value.before !== "string" || typeof value.after !== "string") continue;
+      const path = value.path.replace(/\\/g, "/");
+      if (!path) continue;
+      if (!value.before && value.after) changes.set(path, "added");
+      else if (value.before && !value.after) changes.set(path, "deleted");
+      else if (value.before !== value.after) changes.set(path, "modified");
+    }
+  }
+  return changes;
+}
+
+function getProjectFileNodeChangeKind(
+  node: ProjectFileTreeNode,
+  changes: Map<string, ProjectFileChangeKind>
+): ProjectFileChangeKind | null {
+  const direct = changes.get(node.path);
+  if (direct) return direct;
+  if (node.kind !== "directory") return null;
+  const nested = [...changes.entries()]
+    .filter(([path]) => path.startsWith(`${node.path}/`))
+    .map(([, change]) => change);
+  if (nested.includes("modified")) return "modified";
+  if (nested.includes("added")) return "added";
+  return nested.includes("deleted") ? "deleted" : null;
+}
+
+function projectFileChangeBadge(change: ProjectFileChangeKind): "A" | "M" | "D" {
+  return change === "added" ? "A" : change === "modified" ? "M" : "D";
+}
+
+function projectFileChangeLabel(change: ProjectFileChangeKind): string {
+  return change === "added" ? "新增" : change === "modified" ? "已修改" : "已删除";
+}
+
+export function highlightMarkdownCode(content: string, language?: string): string {
+  const normalizedLanguage = language?.trim().toLowerCase();
+  const resolvedLanguage = normalizedLanguage ? CODE_LANGUAGE_ALIASES[normalizedLanguage] ?? normalizedLanguage : undefined;
+  if (resolvedLanguage && hljs.getLanguage(resolvedLanguage)) {
+    return hljs.highlight(content, { language: resolvedLanguage, ignoreIllegals: true }).value;
+  }
+  return hljs.highlightAuto(content).value;
 }
 
 function CopyTextButton({ content }: { content: string }) {
@@ -9981,6 +11194,108 @@ function cloneConfig(config: AppConfig): AppConfig {
   };
 }
 
+type McpJsonInput = Record<string, unknown>;
+
+export function parseMcpJsonConfig(text: string): McpServerConfig[] {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`JSON 格式无效：${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const root = getMcpJsonEntries(raw);
+  const seenIds = new Set<string>();
+  const servers: McpServerConfig[] = [];
+
+  for (const [key, value] of Object.entries(root)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`服务 ${key} 必须是对象。`);
+    }
+    const entry = value as McpJsonInput;
+    const id = stringValue(entry.id) ?? key.trim();
+    if (!id) throw new Error("服务 ID 不能为空。");
+    if (seenIds.has(id)) throw new Error(`服务 ID 重复：${id}`);
+    seenIds.add(id);
+
+    const command = stringValue(entry.command);
+    const url = stringValue(entry.url);
+    const transport = normalizeMcpJsonTransport(stringValue(entry.transport) ?? stringValue(entry.type), command, url);
+    if (transport === "stdio" && !command) throw new Error(`服务 ${id} 的 stdio 配置需要 command。`);
+    if (transport !== "stdio" && !url) throw new Error(`服务 ${id} 的 ${transport} 配置需要 url。`);
+
+    servers.push({
+      id,
+      name: stringValue(entry.name) ?? id,
+      description: stringValue(entry.description),
+      command,
+      args: Array.isArray(entry.args) ? entry.args.map(String) : undefined,
+      env: normalizeMcpJsonEnvironment(entry.env),
+      cwd: stringValue(entry.cwd),
+      url,
+      transport,
+      source: "config",
+      enabled: typeof entry.isActive === "boolean" ? entry.isActive : entry.enabled !== false
+    });
+  }
+
+  return servers;
+}
+
+function getMcpJsonEntries(raw: unknown): McpJsonInput {
+  if (Array.isArray(raw)) {
+    return Object.fromEntries(raw.map((value, index) => [`mcp-${index + 1}`, value]));
+  }
+  if (!raw || typeof raw !== "object") throw new Error("JSON 顶层必须是服务对象、服务数组，或包含 mcpServers 的对象。");
+  const root = raw as McpJsonInput;
+  const servers = root.mcpServers;
+  if (servers !== undefined) return getMcpJsonEntries(servers);
+  return root;
+}
+
+function normalizeMcpJsonTransport(value: string | undefined, command: string | undefined, url: string | undefined): "stdio" | "sse" | "streamable_http" {
+  const normalized = value?.toLowerCase().replace(/-/g, "_");
+  if (normalized === "sse") return "sse";
+  if (normalized === "http" || normalized === "streamable_http") return "streamable_http";
+  if (normalized === "stdio") return "stdio";
+  if (normalized) throw new Error(`不支持的 MCP 传输方式：${value}`);
+  return command ? "stdio" : url ? "streamable_http" : "stdio";
+}
+
+function normalizeMcpJsonEnvironment(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("env 必须是键值对象。");
+  return Object.fromEntries(Object.entries(value as McpJsonInput).map(([key, item]) => [key, String(item)]));
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+export function serializeMcpJsonConfig(servers: McpServerConfig[]): Record<string, Record<string, unknown>> {
+  return Object.fromEntries(servers.map((server) => [server.id, {
+    name: server.name,
+    type: server.transport ?? (server.command ? "stdio" : "streamable_http"),
+    ...(server.description ? { description: server.description } : {}),
+    isActive: server.enabled !== false,
+    ...(server.command ? { command: server.command } : {}),
+    ...(server.args?.length ? { args: server.args } : {}),
+    ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),
+    ...(server.cwd ? { cwd: server.cwd } : {}),
+    ...(server.url ? { url: server.url } : {})
+  }]));
+}
+
+function createAvailableMcpId(servers: McpServerConfig[]): string {
+  let index = servers.length + 1;
+  let id = `mcp-${index}`;
+  while (servers.some((server) => server.id === id)) {
+    index += 1;
+    id = `mcp-${index}`;
+  }
+  return id;
+}
+
 function normalizeDraftConfig(config: AppConfig): AppConfig {
   const next = cloneConfig(config);
   next.models = next.models.filter((model) =>
@@ -10310,6 +11625,19 @@ function IconChevronDown() {
 }
 
 function getDisplayMessageContent(message: MessageRecord): string {
+  if (message.role === "user" && message.content.trimStart().startsWith("[internal:")) {
+    if (message.content.includes("gpa-resume")) {
+      return "继续执行剩余的 GPA 计划任务";
+    }
+    if (message.content.includes("gpa-confirm") && message.content.includes("goal")) {
+      return "已确认目标，开始制定计划";
+    }
+    if (message.content.includes("gpa-confirm")) {
+      return "已确认计划，开始执行";
+    }
+    return "继续";
+  }
+
   if (message.role !== "assistant") {
     return message.content;
   }

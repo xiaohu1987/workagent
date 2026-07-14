@@ -145,9 +145,9 @@ export class McpManager {
     const client = await this.createClient(config);
     try {
       const [toolResponse, resourceResponse, templateResponse] = await Promise.all([
-        client.listTools?.() ?? Promise.resolve({ tools: [] }),
-        client.listResources?.() ?? Promise.resolve({ resources: [] }),
-        client.listResourceTemplates?.() ?? Promise.resolve({ resourceTemplates: [] })
+        discover(() => client.listTools?.(), { tools: [] }),
+        discover(() => client.listResources?.(), { resources: [] }),
+        discover(() => client.listResourceTemplates?.(), { resourceTemplates: [] })
       ]);
       return {
         tools: (toolResponse.tools ?? []).map((tool) => ({
@@ -233,6 +233,19 @@ export class McpManager {
       });
       throw error;
     }
+  }
+}
+
+/**
+ * An MCP connection can be valid while a server omits optional discovery APIs.
+ * Connection testing should report the supported capabilities instead of failing
+ * because, for example, resources/list is not implemented.
+ */
+async function discover<T>(operation: () => Promise<T> | undefined, fallback: T): Promise<T> {
+  try {
+    return (await operation()) ?? fallback;
+  } catch {
+    return fallback;
   }
 }
 

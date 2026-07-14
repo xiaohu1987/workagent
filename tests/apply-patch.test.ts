@@ -48,6 +48,10 @@ describe("applyCodexPatch", () => {
     expect(added).toBe("new file\n");
     expect(result.touched).toHaveLength(2);
     expect(result.changes).toHaveLength(2);
+    expect(result.snapshots).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "note.txt", before: "hello\nworld\n", after: "hello\nworld\npatched\n" }),
+      expect.objectContaining({ path: "nested/new.txt", before: "", after: "new file\n" })
+    ]));
   });
 
   it("rejects patch paths outside the selected project folder", async () => {

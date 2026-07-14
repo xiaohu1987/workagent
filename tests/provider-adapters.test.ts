@@ -849,6 +849,52 @@ describe("parseDecisionFromText", () => {
     expect(xml.toolCalls).toMatchObject([{ name: "fs.read_file", arguments: { path: "package.json" } }]);
   });
 
+  it("promotes standalone request_user_input XML into a validated tool call", () => {
+    const decision = parseDecisionFromText([
+      "需要确认几个设计选项：",
+      '<request_user_input title="宝可梦小游戏：需要确认几个设计选项">',
+      '<question id="pokemon_count" label="宝可梦数量" prompt="图鉴里需要多少只宝可梦？" options="6只（精简版）、9只（中等）、12只（丰富版）">',
+      "</question>",
+      '<question id="battle_style" label="对战风格" prompt="对战交互偏好？" options="纯文本、日志式（简单快速）、带简单动画">',
+      "</question>",
+      "</request_user_input>",
+      "请确认后继续。"
+    ].join("\n"));
+
+    expect(decision).toMatchObject({
+      isStructured: true,
+      endTurn: false,
+      toolCalls: [{
+        name: "request_user_input",
+        arguments: {
+          title: "宝可梦小游戏：需要确认几个设计选项",
+          questions: [
+            {
+              id: "pokemon_count",
+              label: "宝可梦数量",
+              prompt: "图鉴里需要多少只宝可梦？",
+              options: [
+                { id: "option_1", label: "6只（精简版）", recommended: true },
+                { id: "option_2", label: "9只（中等）", recommended: false },
+                { id: "option_3", label: "12只（丰富版）", recommended: false }
+              ]
+            }
+          ]
+        }
+      }]
+    });
+    expect(decision.assistantMessage).toContain("需要确认几个设计选项");
+    expect(decision.assistantMessage).not.toContain("<request_user_input");
+  });
+
+  it("leaves standalone request_user_input XML unstructured when no valid options exist", () => {
+    const decision = parseDecisionFromText(
+      '<request_user_input title="确认"><question id="q1" label="问题" prompt="请选择" options=""></question></request_user_input>'
+    );
+
+    expect(decision).toMatchObject({ isStructured: false, toolCalls: [] });
+  });
+
   it("keeps unrepairable text protocols unstructured and prevents tool execution", () => {
     const decision = parseDecisionFromText("<tool_calls>{not valid</tool_calls>");
 
