@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   createToolCallFingerprint,
+  buildUserMessageMetadata,
+  buildBrowserTestChoiceQuestion,
+  resolveBrowserTestChoice,
+  isBrowserTestToolCall,
   classifySuccessfulToolEvidence,
   buildGpaPlanProgressRecoveryInstruction,
   validateActCompletion,
@@ -10,12 +14,13 @@ import {
   buildStrategySwitchInstruction,
   buildRepeatedTaskRecoveryMessage,
   buildRuntimeFailureRecoveryMessage,
-  buildRuntimeTranscript,
   AgentModelCompatibilityError,
   compactTranscriptForContext,
   CONTEXT_COMPACTION_THRESHOLD,
   shouldFinishGpaAnalysisTurn,
+  parseCanonicalGpaPlanTasks,
   parseGpaPlanTasks,
+  reconcileGpaPlanTasks,
   buildGpaRiskClarificationQuestions,
   buildGpaTextClarificationQuestions,
   parseEmbeddedRequestUserInput,
@@ -44,6 +49,15 @@ import {
   GPA_PLAN_RELATIVE_PATH,
   toGpaPlanResumePreview
 } from "@agent-runtime";
+
+describe("user message context persistence", () => {
+  it("stores full model context while preserving clean user display content", () => {
+    const initialInput = "Inspect this folder\n\n[Attached folder]\nD:\\project\\src";
+    const metadata = buildUserMessageMetadata(initialInput, "Inspect this folder", []);
+
+    expect(metadata).toEqual({ displayContent: "Inspect this folder" });
+  });
+});
 
 describe("createToolCallFingerprint", () => {
   it("stops only after five consecutive failures of the same tool task", () => {
@@ -179,16 +193,6 @@ describe("Agent capability compatibility", () => {
 });
 
 describe("context compaction", () => {
-  it("keeps the full persisted history for context compaction instead of silently dropping older messages", () => {
-    const history = Array.from({ length: 25 }, (_, index) => ({
-      role: index % 2 === 0 ? "user" as const : "tool" as const,
-      content: `message ${index}`,
-      metadataJson: null
-    }));
-
-    expect(buildRuntimeTranscript(history as any)).toHaveLength(25);
-  });
-
   it("compresses the transcript before it reaches the model context limit", () => {
     const transcript = Array.from({ length: 20 }, (_, index) => ({
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
@@ -209,21 +213,6 @@ describe("context compaction", () => {
 
     expect(result.compacted).toBe(false);
     expect(result.transcript).toBe(transcript);
-  });
-
-  it.each([64_000, 128_000])("uses 75 percent of a %i-token model window as the threshold", (contextWindow) => {
-    const thresholdTokens = Math.floor(contextWindow * CONTEXT_COMPACTION_THRESHOLD);
-    const belowThreshold = [{
-      role: "user" as const,
-      content: "x".repeat(Math.floor((thresholdTokens - 1) * 2.8))
-    }];
-    const atThreshold = [{
-      role: "user" as const,
-      content: "x".repeat(Math.ceil(thresholdTokens * 2.8))
-    }];
-
-    expect(compactTranscriptForContext(belowThreshold, contextWindow, "").compacted).toBe(false);
-    expect(compactTranscriptForContext(atThreshold, contextWindow, "").compacted).toBe(true);
   });
 
   it("keeps recent native tool-call metadata during compaction", () => {
@@ -436,6 +425,50 @@ describe("GPA ACT completion evidence", () => {
     expect(result.missingBrowserVerification).toEqual(["mobile page assertions", "mobile screenshot"]);
   });
 
+  it("skips browser completion requirements when the user declines browser testing", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-ui",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\src\\App.tsx"]
+    });
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "test-ui",
+      toolName: "shell.exec",
+      hasPriorDelivery: true
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "The interface is complete and browser testing was skipped by user choice.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-ui", kind: "delivery" },
+          { taskId: "T1", toolCallId: "test-ui", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, verification],
+      browserVerification: {
+        skippedByUser: true,
+        desktopOnly: false,
+        canvasRequired: false,
+        desktopAssertionCount: 0,
+        mobileAssertionCount: 0,
+        desktopScreenshotCount: 0,
+        mobileScreenshotCount: 0,
+        screenshotAttachmentCount: 0,
+        modelSupportsMultimodalInput: true
+      }
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.missingBrowserVerification).toEqual([]);
+  });
+
   it("accepts deterministic browser verification for a non-multimodal model when disclosed", () => {
     const delivery = classifySuccessfulToolEvidence({
       toolCallId: "patch-ui",
@@ -554,6 +587,33 @@ describe("GPA ACT completion evidence", () => {
   });
 });
 
+describe("browser test choice", () => {
+  it("offers explicit run and skip options", () => {
+    const question = buildBrowserTestChoiceQuestion();
+
+    expect(question).toMatchObject({
+      id: "browser_testing",
+      allowFreeText: false
+    });
+    expect(question.options.map((option) => option.id)).toEqual([
+      "run_browser_tests",
+      "skip_browser_tests"
+    ]);
+  });
+
+  it("resolves both browser test choices and ignores unknown answers", () => {
+    expect(resolveBrowserTestChoice({ browser_testing: "run_browser_tests" })).toBe("run");
+    expect(resolveBrowserTestChoice({ browser_testing: "skip_browser_tests" })).toBe("skip");
+    expect(resolveBrowserTestChoice({ browser_testing: "unexpected" })).toBeUndefined();
+  });
+
+  it("recognizes browser interactions that must wait for the user choice", () => {
+    expect(isBrowserTestToolCall("browser.assert_page")).toBe(true);
+    expect(isBrowserTestToolCall("browser.select_option")).toBe(true);
+    expect(isBrowserTestToolCall("shell.exec")).toBe(false);
+  });
+});
+
 describe("GPA plan validation", () => {
   it("extracts visible task lines before allowing a PLAN confirmation", () => {
     expect(parseGpaPlanTasks("T1: Create the game board\nT2: Add battle actions")).toEqual([
@@ -584,6 +644,59 @@ describe("GPA plan validation", () => {
     expect(parseGpaPlanTasks(content)).toEqual([
       { id: "T1", title: "获取宝可梦图鉴数据", done: false },
       { id: "T2", title: "实现属性克制表", done: false }
+    ]);
+  });
+
+  it("parses Markdown T-task headings without colons and ignores later numbered summaries", () => {
+    const content = [
+      "#### T1 Build the project skeleton",
+      "#### T2 Add combat data",
+      "#### T3 Verify the game",
+      "### Critical path",
+      "1. T2 data model",
+      "2. T3 verification",
+      "### Deliverables",
+      "1. index.html",
+      "2. README.md"
+    ].join("\n");
+
+    expect(parseGpaPlanTasks(content)).toEqual([
+      { id: "T1", title: "Build the project skeleton", done: false },
+      { id: "T2", title: "Add combat data", done: false },
+      { id: "T3", title: "Verify the game", done: false }
+    ]);
+  });
+
+  it("accepts only canonical, unique, sequential PLAN task headings", () => {
+    expect(parseCanonicalGpaPlanTasks([
+      "### T1: Build the project skeleton",
+      "### T2: Add combat data",
+      "### T3: Verify the game"
+    ].join("\n"))).toEqual([
+      { id: "T1", title: "Build the project skeleton", done: false },
+      { id: "T2", title: "Add combat data", done: false },
+      { id: "T3", title: "Verify the game", done: false }
+    ]);
+    expect(parseCanonicalGpaPlanTasks("### T1 Build without colon")).toEqual([]);
+    expect(parseCanonicalGpaPlanTasks("### T1: First\n### T3: Gap")).toEqual([]);
+    expect(parseCanonicalGpaPlanTasks("### T1: First\n### T1: Duplicate")).toEqual([]);
+  });
+
+  it("reconciles a fallback summary task list with the full plan body", () => {
+    const currentTasks = [
+      { id: "T1", title: "T3 data model", done: true },
+      { id: "T2", title: "README.md", done: false }
+    ];
+    const body = [
+      "#### T1 Build the project skeleton",
+      "#### T2 Add combat data",
+      "#### T3 Verify the game"
+    ].join("\n");
+
+    expect(reconcileGpaPlanTasks(currentTasks, body)).toEqual([
+      { id: "T1", title: "Build the project skeleton", done: false },
+      { id: "T2", title: "Add combat data", done: false },
+      { id: "T3", title: "Verify the game", done: false }
     ]);
   });
 

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BrowserRuntime } from "@browser-runtime";
+import { BrowserRuntime, isBrowserErrorPageUrl } from "@browser-runtime";
 
 const tempDirs: string[] = [];
 
@@ -17,6 +17,11 @@ afterEach(async () => {
 });
 
 describe("BrowserRuntime", () => {
+  it("identifies Chromium internal error page URLs", () => {
+    expect(isBrowserErrorPageUrl("chrome-error://chromewebdata/")).toBe(true);
+    expect(isBrowserErrorPageUrl("http://127.0.0.1:8000/")).toBe(false);
+  });
+
   it("opens tabs, navigates, and supports history", async () => {
     const browser = new BrowserRuntime();
     const threadId = "thread-1";

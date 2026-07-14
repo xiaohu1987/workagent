@@ -46,7 +46,9 @@ import {
   parseGpaCompletedTaskDeclarations,
   nextStageAfterConfirmation,
   parseEmbeddedRequestUserInput,
+  parseCanonicalGpaPlanTasks,
   parseGpaPlanTasks,
+  reconcileGpaPlanTasks,
   parseGpaState
 } from "./gpa";
 import {
@@ -73,8 +75,10 @@ export {
   canEnterGpaAct,
   canStartGpaStage,
   parseEmbeddedRequestUserInput,
+  parseCanonicalGpaPlanTasks,
   parseGpaCompletedTaskDeclarations,
   parseGpaPlanTasks,
+  reconcileGpaPlanTasks,
   parseGpaState
 } from "./gpa";
 export {
@@ -149,6 +153,7 @@ export interface ActCompletionValidationResult {
 
 interface BrowserVerificationEvidenceState {
   required: boolean;
+  testChoice?: BrowserTestChoice;
   canvasRequired: boolean;
   desktopAssertions: Set<string>;
   mobileAssertions: Set<string>;
@@ -163,6 +168,7 @@ interface BrowserVerificationEvidenceState {
 }
 
 interface BrowserCompletionRequirement {
+  skippedByUser?: boolean;
   desktopOnly: boolean;
   canvasRequired: boolean;
   desktopAssertionCount: number;
@@ -173,6 +179,12 @@ interface BrowserCompletionRequirement {
   modelSupportsMultimodalInput: boolean;
   visualSkippedReason?: "model_not_multimodal";
 }
+
+export type BrowserTestChoice = "run" | "skip";
+
+export const BROWSER_TEST_CHOICE_QUESTION_ID = "browser_testing";
+export const RUN_BROWSER_TESTS_OPTION_ID = "run_browser_tests";
+export const SKIP_BROWSER_TESTS_OPTION_ID = "skip_browser_tests";
 
 interface RuntimePersistence {
   getThread(threadId: string): Promise<ThreadRecord>;
@@ -419,6 +431,31 @@ class ThreadSessionRuntime {
     const thread = await this.services.persistence.getThread(this.threadId);
     this.#gpa = parseGpaState(thread.gpaStateJson);
     this.#gpaLoaded = true;
+    if (thread.mode === "project" && thread.cwd && this.#gpa.planTasks.length > 0) {
+      const planFile = await readGpaPlanFile(thread.cwd);
+      if (planFile?.body) {
+        const reconciledTasks = reconcileGpaPlanTasks(this.#gpa.planTasks, planFile.body);
+        if (reconciledTasks !== this.#gpa.planTasks) {
+          const previousTasks = this.#gpa.planTasks;
+          await this.#commitGpa({
+            ...this.#gpa,
+            planTasks: reconciledTasks,
+            updatedAt: new Date().toISOString()
+          });
+          await this.#persistGpaPlanFile({
+            status: planFile.status,
+            tasks: reconciledTasks,
+            body: planFile.body
+          });
+          await this.services.log("gpa.plan_tasks_reconciled", this.threadId, {
+            previousTaskCount: previousTasks.length,
+            taskCount: reconciledTasks.length,
+            previousTaskIds: previousTasks.map((task) => task.id),
+            taskIds: reconciledTasks.map((task) => task.id)
+          });
+        }
+      }
+    }
     return this.#gpa;
   }
 
@@ -777,6 +814,7 @@ class ThreadSessionRuntime {
     const agentOpenedBrowserTabIds = new Set<string>();
     const browserVerificationEvidence: BrowserVerificationEvidenceState = {
       required: false,
+      testChoice: undefined,
       canvasRequired: false,
       desktopAssertions: new Set(),
       mobileAssertions: new Set(),
@@ -807,7 +845,13 @@ class ThreadSessionRuntime {
         updatedAt: new Date().toISOString()
       });
       const priorMessages = await this.services.persistence.listMessages(this.threadId);
-      await this.recordMessage("user", displayContent ?? initialInput, turn.id, attachments.length > 0 ? { attachments } : undefined);
+      const userMessageMetadata = buildUserMessageMetadata(initialInput, displayContent, attachments);
+      await this.recordMessage(
+        "user",
+        initialInput,
+        turn.id,
+        userMessageMetadata
+      );
 
       const multimodalClassification = await this.classifyMultimodalIntent({
         currentInput: initialInput,
@@ -868,7 +912,7 @@ class ThreadSessionRuntime {
       let interruptedVisibleContent = "";
 
       try {
-        let transcript = buildRuntimeTranscript(history);
+        let transcript = compactTranscript(history);
       let hasExecutedToolCall = false;
       const successfulToolCallFingerprints = new Set<string>();
       const successfulToolEvidence: SuccessfulToolEvidence[] = [];
@@ -883,6 +927,31 @@ class ThreadSessionRuntime {
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
+      const requestBrowserTestChoice = async (reason: "browser_tool" | "frontend_delivery") => {
+        if (browserVerificationEvidence.testChoice) {
+          return browserVerificationEvidence.testChoice;
+        }
+        const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+          title: "是否进行浏览器测试？",
+          kind: "generic",
+          allowSkip: false,
+          questions: [buildBrowserTestChoiceQuestion()]
+        });
+        const choice = resolveBrowserTestChoice(answers) ?? "run";
+        browserVerificationEvidence.testChoice = choice;
+        transcript.push({
+          role: "user",
+          content: choice === "run"
+            ? "[Internal browser test choice. Do not quote this instruction.] The user chose to run browser tests. Complete the required browser assertions and screenshots before finishing."
+            : "[Internal browser test choice. Do not quote this instruction.] The user chose to skip browser tests. Do not call browser tools solely for verification. Continue with appropriate non-browser verification and mention that browser testing was skipped by user choice in the final summary."
+        });
+        await this.services.log("browser.test_choice_resolved", this.threadId, {
+          turnRunId: turn.id,
+          choice,
+          reason
+        });
+        return choice;
+      };
       const readRepeatedTaskFailure = () => repeatedTaskFailure as {
         taskKey: string;
         attempts: number;
@@ -987,32 +1056,6 @@ class ThreadSessionRuntime {
         return bootstrapWorkspace;
       };
 
-      const compactTranscriptForModel = async (systemPrompt: string) => {
-        const compaction = compactTranscriptForContext(transcript, model.contextWindow, systemPrompt);
-        if (!compaction.compacted) {
-          return;
-        }
-
-        transcript = compaction.transcript;
-        const compactionPayload = {
-          turnRunId: turn.id,
-          contextWindow: model.contextWindow,
-          threshold: CONTEXT_COMPACTION_THRESHOLD,
-          target: CONTEXT_COMPACTION_TARGET,
-          beforeTokens: compaction.beforeTokens,
-          afterTokens: compaction.afterTokens,
-          messagesBefore: compaction.messagesBefore,
-          messagesAfter: transcript.length
-        };
-        await this.services.log("agent.context_compacted", this.threadId, compactionPayload);
-        await this.services.emit({
-          type: "agent.context_compacted",
-          threadId: this.threadId,
-          payload: compactionPayload,
-          createdAt: new Date().toISOString()
-        });
-      };
-
       while (!repeatedTaskFailure) {
         const prompt = buildRuntimePrompt(
           model,
@@ -1032,7 +1075,27 @@ class ThreadSessionRuntime {
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
         }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${availableToolsPrompt}`;
-        await compactTranscriptForModel(systemPrompt);
+        const compaction = compactTranscriptForContext(transcript, model.contextWindow, systemPrompt);
+        if (compaction.compacted) {
+          transcript = compaction.transcript;
+          const compactionPayload = {
+            turnRunId: turn.id,
+            contextWindow: model.contextWindow,
+            threshold: CONTEXT_COMPACTION_THRESHOLD,
+            target: CONTEXT_COMPACTION_TARGET,
+            beforeTokens: compaction.beforeTokens,
+            afterTokens: compaction.afterTokens,
+            messagesBefore: compaction.messagesBefore,
+            messagesAfter: transcript.length
+          };
+          await this.services.log("agent.context_compacted", this.threadId, compactionPayload);
+          await this.services.emit({
+            type: "agent.context_compacted",
+            threadId: this.threadId,
+            payload: compactionPayload,
+            createdAt: new Date().toISOString()
+          });
+        }
         const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
           ? this.services.config.timeouts.recoveryModelDecisionMs
           : this.services.config.timeouts.modelDecisionMs;
@@ -1366,6 +1429,28 @@ class ThreadSessionRuntime {
           }
         }
 
+        const browserTestToolCallCount = decision.toolCalls.filter(
+          (call) => isBrowserTestToolCall(call.name)
+        ).length;
+        if (this.#gpa.stage === "act" && browserTestToolCallCount > 0) {
+          const choice = browserVerificationEvidence.testChoice ??
+            await requestBrowserTestChoice("browser_tool");
+          if (choice === "skip") {
+            decision.toolCalls = decision.toolCalls.filter(
+              (call) => !isBrowserTestToolCall(call.name)
+            );
+            decision.endTurn = false;
+            decision.goalCompleted = false;
+            await this.services.log("browser.test_tool_calls_skipped", this.threadId, {
+              turnRunId: turn.id,
+              count: browserTestToolCallCount
+            });
+            if (decision.toolCalls.length === 0) {
+              continue;
+            }
+          }
+        }
+
         if (decision.toolCalls.length > 0) {
           prematureCompletionAttempts = 0;
           if (decision.toolCalls[0]?.name !== "fs.read_directory" || executionRecoveryAttempts < 2) {
@@ -1412,6 +1497,7 @@ class ThreadSessionRuntime {
             planTasks: this.#gpa.planTasks,
             successfulEvidence: successfulToolEvidence,
             browserVerification: browserVerificationEvidence.required ? {
+              skippedByUser: browserVerificationEvidence.testChoice === "skip",
               desktopOnly: desktopOnlyBrowserVerification,
               canvasRequired: browserVerificationEvidence.canvasRequired,
               desktopAssertionCount: browserVerificationEvidence.desktopAssertions.size,
@@ -1514,7 +1600,7 @@ class ThreadSessionRuntime {
           });
         }
         const parsedPlanTasks = this.#gpa.stage === "plan"
-          ? parseGpaPlanTasks(assistantMessage ?? "")
+          ? parseCanonicalGpaPlanTasks(assistantMessage ?? "")
           : [];
         let effectivePlanTasks = parsedPlanTasks;
         if (
@@ -1539,10 +1625,10 @@ class ThreadSessionRuntime {
                 { id: "T1", title: "按已确认目标继续完成项目", done: false }
               ];
               const fallbackPlan = [
-                "模型未产出标准任务列表（需要 `T1:` / `T2:` 这类格式），已自动生成可确认的回退计划。",
+                "模型未产出标准任务列表（需要 `### T1: 任务名称`，并按 T2、T3 连续编号），已自动生成可确认的回退计划。",
                 "你可以直接确认后进入执行；也可以先关掉 GPA，普通发消息继续改代码。",
                 "",
-                "T1: 按已确认目标继续完成项目",
+                "### T1: 按已确认目标继续完成项目",
                 "",
                 "验收标准：对照当前项目状态完成目标，并验证可运行。",
                 "",
@@ -1571,7 +1657,7 @@ class ThreadSessionRuntime {
               role: "user",
               content:
                 this.#gpa.stage === "plan"
-                  ? "Your previous PLAN response was not shown because it did not contain a valid task list. Return a user-visible PLAN now. Include at least one task on its own line using exactly `T1: task title` (then T2, T3 as needed), plus acceptance criteria. Do not call tools."
+                  ? "Your previous PLAN response was not shown because it violated the PLAN task ID contract. Rewrite the complete user-visible PLAN now. Every atomic task heading must use exactly `### T1: Task title`, then T2, T3, and so on without gaps or duplicates. Start at T1. Reference those IDs inline in all other sections and do not create additional numbered task lists. Include acceptance criteria. Do not call tools."
                   : "Your previous GOAL response was not shown because it was empty. Return a complete, user-visible GOAL analysis with the objective, acceptance criteria, constraints, and any needed clarification. Do not call tools."
             });
             continue;
@@ -2105,9 +2191,15 @@ class ThreadSessionRuntime {
           }
         }
 
-        // Compact only after the complete native tool batch is recorded so call
-        // envelopes and their results remain together in the retained context.
-        await compactTranscriptForModel(systemPrompt);
+        if (
+          this.#gpa.stage === "act" &&
+          !readRepeatedTaskFailure() &&
+          browserVerificationEvidence.required &&
+          !browserVerificationEvidence.testChoice
+        ) {
+          await requestBrowserTestChoice("frontend_delivery");
+          continue;
+        }
 
         if (reevaluateAfterUserInput) {
           continue;
@@ -2802,6 +2894,18 @@ class ThreadSessionRuntime {
   }
 }
 
+export function buildUserMessageMetadata(
+  initialInput: string,
+  displayContent: string | undefined,
+  attachments: MessageAttachment[]
+): Record<string, unknown> | undefined {
+  const metadata = {
+    ...(attachments.length > 0 ? { attachments } : {}),
+    ...(displayContent !== undefined && displayContent !== initialInput ? { displayContent } : {})
+  };
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
 export function createToolCallFingerprint(name: string, argumentsJson: Record<string, unknown>): string {
   return `${name}:${stableSerialize(argumentsJson)}`;
 }
@@ -2906,12 +3010,66 @@ function buildBrowserVerificationDirective(stage: GpaStage): string {
   return [
     "\n\nFrontend verification policy:",
     "Preferred order: locate with fs/code tools, write changes with apply_patch or fs.write_file, then verify in the app browser when the task is browser-rendered.",
-    "After changing HTML, CSS, JavaScript, JSX, TSX, Vue, Svelte, Canvas, or other browser-rendered resources, gather verification evidence before completing (assert_page and/or capture_screenshot on a fresh page load).",
+    "After changing HTML, CSS, JavaScript, JSX, TSX, Vue, Svelte, Canvas, or other browser-rendered resources, the runtime will ask the user whether browser testing should run. Do not start browser verification before that choice. If the user chooses yes, gather browser evidence before completing; if the user chooses no, skip browser verification and use appropriate non-browser checks.",
     "Desktop ~1440x900 and mobile ~390x844 are recommended unless the user asked for desktop-only.",
     "Useful checks include relevant text/elements, images_loaded, no_horizontal_overflow, no_severe_console_errors, and canvas_nonblank for Canvas/game work.",
     "A screenshot from before the latest file change is weak evidence. If the model supports images, inspect the screenshot attachment before claiming visual quality.",
     "If the model does not support images, rely on deterministic assertions and explicitly state `未执行视觉模型检查（model_not_multimodal）` in the final summary."
   ].join(" ");
+}
+
+export function buildBrowserTestChoiceQuestion() {
+  return {
+    id: BROWSER_TEST_CHOICE_QUESTION_ID,
+    label: "浏览器测试",
+    prompt: "本次改动涉及浏览器页面，是否进行浏览器测试？",
+    options: [
+      {
+        id: RUN_BROWSER_TESTS_OPTION_ID,
+        label: "进行浏览器测试",
+        description: "执行桌面端和移动端页面断言及截图验收。",
+        recommended: true
+      },
+      {
+        id: SKIP_BROWSER_TESTS_OPTION_ID,
+        label: "跳过浏览器测试",
+        description: "跳过浏览器验收，继续使用其他可用验证结果。"
+      }
+    ],
+    allowFreeText: false
+  };
+}
+
+export function resolveBrowserTestChoice(
+  answers: Record<string, string>
+): BrowserTestChoice | undefined {
+  const answer = answers[BROWSER_TEST_CHOICE_QUESTION_ID];
+  if (answer === RUN_BROWSER_TESTS_OPTION_ID) return "run";
+  if (answer === SKIP_BROWSER_TESTS_OPTION_ID) return "skip";
+  return undefined;
+}
+
+const BROWSER_TEST_TOOL_NAMES = new Set([
+  "browser.open_tab",
+  "browser.navigate",
+  "browser.reload",
+  "browser.read_page_text",
+  "browser.inspect_page",
+  "browser.inspect_target",
+  "browser.click",
+  "browser.fill",
+  "browser.select_option",
+  "browser.scroll",
+  "browser.press_key",
+  "browser.wait_for",
+  "browser.set_viewport",
+  "browser.assert_page",
+  "browser.capture_snapshot",
+  "browser.capture_screenshot"
+]);
+
+export function isBrowserTestToolCall(toolName: string): boolean {
+  return BROWSER_TEST_TOOL_NAMES.has(canonicalizeToolName(toolName));
 }
 
 function updateBrowserVerificationEvidence(
@@ -3106,7 +3264,7 @@ export function validateActCompletion(input: {
   const missingVerification = !referencedEvidence.some((item) => item.kinds.includes("verification"));
   const missingBrowserVerification: string[] = [];
   const browser = input.browserVerification;
-  if (browser) {
+  if (browser && !browser.skippedByUser) {
     if (browser.desktopAssertionCount === 0) missingBrowserVerification.push("desktop page assertions");
     if (browser.desktopScreenshotCount === 0) missingBrowserVerification.push("desktop screenshot");
     if (!browser.desktopOnly && browser.mobileAssertionCount === 0) missingBrowserVerification.push("mobile page assertions");
@@ -3729,8 +3887,10 @@ function formatRuntimeDate(date: Date): string {
   }).format(date);
 }
 
-export function buildRuntimeTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {
-  return messages.map((message) => ({
+function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {
+  const maxMessages = 24;
+  const visible = messages.slice(-maxMessages);
+  return visible.map((message) => ({
     role: message.role,
     content: message.content,
     attachments: getMessageAttachments(message)

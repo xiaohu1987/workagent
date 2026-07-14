@@ -36,7 +36,7 @@ import type {
 } from "@shared-types";
 import { normalizeRuntimeTimeouts } from "@shared-types";
 import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@agent-runtime";
-import { BrowserRuntime, loadPage, type PageSnapshot } from "@browser-runtime";
+import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
 import { hashDirectory, PluginRuntime } from "@plugin-runtime";
@@ -117,9 +117,10 @@ export class DesktopBackend {
     this.#config = await loadConfig(this.#layout.configFile);
     this.#db = new DatabaseService(this.#layout.dbFile);
     this.#db.recoverInterruptedThreads();
+    this.removePersistedBrowserErrorTabs();
     this.#mcp = new McpManager();
     await this.syncInstalledPlugins();
-    await this.refreshMcpConfiguration();
+    await this.refreshMcpConfiguration(false);
     await this.refreshSkills();
 
     this.#runtime = new AgentRuntimeService({
@@ -211,6 +212,13 @@ export class DesktopBackend {
       this.#runtime.wakeQueuedMessages(threadId);
     }
     await this.#logs.append("backend.initialized", { logsDir: this.#layout.logsDir, bundledSkillFileCount });
+    setImmediate(() => {
+      void this.#mcp.refresh().then(() =>
+        this.#logs.append("mcp.startup_refresh_completed", {
+          statuses: this.#mcp.listStatuses()
+        })
+      );
+    });
   }
 
   public onEvent(listener: (event: RuntimeEvent) => void): () => void {
@@ -386,7 +394,8 @@ export class DesktopBackend {
 
   public getThreadSnapshot(threadId: string): RuntimeThreadSnapshot {
     const thread = this.#db.getThread(threadId);
-    this.#browser.syncPersistedTabs(threadId, this.#db.listBrowserTabs(threadId));
+    const browserTabs = this.removePersistedBrowserErrorTabs(threadId);
+    this.#browser.syncPersistedTabs(threadId, browserTabs);
     return {
       thread,
       messages: this.#db.listMessages(threadId),
@@ -395,7 +404,7 @@ export class DesktopBackend {
       prompts: this.#db.listUserPrompts(threadId),
       artifacts: this.#db.listArtifacts(threadId),
       knowledgeBases: this.listVisibleKnowledgeBasesForThread(thread),
-      browserTabs: this.#db.listBrowserTabs(threadId),
+      browserTabs,
       projectPlugins: this.listProjectPluginsForThread(thread),
       toolCalls: this.#db.listToolCalls(threadId),
       contextCompaction: this.#db.getLatestContextCompaction(threadId),
@@ -1356,6 +1365,9 @@ export class DesktopBackend {
     const contents = await this.requireBrowserContents(input.threadId, input.tabId);
     const page = await this.readVisibleBrowserPage(contents, false);
     const existing = this.#browser.listTabs(input.threadId).find((tab) => tab.id === input.tabId);
+    if (isBrowserErrorPageUrl(page.url) && existing) {
+      return existing;
+    }
     if (existing && existing.url === page.url && existing.title === page.title) {
       return existing;
     }
@@ -1584,9 +1596,29 @@ export class DesktopBackend {
   }
 
   private async syncBrowserTabFromPage(threadId: string, tabId: string, page: { title: string; url: string; text: string; html?: string }) {
+    if (isBrowserErrorPageUrl(page.url)) {
+      const existing = this.#browser.listTabs(threadId).find((tab) => tab.id === tabId);
+      if (existing) return existing;
+    }
     const tab = this.#browser.syncTab(threadId, tabId, { ...page, html: page.html ?? "" });
     this.persistBrowserTabs(threadId);
     return tab;
+  }
+
+  private removePersistedBrowserErrorTabs(threadId?: string): BrowserTabRecord[] {
+    const threadIds = threadId ? [threadId] : this.#db.listThreads().map((thread) => thread.id);
+    let requestedTabs: BrowserTabRecord[] = [];
+    for (const id of threadIds) {
+      const tabs = this.#db.listBrowserTabs(id);
+      const filtered = tabs.filter((tab) => !isBrowserErrorPageUrl(tab.url));
+      if (filtered.length !== tabs.length) {
+        this.#db.replaceBrowserTabs(id, filtered);
+      }
+      if (id === threadId) {
+        requestedTabs = filtered;
+      }
+    }
+    return requestedTabs;
   }
 
   public async openFileLocation(threadId: string, filePath: string): Promise<string> {
@@ -2358,7 +2390,7 @@ export class DesktopBackend {
     await this.#skills.refresh(this.#layout.root, cwd, pluginRoots);
   }
 
-  private async refreshMcpConfiguration(): Promise<void> {
+  private async refreshMcpConfiguration(connect = true): Promise<void> {
     const pluginServers = await this.#plugins.collectPluginMcpServers(this.#db.listPlugins());
     const effectiveServers = new Map<string, McpServerConfig>();
 
@@ -2375,7 +2407,9 @@ export class DesktopBackend {
     }
 
     this.#mcp.setConfigs([...effectiveServers.values()]);
-    await this.#mcp.refresh();
+    if (connect) {
+      await this.#mcp.refresh();
+    }
   }
 
   private listProjectPluginsForThread(thread: ThreadRecord): Array<{

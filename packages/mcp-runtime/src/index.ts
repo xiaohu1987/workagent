@@ -91,10 +91,10 @@ export class McpManager {
       (config) => config.enabled && (!requested || requested.has(config.id))
     );
 
-    for (const config of activeConfigs) {
+    await Promise.all(activeConfigs.map(async (config) => {
       const existing = this.#clients.get(config.id);
       if (existing && existing.fingerprint === connectionFingerprint(config)) {
-        continue;
+        return;
       }
       if (existing) {
         await existing.client.close?.();
@@ -105,7 +105,7 @@ export class McpManager {
       } catch {
         // Keep other MCP servers usable; the connection state retains the error.
       }
-    }
+    }));
   }
 
   public async listTools(serverIds?: string[]): Promise<McpToolDescriptor[]> {

@@ -38,6 +38,14 @@ export function browserTabOriginKey(url: string): string {
   }
 }
 
+export function isBrowserErrorPageUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === "chrome-error:";
+  } catch {
+    return false;
+  }
+}
+
 export class BrowserRuntime {
   readonly #tabsByThread = new Map<string, BrowserTabSession[]>();
 

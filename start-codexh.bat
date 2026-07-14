@@ -4,8 +4,22 @@ title codexh startup
 
 cd /d "%~dp0"
 
+set "NODE_EXE="
+for /f "delims=" %%I in ('dir /b /s "%USERPROFILE%\.cache\codex-runtimes\*\dependencies\node\bin\node.exe" 2^>nul') do set "NODE_EXE=%%I"
+if not defined NODE_EXE (
+  for /f "delims=" %%I in ('where node 2^>nul') do if not defined NODE_EXE set "NODE_EXE=%%I"
+)
+
+if not defined NODE_EXE (
+  echo ERROR: Node.js was not found.
+  echo Install Node.js 22 or later, then run this script again.
+  pause
+  exit /b 1
+)
+
 set "ELECTRON_PACKAGE_DIR=%cd%\node_modules\electron"
 set "ELECTRON_CLI=%ELECTRON_PACKAGE_DIR%\cli.js"
+set "ELECTRON_EXE=%ELECTRON_PACKAGE_DIR%\dist\electron.exe"
 :found_electron
 
 set "EVITE_CLI=%cd%\node_modules\electron-vite\bin\electron-vite.js"
@@ -24,18 +38,17 @@ if not exist "%ELECTRON_CLI%" (
   exit /b 1
 )
 
-for /f "usebackq delims=" %%I in (`node -e "process.stdout.write(require('./node_modules/electron'))"`) do (
-  set "ELECTRON_EXE=%%I"
-)
-
-if not defined ELECTRON_EXE (
+if not exist "%ELECTRON_EXE%" (
   echo ERROR: Electron runtime could not be resolved.
   pause
   exit /b 1
 )
 
 if not exist "%cd%\tmp" mkdir "%cd%\tmp"
+if not exist "%cd%\log" mkdir "%cd%\log"
 set "USER_DATA_DIR=%cd%\tmp\electron-profile"
+set "STDOUT_LOG=%cd%\log\electron.stdout.log"
+set "STDERR_LOG=%cd%\log\electron.stderr.log"
 set "DIST_DIR=%cd%\dist"
 set "DIST_MAIN=%DIST_DIR%\main\index.js"
 set "DIST_PRELOAD=%DIST_DIR%\preload\index.cjs"
@@ -71,7 +84,7 @@ if exist "%DIST_DIR%" (
 )
 
 echo [2/3] Building fresh dist...
-node "%EVITE_CLI%" build --config apps\desktop\electron.vite.config.ts
+"%NODE_EXE%" "%EVITE_CLI%" build --config apps\desktop\electron.vite.config.ts
 if errorlevel 1 goto :build_failed
 if not exist "%DIST_MAIN%" goto :error
 if not exist "%DIST_PRELOAD%" goto :error
@@ -81,11 +94,11 @@ goto :launch
 :launch
 echo [3/3] Launching codexh with freshly built dist...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$target = [System.IO.Path]::GetFullPath('%ELECTRON_EXE%');" ^
-  "$running = Get-CimInstance Win32_Process -Filter \"Name = 'electron.exe'\" | Where-Object { $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq $target) };" ^
+  "$profile = [System.IO.Path]::GetFullPath('%USER_DATA_DIR%');" ^
+  "$running = Get-CimInstance Win32_Process -Filter \"Name = 'electron.exe'\" | Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($profile, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 };" ^
   "if ($running) { $running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 800 }"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$argsList = @('.', '--user-data-dir=%USER_DATA_DIR%'); Start-Process -FilePath '%ELECTRON_EXE%' -WorkingDirectory '%cd%' -ArgumentList $argsList"
+  "$argsList = @('.', '--user-data-dir=%USER_DATA_DIR%'); Start-Process -FilePath '%ELECTRON_EXE%' -WorkingDirectory '%cd%' -ArgumentList $argsList -RedirectStandardOutput '%STDOUT_LOG%' -RedirectStandardError '%STDERR_LOG%'"
 exit /b 0
 
 :build_failed

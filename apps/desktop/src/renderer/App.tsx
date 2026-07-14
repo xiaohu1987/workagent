@@ -145,13 +145,13 @@ type FileSnapshotDiffLine = {
 };
 
 type ComposerAttachment =
-  | { id: string; kind: "file" | "folder" | "image"; path: string; label: string; file?: File; previewUrl?: string }
+  | { id: string; kind: "file" | "folder" | "image"; path: string; label: string; file?: File; previewUrl?: string; entries?: string[]; entriesTruncated?: boolean }
   | { id: string; kind: "code"; path: string; content: string; label: string; intent: "reference" | "edit" }
   | { id: string; kind: "skill"; skillId: string; label: string; description: string }
   | { id: string; kind: "mcp"; serverId: string; label: string; description: string };
 
 type ComposerAttachmentInput =
-  | { kind: "file" | "folder" | "image"; path: string; label: string; file?: File; previewUrl?: string }
+  | { kind: "file" | "folder" | "image"; path: string; label: string; file?: File; previewUrl?: string; entries?: string[]; entriesTruncated?: boolean }
   | { kind: "code"; path: string; content: string; label: string; intent: "reference" | "edit" }
   | { kind: "skill"; skillId: string; label: string; description: string }
   | { kind: "mcp"; serverId: string; label: string; description: string };
@@ -338,6 +338,7 @@ type FileChangeSummaryItem = {
   kind?: "generated-image" | "generated-video" | "generated-file" | "patch";
   description?: string;
   symbols?: Array<{ name: string; kind: string; change: string }>;
+  snapshot?: FileSnapshot;
 };
 
 type ConversationTurnItem = {
@@ -2344,7 +2345,7 @@ export function App() {
         return;
       }
       const hasMultimodalAttachment = composerAttachments.some(
-        (attachment) => attachment.kind === "file" || attachment.kind === "folder" || attachment.kind === "image"
+        (attachment) => attachment.kind === "file" || attachment.kind === "image"
       );
       if (hasMultimodalAttachment && !selectedComposerModel?.supportsMultimodalInput) {
         unsupportedMultimodalInput = true;
@@ -3478,6 +3479,17 @@ export function App() {
       next.multimodal[kind].defaultProviderId = providerId;
       next.multimodal[kind].defaultModelId = modelId;
     }, `已设为默认${kind === "image" ? "图片" : "视频"}模型`);
+  }
+
+  function setReasoningDefault(providerId: string, modelId: string) {
+    void persistMultimodalChange((next) => {
+      const model = next.models.find((entry) =>
+        entry.providerId === providerId && entry.id === modelId && isReasoningModel(entry)
+      );
+      if (!model) return;
+      next.defaultProvider = providerId;
+      next.defaultModel = modelId;
+    }, "已设为默认推理模型");
   }
 
   function setMultimodalEnabled(kind: "image" | "video", enabled: boolean) {
@@ -4855,7 +4867,7 @@ export function App() {
                         const kind = role === "reasoning" ? null : role;
                         const title = role === "reasoning" ? "推理模型" : role === "image" ? "图片模型" : "视频模型";
                         const hint = role === "reasoning"
-                          ? "手动添加后会出现在聊天下拉；可随时移除。"
+                          ? "手动添加后会出现在聊天下拉；可设置默认模型或随时移除。"
                           : `从统一模型库中分配${role === "image" ? "图片" : "视频"}生成模型。`;
                         return (
                           <div key={role} className={`config-block multimodal-model-panel is-${role}`}>
@@ -4888,7 +4900,8 @@ export function App() {
                                 const isDefault = kind
                                   ? configDraft.multimodal[kind].defaultProviderId === model.providerId &&
                                     configDraft.multimodal[kind].defaultModelId === model.id
-                                  : false;
+                                  : configDraft.defaultProvider === model.providerId &&
+                                    configDraft.defaultModel === model.id;
                                 const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
                                 return (
                                   <div key={modelKey(model.providerId, model.id)} className="provider-model-row multimodal-list-row">
@@ -4901,7 +4914,16 @@ export function App() {
                                       {model.supportsVideoGeneration ? <em className="mm-tag is-video">视频</em> : null}
                                     </div>
                                     <div className="provider-model-actions">
-                                      {kind && !isDefault ? <button className="settings-mini-button" onClick={() => setMultimodalDefault(kind, model.providerId, model.id)}>设为默认</button> : null}
+                                      {!isDefault ? (
+                                        <button
+                                          className="settings-mini-button"
+                                          onClick={() => kind
+                                            ? setMultimodalDefault(kind, model.providerId, model.id)
+                                            : setReasoningDefault(model.providerId, model.id)}
+                                        >
+                                          设为默认
+                                        </button>
+                                      ) : null}
                                       <button className="settings-mini-button" onClick={() => removeFromMultimodalRole(model.providerId, model.id)}>移除</button>
                                     </div>
                                   </div>
@@ -4925,7 +4947,9 @@ export function App() {
 
                       <div className="settings-save-row">
                         <span className="subtle-inline">
-                          操作即保存 · 默认图片：{configDraft.multimodal.image.defaultModelId ?? "未设置"}
+                          操作即保存 · 默认推理：{configDraft.defaultModel ?? "未设置"}
+                          {" · "}
+                          默认图片：{configDraft.multimodal.image.defaultModelId ?? "未设置"}
                           {" · "}
                           默认视频：{configDraft.multimodal.video.defaultModelId ?? "未设置"}
                         </span>
@@ -6689,10 +6713,15 @@ function ProjectFilesWorkspace({
               icon: <IconCompose />,
               onSelect: () => {
                 const target = resolveProjectFilePath(projectRoot, contextMenu.node.path);
+                const folderManifest = contextMenu.node.kind === "directory"
+                  ? buildProjectFolderManifest(contextMenu.node)
+                  : null;
                 onAddAttachment({
                   kind: contextMenu.node.kind === "directory" ? "folder" : "file",
                   path: target,
-                  label: contextMenu.node.name
+                  label: contextMenu.node.name,
+                  entries: folderManifest?.entries,
+                  entriesTruncated: folderManifest?.truncated
                 });
               }
             }
@@ -6834,6 +6863,24 @@ export function resolveProjectFilePath(projectRoot: string, relativePath: string
   return relative ? `${root}${separator}${relative}` : root;
 }
 
+export function buildProjectFolderManifest(node: ProjectFileTreeNode, maximumEntries = 200) {
+  const entries: string[] = [];
+  let truncated = false;
+  const visit = (children: ProjectFileTreeNode[]) => {
+    for (const child of children) {
+      if (entries.length >= maximumEntries) {
+        truncated = true;
+        return;
+      }
+      entries.push(child.kind === "directory" ? `${child.path}/` : child.path);
+      if (child.kind === "directory") visit(child.children);
+      if (truncated) return;
+    }
+  };
+  visit(node.children);
+  return { entries, truncated };
+}
+
 export function formatComposerAttachments(attachments: ComposerAttachment[]): string {
   return attachments
     .map((attachment) => {
@@ -6855,7 +6902,21 @@ export function formatComposerAttachments(attachments: ComposerAttachment[]): st
       if (attachment.kind === "image") {
         return `[Attached image]\n${attachment.path}\nUse the image attachment as visual reference when the selected model supports image input.`;
       }
-      return attachment.kind === "file" ? `[Attached file]\n${attachment.path}` : `[Attached folder]\n${attachment.path}`;
+      if (attachment.kind === "folder") {
+        const manifest = attachment.entries?.length
+          ? [
+              `Directory tree (${attachment.entries.length}${attachment.entriesTruncated ? "+" : ""} entries):`,
+              ...attachment.entries.map((entry) => `- ${entry}`)
+            ].join("\n")
+          : "Directory tree was not preloaded.";
+        return [
+          "[Attached folder - required task context]",
+          `path: ${attachment.path}`,
+          manifest,
+          "Inspect this folder before answering. Use fs.read_directory on the exact path, then use fs.read_file for the files relevant to the request. Do not claim the folder was inspected until those tool calls succeed."
+        ].join("\n");
+      }
+      return `[Attached file]\n${attachment.path}`;
     })
     .join("\n\n");
 }
@@ -7134,7 +7195,10 @@ function ProjectPreviewWorkspace({
             <ol className="project-preview-code project-preview-diff" aria-label={`${currentPath} 快照 Diff`}>
               {diffLines.map((line, index) => (
                 <li key={`${currentPath}-diff-${index}`} className={`is-${line.kind}`}>
-                  <code>{line.kind === "context" ? " " : line.kind === "added" ? "+" : "-"} {line.content}</code>
+                  <code>
+                    <span className="project-preview-diff-marker" aria-hidden="true">{getFileSnapshotDiffMarker(line.kind)}</span>
+                    <span>{line.content}</span>
+                  </code>
                 </li>
               ))}
             </ol>
@@ -7287,6 +7351,56 @@ export function buildFileSnapshotDiff(before: string, after: string): FileSnapsh
     ...afterLines.slice(prefix, afterLines.length - suffix).map((content) => ({ kind: "added" as const, content })),
     ...beforeLines.slice(beforeLines.length - suffix).map((content) => ({ kind: "context" as const, content }))
   ];
+}
+
+export function buildFileSnapshotDiffPreview(before: string, after: string, maximumLines = 180) {
+  const lines = buildFileSnapshotDiff(before, after);
+  const changedIndices = lines
+    .map((line, index) => line.kind === "context" ? -1 : index)
+    .filter((index) => index >= 0);
+  const firstChanged = changedIndices[0] ?? 0;
+  const lastChanged = changedIndices.at(-1) ?? Math.min(lines.length - 1, 10);
+  const start = Math.max(0, firstChanged - 5);
+  const end = Math.min(lines.length, lastChanged + 6);
+  const selected = lines.slice(start, end).map((line, index) => ({
+    ...line,
+    lineNumber: start + index + 1,
+    omitted: false
+  }));
+  const boundedMaximum = Math.max(20, maximumLines);
+  const visible = selected.length <= boundedMaximum
+    ? selected
+    : [
+        ...selected.slice(0, Math.floor(boundedMaximum / 2)),
+        {
+          kind: "context" as const,
+          content: `... 隐藏 ${selected.length - boundedMaximum} 行变更 ...`,
+          lineNumber: null,
+          omitted: true
+        },
+        ...selected.slice(selected.length - Math.ceil(boundedMaximum / 2))
+      ];
+  return [
+    ...(start > 0 ? [{
+      kind: "context" as const,
+      content: `... 隐藏 ${start} 行未变更内容 ...`,
+      lineNumber: null,
+      omitted: true
+    }] : []),
+    ...visible,
+    ...(end < lines.length ? [{
+      kind: "context" as const,
+      content: `... 隐藏 ${lines.length - end} 行未变更内容 ...`,
+      lineNumber: null,
+      omitted: true
+    }] : [])
+  ];
+}
+
+export function getFileSnapshotDiffMarker(kind: FileSnapshotDiffLine["kind"]): string {
+  if (kind === "added") return "+";
+  if (kind === "removed") return "-";
+  return " ";
 }
 
 function BrowserWorkspace({
@@ -8198,6 +8312,7 @@ function getToolFileChanges(
       const touched = Array.isArray(resultJson?.touched) ? resultJson.touched : [];
       return structured.map((raw, index) => {
         const change = raw as Record<string, unknown>;
+        const relativePath = toWorkspaceRelativePath(String(change.path ?? ""), workspaceRoot);
         const actionRaw = String(change.action ?? "update");
         const action: FileChangeAction =
           actionRaw === "add" ? "created" : actionRaw === "delete" ? "deleted" : "modified";
@@ -8211,12 +8326,13 @@ function getToolFileChanges(
               .filter((symbol) => symbol.name)
           : undefined;
         return decorateGeneratedFileChange({
-          path: toWorkspaceRelativePath(String(change.path ?? ""), workspaceRoot),
+          path: relativePath,
           absolutePath: typeof touched[index] === "string" ? touched[index] : undefined,
           action,
           additions: Number(change.additions ?? 0),
           deletions: Number(change.deletions ?? 0),
-          symbols
+          symbols,
+          snapshot: findResultFileSnapshot(resultJson, relativePath, workspaceRoot)
         });
       });
     }
@@ -8227,7 +8343,8 @@ function getToolFileChanges(
       : Array.isArray(result.touched) ? result.touched : [];
     return changes.map((change, index) => decorateGeneratedFileChange({
       ...change,
-      absolutePath: typeof touched[index] === "string" ? touched[index] : undefined
+      absolutePath: typeof touched[index] === "string" ? touched[index] : undefined,
+      snapshot: findResultFileSnapshot(resultJson, change.path, workspaceRoot)
     }));
   }
 
@@ -8252,7 +8369,8 @@ function getToolFileChanges(
           action: "modified" as const,
           additions: symbols.filter((symbol) => symbol.change === "added").length,
           deletions: symbols.filter((symbol) => symbol.change === "removed").length,
-          symbols
+          symbols,
+          snapshot: findResultFileSnapshot(resultJson, path, workspaceRoot)
         }]
       : [];
   }
@@ -8265,15 +8383,41 @@ function getToolFileChanges(
     return path
       ? [decorateGeneratedFileChange({
           path: toWorkspaceRelativePath(path, workspaceRoot),
-          absolutePath,
-          action: "created",
-          additions: 0,
-          deletions: 0
-        })]
+        absolutePath,
+        action: "created",
+        additions: 0,
+        deletions: 0,
+        snapshot: findResultFileSnapshot(resultJson, path, workspaceRoot)
+      })]
       : [];
   }
 
   return [];
+}
+
+function findResultFileSnapshot(
+  resultJson: Record<string, unknown> | undefined,
+  filePath: string,
+  workspaceRoot?: string | null
+): FileSnapshot | undefined {
+  const snapshots = resultJson?.snapshots;
+  if (!Array.isArray(snapshots)) return undefined;
+  const targetPath = toWorkspaceRelativePath(filePath, workspaceRoot).replace(/\\/g, "/").toLowerCase();
+  for (const candidate of snapshots) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const value = candidate as Record<string, unknown>;
+    if (typeof value.path !== "string" || typeof value.before !== "string" || typeof value.after !== "string") continue;
+    const snapshotPath = toWorkspaceRelativePath(value.path, workspaceRoot).replace(/\\/g, "/");
+    if (snapshotPath.toLowerCase() !== targetPath) continue;
+    return {
+      path: snapshotPath,
+      before: value.before,
+      after: value.after,
+      beforeTruncated: value.beforeTruncated === true,
+      afterTruncated: value.afterTruncated === true
+    };
+  }
+  return undefined;
 }
 
 function parsePatchFileChanges(patch: string, workspaceRoot?: string | null): FileChangeSummaryItem[] {
@@ -8326,7 +8470,16 @@ function mergeFileChange(existing: FileChangeSummaryItem | undefined, next: File
     deletions: existing.deletions + next.deletions,
     kind: next.kind ?? existing.kind,
     description: next.description ?? existing.description,
-    symbols: symbolMap.size > 0 ? [...symbolMap.values()] : undefined
+    symbols: symbolMap.size > 0 ? [...symbolMap.values()] : undefined,
+    snapshot: existing.snapshot && next.snapshot
+      ? {
+          path: next.snapshot.path,
+          before: existing.snapshot.before,
+          after: next.snapshot.after,
+          beforeTruncated: existing.snapshot.beforeTruncated,
+          afterTruncated: next.snapshot.afterTruncated
+        }
+      : next.snapshot ?? existing.snapshot
   };
 }
 
@@ -8348,30 +8501,157 @@ function FileChangeSummary({
   files: FileChangeSummaryItem[];
   onOpenFolder: (filePath: string) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const [diffPreview, setDiffPreview] = useState<{ file: FileChangeSummaryItem; anchor: DOMRect } | null>(null);
+  const hoverTimerRef = useRef<number | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+  }, []);
   if (files.length === 0) {
     return null;
   }
 
+  const defaultVisibleCount = 5;
+  const canExpand = files.length > defaultVisibleCount;
+  const visibleFiles = expanded ? files : files.slice(0, defaultVisibleCount);
+
+  const clearPreviewCloseTimer = () => {
+    if (closeTimerRef.current === null) return;
+    window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  };
+  const startDiffPreviewTimer = (file: FileChangeSummaryItem, anchor: DOMRect) => {
+    if (!file.snapshot) return;
+    clearPreviewCloseTimer();
+    if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = window.setTimeout(() => {
+      setDiffPreview({ file, anchor });
+      hoverTimerRef.current = null;
+    }, 3_000);
+  };
+  const scheduleDiffPreviewClose = () => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+    clearPreviewCloseTimer();
+    closeTimerRef.current = window.setTimeout(() => {
+      setDiffPreview(null);
+      closeTimerRef.current = null;
+    }, 140);
+  };
+
   return (
-    <section className="generated-file-list" aria-label="主要改动文件">
-      <h3 className="generated-file-list-title">主要改动文件</h3>
-      <ul className="generated-file-list-items">
-        {files.map((file) => (
-          <li key={file.path} className="generated-file-list-item">
+    <>
+      <section className="generated-file-list" aria-label="主要改动文件">
+        <header className="generated-file-list-head">
+          <div className="generated-file-list-heading">
+            <span className="generated-file-list-icon" aria-hidden="true"><IconFileChanges /></span>
+            <h3 className="generated-file-list-title">主要改动文件</h3>
+            <span className="generated-file-list-count">{files.length}</span>
+          </div>
+          {canExpand ? (
             <button
               type="button"
-              className="generated-file-path"
-              onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
-              title="打开所在文件夹"
+              className={`generated-file-list-toggle ${expanded ? "is-expanded" : ""}`}
+              aria-expanded={expanded}
+              title={expanded ? "收起文件列表" : `展开全部 ${files.length} 个文件`}
+              onClick={() => {
+                setExpanded((current) => !current);
+                setDiffPreview(null);
+              }}
             >
-              {getFileLeafName(file.path)}
+              <span>{visibleFiles.length}/{files.length}</span>
+              <IconChevronDown />
             </button>
-            <span className="generated-file-sep" aria-hidden="true">—</span>
-            <span className="generated-file-desc">{getMainChangedFileDescription(file)}</span>
-          </li>
+          ) : null}
+        </header>
+        <ul className="generated-file-list-items">
+          {visibleFiles.map((file) => (
+            <li
+              key={file.path}
+              className={`generated-file-list-item ${file.snapshot ? "has-diff-preview" : ""}`}
+              onMouseEnter={(event) => startDiffPreviewTimer(file, event.currentTarget.getBoundingClientRect())}
+              onMouseLeave={scheduleDiffPreviewClose}
+            >
+              <button
+                type="button"
+                className="generated-file-path"
+                onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
+                title={file.snapshot ? "停留 3 秒查看快照 Diff；点击打开所在文件夹" : "打开所在文件夹"}
+              >
+                {getFileLeafName(file.path)}
+              </button>
+              <span className="generated-file-sep" aria-hidden="true">—</span>
+              <span className="generated-file-desc">{getMainChangedFileDescription(file)}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+      {diffPreview?.file.snapshot ? (
+        <FileSnapshotDiffPopover
+          file={diffPreview.file}
+          anchor={diffPreview.anchor}
+          onMouseEnter={clearPreviewCloseTimer}
+          onMouseLeave={scheduleDiffPreviewClose}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function FileSnapshotDiffPopover({
+  file,
+  anchor,
+  onMouseEnter,
+  onMouseLeave
+}: {
+  file: FileChangeSummaryItem;
+  anchor: DOMRect;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
+}) {
+  const snapshot = file.snapshot;
+  if (!snapshot) return null;
+  const lines = buildFileSnapshotDiffPreview(snapshot.before, snapshot.after);
+  const width = Math.min(720, window.innerWidth - 32);
+  const left = Math.max(16, Math.min(anchor.left, window.innerWidth - width - 16));
+  const placeAbove = anchor.top > Math.min(440, window.innerHeight * 0.56);
+  const style: CSSProperties = placeAbove
+    ? { left, width, bottom: Math.max(16, window.innerHeight - anchor.top + 8) }
+    : { left, width, top: Math.min(window.innerHeight - 180, anchor.bottom + 8) };
+
+  return createPortal(
+    <aside
+      className="generated-file-diff-popover"
+      aria-label={`${file.path} 快照 Diff`}
+      style={style}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+    >
+      <header className="generated-file-diff-head">
+        <span title={file.path}>{file.path}</span>
+        <div>
+          <b>+{file.additions}</b>
+          <i>-{file.deletions}</i>
+        </div>
+      </header>
+      <div className="generated-file-diff-code">
+        {lines.map((line, index) => (
+          <div key={`${file.path}-hover-diff-${index}`} className={`is-${line.kind} ${line.omitted ? "is-omitted" : ""}`}>
+            <span className="generated-file-diff-line-number" aria-hidden="true">{line.lineNumber ?? ""}</span>
+            <span className="generated-file-diff-marker" aria-hidden="true">{line.omitted ? "" : getFileSnapshotDiffMarker(line.kind)}</span>
+            <code>{line.omitted ? line.content : renderCodePreviewLine(line.content, `${file.path}-hover-${index}`)}</code>
+          </div>
         ))}
-      </ul>
-    </section>
+      </div>
+      {snapshot.beforeTruncated || snapshot.afterTruncated ? (
+        <footer className="generated-file-diff-note">快照内容过长，仅显示已保存的部分。</footer>
+      ) : null}
+    </aside>,
+    document.body
   );
 }
 
@@ -8569,7 +8849,13 @@ function getFileParentPath(filePath: string) {
   return index === -1 ? "./" : normalized.slice(0, index + 1);
 }
 
-export function buildPlanTimelineItems(state: GpaState) {
+type PlanTimelineItem = {
+  id: string;
+  label: string;
+  status: "pending" | "in_progress" | "completed";
+};
+
+export function buildPlanTimelineItems(state: GpaState): PlanTimelineItem[] {
   const phases: Array<{ id: Exclude<GpaStage, "off">; label: string }> = [
     { id: "goal", label: "Inspect and clarify the goal" },
     { id: "plan", label: "Build an executable plan" },
@@ -11625,6 +11911,14 @@ function IconChevronDown() {
 }
 
 function getDisplayMessageContent(message: MessageRecord): string {
+  if (message.role === "user" && message.metadataJson) {
+    try {
+      const metadata = JSON.parse(message.metadataJson) as { displayContent?: unknown };
+      if (typeof metadata.displayContent === "string") return metadata.displayContent;
+    } catch {
+      // Fall back to stored content for legacy messages with malformed metadata.
+    }
+  }
   if (message.role === "user" && message.content.trimStart().startsWith("[internal:")) {
     if (message.content.includes("gpa-resume")) {
       return "继续执行剩余的 GPA 计划任务";

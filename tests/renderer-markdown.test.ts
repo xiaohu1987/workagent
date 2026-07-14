@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProjectFileTree,
+  buildProjectFolderManifest,
   buildFileSnapshotDiff,
+  buildFileSnapshotDiffPreview,
+  getFileSnapshotDiffMarker,
   getProjectFileChangeKinds,
   buildContextUsage,
   buildPlanTimelineItems,
@@ -198,6 +201,45 @@ describe("parseMarkdownBlocks", () => {
       { kind: "added", content: "new" },
       { kind: "context", content: "last" }
     ]);
+  });
+
+  it("includes a bounded directory tree and inspection requirement for attached folders", () => {
+    const folder = buildProjectFileTree([
+      { path: "src", kind: "directory" },
+      { path: "src/app.ts", kind: "file" },
+      { path: "src/lib", kind: "directory" },
+      { path: "src/lib/tool.ts", kind: "file" }
+    ])[0]!;
+    const manifest = buildProjectFolderManifest(folder);
+    const context = formatComposerAttachments([{
+      id: "folder",
+      kind: "folder",
+      path: "D:\\project\\src",
+      label: "src",
+      entries: manifest.entries,
+      entriesTruncated: manifest.truncated
+    }]);
+
+    expect(context).toContain("src/app.ts");
+    expect(context).toContain("src/lib/tool.ts");
+    expect(context).toContain("Use fs.read_directory");
+  });
+
+  it("uses visible Git-style markers for snapshot additions and removals", () => {
+    expect(getFileSnapshotDiffMarker("removed")).toBe("-");
+    expect(getFileSnapshotDiffMarker("added")).toBe("+");
+    expect(getFileSnapshotDiffMarker("context")).toBe(" ");
+  });
+
+  it("keeps hover diff previews focused around changed lines", () => {
+    const before = [...Array.from({ length: 30 }, (_, index) => `before-${index}`), "old", ...Array.from({ length: 30 }, (_, index) => `after-${index}`)].join("\n");
+    const after = before.replace("old", "new");
+    const preview = buildFileSnapshotDiffPreview(before, after);
+
+    expect(preview.some((line) => line.omitted && line.content.includes("隐藏"))).toBe(true);
+    expect(preview.some((line) => line.kind === "removed" && line.content === "old")).toBe(true);
+    expect(preview.some((line) => line.kind === "added" && line.content === "new")).toBe(true);
+    expect(preview.length).toBeLessThan(20);
   });
 
   it("uses Git-like file states from task snapshots", () => {

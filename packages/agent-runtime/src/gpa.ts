@@ -176,7 +176,10 @@ export function buildGpaSystemDirective(
   const webFrontendRule = state.stage === "act" && options?.webFrontendTask
     ? "\n【网页/前端任务约束】禁止用 Python（python -c / *.py）生成或改写 HTML/CSS/JS。请使用 apply_patch 或 fs.write_file。优先顺序建议：先用 fs/code 定位并写出改动，再按需预览验证；完成前须有浏览器断言/截图等验证证据。"
     : "";
-  return `${header}\n\n${rules[state.stage]}${analysisClarificationRule}${actClarificationRule}${webFrontendRule}`;
+  const planTaskIdContract = state.stage === "plan"
+    ? "\n[PLAN task ID contract]\nEvery atomic task heading must use exactly `### T1: Task title`. Continue with T2, T3, and so on without gaps or duplicates. Start at T1. Do not create new numbered task lists in critical-path, risk, summary, or deliverable sections; reference the existing T-IDs inline instead. A PLAN that violates this format will be rejected and must be rewritten."
+    : "";
+  return `${header}\n\n${rules[state.stage]}${analysisClarificationRule}${actClarificationRule}${webFrontendRule}${planTaskIdContract}`;
 }
 
 /** GPA workflow is project-workspace only; chat threads may only turn it off. */
@@ -209,6 +212,25 @@ export function nextStageAfterConfirmation(stage: GpaStage): GpaStage {
   return stage;
 }
 
+export function parseCanonicalGpaPlanTasks(content: string): GpaState["planTasks"] {
+  const tasks: GpaState["planTasks"] = [];
+  const seenIds = new Set<string>();
+  for (const line of content.split(/\r?\n/)) {
+    const match = line.match(/^\s*###\s+(T\d+)\s*:\s*(.+?)\s*$/i);
+    if (!match) continue;
+    const id = match[1].toUpperCase();
+    const title = match[2].replace(/\*\*/g, "").replace(/`/g, "").trim();
+    if (!title || seenIds.has(id)) {
+      return [];
+    }
+    seenIds.add(id);
+    tasks.push({ id, title: title.slice(0, 180), done: false });
+  }
+  return tasks.length > 0 && tasks.every((task, index) => task.id === `T${index + 1}`)
+    ? tasks
+    : [];
+}
+
 /** Extracts user-visible GPA plan tasks from the PLAN response. */
 export function parseGpaPlanTasks(content: string): GpaState["planTasks"] {
   const tasks: GpaState["planTasks"] = [];
@@ -225,6 +247,17 @@ export function parseGpaPlanTasks(content: string): GpaState["planTasks"] {
     seenIds.add(id);
     tasks.push({ id, title: title.slice(0, 180), done: false });
   };
+
+  // Some models emit task headings without a colon, such as
+  // `#### T1 Build the project skeleton`.
+  for (const line of lines) {
+    const match = line.match(
+      /^\s*#{1,6}\s*(T\d+)(?:\s*[:\uFF1A-]\s*|\s+)(.+?)\s*$/i
+    );
+    if (!match) continue;
+    appendTask(match[1], match[2]);
+    if (tasks.length >= 20) break;
+  }
 
   // Prefer explicit T-ids, including Markdown headings such as `### T1:`.
   for (const line of lines) {
@@ -258,6 +291,26 @@ export function parseGpaPlanTasks(content: string): GpaState["planTasks"] {
   }
 
   return tasks;
+}
+
+export function reconcileGpaPlanTasks(
+  currentTasks: GpaState["planTasks"],
+  planBody: string
+): GpaState["planTasks"] {
+  const parsedTasks = parseGpaPlanTasks(planBody);
+  if (parsedTasks.length <= currentTasks.length) {
+    return currentTasks;
+  }
+
+  const completedStableTasks = new Set(
+    currentTasks
+      .filter((task) => task.done)
+      .map((task) => `${task.id.toUpperCase()}\u0000${task.title.trim()}`)
+  );
+  return parsedTasks.map((task) => ({
+    ...task,
+    done: completedStableTasks.has(`${task.id.toUpperCase()}\u0000${task.title.trim()}`)
+  }));
 }
 
 function clarificationOptions(question: string): UserInputOption[] {
