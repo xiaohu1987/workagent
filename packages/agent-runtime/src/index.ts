@@ -106,6 +106,19 @@ export const MAX_AGENT_PROTOCOL_FAILURES = 2;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
+export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 32_000;
+export const MAX_CONTEXT_MESSAGE_TOKENS = 24_000;
+
+export function isUpstreamContextOverflowError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b400\s+Upstream error:\s*400\b/i.test(message)) {
+    return true;
+  }
+  if (!/\b(?:HTTP\s*)?400\b/i.test(message)) {
+    return false;
+  }
+  return /(context(?:\s+window)?|token|request|payload|body).*(?:too\s+(?:large|long|many)|exceed|limit|maximum)|(?:too\s+(?:large|long|many)|exceed|limit|maximum).*(context|token|request|payload|body)/i.test(message);
+}
 
 type Submission =
   | { type: "queue_wakeup" }
@@ -960,6 +973,7 @@ class ThreadSessionRuntime {
       let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
+      let upstreamContextRecoveryAttempts = 0;
       let agentProtocolFailureAttempts = 0;
       let gpaAnalysisValidationAttempts = 0;
       let gpaPlanProgressReminderIssued = false;
@@ -1075,11 +1089,24 @@ class ThreadSessionRuntime {
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
         }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${availableToolsPrompt}`;
-        const compaction = compactTranscriptForContext(transcript, model.contextWindow, systemPrompt);
-        if (compaction.compacted) {
+        const compactContext = async (
+          trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery",
+          force = false
+        ): Promise<boolean> => {
+          const compaction = compactTranscriptForContext(
+            transcript,
+            model.contextWindow,
+            systemPrompt,
+            { force }
+          );
+          if (!compaction.compacted) {
+            return false;
+          }
           transcript = compaction.transcript;
           const compactionPayload = {
             turnRunId: turn.id,
+            trigger,
+            reason: compaction.reason,
             contextWindow: model.contextWindow,
             threshold: CONTEXT_COMPACTION_THRESHOLD,
             target: CONTEXT_COMPACTION_TARGET,
@@ -1095,7 +1122,9 @@ class ThreadSessionRuntime {
             payload: compactionPayload,
             createdAt: new Date().toISOString()
           });
-        }
+          return true;
+        };
+        await compactContext("pre_model_request");
         const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
           ? this.services.config.timeouts.recoveryModelDecisionMs
           : this.services.config.timeouts.modelDecisionMs;
@@ -1127,6 +1156,31 @@ class ThreadSessionRuntime {
             () => modelTurnAbortController.abort()
           );
         } catch (error) {
+          if (
+            !abortController.signal.aborted &&
+            upstreamContextRecoveryAttempts === 0 &&
+            isUpstreamContextOverflowError(error)
+          ) {
+            upstreamContextRecoveryAttempts += 1;
+            await compactContext("upstream_400_recovery", true);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            await this.services.log("provider.context_overflow_recovery", this.threadId, {
+              turnRunId: turn.id,
+              attempt: upstreamContextRecoveryAttempts,
+              error: errorMessage
+            });
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: upstreamContextRecoveryAttempts,
+                maxAttempts: 1,
+                reason: "upstream_context_overflow"
+              },
+              createdAt: new Date().toISOString()
+            });
+            continue;
+          }
           if (!(error instanceof ModelDecisionTimeoutError) || abortController.signal.aborted) {
             throw error;
           }
@@ -2036,7 +2090,8 @@ class ThreadSessionRuntime {
 
           const completedAt = new Date().toISOString();
           const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result);
-          const resultJson = JSON.stringify(sanitizedResult);
+          const resultJson = JSON.stringify({ ...result, json: sanitizedResult.json });
+          const eventResultJson = JSON.stringify(sanitizedResult);
           const status = result.ok ? "completed" : "failed";
           await this.services.persistence.finishToolCall(toolRecord.id, {
             status,
@@ -2050,7 +2105,7 @@ class ThreadSessionRuntime {
               toolCallId: toolRecord.id,
               toolName: toolCall.name,
               turnRunId: toolRecord.turnRunId,
-              resultJson,
+              resultJson: eventResultJson,
               status,
               completedAt,
               ok: result.ok
@@ -2190,6 +2245,8 @@ class ThreadSessionRuntime {
             }
           }
         }
+
+        await compactContext("post_tool_batch");
 
         if (
           this.#gpa.stage === "act" &&
@@ -3910,10 +3967,12 @@ function getMessageAttachments(message: MessageRecord): MessageAttachment[] | un
 export function compactTranscriptForContext(
   transcript: ProviderTurnInput["transcript"],
   contextWindow: number,
-  systemPrompt: string
+  systemPrompt: string,
+  options: { force?: boolean } = {}
 ): {
   transcript: ProviderTurnInput["transcript"];
   compacted: boolean;
+  reason: "threshold" | "oversized_message" | "forced" | null;
   beforeTokens: number;
   afterTokens: number;
   messagesBefore: number;
@@ -3922,10 +3981,20 @@ export function compactTranscriptForContext(
   const systemTokens = estimateRuntimeTokens(systemPrompt);
   const transcriptTokens = estimateRuntimeTranscriptTokens(transcript);
   const beforeTokens = systemTokens + transcriptTokens;
-  if (beforeTokens / safeContextWindow < CONTEXT_COMPACTION_THRESHOLD) {
+  const perMessageLimitTokens = Math.max(
+    128,
+    Math.min(MAX_CONTEXT_MESSAGE_TOKENS, Math.floor(safeContextWindow * 0.08))
+  );
+  const hasOversizedMessage = transcript.some(
+    (message) => estimateRuntimeTokens(message.content) > perMessageLimitTokens
+  );
+  const overThreshold = beforeTokens / safeContextWindow >= CONTEXT_COMPACTION_THRESHOLD;
+  const reason = options.force ? "forced" : hasOversizedMessage ? "oversized_message" : overThreshold ? "threshold" : null;
+  if (!reason) {
     return {
       transcript,
       compacted: false,
+      reason: null,
       beforeTokens,
       afterTokens: beforeTokens,
       messagesBefore: transcript.length
@@ -3944,7 +4013,10 @@ export function compactTranscriptForContext(
   const summaryBudget = Math.max(120, Math.floor(targetTranscriptTokens * 0.3));
   const recentBudget = Math.max(
     96,
-    Math.floor((targetTranscriptTokens - summaryBudget) / Math.max(1, recentMessages.length))
+    Math.min(
+      perMessageLimitTokens,
+      Math.floor((targetTranscriptTokens - summaryBudget) / Math.max(1, recentMessages.length))
+    )
   );
   const summary = buildCompactedTranscriptSummary(earlierMessages, summaryBudget);
   const compactedTranscript: ProviderTurnInput["transcript"] = [
@@ -3958,6 +4030,7 @@ export function compactTranscriptForContext(
   return {
     transcript: compactedTranscript,
     compacted: true,
+    reason,
     beforeTokens,
     afterTokens,
     messagesBefore: transcript.length
@@ -3997,9 +4070,14 @@ function estimateRuntimeTranscriptTokens(transcript: ProviderTurnInput["transcri
   }, 0);
 }
 
-function estimateRuntimeTokens(content: string): number {
+export function estimateRuntimeTokens(content: string): number {
   const normalized = content.trim();
-  return normalized ? Math.ceil(Array.from(normalized).length / 2.8) : 0;
+  if (!normalized) {
+    return 0;
+  }
+  const codePointEstimate = Math.ceil(Array.from(normalized).length / 2.8);
+  const byteEstimate = Math.ceil(Buffer.byteLength(normalized, "utf8") / 2);
+  return Math.max(codePointEstimate, byteEstimate);
 }
 
 function selectProtocolSafeRecentMessages(
@@ -4044,16 +4122,30 @@ function videoExtensionForMime(mimeType: string): string {
 }
 
 function truncateToRuntimeTokenBudget(content: string, tokenBudget: number): string {
-  const maximumCharacters = Math.max(0, Math.floor(tokenBudget * 2.8));
-  if (content.length <= maximumCharacters) {
+  const safeBudget = Math.max(0, Math.floor(tokenBudget));
+  if (estimateRuntimeTokens(content) <= safeBudget) {
     return content;
   }
-  if (maximumCharacters < 48) {
-    return `${content.slice(0, Math.max(0, maximumCharacters - 1))}...`;
+  if (safeBudget === 0) {
+    return "";
   }
-  const headLength = Math.floor(maximumCharacters * 0.72);
-  const tailLength = Math.max(0, maximumCharacters - headLength - 34);
-  return `${content.slice(0, headLength)}\n...[已压缩]...\n${content.slice(-tailLength)}`;
+  const marker = "\n...[context compacted]...\n";
+  let low = 0;
+  let high = content.length;
+  let best = "";
+  while (low <= high) {
+    const retainedCharacters = Math.floor((low + high) / 2);
+    const headLength = Math.ceil(retainedCharacters * 0.72);
+    const tailLength = Math.max(0, retainedCharacters - headLength);
+    const candidate = `${content.slice(0, headLength)}${marker}${tailLength > 0 ? content.slice(-tailLength) : ""}`;
+    if (estimateRuntimeTokens(candidate) <= safeBudget) {
+      best = candidate;
+      low = retainedCharacters + 1;
+    } else {
+      high = retainedCharacters - 1;
+    }
+  }
+  return best || marker.trim().slice(0, Math.max(1, safeBudget));
 }
 
 const BROWSER_OBSERVATION_FINGERPRINT_PREFIXES = [
@@ -4101,30 +4193,30 @@ export function sanitizeToolResultForTranscript(toolName: string, result: ToolRe
 
 export function summarizeToolResultForModel(toolName: string, result: ToolResult): string {
   const content = result.content ?? "";
+  let summarized = content;
   if (toolName.startsWith("browser.") || toolName === "web_search.open_page") {
-    return truncateCharacters(content, 12_000);
-  }
-  if (toolName === "shell.exec") {
-    return truncateCharacters(content, 8_000);
-  }
-  if (toolName === "fs.read_file" && content.length > 32_000) {
+    summarized = truncateCharacters(content, 12_000);
+  } else if (toolName === "shell.exec") {
+    summarized = truncateCharacters(content, 8_000);
+  } else if (toolName === "fs.read_file" && content.length > 32_000) {
     const head = content.slice(0, 2_000);
     const tail = content.slice(-2_000);
-    return [
+    summarized = [
       "File content is large. Prefer code.outline or fs.read_file with offset/limit.",
       head,
       "\n...[truncated]...\n",
       tail
     ].join("\n");
   }
-  return content;
+  return truncateCharacters(summarized, MAX_MODEL_TOOL_RESULT_CHARACTERS);
 }
 
 function truncateCharacters(content: string, limit: number): string {
   if (content.length <= limit) {
     return content;
   }
-  return `${content.slice(0, limit)}\n…[truncated ${content.length - limit} chars]`;
+  const suffix = `\n…[truncated ${content.length - limit} chars]`;
+  return `${content.slice(0, Math.max(0, limit - suffix.length))}${suffix}`;
 }
 
 function resolveModel(config: AppConfig, modelId: string): ModelProfile {

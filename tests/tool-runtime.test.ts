@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import fs from "node:fs/promises";
 import os from "node:os";
-import { buildCodeSearchCommand, ToolRuntime, canonicalizeToolName, type ToolRuntimeContext } from "@tool-runtime";
+import {
+  buildCodeSearchCommand,
+  MAX_CODE_SEARCH_RESULT_LINES,
+  ToolRuntime,
+  canonicalizeToolName,
+  type ToolRuntimeContext
+} from "@tool-runtime";
 
 describe("canonicalizeToolName", () => {
   it("maps common image/video aliases to builtin multimodal tools", () => {
@@ -145,6 +151,10 @@ describe("ToolRuntime", () => {
     expect(command).toContain("elseif (Get-Command grep");
     expect(command).toContain("--glob '!node_modules/**'");
     expect(command).toContain("--exclude-dir=node_modules");
+    expect(command).toContain("--max-filesize 5M");
+    expect(command).toContain("--glob '!*.png'");
+    expect(command).toContain("Select-Object -First 500");
+    expect(command).toContain("'[\\\\/](node_modules|dist|build|\\.git)[\\\\/]'");
   });
 
   it("prefers rg and falls back to grep for Unix workspace searches", () => {
@@ -154,6 +164,26 @@ describe("ToolRuntime", () => {
     expect(command).toContain("elif command -v grep");
     expect(command).toContain("--glob '!node_modules/**'");
     expect(command).toContain("--exclude-dir=node_modules");
+    expect(command).toContain("--max-filesize 5M");
+    expect(command).toContain("--glob '!*.png'");
+    expect(command).toContain("head -n 500");
+  });
+
+  it("caps code search output even when the shell returns more lines", async () => {
+    const runtime = new ToolRuntime();
+    const output = Array.from({ length: 700 }, (_, index) => `result-${index}`).join("\n");
+    const result = await runtime.execute(
+      { id: "search-1", name: "code.search", arguments: { pattern: "result" } },
+      {
+        cwd: process.cwd(),
+        runTerminalCommand: vi.fn().mockResolvedValue({ output })
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.content.split("\n")).toHaveLength(MAX_CODE_SEARCH_RESULT_LINES + 1);
+    expect(result.content).toContain("[search output truncated]");
+    expect(result.content).not.toContain("result-699");
   });
 
   it("maps legacy read_file to the file reader", async () => {

@@ -17,6 +17,10 @@ import {
   AgentModelCompatibilityError,
   compactTranscriptForContext,
   CONTEXT_COMPACTION_THRESHOLD,
+  estimateRuntimeTokens,
+  isUpstreamContextOverflowError,
+  MAX_MODEL_TOOL_RESULT_CHARACTERS,
+  summarizeToolResultForModel,
   shouldFinishGpaAnalysisTurn,
   parseCanonicalGpaPlanTasks,
   parseGpaPlanTasks,
@@ -213,6 +217,32 @@ describe("context compaction", () => {
 
     expect(result.compacted).toBe(false);
     expect(result.transcript).toBe(transcript);
+  });
+
+  it("compresses a single oversized message below the total context threshold", () => {
+    const transcript = [{ role: "tool" as const, content: "x".repeat(60_000) }];
+    const result = compactTranscriptForContext(transcript, 500_000, "system instructions");
+
+    expect(result.beforeTokens).toBeLessThan(500_000 * CONTEXT_COMPACTION_THRESHOLD);
+    expect(result.compacted).toBe(true);
+    expect(result.reason).toBe("oversized_message");
+    expect(result.afterTokens).toBeLessThan(result.beforeTokens);
+  });
+
+  it("uses UTF-8 bytes to conservatively estimate non-ASCII content", () => {
+    expect(estimateRuntimeTokens("你".repeat(100))).toBe(150);
+  });
+
+  it("force-compacts context for a one-time upstream recovery", () => {
+    const transcript = Array.from({ length: 20 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: `message ${index} ${"x".repeat(1_000)}`
+    }));
+    const result = compactTranscriptForContext(transcript, 128_000, "system instructions", { force: true });
+
+    expect(result.compacted).toBe(true);
+    expect(result.reason).toBe("forced");
+    expect(result.afterTokens).toBeLessThan(result.beforeTokens);
   });
 
   it("keeps recent native tool-call metadata during compaction", () => {
@@ -611,6 +641,28 @@ describe("browser test choice", () => {
     expect(isBrowserTestToolCall("browser.assert_page")).toBe(true);
     expect(isBrowserTestToolCall("browser.select_option")).toBe(true);
     expect(isBrowserTestToolCall("shell.exec")).toBe(false);
+  });
+});
+
+describe("context overflow recovery", () => {
+  it("recognizes the upstream 400 returned for an oversized request", () => {
+    expect(isUpstreamContextOverflowError(new Error("400 Upstream error: 400"))).toBe(true);
+    expect(isUpstreamContextOverflowError(new Error("HTTP 400 request body too large"))).toBe(true);
+  });
+
+  it("does not retry unrelated provider errors", () => {
+    expect(isUpstreamContextOverflowError(new Error("HTTP 400 invalid API key"))).toBe(false);
+    expect(isUpstreamContextOverflowError(new Error("HTTP 500 upstream unavailable"))).toBe(false);
+  });
+
+  it("caps generic tool results before adding them to model context", () => {
+    const summarized = summarizeToolResultForModel("code.search", {
+      ok: true,
+      content: "binary-like-output\n".repeat(100_000)
+    });
+
+    expect(summarized.length).toBeLessThanOrEqual(MAX_MODEL_TOOL_RESULT_CHARACTERS);
+    expect(summarized).toContain("truncated");
   });
 });
 

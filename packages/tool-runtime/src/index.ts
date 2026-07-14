@@ -39,6 +39,8 @@ export {
   truncatePageText
 } from "./browser-page-sanitize";
 
+export const MAX_CODE_SEARCH_RESULT_LINES = 500;
+
 export interface ToolRuntimeContext {
   cwd: string;
   appHome: string;
@@ -582,7 +584,10 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     async (args, ctx) => {
       const command = buildCodeSearchCommand(String(args.pattern ?? ""), ctx.cwd);
       const terminal = await runShell(command, ctx);
-      const output = terminal.output;
+      const outputLines = terminal.output.replace(/\r\n/g, "\n").split("\n");
+      const output = outputLines.length > MAX_CODE_SEARCH_RESULT_LINES
+        ? `${outputLines.slice(0, MAX_CODE_SEARCH_RESULT_LINES).join("\n")}\n...[search output truncated]`
+        : terminal.output;
       return { ok: true, content: output, json: { pattern: args.pattern, output } };
     }
   );
@@ -1653,20 +1658,29 @@ export function buildCodeSearchCommand(
   cwd: string,
   platform: NodeJS.Platform = process.platform
 ): string {
+  const binaryExtensions = [
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif", "pdf", "zip", "7z", "rar",
+    "tar", "gz", "woff", "woff2", "ttf", "otf", "eot", "mp3", "wav", "ogg", "mp4", "webm",
+    "mov", "avi", "wasm", "exe", "dll", "bin"
+  ];
+  const rgBinaryGlobs = binaryExtensions.map((extension) => `--glob '!*.${extension}'`).join(" ");
+  const grepBinaryExcludes = binaryExtensions.map((extension) => `--exclude='*.${extension}'`).join(" ");
   if (platform === "win32") {
     const escapedPattern = escapePowerShell(pattern);
     const escapedCwd = escapePowerShell(cwd);
-    const rg = `rg -n --hidden --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' --glob '!.git/**' -- '${escapedPattern}' '${escapedCwd}'`;
-    const grep = `grep -RIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.git -- '${escapedPattern}' '${escapedCwd}'`;
-    const selectString = `Get-ChildItem -Path '${escapedCwd}' -Recurse -File -Exclude node_modules,dist,build | Select-String -Pattern '${escapedPattern}' | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }`;
+    const rg = `rg -n --hidden --max-filesize 5M --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' --glob '!.git/**' ${rgBinaryGlobs} -- '${escapedPattern}' '${escapedCwd}' | Select-Object -First ${MAX_CODE_SEARCH_RESULT_LINES}`;
+    const grep = `grep -RIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.git ${grepBinaryExcludes} -- '${escapedPattern}' '${escapedCwd}' | Select-Object -First ${MAX_CODE_SEARCH_RESULT_LINES}`;
+    const excludedExtensions = binaryExtensions.map((extension) => `'.${extension}'`).join(",");
+    const selectString = `Get-ChildItem -Path '${escapedCwd}' -Recurse -File | Where-Object { $_.Length -le 5MB -and @(${excludedExtensions}) -notcontains $_.Extension.ToLowerInvariant() -and $_.FullName -notmatch '[\\\\/](node_modules|dist|build|\\.git)[\\\\/]' } | Select-String -Pattern '${escapedPattern}' | Select-Object -First ${MAX_CODE_SEARCH_RESULT_LINES} | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }`;
     return `if (Get-Command rg -ErrorAction SilentlyContinue) { ${rg}; if ($LASTEXITCODE -eq 1) { exit 0 } } elseif (Get-Command grep -ErrorAction SilentlyContinue) { ${grep}; if ($LASTEXITCODE -eq 1) { exit 0 } } else { ${selectString} }`;
   }
 
   const escapedPattern = escapePosixShell(pattern);
   const escapedCwd = escapePosixShell(cwd);
-  const rg = `rg -n --hidden --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' --glob '!.git/**' -- ${escapedPattern} ${escapedCwd}`;
-  const grep = `grep -RIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.git -- ${escapedPattern} ${escapedCwd}`;
-  return `if command -v rg >/dev/null 2>&1; then ${rg}; elif command -v grep >/dev/null 2>&1; then ${grep}; else find ${escapedCwd} -type f -not -path '*/node_modules/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/.git/*' -exec sh -c 'grep -n -- "$1" "$2" 2>/dev/null && printf "%s\\n" "$2"' _ ${escapedPattern} {} \\;; fi`;
+  const rg = `rg -n --hidden --max-filesize 5M --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' --glob '!.git/**' ${rgBinaryGlobs} -- ${escapedPattern} ${escapedCwd} | head -n ${MAX_CODE_SEARCH_RESULT_LINES}`;
+  const grep = `grep -RIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.git ${grepBinaryExcludes} -- ${escapedPattern} ${escapedCwd} | head -n ${MAX_CODE_SEARCH_RESULT_LINES}`;
+  const findBinaryExcludes = binaryExtensions.map((extension) => `! -iname '*.${extension}'`).join(" ");
+  return `if command -v rg >/dev/null 2>&1; then ${rg}; elif command -v grep >/dev/null 2>&1; then ${grep}; else find ${escapedCwd} -type f -size -5M -not -path '*/node_modules/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/.git/*' ${findBinaryExcludes} -exec sh -c 'grep -n -- "$1" "$2" 2>/dev/null && printf "%s\\n" "$2"' _ ${escapedPattern} {} \\; | head -n ${MAX_CODE_SEARCH_RESULT_LINES}; fi`;
 }
 
 function escapePosixShell(value: string): string {
