@@ -157,6 +157,104 @@ describe("applyCodexPatch", () => {
     expect(await fs.readFile(filePath, "utf8")).toBe("title\nbody\nfooter\n");
     expect(result.changes[0]?.applyMode).toBe("text");
   });
+
+  it("does not write any file when a later hunk fails preflight", async () => {
+    const root = await makeTempDir();
+    const first = path.join(root, "first.txt");
+    const second = path.join(root, "second.txt");
+    await fs.writeFile(first, "before-first\n", "utf8");
+    await fs.writeFile(second, "before-second\n", "utf8");
+
+    await expect(applyCodexPatch(
+      `*** Begin Patch
+*** Update File: first.txt
+@@
+-before-first
++after-first
+*** Update File: second.txt
+@@
+-missing-current-text
++after-second
+*** End Patch`,
+      root
+    )).rejects.toThrow(/not found|ambiguous/i);
+
+    await expect(fs.readFile(first, "utf8")).resolves.toBe("before-first\n");
+    await expect(fs.readFile(second, "utf8")).resolves.toBe("before-second\n");
+  });
+
+  it("rolls back committed files when a later atomic rename fails", async () => {
+    const root = await makeTempDir();
+    const first = path.join(root, "first.txt");
+    const second = path.join(root, "second.txt");
+    await fs.writeFile(first, "before-first\n", "utf8");
+    await fs.writeFile(second, "before-second\n", "utf8");
+    let renameCount = 0;
+    const fileSystem = {
+      readFile: (filePath: string, encoding: "utf8") => fs.readFile(filePath, encoding),
+      writeFile: (filePath: string, content: string, encoding: "utf8") => fs.writeFile(filePath, content, encoding),
+      mkdir: (directory: string, options: { recursive: true }) => fs.mkdir(directory, options),
+      rm: (filePath: string, options: { force: true }) => fs.rm(filePath, options),
+      rename: async (source: string, destination: string) => {
+        renameCount += 1;
+        if (renameCount === 2) throw new Error("injected rename failure");
+        await fs.rename(source, destination);
+      }
+    };
+
+    await expect(applyCodexPatch(
+      `*** Begin Patch
+*** Update File: first.txt
+@@
+-before-first
++after-first
+*** Update File: second.txt
+@@
+-before-second
++after-second
+*** End Patch`,
+      root,
+      { fileSystem }
+    )).rejects.toMatchObject({ code: "commit_failed", rollbackSucceeded: true });
+
+    await expect(fs.readFile(first, "utf8")).resolves.toBe("before-first\n");
+    await expect(fs.readFile(second, "utf8")).resolves.toBe("before-second\n");
+  });
+
+  it("rejects stale read versions without changing the file", async () => {
+    const root = await makeTempDir();
+    const filePath = path.join(root, "note.txt");
+    await fs.writeFile(filePath, "current\n", "utf8");
+
+    await expect(applyCodexPatch(
+      `*** Begin Patch
+*** Update File: note.txt
+@@
+-current
++next
+*** End Patch`,
+      root,
+      { expectedVersions: new Map([[filePath, "stale-sha256"]]) }
+    )).rejects.toMatchObject({ code: "version_conflict" });
+    await expect(fs.readFile(filePath, "utf8")).resolves.toBe("current\n");
+  });
+
+  it("rejects conflicting operations before they touch the workspace", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "note.txt"), "current\n", "utf8");
+
+    await expect(applyCodexPatch(
+      `*** Begin Patch
+*** Update File: note.txt
+@@
+-current
++next
+*** Delete File: note.txt
+*** End Patch`,
+      root
+    )).rejects.toMatchObject({ code: "preflight_failed" });
+    await expect(fs.readFile(path.join(root, "note.txt"), "utf8")).resolves.toBe("current\n");
+  });
 });
 
 describe("ast locate and diff", () => {

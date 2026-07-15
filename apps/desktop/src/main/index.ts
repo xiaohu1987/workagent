@@ -224,6 +224,11 @@ async function createWindow(): Promise<void> {
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[renderer] Render process gone", details);
   });
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (level >= 2) {
+      console.error("[renderer] Console error", { message, line, sourceId });
+    }
+  });
 
   if (process.env.VITE_DEV_SERVER_URL) {
     await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
@@ -233,6 +238,9 @@ async function createWindow(): Promise<void> {
 
   mainWindow.webContents.setZoomFactor(0.9);
   void updates.check();
+  setTimeout(() => {
+    void backend.initializeDeferredServices();
+  }, 250);
 }
 
 function reportStartupError(error: unknown): void {
@@ -389,11 +397,15 @@ function registerIpc(): void {
     backend.openFileLocation(payload.threadId, payload.path)
   );
   ipcMain.handle("skills:list", async (_event, cwd?: string | null) => {
+    await backend.initializeDeferredServices();
     await backend.reloadSkills(cwd);
     return backend.listSkills();
   });
   ipcMain.handle("skills:usage-stats", () => backend.getSkillUsageStats());
-  ipcMain.handle("plugins:list", () => backend.listPlugins());
+  ipcMain.handle("plugins:list", async () => {
+    await backend.initializeDeferredServices();
+    return backend.listPlugins();
+  });
   ipcMain.handle("plugins:install", (_event, source: string) => backend.installPlugin(source));
   ipcMain.handle("plugins:set-enabled", (_event, payload) =>
     backend.setProjectPluginEnabled(payload.threadId, payload.pluginId, payload.enabled)
@@ -410,7 +422,10 @@ function registerIpc(): void {
     return config;
   });
   ipcMain.handle("config:save", (_event, config) => backend.saveConfig(config));
-  ipcMain.handle("mcp:list", () => backend.listMcpServers());
+  ipcMain.handle("mcp:list", async () => {
+    await backend.initializeDeferredServices();
+    return backend.listMcpServers();
+  });
   ipcMain.handle("mcp:test", (_event, config) => backend.testMcpServer(config));
   ipcMain.handle("mcp:refresh-tools", (_event, serverId?: string) => backend.refreshMcpTools(serverId));
   ipcMain.handle("mcp:login", (_event, serverId: string) => backend.loginMcpServer(serverId));

@@ -119,6 +119,7 @@ export class DesktopBackend {
   #mcp!: McpManager;
   #mcpOAuth!: McpOAuthService;
   #logs!: RuntimeLogWriter;
+  #deferredServices: Promise<void> | null = null;
 
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
@@ -138,9 +139,11 @@ export class DesktopBackend {
       },
       createOAuthProvider: (config) => this.#mcpOAuth.createProvider(config)
     });
-    await this.syncInstalledPlugins();
-    await this.refreshMcpConfiguration(false);
-    await this.refreshSkills();
+    this.#mcp.setConfigs(this.#config.mcpServers.map((server) => ({
+      ...server,
+      source: "config",
+      pluginId: undefined
+    })));
 
     this.#runtime = new AgentRuntimeService({
       config: this.#config,
@@ -237,13 +240,17 @@ export class DesktopBackend {
       this.#runtime.wakeQueuedMessages(threadId);
     }
     await this.#logs.append("backend.initialized", { logsDir: this.#layout.logsDir, bundledSkillFileCount });
-    setImmediate(() => {
-      void this.#mcp.refresh().then(() =>
-        this.#logs.append("mcp.startup_refresh_completed", {
-          statuses: this.#mcp.listStatuses()
-        })
-      );
-    });
+  }
+
+  public initializeDeferredServices(): Promise<void> {
+    if (!this.#deferredServices) {
+      this.#deferredServices = this.initializeDeferredServicesInternal().catch(async (error) => {
+        await this.#logs.append("backend.deferred_initialization_failed", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }
+    return this.#deferredServices;
   }
 
   public onEvent(listener: (event: RuntimeEvent) => void): () => void {
@@ -592,6 +599,7 @@ export class DesktopBackend {
   }
 
   public async sendMessage(threadId: string, content: string, attachments: MessageAttachment[] = [], displayContent?: string): Promise<void> {
+    await this.initializeDeferredServices();
     const thread = this.#db.getThread(threadId);
     const isFirstThreadMessage = this.#db.listMessages(threadId).length === 0 && this.#db.listQueuedMessages(threadId).length === 0;
     if (isFirstThreadMessage) {
@@ -2588,6 +2596,19 @@ export class DesktopBackend {
     }
   }
 
+  private async initializeDeferredServicesInternal(): Promise<void> {
+    await this.#logs.prune();
+    await this.syncInstalledPlugins();
+    await this.refreshMcpConfiguration(false);
+    await this.refreshSkills();
+    await this.#mcp.refresh();
+    await this.#logs.append("backend.deferred_initialization_completed", {
+      pluginCount: this.#db.listPlugins().length,
+      skillCount: this.#skills.list().length,
+      mcpStatuses: this.#mcp.listStatuses()
+    });
+  }
+
   private async refreshSkills(cwd?: string | null): Promise<void> {
     const pluginRoots = await this.#plugins.collectPluginSkillRoots(this.#db.listPlugins());
     await this.#skills.refresh(this.#layout.root, cwd, pluginRoots);
@@ -2834,6 +2855,7 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       image: normalizeMultimodalDefaults(config.multimodal?.image, nextModels, "image"),
       video: normalizeMultimodalDefaults(config.multimodal?.video, nextModels, "video")
     },
+    projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     timeouts: normalizeRuntimeTimeouts(config.timeouts)
   };
 }

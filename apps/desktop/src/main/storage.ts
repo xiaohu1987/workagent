@@ -177,6 +177,7 @@ export function defaultConfig(): AppConfig {
       inAppBrowser: true
     },
     timeouts: normalizeRuntimeTimeouts(),
+    projectExecutionPolicies: {},
     mcpServers: []
   };
 }
@@ -294,6 +295,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       inAppBrowser: parsed.desktop?.inAppBrowser ?? true
     },
     timeouts: normalizeRuntimeTimeouts(parsed.timeouts),
+    projectExecutionPolicies: normalizeProjectExecutionPolicies(parsed.projectExecutionPolicies),
     mcpServers: ((parsed.mcpServers ?? []) as Array<Record<string, unknown>>).map((item) => ({
       id: String(item.id),
       name: String(item.name ?? item.id),
@@ -321,6 +323,7 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     multimodal: config.multimodal,
     desktop: config.desktop,
     timeouts: normalizeRuntimeTimeouts(config.timeouts),
+    projectExecutionPolicies: normalizeProjectExecutionPolicies(config.projectExecutionPolicies),
     providers: Object.fromEntries(config.providers.map((provider) => [provider.id, provider])),
     models: Object.fromEntries(config.models.map((model) => [model.id, model])),
     mcpServers: config.mcpServers.map((server) => ({
@@ -341,6 +344,25 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
   };
 
   await fs.writeFile(configFile, TOML.stringify(tomlObject as any), "utf8");
+}
+
+function normalizeProjectExecutionPolicies(value: unknown): NonNullable<AppConfig["projectExecutionPolicies"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized: NonNullable<AppConfig["projectExecutionPolicies"]> = {};
+  for (const [workspacePath, rawPolicy] of Object.entries(value as Record<string, unknown>)) {
+    if (!rawPolicy || typeof rawPolicy !== "object" || Array.isArray(rawPolicy)) continue;
+    const policy = rawPolicy as Record<string, unknown>;
+    const commands = Array.isArray(policy.verificationCommands)
+      ? policy.verificationCommands.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      : undefined;
+    const key = process.platform === "win32" ? path.resolve(workspacePath).toLowerCase() : path.resolve(workspacePath);
+    normalized[key] = {
+      mode: policy.mode === "prompt" ? "prompt" : "controlled",
+      autoVerify: policy.autoVerify !== false,
+      ...(commands?.length ? { verificationCommands: commands } : {})
+    };
+  }
+  return normalized;
 }
 
 function normalizeMcpAuth(value: unknown): McpServerConfig["auth"] {

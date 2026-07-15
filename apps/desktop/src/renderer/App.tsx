@@ -3,7 +3,9 @@ import { createPortal } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
+import c from "highlight.js/lib/languages/c";
 import csharp from "highlight.js/lib/languages/csharp";
+import cpp from "highlight.js/lib/languages/cpp";
 import css from "highlight.js/lib/languages/css";
 import diff from "highlight.js/lib/languages/diff";
 import go from "highlight.js/lib/languages/go";
@@ -11,7 +13,9 @@ import java from "highlight.js/lib/languages/java";
 import javascript from "highlight.js/lib/languages/javascript";
 import json from "highlight.js/lib/languages/json";
 import markdown from "highlight.js/lib/languages/markdown";
+import php from "highlight.js/lib/languages/php";
 import python from "highlight.js/lib/languages/python";
+import ruby from "highlight.js/lib/languages/ruby";
 import rust from "highlight.js/lib/languages/rust";
 import sql from "highlight.js/lib/languages/sql";
 import typescript from "highlight.js/lib/languages/typescript";
@@ -56,19 +60,15 @@ import {
   isThreadExecutionInProgress,
   shouldShowTaskProcessing
 } from "./thread-ui-state";
-import { useMotionPresence, useMotionSwitch } from "./motion-presence";
+import { useMotionPresence } from "./motion-presence";
 
 type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "timeouts" | "update";
 type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
 
-const RIGHT_WORKSPACE_TABS: RightWorkspaceTab[] = ["changes", "files", "browser"];
-
-function getWorkspaceTabDirection(from: RightWorkspaceTab, to: RightWorkspaceTab): "forward" | "backward" {
-  return RIGHT_WORKSPACE_TABS.indexOf(to) >= RIGHT_WORKSPACE_TABS.indexOf(from) ? "forward" : "backward";
-}
-
 hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("c", c);
 hljs.registerLanguage("csharp", csharp);
+hljs.registerLanguage("cpp", cpp);
 hljs.registerLanguage("css", css);
 hljs.registerLanguage("diff", diff);
 hljs.registerLanguage("go", go);
@@ -76,7 +76,9 @@ hljs.registerLanguage("java", java);
 hljs.registerLanguage("javascript", javascript);
 hljs.registerLanguage("json", json);
 hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("php", php);
 hljs.registerLanguage("python", python);
+hljs.registerLanguage("ruby", ruby);
 hljs.registerLanguage("rust", rust);
 hljs.registerLanguage("sql", sql);
 hljs.registerLanguage("typescript", typescript);
@@ -97,6 +99,53 @@ const CODE_LANGUAGE_ALIASES: Record<string, string> = {
   svg: "xml",
   yml: "yaml",
   md: "markdown"
+};
+
+type FilePreviewLanguage = {
+  id: string | null;
+  label: string;
+};
+
+const FILE_PREVIEW_LANGUAGES: Record<string, FilePreviewLanguage> = {
+  bash: { id: "bash", label: "Shell" },
+  c: { id: "c", label: "C" },
+  cc: { id: "cpp", label: "C++" },
+  cjs: { id: "javascript", label: "JavaScript" },
+  cpp: { id: "cpp", label: "C++" },
+  css: { id: "css", label: "CSS" },
+  cs: { id: "csharp", label: "C#" },
+  csv: { id: null, label: "CSV" },
+  diff: { id: "diff", label: "Diff" },
+  go: { id: "go", label: "Go" },
+  h: { id: "c", label: "C" },
+  hpp: { id: "cpp", label: "C++" },
+  htm: { id: "xml", label: "HTML" },
+  html: { id: "xml", label: "HTML" },
+  java: { id: "java", label: "Java" },
+  js: { id: "javascript", label: "JavaScript" },
+  json: { id: "json", label: "JSON" },
+  jsonc: { id: "json", label: "JSON" },
+  json5: { id: "json", label: "JSON" },
+  jsx: { id: "javascript", label: "JavaScript" },
+  mjs: { id: "javascript", label: "JavaScript" },
+  md: { id: "markdown", label: "Markdown" },
+  mts: { id: "typescript", label: "TypeScript" },
+  php: { id: "php", label: "PHP" },
+  py: { id: "python", label: "Python" },
+  rb: { id: "ruby", label: "Ruby" },
+  rs: { id: "rust", label: "Rust" },
+  scss: { id: "css", label: "SCSS" },
+  sh: { id: "bash", label: "Shell" },
+  sql: { id: "sql", label: "SQL" },
+  svg: { id: "xml", label: "SVG" },
+  toml: { id: null, label: "TOML" },
+  ts: { id: "typescript", label: "TypeScript" },
+  tsx: { id: "typescript", label: "TypeScript" },
+  txt: { id: null, label: "Text" },
+  xml: { id: "xml", label: "XML" },
+  yaml: { id: "yaml", label: "YAML" },
+  yml: { id: "yaml", label: "YAML" },
+  zsh: { id: "bash", label: "Shell" }
 };
 
 const SKILL_SORT_OPTIONS = [
@@ -216,6 +265,7 @@ type WorkspaceContextMenuAction = {
   id: string;
   label: string;
   icon: ReactNode;
+  destructive?: boolean;
   onSelect: () => void;
 };
 
@@ -495,6 +545,7 @@ export function App() {
   );
   const [resizingPane, setResizingPane] = useState<ResizePane | null>(null);
   const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("files");
+  const [rightWorkspaceExpandedTab, setRightWorkspaceExpandedTab] = useState<RightWorkspaceTab | null>("files");
   const [terminalTabsByThread, setTerminalTabsByThread] = useState<Record<string, TerminalWorkspaceTab[]>>({});
   const [activeTerminalTabByThread, setActiveTerminalTabByThread] = useState<Record<string, string>>({});
   const [terminalInputsByThread, setTerminalInputsByThread] = useState<Record<string, Record<string, string>>>({});
@@ -1825,14 +1876,6 @@ export function App() {
         .at(-1) ?? null,
     [activeSnapshotThreadId, streamingAssistants]
   );
-  const hasActiveTimelineTool = useMemo(
-    () => timelineEntries.some(
-      (entry) => entry.kind === "tool-group" && entry.toolCalls.some(
-        (toolCall) => toolCall.status === "running" || toolCall.status === "pending"
-      )
-    ),
-    [timelineEntries]
-  );
   const composerPrimaryAction = getComposerPrimaryActionState(
     selectedThreadStatus,
     input.trim() || composerAttachments.length > 0 ? "content" : ""
@@ -1843,18 +1886,12 @@ export function App() {
     ? runtimeProgress
     : null;
   const activeRuntimeActivity = activeRuntimeThreadId ? runtimeActivities[activeRuntimeThreadId] ?? null : null;
-  const hasRuntimeToolActivity = activeRuntimeActivity?.entries.some((entry) => entry.kind === "tool") ?? false;
   const completedTurnTimer = activeRuntimeThreadId ? completedTurnTimers[activeRuntimeThreadId] ?? null : null;
   const isRuntimeActivityExpanded = activeRuntimeThreadId ? !!expandedRuntimeThreads[activeRuntimeThreadId] : false;
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
-  const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
-    isTaskProcessing,
-    Boolean(activeStreamingAssistant),
-    hasActiveTimelineTool,
-    hasRuntimeToolActivity
-  );
+  const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(isTaskProcessing);
   const taskProcessingLabel = useMemo(
     () =>
       activeToolCall?.threadId === activeSnapshotThreadId
@@ -4297,21 +4334,6 @@ export function App() {
                         {thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}
                       </button>
                     )}
-                    {!isThreadRunning && !isRenaming && (
-                      <button
-                        type="button"
-                        className="history-item-delete"
-                        title={historyItemAffordance.title}
-                        aria-label={`删除任务 ${thread.title}`}
-                        disabled={Boolean(deletingThreadId)}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          requestDeleteHistoryThread(thread);
-                        }}
-                      >
-                        <IconTrash />
-                      </button>
-                    )}
                   </div>
                 );
               })
@@ -4335,7 +4357,16 @@ export function App() {
                   label: visibleHistoryContextMenu.thread.isPinned ? "取消置顶" : "置顶任务",
                   icon: <IconPin />,
                   onSelect: () => void toggleThreadPinned(visibleHistoryContextMenu.thread)
-                }
+                },
+                ...(canDeleteThread(visibleHistoryContextMenu.thread.status, deletingThreadId)
+                  ? [{
+                      id: "delete-history-thread",
+                      label: "删除任务",
+                      icon: <IconTrash />,
+                      destructive: true,
+                      onSelect: () => requestDeleteHistoryThread(visibleHistoryContextMenu.thread)
+                    }]
+                  : [])
               ]}
             />
           ) : null}
@@ -4420,6 +4451,7 @@ export function App() {
                 aria-label="显示右侧文件工作区"
                 onClick={() => {
                   setRightWorkspaceTab("files");
+                  setRightWorkspaceExpandedTab("files");
                   setIsRightWorkspaceOpen(true);
                 }}
               >
@@ -4574,6 +4606,7 @@ export function App() {
                     }}
                     onShowBrowser={(snapshot?.browserTabs.length ?? 0) > 0 ? () => {
                       setRightWorkspaceTab("browser");
+                      setRightWorkspaceExpandedTab("browser");
                       setIsRightWorkspaceOpen(true);
                     } : undefined}
                     onShowDetails={() => {
@@ -4840,6 +4873,8 @@ export function App() {
           hidden={!isRightWorkspaceOpen}
           activeTab={rightWorkspaceTab}
           onTabChange={setRightWorkspaceTab}
+          expandedTab={rightWorkspaceExpandedTab}
+          onExpandedTabChange={setRightWorkspaceExpandedTab}
           onHide={() => setIsRightWorkspaceOpen(false)}
           projectRoot={selectedThread?.cwd ?? ""}
           onAddAttachment={addComposerAttachment}
@@ -6709,6 +6744,8 @@ function RightWorkspacePanel({
   hidden,
   activeTab,
   onTabChange,
+  expandedTab,
+  onExpandedTabChange,
   onHide,
   projectRoot,
   onAddAttachment,
@@ -6732,6 +6769,8 @@ function RightWorkspacePanel({
   hidden: boolean;
   activeTab: RightWorkspaceTab;
   onTabChange: (tab: RightWorkspaceTab) => void;
+  expandedTab: RightWorkspaceTab | null;
+  onExpandedTabChange: (tab: RightWorkspaceTab | null) => void;
   onHide: () => void;
   projectRoot: string;
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
@@ -6752,57 +6791,17 @@ function RightWorkspacePanel({
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
   threadId: string | null;
 }) {
-  const tabTransition = useMotionSwitch(activeTab, getWorkspaceTabDirection);
-  const getViewMotion = (tab: RightWorkspaceTab): "entering" | "entered" | "exiting" | "hidden" => {
-    if (tab === tabTransition.current) return tabTransition.leaving ? "entering" : "entered";
-    if (tab === tabTransition.leaving) return "exiting";
-    return "hidden";
-  };
-
   return (
-    <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="右侧工作区" aria-hidden={hidden}>
-      <header className="right-workspace-header">
-        <nav className="right-workspace-tabs" aria-label="工作区标签">
-          <WorkspaceTabButton
-            active={activeTab === "changes"}
-            label="Git"
-            badge={gitSnapshot?.files.length ?? 0}
-            onClick={() => onTabChange("changes")}
-          >
-            <IconFileChanges />
-          </WorkspaceTabButton>
-          <WorkspaceTabButton active={activeTab === "files"} label="文件夹" onClick={() => onTabChange("files")}>
-            <IconFolder />
-          </WorkspaceTabButton>
-          <WorkspaceTabButton active={activeTab === "browser"} label="浏览器" onClick={() => onTabChange("browser")}>
-            <IconGlobe />
-          </WorkspaceTabButton>
-        </nav>
-        <button
-          type="button"
-          className="right-workspace-hide-button"
-          title="向右隐藏工作区"
-          aria-label="向右隐藏工作区"
-          onClick={onHide}
+    <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="Right workspace" aria-hidden={hidden}>
+      <div className="right-workspace-accordion">
+        <WorkspaceAccordionSection
+          active={expandedTab === "changes"}
+          id="git"
+          label="Git"
+          badge={gitSnapshot?.files.length ?? 0}
+          icon={<IconFileChanges />}
+          onClick={() => toggleWorkspaceSection("changes", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
         >
-          <IconChevronRight />
-        </button>
-      </header>
-
-      <div className="right-workspace-content">
-        <div className="right-workspace-view" data-motion={getViewMotion("files")} data-direction={tabTransition.direction} aria-hidden={getViewMotion("files") === "hidden"}>
-          <ProjectFilesWorkspace
-            files={projectFiles}
-            toolCalls={projectToolCalls}
-            loading={projectFilesLoading}
-            selectedPath={selectedProjectFile}
-            onSelect={onSelectProjectFile}
-            onOpen={onOpenProjectFile}
-            projectRoot={projectRoot}
-            onAddAttachment={onAddAttachment}
-          />
-        </div>
-        <div className="right-workspace-view" data-motion={getViewMotion("changes")} data-direction={tabTransition.direction} aria-hidden={getViewMotion("changes") === "hidden"}>
           <GitChangesWorkspace
             threadId={threadId}
             snapshot={gitSnapshot}
@@ -6813,52 +6812,113 @@ function RightWorkspacePanel({
             onAction={onGitAction}
             onComment={onGitComment}
           />
-        </div>
-        <div className="right-workspace-view" data-motion={getViewMotion("browser")} data-direction={tabTransition.direction} aria-hidden={getViewMotion("browser") === "hidden"}>
+        </WorkspaceAccordionSection>
+        <WorkspaceAccordionSection
+          active={expandedTab === "files"}
+          id="files"
+          label="文件夹"
+          icon={<IconFolder />}
+          onClick={() => toggleWorkspaceSection("files", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
+        >
+          <ProjectFilesWorkspace
+            files={projectFiles}
+            toolCalls={projectToolCalls}
+            loading={projectFilesLoading}
+            selectedPath={selectedProjectFile}
+            onSelect={onSelectProjectFile}
+            onOpen={onOpenProjectFile}
+            projectRoot={projectRoot}
+            onAddAttachment={onAddAttachment}
+          />
+        </WorkspaceAccordionSection>
+        <WorkspaceAccordionSection
+          active={expandedTab === "browser"}
+          id="browser"
+          label="浏览器"
+          icon={<IconGlobe />}
+          onClick={() => toggleWorkspaceSection("browser", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
+        >
           {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
             <BrowserWorkspace
               key={browserThreadId}
               tabs={tabs}
               threadId={browserThreadId}
               onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
-              visible={!hidden && (getViewMotion("browser") === "entered" || getViewMotion("browser") === "entering" || getViewMotion("browser") === "exiting") && browserThreadId === threadId}
+              visible={!hidden && expandedTab === "browser" && browserThreadId === threadId}
             />
           ) : null)}
           {threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
-            <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里" />
+            <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里。" />
           ) : null}
-        </div>
+        </WorkspaceAccordionSection>
       </div>
+      <button
+        type="button"
+        className="right-workspace-hide-button"
+        title="向右隐藏工作区"
+        aria-label="向右隐藏工作区"
+        onClick={onHide}
+      >
+        <IconChevronRight />
+      </button>
     </aside>
   );
 }
 
-function WorkspaceTabButton({
+function toggleWorkspaceSection(
+  tab: RightWorkspaceTab,
+  activeTab: RightWorkspaceTab,
+  expandedTab: RightWorkspaceTab | null,
+  onTabChange: (tab: RightWorkspaceTab) => void,
+  onExpandedTabChange: (tab: RightWorkspaceTab | null) => void
+): void {
+  if (expandedTab === tab) {
+    onExpandedTabChange(null);
+    return;
+  }
+  if (activeTab !== tab) {
+    onTabChange(tab);
+  }
+  onExpandedTabChange(tab);
+}
+
+function WorkspaceAccordionSection({
   active,
+  id,
   label,
   badge,
+  icon,
   children,
   onClick
 }: {
   active: boolean;
+  id: string;
   label: string;
   badge?: number;
+  icon: ReactNode;
   children: ReactNode;
   onClick: () => void;
 }) {
+  const contentId = `right-workspace-${id}`;
+
   return (
-    <button
-      type="button"
-      className={`right-workspace-tab ${active ? "active" : ""}`}
-      title={label}
-      aria-label={label}
-      aria-expanded={active}
-      onClick={onClick}
-    >
-      {children}
-      <span className="right-workspace-tab-label">{label}</span>
-      {badge ? <span className="right-workspace-tab-badge">{badge > 99 ? "99+" : badge}</span> : null}
-    </button>
+    <section className={`right-workspace-accordion-section ${active ? "active" : ""}`}>
+      <button
+        type="button"
+        className="right-workspace-tab"
+        aria-expanded={active}
+        aria-controls={contentId}
+        onClick={onClick}
+      >
+        {icon}
+        <span className="right-workspace-tab-label">{label}</span>
+        {badge ? <span className="right-workspace-tab-badge">{badge > 99 ? "99+" : badge}</span> : null}
+        <span className="right-workspace-tab-chevron" aria-hidden="true"><IconChevronDown /></span>
+      </button>
+      <div id={contentId} className="right-workspace-accordion-content" aria-hidden={!active} inert={!active}>
+        {children}
+      </div>
+    </section>
   );
 }
 
@@ -7115,11 +7175,17 @@ function FilePreviewDialog({
   const [draft, setDraft] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const editorHighlightRef = useRef<HTMLOListElement | null>(null);
   const contextMenuPresence = useMotionPresence(contextMenu, 140);
   const visibleContextMenu = contextMenu ?? contextMenuPresence.value;
   const fileName = path.split(/[\\/]/).pop() || path;
+  const language = useMemo(() => getFilePreviewLanguage(path), [path]);
   const canEdit = Boolean(preview && !preview.truncated && !preview.binary);
   const isDirty = preview ? draft !== preview.content : false;
+  const highlightedLines = useMemo(
+    () => highlightFilePreview(canEdit ? draft : preview?.content ?? "", language.id),
+    [canEdit, draft, language.id, preview?.content]
+  );
 
   useEffect(() => {
     setDraft(preview?.content ?? "");
@@ -7157,6 +7223,7 @@ function FilePreviewDialog({
             <strong>{fileName}</strong>
             <span>{path}</span>
           </div>
+          <span className="file-preview-language" title={language.label}>{language.label}</span>
           <div className="file-preview-lightbox-actions">
             {canEdit ? (
               <button
@@ -7170,7 +7237,7 @@ function FilePreviewDialog({
                 <span>{isSaving ? "保存中..." : "保存"}</span>
               </button>
             ) : null}
-            <button type="button" onClick={onClose} title="关闭" aria-label="关闭">
+            <button className="file-preview-close-button" type="button" onClick={onClose} title="关闭" aria-label="关闭">
               <IconClose />
             </button>
           </div>
@@ -7178,13 +7245,41 @@ function FilePreviewDialog({
         {preview ? (
           <>
             {canEdit ? (
-              <textarea
-                className="file-preview-editor"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                aria-label={`${path} 内容`}
-                spellCheck={false}
-              />
+              <div className="file-preview-editor-shell">
+                <ol ref={editorHighlightRef} className="project-preview-code file-preview-lightbox-code file-preview-editor-highlight" aria-hidden="true">
+                  {highlightedLines.map((line, index) => (
+                    <li key={`${path}-editor-line-${index}`}>
+                      <code dangerouslySetInnerHTML={{ __html: line || " " }} />
+                    </li>
+                  ))}
+                </ol>
+                <textarea
+                  className="file-preview-editor"
+                  value={draft}
+                  wrap="off"
+                  onChange={(event) => setDraft(event.target.value)}
+                  onScroll={(event) => {
+                    if (!editorHighlightRef.current) return;
+                    editorHighlightRef.current.scrollTop = event.currentTarget.scrollTop;
+                    editorHighlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Tab") return;
+                    event.preventDefault();
+                    const target = event.currentTarget;
+                    const start = target.selectionStart;
+                    const end = target.selectionEnd;
+                    const nextDraft = `${draft.slice(0, start)}  ${draft.slice(end)}`;
+                    setDraft(nextDraft);
+                    requestAnimationFrame(() => {
+                      target.selectionStart = start + 2;
+                      target.selectionEnd = start + 2;
+                    });
+                  }}
+                  aria-label={`${path} 内容`}
+                  spellCheck={false}
+                />
+              </div>
             ) : (
               <ol
                 className="project-preview-code file-preview-lightbox-code"
@@ -7206,7 +7301,7 @@ function FilePreviewDialog({
               >
                 {preview.content.split(/\r?\n/).map((line, index) => (
                   <li key={`${path}-line-${index}`}>
-                    <code>{renderCodePreviewLine(line, `${path}-${index}`)}</code>
+                    <code dangerouslySetInnerHTML={{ __html: highlightedLines[index] || " " }} />
                   </li>
                 ))}
               </ol>
@@ -7990,6 +8085,33 @@ function renderCodePreviewLine(line: string, keyPrefix: string): ReactNode[] {
   }
 
   return tokens;
+}
+
+function getFilePreviewLanguage(path: string): FilePreviewLanguage {
+  const fileName = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  if (fileName === "dockerfile") return { id: "bash", label: "Dockerfile" };
+  if (fileName === "makefile") return { id: "bash", label: "Makefile" };
+  if (fileName.startsWith(".env")) return { id: "bash", label: "Env" };
+  const extension = fileName.includes(".") ? fileName.split(".").pop() ?? "" : "";
+  return FILE_PREVIEW_LANGUAGES[extension] ?? { id: null, label: "Text" };
+}
+
+function highlightFilePreview(content: string, language: string | null): string[] {
+  const source = content.replace(/\r\n?/g, "\n");
+  if (!language || !hljs.getLanguage(language)) {
+    return source.split("\n").map(escapeHtml);
+  }
+  return hljs.highlight(source, { language, ignoreIllegals: true }).value.split("\n");
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  })[character] ?? character);
 }
 
 export function getLatestFileSnapshot(toolCalls: ToolCallRecord[], selectedPath: string): FileSnapshot | null {
@@ -8776,12 +8898,11 @@ function ComposerModelPicker({
 }
 
 export function shouldShowRuntimeActivityPanel(
-  isTaskProcessing: boolean,
-  hasStreamingAssistant: boolean,
-  hasActiveTimelineTool: boolean,
-  hasRuntimeToolActivity = false
+  isTaskProcessing: boolean
 ): boolean {
-  return isTaskProcessing && !hasStreamingAssistant && !hasActiveTimelineTool && !hasRuntimeToolActivity;
+  // The persistent activity panel is the execution heartbeat. Tool summaries
+  // and streamed text supplement it, but must never hide it while Stop is shown.
+  return isTaskProcessing;
 }
 
 export function buildTimelineEntries(

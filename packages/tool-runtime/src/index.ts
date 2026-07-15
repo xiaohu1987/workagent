@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -12,6 +12,7 @@ import type {
   BrowserTabRecord,
   KnowledgeBaseRecord,
   RuntimeToolCall,
+  ProjectExecutionPolicy,
   ToolResult,
   ToolSearchResult,
   ToolSpecDefinition,
@@ -49,6 +50,9 @@ export interface ToolRuntimeContext {
   turnRunId: string;
   toolCallId?: string;
   approvalMode: ApprovalMode;
+  executionPolicy?: ProjectExecutionPolicy;
+  /** SHA-256 versions captured by fs.read_file during the current Agent turn. */
+  expectedFileVersions?: ReadonlyMap<string, string>;
   browserTabs: BrowserTabRecord[];
   knowledgeBases: KnowledgeBaseRecord[];
   searchKnowledge: (query: string, knowledgeBaseIds?: string[]) => Promise<any[]>;
@@ -470,7 +474,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         (Number.isFinite(rawOffset) && rawOffset >= 1) ||
         (Number.isFinite(rawLimit) && rawLimit > 0);
       if (!hasSlice) {
-        return { ok: true, content, json: { path: filePath, content, totalLines } };
+        return { ok: true, content, json: { path: filePath, content, totalLines, sha256: sha256(content) } };
       }
       const startLine = Number.isFinite(rawOffset) && rawOffset >= 1 ? Math.floor(rawOffset) : 1;
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : totalLines;
@@ -483,7 +487,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       return {
         ok: true,
         content: `${header}\n${numbered}`,
-        json: { path: filePath, totalLines, startLine, endLine, content: numbered }
+        json: { path: filePath, totalLines, startLine, endLine, content: numbered, sha256: sha256(content) }
       };
     }
   );
@@ -685,7 +689,8 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     ),
     async (args, ctx) => {
       const patchText = normalizeApplyPatchInput(args);
-      const approved = await ctx.requestApproval({
+      const requiresApproval = /^\*\*\* Delete File:/m.test(patchText) || ctx.executionPolicy?.mode !== "controlled";
+      const approved = !requiresApproval || await ctx.requestApproval({
         title: "应用补丁",
         description: "将对多个文件写入或删除内容。",
         riskLevel: "high",
@@ -696,7 +701,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       }
       let result: Awaited<ReturnType<typeof applyCodexPatch>>;
       try {
-        result = await applyCodexPatch(patchText, ctx.cwd);
+        result = await applyCodexPatch(patchText, ctx.cwd, { expectedVersions: ctx.expectedFileVersions });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         return {
@@ -722,6 +727,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         )
         .slice(0, 40);
       const content = [
+        "Patch committed atomically.",
         result.touched.join("\n"),
         symbolLines.length > 0 ? `Entity changes:\n${symbolLines.join("\n")}` : ""
       ]
@@ -730,9 +736,19 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       return {
         ok: true,
         content,
-        json: { touched: result.touched, changes: result.changes, snapshots: result.snapshots }
+        json: { touched: result.touched, changes: result.changes, transaction: result.transaction, snapshots: result.snapshots }
       };
     }
+  );
+
+  runtime.register(
+    spec(
+      "project.verify",
+      "Run configured safe project verification commands. Without an explicit project policy, this runs package.json typecheck and test scripts when present. It never installs dependencies or starts a persistent service.",
+      [],
+      "low"
+    ),
+    async (_args, ctx) => runProjectVerification(ctx)
   );
 
   runtime.register(
@@ -1754,6 +1770,75 @@ export function buildCodeSearchCommand(
   const grep = `grep -RIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.git ${grepBinaryExcludes} -- ${escapedPattern} ${escapedCwd} | head -n ${MAX_CODE_SEARCH_RESULT_LINES}`;
   const findBinaryExcludes = binaryExtensions.map((extension) => `! -iname '*.${extension}'`).join(" ");
   return `if command -v rg >/dev/null 2>&1; then ${rg}; elif command -v grep >/dev/null 2>&1; then ${grep}; else find ${escapedCwd} -type f -size -5M -not -path '*/node_modules/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/.git/*' ${findBinaryExcludes} -exec sh -c 'grep -n -- "$1" "$2" 2>/dev/null && printf "%s\\n" "$2"' _ ${escapedPattern} {} \\; | head -n ${MAX_CODE_SEARCH_RESULT_LINES}; fi`;
+}
+
+async function runProjectVerification(ctx: ToolRuntimeContext): Promise<ToolResult> {
+  const commands = await resolveVerificationCommands(ctx);
+  if (commands.length === 0) {
+    return {
+      ok: true,
+      content: "No safe project verification command is configured or discoverable. The change remains unverified.",
+      json: { commands, passed: false, unverified: true, output: "No safe verification command found." }
+    };
+  }
+
+  const outputs: string[] = [];
+  for (const command of commands) {
+    try {
+      const terminal = await runShell(command, ctx);
+      outputs.push(`$ ${command}\n${terminal.output}`.trim());
+    } catch (error) {
+      const output = error instanceof Error ? error.message : String(error);
+      outputs.push(`$ ${command}\n${output}`.trim());
+      return {
+        ok: false,
+        content: `Verification failed: ${command}\n${output}`,
+        json: { commands, passed: false, failedCommand: command, exitCode: null, output: outputs.join("\n\n") }
+      };
+    }
+  }
+  return {
+    ok: true,
+    content: `Verification passed:\n${outputs.join("\n\n")}`,
+    json: { commands, passed: true, output: outputs.join("\n\n") }
+  };
+}
+
+async function resolveVerificationCommands(ctx: ToolRuntimeContext): Promise<string[]> {
+  const configured = ctx.executionPolicy?.verificationCommands?.filter(isSafeVerificationCommand) ?? [];
+  if (configured.length > 0) return configured;
+
+  let packageJson: { scripts?: Record<string, unknown> } | null = null;
+  try {
+    packageJson = JSON.parse(await ctx.readFile(path.join(ctx.cwd, "package.json"))) as { scripts?: Record<string, unknown> };
+  } catch {
+    return [];
+  }
+  const scripts = packageJson.scripts ?? {};
+  const runner = await preferredNodePackageRunner(ctx);
+  return ["typecheck", "test"]
+    .filter((name) => typeof scripts[name] === "string")
+    .map((name) => `${runner} run ${name}`);
+}
+
+async function preferredNodePackageRunner(ctx: ToolRuntimeContext): Promise<"pnpm" | "npm"> {
+  try {
+    await ctx.readFile(path.join(ctx.cwd, "pnpm-lock.yaml"));
+    return "pnpm";
+  } catch {
+    return "npm";
+  }
+}
+
+function isSafeVerificationCommand(command: string): boolean {
+  const normalized = command.trim();
+  return Boolean(normalized) &&
+    !/[;&|<>\r\n]/.test(normalized) &&
+    !/\b(?:install|add|remove|publish|start|dev|serve)\b/i.test(normalized);
+}
+
+function sha256(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 function escapePosixShell(value: string): string {

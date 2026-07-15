@@ -374,6 +374,57 @@ describe("ToolRuntime", () => {
     expect(runTerminalCommand).not.toHaveBeenCalled();
   });
 
+  it("returns a SHA-256 version for file reads and permits controlled non-destructive patches", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-version-"));
+    const filePath = path.join(root, "note.txt");
+    await fs.writeFile(filePath, "before\n", "utf8");
+    const requestApproval = vi.fn().mockResolvedValue(true);
+    const runtime = new ToolRuntime();
+    const context = {
+      cwd: root,
+      readFile: (target: string) => fs.readFile(target, "utf8"),
+      requestApproval,
+      executionPolicy: { mode: "controlled", autoVerify: true }
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const read = await runtime.execute({ id: "read", name: "fs.read_file", arguments: { path: "note.txt" } }, context);
+      expect(read.json?.sha256).toMatch(/^[a-f0-9]{64}$/);
+      context.expectedFileVersions = new Map([[filePath, String(read.json?.sha256)]]);
+      const patched = await runtime.execute({
+        id: "patch",
+        name: "apply_patch",
+        arguments: { patch: "*** Begin Patch\n*** Update File: note.txt\n@@\n-before\n+after\n*** End Patch" }
+      }, context);
+      expect(patched.ok).toBe(true);
+      expect(patched.json?.transaction).toMatchObject({ committed: true });
+      expect(requestApproval).not.toHaveBeenCalled();
+      await expect(fs.readFile(filePath, "utf8")).resolves.toBe("after\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs only discovered typecheck and test scripts through project.verify", async () => {
+    const runTerminalCommand = vi.fn().mockResolvedValue({ output: "ok" });
+    const readFile = vi.fn(async (target: string) => {
+      if (target.endsWith("package.json")) {
+        return JSON.stringify({ scripts: { typecheck: "tsc --noEmit", test: "vitest run", dev: "vite" } });
+      }
+      if (target.endsWith("pnpm-lock.yaml")) return "lockfileVersion: '9.0'";
+      throw new Error("not found");
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "verify", name: "project.verify", arguments: {} },
+      { cwd: "C:\\workspace", readFile, runTerminalCommand } as unknown as ToolRuntimeContext
+    );
+
+    expect(result).toMatchObject({ ok: true, json: { commands: ["pnpm run typecheck", "pnpm run test"], passed: true } });
+    expect(runTerminalCommand).toHaveBeenNthCalledWith(1, "pnpm run typecheck");
+    expect(runTerminalCommand).toHaveBeenNthCalledWith(2, "pnpm run test");
+  });
+
   it("accepts numeric browser scroll deltas and rejects string values", async () => {
     const scrollBrowserPage = vi.fn().mockResolvedValue({ title: "Page", url: "https://example.com" });
     const runtime = new ToolRuntime();

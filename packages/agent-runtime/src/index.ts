@@ -29,7 +29,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { DEFAULT_RUNTIME_TIMEOUTS } from "@shared-types";
+import { DEFAULT_PROJECT_EXECUTION_POLICY, DEFAULT_RUNTIME_TIMEOUTS } from "@shared-types";
 import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
@@ -981,6 +981,10 @@ class ThreadSessionRuntime {
 
       try {
         let transcript = compactTranscript(history);
+      const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
+      const policyKey = normalizeWorkspacePolicyKey(workspaceCwd);
+      const executionPolicy = this.services.config.projectExecutionPolicies?.[policyKey] ?? DEFAULT_PROJECT_EXECUTION_POLICY;
+      const expectedFileVersions = new Map<string, string>();
       let hasExecutedToolCall = false;
       const repositoryExploration = createRepositoryExplorationState();
       const successfulToolCallFingerprints = new Set<string>();
@@ -2153,17 +2157,19 @@ class ThreadSessionRuntime {
 
           hasExecutedToolCall = true;
           let result: ToolResult;
+          let toolContext: Parameters<ToolRuntime["execute"]>[1] | null = null;
           try {
             // Projectless chats must never inherit the desktop application's launch folder.
             const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
-            result = await waitForAbort(
-              this.services.toolRuntime.execute(toolCall, {
+            toolContext = {
               cwd: workspaceCwd,
               appHome: "",
               threadId: this.threadId,
               turnRunId: turn.id,
               toolCallId: toolRecord.id,
               approvalMode: this.services.config.desktop.approvals,
+              executionPolicy,
+              expectedFileVersions,
               browserTabs,
               knowledgeBases: visibleKnowledgeBases,
               searchKnowledge: (query, knowledgeBaseIds) =>
@@ -2336,7 +2342,9 @@ class ThreadSessionRuntime {
               ],
               loadSkill: (skillId) =>
                 this.services.skills.loadInstructions(skillId, availableSkillIds)
-              }),
+            };
+            result = await waitForAbort(
+              this.services.toolRuntime.execute(toolCall, toolContext!),
               abortController.signal
             );
           } catch (error) {
@@ -2374,6 +2382,8 @@ class ThreadSessionRuntime {
             : undefined;
           if (result.ok && toolCall.name === "fs.read_file") {
             if (readPath) recordManagedWriteReadback(managedWriteCompletion, readPath);
+            const sha256 = typeof result.json?.sha256 === "string" ? result.json.sha256 : null;
+            if (readPath && sha256) expectedFileVersions.set(readPath, sha256);
           }
           advanceManagedWriteRecovery(managedWriteRecovery, {
             toolName: toolCall.name,
@@ -2549,6 +2559,97 @@ class ThreadSessionRuntime {
               successfullyCreatedFiles.add(filePath);
             }
             taskFailureCounts.delete(toolTaskKey);
+            if (toolCall.name === "apply_patch" && executionPolicy.autoVerify && toolContext) {
+              const verificationCall: RuntimeToolCall = {
+                id: randomUUID(),
+                name: "project.verify",
+                arguments: {}
+              };
+              const verificationRecord = await this.services.persistence.recordToolCall({
+                threadId: this.threadId,
+                turnRunId: turn.id,
+                toolName: verificationCall.name,
+                argumentsJson: "{}",
+                resultJson: null,
+                status: "running",
+                riskLevel: "low",
+                approvalMode: this.services.config.desktop.approvals
+              });
+              await this.services.emit({
+                type: "tool.started",
+                threadId: this.threadId,
+                payload: {
+                  toolCallId: verificationRecord.id,
+                  turnRunId: verificationRecord.turnRunId,
+                  toolName: verificationCall.name,
+                  argumentsJson: verificationRecord.argumentsJson,
+                  riskLevel: verificationRecord.riskLevel,
+                  approvalMode: verificationRecord.approvalMode,
+                  startedAt: verificationRecord.startedAt
+                },
+                createdAt: new Date().toISOString()
+              });
+              let verificationResult: ToolResult;
+              try {
+                verificationResult = await waitForAbort(
+                  this.services.toolRuntime.execute(verificationCall, toolContext),
+                  abortController.signal
+                );
+              } catch (error) {
+                verificationResult = {
+                  ok: false,
+                  content: `Automatic project verification failed: ${error instanceof Error ? error.message : String(error)}`
+                };
+              }
+              const verificationCompletedAt = new Date().toISOString();
+              const verificationSanitized = sanitizeToolResultForTranscript(verificationCall.name, verificationResult);
+              const verificationStatus = verificationResult.ok ? "completed" : "failed";
+              await this.services.persistence.finishToolCall(verificationRecord.id, {
+                status: verificationStatus,
+                resultJson: JSON.stringify({ ...verificationResult, json: verificationSanitized.json }),
+                completedAt: verificationCompletedAt
+              });
+              await this.services.emit({
+                type: "tool.completed",
+                threadId: this.threadId,
+                payload: {
+                  toolCallId: verificationRecord.id,
+                  toolName: verificationCall.name,
+                  turnRunId: verificationRecord.turnRunId,
+                  resultJson: JSON.stringify(verificationSanitized),
+                  status: verificationStatus,
+                  completedAt: verificationCompletedAt,
+                  ok: verificationResult.ok
+                },
+                createdAt: verificationCompletedAt
+              });
+              const verificationMessage = await this.recordMessage(
+                "tool",
+                `${verificationCall.name}\n${summarizeToolResultForModel(verificationCall.name, verificationSanitized)}`,
+                turn.id,
+                { toolCallId: verificationRecord.id }
+              );
+              transcript.push({
+                role: "tool",
+                content: `${verificationMessage.content}\n[tool_call_id: ${verificationCall.id}]`,
+                toolCallId: verificationCall.id,
+                toolResultOk: verificationResult.ok
+              });
+              if (verificationResult.ok && verificationResult.json?.unverified !== true) {
+                successfulToolEvidence.push(classifySuccessfulToolEvidence({
+                  toolCallId: verificationCall.id,
+                  toolRecordId: verificationRecord.id,
+                  toolName: verificationCall.name,
+                  hasPriorDelivery: true
+                }));
+              } else if (!verificationResult.ok) {
+                await registerTaskFailure("project.verify", verificationResult.content);
+                transcript.push({
+                  role: "user",
+                  content: "Automatic project verification failed. Inspect the reported command output, fix the issue, and do not claim completion until fresh verification succeeds."
+                });
+              }
+            }
           } else {
             if (MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
               transcript.push({
@@ -3416,6 +3517,7 @@ const POST_DELIVERY_VERIFICATION_TOOLS = new Set([
   "code.ast_diff",
   "git.status",
   "git.diff",
+  "project.verify",
   "shell.exec",
   "browser.read_page_text",
   "browser.inspect_page",
@@ -3986,6 +4088,11 @@ function stableSerialize(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function normalizeWorkspacePolicyKey(workspacePath: string): string {
+  const resolved = path.resolve(workspacePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 export class AgentRuntimeService {
@@ -4746,7 +4853,7 @@ export function advanceManagedWriteRecovery(
     readPath?: string;
   }
 ): void {
-  if (MANAGED_WRITE_TOOL_NAMES.has(input.toolName) && !input.ok) {
+  if ((input.toolName === "apply_patch" || input.toolName === "fs.write_file") && !input.ok) {
     state.phase = "read";
     state.failedToolName = input.toolName;
     state.targetPaths = getManagedWriteTargetPaths(input.toolName, input.argumentsJson)

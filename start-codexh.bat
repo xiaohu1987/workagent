@@ -5,7 +5,9 @@ title codexh startup
 cd /d "%~dp0"
 
 set "NODE_EXE="
-for /f "delims=" %%I in ('dir /b /s "%USERPROFILE%\.cache\codex-runtimes\*\dependencies\node\bin\node.exe" 2^>nul') do set "NODE_EXE=%%I"
+for /d %%D in ("%USERPROFILE%\.cache\codex-runtimes\*") do (
+  if exist "%%~fD\dependencies\node\bin\node.exe" set "NODE_EXE=%%~fD\dependencies\node\bin\node.exe"
+)
 if not defined NODE_EXE (
   for /f "delims=" %%I in ('where node 2^>nul') do if not defined NODE_EXE set "NODE_EXE=%%I"
 )
@@ -55,6 +57,10 @@ set "DIST_PRELOAD=%DIST_DIR%\preload\index.cjs"
 set "DIST_RENDERER_DIR=%DIST_DIR%\renderer"
 set "DIST_RENDERER_INDEX=%DIST_RENDERER_DIR%\index.html"
 
+:check_dist
+if /i "%~1"=="--rebuild" goto :build
+if exist "%DIST_MAIN%" if exist "%DIST_PRELOAD%" if exist "%DIST_RENDERER_INDEX%" goto :launch
+
 :build
 if not exist "%EVITE_CLI%" (
   echo ERROR: electron-vite was not found, and no dist bundle is available.
@@ -73,17 +79,7 @@ if defined NODE_PATH (
   set "NODE_PATH=%EVITE_LOCAL_NODE_MODULES%;%EVITE_PNPM_NODE_MODULES%;%cd%\node_modules\.pnpm\node_modules"
 )
 
-echo [1/3] Cleaning previous dist...
-if exist "%DIST_DIR%" (
-  rmdir /s /q "%DIST_DIR%"
-  if exist "%DIST_DIR%" (
-    echo ERROR: failed to remove old dist folder. Close any process locking files under dist and try again.
-    pause
-    exit /b 1
-  )
-)
-
-echo [2/3] Building fresh dist...
+echo [1/2] Building dist because it is missing or --rebuild was requested...
 "%NODE_EXE%" "%EVITE_CLI%" build --config apps\desktop\electron.vite.config.ts
 if errorlevel 1 goto :build_failed
 if not exist "%DIST_MAIN%" goto :error
@@ -92,7 +88,7 @@ if not exist "%DIST_RENDERER_INDEX%" goto :error
 goto :launch
 
 :launch
-echo [3/3] Launching codexh with freshly built dist...
+echo [2/2] Launching codexh...
 REM Avoid Get-CimInstance/WMI here: it can hang indefinitely on some Windows hosts.
 echo Stopping previous Electron instance if running...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^

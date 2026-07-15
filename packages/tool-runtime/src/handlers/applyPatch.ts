@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -43,6 +44,14 @@ export interface PatchFileChange {
 export interface ApplyPatchResult {
   touched: string[];
   changes: PatchFileChange[];
+  transaction: {
+    committed: true;
+    files: Array<{
+      path: string;
+      beforeSha256: string | null;
+      afterSha256: string | null;
+    }>;
+  };
   snapshots: Array<{
     path: string;
     before: string;
@@ -52,100 +61,269 @@ export interface ApplyPatchResult {
   }>;
 }
 
-export async function applyCodexPatch(patchText: string, rootDir: string): Promise<ApplyPatchResult> {
-  const operations = parsePatch(patchText);
-  const touched: string[] = [];
-  const changes: PatchFileChange[] = [];
-  const snapshots: ApplyPatchResult["snapshots"] = [];
+export interface ApplyPatchOptions {
+  /** File versions recorded by the current Agent turn after a successful read. */
+  expectedVersions?: ReadonlyMap<string, string> | Record<string, string>;
+  /** Test seam for deterministic commit and rollback failure coverage. */
+  fileSystem?: PatchFileSystem;
+}
 
-  for (const operation of operations) {
+export interface PatchFileSystem {
+  readFile(filePath: string, encoding: "utf8"): Promise<string>;
+  writeFile(filePath: string, content: string, encoding: "utf8"): Promise<void>;
+  mkdir(directory: string, options: { recursive: true }): Promise<unknown>;
+  rm(filePath: string, options: { force: true }): Promise<void>;
+  rename(source: string, destination: string): Promise<void>;
+}
+
+export class PatchApplyError extends Error {
+  public constructor(
+    message: string,
+    public readonly code: "preflight_failed" | "version_conflict" | "commit_failed",
+    public readonly operationIndex?: number,
+    public readonly affectedPaths: string[] = [],
+    public readonly rollbackSucceeded?: boolean
+  ) {
+    super(message);
+    this.name = "PatchApplyError";
+  }
+}
+
+type PlannedFile = {
+  path: string;
+  displayPath: string;
+  /** Original bytes at this physical path, used only for rollback and version metadata. */
+  restore: string | null;
+  before: string | null;
+  after: string | null;
+  action: PatchFileChange["action"];
+  change: PatchFileChange;
+};
+
+const NODE_FILE_SYSTEM: PatchFileSystem = {
+  readFile: (filePath, encoding) => fs.readFile(filePath, encoding),
+  writeFile: (filePath, content, encoding) => fs.writeFile(filePath, content, encoding),
+  mkdir: (directory, options) => fs.mkdir(directory, options),
+  rm: (filePath, options) => fs.rm(filePath, options),
+  rename: (source, destination) => fs.rename(source, destination)
+};
+
+export async function applyCodexPatch(
+  patchText: string,
+  rootDir: string,
+  options: ApplyPatchOptions = {}
+): Promise<ApplyPatchResult> {
+  const operations = parsePatch(patchText);
+  const fileSystem = options.fileSystem ?? NODE_FILE_SYSTEM;
+  const planned = await preflightPatch(operations, rootDir, fileSystem, options.expectedVersions);
+  await commitPatch(planned, fileSystem);
+
+  return {
+    touched: planned.map((entry) => entry.path),
+    changes: planned.map((entry) => entry.change),
+    transaction: {
+      committed: true,
+      files: planned.map((entry) => ({
+        path: entry.displayPath,
+        beforeSha256: entry.restore === null ? null : sha256(entry.restore),
+        afterSha256: entry.after === null ? null : sha256(entry.after)
+      }))
+    },
+    snapshots: planned.map((entry) => createSnapshot(entry.displayPath, entry.before ?? "", entry.after ?? ""))
+  };
+}
+
+async function preflightPatch(
+  operations: PatchOperation[],
+  rootDir: string,
+  fileSystem: PatchFileSystem,
+  expectedVersions?: ApplyPatchOptions["expectedVersions"]
+): Promise<PlannedFile[]> {
+  const planned: PlannedFile[] = [];
+  const occupiedPaths = new Set<string>();
+
+  for (const [operationIndex, operation] of operations.entries()) {
+    const sourcePath = resolveWorkspacePath(rootDir, operation.file);
+    const targetPath = operation.type === "update"
+      ? resolveWorkspacePath(rootDir, operation.moveTo ?? operation.file)
+      : sourcePath;
+    const claimed = new Set([sourcePath, targetPath]);
+    if ([...claimed].some((candidate) => occupiedPaths.has(candidate))) {
+      throw new PatchApplyError(
+        `Patch operation ${operationIndex + 1} conflicts with another operation targeting ${operation.file}.`,
+        "preflight_failed",
+        operationIndex,
+        [...claimed]
+      );
+    }
+    for (const candidate of claimed) occupiedPaths.add(candidate);
+
     if (operation.type === "add") {
-      const filePath = resolveWorkspacePath(rootDir, operation.file);
-      await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.writeFile(filePath, operation.content, "utf8");
-      touched.push(filePath);
-      snapshots.push(createSnapshot(operation.file, "", operation.content));
-      const language = languageFromPath(operation.file);
-      let symbols: PatchFileChange["symbols"];
-      if (language) {
-        const extracted = await extractSymbols(operation.content, language);
-        symbols = extracted.map((symbol) => ({
-          name: symbol.name,
-          kind: symbol.kind,
-          change: "added" as const
-        }));
+      if (await fileExists(sourcePath, fileSystem)) {
+        throw new PatchApplyError(`Cannot add ${operation.file}: the file already exists.`, "preflight_failed", operationIndex, [sourcePath]);
       }
-      changes.push({
-        path: operation.file,
+      const language = languageFromPath(operation.file);
+      const symbols = language
+        ? (await extractSymbols(operation.content, language)).map((symbol) => ({ name: symbol.name, kind: symbol.kind, change: "added" as const }))
+        : undefined;
+      planned.push({
+        path: sourcePath,
+        displayPath: normalizeDisplayPath(operation.file),
+        restore: null,
+        before: null,
+        after: operation.content,
         action: "add",
-        symbols,
-        additions: operation.content.split("\n").filter((line) => line.length > 0).length,
-        deletions: 0,
-        applyMode: language ? "ast" : "text"
+        change: {
+          path: normalizeDisplayPath(operation.file), action: "add", symbols,
+          additions: operation.content.split("\n").filter(Boolean).length, deletions: 0,
+          applyMode: language ? "ast" : "text"
+        }
       });
       continue;
     }
+
+    let before: string;
+    try {
+      before = await fileSystem.readFile(sourcePath, "utf8");
+    } catch {
+      throw new PatchApplyError(`Cannot ${operation.type} ${operation.file}: the file does not exist or is unreadable.`, "preflight_failed", operationIndex, [sourcePath]);
+    }
+    assertExpectedVersion(sourcePath, operation.file, before, expectedVersions, operationIndex);
 
     if (operation.type === "delete") {
-      const filePath = resolveWorkspacePath(rootDir, operation.file);
-      let symbols: PatchFileChange["symbols"];
       const language = languageFromPath(operation.file);
-      try {
-        const previous = await fs.readFile(filePath, "utf8");
-        snapshots.push(createSnapshot(operation.file, previous, ""));
-        if (language) {
-          const extracted = await extractSymbols(previous, language);
-          symbols = extracted.map((symbol) => ({
-            name: symbol.name,
-            kind: symbol.kind,
-            change: "removed" as const
-          }));
-        }
-      } catch {
-        // file may already be missing
-        snapshots.push(createSnapshot(operation.file, "", ""));
-      }
-      await fs.rm(filePath, { recursive: true, force: true });
-      touched.push(filePath);
-      changes.push({
-        path: operation.file,
+      const symbols = language
+        ? (await extractSymbols(before, language)).map((symbol) => ({ name: symbol.name, kind: symbol.kind, change: "removed" as const }))
+        : undefined;
+      planned.push({
+        path: sourcePath,
+        displayPath: normalizeDisplayPath(operation.file),
+        restore: before,
+        before,
+        after: null,
         action: "delete",
-        symbols,
-        additions: 0,
-        deletions: 0,
-        applyMode: language ? "ast" : "text"
+        change: { path: normalizeDisplayPath(operation.file), action: "delete", symbols, additions: 0, deletions: 0, applyMode: language ? "ast" : "text" }
       });
       continue;
     }
 
-    const sourcePath = resolveWorkspacePath(rootDir, operation.file);
-    const nextPath = resolveWorkspacePath(rootDir, operation.moveTo ?? operation.file);
-    const current = await fs.readFile(sourcePath, "utf8");
-    const applied = await applyHunks(current, operation.hunks, operation.file);
-    await fs.mkdir(path.dirname(nextPath), { recursive: true });
-    await fs.writeFile(nextPath, applied.content, "utf8");
-    if (operation.moveTo && nextPath !== sourcePath) {
-      await fs.rm(sourcePath, { force: true });
+    if (targetPath !== sourcePath && await fileExists(targetPath, fileSystem)) {
+      throw new PatchApplyError(`Cannot move ${operation.file}: destination ${operation.moveTo} already exists.`, "preflight_failed", operationIndex, [sourcePath, targetPath]);
     }
-    touched.push(nextPath);
-    snapshots.push(createSnapshot(operation.moveTo ?? operation.file, current, applied.content));
-
-    const entityDiff = await astDiffSources(current, applied.content, operation.file);
-    changes.push({
-      path: operation.moveTo ?? operation.file,
+    const applied = await applyHunks(before, operation.hunks, operation.file);
+    const entityDiff = await astDiffSources(before, applied.content, operation.file);
+    planned.push({
+      path: targetPath,
+      displayPath: normalizeDisplayPath(operation.moveTo ?? operation.file),
+      restore: targetPath === sourcePath ? before : null,
+      before,
+      after: applied.content,
       action: "update",
-      symbols: entityDiff.entities.map((entity) => ({
-        name: entity.name,
-        kind: entity.kind,
-        change: entity.change
-      })),
-      additions: applied.additions,
-      deletions: applied.deletions,
-      applyMode: applied.applyMode
+      change: {
+        path: normalizeDisplayPath(operation.moveTo ?? operation.file), action: "update",
+        symbols: entityDiff.entities.map((entity) => ({ name: entity.name, kind: entity.kind, change: entity.change })),
+        additions: applied.additions, deletions: applied.deletions, applyMode: applied.applyMode
+      }
     });
+    if (targetPath !== sourcePath) {
+      planned.push({
+        path: sourcePath,
+        displayPath: normalizeDisplayPath(operation.file),
+        restore: before,
+        before,
+        after: null,
+        action: "delete",
+        change: { path: normalizeDisplayPath(operation.file), action: "delete", additions: 0, deletions: 0, applyMode: languageFromPath(operation.file) ? "ast" : "text" }
+      });
+    }
   }
+  return planned;
+}
 
-  return { touched, changes, snapshots };
+async function commitPatch(planned: PlannedFile[], fileSystem: PatchFileSystem): Promise<void> {
+  const staged = new Map<string, string>();
+  try {
+    for (const entry of planned) {
+      if (entry.after === null) continue;
+      await fileSystem.mkdir(path.dirname(entry.path), { recursive: true });
+      const temporary = `${entry.path}.codexh-${randomUUID()}.tmp`;
+      await fileSystem.writeFile(temporary, entry.after, "utf8");
+      staged.set(entry.path, temporary);
+    }
+
+    for (const entry of planned) {
+      const temporary = staged.get(entry.path);
+      if (temporary) await fileSystem.rename(temporary, entry.path);
+      if (entry.after === null) await fileSystem.rm(entry.path, { force: true });
+    }
+  } catch (error) {
+    const rollbackSucceeded = await rollbackPatch(planned, fileSystem);
+    throw new PatchApplyError(
+      `Patch commit failed: ${error instanceof Error ? error.message : String(error)}. ${rollbackSucceeded ? "All prior files were restored." : "Rollback could not restore every file."}`,
+      "commit_failed",
+      undefined,
+      planned.map((entry) => entry.path),
+      rollbackSucceeded
+    );
+  } finally {
+    await Promise.all([...staged.values()].map((temporary) => fileSystem.rm(temporary, { force: true }).catch(() => undefined)));
+  }
+}
+
+async function rollbackPatch(planned: PlannedFile[], fileSystem: PatchFileSystem): Promise<boolean> {
+  let succeeded = true;
+  for (const entry of [...planned].reverse()) {
+    try {
+      if (entry.restore === null) {
+        await fileSystem.rm(entry.path, { force: true });
+      } else {
+        await fileSystem.mkdir(path.dirname(entry.path), { recursive: true });
+        await fileSystem.writeFile(entry.path, entry.restore, "utf8");
+      }
+    } catch {
+      succeeded = false;
+    }
+  }
+  return succeeded;
+}
+
+async function fileExists(filePath: string, fileSystem: PatchFileSystem): Promise<boolean> {
+  try {
+    await fileSystem.readFile(filePath, "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function assertExpectedVersion(
+  absolutePath: string,
+  displayPath: string,
+  content: string,
+  expectedVersions: ApplyPatchOptions["expectedVersions"],
+  operationIndex: number
+): void {
+  const expected = expectedVersions && typeof (expectedVersions as ReadonlyMap<string, string>).get === "function"
+    ? (expectedVersions as ReadonlyMap<string, string>).get(absolutePath) ?? (expectedVersions as ReadonlyMap<string, string>).get(displayPath)
+    : expectedVersions
+      ? (expectedVersions as Record<string, string>)[absolutePath] ?? (expectedVersions as Record<string, string>)[displayPath]
+      : undefined;
+  if (expected && expected !== sha256(content)) {
+    throw new PatchApplyError(
+      `File version conflict for ${displayPath}. Re-read the file before applying a new patch.`,
+      "version_conflict",
+      operationIndex,
+      [absolutePath]
+    );
+  }
+}
+
+function normalizeDisplayPath(filePath: string): string {
+  return filePath.replace(/\\/g, "/");
+}
+
+function sha256(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 const SNAPSHOT_TEXT_LIMIT = 512_000;

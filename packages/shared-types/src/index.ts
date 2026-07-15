@@ -513,6 +513,19 @@ export interface RuntimeTimeoutSettings {
   videoPollIntervalMs: number;
 }
 
+export interface ProjectExecutionPolicy {
+  /** Controlled mode auto-runs reads, non-destructive patches, and safe verification only. */
+  mode: "controlled" | "prompt";
+  autoVerify: boolean;
+  /** Overrides package.json discovery when present. Commands must be local verification commands. */
+  verificationCommands?: string[];
+}
+
+export const DEFAULT_PROJECT_EXECUTION_POLICY: ProjectExecutionPolicy = {
+  mode: "controlled",
+  autoVerify: true
+};
+
 export const DEFAULT_RUNTIME_TIMEOUTS: RuntimeTimeoutSettings = {
   modelDecisionMs: 90_000,
   recoveryModelDecisionMs: 20_000,
@@ -561,6 +574,8 @@ export interface AppConfig {
     inAppBrowser: boolean;
   };
   timeouts: RuntimeTimeoutSettings;
+  /** Optional per-workspace overrides keyed by normalized absolute workspace path. */
+  projectExecutionPolicies?: Record<string, ProjectExecutionPolicy>;
   mcpServers: McpServerConfig[];
 }
 

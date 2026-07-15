@@ -28,4 +28,47 @@ describe("RuntimeLogWriter", () => {
     expect(JSON.parse(globalLine)).toMatchObject({ kind: "tool.execution_error", threadId: "thread-1" });
     expect(JSON.parse(threadLine)).toMatchObject({ payload: { toolName: "apply_patch" } });
   });
+
+  it("retains the newest complete records within the configured size limits", async () => {
+    const logsDir = await makeTempDir();
+    const writer = new RuntimeLogWriter(logsDir, { globalBytes: 1024, sessionBytes: 1024 });
+
+    for (let index = 0; index < 10; index += 1) {
+      await writer.append("runtime.event", { index, content: "x".repeat(300) }, "thread-1");
+    }
+
+    const globalRecords = (await fs.readFile(path.join(logsDir, "runtime.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const sessionRecords = (await fs.readFile(path.join(logsDir, "sessions", "thread-1.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(globalRecords.at(-1)).toMatchObject({ payload: { index: 9 } });
+    expect(sessionRecords.at(-1)).toMatchObject({ payload: { index: 9 } });
+    expect((await fs.stat(path.join(logsDir, "runtime.jsonl"))).size).toBeLessThanOrEqual(1024);
+    expect((await fs.stat(path.join(logsDir, "sessions", "thread-1.jsonl"))).size).toBeLessThanOrEqual(1024);
+  });
+
+  it("prunes existing global and session logs after startup", async () => {
+    const logsDir = await makeTempDir();
+    const sessionsDir = path.join(logsDir, "sessions");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const records = Array.from({ length: 10 }, (_, index) => JSON.stringify({ index, content: "x".repeat(300) })).join("\n") + "\n";
+    await fs.writeFile(path.join(logsDir, "runtime.jsonl"), records, "utf8");
+    await fs.writeFile(path.join(sessionsDir, "thread-1.jsonl"), records, "utf8");
+
+    const writer = new RuntimeLogWriter(logsDir, { globalBytes: 1024, sessionBytes: 1024 });
+    await writer.prune();
+
+    const sessionRecords = (await fs.readFile(path.join(sessionsDir, "thread-1.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(sessionRecords.at(-1)).toMatchObject({ index: 9 });
+    expect((await fs.stat(path.join(logsDir, "runtime.jsonl"))).size).toBeLessThanOrEqual(1024);
+    expect((await fs.stat(path.join(sessionsDir, "thread-1.jsonl"))).size).toBeLessThanOrEqual(1024);
+  });
 });

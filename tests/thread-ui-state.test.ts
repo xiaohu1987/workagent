@@ -152,12 +152,9 @@ describe("file write transcript filtering", () => {
 });
 
 describe("runtime activity visibility", () => {
-  it("uses the timeline tool summary instead of a duplicate processing panel", () => {
-    expect(shouldShowRuntimeActivityPanel(true, false, false)).toBe(true);
-    expect(shouldShowRuntimeActivityPanel(true, false, true)).toBe(false);
-    expect(shouldShowRuntimeActivityPanel(true, false, false, true)).toBe(false);
-    expect(shouldShowRuntimeActivityPanel(true, true, false)).toBe(false);
-    expect(shouldShowRuntimeActivityPanel(false, false, false)).toBe(false);
+  it("keeps the execution heartbeat visible for every active task", () => {
+    expect(shouldShowRuntimeActivityPanel(true)).toBe(true);
+    expect(shouldShowRuntimeActivityPanel(false)).toBe(false);
   });
 });
 
