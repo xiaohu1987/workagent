@@ -122,6 +122,7 @@ const api = {
   abandonProjectGpaPlan: (threadId: string) => ipcRenderer.invoke("gpa:abandon-plan", threadId),
   setGpaStage: (payload: { threadId: string; stage: "off" | "goal" | "plan" | "act" }) =>
     ipcRenderer.invoke("gpa:set-stage", payload),
+  resetGpaConfirmationTimeout: (threadId: string) => ipcRenderer.invoke("gpa:reset-confirmation-timeout", threadId),
   setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) =>
     ipcRenderer.invoke("gpa:set-full-access", payload),
   setKnowledgeEnabled: (payload: { threadId: string; knowledgeEnabled: boolean }) =>

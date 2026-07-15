@@ -56,6 +56,7 @@ import {
 } from "./storage";
 
 type ResolverMap<T> = Map<string, (value: T) => void>;
+const INTERACTION_TIMEOUT_MS = 10_000;
 
 async function seedBundledSkills(layout: Pick<HomeLayout, "skillsSystemDir" | "skillsImportedDir" | "skillsInstalledDir">): Promise<number> {
   if (!app.isPackaged) {
@@ -86,6 +87,8 @@ export class DesktopBackend {
   readonly #events = new EventEmitter();
   readonly #approvalResolvers: ResolverMap<boolean> = new Map();
   readonly #promptResolvers: ResolverMap<Record<string, string>> = new Map();
+  readonly #approvalTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #promptTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #sessionApprovedThreadIds = new Set<string>();
   readonly #skills = new SkillsManager();
   readonly #toolRuntime = new ToolRuntime();
@@ -222,6 +225,9 @@ export class DesktopBackend {
       emit: async (event) => this.emit(event),
       log: async (kind, threadId, payload) => this.#logs.append(kind, payload, threadId)
     });
+    for (const approval of this.#db.listPendingApprovals()) {
+      this.#scheduleApprovalTimeout(approval.id);
+    }
     for (const threadId of this.#db.listQueuedMessageThreadIds()) {
       this.#runtime.wakeQueuedMessages(threadId);
     }
@@ -456,6 +462,10 @@ export class DesktopBackend {
     await this.#runtime.setGpaStage(threadId, stage);
   }
 
+  public async resetGpaConfirmationTimeout(threadId: string): Promise<void> {
+    await this.#runtime.resetGpaConfirmationTimeout(threadId);
+  }
+
   public async getProjectGpaPlan(threadId: string) {
     const thread = this.#db.getThread(threadId);
     if (thread.mode !== "project" || !thread.cwd) {
@@ -662,7 +672,15 @@ export class DesktopBackend {
     for (const [promptId] of [...this.#promptResolvers.entries()]) {
       const record = this.#db.getUserPrompt(promptId);
       if (record?.threadId === threadId) {
+        this.#clearPromptTimeout(promptId);
         this.#promptResolvers.delete(promptId);
+      }
+    }
+    for (const [approvalId] of [...this.#approvalTimeouts.entries()]) {
+      if (this.#db.getApproval(approvalId)?.threadId === threadId) {
+        this.#clearApprovalTimeout(approvalId);
+        this.#approvalResolvers.get(approvalId)?.(false);
+        this.#approvalResolvers.delete(approvalId);
       }
     }
     const updated = this.#db.interruptThreadExecution(threadId);
@@ -2025,6 +2043,7 @@ export class DesktopBackend {
     resolution: {
       decision: "approved" | "denied";
       mode?: "once" | "session" | "remember";
+      source?: "user" | "timeout";
     }
   ): void {
     const approval = this.#db.getApproval(id);
@@ -2034,7 +2053,9 @@ export class DesktopBackend {
 
     const approved = resolution.decision === "approved";
     const resolutionMode = approved ? (resolution.mode ?? "once") : null;
-    this.#db.resolveApproval(id, { approved, resolutionMode });
+    const source = resolution.source ?? "user";
+    this.#clearApprovalTimeout(id);
+    this.#db.resolveApproval(id, { approved, resolutionMode, resolutionSource: source });
 
     if (approved) {
       if (resolutionMode === "session") {
@@ -2058,7 +2079,8 @@ export class DesktopBackend {
       payload: {
         approvalId: approval.id,
         approved,
-        mode: resolutionMode
+        mode: resolutionMode,
+        source
       },
       createdAt: new Date().toISOString()
     });
@@ -2067,7 +2089,11 @@ export class DesktopBackend {
     this.#approvalResolvers.delete(id);
   }
 
-  public async answerUserPrompt(id: string, answers: Record<string, string>): Promise<void> {
+  public async answerUserPrompt(
+    id: string,
+    answers: Record<string, string>,
+    source: "user" | "timeout" = "user"
+  ): Promise<void> {
     const prompt = this.#db.getUserPrompt(id);
     const resolve = this.#promptResolvers.get(id);
     const thread = prompt ? this.#db.getThread(prompt.threadId) : null;
@@ -2075,7 +2101,8 @@ export class DesktopBackend {
       throw new Error("此问题所属的任务已中断，请重新开始后再决定。");
     }
 
-    this.#db.resolveUserPrompt(id, answers);
+    this.#clearPromptTimeout(id);
+    this.#db.resolveUserPrompt(id, answers, source);
     this.#db.finishTurn(prompt.turnRunId, { status: "running" });
     const updatedThread = this.#db.updateThread(prompt.threadId, { status: "running" });
     const answeredPrompt = this.#db.getUserPrompt(id);
@@ -2140,7 +2167,8 @@ export class DesktopBackend {
       riskLevel: input.riskLevel,
       approvalKey,
       payloadJson: JSON.stringify(input.payload),
-      status: "pending"
+      status: "pending",
+      expiresAt: new Date(Date.now() + INTERACTION_TIMEOUT_MS).toISOString()
     });
 
     await this.emit({
@@ -2150,9 +2178,11 @@ export class DesktopBackend {
       createdAt: new Date().toISOString()
     });
 
-    return new Promise<boolean>((resolve) => {
+    const response = new Promise<boolean>((resolve) => {
       this.#approvalResolvers.set(record.id, resolve);
     });
+    this.#scheduleApprovalTimeout(record.id);
+    return response;
   }
 
   private async requestUserInput(
@@ -2163,8 +2193,13 @@ export class DesktopBackend {
       kind: "generic" | "gpa_plan_clarification";
       allowSkip: boolean;
       questions: UserInputQuestion[];
+      timeoutMs?: number;
+      defaultAnswers?: Record<string, string>;
     }
   ): Promise<Record<string, string>> {
+    const defaultAnswers = input.defaultAnswers ??
+      (input.kind === "generic" ? buildPromptDefaultAnswers(input.questions) : null);
+    const timeoutMs = input.timeoutMs ?? (defaultAnswers ? INTERACTION_TIMEOUT_MS : undefined);
     const prompt = this.#db.createUserPrompt({
       threadId,
       turnRunId,
@@ -2172,7 +2207,9 @@ export class DesktopBackend {
       kind: input.kind,
       allowSkip: input.allowSkip,
       questions: input.questions,
-      status: "pending"
+      status: "pending",
+      expiresAt: timeoutMs ? new Date(Date.now() + timeoutMs).toISOString() : null,
+      defaultAnswers
     });
 
     this.#db.finishTurn(turnRunId, { status: "waiting_user_input" });
@@ -2180,6 +2217,9 @@ export class DesktopBackend {
     const response = new Promise<Record<string, string>>((resolve) => {
       this.#promptResolvers.set(prompt.id, resolve);
     });
+    if (prompt.expiresAt && prompt.defaultAnswers) {
+      this.#schedulePromptTimeout(prompt.id);
+    }
 
     await this.emit({
       type: "user-input.requested",
@@ -2195,6 +2235,38 @@ export class DesktopBackend {
     });
 
     return response;
+  }
+
+  #scheduleApprovalTimeout(id: string): void {
+    this.#clearApprovalTimeout(id);
+    const approval = this.#db.getApproval(id);
+    if (!approval?.expiresAt || approval.status !== "pending") return;
+    const delay = Math.max(0, Date.parse(approval.expiresAt) - Date.now());
+    this.#approvalTimeouts.set(id, setTimeout(() => {
+      void this.resolveApproval(id, { decision: "denied", source: "timeout" });
+    }, delay));
+  }
+
+  #clearApprovalTimeout(id: string): void {
+    const timer = this.#approvalTimeouts.get(id);
+    if (timer) clearTimeout(timer);
+    this.#approvalTimeouts.delete(id);
+  }
+
+  #schedulePromptTimeout(id: string): void {
+    this.#clearPromptTimeout(id);
+    const prompt = this.#db.getUserPrompt(id);
+    if (!prompt?.expiresAt || !prompt.defaultAnswers || prompt.status !== "pending") return;
+    const delay = Math.max(0, Date.parse(prompt.expiresAt) - Date.now());
+    this.#promptTimeouts.set(id, setTimeout(() => {
+      void this.answerUserPrompt(id, prompt.defaultAnswers ?? {}, "timeout").catch(() => undefined);
+    }, delay));
+  }
+
+  #clearPromptTimeout(id: string): void {
+    const timer = this.#promptTimeouts.get(id);
+    if (timer) clearTimeout(timer);
+    this.#promptTimeouts.delete(id);
   }
 
   private async spawnChildAgent(
@@ -2864,6 +2936,16 @@ function buildThreadTitleFromFirstMessage(content: string): string {
   }
 
   return `${codePoints.slice(0, 24).join("").trimEnd()}...`;
+}
+
+function buildPromptDefaultAnswers(questions: UserInputQuestion[]): Record<string, string> | null {
+  const answers: Record<string, string> = {};
+  for (const question of questions) {
+    const option = question.options?.find((entry) => entry.recommended) ?? question.options?.[0];
+    if (!option) return null;
+    answers[question.id] = option.id;
+  }
+  return Object.keys(answers).length > 0 ? answers : null;
 }
 
 function hashApprovalPayload(input: {

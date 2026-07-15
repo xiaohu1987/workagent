@@ -464,6 +464,8 @@ export class DatabaseService {
         payload_json TEXT NOT NULL,
         status TEXT NOT NULL,
         resolution_mode TEXT,
+        expires_at TEXT,
+        resolution_source TEXT,
         created_at TEXT NOT NULL,
         resolved_at TEXT
       );
@@ -474,6 +476,9 @@ export class DatabaseService {
         title TEXT NOT NULL,
         kind TEXT NOT NULL DEFAULT 'generic',
         allow_skip INTEGER NOT NULL DEFAULT 0,
+        expires_at TEXT,
+        default_answers_json TEXT,
+        resolution_source TEXT,
         questions_json TEXT NOT NULL,
         status TEXT NOT NULL,
         answers_json TEXT,
@@ -624,6 +629,11 @@ export class DatabaseService {
     this.ensureColumn("user_input_prompts", "allow_skip", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("user_input_prompts", "answers_json", "TEXT");
     this.ensureColumn("user_input_prompts", "answered_at", "TEXT");
+    this.ensureColumn("approval_records", "expires_at", "TEXT");
+    this.ensureColumn("approval_records", "resolution_source", "TEXT");
+    this.ensureColumn("user_input_prompts", "expires_at", "TEXT");
+    this.ensureColumn("user_input_prompts", "default_answers_json", "TEXT");
+    this.ensureColumn("user_input_prompts", "resolution_source", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -1139,12 +1149,14 @@ export class DatabaseService {
   }
 
   public createApproval(
-    input: Omit<ApprovalRequest, "id" | "createdAt" | "resolutionMode" | "resolvedAt">
+    input: Omit<ApprovalRequest, "id" | "createdAt" | "resolutionMode" | "resolvedAt" | "expiresAt" | "resolutionSource"> & { expiresAt?: string | null }
   ): ApprovalRequest {
     const record: ApprovalRequest = {
       ...input,
       id: randomUUID(),
       resolutionMode: null,
+      expiresAt: input.expiresAt ?? null,
+      resolutionSource: null,
       createdAt: nowIso(),
       resolvedAt: null
     };
@@ -1152,8 +1164,8 @@ export class DatabaseService {
       .prepare(
         `INSERT INTO approval_records (
           id, thread_id, turn_run_id, tool_call_id, project_id, title, description, scope, risk_level,
-          approval_key, payload_json, status, resolution_mode, created_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          approval_key, payload_json, status, resolution_mode, expires_at, resolution_source, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -1169,6 +1181,8 @@ export class DatabaseService {
         record.payloadJson,
         record.status,
         record.resolutionMode,
+        record.expiresAt,
+        record.resolutionSource,
         record.createdAt,
         record.resolvedAt
       );
@@ -1177,13 +1191,14 @@ export class DatabaseService {
 
   public resolveApproval(
     id: string,
-    input: { approved: boolean; resolutionMode?: ApprovalResolutionMode | null }
+    input: { approved: boolean; resolutionMode?: ApprovalResolutionMode | null; resolutionSource?: "user" | "timeout" }
   ): void {
     this.#db
-      .prepare("UPDATE approval_records SET status = ?, resolution_mode = ?, resolved_at = ? WHERE id = ?")
+      .prepare("UPDATE approval_records SET status = ?, resolution_mode = ?, resolution_source = ?, resolved_at = ? WHERE id = ?")
       .run(
         input.approved ? "approved" : "denied",
         input.approved ? (input.resolutionMode ?? "once") : null,
+        input.resolutionSource ?? "user",
         nowIso(),
         id
       );
@@ -1198,6 +1213,13 @@ export class DatabaseService {
     return this.#db
       .prepare("SELECT * FROM approval_records WHERE thread_id = ? ORDER BY created_at DESC")
       .all(threadId)
+      .map(mapApprovalRow);
+  }
+
+  public listPendingApprovals(): ApprovalRequest[] {
+    return this.#db
+      .prepare("SELECT * FROM approval_records WHERE status = 'pending' ORDER BY created_at ASC")
+      .all()
       .map(mapApprovalRow);
   }
 
@@ -1259,17 +1281,25 @@ export class DatabaseService {
     return record;
   }
 
-  public createUserPrompt(input: Omit<UserInputPrompt, "id" | "createdAt" | "answers" | "answeredAt">): UserInputPrompt {
+  public createUserPrompt(
+    input: Omit<UserInputPrompt, "id" | "createdAt" | "answers" | "answeredAt" | "expiresAt" | "defaultAnswers" | "resolutionSource"> & {
+      expiresAt?: string | null;
+      defaultAnswers?: Record<string, string> | null;
+    }
+  ): UserInputPrompt {
     const prompt: UserInputPrompt = {
       ...input,
       id: randomUUID(),
       answers: null,
+      expiresAt: input.expiresAt ?? null,
+      defaultAnswers: input.defaultAnswers ?? null,
+      resolutionSource: null,
       createdAt: nowIso(),
       answeredAt: null
     };
     this.#db
       .prepare(
-        "INSERT INTO user_input_prompts (id, thread_id, turn_run_id, title, kind, allow_skip, questions_json, status, answers_json, created_at, answered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO user_input_prompts (id, thread_id, turn_run_id, title, kind, allow_skip, expires_at, default_answers_json, resolution_source, questions_json, status, answers_json, created_at, answered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       .run(
         prompt.id,
@@ -1278,6 +1308,9 @@ export class DatabaseService {
         prompt.title,
         prompt.kind,
         Number(prompt.allowSkip),
+        prompt.expiresAt,
+        prompt.defaultAnswers ? JSON.stringify(prompt.defaultAnswers) : null,
+        prompt.resolutionSource,
         JSON.stringify(prompt.questions),
         prompt.status,
         null,
@@ -1292,10 +1325,10 @@ export class DatabaseService {
     return row ? mapUserInputPromptRow(row) : null;
   }
 
-  public resolveUserPrompt(id: string, answers: Record<string, string>): void {
+  public resolveUserPrompt(id: string, answers: Record<string, string>, resolutionSource: "user" | "timeout" = "user"): void {
     this.#db
-      .prepare("UPDATE user_input_prompts SET status = 'answered', answers_json = ?, answered_at = ? WHERE id = ?")
-      .run(JSON.stringify(answers), nowIso(), id);
+      .prepare("UPDATE user_input_prompts SET status = 'answered', answers_json = ?, resolution_source = ?, answered_at = ? WHERE id = ?")
+      .run(JSON.stringify(answers), resolutionSource, nowIso(), id);
   }
 
   public cancelPendingUserPrompts(threadId: string, turnRunId?: string): number {
@@ -1990,6 +2023,8 @@ function mapApprovalRow(row: any): ApprovalRequest {
     payloadJson: row.payload_json,
     status: row.status,
     resolutionMode: row.resolution_mode,
+    expiresAt: row.expires_at ?? null,
+    resolutionSource: row.resolution_source === "timeout" ? "timeout" : row.resolution_source === "user" ? "user" : null,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at
   };
@@ -2053,6 +2088,9 @@ function mapUserInputPromptRow(row: any): UserInputPrompt {
     title: row.title,
     kind: row.kind === "gpa_plan_clarification" ? "gpa_plan_clarification" : "generic",
     allowSkip: Boolean(row.allow_skip),
+    expiresAt: row.expires_at ?? null,
+    defaultAnswers: row.default_answers_json ? JSON.parse(row.default_answers_json) : null,
+    resolutionSource: row.resolution_source === "timeout" ? "timeout" : row.resolution_source === "user" ? "user" : null,
     questions: rawQuestions.map((question, questionIndex) => ({
       id: String(question?.id ?? `q${questionIndex + 1}`),
       label: String(question?.label ?? `问题 ${questionIndex + 1}`),

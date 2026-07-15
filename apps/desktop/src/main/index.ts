@@ -416,6 +416,9 @@ function registerIpc(): void {
   ipcMain.handle("gpa:set-stage", (_event, payload: { threadId: string; stage: string }) =>
     backend.setGpaStage(payload.threadId, payload.stage as "off" | "goal" | "plan" | "act")
   );
+  ipcMain.handle("gpa:reset-confirmation-timeout", (_event, threadId: string) =>
+    backend.resetGpaConfirmationTimeout(threadId)
+  );
   ipcMain.handle("gpa:project-plan", (_event, threadId: string) => backend.getProjectGpaPlan(threadId));
   ipcMain.handle("gpa:restore-plan", (_event, threadId: string) => backend.restoreProjectGpaPlan(threadId));
   ipcMain.handle("gpa:abandon-plan", (_event, threadId: string) => backend.abandonProjectGpaPlan(threadId));

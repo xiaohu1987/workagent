@@ -11,6 +11,7 @@ import {
   buildTimelineEntries,
   getThreadDeleteFailureMessage,
   getToolProcessingLabel,
+  getToolActivityPresentation,
   getToolActivitySummary,
   shouldShowRuntimeActivityPanel,
   isFileWriteTool,
@@ -154,12 +155,40 @@ describe("runtime activity visibility", () => {
   it("uses the timeline tool summary instead of a duplicate processing panel", () => {
     expect(shouldShowRuntimeActivityPanel(true, false, false)).toBe(true);
     expect(shouldShowRuntimeActivityPanel(true, false, true)).toBe(false);
+    expect(shouldShowRuntimeActivityPanel(true, false, false, true)).toBe(false);
     expect(shouldShowRuntimeActivityPanel(true, true, false)).toBe(false);
     expect(shouldShowRuntimeActivityPanel(false, false, false)).toBe(false);
   });
 });
 
 describe("tool activity summaries", () => {
+  it("keeps a concise live action available for the inline running indicator", () => {
+    const presentation = getToolActivityPresentation([
+      makeToolCall({
+        toolName: "shell.exec",
+        status: "running",
+        completedAt: null,
+        argumentsJson: JSON.stringify({ command: "pnpm build" })
+      })
+    ]);
+
+    expect(presentation.status).toBe("in_progress");
+    expect(presentation.runningCall?.toolName).toBe("shell.exec");
+    expect(presentation.summary).toEqual({
+      title: "\u6b63\u5728\u8fd0\u884c pnpm build",
+      detail: ""
+    });
+  });
+
+  it("removes the live state after every tool has completed", () => {
+    const presentation = getToolActivityPresentation([
+      makeToolCall({ toolName: "shell.exec", argumentsJson: JSON.stringify({ command: "pnpm build" }) })
+    ]);
+
+    expect(presentation.status).toBe("completed");
+    expect(presentation.runningCall).toBeUndefined();
+  });
+
   it("summarizes completed operations in user-facing categories", () => {
     const summary = getToolActivitySummary([
       makeToolCall({ id: "search", toolName: "code.search", argumentsJson: JSON.stringify({ query: "timeline" }) }),

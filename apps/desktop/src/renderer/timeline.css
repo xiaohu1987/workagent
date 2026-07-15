@@ -539,39 +539,40 @@
 
 .tool-activity-group {
   position: relative;
+  display: block;
+  justify-self: start;
   width: min(100%, 920px);
-  margin: 8px 0 10px 24px;
+  max-width: none;
+  margin: 2px 0 4px;
   border: 0;
-  border-left: 2px solid rgba(148, 163, 184, 0.38);
   border-radius: 0;
   color: #b8c0ca;
   background: transparent;
-  overflow: hidden;
+  overflow: visible;
 }
 
-.tool-activity-group.in_progress::before {
-  display: none;
+.tool-activity-group.is-expanded {
+  margin: 2px 0 4px;
+  overflow: visible;
+  background: transparent;
 }
-
-.tool-activity-group.in_progress { border-left-color: #60a5fa; }
-.tool-activity-group.completed { border-left-color: rgba(52, 211, 153, 0.54); }
-.tool-activity-group.failed { border-left-color: rgba(248, 113, 113, 0.76); }
 
 .tool-activity-summary {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 42px;
-  padding: 0 12px;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0;
   cursor: pointer;
-  list-style: none;
   user-select: none;
-  background: rgba(255, 255, 255, 0.018);
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
 }
 
-.tool-activity-summary::-webkit-details-marker { display: none; }
-
-.tool-activity-summary:hover { background: rgba(255, 255, 255, 0.055); }
+.tool-activity-summary:hover { color: #dbe3ec; }
 
 .tool-activity-summary:focus-visible {
   outline: 1px solid rgba(96, 165, 250, 0.72);
@@ -588,20 +589,47 @@
 
 .tool-activity-summary-icon svg { width: 15px; height: 15px; }
 
+.tool-activity-live-indicator {
+  display: inline-grid;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.tool-activity-live-indicator.is-active { opacity: 1; }
+
+.tool-activity-live-indicator .task-processing-dots {
+  gap: 3px;
+  height: 12px;
+}
+
+.tool-activity-live-indicator .task-processing-dots i {
+  width: 3px;
+  height: 3px;
+  background: #7da9d5;
+  animation: task-processing-dot 1.05s ease-in-out infinite;
+  animation-play-state: paused;
+}
+
+.tool-activity-live-indicator.is-active .task-processing-dots i { animation-play-state: running; }
+
 .tool-activity-summary-copy {
   display: flex;
   align-items: baseline;
   flex: 1;
   min-width: 0;
-  gap: 7px;
+  gap: 6px;
   overflow: hidden;
 }
 
 .tool-activity-summary-copy strong {
   overflow: hidden;
-  color: #dce3ea;
+  color: #c7d1dc;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -610,7 +638,7 @@
 .tool-activity-summary-copy span {
   flex: 1;
   overflow: hidden;
-  color: #87919e;
+  color: #778391;
   font-family: inherit;
   font-size: 11px;
   line-height: 1.25;
@@ -620,7 +648,7 @@
 
 .tool-activity-summary-copy span::before {
   content: "\00b7";
-  margin-right: 7px;
+  margin-right: 6px;
   color: #55606d;
 }
 
@@ -649,17 +677,31 @@
   transition: transform 150ms ease;
 }
 
-.tool-activity-group[open] .tool-activity-chevron { transform: rotate(225deg) translate(-2px, -2px); }
+.tool-activity-group.is-expanded .tool-activity-chevron { transform: rotate(225deg) translate(-2px, -2px); }
+
+.tool-activity-details-shell {
+  display: grid;
+  grid-template-rows: 0fr;
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: grid-template-rows 180ms ease, opacity 120ms ease;
+}
+
+.tool-activity-group.is-expanded .tool-activity-details-shell {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
 
 .tool-activity-details {
   display: grid;
+  min-height: 0;
   gap: 1px;
   padding: 3px 0;
   border-top: 1px solid rgba(255, 255, 255, 0.055);
   background: rgba(15, 18, 22, 0.54);
 }
 
-.tool-activity-group:not([open]) > .tool-activity-details,
 .tool-activity-row.compact:not([open]) > .tool-activity-compact-details {
   display: none;
 }

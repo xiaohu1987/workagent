@@ -161,6 +161,7 @@ declare global {
         threadId: string;
         stage: "off" | "goal" | "plan" | "act";
       }) => Promise<void>;
+      resetGpaConfirmationTimeout: (threadId: string) => Promise<void>;
       setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) => Promise<void>;
       setKnowledgeEnabled: (payload: { threadId: string; knowledgeEnabled: boolean }) => Promise<void>;
       onRuntimeEvent: (listener: (event: unknown) => void) => () => void;

@@ -6,6 +6,7 @@ export const DEFAULT_GPA_STATE: GpaState = {
   fullAccess: false,
   knowledgeEnabled: false,
   awaitingConfirmation: null,
+  confirmationExpiresAt: null,
   planTasks: [],
   updatedAt: new Date(0).toISOString()
 };
@@ -43,6 +44,7 @@ export function parseGpaState(json: string | null | undefined): GpaState {
       fullAccess: parsed.fullAccess === true,
       knowledgeEnabled: parsed.knowledgeEnabled === true,
       awaitingConfirmation,
+      confirmationExpiresAt: typeof parsed.confirmationExpiresAt === "string" ? parsed.confirmationExpiresAt : null,
       planTasks,
       updatedAt: parsed.updatedAt ?? new Date().toISOString()
     };

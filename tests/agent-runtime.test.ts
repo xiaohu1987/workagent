@@ -6,6 +6,11 @@ import {
   resolveBrowserTestChoice,
   isBrowserTestToolCall,
   classifySuccessfulToolEvidence,
+  createManagedWriteCompletionState,
+  recordManagedWriteResult,
+  recordManagedWriteReadback,
+  validateManagedWriteCompletion,
+  buildManagedWriteCompletionRecoveryInstruction,
   buildGpaPlanProgressRecoveryInstruction,
   validateActCompletion,
   buildActCompletionRecoveryInstruction,
@@ -635,6 +640,86 @@ describe("GPA ACT completion evidence", () => {
   });
 });
 
+describe("ordinary managed-write completion", () => {
+  it("rejects completion when every managed write failed", () => {
+    const state = createManagedWriteCompletionState();
+    recordManagedWriteResult(state, { toolCallId: "patch-failed", toolName: "apply_patch", ok: false });
+
+    const result = validateManagedWriteCompletion(state);
+
+    expect(result.valid).toBe(false);
+    expect(result.failedToolCallIds).toEqual(["patch-failed"]);
+    expect(result.reasons).toContain("No successful managed file delivery was verified.");
+  });
+
+  it("rejects a readback of a different file", () => {
+    const state = createManagedWriteCompletionState();
+    recordManagedWriteResult(state, {
+      toolCallId: "patch-a",
+      toolName: "apply_patch",
+      ok: true,
+      verifiedPaths: ["C:\\project\\src\\A.ts"]
+    });
+    recordManagedWriteReadback(state, "C:\\project\\src\\B.ts");
+
+    const result = validateManagedWriteCompletion(state);
+
+    expect(result.valid).toBe(false);
+    expect(result.missingReadbackPaths).toEqual(["C:\\project\\src\\A.ts"]);
+  });
+
+  it("accepts a successful write after its exact target is read back", () => {
+    const state = createManagedWriteCompletionState();
+    recordManagedWriteResult(state, {
+      toolCallId: "write-a",
+      toolName: "fs.write_file",
+      ok: true,
+      verifiedPaths: ["C:\\project\\src\\A.ts"]
+    });
+    recordManagedWriteReadback(state, "C:\\project\\src\\A.ts");
+
+    expect(validateManagedWriteCompletion(state).valid).toBe(true);
+  });
+
+  it("requires every delivered patch target to be read back", () => {
+    const state = createManagedWriteCompletionState();
+    recordManagedWriteResult(state, {
+      toolCallId: "patch-many",
+      toolName: "apply_patch",
+      ok: true,
+      verifiedPaths: ["C:\\project\\src\\A.ts", "C:\\project\\src\\B.ts"]
+    });
+    recordManagedWriteReadback(state, "C:\\project\\src\\A.ts");
+
+    const result = validateManagedWriteCompletion(state);
+
+    expect(result.valid).toBe(false);
+    expect(result.missingReadbackPaths).toEqual(["C:\\project\\src\\B.ts"]);
+  });
+
+  it("does not gate ordinary analysis or shell commands", () => {
+    const analysis = createManagedWriteCompletionState();
+    const shellOnly = createManagedWriteCompletionState();
+    recordManagedWriteResult(shellOnly, { toolCallId: "shell", toolName: "shell.exec", ok: true });
+
+    expect(validateManagedWriteCompletion(analysis).valid).toBe(true);
+    expect(validateManagedWriteCompletion(shellOnly).valid).toBe(true);
+  });
+
+  it("builds a path-specific recovery instruction", () => {
+    const state = createManagedWriteCompletionState();
+    recordManagedWriteResult(state, {
+      toolCallId: "patch-a",
+      toolName: "apply_patch",
+      ok: true,
+      verifiedPaths: ["C:\\project\\src\\A.ts"]
+    });
+
+    expect(buildManagedWriteCompletionRecoveryInstruction(validateManagedWriteCompletion(state)))
+      .toContain("C:\\project\\src\\A.ts");
+  });
+});
+
 describe("browser test choice", () => {
   it("offers explicit run and skip options", () => {
     const question = buildBrowserTestChoiceQuestion();
@@ -932,6 +1017,19 @@ describe("GPA plan validation", () => {
         updatedAt: "2026-07-13T12:20:20.652Z"
       }))
     ).toMatchObject({ stage: "plan", awaitingConfirmation: null, planTasks: [] });
+  });
+
+  it("preserves a GPA confirmation deadline for a valid pending plan", () => {
+    const deadline = "2026-07-15T12:00:10.000Z";
+    expect(parseGpaState(JSON.stringify({
+      stage: "plan",
+      fullAccess: false,
+      knowledgeEnabled: false,
+      awaitingConfirmation: "plan",
+      confirmationExpiresAt: deadline,
+      planTasks: [{ id: "T1", title: "Implement timeout", done: false }],
+      updatedAt: "2026-07-15T12:00:00.000Z"
+    }))).toMatchObject({ awaitingConfirmation: "plan", confirmationExpiresAt: deadline });
   });
 
   it("marks completed plan tasks as done during ACT progress", () => {

@@ -15,6 +15,7 @@ export interface GpaState {
   /** When enabled for a task, local knowledge bases are available to the model. */
   knowledgeEnabled: boolean;
   awaitingConfirmation: "goal" | "plan" | "act" | null;
+  confirmationExpiresAt?: string | null;
   planTasks: GpaPlanTask[];
   updatedAt: string;
 }
@@ -37,6 +38,7 @@ export type ToolExposure = "direct" | "deferred";
 export type ApprovalMode = "auto" | "prompt" | "session" | "remembered";
 export type ApprovalDecision = "approved" | "denied";
 export type ApprovalResolutionMode = "once" | "session" | "remember";
+export type InteractionResolutionSource = "user" | "timeout";
 export type SkillScope = "repo" | "user" | "system" | "admin";
 export type KnowledgeScope = "global" | "project" | "imported";
 export type ProviderType =
@@ -215,6 +217,8 @@ export interface ApprovalRequest {
   payloadJson: string;
   status: "pending" | "approved" | "denied";
   resolutionMode: ApprovalResolutionMode | null;
+  expiresAt: string | null;
+  resolutionSource: InteractionResolutionSource | null;
   createdAt: string;
   resolvedAt: string | null;
 }
@@ -263,6 +267,9 @@ export interface UserInputPrompt {
   title: string;
   kind: "generic" | "gpa_plan_clarification";
   allowSkip: boolean;
+  expiresAt: string | null;
+  defaultAnswers: Record<string, string> | null;
+  resolutionSource: InteractionResolutionSource | null;
   questions: UserInputQuestion[];
   status: "pending" | "answered" | "cancelled";
   answers: Record<string, string> | null;

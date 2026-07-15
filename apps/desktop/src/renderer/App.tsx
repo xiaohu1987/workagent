@@ -1063,6 +1063,33 @@ export function App() {
         setRuntimeProgress({ threadId: typed.threadId, phase: "tool", runtimeObserved: true });
         return;
       }
+      if (typed.type === "approval.resolved" && typed.threadId) {
+        const approvalPayload = typed.payload as unknown as {
+          approvalId?: string;
+          approved?: boolean;
+          source?: "user" | "timeout";
+        };
+        if (approvalPayload.approvalId) {
+          setSnapshot((current) => {
+            if (!current || current.thread.id !== typed.threadId) return current;
+            return {
+              ...current,
+              approvals: current.approvals.map((approval) => approval.id === approvalPayload.approvalId
+                ? {
+                    ...approval,
+                    status: approvalPayload.approved ? "approved" : "denied",
+                    resolutionSource: approvalPayload.source ?? "user",
+                    resolvedAt: typed.createdAt ?? new Date().toISOString()
+                  }
+                : approval)
+            };
+          });
+          if (approvalPayload.source === "timeout" && !suppressRuntimeProgressRef.current[typed.threadId]) {
+            appendRuntimeStatus(typed.threadId, "审批超时，已自动拒绝", typed.createdAt);
+          }
+        }
+        return;
+      }
       if (typed.type === "browser.updated" && typed.threadId) {
         const browserThreadId = typed.threadId;
         void window.codexh.getThreadSnapshot(browserThreadId).then((next: RuntimeThreadSnapshot) => {
@@ -1674,6 +1701,7 @@ export function App() {
     ? runtimeProgress
     : null;
   const activeRuntimeActivity = activeRuntimeThreadId ? runtimeActivities[activeRuntimeThreadId] ?? null : null;
+  const hasRuntimeToolActivity = activeRuntimeActivity?.entries.some((entry) => entry.kind === "tool") ?? false;
   const completedTurnTimer = activeRuntimeThreadId ? completedTurnTimers[activeRuntimeThreadId] ?? null : null;
   const isRuntimeActivityExpanded = activeRuntimeThreadId ? !!expandedRuntimeThreads[activeRuntimeThreadId] : false;
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
@@ -1682,7 +1710,8 @@ export function App() {
   const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
     isTaskProcessing,
     Boolean(activeStreamingAssistant),
-    hasActiveTimelineTool
+    hasActiveTimelineTool,
+    hasRuntimeToolActivity
   );
   const taskProcessingLabel = useMemo(
     () =>
@@ -2592,9 +2621,12 @@ export function App() {
     window.requestAnimationFrame(() => gpaRevisionRef.current?.focus());
   }
 
-  function cancelGpaRevision() {
+  async function cancelGpaRevision() {
     setGpaRevisionOpen(false);
     setGpaRevisionDraft("");
+    if (selectedThreadId) {
+      await window.codexh.resetGpaConfirmationTimeout(selectedThreadId);
+    }
   }
 
   async function submitGpaRevision() {
@@ -4213,6 +4245,7 @@ export function App() {
                 {(gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan") && !gpaConfirmationSubmitting ? (
                   <GpaConfirmationCard
                     stage={gpaState.awaitingConfirmation}
+                    expiresAt={gpaState.confirmationExpiresAt}
                     disabled={gpaRevisionSubmitting || gpaConfirmationSubmitting}
                     isEditing={gpaRevisionOpen}
                     revisionDraft={gpaRevisionDraft}
@@ -8269,9 +8302,10 @@ function ComposerModelPicker({
 export function shouldShowRuntimeActivityPanel(
   isTaskProcessing: boolean,
   hasStreamingAssistant: boolean,
-  hasActiveTimelineTool: boolean
+  hasActiveTimelineTool: boolean,
+  hasRuntimeToolActivity = false
 ): boolean {
-  return isTaskProcessing && !hasStreamingAssistant && !hasActiveTimelineTool;
+  return isTaskProcessing && !hasStreamingAssistant && !hasActiveTimelineTool && !hasRuntimeToolActivity;
 }
 
 export function buildTimelineEntries(
@@ -8718,7 +8752,7 @@ function FileChangeSummary({
   }
 
   const defaultVisibleCount = 5;
-  const canExpand = files.length > defaultVisibleCount;
+  const canExpand = files.length > 0;
   const visibleFiles = expanded ? files : files.slice(0, defaultVisibleCount);
 
   const clearPreviewCloseTimer = () => {
@@ -8750,7 +8784,22 @@ function FileChangeSummary({
   return (
     <>
       <section className="generated-file-list" aria-label="主要改动文件">
-        <header className="generated-file-list-head">
+        <header
+          className="generated-file-list-head"
+          role="button"
+          tabIndex={0}
+          aria-expanded={expanded}
+          onClick={() => {
+            setExpanded((current) => !current);
+            setDiffPreview(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            setExpanded((current) => !current);
+            setDiffPreview(null);
+          }}
+        >
           <div className="generated-file-list-heading">
             <span className="generated-file-list-icon" aria-hidden="true"><IconFileChanges /></span>
             <h3 className="generated-file-list-title">主要改动文件</h3>
@@ -8762,7 +8811,8 @@ function FileChangeSummary({
               className={`generated-file-list-toggle ${expanded ? "is-expanded" : ""}`}
               aria-expanded={expanded}
               title={expanded ? "收起文件列表" : `展开全部 ${files.length} 个文件`}
-              onClick={() => {
+              onClick={(event) => {
+                event.stopPropagation();
                 setExpanded((current) => !current);
                 setDiffPreview(null);
               }}
@@ -9433,6 +9483,7 @@ function QueuedMessageList({
 
 function GpaConfirmationCard({
   stage,
+  expiresAt,
   disabled,
   isEditing,
   revisionDraft,
@@ -9444,6 +9495,7 @@ function GpaConfirmationCard({
   onRevisionSubmit
 }: {
   stage: Exclude<GpaStage, "off" | "act">;
+  expiresAt?: string | null;
   disabled: boolean;
   isEditing: boolean;
   revisionDraft: string;
@@ -9454,7 +9506,18 @@ function GpaConfirmationCard({
   onRevisionCancel: () => void;
   onRevisionSubmit: () => void;
 }) {
+  const autoConfirmedRef = useRef(false);
   const isPlan = stage === "plan";
+  useEffect(() => {
+    if (isEditing || disabled || !expiresAt || autoConfirmedRef.current) return;
+    const timer = window.setTimeout(() => {
+      if (!autoConfirmedRef.current) {
+        autoConfirmedRef.current = true;
+        onConfirm();
+      }
+    }, Math.max(0, Date.parse(expiresAt) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [disabled, expiresAt, isEditing, onConfirm]);
   const title = isPlan ? "确认计划" : "确认目标";
   const description = isPlan
     ? "计划确认后将直接进入执行阶段。"
@@ -9502,6 +9565,7 @@ function GpaConfirmationCard({
       <div className="gpa-confirmation-copy">
         <strong>{title}</strong>
         <span>{description}</span>
+        {!isEditing ? <InteractionCountdown expiresAt={expiresAt} timeoutLabel="后将自动继续" /> : null}
       </div>
       <div className="gpa-confirmation-actions">
         <button className="gpa-confirmation-button secondary" type="button" onClick={onRevise} disabled={disabled}>
@@ -9606,33 +9670,34 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
 }
 
 function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
-  const runningCall = toolCalls.find((toolCall) => toolCall.status === "running" || toolCall.status === "pending");
-  const failed = toolCalls.some((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
-  const status = runningCall ? "in_progress" : failed ? "failed" : "completed";
-  const summary = getToolActivitySummary(toolCalls, runningCall);
-  const statusLabel = runningCall
-    ? "\u5904\u7406\u4e2d"
-    : failed
-      ? "\u672a\u5b8c\u6210"
-      : "\u5df2\u5b8c\u6210";
+  const [expanded, setExpanded] = useState(false);
+  const { runningCall, status, summary } = getToolActivityPresentation(toolCalls);
 
   return (
-    <details className={`tool-activity-group ${status}`}>
-      <summary className="tool-activity-summary">
+    <section className={`tool-activity-group ${status} ${expanded ? "is-expanded" : ""}`}>
+      <button
+        type="button"
+        className="tool-activity-summary"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
         <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={runningCall?.toolName ?? toolCalls[0]?.toolName ?? ""} /></span>
+        <span className={`tool-activity-live-indicator ${runningCall ? "is-active" : ""}`} aria-hidden="true">
+          <span className="task-processing-dots"><i /><i /><i /></span>
+        </span>
         <span className="tool-activity-summary-copy">
           <strong>{summary.title}</strong>
           {summary.detail ? <span>{summary.detail}</span> : null}
         </span>
         {runningCall ? <span className="tool-activity-running">进行中</span> : null}
-        <span className={`tool-activity-summary-status ${status}`}>{statusLabel}</span>
-        <span className="tool-activity-summary-count">{`${toolCalls.length} \u6b65`}</span>
         <span className="tool-activity-chevron" aria-hidden />
-      </summary>
-      <div className="tool-activity-details">
-        {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact />)}
+      </button>
+      <div className="tool-activity-details-shell">
+        <div className="tool-activity-details">
+          {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact />)}
+        </div>
       </div>
-    </details>
+    </section>
   );
 }
 
@@ -9710,10 +9775,9 @@ function ToolActivityIcon({ toolName }: { toolName: string }) {
 
 export function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord) {
   if (runningCall) {
-    const input = parseTimelineJson(runningCall.argumentsJson);
     return {
       title: getToolProcessingLabel(runningCall.toolName, runningCall.argumentsJson),
-      detail: isFileWriteTool(runningCall.toolName) ? getFileWriteTarget(input) : getTimelineCommand(runningCall.toolName, input)
+      detail: ""
     };
   }
 
@@ -9744,6 +9808,17 @@ export function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?
   return {
     title: `\u5df2\u5b8c\u6210${subject}`,
     detail: completedDetail || `\u5df2\u5904\u7406 ${toolCalls.length} \u6b65`
+  };
+}
+
+export function getToolActivityPresentation(toolCalls: ToolCallRecord[]) {
+  const runningCall = toolCalls.find((toolCall) => toolCall.status === "running" || toolCall.status === "pending");
+  const failed = toolCalls.some((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
+
+  return {
+    runningCall,
+    status: runningCall ? "in_progress" : failed ? "failed" : "completed",
+    summary: getToolActivitySummary(toolCalls, runningCall)
   };
 }
 
@@ -9838,6 +9913,18 @@ function LocalServerPreview({ url }: { url: string }) {
   );
 }
 
+function InteractionCountdown({ expiresAt, timeoutLabel }: { expiresAt: string | null | undefined; timeoutLabel: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!expiresAt) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [expiresAt]);
+  if (!expiresAt) return null;
+  const seconds = Math.max(0, Math.ceil((Date.parse(expiresAt) - now) / 1_000));
+  return <small className="interaction-countdown">{seconds > 0 ? `${seconds} 秒${timeoutLabel}` : "正在自动处理..."}</small>;
+}
+
 function ApprovalCard({
   approval,
   resolving,
@@ -9853,6 +9940,7 @@ function ApprovalCard({
         <span className="approval-card-label">需要审批</span>
         <strong>{approval.title}</strong>
         <p>{approval.description}</p>
+        <InteractionCountdown expiresAt={approval.expiresAt} timeoutLabel="后将自动拒绝" />
       </div>
       <div className="approval-card-actions">
         <button type="button" className="approval-deny-button" disabled={resolving} onClick={() => onResolve("denied")}>
@@ -9921,6 +10009,7 @@ function UserInputPromptCard({
       <header className="user-input-prompt-head">
         <span className="user-input-prompt-icon" aria-hidden><IconHelpCircle /></span>
         <strong>{prompt.title}</strong>
+        <InteractionCountdown expiresAt={prompt.expiresAt} timeoutLabel="后将自动执行默认操作" />
       </header>
       <div className="user-input-prompt-questions">
         {prompt.questions.map((question, index) => (

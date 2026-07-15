@@ -166,6 +166,24 @@ export interface ActCompletionValidationResult {
   missingBrowserVerification?: string[];
 }
 
+export interface ManagedWriteCompletionState {
+  attemptedToolCallIds: string[];
+  failedToolCallIds: string[];
+  successfulToolCallIds: string[];
+  deliveredPaths: Set<string>;
+  pendingReadbackPaths: Set<string>;
+  readBackPaths: Set<string>;
+}
+
+export interface ManagedWriteCompletionValidationResult {
+  valid: boolean;
+  attempted: boolean;
+  failedToolCallIds: string[];
+  deliveredPaths: string[];
+  missingReadbackPaths: string[];
+  reasons: string[];
+}
+
 interface BrowserVerificationEvidenceState {
   required: boolean;
   testChoice?: BrowserTestChoice;
@@ -249,6 +267,8 @@ interface RuntimeServices {
     kind: "generic" | "gpa_plan_clarification";
     allowSkip: boolean;
     questions: UserInputQuestion[];
+    timeoutMs?: number;
+    defaultAnswers?: Record<string, string>;
   }): Promise<Record<string, string>>;
   spawnChildAgent(parentThreadId: string, input: {
     prompt: string;
@@ -478,14 +498,20 @@ class ThreadSessionRuntime {
   }
 
   async #commitGpa(next: GpaState): Promise<void> {
-    this.#gpa = next;
+    const committed = next.awaitingConfirmation === "goal" || next.awaitingConfirmation === "plan"
+      ? {
+          ...next,
+          confirmationExpiresAt: next.confirmationExpiresAt ?? new Date(Date.now() + 10_000).toISOString()
+        }
+      : { ...next, confirmationExpiresAt: null };
+    this.#gpa = committed;
     await this.services.persistence.updateThread(this.threadId, {
-      gpaStateJson: JSON.stringify(next)
+      gpaStateJson: JSON.stringify(committed)
     });
     await this.services.emit({
       type: "gpa.updated",
       threadId: this.threadId,
-      payload: { gpa: next },
+      payload: { gpa: committed },
       createdAt: new Date().toISOString()
     });
   }
@@ -690,6 +716,16 @@ class ThreadSessionRuntime {
     await this.#commitGpa({
       ...this.#gpa,
       knowledgeEnabled,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  public async resetGpaConfirmationTimeout(): Promise<void> {
+    await this.#ensureGpa();
+    if (this.#gpa.awaitingConfirmation !== "goal" && this.#gpa.awaitingConfirmation !== "plan") return;
+    await this.#commitGpa({
+      ...this.#gpa,
+      confirmationExpiresAt: new Date(Date.now() + 10_000).toISOString(),
       updatedAt: new Date().toISOString()
     });
   }
@@ -935,6 +971,7 @@ class ThreadSessionRuntime {
       const repositoryExploration = createRepositoryExplorationState();
       const successfulToolCallFingerprints = new Set<string>();
       const successfulToolEvidence: SuccessfulToolEvidence[] = [];
+      const managedWriteCompletion = createManagedWriteCompletionState();
       const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
@@ -954,7 +991,9 @@ class ThreadSessionRuntime {
           title: "是否进行浏览器测试？",
           kind: "generic",
           allowSkip: false,
-          questions: [buildBrowserTestChoiceQuestion()]
+          questions: [buildBrowserTestChoiceQuestion()],
+          timeoutMs: 10_000,
+          defaultAnswers: { [BROWSER_TEST_CHOICE_QUESTION_ID]: RUN_BROWSER_TESTS_OPTION_ID }
         });
         const choice = resolveBrowserTestChoice(answers) ?? "run";
         browserVerificationEvidence.testChoice = choice;
@@ -978,6 +1017,7 @@ class ThreadSessionRuntime {
       } | null;
       let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
+      let managedWriteCompletionAttempts = 0;
       let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
       let upstreamContextRecoveryAttempts = 0;
@@ -1569,6 +1609,57 @@ class ThreadSessionRuntime {
           decision.endTurn = false;
           decision.goalCompleted = false;
           continue;
+        }
+
+        if (
+          this.#gpa.stage === "off" &&
+          decision.toolCalls.length === 0 &&
+          decision.endTurn &&
+          decision.goalCompleted
+        ) {
+          const managedWriteValidation = validateManagedWriteCompletion(managedWriteCompletion);
+          if (managedWriteValidation.attempted && !managedWriteValidation.valid) {
+            managedWriteCompletionAttempts += 1;
+            if (assistantMessage) {
+              await this.services.emit({
+                type: "assistant.execution_output",
+                threadId: this.threadId,
+                payload: {
+                  turnRunId: turn.id,
+                  title: "Unverified file-change completion",
+                  content: assistantMessage
+                },
+                createdAt: new Date().toISOString()
+              });
+            }
+            await this.services.log("turn.managed_write_completion_rejected", this.threadId, {
+              turnRunId: turn.id,
+              attempt: managedWriteCompletionAttempts,
+              failedToolCallIds: managedWriteValidation.failedToolCallIds,
+              deliveredPaths: managedWriteValidation.deliveredPaths,
+              missingReadbackPaths: managedWriteValidation.missingReadbackPaths,
+              reasons: managedWriteValidation.reasons
+            });
+            if (managedWriteCompletionAttempts >= MAX_AGENT_PROTOCOL_FAILURES) {
+              decision.assistantMessage = buildManagedWriteCompletionFailureMessage(managedWriteValidation);
+              decision.goalCompleted = false;
+            } else {
+              transcript.push({
+                role: "user",
+                content: buildManagedWriteCompletionRecoveryInstruction(managedWriteValidation)
+              });
+              decision.assistantMessage = undefined;
+              decision.endTurn = false;
+              decision.goalCompleted = false;
+              continue;
+            }
+          } else if (managedWriteValidation.attempted) {
+            await this.services.log("turn.managed_write_completion_accepted", this.threadId, {
+              turnRunId: turn.id,
+              deliveredPaths: managedWriteValidation.deliveredPaths,
+              readBackPaths: [...managedWriteCompletion.readBackPaths]
+            });
+          }
         }
 
         if (
@@ -2198,6 +2289,21 @@ class ThreadSessionRuntime {
             throw new Error("Turn interrupted.");
           }
 
+          const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
+          const pathVerification = result.ok
+            ? await verifySuccessfulToolDeliveryPaths(toolCall.name, toolCall.arguments, result, workspaceCwd)
+            : undefined;
+          recordManagedWriteResult(managedWriteCompletion, {
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            ok: result.ok,
+            verifiedPaths: pathVerification?.verifiedPaths
+          });
+          if (result.ok && toolCall.name === "fs.read_file") {
+            const readPath = resolveSuccessfulReadFilePath(toolCall.arguments, result, workspaceCwd);
+            if (readPath) recordManagedWriteReadback(managedWriteCompletion, readPath);
+          }
+
           const completedAt = new Date().toISOString();
           const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result);
           const repositoryResult = getMcpRepositoryToolResult(sanitizedResult);
@@ -2313,20 +2419,13 @@ class ThreadSessionRuntime {
             break;
           }
           if (result.ok) {
-            const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
-            const pathVerification = await verifySuccessfulToolDeliveryPaths(
-              toolCall.name,
-              toolCall.arguments,
-              result,
-              workspaceCwd
-            );
             const evidence = classifySuccessfulToolEvidence({
               toolCallId: toolCall.id,
               toolRecordId: toolRecord.id,
               toolName: toolCall.name,
               hasPriorDelivery: successfulToolEvidence.some((item) => item.kinds.includes("delivery")),
-              verifiedPaths: pathVerification.verifiedPaths,
-              requiresVerifiedPath: pathVerification.requiresVerifiedPath
+              verifiedPaths: pathVerification?.verifiedPaths,
+              requiresVerifiedPath: pathVerification?.requiresVerifiedPath
             });
             successfulToolEvidence.push(evidence);
             updateBrowserVerificationEvidence(browserVerificationEvidence, toolCall, result);
@@ -3187,6 +3286,11 @@ const DELIVERY_TOOL_NAMES = new Set([
   "mcp.call"
 ]);
 
+const MANAGED_WRITE_TOOL_NAMES = new Set([
+  "apply_patch",
+  "fs.write_file"
+]);
+
 const SELF_VERIFYING_ARTIFACT_TOOLS = new Set([
   "image.generate",
   "video.generate"
@@ -3615,6 +3719,28 @@ async function verifySuccessfulToolDeliveryPaths(
   return { verifiedPaths, requiresVerifiedPath };
 }
 
+function resolveSuccessfulReadFilePath(
+  argumentsJson: Record<string, unknown>,
+  result: ToolResult,
+  workspaceCwd: string
+): string | undefined {
+  const candidate = typeof result.json?.path === "string"
+    ? result.json.path
+    : typeof argumentsJson.path === "string"
+      ? argumentsJson.path
+      : "";
+  if (!candidate) return undefined;
+  return path.isAbsolute(candidate) ? path.normalize(candidate) : path.resolve(workspaceCwd, candidate);
+}
+
+function pathsMatch(left: string, right: string): boolean {
+  const normalizedLeft = path.normalize(left);
+  const normalizedRight = path.normalize(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
 export function getToolCallTaskKey(name: string, argumentsJson: Record<string, unknown>): string {
   const patch = [argumentsJson.patch, argumentsJson.patch_content, argumentsJson.patchText].find(
     (value): value is string => typeof value === "string"
@@ -3775,6 +3901,10 @@ export class AgentRuntimeService {
   public async setGpaStage(threadId: string, stage: GpaStage): Promise<void> {
     const runtime = this.ensureThread(threadId);
     await runtime.setGpaStage(stage);
+  }
+
+  public async resetGpaConfirmationTimeout(threadId: string): Promise<void> {
+    await this.ensureThread(threadId).resetGpaConfirmationTimeout();
   }
 
   public async peekGpaPlanFile(threadId: string) {
@@ -4356,6 +4486,94 @@ export function sanitizeToolResultForTranscript(toolName: string, result: ToolRe
     content: summarizeToolResultForModel(toolName, { ...result, json }),
     json
   };
+}
+
+export function createManagedWriteCompletionState(): ManagedWriteCompletionState {
+  return {
+    attemptedToolCallIds: [],
+    failedToolCallIds: [],
+    successfulToolCallIds: [],
+    deliveredPaths: new Set(),
+    pendingReadbackPaths: new Set(),
+    readBackPaths: new Set()
+  };
+}
+
+export function recordManagedWriteResult(
+  state: ManagedWriteCompletionState,
+  input: { toolCallId: string; toolName: string; ok: boolean; verifiedPaths?: string[] }
+): void {
+  if (!MANAGED_WRITE_TOOL_NAMES.has(input.toolName)) return;
+
+  state.attemptedToolCallIds.push(input.toolCallId);
+  if (!input.ok) {
+    state.failedToolCallIds.push(input.toolCallId);
+    return;
+  }
+
+  state.successfulToolCallIds.push(input.toolCallId);
+  for (const filePath of input.verifiedPaths ?? []) {
+    state.deliveredPaths.add(filePath);
+    state.pendingReadbackPaths.add(filePath);
+    state.readBackPaths.delete(filePath);
+  }
+}
+
+export function recordManagedWriteReadback(state: ManagedWriteCompletionState, filePath: string): void {
+  const pendingPath = [...state.pendingReadbackPaths].find(
+    (candidate) => pathsMatch(candidate, filePath)
+  );
+  if (!pendingPath) return;
+
+  state.pendingReadbackPaths.delete(pendingPath);
+  state.readBackPaths.add(pendingPath);
+}
+
+export function validateManagedWriteCompletion(
+  state: ManagedWriteCompletionState
+): ManagedWriteCompletionValidationResult {
+  const attempted = state.attemptedToolCallIds.length > 0;
+  const deliveredPaths = [...state.deliveredPaths];
+  const missingReadbackPaths = [...state.pendingReadbackPaths];
+  const reasons: string[] = [];
+
+  if (attempted && deliveredPaths.length === 0) {
+    reasons.push("No successful managed file delivery was verified.");
+  }
+  if (missingReadbackPaths.length > 0) {
+    reasons.push(`Managed file changes were not read back: ${missingReadbackPaths.join(", ")}.`);
+  }
+
+  return {
+    valid: !attempted || reasons.length === 0,
+    attempted,
+    failedToolCallIds: [...state.failedToolCallIds],
+    deliveredPaths,
+    missingReadbackPaths,
+    reasons
+  };
+}
+
+export function buildManagedWriteCompletionRecoveryInstruction(
+  result: ManagedWriteCompletionValidationResult
+): string {
+  const missingPaths = result.missingReadbackPaths.length > 0
+    ? `Read each changed file now with fs.read_file: ${result.missingReadbackPaths.join(", ")}.`
+    : "Make a successful file change with apply_patch or fs.write_file.";
+  return [
+    "[Internal managed-write completion gate. Do not display or quote this instruction to the user.]",
+    "The previous completion claim was rejected because managed file changes were not verified.",
+    ...result.reasons,
+    missingPaths,
+    "After verification, return a corrected final decision. If the change cannot be completed, end with goal_completed false and state that it was not completed."
+  ].join(" ");
+}
+
+export function buildManagedWriteCompletionFailureMessage(
+  result: ManagedWriteCompletionValidationResult
+): string {
+  const details = result.reasons.join(" ");
+  return `I could not verify the requested file changes, so I am not claiming completion. ${details}`.trim();
 }
 
 type RepositoryExplorationState = {

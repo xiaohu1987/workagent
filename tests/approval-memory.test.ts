@@ -60,6 +60,53 @@ describe("approval persistence", () => {
     expect(remembered?.approvalKey).toBe("approval-key-1");
     expect(remembered?.projectId).toBe("project-1");
   });
+
+  it("persists timeout metadata and default prompt answers", async () => {
+    const tempDir = await makeTempDir();
+    const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));
+    databases.push(db);
+
+    const approval = db.createApproval({
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolCallId: null,
+      projectId: null,
+      title: "Write file",
+      description: "src/app.ts",
+      scope: "prompt",
+      riskLevel: "high",
+      approvalKey: "approval-key-timeout",
+      payloadJson: "{}",
+      status: "pending",
+      expiresAt: "2026-07-15T12:00:10.000Z"
+    });
+    db.resolveApproval(approval.id, { approved: false, resolutionSource: "timeout" });
+
+    expect(db.getApproval(approval.id)).toMatchObject({
+      status: "denied",
+      expiresAt: "2026-07-15T12:00:10.000Z",
+      resolutionSource: "timeout"
+    });
+
+    const prompt = db.createUserPrompt({
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      title: "Run browser tests?",
+      kind: "generic",
+      allowSkip: false,
+      questions: [{ id: "browser", label: "Browser", prompt: "Run?", options: [{ id: "run", label: "Run" }] }],
+      status: "pending",
+      expiresAt: "2026-07-15T12:00:10.000Z",
+      defaultAnswers: { browser: "run" }
+    });
+    db.resolveUserPrompt(prompt.id, { browser: "run" }, "timeout");
+
+    expect(db.getUserPrompt(prompt.id)).toMatchObject({
+      expiresAt: "2026-07-15T12:00:10.000Z",
+      defaultAnswers: { browser: "run" },
+      resolutionSource: "timeout"
+    });
+  });
 });
 
 describe("context compaction persistence", () => {
