@@ -541,6 +541,11 @@ function normalizeMcpServerConfig(
   if (!command && !url) {
     return null;
   }
+  // Plugins may declare remote endpoints, but credentials must be attached by the
+  // local user configuration rather than travelling in an installable manifest.
+  if (url && (typed.auth !== undefined || typed.headers !== undefined || typed.bearerTokenEnvVar !== undefined)) {
+    return null;
+  }
 
   return {
     id: `${document.pluginId}:${slugify(serverName)}`,

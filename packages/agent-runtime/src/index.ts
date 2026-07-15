@@ -9,6 +9,7 @@ import type {
   BrowserViewport,
   CompletionEvidenceKind,
   MessageAttachment,
+  McpRepositoryToolResult,
   McpServerConfig,
   MessageRecord,
   ModelProfile,
@@ -107,6 +108,7 @@ export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recov
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
 export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 32_000;
+export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
 export const MAX_CONTEXT_MESSAGE_TOKENS = 24_000;
 
 export function isUpstreamContextOverflowError(error: unknown): boolean {
@@ -282,6 +284,9 @@ interface RuntimeServices {
   listMcpResourceTemplates(server?: string): Promise<any[]>;
   listMcpTools(server?: string): Promise<any[]>;
   readMcpResource(server: string, uri: string): Promise<any>;
+  listMcpPrompts(server?: string): Promise<any[]>;
+  getMcpPrompt(server: string, name: string, args?: Record<string, string>): Promise<any>;
+  getMcpToolApprovalMode(server: string, tool: string): "auto" | "prompt" | "writes" | "approve";
   callMcpTool(server: string, tool: string, argumentsJson: Record<string, unknown>): Promise<any>;
   markModelAgentIncompatible(threadId: string, modelId: string, reason: string): Promise<void>;
   emit(event: RuntimeEvent): Promise<void>;
@@ -927,6 +932,7 @@ class ThreadSessionRuntime {
       try {
         let transcript = compactTranscript(history);
       let hasExecutedToolCall = false;
+      const repositoryExploration = createRepositoryExplorationState();
       const successfulToolCallFingerprints = new Set<string>();
       const successfulToolEvidence: SuccessfulToolEvidence[] = [];
       const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
@@ -972,6 +978,7 @@ class ThreadSessionRuntime {
       } | null;
       let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
+      let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
       let upstreamContextRecoveryAttempts = 0;
       let agentProtocolFailureAttempts = 0;
@@ -1518,6 +1525,53 @@ class ThreadSessionRuntime {
 
         const assistantMessage = decision.assistantMessage?.trim();
         if (
+          decision.toolCalls.length === 0 &&
+          decision.endTurn &&
+          repositoryExploration.pendingFollowUp
+        ) {
+          const reason = repositoryExploration.pendingFollowUp;
+          await this.services.log("agent.repository_completion_rejected", this.threadId, {
+            turnRunId: turn.id,
+            reason
+          });
+          transcript.push({
+            role: "user",
+            content: buildRepositoryExplorationRecoveryInstruction(reason)
+          });
+          decision.assistantMessage = undefined;
+          decision.endTurn = false;
+          decision.goalCompleted = false;
+          continue;
+        }
+        if (
+          this.#gpa.stage !== "act" &&
+          hasExecutedToolCall &&
+          decision.toolCalls.length === 0 &&
+          decision.endTurn &&
+          assistantMessage &&
+          isProgressOnlyAssistantMessage(assistantMessage)
+        ) {
+          progressOnlyCompletionAttempts += 1;
+          await this.services.log("turn.progress_completion_rejected", this.threadId, {
+            turnRunId: turn.id,
+            attempt: progressOnlyCompletionAttempts,
+            maxAttempts: MAX_AGENT_PROTOCOL_FAILURES,
+            messagePreview: assistantMessage.slice(0, 500)
+          });
+          await registerAgentProtocolFailure(
+            "The model ended the turn with progress commentary instead of an answer or a tool call."
+          );
+          transcript.push({
+            role: "user",
+            content: buildProgressOnlyCompletionRecoveryInstruction(progressOnlyCompletionAttempts)
+          });
+          decision.assistantMessage = undefined;
+          decision.endTurn = false;
+          decision.goalCompleted = false;
+          continue;
+        }
+
+        if (
           this.#gpa.stage === "act" &&
           decision.toolCalls.length === 0 &&
           decision.endTurn
@@ -1718,8 +1772,8 @@ class ThreadSessionRuntime {
           }
         }
         const deferredExecutionPayload =
-          Boolean(decision.assistantMessage) && isDeferredExecutionPayload(decision.assistantMessage);
-        if (deferredExecutionPayload) {
+          Boolean(decision.assistantMessage) && isDeferredExecutionPayload(decision.assistantMessage ?? "");
+        if (deferredExecutionPayload && assistantMessage) {
           await this.services.emit({
             type: "assistant.execution_output",
             threadId: this.threadId,
@@ -1825,6 +1879,25 @@ class ThreadSessionRuntime {
             ...rawToolCall,
             name: canonicalizeToolName(rawToolCall.name)
           };
+          const repositoryPreparation = prepareRepositoryExplorationCall(toolCall, repositoryExploration);
+          if (!repositoryPreparation.ok) {
+            transcript.push({ role: "user", content: repositoryPreparation.message });
+            await this.services.log("agent.repository_exploration_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              reason: repositoryPreparation.message
+            });
+            await this.services.emit({
+              type: "agent.repository_exploration",
+              threadId: this.threadId,
+              payload: { status: "narrowing", reason: repositoryPreparation.message, turnRunId: turn.id },
+              createdAt: new Date().toISOString()
+            });
+            continue;
+          }
+          toolCall = repositoryPreparation.call;
+          rawToolCall.arguments = toolCall.arguments;
+          rawToolCall.name = toolCall.name;
           let toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
           let toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
           const browserTabs = await this.services.listBrowserTabs(this.threadId);
@@ -2053,9 +2126,46 @@ class ThreadSessionRuntime {
                 assertAccessibleMcpServer(server, activeMcpServerIds);
                 return this.services.readMcpResource(server, uri);
               },
+              listMcpPrompts: async (server) => {
+                if (server) {
+                  assertAccessibleMcpServer(server, activeMcpServerIds);
+                  return this.services.listMcpPrompts(server);
+                }
+                return (await this.services.listMcpPrompts()).filter((prompt) => activeMcpServerIds.includes(prompt.server));
+              },
+              getMcpPrompt: async (server, name, args) => {
+                assertAccessibleMcpServer(server, activeMcpServerIds);
+                return this.services.getMcpPrompt(server, name, args);
+              },
+              getMcpToolApprovalMode: (server, tool) => {
+                assertAccessibleMcpServer(server, activeMcpServerIds);
+                return this.services.getMcpToolApprovalMode(server, tool);
+              },
               callMcpTool: async (server, tool, argumentsJson) => {
                 assertAccessibleMcpServer(server, activeMcpServerIds);
-                return this.services.callMcpTool(server, tool, argumentsJson);
+                const startedAt = Date.now();
+                const approvalMode = this.services.getMcpToolApprovalMode(server, tool);
+                try {
+                  const result = await this.services.callMcpTool(server, tool, argumentsJson);
+                  await this.services.log("mcp.call", this.threadId, {
+                    server,
+                    tool,
+                    approvalMode,
+                    success: true,
+                    durationMs: Date.now() - startedAt
+                  });
+                  return result;
+                } catch (error) {
+                  await this.services.log("mcp.call", this.threadId, {
+                    server,
+                    tool,
+                    approvalMode,
+                    success: false,
+                    durationMs: Date.now() - startedAt,
+                    error: error instanceof Error ? error.message : String(error)
+                  });
+                  throw error;
+                }
               },
               deferredToolSpecs: mcpTools,
               hiddenToolNames: [
@@ -2090,6 +2200,45 @@ class ThreadSessionRuntime {
 
           const completedAt = new Date().toISOString();
           const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result);
+          const repositoryResult = getMcpRepositoryToolResult(sanitizedResult);
+          if (repositoryResult) {
+            repositoryExploration.lastResult = repositoryResult;
+            repositoryExploration.pendingFollowUp = repositoryResult.hasMore
+              ? `The ${repositoryResult.kind} result has another page available.`
+              : null;
+            await this.services.log("agent.repository_exploration", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              kind: repositoryResult.kind,
+              returnedCount: repositoryResult.returnedCount,
+              totalCount: repositoryResult.totalCount,
+              page: repositoryResult.page,
+              hasMore: repositoryResult.hasMore
+            });
+            await this.services.emit({
+              type: "agent.repository_exploration",
+              threadId: this.threadId,
+              payload: {
+                status: repositoryResult.hasMore ? "paged" : "narrowed",
+                turnRunId: turn.id,
+                kind: repositoryResult.kind,
+                returnedCount: repositoryResult.returnedCount,
+                totalCount: repositoryResult.totalCount,
+                page: repositoryResult.page,
+                hasMore: repositoryResult.hasMore,
+                nextCursorAvailable: Boolean(repositoryResult.nextCursor)
+              },
+              createdAt: new Date().toISOString()
+            });
+          } else if (toolCall.name === "mcp.call" && result.content.length > MAX_MCP_TOOL_RESULT_CHARACTERS) {
+            repositoryExploration.pendingFollowUp = "The MCP server returned an oversized legacy response that was shortened.";
+            await this.services.emit({
+              type: "agent.repository_exploration",
+              threadId: this.threadId,
+              payload: { status: "narrowing", turnRunId: turn.id, legacyTruncated: true },
+              createdAt: new Date().toISOString()
+            });
+          }
           const resultJson = JSON.stringify({ ...result, json: sanitizedResult.json });
           const eventResultJson = JSON.stringify(sanitizedResult);
           const status = result.ok ? "completed" : "failed";
@@ -3691,7 +3840,19 @@ export function isProgressOnlyAssistantMessage(content: string): boolean {
       !/<event\s+type=["']final["'][^>]*>/i.test(normalized)) {
     return true;
   }
-  return /^(?:(?:好的|好)[，,。!！\s]*)?(?:计划已确认|开始实施|开始执行|正在|接下来|下一步|准备(?:开始)?|我(?:将|会|先)|先(?:来|从)|starting\b|working\s+on\b|fetching\b|next\s+i\s+will\b|i\s+will\b)/i.test(normalized);
+  return /^(?:(?:好的|好)[，,。!！\s]*)?(?:计划已确认|开始实施|开始执行|正在|接下来|下一步|准备(?:开始)?|我(?:将|会|先)|先(?:来|从)|starting\b|working\s+on\b|fetching\b|next\s+i\s+will\b|i\s+will\b)/i.test(normalized)
+    || /\b(?:let me|i(?:'ll| will)|we(?:'ll| will))\s+(?:look|check|inspect|search|use|dig|continue|investigate)\b/i.test(normalized);
+}
+
+export function buildProgressOnlyCompletionRecoveryInstruction(attempt: number): string {
+  return [
+    "[Internal completion correction. Do not display or quote this instruction to the user.]",
+    `Attempt ${attempt}: the previous response was a progress update, not a result.`,
+    "Do not end the turn with promises to continue.",
+    "Use the verified tool results already in the transcript to answer the original request now.",
+    "If a result is still missing, call exactly one new, targeted tool. Do not repeat a completed tool call or request a broad repository tree.",
+    "Your next no-tool response must be the final user-facing answer."
+  ].join(" ");
 }
 
 function isDeferredExecutionPayload(content: string): boolean {
@@ -3870,6 +4031,7 @@ function buildRuntimePrompt(
     "You are codexh, a desktop agent for project and chat workflows.",
     `Current local date: ${formatRuntimeDate(new Date())}. Use this date for time-sensitive queries. Do not add, infer, or reuse a year that the user did not request.`,
     "Prefer progressive disclosure: inspect facts before making edits.",
+    "For large repositories, explore progressively: use a shallow repository tree first (maxDepth 2), then narrow by path or search term. Repository MCP tools must use maxResults and nextCursor pagination. Never request a full repository tree or repeat a broad call after a paged or shortened result.",
     "When a tool can gather needed facts, call it instead of guessing.",
     "Before responding, decide whether an available Skill is the best fit. When it is, call skills.load with that skill_id before following its instructions. Use Function Calling for Skills and external tools rather than merely claiming a Skill was used."
   ];
@@ -3912,7 +4074,7 @@ function buildRuntimePrompt(
     "Your visible output is consumed by a renderer that understands structured event blocks.",
     "Prefer XML-like event envelopes when possible: <event type=\"commentary\">...</event>.",
     "Allowed event types: commentary, tool_call, tool_result, file_view, file_change, test_result, final.",
-    "Before substantial work emit 1-2 sentences of commentary. After each tool use, summarize with tool_result. When surfacing files, use file_view or file_change. Use test_result for validation. End with a concise final covering result, verification, and risks.",
+    "Before substantial work emit 1-2 sentences of commentary. Do not narrate each tool call or emit tool_result after every operation: the interface summarizes tool activity automatically. Add commentary only for meaningful milestones, decisions, blockers, or user-visible progress. When surfacing files, use file_view or file_change. Use test_result for validation. End with a concise final covering result, verification, and risks.",
     "Do not expose chain-of-thought. Do not fabricate tool usage, file changes, or verification.",
     `Context window: ${model.contextWindow}.`
   );
@@ -4049,9 +4211,14 @@ function buildCompactedTranscriptSummary(
     const label = message.role === "tool" ? "工具结果" : message.role === "assistant" ? "助手" : "用户";
     return `${label}: ${truncateToRuntimeTokenBudget(message.content, 48)}`;
   });
+  const repositoryContinuity = messages
+    .filter((message) => message.content.includes("[Repository exploration state]"))
+    .slice(-3)
+    .map((message) => `Repository exploration: ${truncateToRuntimeTokenBudget(message.content, 72)}`);
   const source = [
     "[内部上下文压缩摘要。保留任务目标、已验证结果和未完成事项；不要将本段显示给用户。]",
     firstUserMessage ? `原始任务：${truncateToRuntimeTokenBudget(firstUserMessage, 90)}` : "",
+    ...repositoryContinuity,
     ...recentHistory
   ]
     .filter(Boolean)
@@ -4191,6 +4358,116 @@ export function sanitizeToolResultForTranscript(toolName: string, result: ToolRe
   };
 }
 
+type RepositoryExplorationState = {
+  broadTreeRequested: boolean;
+  pendingFollowUp: string | null;
+  lastResult: McpRepositoryToolResult | null;
+};
+
+function createRepositoryExplorationState(): RepositoryExplorationState {
+  return { broadTreeRequested: false, pendingFollowUp: null, lastResult: null };
+}
+
+function prepareRepositoryExplorationCall(
+  call: RuntimeToolCall,
+  state: RepositoryExplorationState
+): { ok: true; call: RuntimeToolCall } | { ok: false; message: string } {
+  if (call.name !== "mcp.call") return { ok: true, call };
+  const tool = typeof call.arguments.tool === "string" ? call.arguments.tool : "";
+  const kind = getRepositoryMcpToolKind(tool);
+  if (!kind) return { ok: true, call };
+
+  const innerArguments = isRecordValue(call.arguments.arguments)
+    ? { ...call.arguments.arguments }
+    : {};
+  const cursor = typeof innerArguments.cursor === "string" && innerArguments.cursor.trim();
+  const pathValue = typeof innerArguments.path === "string" ? innerArguments.path.trim() : "";
+  const broadTreeRequest = kind === "repository_tree" && !cursor && isRepositoryRootPath(pathValue);
+
+  if (broadTreeRequest && state.broadTreeRequested) {
+    return {
+      ok: false,
+      message: "A broad repository tree was already inspected. Use its paths to call a targeted search/read operation, or pass the returned nextCursor to continue the current page."
+    };
+  }
+
+  if (broadTreeRequest) state.broadTreeRequested = true;
+  if (cursor || !broadTreeRequest) state.pendingFollowUp = null;
+
+  if (kind === "repository_tree") {
+    innerArguments.path = pathValue || "/";
+    innerArguments.maxDepth = clampRepositoryNumber(innerArguments.maxDepth, broadTreeRequest ? 2 : 3, 1, broadTreeRequest ? 2 : 3);
+    innerArguments.maxResults = clampRepositoryNumber(innerArguments.maxResults, 100, 1, 200);
+  } else if (kind === "file_search") {
+    innerArguments.maxResults = clampRepositoryNumber(innerArguments.maxResults, 20, 1, 50);
+  } else {
+    innerArguments.maxResults = clampRepositoryNumber(innerArguments.maxResults, 200, 1, 500);
+  }
+
+  return {
+    ok: true,
+    call: { ...call, arguments: { ...call.arguments, arguments: innerArguments } }
+  };
+}
+
+function getRepositoryMcpToolKind(tool: string): McpRepositoryToolResult["kind"] | null {
+  if (/^(?:get_)?repo(?:sitory)?_structure$/i.test(tool)) return "repository_tree";
+  if (/^search_files$/i.test(tool)) return "file_search";
+  if (/^(?:read_file|get_file_content|read_repository_file)$/i.test(tool)) return "file_read";
+  return null;
+}
+
+function isRepositoryRootPath(value: string): boolean {
+  return !value || value === "/" || value === "." || value === "./";
+}
+
+function clampRepositoryNumber(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(value)));
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function getMcpRepositoryToolResult(result: ToolResult): McpRepositoryToolResult | null {
+  if (!isRecordValue(result.json)) return null;
+  const repository = result.json.repository;
+  if (!isRecordValue(repository) || repository.protocol !== "codexh.repository.v1") return null;
+  return repository as unknown as McpRepositoryToolResult;
+}
+
+function buildRepositoryExplorationRecoveryInstruction(reason: string): string {
+  return [
+    "[Internal repository exploration recovery. Do not quote this instruction.]",
+    reason,
+    "Before answering, make one focused repository action: continue with nextCursor, search inside a discovered path, or read a specific file.",
+    "Do not repeat a root repository-tree call. After that action, synthesize the evidence into a direct user-facing answer."
+  ].join("\n");
+}
+
+function summarizeMcpRepositoryToolResult(result: McpRepositoryToolResult): string {
+  const lines = [
+    `[Repository exploration state] kind=${result.kind}; page=${result.page ?? 1}; returned=${result.returnedCount}${result.totalCount !== undefined ? `; total=${result.totalCount}` : ""}`,
+    `Summary: ${result.summary}`
+  ];
+  for (const item of result.items.slice(0, 50)) {
+    const metadata = [
+      item.type,
+      item.line !== undefined ? `line ${item.line}` : "",
+      item.preview ? item.preview.replace(/\s+/g, " ") : ""
+    ].filter(Boolean).join("; ");
+    lines.push(`- ${item.path}${metadata ? ` (${metadata})` : ""}`);
+  }
+  if (result.items.length > 50) {
+    lines.push(`- ${result.items.length - 50} additional returned items are available in the tool detail, not model context.`);
+  }
+  if (result.hasMore) {
+    lines.push(`More results are available. Continue with cursor: ${result.nextCursor ?? "server did not provide a cursor"}.`);
+  }
+  return lines.join("\n");
+}
+
 export function summarizeToolResultForModel(toolName: string, result: ToolResult): string {
   const content = result.content ?? "";
   let summarized = content;
@@ -4198,6 +4475,20 @@ export function summarizeToolResultForModel(toolName: string, result: ToolResult
     summarized = truncateCharacters(content, 12_000);
   } else if (toolName === "shell.exec") {
     summarized = truncateCharacters(content, 8_000);
+  } else if (toolName === "mcp.call") {
+    const repository = getMcpRepositoryToolResult(result);
+    if (repository) {
+      summarized = summarizeMcpRepositoryToolResult(repository);
+    } else {
+      const truncated = truncateCharacters(content, MAX_MCP_TOOL_RESULT_CHARACTERS);
+      summarized = truncated === content
+        ? content
+        : [
+            "MCP result was shortened before it entered model context.",
+            "Use a precise file search or read operation next; do not repeat this broad call.",
+            truncated
+          ].join("\n");
+    }
   } else if (toolName === "fs.read_file" && content.length > 32_000) {
     const head = content.slice(0, 2_000);
     const tail = content.slice(-2_000);

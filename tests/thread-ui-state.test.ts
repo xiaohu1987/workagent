@@ -8,10 +8,33 @@ import {
   shouldShowTaskProcessing
 } from "../apps/desktop/src/renderer/thread-ui-state";
 import {
+  buildTimelineEntries,
+  getThreadDeleteFailureMessage,
   getToolProcessingLabel,
+  getToolActivitySummary,
+  shouldShowRuntimeActivityPanel,
   isFileWriteTool,
-  isPatchAssistantMessage
+  isPatchAssistantMessage,
+  reconcilePendingUserMessages
 } from "../apps/desktop/src/renderer/App";
+import type { MessageRecord, ToolCallRecord } from "../packages/shared-types/src";
+
+function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
+  return {
+    id: "tool-1",
+    threadId: "thread-1",
+    turnRunId: "turn-1",
+    toolName: "fs.read_file",
+    argumentsJson: JSON.stringify({ path: "src/App.tsx" }),
+    resultJson: "{}",
+    status: "completed",
+    riskLevel: "low",
+    approvalMode: "auto",
+    startedAt: "2026-07-15T00:00:00.000Z",
+    completedAt: "2026-07-15T00:00:01.000Z",
+    ...overrides
+  };
+}
 
 describe("thread UI state helpers", () => {
   it("treats running and waiting threads as executing", () => {
@@ -124,5 +147,137 @@ describe("file write transcript filtering", () => {
     expect(isFileWriteTool("apply_patch")).toBe(true);
     expect(isFileWriteTool("fs.write_file")).toBe(true);
     expect(isFileWriteTool("fs.read_file")).toBe(false);
+  });
+});
+
+describe("runtime activity visibility", () => {
+  it("uses the timeline tool summary instead of a duplicate processing panel", () => {
+    expect(shouldShowRuntimeActivityPanel(true, false, false)).toBe(true);
+    expect(shouldShowRuntimeActivityPanel(true, false, true)).toBe(false);
+    expect(shouldShowRuntimeActivityPanel(true, true, false)).toBe(false);
+    expect(shouldShowRuntimeActivityPanel(false, false, false)).toBe(false);
+  });
+});
+
+describe("tool activity summaries", () => {
+  it("summarizes completed operations in user-facing categories", () => {
+    const summary = getToolActivitySummary([
+      makeToolCall({ id: "search", toolName: "code.search", argumentsJson: JSON.stringify({ query: "timeline" }) }),
+      makeToolCall({ id: "read", toolName: "fs.read_file" }),
+      makeToolCall({ id: "write", toolName: "apply_patch", argumentsJson: JSON.stringify({ patch: "*** Begin Patch\n*** Update File: src/App.tsx\n*** End Patch" }) }),
+      makeToolCall({ id: "test", toolName: "shell.exec", argumentsJson: JSON.stringify({ command: "pnpm test" }) })
+    ]);
+
+    expect(summary).toEqual({
+      title: "\u5df2\u5b8c\u6210\u67e5\u8be2\u4e0e\u8bfb\u53d6",
+      detail: "\u67e5\u8be2 1 \u6b21 \u00b7 \u8bfb\u53d6 1 \u9879 \u00b7 \u4fee\u6539 1 \u4e2a\u6587\u4ef6 \u00b7 \u9a8c\u8bc1 1 \u6b21"
+    });
+  });
+
+  it("surfaces failed operations in the collapsed summary", () => {
+    const summary = getToolActivitySummary([
+      makeToolCall({ id: "failed", toolName: "shell.exec", status: "failed", argumentsJson: JSON.stringify({ command: "pnpm test" }) }),
+      makeToolCall({ id: "read", toolName: "fs.read_file" })
+    ]);
+
+    expect(summary.title).toBe("\u90e8\u5206\u8bfb\u53d6\u4e0e\u9a8c\u8bc1\u672a\u5b8c\u6210");
+    expect(summary.detail).toBe("\u5df2\u5c1d\u8bd5 2 \u6b21\u8bfb\u53d6\u4e0e\u9a8c\u8bc1 \u00b7 1 \u6b21\u5931\u8d25");
+  });
+
+  it("describes MCP calls as queries instead of exposing the tool name", () => {
+    const summary = getToolActivitySummary([
+      makeToolCall({ id: "mcp-1", toolName: "mcp.call" }),
+      makeToolCall({ id: "mcp-2", toolName: "mcp.call", status: "failed" })
+    ]);
+
+    expect(summary).toEqual({
+      title: "\u90e8\u5206\u67e5\u8be2\u672a\u5b8c\u6210",
+      detail: "\u5df2\u5c1d\u8bd5 2 \u6b21\u67e5\u8be2 \u00b7 1 \u6b21\u5931\u8d25"
+    });
+  });
+});
+
+describe("tool timeline grouping", () => {
+  it("groups calls by turn and keeps legacy calls separate", () => {
+    const entries = buildTimelineEntries(
+      [],
+      [
+        makeToolCall({ id: "turn-1-read", turnRunId: "turn-1" }),
+        makeToolCall({ id: "turn-1-search", turnRunId: "turn-1", toolName: "code.search" }),
+        makeToolCall({ id: "turn-2-read", turnRunId: "turn-2", startedAt: "2026-07-15T00:01:00.000Z" }),
+        makeToolCall({ id: "legacy", turnRunId: "", startedAt: "2026-07-15T00:02:00.000Z" })
+      ],
+      []
+    );
+    const toolGroups = entries.filter((entry) => entry.kind === "tool-group");
+
+    expect(toolGroups).toHaveLength(3);
+    expect(toolGroups.find((entry) => entry.id === "tool-group-turn-1")?.toolCalls).toHaveLength(2);
+    expect(toolGroups.find((entry) => entry.id === "tool-group-legacy-legacy")?.toolCalls).toHaveLength(1);
+  });
+
+  it("keeps file changes as a separate outcome summary", () => {
+    const entries = buildTimelineEntries(
+      [],
+      [makeToolCall({
+        toolName: "apply_patch",
+        argumentsJson: JSON.stringify({ patch: "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch" })
+      })],
+      []
+    );
+
+    expect(entries.some((entry) => entry.kind === "tool-group")).toBe(true);
+    expect(entries.some((entry) => entry.kind === "file-summary")).toBe(true);
+  });
+});
+
+describe("optimistic user message reconciliation", () => {
+  it("replaces an optimistic message with the persisted display message", () => {
+    const optimistic: MessageRecord = {
+      id: "optimistic-1",
+      threadId: "thread-1",
+      turnRunId: null,
+      role: "user",
+      content: "Check the WebP submission controls",
+      metadataJson: null,
+      createdAt: "2026-07-15T01:00:00.000Z"
+    };
+    const persisted: MessageRecord = {
+      ...optimistic,
+      id: "persisted-1",
+      content: "Check the WebP submission controls\n\n[attached skill context]",
+      metadataJson: JSON.stringify({ displayContent: optimistic.content }),
+      createdAt: "2026-07-15T01:00:02.000Z"
+    };
+
+    expect(reconcilePendingUserMessages([optimistic], [persisted])).toEqual([]);
+  });
+
+  it("matches persisted messages one-to-one when identical requests are sent", () => {
+    const first: MessageRecord = {
+      id: "optimistic-1",
+      threadId: "thread-1",
+      turnRunId: null,
+      role: "user",
+      content: "Continue",
+      metadataJson: null,
+      createdAt: "2026-07-15T01:00:00.000Z"
+    };
+    const second: MessageRecord = { ...first, id: "optimistic-2", createdAt: "2026-07-15T01:00:01.000Z" };
+    const persisted: MessageRecord = { ...first, id: "persisted-1", createdAt: "2026-07-15T01:00:02.000Z" };
+
+    expect(reconcilePendingUserMessages([first, second], [persisted])).toEqual([second]);
+  });
+});
+
+describe("thread deletion feedback", () => {
+  it("explains how to release a Windows-locked task output directory", () => {
+    const message = getThreadDeleteFailureMessage(
+      new Error("EBUSY: resource busy or locked, rmdir 'C:\\Users\\name\\.codexh\\outputs\\thread-1'")
+    );
+
+    expect(message).toContain("终端或预览");
+    expect(message).toContain("完全退出并重新打开 CodeXH");
+    expect(message).not.toContain("EBUSY");
   });
 });

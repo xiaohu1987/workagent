@@ -129,6 +129,34 @@ export interface ToolResult {
   followUpMessage?: string;
 }
 
+/**
+ * Optional v1 contract for MCP tools that inspect large repositories. The
+ * envelope keeps pagination separate from the textual MCP protocol payload so
+ * clients can retain the complete result without placing it in model context.
+ */
+export type McpRepositoryResultKind = "repository_tree" | "file_search" | "file_read";
+
+export interface McpRepositoryResultItem {
+  path: string;
+  type?: "file" | "directory" | "match" | "line";
+  name?: string;
+  size?: number;
+  line?: number;
+  preview?: string;
+}
+
+export interface McpRepositoryToolResult {
+  protocol: "codexh.repository.v1";
+  kind: McpRepositoryResultKind;
+  summary: string;
+  items: McpRepositoryResultItem[];
+  returnedCount: number;
+  totalCount?: number;
+  page?: number;
+  hasMore: boolean;
+  nextCursor?: string;
+}
+
 export interface BrowserViewport {
   width: number;
   height: number;
@@ -398,9 +426,30 @@ export interface McpServerConfig {
   cwd?: string;
   url?: string;
   transport?: string;
+  /** Authentication configuration only. Tokens are deliberately never persisted here. */
+  auth?: McpAuthConfig;
+  defaultToolsApprovalMode?: McpToolApprovalMode;
+  tools?: Record<string, McpToolPolicy>;
   source?: "config" | "plugin";
   pluginId?: string;
   enabled: boolean;
+}
+
+export type McpToolApprovalMode = "auto" | "prompt" | "writes" | "approve";
+
+export interface McpToolPolicy {
+  enabled?: boolean;
+  approvalMode?: McpToolApprovalMode;
+}
+
+export interface McpAuthConfig {
+  mode: "none" | "bearer_env" | "oauth";
+  /** Environment variable holding a bearer token; the value is never stored in config. */
+  bearerTokenEnvVar?: string;
+  /** A pre-registered public OAuth client id. Dynamic registration is intentionally not used. */
+  oauthClientId?: string;
+  oauthResource?: string;
+  oauthScopes?: string[];
 }
 
 export interface ProviderDefinition {
@@ -623,6 +672,7 @@ export interface RuntimeEvent {
     | "assistant.execution_output"
     | "agent.retrying"
     | "agent.context_compacted"
+    | "agent.repository_exploration"
     | "queue.updated"
     | "turn.updated"
     | "tool.started"

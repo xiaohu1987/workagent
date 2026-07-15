@@ -7,6 +7,9 @@ type UpdateState = {
   insecureTransport?: boolean;
   missingSha256?: boolean;
   progress?: number;
+  receivedBytes?: number;
+  totalBytes?: number;
+  downloadedInstaller?: string;
   error?: string;
   isPackaged: boolean;
 };
@@ -76,7 +79,10 @@ declare global {
       getConfig: () => Promise<any>;
       saveConfig: (config: unknown) => Promise<void>;
       listMcpServers: () => Promise<any[]>;
-      testMcpServer: (config: unknown) => Promise<{ tools: any[]; resources: any[]; resourceTemplates: any[] }>;
+      testMcpServer: (config: unknown) => Promise<{ tools: any[]; resources: any[]; resourceTemplates: any[]; prompts: any[] }>;
+      refreshMcpTools: (serverId?: string) => Promise<any[]>;
+      loginMcpServer: (serverId: string) => Promise<void>;
+      logoutMcpServer: (serverId: string) => Promise<void>;
       fetchProviderModels: (payload: {
         baseUrl?: string;
         apiKey?: string;

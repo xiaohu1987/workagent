@@ -109,6 +109,9 @@ type UpdateState = {
   insecureTransport?: boolean;
   missingSha256?: boolean;
   progress?: number;
+  receivedBytes?: number;
+  totalBytes?: number;
+  downloadedInstaller?: string;
   error?: string;
   isPackaged: boolean;
 };
@@ -322,7 +325,7 @@ type ModelTestResult = {
 
 type TimelineEntry =
   | { kind: "message"; id: string; createdAt: string; message: MessageRecord }
-  | { kind: "tool"; id: string; createdAt: string; toolCall: ToolCallRecord }
+  | { kind: "tool-group"; id: string; createdAt: string; toolCalls: ToolCallRecord[] }
   | { kind: "file-summary"; id: string; createdAt: string; files: FileChangeSummaryItem[] }
   | { kind: "directory-read-group"; id: string; createdAt: string; directory: string; count: number }
   | { kind: "user-input"; id: string; createdAt: string; prompt: UserInputPrompt };
@@ -369,6 +372,11 @@ type RuntimeProgress = {
   runtimeObserved: boolean;
 };
 
+type ComposerSubmission = {
+  content: string;
+  startedAt: string;
+};
+
 type RuntimeActivityEntry =
   | { id: string; kind: "status"; label: string; createdAt: string }
   | { id: string; kind: "output"; label: string; content: string; createdAt: string }
@@ -382,6 +390,7 @@ type RuntimeActivity = {
 
 type McpRuntimeServer = McpServerConfig & {
   status: { state: "idle" | "connecting" | "connected" | "error" | "disabled"; error?: string };
+  authStatus?: "not_configured" | "signed_out" | "signed_in";
 };
 
 type HistorySearchResult = {
@@ -498,6 +507,7 @@ export function App() {
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null);
+  const [composerSubmission, setComposerSubmission] = useState<ComposerSubmission | null>(null);
   const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
   const [completedTurnTimers, setCompletedTurnTimers] = useState<Record<string, { startedAt: string; completedAt: string }>>({});
   const [expandedRuntimeThreads, setExpandedRuntimeThreads] = useState<Record<string, boolean>>({});
@@ -564,7 +574,8 @@ export function App() {
   const [mcpCreateError, setMcpCreateError] = useState<string | null>(null);
   const [mcpJsonDraft, setMcpJsonDraft] = useState("");
   const [mcpJsonError, setMcpJsonError] = useState<string | null>(null);
-  const [mcpTestResults, setMcpTestResults] = useState<Record<string, { tools: Array<{ name: string; description: string }>; resources: Array<{ uri: string; name: string }>; resourceTemplates: Array<{ uriTemplate: string; name: string }> }>>({});
+  const [mcpTestResults, setMcpTestResults] = useState<Record<string, { tools: Array<{ name: string; description: string }>; resources: Array<{ uri: string; name: string }>; resourceTemplates: Array<{ uriTemplate: string; name: string }>; prompts: Array<{ name: string; description: string }> }>>({});
+  const [mcpAuthBusyId, setMcpAuthBusyId] = useState<string | null>(null);
   const [settingsProviderId, setSettingsProviderId] = useState<string | null>(null);
   const [providerSecretDrafts, setProviderSecretDrafts] = useState<Record<string, string>>({});
   const [newModelId, setNewModelId] = useState("");
@@ -820,6 +831,7 @@ export function App() {
 
   function startRuntimeActivity(threadId: string) {
     const createdAt = new Date().toISOString();
+    setComposerSubmission(null);
     setCompletedTurnTimers((current) => {
       if (!current[threadId]) return current;
       const next = { ...current };
@@ -966,6 +978,7 @@ export function App() {
           toolName?: string;
           argumentsJson?: string;
           resultJson?: string;
+          prompt?: UserInputPrompt;
           riskLevel?: ToolCallRecord["riskLevel"];
           approvalMode?: ToolCallRecord["approvalMode"];
           status?: ToolCallRecord["status"];
@@ -1210,7 +1223,31 @@ export function App() {
       }
       if (typed.type === "agent.context_compacted" && typed.threadId) {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
-          appendRuntimeStatus(typed.threadId, "上下文已自动压缩", typed.createdAt);
+          appendRuntimeStatus(typed.threadId, "上下文已自动压缩，继续分析中", typed.createdAt);
+        }
+      }
+      if (typed.type === "agent.repository_exploration" && typed.threadId) {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          const explorationPayload = typed.payload as unknown as {
+            status?: "paged" | "narrowing" | "narrowed";
+            page?: number;
+            returnedCount?: number;
+          };
+          const status = explorationPayload.status;
+          const page = typeof explorationPayload.page === "number" ? explorationPayload.page : 1;
+          const returned = typeof explorationPayload.returnedCount === "number" ? explorationPayload.returnedCount : null;
+          if (status === "paged") {
+            appendRuntimeStatus(
+              typed.threadId,
+              `结果已分页（第 ${page} 页${returned === null ? "" : `，${returned} 项`}），正在缩小范围`,
+              typed.createdAt
+            );
+          } else if (status === "narrowing") {
+            appendRuntimeStatus(typed.threadId, "正在缩小检索范围并定位相关文件", typed.createdAt);
+          } else {
+            appendRuntimeStatus(typed.threadId, "已定位相关路径，继续分析中", typed.createdAt);
+          }
+          setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         }
       }
       if (typed.type === "message.created" && typed.threadId && typed.payload?.message?.role === "user") {
@@ -1619,6 +1656,14 @@ export function App() {
         .at(-1) ?? null,
     [activeSnapshotThreadId, streamingAssistants]
   );
+  const hasActiveTimelineTool = useMemo(
+    () => timelineEntries.some(
+      (entry) => entry.kind === "tool-group" && entry.toolCalls.some(
+        (toolCall) => toolCall.status === "running" || toolCall.status === "pending"
+      )
+    ),
+    [timelineEntries]
+  );
   const composerPrimaryAction = getComposerPrimaryActionState(
     selectedThreadStatus,
     input.trim() || composerAttachments.length > 0 ? "content" : ""
@@ -1634,6 +1679,11 @@ export function App() {
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
+  const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
+    isTaskProcessing,
+    Boolean(activeStreamingAssistant),
+    hasActiveTimelineTool
+  );
   const taskProcessingLabel = useMemo(
     () =>
       activeToolCall?.threadId === activeSnapshotThreadId
@@ -2016,12 +2066,7 @@ export function App() {
         return;
       }
       const pending = pendingUserMessagesRef.current[threadId] ?? [];
-      const remaining = pending.filter((optimistic) => !next.messages.some(
-        (message) =>
-          message.role === "user" &&
-          message.content === optimistic.content &&
-          Date.parse(message.createdAt) >= Date.parse(optimistic.createdAt) - 1_000
-      ));
+      const remaining = reconcilePendingUserMessages(pending, next.messages);
       if (remaining.length > 0) {
         pendingUserMessagesRef.current[threadId] = remaining;
       } else {
@@ -2316,8 +2361,8 @@ export function App() {
       await refreshThreads();
       showNotice("任务已删除。", { tone: "success" });
     } catch (error) {
-      showNotice("删除失败。", {
-        message: error instanceof Error ? error.message : "请稍后重试。"
+      showNotice("暂时无法删除任务。", {
+        message: getThreadDeleteFailureMessage(error)
       });
     } finally {
       setDeletingThreadId((current) => (current === thread.id ? null : current));
@@ -2352,6 +2397,10 @@ export function App() {
       }
     }
 
+    if (!options?.internal) {
+      setComposerSubmission({ content: inputContent, startedAt: new Date().toISOString() });
+    }
+
     let threadId = selectedThreadId;
     if (!threadId) {
       const thread = await createThreadRecord("chat");
@@ -2362,6 +2411,7 @@ export function App() {
 
     if (unsupportedMultimodalInput) {
       await window.codexh.rejectUnsupportedMultimodal({ threadId, content: inputContent });
+      setComposerSubmission(null);
       setInput("");
       setComposerAttachments([]);
       setGpaComposerSelected(false);
@@ -2405,6 +2455,7 @@ export function App() {
       try {
         importedAttachments = await importComposerAttachments(threadId, composerAttachments);
       } catch (error) {
+        setComposerSubmission(null);
         showNotice("添加附件失败", { message: error instanceof Error ? error.message : String(error) });
         return;
       }
@@ -2423,6 +2474,8 @@ export function App() {
       suppressRuntimeProgressRef.current[threadId] = false;
       startRuntimeActivity(threadId);
       setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
+    } else {
+      setComposerSubmission(null);
     }
     try {
       await window.codexh.sendMessage({ threadId, content: raw, displayContent, attachments: importedAttachments });
@@ -2435,6 +2488,7 @@ export function App() {
           : current
         );
       }
+      setComposerSubmission(null);
       setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
       clearRuntimeActivity(threadId);
       showNotice("发送消息失败", { message: error instanceof Error ? error.message : String(error) });
@@ -3045,7 +3099,7 @@ export function App() {
   function addMcpServer() {
     if (!configDraft) return;
     const id = createAvailableMcpId(configDraft.mcpServers);
-    setMcpCreateDraft({ id, name: "", transport: "stdio", command: "", args: [], enabled: true, source: "config" });
+    setMcpCreateDraft({ id, name: "", transport: "streamable_http", url: "", auth: { mode: "none" }, defaultToolsApprovalMode: "prompt", enabled: true, source: "config" });
     setMcpCreateMode("form");
     setMcpCreateError(null);
     setMcpJsonDraft("");
@@ -3111,7 +3165,7 @@ export function App() {
       const result = await window.codexh.testMcpServer(server);
       setMcpTestResults((current) => ({
         ...current,
-        [server.id]: { tools: result.tools, resources: result.resources, resourceTemplates: result.resourceTemplates }
+        [server.id]: { tools: result.tools, resources: result.resources, resourceTemplates: result.resourceTemplates, prompts: result.prompts }
       }));
       showNotice(`${server.name} 测试成功`, { tone: "success", message: `发现 ${result.tools.length} 个工具` });
     } catch (error) {
@@ -3119,6 +3173,45 @@ export function App() {
     } finally {
       setTestingMcpServerId((current) => current === server.id ? null : current);
       await refreshMcpServers();
+    }
+  }
+
+  async function loginMcpServer(serverId: string) {
+    setMcpAuthBusyId(serverId);
+    try {
+      await window.codexh.loginMcpServer(serverId);
+      await refreshMcpServers();
+      showNotice("OAuth 登录完成", { tone: "success" });
+    } catch (error) {
+      showNotice("OAuth 登录失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setMcpAuthBusyId(null);
+    }
+  }
+
+  async function logoutMcpServer(serverId: string) {
+    setMcpAuthBusyId(serverId);
+    try {
+      await window.codexh.logoutMcpServer(serverId);
+      await refreshMcpServers();
+      showNotice("OAuth 已退出", { tone: "success" });
+    } catch (error) {
+      showNotice("OAuth 退出失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setMcpAuthBusyId(null);
+    }
+  }
+
+  async function refreshMcpToolDirectory(serverId: string) {
+    try {
+      const tools = await window.codexh.refreshMcpTools(serverId);
+      setMcpTestResults((current) => ({
+        ...current,
+        [serverId]: { ...(current[serverId] ?? { resources: [], resourceTemplates: [], prompts: [] }), tools }
+      }));
+      showNotice("MCP 工具目录已刷新", { tone: "success", message: `发现 ${tools.length} 个工具` });
+    } catch (error) {
+      showNotice("刷新 MCP 工具目录失败", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -4062,7 +4155,11 @@ export function App() {
               </div>
             ) : null}
             {showWelcome ? (
-              <div className="welcome-empty-state" />
+              <div className="welcome-empty-state">
+                {composerSubmission ? (
+                  <ComposerSubmissionStatus submission={composerSubmission} />
+                ) : null}
+              </div>
             ) : (
               <div ref={chatTranscriptRef} className="chat-transcript task-timeline">
                 {timelineEntries.map((entry) =>
@@ -4093,7 +4190,7 @@ export function App() {
                       onAnswer={() => undefined}
                     />
                   ) : (
-                    <ExecutionStep key={entry.id} toolCall={entry.toolCall} />
+                    <ToolActivityGroup key={entry.id} toolCalls={entry.toolCalls} />
                   )
                 )}
                 {pendingApprovals.map((approval) => (
@@ -4146,7 +4243,7 @@ export function App() {
                     )}
                   </section>
                 ) : null}
-                {isTaskProcessing ? (
+                {showRuntimeActivityPanel ? (
                   <RuntimeActivityPanel
                     label={taskProcessingLabel}
                     startedAt={
@@ -4168,6 +4265,14 @@ export function App() {
                       setRightWorkspaceTab("browser");
                       setIsTerminalOpen(true);
                     } : undefined}
+                    onShowDetails={() => {
+                      if (!activeRuntimeThreadId) return;
+                      setExpandedRuntimeThreads((current) => ({ ...current, [activeRuntimeThreadId]: true }));
+                    }}
+                    onRefresh={() => {
+                      if (activeRuntimeThreadId) void refreshSnapshot(activeRuntimeThreadId);
+                    }}
+                    onInterrupt={() => void interruptActiveThread()}
                   />
                 ) : completedTurnTimer ? (
                   <TurnElapsedBanner
@@ -4177,6 +4282,9 @@ export function App() {
                 ) : null}
               </div>
             )}
+            {!showWelcome && composerSubmission ? (
+              <ComposerSubmissionStatus submission={composerSubmission} />
+            ) : null}
           </div>
 
           <footer
@@ -5019,9 +5127,20 @@ export function App() {
                     </div>
                     {updateState?.changelog ? <pre className="update-changelog">{updateState.changelog}</pre> : null}
                     {updateState?.phase === "downloading" ? (
-                      <div className="update-progress"><span style={{ width: `${updateState.progress ?? 0}%` }} /></div>
+                      <div className="update-progress-group">
+                        <div className="update-progress" aria-label={`下载进度 ${updateState.progress ?? 0}%`}>
+                          <span style={{ width: `${updateState.progress ?? 0}%` }} />
+                        </div>
+                        <div className="update-progress-meta">
+                          <span>{formatUpdateDownloadSize(updateState.receivedBytes, updateState.totalBytes)}</span>
+                          <strong>{updateState.progress === undefined ? "正在接收" : `${updateState.progress}%`}</strong>
+                        </div>
+                      </div>
                     ) : null}
                     {updateState?.error ? <div className="update-error">{updateState.error}</div> : null}
+                    {updateState?.phase === "downloaded" && updateState.downloadedInstaller ? (
+                      <div className="update-download-path">安装包已保存至：<code>{updateState.downloadedInstaller}</code></div>
+                    ) : null}
                     {updateState?.phase === "available" ? (
                       <div className="action-row">
                         <button className="button warm" onClick={() => void downloadAvailableUpdate()} disabled={!updateState.isPackaged}>
@@ -5371,8 +5490,9 @@ export function App() {
                                 <div className="mcp-server-row-title">
                                   <span className="mcp-server-row-icon" aria-hidden><IconMcp /></span>
                                   <strong>{server.name || server.id}</strong>
-                                  <span className={`mcp-transport-pill ${transport}`}>{transportLabel}</span>
+                                 <span className={`mcp-transport-pill ${transport}`}>{transportLabel}</span>
                                   <span className={`mcp-status-pill ${statusState}`}>{statusState}</span>
+                                  {server.auth?.mode === "oauth" ? <span className="mcp-transport-pill">{runtime?.authStatus === "signed_in" ? "OAuth 已登录" : "OAuth 未登录"}</span> : null}
                                 </div>
                                 {!isEditing ? (
                                   <span className="mcp-server-row-target" title={server.command ?? server.url ?? server.id}>
@@ -5399,16 +5519,78 @@ export function App() {
                                   <label className="settings-field full"><span>命令</span><input value={server.command ?? ""} placeholder="npx" onChange={(event) => updateMcpServerDraft(server.id, { command: event.target.value })} /></label>
                                   <label className="settings-field"><span>参数（每行一个）</span><textarea value={(server.args ?? []).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { args: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} /></label>
                                   <label className="settings-field"><span>环境变量（KEY=VALUE）</span><textarea value={Object.entries(server.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { env: parseMcpEnvironment(event.target.value) })} /></label>
-                                </> : <label className="settings-field full"><span>服务 URL</span><input value={server.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => updateMcpServerDraft(server.id, { url: event.target.value })} /></label>}
+                                </> : <>
+                                  <label className="settings-field full"><span>服务 URL</span><input value={server.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => updateMcpServerDraft(server.id, { url: event.target.value })} /></label>
+                                  <label className="settings-field"><span>认证方式</span><select value={server.auth?.mode ?? "none"} onChange={(event) => updateMcpServerDraft(server.id, { auth: { mode: event.target.value as "none" | "bearer_env" | "oauth" } })}><option value="none">无认证</option><option value="bearer_env">Bearer 环境变量</option><option value="oauth">OAuth</option></select></label>
+                                  <label className="settings-field"><span>默认工具审批</span><select value={server.defaultToolsApprovalMode ?? "prompt"} onChange={(event) => updateMcpServerDraft(server.id, { defaultToolsApprovalMode: event.target.value as "auto" | "prompt" | "writes" | "approve" })}><option value="prompt">每次确认</option><option value="auto">自动执行</option><option value="writes">写入时确认</option><option value="approve">高风险确认</option></select></label>
+                                  {server.auth?.mode === "bearer_env" ? <label className="settings-field full"><span>Bearer Token 环境变量</span><input value={server.auth.bearerTokenEnvVar ?? ""} placeholder="MCP_TOKEN" onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, bearerTokenEnvVar: event.target.value } })} /></label> : null}
+                                  {server.auth?.mode === "oauth" ? <>
+                                    <label className="settings-field"><span>OAuth Client ID</span><input value={server.auth.oauthClientId ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, oauthClientId: event.target.value } })} /></label>
+                                    <label className="settings-field"><span>Scopes（空格分隔）</span><input value={(server.auth.oauthScopes ?? []).join(" ")} onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, oauthScopes: event.target.value.split(/\s+/).filter(Boolean) } })} /></label>
+                                    <label className="settings-field full"><span>Resource Metadata URL（可选）</span><input value={server.auth.oauthResource ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, oauthResource: event.target.value || undefined } })} /></label>
+                                  </> : null}
+                                </>}
                               </div>
                             ) : null}
                             <div className="mcp-server-row-actions">
-                              <button className="button secondary" type="button" onClick={() => setEditingMcpServerId(isEditing ? null : server.id)}>{isEditing ? "收起" : "编辑"}</button>
-                              <button className="button secondary" type="button" disabled={testingMcpServerId === server.id} onClick={() => void testMcpServer(server)}>{testingMcpServerId === server.id ? "测试中" : "测试连接"}</button>
-                              <button className="button ghost" type="button" onClick={() => removeMcpServer(server.id)}>删除</button>
-                              {testResult ? <span className="mcp-test-summary">工具 {testResult.tools.length} · 资源 {testResult.resources.length} · 模板 {testResult.resourceTemplates.length}</span> : null}
-                            </div>
-                            {testResult ? <details className="mcp-test-details"><summary>查看发现的能力</summary><div>{testResult.tools.map((tool) => <span key={tool.name}>{tool.name} {tool.description}</span>)}</div><div>{testResult.resources.map((resource) => <span key={resource.uri}>{resource.name}: {resource.uri}</span>)}</div><div>{testResult.resourceTemplates.map((template) => <span key={template.uriTemplate}>{template.name}: {template.uriTemplate}</span>)}</div></details> : null}
+                               <button className="button secondary" type="button" onClick={() => setEditingMcpServerId(isEditing ? null : server.id)}>{isEditing ? "收起" : "编辑"}</button>
+                               <button className="button secondary" type="button" disabled={testingMcpServerId === server.id} onClick={() => void testMcpServer(server)}>{testingMcpServerId === server.id ? "测试中" : "测试连接"}</button>
+                               <button className="button secondary" type="button" onClick={() => void refreshMcpToolDirectory(server.id)}>刷新工具</button>
+                               {server.auth?.mode === "oauth" ? <button className="button secondary" type="button" disabled={mcpAuthBusyId === server.id} onClick={() => void (runtime?.authStatus === "signed_in" ? logoutMcpServer(server.id) : loginMcpServer(server.id))}>{mcpAuthBusyId === server.id ? "处理中" : runtime?.authStatus === "signed_in" ? "退出 OAuth" : "登录 OAuth"}</button> : null}
+                               <button className="button ghost" type="button" onClick={() => removeMcpServer(server.id)}>删除</button>
+                               {testResult ? <span className="mcp-test-summary">工具 {testResult.tools.length} · 资源 {testResult.resources.length} · 模板 {testResult.resourceTemplates.length} · 提示词 {testResult.prompts.length}</span> : null}
+                             </div>
+                             {testResult ? (
+                               <details className="mcp-test-details">
+                                 <summary>
+                                   <span>查看发现的能力</span>
+                                   <span>{testResult.tools.length} 个工具</span>
+                                 </summary>
+                                 <div className="mcp-tool-list">
+                                   {testResult.tools.map((tool) => {
+                                     const policy = server.tools?.[tool.name];
+                                     return (
+                                       <div className="mcp-tool-row" key={tool.name}>
+                                         <label className="mcp-tool-enabled" title={policy?.enabled === false ? "启用工具" : "停用工具"}>
+                                           <input
+                                             type="checkbox"
+                                             checked={policy?.enabled !== false}
+                                             onChange={(event) => updateMcpServerDraft(server.id, {
+                                               tools: { ...(server.tools ?? {}), [tool.name]: { ...policy, enabled: event.target.checked } }
+                                             })}
+                                           />
+                                           <span className="mcp-tool-name">{tool.name}</span>
+                                         </label>
+                                         <span className="mcp-tool-description" title={tool.description}>{tool.description || "无描述"}</span>
+                                         <select
+                                           className="mcp-tool-approval"
+                                           aria-label={`${tool.name} 的审批策略`}
+                                           value={policy?.approvalMode ?? server.defaultToolsApprovalMode ?? "prompt"}
+                                           onChange={(event) => updateMcpServerDraft(server.id, {
+                                             tools: {
+                                               ...(server.tools ?? {}),
+                                               [tool.name]: { ...policy, approvalMode: event.target.value as "auto" | "prompt" | "writes" | "approve" }
+                                             }
+                                           })}
+                                         >
+                                           <option value="auto">自动</option>
+                                           <option value="prompt">每次确认</option>
+                                           <option value="writes">写入确认</option>
+                                           <option value="approve">高风险确认</option>
+                                         </select>
+                                       </div>
+                                     );
+                                   })}
+                                 </div>
+                                 {(testResult.resources.length || testResult.resourceTemplates.length || testResult.prompts.length) ? (
+                                   <div className="mcp-discovery-meta">
+                                     {testResult.resources.length ? <span>资源 {testResult.resources.length}</span> : null}
+                                     {testResult.resourceTemplates.length ? <span>模板 {testResult.resourceTemplates.length}</span> : null}
+                                     {testResult.prompts.length ? <span>提示词 {testResult.prompts.length}</span> : null}
+                                   </div>
+                                 ) : null}
+                               </details>
+                             ) : null}
                           </article>
                         );
                       }) : <div className="detail-empty">尚未配置 MCP 服务。</div>}
@@ -8084,7 +8266,15 @@ function ComposerModelPicker({
   );
 }
 
-function buildTimelineEntries(
+export function shouldShowRuntimeActivityPanel(
+  isTaskProcessing: boolean,
+  hasStreamingAssistant: boolean,
+  hasActiveTimelineTool: boolean
+): boolean {
+  return isTaskProcessing && !hasStreamingAssistant && !hasActiveTimelineTool;
+}
+
+export function buildTimelineEntries(
   messages: MessageRecord[],
   toolCalls: ToolCallRecord[],
   artifacts: ArtifactRecord[],
@@ -8139,14 +8329,7 @@ function buildTimelineEntries(
 
   }
 
-  const toolEntries: TimelineEntry[] = toolCalls
-    .filter((toolCall) => !isFileWriteTool(toolCall.toolName))
-    .map((toolCall) => ({
-      kind: "tool",
-      id: `tool-${toolCall.id}`,
-      createdAt: toolCall.startedAt,
-      toolCall
-    }));
+  const toolEntries = buildToolGroupTimelineEntries(toolCalls);
 
   // While a thread is running, only suppress the in-progress turn's file summary.
   // Prior turns' "主要改动文件" must stay visible.
@@ -8171,6 +8354,27 @@ function buildTimelineEntries(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
   );
   return collapseDirectoryReadMessages(sortedEntries);
+}
+
+function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[]): TimelineEntry[] {
+  const groups = new Map<string, ToolCallRecord[]>();
+
+  for (const toolCall of toolCalls) {
+    // Legacy calls without a turn id remain independently inspectable instead
+    // of being merged into an unrelated task.
+    const groupId = toolCall.turnRunId || `legacy-${toolCall.id}`;
+    groups.set(groupId, [...(groups.get(groupId) ?? []), toolCall]);
+  }
+
+  return [...groups.entries()].map(([turnRunId, groupedToolCalls]) => ({
+    kind: "tool-group" as const,
+    id: `tool-group-${turnRunId}`,
+    createdAt: groupedToolCalls.reduce(
+      (earliest, toolCall) => Date.parse(toolCall.startedAt) < Date.parse(earliest) ? toolCall.startedAt : earliest,
+      groupedToolCalls[0]?.startedAt ?? new Date(0).toISOString()
+    ),
+    toolCalls: groupedToolCalls.sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
+  }));
 }
 
 function getTurnSummaryCreatedAt(
@@ -9033,6 +9237,28 @@ function TurnElapsedBanner({
   );
 }
 
+function ComposerSubmissionStatus({ submission }: { submission: ComposerSubmission }) {
+  const elapsedMs = useElapsedClock(submission.startedAt, true);
+  const isSlow = elapsedMs >= 5_000;
+  const isDelayed = elapsedMs >= 15_000;
+  const content = submission.content.replace(/\s+/g, " ").trim();
+  const label = isDelayed
+    ? `\u4ecd\u5728\u51c6\u5907\u4efb\u52a1 \u00b7 \u5df2\u7b49\u5f85 ${formatElapsedClock(elapsedMs)}`
+    : isSlow
+      ? `\u6b63\u5728\u542f\u52a8\u4efb\u52a1 \u00b7 \u5df2\u7b49\u5f85 ${formatElapsedClock(elapsedMs)}`
+      : "\u6d88\u606f\u5df2\u6536\u5230\uff0c\u6b63\u5728\u51c6\u5907\u4efb\u52a1";
+
+  return (
+    <section className={`composer-submission-status ${isSlow ? "slow" : ""}`} aria-live="polite">
+      <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
+      <div>
+        <strong>{label}</strong>
+        {content ? <span className="composer-submission-preview">{content}</span> : null}
+      </div>
+    </section>
+  );
+}
+
 function RuntimeActivityPanel({
   label,
   startedAt,
@@ -9041,7 +9267,10 @@ function RuntimeActivityPanel({
   screenshots,
   expanded,
   onToggle,
-  onShowBrowser
+  onShowBrowser,
+  onShowDetails,
+  onRefresh,
+  onInterrupt
 }: {
   label: string;
   startedAt?: string;
@@ -9051,16 +9280,31 @@ function RuntimeActivityPanel({
   expanded: boolean;
   onToggle: () => void;
   onShowBrowser?: () => void;
+  onShowDetails: () => void;
+  onRefresh: () => void;
+  onInterrupt: () => void;
 }) {
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
-  const latestTool = [...entries].reverse().find((entry) => entry.kind === "tool");
+  const toolEntries = entries.filter(
+    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
+  );
   const latestOutput = [...entries].reverse().find((entry) => entry.kind === "output");
   const completedToolCount = entries.filter(
     (entry) => entry.kind === "tool" && entry.toolCall.status === "completed"
   ).length;
+  const failedToolCount = entries.filter(
+    (entry) => entry.kind === "tool" && (entry.toolCall.status === "failed" || entry.toolCall.status === "denied")
+  ).length;
   const resolvedStartedAt = startedAt || getRuntimeActivityStartedAt(entries);
+  const elapsedMs = useElapsedClock(resolvedStartedAt, active !== false);
+  const isWaitingForFirstUpdate = entries.length <= 1;
+  const isSlowStart = isWaitingForFirstUpdate && elapsedMs >= 5_000;
+  const isUnresponsive = isWaitingForFirstUpdate && elapsedMs >= 15_000;
+  const displayLabel = isSlowStart
+    ? `\u6b63\u5728\u542f\u52a8\u4efb\u52a1 \u00b7 \u5df2\u7b49\u5f85 ${formatElapsedClock(elapsedMs)}`
+    : label;
   return (
-    <section className={`runtime-activity-panel ${expanded ? "expanded" : ""}`} aria-live="polite">
+    <section className={`runtime-activity-panel ${expanded ? "expanded" : ""} ${isSlowStart ? "slow-start" : ""}`} aria-live="polite">
       {resolvedStartedAt ? (
         <TurnElapsedBanner startedAt={resolvedStartedAt} active={active !== false} />
       ) : null}
@@ -9071,9 +9315,27 @@ function RuntimeActivityPanel({
         onClick={onToggle}
       >
         <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
-        <span>{label}</span>
+        <span>{displayLabel}</span>
         <span className="runtime-activity-chevron" aria-hidden="true" />
       </button>
+      {isSlowStart ? (
+        <div className="runtime-slow-start">
+          <span>{isUnresponsive ? "\u8fd8\u6ca1\u6536\u5230\u4efb\u52a1\u8fd0\u884c\u72b6\u6001" : "\u542f\u52a8\u8017\u65f6\u6bd4\u5e73\u65f6\u66f4\u957f"}</span>
+          {isUnresponsive ? (
+            <span className="runtime-slow-start-actions">
+              <button type="button" title="\u67e5\u770b\u8fd0\u884c\u8be6\u60c5" aria-label="\u67e5\u770b\u8fd0\u884c\u8be6\u60c5" onClick={onShowDetails}>
+                <IconEye />
+              </button>
+              <button type="button" title="\u5237\u65b0\u4efb\u52a1\u72b6\u6001" aria-label="\u5237\u65b0\u4efb\u52a1\u72b6\u6001" onClick={onRefresh}>
+                <IconRefresh />
+              </button>
+              <button type="button" className="danger" title="\u505c\u6b62\u6267\u884c" aria-label="\u505c\u6b62\u6267\u884c" onClick={onInterrupt}>
+                <IconStop />
+              </button>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       {onShowBrowser ? (
         <button type="button" className="runtime-show-browser" onClick={onShowBrowser}>
           <IconGlobe />
@@ -9092,9 +9354,13 @@ function RuntimeActivityPanel({
               <span>已完成 {completedToolCount} 个工具操作</span>
             </div>
           ) : null}
-          {latestTool?.kind === "tool" ? (
-            <ToolActivityRow key={latestTool.id} toolCall={latestTool.toolCall} compact />
+          {failedToolCount > 0 ? (
+            <div className="runtime-activity-status-row failed">
+              <span className="runtime-activity-status-check" aria-hidden="true">!</span>
+              <span>{`\u6709 ${failedToolCount} \u9879\u64cd\u4f5c\u5931\u8d25`}</span>
+            </div>
           ) : null}
+          {toolEntries.map((entry) => <ToolActivityRow key={entry.id} toolCall={entry.toolCall} compact />)}
           {latestOutput?.kind === "output" ? (
             <RuntimeActivityOutputRow key={latestOutput.id} label={latestOutput.label} content={latestOutput.content} />
           ) : null}
@@ -9344,9 +9610,14 @@ function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
   const failed = toolCalls.some((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
   const status = runningCall ? "in_progress" : failed ? "failed" : "completed";
   const summary = getToolActivitySummary(toolCalls, runningCall);
+  const statusLabel = runningCall
+    ? "\u5904\u7406\u4e2d"
+    : failed
+      ? "\u672a\u5b8c\u6210"
+      : "\u5df2\u5b8c\u6210";
 
   return (
-    <details className={`tool-activity-group ${status}`} open={failed}>
+    <details className={`tool-activity-group ${status}`}>
       <summary className="tool-activity-summary">
         <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={runningCall?.toolName ?? toolCalls[0]?.toolName ?? ""} /></span>
         <span className="tool-activity-summary-copy">
@@ -9354,10 +9625,12 @@ function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
           {summary.detail ? <span>{summary.detail}</span> : null}
         </span>
         {runningCall ? <span className="tool-activity-running">进行中</span> : null}
+        <span className={`tool-activity-summary-status ${status}`}>{statusLabel}</span>
+        <span className="tool-activity-summary-count">{`${toolCalls.length} \u6b65`}</span>
         <span className="tool-activity-chevron" aria-hidden />
       </summary>
       <div className="tool-activity-details">
-        {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} />)}
+        {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact />)}
       </div>
     </details>
   );
@@ -9391,7 +9664,7 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
           <code>$ {command}</code>
           {localUrl ? <LocalServerPreview url={localUrl} /> : null}
           {output ? (
-            <details className="tool-activity-output">
+            <details className="tool-activity-output" open>
               <summary>{failed ? "查看错误输出" : "查看输出"}</summary>
               <pre>{output}</pre>
               <MessageDetectedMediaGallery content={output} />
@@ -9435,7 +9708,81 @@ function ToolActivityIcon({ toolName }: { toolName: string }) {
   return <IconTerminal />;
 }
 
-function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord) {
+export function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord) {
+  if (runningCall) {
+    const input = parseTimelineJson(runningCall.argumentsJson);
+    return {
+      title: getToolProcessingLabel(runningCall.toolName, runningCall.argumentsJson),
+      detail: isFileWriteTool(runningCall.toolName) ? getFileWriteTarget(input) : getTimelineCommand(runningCall.toolName, input)
+    };
+  }
+
+  const counts = { search: 0, read: 0, write: 0, verify: 0, browser: 0, other: 0 };
+  const failedCalls = toolCalls.filter((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
+  for (const toolCall of toolCalls) {
+    const kind = getToolActivityKind(toolCall);
+    counts[kind] += 1;
+  }
+
+  const subject = getToolActivitySubject(counts);
+  const completedDetail = [
+    counts.search ? `\u67e5\u8be2 ${counts.search} \u6b21` : "",
+    counts.read ? `\u8bfb\u53d6 ${counts.read} \u9879` : "",
+    counts.write ? `\u4fee\u6539 ${counts.write} \u4e2a\u6587\u4ef6` : "",
+    counts.verify ? `\u9a8c\u8bc1 ${counts.verify} \u6b21` : "",
+    counts.browser ? `\u9875\u9762\u64cd\u4f5c ${counts.browser} \u6b21` : "",
+    counts.other ? `\u5176\u4ed6\u5904\u7406 ${counts.other} \u6b21` : ""
+  ].filter(Boolean).join(" \u00b7 ");
+
+  if (failedCalls.length > 0) {
+    return {
+      title: `\u90e8\u5206${subject}\u672a\u5b8c\u6210`,
+      detail: `\u5df2\u5c1d\u8bd5 ${toolCalls.length} \u6b21${subject} \u00b7 ${failedCalls.length} \u6b21\u5931\u8d25`
+    };
+  }
+
+  return {
+    title: `\u5df2\u5b8c\u6210${subject}`,
+    detail: completedDetail || `\u5df2\u5904\u7406 ${toolCalls.length} \u6b65`
+  };
+}
+
+function getToolActivitySubject(counts: { search: number; read: number; write: number; verify: number; browser: number; other: number }): string {
+  const labels = [
+    counts.search ? "\u67e5\u8be2" : "",
+    counts.read ? "\u8bfb\u53d6" : "",
+    counts.write ? "\u4fee\u6539" : "",
+    counts.verify ? "\u9a8c\u8bc1" : "",
+    counts.browser ? "\u9875\u9762\u64cd\u4f5c" : ""
+  ].filter(Boolean);
+  return labels.slice(0, 2).join("\u4e0e") || "\u5904\u7406";
+}
+
+function getToolActivityKind(toolCall: ToolCallRecord): "search" | "read" | "write" | "verify" | "browser" | "other" {
+  const { toolName } = toolCall;
+  if (isFileWriteTool(toolName)) return "write";
+  if (
+    toolName === "code.search" ||
+    toolName === "knowledge.search" ||
+    toolName === "web_search.search_query" ||
+    toolName === "mcp.call" ||
+    toolName === "mcp.list_tools" ||
+    toolName === "list_mcp_resources" ||
+    toolName === "list_mcp_resource_templates"
+  ) return "search";
+  if (toolName === "fs.read_file" || toolName === "fs.read_directory" || toolName === "knowledge.read" || toolName === "read_mcp_resource") return "read";
+  if (toolName === "browser.assert_page" || toolName === "browser.capture_screenshot" || isVerificationCommand(toolCall)) return "verify";
+  if (toolName.startsWith("browser.") || toolName === "web_search.open_page") return "browser";
+  return "other";
+}
+
+function isVerificationCommand(toolCall: ToolCallRecord): boolean {
+  if (toolCall.toolName !== "shell.exec" && toolCall.toolName !== "execute_command") return false;
+  const command = String(parseTimelineJson(toolCall.argumentsJson).command ?? "");
+  return /\b(test|build|lint|typecheck|vitest|jest|playwright|pytest)\b/i.test(command);
+}
+
+function getLegacyToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord) {
   if (runningCall) {
     const input = parseTimelineJson(runningCall.argumentsJson);
     return {
@@ -10881,6 +11228,17 @@ function formatUpdatePhase(phase: UpdateState["phase"]): string {
   }
 }
 
+function formatUpdateDownloadSize(receivedBytes?: number, totalBytes?: number): string {
+  const received = formatByteSize(receivedBytes ?? 0);
+  return totalBytes && totalBytes > 0 ? `${received} / ${formatByteSize(totalBytes)}` : `${received} 已下载`;
+}
+
+function formatByteSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function isCommentaryOnlyTranscriptMessage(message: MessageRecord) {
   if (message.role !== "assistant" && message.role !== "system") {
     return false;
@@ -11520,6 +11878,9 @@ export function parseMcpJsonConfig(text: string): McpServerConfig[] {
       cwd: stringValue(entry.cwd),
       url,
       transport,
+      ...(entry.auth !== undefined ? { auth: normalizeMcpJsonAuth(entry.auth) } : {}),
+      ...(entry.defaultToolsApprovalMode !== undefined ? { defaultToolsApprovalMode: normalizeMcpJsonApprovalMode(entry.defaultToolsApprovalMode) } : {}),
+      ...(entry.tools !== undefined ? { tools: normalizeMcpJsonToolPolicies(entry.tools) } : {}),
       source: "config",
       enabled: typeof entry.isActive === "boolean" ? entry.isActive : entry.enabled !== false
     });
@@ -11554,6 +11915,31 @@ function normalizeMcpJsonEnvironment(value: unknown): Record<string, string> | u
   return Object.fromEntries(Object.entries(value as McpJsonInput).map(([key, item]) => [key, String(item)]));
 }
 
+function normalizeMcpJsonAuth(value: unknown): McpServerConfig["auth"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { mode: "none" };
+  const auth = value as McpJsonInput;
+  const mode = stringValue(auth.mode) === "bearer_env" || stringValue(auth.mode) === "oauth" ? stringValue(auth.mode) as "bearer_env" | "oauth" : "none";
+  return {
+    mode,
+    bearerTokenEnvVar: stringValue(auth.bearerTokenEnvVar),
+    oauthClientId: stringValue(auth.oauthClientId),
+    oauthResource: stringValue(auth.oauthResource),
+    oauthScopes: Array.isArray(auth.oauthScopes) ? auth.oauthScopes.map(String) : undefined
+  };
+}
+
+function normalizeMcpJsonApprovalMode(value: unknown): McpServerConfig["defaultToolsApprovalMode"] {
+  return value === "auto" || value === "writes" || value === "approve" || value === "prompt" ? value : "prompt";
+}
+
+function normalizeMcpJsonToolPolicies(value: unknown): McpServerConfig["tools"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return Object.fromEntries(Object.entries(value as McpJsonInput).map(([name, raw]) => {
+    const policy = raw && typeof raw === "object" ? raw as McpJsonInput : {};
+    return [name, { enabled: policy.enabled === false ? false : undefined, approvalMode: normalizeMcpJsonApprovalMode(policy.approvalMode) }];
+  }));
+}
+
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -11568,7 +11954,10 @@ export function serializeMcpJsonConfig(servers: McpServerConfig[]): Record<strin
     ...(server.args?.length ? { args: server.args } : {}),
     ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),
     ...(server.cwd ? { cwd: server.cwd } : {}),
-    ...(server.url ? { url: server.url } : {})
+    ...(server.url ? { url: server.url } : {}),
+    ...(server.auth && (server.auth.mode !== "none" || server.auth.bearerTokenEnvVar || server.auth.oauthClientId || server.auth.oauthResource || server.auth.oauthScopes?.length) ? { auth: server.auth } : {}),
+    ...(server.defaultToolsApprovalMode && server.defaultToolsApprovalMode !== "prompt" ? { defaultToolsApprovalMode: server.defaultToolsApprovalMode } : {}),
+    ...(server.tools ? { tools: server.tools } : {})
   }]));
 }
 
@@ -11908,6 +12297,41 @@ function IconChevronDown() {
       <path d="m6.5 9.5 5.5 5 5.5-5" />
     </SvgIcon>
   );
+}
+
+export function getThreadDeleteFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (/\bEBUSY\b|resource busy|resource.*locked|\brmdir\b/i.test(message)) {
+    return "该任务的终端或预览仍在使用临时文件。请关闭该任务的终端或预览后重试；若仍失败，请完全退出并重新打开 CodeXH 后再删除。";
+  }
+  return message || "请稍后重试。";
+}
+
+export function reconcilePendingUserMessages(
+  pending: MessageRecord[],
+  persisted: MessageRecord[]
+): MessageRecord[] {
+  const consumedPersistedIds = new Set<string>();
+
+  return pending.filter((optimistic) => {
+    const optimisticContent = normalizeUserMessageForReconciliation(optimistic.content);
+    const optimisticCreatedAt = Date.parse(optimistic.createdAt);
+    const matched = persisted.find((message) => {
+      if (message.role !== "user" || consumedPersistedIds.has(message.id)) return false;
+      const messageCreatedAt = Date.parse(message.createdAt);
+      if (Number.isFinite(optimisticCreatedAt) && messageCreatedAt < optimisticCreatedAt - 1_000) return false;
+      return normalizeUserMessageForReconciliation(message.content) === optimisticContent
+        || normalizeUserMessageForReconciliation(getDisplayMessageContent(message)) === optimisticContent;
+    });
+
+    if (!matched) return true;
+    consumedPersistedIds.add(matched.id);
+    return false;
+  });
+}
+
+function normalizeUserMessageForReconciliation(content: string): string {
+  return content.replace(/\r\n?/g, "\n").trim();
 }
 
 function getDisplayMessageContent(message: MessageRecord): string {

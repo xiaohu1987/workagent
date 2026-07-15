@@ -16,6 +16,9 @@ export interface UpdateState {
   insecureTransport?: boolean;
   missingSha256?: boolean;
   progress?: number;
+  receivedBytes?: number;
+  totalBytes?: number;
+  downloadedInstaller?: string;
   error?: string;
   isPackaged: boolean;
 }
@@ -62,7 +65,14 @@ export class UpdateService {
   }
 
   public async check(): Promise<UpdateState> {
-    this.#setState({ phase: "checking", error: undefined, progress: undefined });
+    this.#setState({
+      phase: "checking",
+      error: undefined,
+      progress: undefined,
+      receivedBytes: undefined,
+      totalBytes: undefined,
+      downloadedInstaller: undefined
+    });
     await this.options.log("update.check_started", { currentVersion: this.#state.currentVersion });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), UPDATE_TIMEOUT_MS);
@@ -81,14 +91,20 @@ export class UpdateService {
       if (!isVersionGreater(remoteVersion, this.#state.currentVersion)) {
         this.#expectedSha256 = null;
         this.#downloadedInstaller = null;
-        this.#setState({ phase: "up-to-date", remoteVersion, changelog, downloadUrl, insecureTransport, missingSha256, error: undefined });
+        this.#setState({
+          phase: "up-to-date", remoteVersion, changelog, downloadUrl, insecureTransport, missingSha256,
+          error: undefined, receivedBytes: undefined, totalBytes: undefined, downloadedInstaller: undefined
+        });
         await this.options.log("update.not_available", { currentVersion: this.#state.currentVersion, remoteVersion });
         return this.getState();
       }
 
       this.#expectedSha256 = sha256;
       this.#downloadedInstaller = null;
-      this.#setState({ phase: "available", remoteVersion, changelog, downloadUrl, insecureTransport, missingSha256, error: undefined, progress: undefined });
+      this.#setState({
+        phase: "available", remoteVersion, changelog, downloadUrl, insecureTransport, missingSha256,
+        error: undefined, progress: undefined, receivedBytes: undefined, totalBytes: undefined, downloadedInstaller: undefined
+      });
       await this.options.log("update.available", { currentVersion: this.#state.currentVersion, remoteVersion, insecureTransport, missingSha256 });
       // 仅在 HTTPS 且具备 sha256 时自动下载，避免未校验安装包静默落地。
       if (!insecureTransport && !missingSha256 && this.options.isPackaged) {
@@ -124,27 +140,42 @@ export class UpdateService {
     const target = path.join(updatesDir, `CodeXH-Setup-${this.#state.remoteVersion}.exe`);
     const partial = `${target}.partial`;
     try {
-      this.#setState({ phase: "downloading", progress: 0, error: undefined });
+      this.#setState({ phase: "downloading", progress: 0, receivedBytes: 0, totalBytes: undefined, downloadedInstaller: undefined, error: undefined });
       await this.options.log("update.download_started", { remoteVersion: this.#state.remoteVersion, insecureTransport: this.#state.insecureTransport === true });
       await fsp.mkdir(updatesDir, { recursive: true });
       await fsp.rm(partial, { force: true });
       const response = await fetch(this.#state.downloadUrl, { signal: controller.signal, cache: "no-store" });
       if (!response.ok || !response.body) throw new Error(`下载更新失败：HTTP ${response.status}。`);
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (contentType.includes("text/html")) {
+        throw new Error("下载地址返回了网页而不是 Windows 安装包，请联系更新服务管理员修正下载地址。");
+      }
       const total = Number(response.headers.get("content-length") ?? 0);
+      this.#setState({ totalBytes: Number.isFinite(total) && total > 0 ? total : undefined });
       const hash = createHash("sha256");
       const output = fs.createWriteStream(partial, { flags: "w" });
       const reader = response.body.getReader();
       let received = 0;
+      let isFirstChunk = true;
 
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           const chunk = Buffer.from(value);
+          if (isFirstChunk) {
+            isFirstChunk = false;
+            if (chunk.byteLength < 2 || chunk[0] !== 0x4d || chunk[1] !== 0x5a) {
+              throw new Error("下载内容不是有效的 Windows 安装包，请联系更新服务管理员修正下载地址。");
+            }
+          }
           hash.update(chunk);
           received += chunk.byteLength;
           if (!output.write(chunk)) await once(output, "drain");
-          if (total > 0) this.#setState({ progress: Math.min(99, Math.round((received / total) * 100)) });
+          this.#setState({
+            progress: total > 0 ? Math.min(99, Math.round((received / total) * 100)) : undefined,
+            receivedBytes: received
+          });
         }
         output.end();
         await once(output, "finish");
@@ -160,7 +191,7 @@ export class UpdateService {
       }
       await fsp.rename(partial, target);
       this.#downloadedInstaller = target;
-      this.#setState({ phase: "downloaded", progress: 100, error: undefined });
+      this.#setState({ phase: "downloaded", progress: 100, receivedBytes: received, totalBytes: total || undefined, downloadedInstaller: target, error: undefined });
       await this.options.log(
         this.#expectedSha256 ? "update.download_verified" : "update.download_unverified",
         { remoteVersion: this.#state.remoteVersion, bytes: received, sha256: actualSha256 }
@@ -171,7 +202,7 @@ export class UpdateService {
       const message = error instanceof Error && error.name === "AbortError"
         ? "下载安装包超时，请稍后重试。"
         : error instanceof Error ? error.message : String(error);
-      this.#setState({ phase: "error", error: message, progress: undefined });
+      this.#setState({ phase: "error", error: message, progress: undefined, receivedBytes: undefined, totalBytes: undefined, downloadedInstaller: undefined });
       await this.options.log("update.download_failed", { message });
       return this.getState();
     } finally {

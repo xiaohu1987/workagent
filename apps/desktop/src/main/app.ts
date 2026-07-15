@@ -44,6 +44,7 @@ import { ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { ToolRuntime } from "@tool-runtime";
 import { RuntimeLogWriter } from "./runtime-log";
+import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime } from "./terminal-runtime";
 import {
   DatabaseService,
@@ -108,17 +109,27 @@ export class DesktopBackend {
   #config!: AppConfig;
   #runtime!: AgentRuntimeService;
   #mcp!: McpManager;
+  #mcpOAuth!: McpOAuthService;
   #logs!: RuntimeLogWriter;
 
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
     this.#logs = new RuntimeLogWriter(this.#layout.logsDir);
+    this.#mcpOAuth = new McpOAuthService(
+      new McpCredentialStore(path.join(path.dirname(this.#layout.configFile), "mcp-credentials.json"))
+    );
     const bundledSkillFileCount = await seedBundledSkills(this.#layout);
     this.#config = await loadConfig(this.#layout.configFile);
     this.#db = new DatabaseService(this.#layout.dbFile);
     this.#db.recoverInterruptedThreads();
     this.removePersistedBrowserErrorTabs();
-    this.#mcp = new McpManager();
+    this.#mcp = new McpManager([], undefined, {
+      resolveBearerToken: (config) => {
+        const name = config.auth?.bearerTokenEnvVar?.trim();
+        return name ? process.env[name] : undefined;
+      },
+      createOAuthProvider: (config) => this.#mcpOAuth.createProvider(config)
+    });
     await this.syncInstalledPlugins();
     await this.refreshMcpConfiguration(false);
     await this.refreshSkills();
@@ -201,6 +212,9 @@ export class DesktopBackend {
       listMcpResourceTemplates: async (server) => this.#mcp.listResourceTemplates(server),
       listMcpTools: async (server) => this.#mcp.listTools(server ? [server] : undefined),
       readMcpResource: async (server, uri) => this.#mcp.readResource(server, uri),
+      listMcpPrompts: async (server) => this.#mcp.listPrompts(server),
+      getMcpPrompt: async (server, name, args) => this.#mcp.getPrompt(server, name, args),
+      getMcpToolApprovalMode: (server, tool) => this.#mcp.getToolApprovalMode(server, tool),
       callMcpTool: async (server, tool, argumentsJson) =>
         this.#mcp.callTool(server, tool, argumentsJson),
       markModelAgentIncompatible: async (threadId, modelId, reason) =>
@@ -263,16 +277,37 @@ export class DesktopBackend {
     return updated;
   }
 
-  public listMcpServers() {
+  public async listMcpServers() {
     const statusById = new Map(this.#mcp.listStatuses().map((status) => [status.serverId, status]));
-    return this.#mcp.listConfigs().map((server) => ({
+    return Promise.all(this.#mcp.listConfigs().map(async (server) => ({
       ...server,
+      authStatus: await this.#mcpOAuth.status(server),
       status: statusById.get(server.id) ?? { serverId: server.id, state: server.enabled ? "idle" : "disabled" }
-    }));
+    })));
   }
 
   public async testMcpServer(config: McpServerConfig) {
     return this.#mcp.testConfig({ ...config, source: "config", pluginId: undefined });
+  }
+
+  public async refreshMcpTools(serverId?: string) {
+    const tools = await this.#mcp.refreshToolDirectory(serverId ? [serverId] : undefined);
+    await this.#logs.append("mcp.tools_refreshed", { serverId: serverId ?? "all", toolCount: tools.length });
+    return tools;
+  }
+
+  public async loginMcpServer(serverId: string): Promise<void> {
+    const config = this.#mcp.listConfigs().find((server) => server.id === serverId);
+    if (!config) throw new Error(`Unknown MCP server: ${serverId}`);
+    await this.#mcpOAuth.login(config);
+    await this.#mcp.refresh([serverId]);
+    await this.#logs.append("mcp.oauth_login", { serverId, outcome: "success" });
+  }
+
+  public async logoutMcpServer(serverId: string): Promise<void> {
+    await this.#mcpOAuth.logout(serverId);
+    await this.#mcp.refresh([serverId]);
+    await this.#logs.append("mcp.oauth_logout", { serverId, outcome: "success" });
   }
 
   public createThread(input: {
@@ -2403,7 +2438,16 @@ export class DesktopBackend {
     }
 
     for (const server of pluginServers) {
-      effectiveServers.set(server.id, server);
+      const localOverride = this.#config.mcpServers.find((configured) => configured.id === server.id);
+      effectiveServers.set(server.id, localOverride ? {
+        ...server,
+        // Endpoint and process details stay owned by the plugin. Local config can
+        // only attach credentials and policy for the user's installation.
+        auth: localOverride.auth,
+        defaultToolsApprovalMode: localOverride.defaultToolsApprovalMode,
+        tools: localOverride.tools,
+        enabled: localOverride.enabled
+      } : server);
     }
 
     this.#mcp.setConfigs([...effectiveServers.values()]);

@@ -539,47 +539,39 @@
 
 .tool-activity-group {
   position: relative;
-  width: fit-content;
-  min-width: min(100%, 320px);
-  max-width: min(100%, 680px);
-  margin-left: 24px;
-  border: 1px solid rgba(148, 163, 184, 0.15);
-  border-radius: 7px;
-  color: #c5ccd6;
-  background: #202124;
+  width: min(100%, 920px);
+  margin: 8px 0 10px 24px;
+  border: 0;
+  border-left: 2px solid rgba(148, 163, 184, 0.38);
+  border-radius: 0;
+  color: #b8c0ca;
+  background: transparent;
   overflow: hidden;
 }
 
-.tool-activity-group::before {
-  top: 10px;
-  background: #7d8591;
-  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.35);
-}
-
 .tool-activity-group.in_progress::before {
-  background: #60a5fa;
-  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.5);
+  display: none;
 }
 
-.tool-activity-group.failed::before {
-  background: #f87171;
-  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.5);
-}
+.tool-activity-group.in_progress { border-left-color: #60a5fa; }
+.tool-activity-group.completed { border-left-color: rgba(52, 211, 153, 0.54); }
+.tool-activity-group.failed { border-left-color: rgba(248, 113, 113, 0.76); }
 
 .tool-activity-summary {
   display: flex;
   align-items: center;
-  gap: 9px;
-  min-height: 34px;
-  padding: 0 10px;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 12px;
   cursor: pointer;
   list-style: none;
   user-select: none;
+  background: rgba(255, 255, 255, 0.018);
 }
 
 .tool-activity-summary::-webkit-details-marker { display: none; }
 
-.tool-activity-summary:hover { background: rgba(255, 255, 255, 0.045); }
+.tool-activity-summary:hover { background: rgba(255, 255, 255, 0.055); }
 
 .tool-activity-summary:focus-visible {
   outline: 1px solid rgba(96, 165, 250, 0.72);
@@ -597,37 +589,55 @@
 .tool-activity-summary-icon svg { width: 15px; height: 15px; }
 
 .tool-activity-summary-copy {
-  display: grid;
+  display: flex;
+  align-items: baseline;
+  flex: 1;
   min-width: 0;
-  gap: 1px;
+  gap: 7px;
+  overflow: hidden;
 }
 
 .tool-activity-summary-copy strong {
   overflow: hidden;
-  color: #d1d5db;
-  font-size: 13px;
-  font-weight: 500;
+  color: #dce3ea;
+  font-size: 12px;
+  font-weight: 600;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tool-activity-summary-copy span {
+  flex: 1;
   overflow: hidden;
-  color: #878f9b;
-  font-family: var(--font-mono);
+  color: #87919e;
+  font-family: inherit;
   font-size: 11px;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tool-activity-running {
-  flex: 0 0 auto;
-  color: #8fc5ff;
-  font-size: 11px;
-  animation: timeline-pulse 1.1s ease-in-out infinite;
+.tool-activity-summary-copy span::before {
+  content: "\00b7";
+  margin-right: 7px;
+  color: #55606d;
 }
+
+.tool-activity-running { display: none; }
+
+.tool-activity-summary-status,
+.tool-activity-summary-count {
+  flex: 0 0 auto;
+  color: #7f8996;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.tool-activity-summary-status.in_progress { color: #8fc5ff; }
+.tool-activity-summary-status.completed { color: #77cfa3; }
+.tool-activity-summary-status.failed { color: #fb9b9b; }
+.tool-activity-summary-count { padding-left: 8px; border-left: 1px solid rgba(148, 163, 184, 0.16); }
 
 .tool-activity-chevron {
   width: 7px;
@@ -644,9 +654,30 @@
 .tool-activity-details {
   display: grid;
   gap: 1px;
-  padding: 1px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-  background: #191a1d;
+  padding: 3px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+  background: rgba(15, 18, 22, 0.54);
+}
+
+.tool-activity-group:not([open]) > .tool-activity-details,
+.tool-activity-row.compact:not([open]) > .tool-activity-compact-details {
+  display: none;
+}
+
+.tool-activity-group .tool-activity-row.compact {
+  display: block;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  background: transparent;
+}
+
+.tool-activity-group .tool-activity-row.compact:last-child { border-bottom: 0; }
+
+.tool-activity-group .tool-activity-compact-summary {
+  min-height: 30px;
+  padding: 0 12px;
 }
 
 .tool-activity-row {

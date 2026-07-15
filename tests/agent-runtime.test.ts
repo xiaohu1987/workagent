@@ -10,6 +10,7 @@ import {
   validateActCompletion,
   buildActCompletionRecoveryInstruction,
   isProgressOnlyAssistantMessage,
+  buildProgressOnlyCompletionRecoveryInstruction,
   buildExecutionRecoveryInstruction,
   buildStrategySwitchInstruction,
   buildRepeatedTaskRecoveryMessage,
@@ -20,6 +21,7 @@ import {
   estimateRuntimeTokens,
   isUpstreamContextOverflowError,
   MAX_MODEL_TOOL_RESULT_CHARACTERS,
+  MAX_MCP_TOOL_RESULT_CHARACTERS,
   summarizeToolResultForModel,
   shouldFinishGpaAnalysisTurn,
   parseCanonicalGpaPlanTasks,
@@ -141,6 +143,22 @@ describe("ACT execution recovery", () => {
     expect(instruction).toContain("call apply_patch");
     expect(instruction).toContain("Do not write progress prose");
     expect(instruction).not.toContain("failed");
+  });
+});
+
+describe("premature completion recovery", () => {
+  it("recognizes an English promise to continue as progress commentary", () => {
+    expect(isProgressOnlyAssistantMessage(
+      "I see those calls were already made. Let me look at the specific directories."
+    )).toBe(true);
+  });
+
+  it("requires a final answer or one targeted tool after progress-only completion", () => {
+    const instruction = buildProgressOnlyCompletionRecoveryInstruction(1);
+
+    expect(instruction).toContain("not a result");
+    expect(instruction).toContain("exactly one new, targeted tool");
+    expect(instruction).toContain("Do not repeat a completed tool call");
   });
 });
 
@@ -663,6 +681,47 @@ describe("context overflow recovery", () => {
 
     expect(summarized.length).toBeLessThanOrEqual(MAX_MODEL_TOOL_RESULT_CHARACTERS);
     expect(summarized).toContain("truncated");
+  });
+
+  it("uses a tighter context budget for large MCP responses", () => {
+    const summarized = summarizeToolResultForModel("mcp.call", {
+      ok: true,
+      content: "repository tree\n".repeat(10_000)
+    });
+
+    expect(summarized.length).toBeLessThanOrEqual(MAX_MCP_TOOL_RESULT_CHARACTERS + 256);
+    expect(summarized).toContain("MCP result was shortened");
+    expect(summarized).toContain("precise file search");
+  });
+
+  it("uses compact structured repository pages instead of raw MCP content", () => {
+    const summarized = summarizeToolResultForModel("mcp.call", {
+      ok: true,
+      content: "legacy raw result".repeat(10_000),
+      json: {
+        repository: {
+          protocol: "codexh.repository.v1",
+          kind: "file_search",
+          summary: "Matches for session handling",
+          items: Array.from({ length: 80 }, (_, index) => ({
+            path: `src/session-${index}.ts`,
+            type: "match",
+            line: index + 1,
+            preview: "session lookup"
+          })),
+          returnedCount: 80,
+          totalCount: 120,
+          page: 1,
+          hasMore: true,
+          nextCursor: "next-page"
+        }
+      }
+    });
+
+    expect(summarized).toContain("[Repository exploration state]");
+    expect(summarized).toContain("next-page");
+    expect(summarized).not.toContain("legacy raw result");
+    expect(summarized).toContain("additional returned items");
   });
 });
 

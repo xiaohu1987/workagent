@@ -304,6 +304,9 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
       url: typeof item.url === 'string' ? item.url : undefined,
       transport: typeof item.transport === 'string' ? item.transport : undefined,
+      auth: normalizeMcpAuth(item.auth),
+      defaultToolsApprovalMode: normalizeMcpApprovalMode(item.defaultToolsApprovalMode),
+      tools: normalizeMcpTools(item.tools),
       source: 'config',
       enabled: item.enabled !== false
     })) satisfies McpServerConfig[]
@@ -330,11 +333,42 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
       cwd: server.cwd,
       url: server.url,
       transport: server.transport,
+      auth: server.auth,
+      defaultToolsApprovalMode: server.defaultToolsApprovalMode,
+      tools: server.tools,
       enabled: server.enabled
     }))
   };
 
   await fs.writeFile(configFile, TOML.stringify(tomlObject as any), "utf8");
+}
+
+function normalizeMcpAuth(value: unknown): McpServerConfig["auth"] {
+  if (!value || typeof value !== "object") return { mode: "none" };
+  const auth = value as Record<string, unknown>;
+  const mode = auth.mode === "bearer_env" || auth.mode === "oauth" ? auth.mode : "none";
+  return {
+    mode,
+    bearerTokenEnvVar: typeof auth.bearerTokenEnvVar === "string" ? auth.bearerTokenEnvVar : undefined,
+    oauthClientId: typeof auth.oauthClientId === "string" ? auth.oauthClientId : undefined,
+    oauthResource: typeof auth.oauthResource === "string" ? auth.oauthResource : undefined,
+    oauthScopes: Array.isArray(auth.oauthScopes) ? auth.oauthScopes.map(String) : undefined
+  };
+}
+
+function normalizeMcpApprovalMode(value: unknown): McpServerConfig["defaultToolsApprovalMode"] {
+  return value === "auto" || value === "writes" || value === "approve" || value === "prompt" ? value : "prompt";
+}
+
+function normalizeMcpTools(value: unknown): McpServerConfig["tools"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, raw]) => {
+    const policy = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    return [name, {
+      enabled: policy.enabled !== false ? undefined : false,
+      approvalMode: normalizeMcpApprovalMode(policy.approvalMode)
+    }];
+  }));
 }
 
 export class DatabaseService {

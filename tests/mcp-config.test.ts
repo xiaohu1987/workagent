@@ -42,4 +42,19 @@ describe("MCP JSON configuration", () => {
       }
     });
   });
+
+  it("preserves credential references and tool policies without serializing tokens", () => {
+    const [server] = parseMcpJsonConfig(`{
+      "private": {
+        "url": "https://example.com/mcp",
+        "auth": { "mode": "bearer_env", "bearerTokenEnvVar": "MCP_TOKEN" },
+        "defaultToolsApprovalMode": "prompt",
+        "tools": { "write": { "enabled": false, "approvalMode": "approve" } }
+      }
+    }`);
+
+    expect(server.auth).toEqual({ mode: "bearer_env", bearerTokenEnvVar: "MCP_TOKEN", oauthClientId: undefined, oauthResource: undefined, oauthScopes: undefined });
+    expect(server.tools).toEqual({ write: { enabled: false, approvalMode: "approve" } });
+    expect(JSON.stringify(serializeMcpJsonConfig([server]))).not.toContain("MCP_TOKEN_VALUE");
+  });
 });

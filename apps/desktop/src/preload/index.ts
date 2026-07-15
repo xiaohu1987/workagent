@@ -74,6 +74,9 @@ const api = {
   saveConfig: (config: unknown) => ipcRenderer.invoke("config:save", config),
   listMcpServers: () => ipcRenderer.invoke("mcp:list"),
   testMcpServer: (config: unknown) => ipcRenderer.invoke("mcp:test", config),
+  refreshMcpTools: (serverId?: string) => ipcRenderer.invoke("mcp:refresh-tools", serverId),
+  loginMcpServer: (serverId: string) => ipcRenderer.invoke("mcp:login", serverId),
+  logoutMcpServer: (serverId: string) => ipcRenderer.invoke("mcp:logout", serverId),
   importKnowledge: (payload: {
     displayName: string;
     scope: "global" | "project" | "imported";

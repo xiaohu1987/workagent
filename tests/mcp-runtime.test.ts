@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { McpManager, type McpClient } from "@mcp-runtime";
+import { extractMcpRepositoryToolResult, McpManager, type McpClient } from "@mcp-runtime";
 import type { McpServerConfig } from "@shared-types";
 
 const baseConfig: McpServerConfig = {
@@ -62,8 +62,76 @@ describe("McpManager", () => {
     await expect(manager.testConfig(baseConfig)).resolves.toEqual({
       tools: [expect.objectContaining({ server: "stocks", name: "market_cap" })],
       resources: [],
-      resourceTemplates: []
+      resourceTemplates: [],
+      prompts: []
     });
     expect(client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("caches the tool directory, applies policies, and exposes MCP prompts", async () => {
+    const listTools = vi.fn().mockResolvedValue({
+      tools: [
+        { name: "read", inputSchema: { type: "object" } },
+        { name: "disabled", inputSchema: { type: "object" } }
+      ]
+    });
+    const client: McpClient = {
+      listTools,
+      listPrompts: vi.fn().mockResolvedValue({ prompts: [{ name: "summarize", description: "Summarize input" }] })
+    };
+    const manager = new McpManager([{
+      ...baseConfig,
+      defaultToolsApprovalMode: "auto",
+      tools: { disabled: { enabled: false }, read: { approvalMode: "approve" } }
+    }], vi.fn().mockResolvedValue(client), { toolCacheTtlMs: 60_000 });
+
+    await manager.refresh();
+    await expect(manager.listTools()).resolves.toEqual([
+      expect.objectContaining({ name: "read", approvalMode: "approve" })
+    ]);
+    await manager.listTools();
+    expect(listTools).toHaveBeenCalledTimes(1);
+    await expect(manager.listPrompts()).resolves.toEqual([
+      expect.objectContaining({ server: "stocks", name: "summarize" })
+    ]);
+  });
+});
+
+describe("repository pagination MCP contract", () => {
+  it("accepts structured repository pages and keeps the continuation cursor", () => {
+    const result = extractMcpRepositoryToolResult({
+      structuredContent: {
+        protocol: "codexh.repository.v1",
+        kind: "repository_tree",
+        summary: "Top-level projects",
+        items: [{ path: "src", type: "directory" }, { path: "package.json", type: "file" }],
+        returnedCount: 2,
+        totalCount: 240,
+        page: 1,
+        hasMore: true,
+        nextCursor: "cursor-2"
+      }
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      kind: "repository_tree",
+      returnedCount: 2,
+      hasMore: true,
+      nextCursor: "cursor-2"
+    }));
+  });
+
+  it("accepts a JSON text MCP content block and ignores legacy text", () => {
+    const page = {
+      kind: "file_search",
+      summary: "Matches for auth",
+      items: [{ path: "src/auth.ts", type: "match", line: 12, preview: "export function auth" }],
+      returnedCount: 1,
+      hasMore: false
+    };
+
+    expect(extractMcpRepositoryToolResult({ content: [{ type: "text", text: JSON.stringify(page) }] }))
+      .toEqual(expect.objectContaining({ kind: "file_search", returnedCount: 1 }));
+    expect(extractMcpRepositoryToolResult({ content: [{ type: "text", text: "# a legacy markdown tree" }] })).toBeNull();
   });
 });

@@ -17,6 +17,7 @@ import type {
   ToolSpecDefinition,
   UserInputQuestion
 } from "@shared-types";
+import { extractMcpRepositoryToolResult } from "@mcp-runtime";
 import { applyCodexPatch } from "./handlers/applyPatch";
 import { astDiffSources, extractSymbols, isAstSupportedPath, languageFromPath } from "./ast";
 import { prepareShellCommandForWebFrontend } from "./web-shell-policy";
@@ -155,8 +156,11 @@ export interface ToolRuntimeContext {
   abortSignal?: AbortSignal;
   listMcpResources: (server?: string) => Promise<any[]>;
   listMcpResourceTemplates: (server?: string) => Promise<any[]>;
-  listMcpTools: (server?: string) => Promise<Array<{ server: string; name: string; description: string; inputSchema: Record<string, unknown> }>>;
+  listMcpTools: (server?: string) => Promise<Array<{ server: string; name: string; description: string; inputSchema: Record<string, unknown>; annotations?: { readOnlyHint?: boolean } }>>;
   readMcpResource: (server: string, uri: string) => Promise<any>;
+  listMcpPrompts: (server?: string) => Promise<any[]>;
+  getMcpPrompt: (server: string, name: string, args?: Record<string, string>) => Promise<any>;
+  getMcpToolApprovalMode: (server: string, tool: string) => "auto" | "prompt" | "writes" | "approve";
   callMcpTool: (server: string, tool: string, argumentsJson: Record<string, unknown>) => Promise<any>;
   deferredToolSpecs?: ToolSpecDefinition[];
   hiddenToolNames?: string[];
@@ -1162,6 +1166,26 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
+    spec("list_mcp_prompts", "List reusable prompts from configured MCP servers.", [], "low"),
+    async (args, ctx) => {
+      const prompts = await ctx.listMcpPrompts(typeof args.server === "string" ? args.server : undefined);
+      return { ok: true, content: JSON.stringify(prompts, null, 2), json: { prompts } };
+    }
+  );
+
+  runtime.register(
+    spec("get_mcp_prompt", "Get a reusable prompt from an MCP server.", ["server", "name"], "low"),
+    async (args, ctx) => {
+      const prompt = await ctx.getMcpPrompt(
+        String(args.server ?? ""),
+        String(args.name ?? ""),
+        (args.arguments as Record<string, string>) ?? {}
+      );
+      return { ok: true, content: JSON.stringify(prompt, null, 2), json: { prompt } };
+    }
+  );
+
+  runtime.register(
     spec("browser.inspect_page", "Inspect the visible browser page before interacting. Returns page text and interactive element ids.", ["tabId"], "low"),
     async (args, ctx) => {
       const page = await ctx.inspectBrowserPage(String(args.tabId ?? ""));
@@ -1510,7 +1534,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     {
       name: "mcp.call",
-      description: "Call a tool on a configured MCP server.",
+      description: "Call a tool on a configured MCP server. For repository inspection tools, use their path, cursor, maxResults, and maxDepth arguments; start shallow and continue with nextCursor instead of requesting a whole repository.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1529,21 +1553,32 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!tools.some((entry) => entry.server === server && entry.name === tool)) {
         return { ok: false, content: `MCP tool ${server}:${tool} is not in the discovered tool directory.` };
       }
-      const approved = await ctx.requestApproval({
-        title: "调用 MCP 工具",
-        description: `${server}:${tool}`,
-        riskLevel: "high",
-        payload: args
-      });
-      if (!approved) {
-        return { ok: false, content: "MCP 调用被拒绝。" };
+      const approvalMode = ctx.getMcpToolApprovalMode?.(server, tool) ?? "prompt";
+      const selectedTool = tools.find((entry) => entry.server === server && entry.name === tool);
+      const requiresApproval = approvalMode === "approve" || approvalMode === "prompt" ||
+        (approvalMode === "writes" && selectedTool?.annotations?.readOnlyHint !== true);
+      if (requiresApproval) {
+        const approved = await ctx.requestApproval({
+          title: "调用 MCP 工具",
+          description: `${server}:${tool}`,
+          riskLevel: approvalMode === "approve" ? "high" : "medium",
+          payload: { ...args, approvalMode }
+        });
+        if (!approved) {
+          return { ok: false, content: "MCP 调用被拒绝。" };
+        }
       }
       const result = await ctx.callMcpTool(
         server,
         tool,
         (args.arguments as Record<string, unknown>) ?? {}
       );
-      return { ok: true, content: JSON.stringify(result, null, 2), json: { result } };
+      const repository = extractMcpRepositoryToolResult(result);
+      return {
+        ok: true,
+        content: JSON.stringify(result, null, 2),
+        json: { result, ...(repository ? { repository } : {}) }
+      };
     }
   );
 }
