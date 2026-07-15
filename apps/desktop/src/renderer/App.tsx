@@ -56,10 +56,16 @@ import {
   isThreadExecutionInProgress,
   shouldShowTaskProcessing
 } from "./thread-ui-state";
-import { useMotionPresence } from "./motion-presence";
+import { useMotionPresence, useMotionSwitch } from "./motion-presence";
 
 type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "timeouts" | "update";
 type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
+
+const RIGHT_WORKSPACE_TABS: RightWorkspaceTab[] = ["changes", "files", "browser"];
+
+function getWorkspaceTabDirection(from: RightWorkspaceTab, to: RightWorkspaceTab): "forward" | "backward" {
+  return RIGHT_WORKSPACE_TABS.indexOf(to) >= RIGHT_WORKSPACE_TABS.indexOf(from) ? "forward" : "backward";
+}
 
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("csharp", csharp);
@@ -6746,6 +6752,13 @@ function RightWorkspacePanel({
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
   threadId: string | null;
 }) {
+  const tabTransition = useMotionSwitch(activeTab, getWorkspaceTabDirection);
+  const getViewMotion = (tab: RightWorkspaceTab): "entering" | "entered" | "exiting" | "hidden" => {
+    if (tab === tabTransition.current) return tabTransition.leaving ? "entering" : "entered";
+    if (tab === tabTransition.leaving) return "exiting";
+    return "hidden";
+  };
+
   return (
     <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="右侧工作区" aria-hidden={hidden}>
       <header className="right-workspace-header">
@@ -6777,19 +6790,7 @@ function RightWorkspacePanel({
       </header>
 
       <div className="right-workspace-content">
-        {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
-          <BrowserWorkspace
-            key={browserThreadId}
-            tabs={tabs}
-            threadId={browserThreadId}
-            onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
-            visible={!hidden && activeTab === "browser" && browserThreadId === threadId}
-          />
-        ) : null)}
-        {activeTab === "browser" && threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
-          <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里" />
-        ) : null}
-        {activeTab === "files" ? (
+        <div className="right-workspace-view" data-motion={getViewMotion("files")} data-direction={tabTransition.direction} aria-hidden={getViewMotion("files") === "hidden"}>
           <ProjectFilesWorkspace
             files={projectFiles}
             toolCalls={projectToolCalls}
@@ -6800,8 +6801,8 @@ function RightWorkspacePanel({
             projectRoot={projectRoot}
             onAddAttachment={onAddAttachment}
           />
-        ) : null}
-        {!hidden && activeTab === "changes" ? (
+        </div>
+        <div className="right-workspace-view" data-motion={getViewMotion("changes")} data-direction={tabTransition.direction} aria-hidden={getViewMotion("changes") === "hidden"}>
           <GitChangesWorkspace
             threadId={threadId}
             snapshot={gitSnapshot}
@@ -6812,7 +6813,21 @@ function RightWorkspacePanel({
             onAction={onGitAction}
             onComment={onGitComment}
           />
-        ) : null}
+        </div>
+        <div className="right-workspace-view" data-motion={getViewMotion("browser")} data-direction={tabTransition.direction} aria-hidden={getViewMotion("browser") === "hidden"}>
+          {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
+            <BrowserWorkspace
+              key={browserThreadId}
+              tabs={tabs}
+              threadId={browserThreadId}
+              onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
+              visible={!hidden && (getViewMotion("browser") === "entered" || getViewMotion("browser") === "entering" || getViewMotion("browser") === "exiting") && browserThreadId === threadId}
+            />
+          ) : null)}
+          {threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
+            <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里" />
+          ) : null}
+        </div>
       </div>
     </aside>
   );
@@ -6837,9 +6852,11 @@ function WorkspaceTabButton({
       className={`right-workspace-tab ${active ? "active" : ""}`}
       title={label}
       aria-label={label}
+      aria-expanded={active}
       onClick={onClick}
     >
       {children}
+      <span className="right-workspace-tab-label">{label}</span>
       {badge ? <span className="right-workspace-tab-badge">{badge > 99 ? "99+" : badge}</span> : null}
     </button>
   );

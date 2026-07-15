@@ -7,6 +7,14 @@ export type MotionPresenceState<T> = {
   phase: MotionPresencePhase;
 };
 
+export type MotionSwitchDirection = "forward" | "backward";
+
+export type MotionSwitchState<T> = {
+  current: T;
+  leaving: T | null;
+  direction: MotionSwitchDirection;
+};
+
 export type MotionPresenceAction<T> =
   | { type: "show"; value: T }
   | { type: "hide" }
@@ -89,5 +97,47 @@ export function useMotionPresence<T>(value: T | null | undefined, duration = 180
   if (state.value !== null && (state.phase === "entered" || state.phase === "entering")) {
     return { value: state.value, phase: "exiting" };
   }
+  return state;
+}
+
+/** Keeps the previous keyed view mounted long enough for a directional swap animation. */
+export function useMotionSwitch<T>(
+  value: T,
+  getDirection: (from: T, to: T) => MotionSwitchDirection,
+  duration = 180
+): MotionSwitchState<T> {
+  const [state, setState] = useState<MotionSwitchState<T>>({
+    current: value,
+    leaving: null,
+    direction: "forward"
+  });
+  const currentRef = useRef(value);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const from = currentRef.current;
+    if (Object.is(value, from)) {
+      return;
+    }
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    const direction = getDirection(from, value);
+    currentRef.current = value;
+    setState({ current: value, leaving: from, direction });
+    const delay = resolveMotionPresenceDuration(duration, prefersReducedMotion());
+    timerRef.current = window.setTimeout(() => {
+      setState((current) => ({ ...current, leaving: null }));
+      timerRef.current = null;
+    }, delay);
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [duration, getDirection, value]);
+
   return state;
 }

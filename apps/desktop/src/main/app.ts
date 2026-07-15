@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
+import iconv from "iconv-lite";
 import { app, BrowserWindow, net, shell, webContents } from "electron";
 import type { WebContents } from "electron";
 import type {
@@ -453,12 +454,12 @@ export class DesktopBackend {
     const buffer = await fs.readFile(target);
     const limit = 512_000;
     const visible = buffer.subarray(0, limit);
-    const isBinary = visible.includes(0);
+    const decoded = decodeProjectText(visible);
     return {
       path: relativePath,
-      content: isBinary ? "Binary file preview is not available." : visible.toString("utf8"),
+      content: decoded?.content ?? "Binary file preview is not available.",
       truncated: buffer.length > limit,
-      binary: isBinary
+      binary: !decoded
     };
   }
 
@@ -475,11 +476,12 @@ export class DesktopBackend {
     }
 
     const existing = await fs.readFile(target);
-    if (existing.includes(0)) {
+    const decoded = decodeProjectText(existing);
+    if (!decoded) {
       throw new Error("Binary project files cannot be edited here.");
     }
 
-    await fs.writeFile(target, content, "utf8");
+    await fs.writeFile(target, encodeProjectText(content, decoded.encoding));
     return { path: relativePath };
   }
 
@@ -3214,6 +3216,84 @@ function filterRelevantSearchResults<T extends { title: string; snippet: string 
     const text = `${result.title} ${result.snippet}`.toLowerCase();
     return terms.some((term) => text.includes(term.toLowerCase()));
   });
+}
+
+type ProjectTextEncoding = "utf8" | "utf8-bom" | "utf16le" | "utf16be" | "gb18030";
+
+function decodeProjectText(buffer: Buffer): { content: string; encoding: ProjectTextEncoding } | null {
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    return { content: buffer.subarray(3).toString("utf8"), encoding: "utf8-bom" };
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return { content: buffer.subarray(2).toString("utf16le"), encoding: "utf16le" };
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    return { content: decodeUtf16Be(buffer.subarray(2)), encoding: "utf16be" };
+  }
+  if (buffer.includes(0)) {
+    return null;
+  }
+  if (isValidUtf8(buffer)) {
+    return { content: buffer.toString("utf8"), encoding: "utf8" };
+  }
+  if (!looksLikeText(buffer)) {
+    return null;
+  }
+  return { content: iconv.decode(buffer, "gb18030"), encoding: "gb18030" };
+}
+
+function encodeProjectText(content: string, encoding: ProjectTextEncoding): Buffer {
+  switch (encoding) {
+    case "utf8-bom":
+      return Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(content, "utf8")]);
+    case "utf16le":
+      return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, "utf16le")]);
+    case "utf16be":
+      return Buffer.concat([Buffer.from([0xfe, 0xff]), encodeUtf16Be(content)]);
+    case "gb18030":
+      return iconv.encode(content, "gb18030");
+    default:
+      return Buffer.from(content, "utf8");
+  }
+}
+
+function isValidUtf8(buffer: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function looksLikeText(buffer: Buffer): boolean {
+  let controlCharacters = 0;
+  for (const byte of buffer) {
+    if ((byte < 0x09) || (byte > 0x0d && byte < 0x20) || byte === 0x7f) {
+      controlCharacters += 1;
+    }
+  }
+  return controlCharacters <= Math.max(2, Math.floor(buffer.length / 20));
+}
+
+function decodeUtf16Be(buffer: Buffer): string {
+  const length = buffer.length - (buffer.length % 2);
+  const littleEndian = Buffer.allocUnsafe(length);
+  for (let index = 0; index < length; index += 2) {
+    littleEndian[index] = buffer[index + 1]!;
+    littleEndian[index + 1] = buffer[index]!;
+  }
+  return littleEndian.toString("utf16le");
+}
+
+function encodeUtf16Be(content: string): Buffer {
+  const littleEndian = Buffer.from(content, "utf16le");
+  const bigEndian = Buffer.allocUnsafe(littleEndian.length);
+  for (let index = 0; index < littleEndian.length; index += 2) {
+    bigEndian[index] = littleEndian[index + 1]!;
+    bigEndian[index + 1] = littleEndian[index]!;
+  }
+  return bigEndian;
 }
 
 function resolveProjectFilePath(root: string, relativePath: string): string {
