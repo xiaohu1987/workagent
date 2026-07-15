@@ -879,6 +879,42 @@ export class DatabaseService {
     return thread;
   }
 
+  public clearThreadConversation(threadId: string): ThreadRecord {
+    const thread = this.getThread(threadId);
+    if (thread.status === "running" || thread.status === "waiting") {
+      throw new Error("任务正在执行，暂时不能清空聊天记录。");
+    }
+
+    const conversationTables = [
+      "messages",
+      "queued_messages",
+      "turn_runs",
+      "tool_calls",
+      "approval_records",
+      "user_input_prompts",
+      "artifacts",
+      "browser_tabs",
+      "runtime_events"
+    ];
+    const updatedAt = nowIso();
+
+    this.#db.exec("BEGIN");
+    try {
+      for (const table of conversationTables) {
+        this.#db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(threadId);
+      }
+      this.#db
+        .prepare("UPDATE threads SET status = 'idle', gpa_state_json = NULL, updated_at = ? WHERE id = ?")
+        .run(updatedAt, threadId);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+
+    return this.getThread(threadId);
+  }
+
   public listMessages(threadId: string): MessageRecord[] {
     return this.#db
       .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC")
@@ -1889,7 +1925,10 @@ When the user wants an image, do **not** invent a picture or claim you generated
 
 ## Required workflow
 1. Call \`skills.load\` with \`skill_id: generate_image\` if you have not loaded it yet.
-2. Call the built-in function \`image.generate\` with a concrete \`prompt\`.
+2. Call the built-in function \`image.generate\` with a concrete \`prompt\` and \`count\`.
+   - Default \`count\` to 1.
+   - Use the requested count when the user asks for multiple separate images (maximum 4).
+   - If the user clearly asks for multiple images without an exact number, use \`count: 2\`.
 3. The runtime will use the **default image model** from **设置 → 多模态** (not the chat reasoning model).
 4. After the tool succeeds, briefly confirm the image was generated. The UI will show the image attachment.
 
@@ -1904,7 +1943,7 @@ Tell the user to open **设置 → 多模态**, enable image generation, add an 
       meta: `interface:
   display_name: Generate Image
   short_description: Generate images via image.generate and the default multimodal image model
-  default_prompt: Load generate_image, then call image.generate with a detailed prompt.
+  default_prompt: Load generate_image, then call image.generate with a detailed prompt and the requested image count.
 policy:
   allow_implicit_invocation: true
 dependencies:

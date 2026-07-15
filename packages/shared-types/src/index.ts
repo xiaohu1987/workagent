@@ -739,6 +739,57 @@ export interface RuntimeThreadSnapshot {
   gpa: GpaState | null;
 }
 
+export type GitDiffLineKind = "context" | "added" | "removed" | "meta";
+
+export interface GitDiffLine {
+  kind: GitDiffLineKind;
+  content: string;
+  oldLine: number | null;
+  newLine: number | null;
+}
+
+export interface GitHunk {
+  id: string;
+  header: string;
+  lines: GitDiffLine[];
+}
+
+export interface GitFileChange {
+  path: string;
+  originalPath?: string;
+  indexStatus: string;
+  worktreeStatus: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  conflicted: boolean;
+  binary: boolean;
+  additions: number;
+  deletions: number;
+  stagedHunks: GitHunk[];
+  unstagedHunks: GitHunk[];
+}
+
+export interface GitSnapshot {
+  available: boolean;
+  message?: string;
+  root?: string;
+  head?: string;
+  branch?: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  canCreatePullRequest: boolean;
+  files: GitFileChange[];
+}
+
+export interface GitActionResult {
+  ok: boolean;
+  message: string;
+  snapshot: GitSnapshot;
+  pullRequestUrl?: string;
+}
+
 export interface ToolSearchResult {
   name: string;
   description: string;

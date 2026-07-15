@@ -169,6 +169,7 @@ export interface ActCompletionValidationResult {
 export interface ManagedWriteCompletionState {
   attemptedToolCallIds: string[];
   failedToolCallIds: string[];
+  failedToolSummaries: string[];
   successfulToolCallIds: string[];
   deliveredPaths: Set<string>;
   pendingReadbackPaths: Set<string>;
@@ -179,9 +180,21 @@ export interface ManagedWriteCompletionValidationResult {
   valid: boolean;
   attempted: boolean;
   failedToolCallIds: string[];
+  failedToolSummaries: string[];
   deliveredPaths: string[];
   missingReadbackPaths: string[];
   reasons: string[];
+}
+
+export interface ManagedWriteRecoveryState {
+  phase: "none" | "read" | "write";
+  failedToolName?: "apply_patch" | "fs.write_file";
+  targetPaths: string[];
+}
+
+export interface ManagedWriteRecoveryToolCallValidation {
+  allowed: boolean;
+  message?: string;
 }
 
 interface BrowserVerificationEvidenceState {
@@ -921,6 +934,7 @@ class ThreadSessionRuntime {
           intent: multimodalClassification.intent,
           turnId: turn.id,
           prompt: multimodalClassification.prompt,
+          count: multimodalClassification.count,
           abortController
         });
         return;
@@ -972,12 +986,14 @@ class ThreadSessionRuntime {
       const successfulToolCallFingerprints = new Set<string>();
       const successfulToolEvidence: SuccessfulToolEvidence[] = [];
       const managedWriteCompletion = createManagedWriteCompletionState();
+      const managedWriteRecovery = createManagedWriteRecoveryState();
       const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
       const knowledgeSources = new Map<string, KnowledgeSourceReference>();
       const browserSources = new Map<string, BrowserSourceReference>();
       const visibleAssistantMessages = new Set<string>();
+      const visibleCommentaryMessages = new Set<string>();
       const loadedSkillIds = new Set<string>(thread.selectedSkillIds);
       let skillForceReminderIssued = false;
       let terminalThread: ThreadRecord | null = null;
@@ -1132,6 +1148,17 @@ class ThreadSessionRuntime {
         );
         const adapter = this.services.providerFactory.create(provider);
         let streamedVisibleContent = "";
+        const discardStreamedAssistant = async () => {
+          if (!streamedVisibleContent) return;
+          await this.services.emit({
+            type: "assistant.completed",
+            threadId: this.threadId,
+            payload: { turnRunId: turn.id, discarded: true },
+            createdAt: new Date().toISOString()
+          });
+          streamedVisibleContent = "";
+          interruptedVisibleContent = "";
+        };
         const modelTurnAbortController = createChildAbortController(abortController.signal);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
@@ -1191,10 +1218,12 @@ class ThreadSessionRuntime {
                 }
                 streamedVisibleContent += delta;
                 interruptedVisibleContent = streamedVisibleContent;
-                // The renderer receives text only after the complete decision is
-                // validated. This prevents malformed tool payloads from leaking
-                // into the user-facing transcript during streaming.
-                return;
+                await this.services.emit({
+                  type: "assistant.delta",
+                  threadId: this.threadId,
+                  payload: { turnRunId: turn.id, content: streamedVisibleContent },
+                  createdAt: new Date().toISOString()
+                });
               },
               abortSignal: modelTurnAbortController.signal
             }),
@@ -1408,6 +1437,7 @@ class ThreadSessionRuntime {
         }
 
         if (!decision.isStructured) {
+          await discardStreamedAssistant();
           if (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") {
             gpaAnalysisValidationAttempts += 1;
             await this.services.log("gpa.analysis_output_invalid", this.threadId, {
@@ -1865,6 +1895,7 @@ class ThreadSessionRuntime {
         const deferredExecutionPayload =
           Boolean(decision.assistantMessage) && isDeferredExecutionPayload(decision.assistantMessage ?? "");
         if (deferredExecutionPayload && assistantMessage) {
+          await discardStreamedAssistant();
           await this.services.emit({
             type: "assistant.execution_output",
             threadId: this.threadId,
@@ -1895,19 +1926,40 @@ class ThreadSessionRuntime {
             decision.goalCompleted = false;
             continue;
           }
-        } else if (
+        }
+
+        const preservesGpaAnalysis =
+          (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") &&
+          decision.toolCalls.length === 1 &&
+          decision.toolCalls[0]?.name === "request_user_input";
+        if (
+          decision.assistantMessage &&
           decision.toolCalls.length > 0 &&
-          !(
-            (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") &&
-            decision.toolCalls.length === 1 &&
-            decision.toolCalls[0]?.name === "request_user_input"
-          )
+          !preservesGpaAnalysis &&
+          isSafeCommentaryMessage(decision.assistantMessage)
         ) {
-          // Progress prose belongs to the execution panel while tools are still
-          // running. Only a validated final response is written to the chat.
-          // Exception: GPA analysis may keep its visible write-up while waiting
-          // on a clarification card.
+          const commentaryKey = createCommentaryMessageKey(decision.assistantMessage, decision.toolCalls);
+          if (!visibleCommentaryMessages.has(commentaryKey)) {
+            visibleCommentaryMessages.add(commentaryKey);
+            const commentaryMessage = await this.recordMessage(
+              "assistant",
+              decision.assistantMessage,
+              turn.id,
+              buildCommentaryMessageMetadata(decision.toolCalls)
+            );
+            transcript.push({ role: "assistant", content: commentaryMessage.content });
+            if (streamedVisibleContent) {
+              await this.services.emit({
+                type: "assistant.completed",
+                threadId: this.threadId,
+                payload: { turnRunId: turn.id, messageId: commentaryMessage.id },
+                createdAt: new Date().toISOString()
+              });
+            }
+          }
           decision.assistantMessage = undefined;
+        } else if (decision.assistantMessage && decision.toolCalls.length > 0 && !preservesGpaAnalysis) {
+          await discardStreamedAssistant();
         }
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
@@ -2054,6 +2106,23 @@ class ThreadSessionRuntime {
             if (repeatedTaskFailure) {
               break;
             }
+            continue;
+          }
+          const recoveryWorkspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
+          const recoveryValidation = validateManagedWriteRecoveryToolCall(
+            managedWriteRecovery,
+            toolCall,
+            recoveryWorkspaceCwd
+          );
+          if (!recoveryValidation.allowed) {
+            const message = recoveryValidation.message ?? "Complete the required managed-write recovery step first.";
+            transcript.push({ role: "user", content: message });
+            await this.services.log("agent.managed_write_recovery_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              phase: managedWriteRecovery.phase,
+              reason: message
+            });
             continue;
           }
           const toolRecord = await this.services.persistence.recordToolCall({
@@ -2297,12 +2366,22 @@ class ThreadSessionRuntime {
             toolCallId: toolCall.id,
             toolName: toolCall.name,
             ok: result.ok,
-            verifiedPaths: pathVerification?.verifiedPaths
+            verifiedPaths: pathVerification?.verifiedPaths,
+            failureSummary: result.ok ? undefined : result.content
           });
+          const readPath = result.ok && toolCall.name === "fs.read_file"
+            ? resolveSuccessfulReadFilePath(toolCall.arguments, result, workspaceCwd)
+            : undefined;
           if (result.ok && toolCall.name === "fs.read_file") {
-            const readPath = resolveSuccessfulReadFilePath(toolCall.arguments, result, workspaceCwd);
             if (readPath) recordManagedWriteReadback(managedWriteCompletion, readPath);
           }
+          advanceManagedWriteRecovery(managedWriteRecovery, {
+            toolName: toolCall.name,
+            argumentsJson: toolCall.arguments,
+            ok: result.ok,
+            workspaceCwd,
+            readPath
+          });
 
           const completedAt = new Date().toISOString();
           const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result);
@@ -2395,11 +2474,15 @@ class ThreadSessionRuntime {
             browserVerificationEvidence.screenshotAttachmentsSent.add(toolCall.id);
           }
           if (toolCall.name === "image.generate" && result.ok) {
-            const attachment = result.json?.attachment as MessageAttachment | undefined;
+            const attachments = Array.isArray(result.json?.attachments)
+              ? result.json.attachments as MessageAttachment[]
+              : result.json?.attachment
+                ? [result.json.attachment as MessageAttachment]
+                : [];
             const artifactId = typeof result.json?.artifactId === "string" ? result.json.artifactId : undefined;
-            if (attachment) {
-              await this.recordMessage("assistant", "已生成图片。", turn.id, {
-                attachments: [attachment],
+            if (attachments.length > 0) {
+              await this.recordMessage("assistant", attachments.length === 1 ? "已生成图片。" : `已生成 ${attachments.length} 张图片。`, turn.id, {
+                attachments,
                 artifactId
               });
             }
@@ -2467,6 +2550,12 @@ class ThreadSessionRuntime {
             }
             taskFailureCounts.delete(toolTaskKey);
           } else {
+            if (MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
+              transcript.push({
+                role: "user",
+                content: buildManagedWriteRecoveryInstruction(managedWriteRecovery)
+              });
+            }
             const attempts = (failedToolCallFingerprints.get(toolCallFingerprint) ?? 0) + 1;
             failedToolCallFingerprints.set(toolCallFingerprint, attempts);
             await registerTaskFailure(toolTaskKey, result.content);
@@ -2616,15 +2705,6 @@ class ThreadSessionRuntime {
       }
     } catch (error) {
       if (abortController.signal.aborted) {
-        let messageId: string | undefined;
-        if (interruptedVisibleContent.trim() && !isDeferredExecutionPayload(interruptedVisibleContent)) {
-          const message = await this.recordMessage(
-            "assistant",
-            interruptedVisibleContent,
-            turn.id
-          );
-          messageId = message.id;
-        }
         const completedAt = new Date().toISOString();
         await this.services.persistence.finishTurn(turn.id, {
           status: "interrupted",
@@ -2640,7 +2720,7 @@ class ThreadSessionRuntime {
           await this.services.emit({
             type: "assistant.completed",
             threadId: this.threadId,
-            payload: { turnRunId: turn.id, messageId },
+            payload: { turnRunId: turn.id, discarded: true },
             createdAt: completedAt
           });
         }
@@ -2796,7 +2876,7 @@ class ThreadSessionRuntime {
     abortController: AbortController;
     turnId: string;
   }): Promise<MultimodalIntentClassification> {
-    const fallback: MultimodalIntentClassification = { intent: "none", prompt: "", parseOk: false };
+    const fallback: MultimodalIntentClassification = { intent: "none", prompt: "", count: 1, parseOk: false };
     try {
       const adapter = this.services.providerFactory.create(input.provider);
       const classifyAbort = createChildAbortController(input.abortController.signal);
@@ -2827,6 +2907,7 @@ class ThreadSessionRuntime {
       await this.services.log("multimodal.intent_classify", this.threadId, {
         turnRunId: input.turnId,
         intent: classification.intent,
+        count: classification.count,
         parseOk: classification.parseOk,
         viaModel: true,
         promptPreview: classification.prompt.slice(0, 200),
@@ -2853,6 +2934,7 @@ class ThreadSessionRuntime {
     intent: "image" | "video";
     turnId: string;
     prompt: string;
+    count: number;
     abortController: AbortController;
   }): Promise<void> {
     const label = input.intent === "image" ? "图片" : "视频";
@@ -2886,6 +2968,7 @@ class ThreadSessionRuntime {
         model: target.model,
         provider: target.provider,
         prompt: input.prompt,
+        count: input.count,
         abortController: input.abortController
       });
       return;
@@ -3097,21 +3180,26 @@ class ThreadSessionRuntime {
     model: ModelProfile;
     provider: ProviderDefinition;
     prompt: string;
+    count: number;
     abortController: AbortController;
   }): Promise<void> {
     const startedAt = new Date().toISOString();
     try {
       void input.model;
       void input.provider;
-      const generated = await this.createGeneratedImageArtifact({
-        turnId: input.turnId,
-        prompt: input.prompt,
-        abortSignal: input.abortController.signal
-      });
+      const count = Math.min(4, Math.max(1, Math.trunc(input.count)));
+      const generated = [];
+      for (let index = 0; index < count; index += 1) {
+        generated.push(await this.createGeneratedImageArtifact({
+          turnId: input.turnId,
+          prompt: input.prompt,
+          abortSignal: input.abortController.signal
+        }));
+      }
       const completedAt = new Date().toISOString();
-      const message = await this.recordMessage("assistant", "已生成图片。", input.turnId, {
-        attachments: [generated.attachment],
-        artifactId: generated.artifact.id
+      const message = await this.recordMessage("assistant", count === 1 ? "已生成图片。" : `已生成 ${count} 张图片。`, input.turnId, {
+        attachments: generated.map((item) => item.attachment),
+        artifactId: generated[0]?.artifact.id
       });
       await this.services.persistence.finishTurn(input.turnId, { status: "completed", completedAt, errorMessage: null });
       const thread = await this.services.persistence.updateThread(this.threadId, { status: "completed", updatedAt: completedAt });
@@ -3213,6 +3301,32 @@ export function buildUserMessageMetadata(
 
 export function createToolCallFingerprint(name: string, argumentsJson: Record<string, unknown>): string {
   return `${name}:${stableSerialize(argumentsJson)}`;
+}
+
+export function createCommentaryMessageKey(content: string, toolCalls: RuntimeToolCall[]): string {
+  const toolBatch = toolCalls
+    .map((toolCall) => createToolCallFingerprint(canonicalizeToolName(toolCall.name), toolCall.arguments))
+    .join("|");
+  return `${normalizeAssistantMessageForDeduplication(content)}:${toolBatch}`;
+}
+
+export function buildCommentaryMessageMetadata(toolCalls: RuntimeToolCall[]): Record<string, unknown> {
+  return {
+    displayKind: "commentary",
+    toolCallIds: toolCalls.map((toolCall) => toolCall.id)
+  };
+}
+
+export function isSafeCommentaryMessage(content: string): boolean {
+  const normalized = content.trim();
+  if (!normalized || isPatchPayload(normalized)) return false;
+  if (/^\s*[\[{][\s\S]*(?:"(?:assistant_message|tool_calls|tool_result|arguments)"|<(?:tool_calls?|tool_result)\b)/i.test(normalized)) {
+    return false;
+  }
+  if (/<\/?tool_(?:calls|result)\b|<event\b[^>]*\btype=["'](?:tool|analysis|reasoning)/i.test(normalized)) {
+    return false;
+  }
+  return !/^(?:web_search|browser|shell|fs|knowledge|mcp|execute_command|read_file|write_file|apply_patch)(?:[._][\w-]+)+\s*[\[{(]/i.test(normalized);
 }
 
 const RETARGETABLE_BROWSER_OBSERVATION_TOOLS = new Set([
@@ -3991,10 +4105,6 @@ function isDeferredExecutionPayload(content: string): boolean {
     return false;
   }
 
-  if (isProgressOnlyAssistantMessage(trimmed)) {
-    return true;
-  }
-
   if (/^<\/?tool_(?:calls|result)\b/i.test(trimmed)) {
     return true;
   }
@@ -4167,7 +4277,7 @@ function buildRuntimePrompt(
   ];
   if (imageGenerateAvailable) {
     blocks.push(
-      "When the user asks to generate, draw, recreate, or vary an image (including follow-ups like 再换一张/再来一张), load the generate_image skill and call image.generate. That tool uses the default image model from Settings → Multimodal, not the chat reasoning model. Never call image_gen, imagegen, or any invented image tool name. Never claim an image was created without a successful image.generate result."
+      "When the user asks to generate, draw, recreate, or vary an image (including follow-ups like 再换一张/再来一张), load the generate_image skill and call image.generate. Set count to the requested number of separate images (1-4); default to 1, or use 2 when the user clearly requests multiple images without an exact number. That tool uses the default image model from Settings → Multimodal, not the chat reasoning model. Never call image_gen, imagegen, or any invented image tool name. Never claim an image was created without a successful image.generate result."
     );
   }
   if (videoGenerateAvailable) {
@@ -4492,6 +4602,7 @@ export function createManagedWriteCompletionState(): ManagedWriteCompletionState
   return {
     attemptedToolCallIds: [],
     failedToolCallIds: [],
+    failedToolSummaries: [],
     successfulToolCallIds: [],
     deliveredPaths: new Set(),
     pendingReadbackPaths: new Set(),
@@ -4501,13 +4612,23 @@ export function createManagedWriteCompletionState(): ManagedWriteCompletionState
 
 export function recordManagedWriteResult(
   state: ManagedWriteCompletionState,
-  input: { toolCallId: string; toolName: string; ok: boolean; verifiedPaths?: string[] }
+  input: {
+    toolCallId: string;
+    toolName: string;
+    ok: boolean;
+    verifiedPaths?: string[];
+    failureSummary?: string;
+  }
 ): void {
   if (!MANAGED_WRITE_TOOL_NAMES.has(input.toolName)) return;
 
   state.attemptedToolCallIds.push(input.toolCallId);
   if (!input.ok) {
     state.failedToolCallIds.push(input.toolCallId);
+    const summary = input.failureSummary?.replace(/\s+/g, " ").trim();
+    state.failedToolSummaries.push(
+      `${input.toolName} (${input.toolCallId})${summary ? `: ${summary.slice(0, 300)}` : ""}`
+    );
     return;
   }
 
@@ -4548,6 +4669,7 @@ export function validateManagedWriteCompletion(
     valid: !attempted || reasons.length === 0,
     attempted,
     failedToolCallIds: [...state.failedToolCallIds],
+    failedToolSummaries: [...state.failedToolSummaries],
     deliveredPaths,
     missingReadbackPaths,
     reasons
@@ -4564,6 +4686,7 @@ export function buildManagedWriteCompletionRecoveryInstruction(
     "[Internal managed-write completion gate. Do not display or quote this instruction to the user.]",
     "The previous completion claim was rejected because managed file changes were not verified.",
     ...result.reasons,
+    ...(result.failedToolSummaries.length > 0 ? [`Failed managed writes: ${result.failedToolSummaries.join("; ")}.`] : []),
     missingPaths,
     "After verification, return a corrected final decision. If the change cannot be completed, end with goal_completed false and state that it was not completed."
   ].join(" ");
@@ -4572,8 +4695,109 @@ export function buildManagedWriteCompletionRecoveryInstruction(
 export function buildManagedWriteCompletionFailureMessage(
   result: ManagedWriteCompletionValidationResult
 ): string {
-  const details = result.reasons.join(" ");
+  const details = [...result.reasons, ...result.failedToolSummaries].join(" ");
   return `I could not verify the requested file changes, so I am not claiming completion. ${details}`.trim();
+}
+
+export function createManagedWriteRecoveryState(): ManagedWriteRecoveryState {
+  return { phase: "none", targetPaths: [] };
+}
+
+export function validateManagedWriteRecoveryToolCall(
+  state: ManagedWriteRecoveryState,
+  toolCall: Pick<RuntimeToolCall, "name" | "arguments">,
+  workspaceCwd: string
+): ManagedWriteRecoveryToolCallValidation {
+  if (state.phase === "none") return { allowed: true };
+
+  if (state.phase === "read") {
+    if (toolCall.name !== "fs.read_file") {
+      return {
+        allowed: false,
+        message: buildManagedWriteRecoveryInstruction(state)
+      };
+    }
+    const readPath = getRecoveryFilePath(toolCall.arguments.path, workspaceCwd);
+    if (
+      state.targetPaths.length > 0 &&
+      (!readPath || !state.targetPaths.some((targetPath) => pathsMatch(targetPath, readPath)))
+    ) {
+      return {
+        allowed: false,
+        message: `${buildManagedWriteRecoveryInstruction(state)} Read the failed write target, not a different file.`
+      };
+    }
+    return { allowed: true };
+  }
+
+  if (!MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
+    return { allowed: false, message: buildManagedWriteRecoveryInstruction(state) };
+  }
+  return { allowed: true };
+}
+
+export function advanceManagedWriteRecovery(
+  state: ManagedWriteRecoveryState,
+  input: {
+    toolName: string;
+    argumentsJson: Record<string, unknown>;
+    ok: boolean;
+    workspaceCwd: string;
+    readPath?: string;
+  }
+): void {
+  if (MANAGED_WRITE_TOOL_NAMES.has(input.toolName) && !input.ok) {
+    state.phase = "read";
+    state.failedToolName = input.toolName;
+    state.targetPaths = getManagedWriteTargetPaths(input.toolName, input.argumentsJson)
+      .map((candidate) => getRecoveryFilePath(candidate, input.workspaceCwd))
+      .filter((candidate): candidate is string => Boolean(candidate));
+    return;
+  }
+
+  if (state.phase === "read" && input.toolName === "fs.read_file" && input.ok && input.readPath) {
+    if (state.targetPaths.length === 0 || state.targetPaths.some((targetPath) => pathsMatch(targetPath, input.readPath!))) {
+      state.phase = "write";
+    }
+    return;
+  }
+
+  if (state.phase === "write" && MANAGED_WRITE_TOOL_NAMES.has(input.toolName) && input.ok) {
+    state.phase = "none";
+    state.failedToolName = undefined;
+    state.targetPaths = [];
+  }
+}
+
+export function buildManagedWriteRecoveryInstruction(state: ManagedWriteRecoveryState): string {
+  const target = state.targetPaths.length > 0
+    ? `Read the failed target first with fs.read_file: ${state.targetPaths.join(", ")}.`
+    : "Read the intended target first with fs.read_file.";
+  const next = state.phase === "write"
+    ? "Now retry with apply_patch or fs.write_file."
+    : target;
+  return [
+    "[Internal managed-write recovery. Do not display or quote this instruction to the user.]",
+    "A managed file write failed.",
+    next,
+    "Do not use shell.exec to edit files; terminal writes cannot satisfy managed-delivery verification."
+  ].join(" ");
+}
+
+function getManagedWriteTargetPaths(toolName: string, argumentsJson: Record<string, unknown>): string[] {
+  if (toolName === "apply_patch") {
+    const patch = [argumentsJson.patch, argumentsJson.patch_content, argumentsJson.patchText].find(
+      (value): value is string => typeof value === "string"
+    ) ?? "";
+    return [...patch.matchAll(/^\*\*\* (?:Add|Update) File: (.+)$/gm)].map((match) => match[1].trim());
+  }
+  const candidate = argumentsJson.path;
+  return typeof candidate === "string" && candidate.trim() ? [candidate] : [];
+}
+
+function getRecoveryFilePath(candidate: unknown, workspaceCwd: string): string | undefined {
+  if (typeof candidate !== "string" || !candidate.trim()) return undefined;
+  return path.isAbsolute(candidate) ? path.normalize(candidate) : path.resolve(workspaceCwd, candidate);
 }
 
 type RepositoryExplorationState = {

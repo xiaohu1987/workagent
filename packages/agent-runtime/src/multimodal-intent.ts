@@ -8,6 +8,7 @@ export type MultimodalIntentKind = "image" | "video" | "none";
 export type MultimodalIntentClassification = {
   intent: MultimodalIntentKind;
   prompt: string;
+  count: number;
   parseOk: boolean;
 };
 
@@ -22,13 +23,15 @@ export function buildMultimodalIntentClassifySystemPrompt(): string {
   return [
     "You classify whether the latest user message is asking to generate or regenerate an image or a video.",
     "Reply with ONLY one JSON object and no other text:",
-    '{"intent":"image"|"video"|"none","prompt":"..."}',
+    '{"intent":"image"|"video"|"none","prompt":"...","count":1}',
     "",
     "Rules:",
     '- intent="image" when the user wants a new image, another variation, redraw, restyle, or image edit that should produce a new image.',
     '- intent="video" when the user wants a new video or another video variation.',
     '- intent="none" for ordinary chat, coding, Q&A, or anything that is not image/video generation.',
     '- When intent is image or video, prompt MUST be a complete text prompt suitable to send directly to an image/video model.',
+    "- For image requests, count is the requested number of separate output images, from 1 to 4. Default to 1. If the user clearly asks for multiple images without an exact number, use 2.",
+    "- For video or none intents, always set count to 1.",
     '- Follow-ups like "再换一张", "换一张", "再来一张", "换个风格", "重新生成", "再试一次", "开启了你再试试": reuse the latest prior image/video generation request from conversation context, and revise the prompt only if the user added new constraints.',
     "- If the latest assistant tip said image/video generation is disabled or missing a default model, and the user confirms retry, reuse the original generation request as prompt.",
     '- When intent is "none", set prompt to an empty string.',
@@ -67,7 +70,7 @@ export function buildMultimodalIntentClassifyTranscript(input: {
 export function parseMultimodalIntentClassification(raw: string): MultimodalIntentClassification {
   const text = stripCodeFences(raw.trim());
   if (!text) {
-    return { intent: "none", prompt: "", parseOk: false };
+    return { intent: "none", prompt: "", count: 1, parseOk: false };
   }
 
   const candidates = modelJsonCandidates(text);
@@ -83,7 +86,7 @@ export function parseMultimodalIntentClassification(raw: string): MultimodalInte
     if (result) return result;
   }
 
-  return { intent: "none", prompt: "", parseOk: false };
+  return { intent: "none", prompt: "", count: 1, parseOk: false };
 }
 
 function tryParseIntentObject(raw: string): MultimodalIntentClassification | null {
@@ -104,11 +107,15 @@ function normalizeIntentObject(parsed: Record<string, unknown>): MultimodalInten
   }
   const prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
   if ((intentRaw === "image" || intentRaw === "video") && !prompt) {
-    return { intent: "none", prompt: "", parseOk: false };
+    return { intent: "none", prompt: "", count: 1, parseOk: false };
   }
+  const requestedCount = typeof parsed.count === "number" && Number.isFinite(parsed.count)
+    ? Math.trunc(parsed.count)
+    : 1;
   return {
     intent: intentRaw,
     prompt: intentRaw === "none" ? "" : prompt,
+    count: intentRaw === "image" ? Math.min(4, Math.max(1, requestedCount)) : 1,
     parseOk: true
   };
 }

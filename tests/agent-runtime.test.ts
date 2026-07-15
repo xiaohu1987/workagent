@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   createToolCallFingerprint,
+  createCommentaryMessageKey,
+  buildCommentaryMessageMetadata,
+  isSafeCommentaryMessage,
   buildUserMessageMetadata,
   buildBrowserTestChoiceQuestion,
   resolveBrowserTestChoice,
@@ -11,6 +14,9 @@ import {
   recordManagedWriteReadback,
   validateManagedWriteCompletion,
   buildManagedWriteCompletionRecoveryInstruction,
+  createManagedWriteRecoveryState,
+  validateManagedWriteRecoveryToolCall,
+  advanceManagedWriteRecovery,
   buildGpaPlanProgressRecoveryInstruction,
   validateActCompletion,
   buildActCompletionRecoveryInstruction,
@@ -148,6 +154,25 @@ describe("ACT execution recovery", () => {
     expect(instruction).toContain("call apply_patch");
     expect(instruction).toContain("Do not write progress prose");
     expect(instruction).not.toContain("failed");
+  });
+});
+
+describe("commentary messages", () => {
+  const toolCalls = [{ id: "read-1", name: "fs.read_file", arguments: { path: "src/App.tsx" } }];
+
+  it("keeps commentary correlated to its tool batch and marks it for display", () => {
+    expect(buildCommentaryMessageMetadata(toolCalls)).toEqual({
+      displayKind: "commentary",
+      toolCallIds: ["read-1"]
+    });
+    expect(createCommentaryMessageKey("I will inspect the renderer.", toolCalls)).toContain("fs.read_file");
+  });
+
+  it("allows short user-facing progress but rejects raw execution payloads", () => {
+    expect(isSafeCommentaryMessage("I will inspect the renderer before changing it.")).toBe(true);
+    expect(isSafeCommentaryMessage('{"assistant_message":"I will inspect","tool_calls":[]}')).toBe(false);
+    expect(isSafeCommentaryMessage("<tool_calls>[{\"name\":\"fs.read_file\"}]</tool_calls>")).toBe(false);
+    expect(isSafeCommentaryMessage("*** Begin Patch\n*** Update File: src/App.tsx\n*** End Patch")).toBe(false);
   });
 });
 
@@ -720,6 +745,72 @@ describe("ordinary managed-write completion", () => {
   });
 });
 
+describe("managed-write recovery", () => {
+  const workspaceCwd = "C:\\project";
+
+  it("requires a target read after a failed managed write", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: { patch: "*** Begin Patch\n*** Update File: src/app.ts\n@@\n-old\n+new\n*** End Patch" },
+      ok: false,
+      workspaceCwd
+    });
+
+    expect(validateManagedWriteRecoveryToolCall(
+      state,
+      { name: "shell.exec", arguments: { command: "Set-Content src/app.ts new" } },
+      workspaceCwd
+    )).toMatchObject({ allowed: false });
+    expect(validateManagedWriteRecoveryToolCall(
+      state,
+      { name: "fs.read_file", arguments: { path: "src/other.ts" } },
+      workspaceCwd
+    )).toMatchObject({ allowed: false });
+    expect(validateManagedWriteRecoveryToolCall(
+      state,
+      { name: "fs.read_file", arguments: { path: "src/app.ts" } },
+      workspaceCwd
+    )).toMatchObject({ allowed: true });
+  });
+
+  it("permits only a managed retry after the required read", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "fs.write_file",
+      argumentsJson: { path: "src/app.ts" },
+      ok: false,
+      workspaceCwd
+    });
+    advanceManagedWriteRecovery(state, {
+      toolName: "fs.read_file",
+      argumentsJson: { path: "src/app.ts" },
+      ok: true,
+      workspaceCwd,
+      readPath: "C:\\project\\src\\app.ts"
+    });
+
+    expect(validateManagedWriteRecoveryToolCall(
+      state,
+      { name: "shell.exec", arguments: { command: "echo new" } },
+      workspaceCwd
+    )).toMatchObject({ allowed: false });
+    expect(validateManagedWriteRecoveryToolCall(
+      state,
+      { name: "fs.write_file", arguments: { path: "src/app.ts", content: "new" } },
+      workspaceCwd
+    )).toMatchObject({ allowed: true });
+
+    advanceManagedWriteRecovery(state, {
+      toolName: "fs.write_file",
+      argumentsJson: { path: "src/app.ts", content: "new" },
+      ok: true,
+      workspaceCwd
+    });
+    expect(state.phase).toBe("none");
+  });
+});
+
 describe("browser test choice", () => {
   it("offers explicit run and skip options", () => {
     const question = buildBrowserTestChoiceQuestion();
@@ -1246,6 +1337,7 @@ describe("multimodal intent classification", () => {
     ).toEqual({
       intent: "image",
       prompt: "生成一张二次元美女跳舞的图片",
+      count: 1,
       parseOk: true
     });
 
@@ -1256,6 +1348,7 @@ describe("multimodal intent classification", () => {
     ).toEqual({
       intent: "video",
       prompt: "美女跳舞",
+      count: 1,
       parseOk: true
     });
   });
@@ -1264,16 +1357,19 @@ describe("multimodal intent classification", () => {
     expect(parseMultimodalIntentClassification('{"intent":"image","prompt":""}')).toEqual({
       intent: "none",
       prompt: "",
+      count: 1,
       parseOk: false
     });
     expect(parseMultimodalIntentClassification("今天星期几")).toEqual({
       intent: "none",
       prompt: "",
+      count: 1,
       parseOk: false
     });
     expect(parseMultimodalIntentClassification('{"intent":"none","prompt":""}')).toEqual({
       intent: "none",
       prompt: "",
+      count: 1,
       parseOk: true
     });
   });
@@ -1284,6 +1380,7 @@ describe("multimodal intent classification", () => {
     expect(parseMultimodalIntentClassification(raw)).toEqual({
       intent: "image",
       prompt: "生成一张二次元美女跳舞的图片",
+      count: 1,
       parseOk: true
     });
   });
@@ -1292,13 +1389,27 @@ describe("multimodal intent classification", () => {
     expect(parseMultimodalIntentClassification("{intent: 'image', prompt: 'city skyline',}")).toEqual({
       intent: "image",
       prompt: "city skyline",
+      count: 1,
       parseOk: true
     });
     expect(parseMultimodalIntentClassification("{intent: 'video', prompt: 'short clip'")).toEqual({
       intent: "video",
       prompt: "short clip",
+      count: 1,
       parseOk: true
     });
+  });
+
+  it("uses and safely caps requested image counts", () => {
+    expect(parseMultimodalIntentClassification(
+      '{"intent":"image","prompt":"四种不同风格的城市夜景","count":4}'
+    )).toMatchObject({ intent: "image", count: 4 });
+    expect(parseMultimodalIntentClassification(
+      '{"intent":"image","prompt":"很多城市夜景","count":12}'
+    )).toMatchObject({ intent: "image", count: 4 });
+    expect(parseMultimodalIntentClassification(
+      '{"intent":"video","prompt":"短片","count":3}'
+    )).toMatchObject({ intent: "video", count: 1 });
   });
 });
 

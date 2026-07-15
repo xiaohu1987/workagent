@@ -21,6 +21,45 @@ describe("canonicalizeToolName", () => {
 });
 
 describe("ToolRuntime", () => {
+  it("defaults image generation to one image and honors a requested count", async () => {
+    let sequence = 0;
+    const generateImageWithDefaultModel = vi.fn(async () => {
+      sequence += 1;
+      return {
+        fileName: `image-${sequence}.png`,
+        absolutePath: `C:\\outputs\\image-${sequence}.png`,
+        mimeType: "image/png",
+        modelId: "image-model",
+        providerId: "provider",
+        modelDisplayName: "Image Model",
+        attachment: { id: `attachment-${sequence}`, kind: "image", name: `image-${sequence}.png` },
+        artifact: { id: `artifact-${sequence}` }
+      };
+    });
+    const runtime = new ToolRuntime();
+    const context = {
+      cwd: process.cwd(),
+      generateImageWithDefaultModel
+    } as unknown as ToolRuntimeContext;
+
+    const single = await runtime.execute(
+      { id: "image-single", name: "image.generate", arguments: { prompt: "a cat" } },
+      context
+    );
+    const multiple = await runtime.execute(
+      { id: "image-multiple", name: "image.generate", arguments: { prompt: "a dog", count: 3 } },
+      context
+    );
+
+    expect(generateImageWithDefaultModel).toHaveBeenCalledTimes(4);
+    expect(single.json).toMatchObject({ count: 1, fileNames: ["image-1.png"] });
+    expect(multiple.json).toMatchObject({
+      count: 3,
+      fileNames: ["image-2.png", "image-3.png", "image-4.png"]
+    });
+    expect(multiple.artifacts).toHaveLength(3);
+  });
+
   it("normalizes up to four GPA user-input questions into one structured tool result", async () => {
     const requestUserInput = vi.fn().mockResolvedValue({
       approach: "recommended",
@@ -461,12 +500,12 @@ describe("ToolRuntime", () => {
     expect(result.content).toContain("apply_patch");
   });
 
-  it("keeps direct file editing on the apply_patch workflow", () => {
+  it("exposes both managed file writing tools directly", () => {
     const { direct, deferred } = new ToolRuntime().listToolSpecs();
 
     expect(direct.map((tool) => tool.name)).toContain("apply_patch");
-    expect(direct.map((tool) => tool.name)).not.toContain("fs.write_file");
-    expect(deferred.map((tool) => tool.name)).toContain("fs.write_file");
+    expect(direct.map((tool) => tool.name)).toContain("fs.write_file");
+    expect(deferred.map((tool) => tool.name)).not.toContain("fs.write_file");
   });
 
   it("loads selected Skill instructions through the skills.load tool", async () => {
@@ -486,21 +525,30 @@ describe("ToolRuntime", () => {
     expect(result.content).toContain("Use the data workflow.");
   });
 
-  it("rejects direct file paths outside the project folder", async () => {
+  it("accepts project-internal absolute file paths and rejects paths outside the project folder", async () => {
     const readFile = vi.fn();
     const runtime = new ToolRuntime();
+    const insidePath = path.join(process.cwd(), "inside.txt");
     const context = {
       cwd: process.cwd(),
-      readFile
+      readFile: readFile.mockResolvedValue("inside")
     } as unknown as ToolRuntimeContext;
+
+    const inside = await runtime.execute(
+      { id: "call-inside", name: "fs.read_file", arguments: { path: insidePath } },
+      context
+    );
+
+    expect(inside).toMatchObject({ ok: true, content: "inside" });
+    expect(readFile).toHaveBeenCalledWith(insidePath);
 
     await expect(
       runtime.execute(
         { id: "call-2", name: "fs.read_file", arguments: { path: path.resolve(process.cwd(), "..", "outside.txt") } },
         context
       )
-    ).rejects.toThrow("relative to the project folder");
-    expect(readFile).not.toHaveBeenCalled();
+    ).rejects.toThrow("outside the project folder");
+    expect(readFile).toHaveBeenCalledTimes(1);
   });
 
   it("accepts a model's patch_content Git diff when it adds one file", async () => {
@@ -556,6 +604,48 @@ describe("ToolRuntime", () => {
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("accepts project-internal absolute paths in canonical patches", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const filePath = path.join(root, "index.html");
+    await fs.writeFile(filePath, "<h1>Before</h1>\n", "utf8");
+    const runtime = new ToolRuntime();
+
+    try {
+      const result = await runtime.execute(
+        {
+          id: "absolute-patch",
+          name: "apply_patch",
+          arguments: {
+            patch: `*** Begin Patch\n*** Update File: ${filePath}\n@@\n-<h1>Before</h1>\n+<h1>After</h1>\n*** End Patch`
+          }
+        },
+        { cwd: root, requestApproval: vi.fn().mockResolvedValue(true) } as unknown as ToolRuntimeContext
+      );
+
+      expect(result.ok).toBe(true);
+      await expect(fs.readFile(filePath, "utf8")).resolves.toBe("<h1>After</h1>\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns canonical recovery guidance for an invalid patch", async () => {
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "invalid-patch",
+        name: "apply_patch",
+        arguments: { patch: "*** Begin Patch\n*** Changed Range: 35\n*** End Patch" }
+      },
+      { cwd: process.cwd(), requestApproval: vi.fn().mockResolvedValue(true) } as unknown as ToolRuntimeContext
+    );
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.content).toContain("Unsupported patch line: *** Changed Range: 35");
+    expect(result.content).toContain("*** Begin Patch");
+    expect(result.content).toContain("Re-read the intended target file");
   });
 
   it("supports fs.read_file offset/limit and code.outline", async () => {

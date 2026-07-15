@@ -33,8 +33,24 @@ declare global {
       chooseKnowledgeFiles: () => Promise<string[]>;
       chooseKnowledgeFolders: () => Promise<string[]>;
       listProjectFiles: (threadId: string) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
-      readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean }>;
+      readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
+      writeProjectFile: (payload: { threadId: string; path: string; content: string }) => Promise<{ path: string }>;
+      getGitSnapshot: (threadId: string) => Promise<any>;
+      stageGitFile: (payload: { threadId: string; path: string }) => Promise<any>;
+      unstageGitFile: (payload: { threadId: string; path: string }) => Promise<any>;
+      revertGitFile: (payload: { threadId: string; path: string; untracked?: boolean }) => Promise<any>;
+      applyGitHunk: (payload: {
+        threadId: string;
+        path: string;
+        hunkId: string;
+        source: "staged" | "unstaged";
+        action: "stage" | "unstage" | "revert";
+      }) => Promise<any>;
+      commitGitChanges: (payload: { threadId: string; message: string }) => Promise<any>;
+      pushGitChanges: (threadId: string) => Promise<any>;
+      createGitPullRequest: (threadId: string) => Promise<any>;
       deleteThread: (threadId: string) => Promise<void>;
+      clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
       getThreadSnapshot: (threadId: string) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[] }) => Promise<void>;
       deleteQueuedMessage: (payload: { threadId: string; id: string }) => Promise<void>;

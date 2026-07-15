@@ -13,6 +13,8 @@ import type {
   BrowserAssertionResult,
   BrowserTabRecord,
   BrowserViewport,
+  GitActionResult,
+  GitSnapshot,
   GpaStage,
   GpaState,
   KnowledgeBaseRecord,
@@ -46,6 +48,7 @@ import { ToolRuntime } from "@tool-runtime";
 import { RuntimeLogWriter } from "./runtime-log";
 import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime } from "./terminal-runtime";
+import { GitService } from "./git-service";
 import {
   DatabaseService,
   defaultConfig,
@@ -101,6 +104,7 @@ export class DesktopBackend {
   readonly #browser = new BrowserRuntime((target) => this.loadBrowserPage(target));
   readonly #plugins = new PluginRuntime();
   readonly #terminal = new TerminalRuntime();
+  readonly #git = new GitService();
   readonly #openedLocalUrls = new Set<string>();
   readonly #browserContents = new Map<string, WebContents>();
   readonly #browserViewports = new Map<string, BrowserViewport>();
@@ -350,6 +354,30 @@ export class DesktopBackend {
     this.#runtime.forgetThread(threadId);
   }
 
+  public async clearThreadConversation(threadId: string): Promise<ThreadRecord> {
+    const thread = this.#db.getThread(threadId);
+    if (thread.status === "running" || thread.status === "waiting") {
+      throw new Error("任务正在执行，请先停止任务再清空聊天记录。");
+    }
+
+    await this.#runtime.abandonGpaPlanFile(threadId);
+    this.#runtime.forgetThread(threadId);
+    for (const tab of this.#db.listBrowserTabs(threadId)) {
+      this.releaseBrowserTabContents(threadId, tab.id);
+    }
+    this.#browser.clearThread(threadId);
+    const updated = this.#db.clearThreadConversation(threadId);
+    this.#terminal.close(threadId);
+    this.#runtime.ensureThread(threadId);
+    await this.emit({
+      type: "thread.updated",
+      threadId,
+      payload: { thread: updated },
+      createdAt: new Date().toISOString()
+    });
+    return updated;
+  }
+
   public async openTerminal(threadId: string, sessionId = "default") {
     const thread = this.#db.getThread(threadId);
     const cwd = thread.cwd ?? await this.getThreadOutputDir(threadId);
@@ -414,7 +442,7 @@ export class DesktopBackend {
     return files;
   }
 
-  public async readProjectFile(threadId: string, relativePath: string): Promise<{ path: string; content: string; truncated: boolean }> {
+  public async readProjectFile(threadId: string, relativePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
     const root = this.getProjectDirectory(threadId);
     const target = resolveProjectFilePath(root, relativePath);
     const stats = await fs.stat(target);
@@ -429,8 +457,30 @@ export class DesktopBackend {
     return {
       path: relativePath,
       content: isBinary ? "Binary file preview is not available." : visible.toString("utf8"),
-      truncated: buffer.length > limit
+      truncated: buffer.length > limit,
+      binary: isBinary
     };
+  }
+
+  public async writeProjectFile(threadId: string, relativePath: string, content: string): Promise<{ path: string }> {
+    if (typeof content !== "string") {
+      throw new Error("Project file content must be text.");
+    }
+
+    const root = this.getProjectDirectory(threadId);
+    const target = resolveProjectFilePath(root, relativePath);
+    const stats = await fs.stat(target);
+    if (!stats.isFile()) {
+      throw new Error("The selected project entry is not a file.");
+    }
+
+    const existing = await fs.readFile(target);
+    if (existing.includes(0)) {
+      throw new Error("Binary project files cannot be edited here.");
+    }
+
+    await fs.writeFile(target, content, "utf8");
+    return { path: relativePath };
   }
 
   public getThreadSnapshot(threadId: string): RuntimeThreadSnapshot {
@@ -460,6 +510,50 @@ export class DesktopBackend {
 
   public async setGpaStage(threadId: string, stage: GpaStage): Promise<void> {
     await this.#runtime.setGpaStage(threadId, stage);
+  }
+
+  public getGitSnapshot(threadId: string): Promise<GitSnapshot> {
+    const thread = this.#db.getThread(threadId);
+    return this.#git.snapshot(thread.cwd ? path.resolve(thread.cwd) : null);
+  }
+
+  public stageGitFile(threadId: string, path: string): Promise<GitActionResult> {
+    return this.#git.stageFile(this.getProjectDirectory(threadId), path);
+  }
+
+  public unstageGitFile(threadId: string, path: string): Promise<GitActionResult> {
+    return this.#git.unstageFile(this.getProjectDirectory(threadId), path);
+  }
+
+  public revertGitFile(threadId: string, path: string, untracked?: boolean): Promise<GitActionResult> {
+    return this.#git.revertFile(this.getProjectDirectory(threadId), path, untracked === true);
+  }
+
+  public applyGitHunk(
+    threadId: string,
+    payload: { path: string; hunkId: string; source: "staged" | "unstaged"; action: "stage" | "unstage" | "revert" }
+  ): Promise<GitActionResult> {
+    return this.#git.applyHunk(this.getProjectDirectory(threadId), payload.path, payload.hunkId, payload.source, payload.action);
+  }
+
+  public commitGitChanges(threadId: string, message: string): Promise<GitActionResult> {
+    return this.#git.commit(this.getProjectDirectory(threadId), message);
+  }
+
+  public pushGitChanges(threadId: string): Promise<GitActionResult> {
+    return this.#git.push(this.getProjectDirectory(threadId));
+  }
+
+  public pullGitChanges(threadId: string): Promise<GitActionResult> {
+    return this.#git.pull(this.getProjectDirectory(threadId));
+  }
+
+  public async createGitPullRequest(threadId: string): Promise<GitActionResult> {
+    const result = await this.#git.createPullRequest(this.getProjectDirectory(threadId));
+    if (result.ok && result.pullRequestUrl) {
+      await shell.openExternal(result.pullRequestUrl);
+    }
+    return result;
   }
 
   public async resetGpaConfirmationTimeout(threadId: string): Promise<void> {

@@ -93,12 +93,18 @@ goto :launch
 
 :launch
 echo [3/3] Launching codexh with freshly built dist...
+REM Avoid Get-CimInstance/WMI here: it can hang indefinitely on some Windows hosts.
+echo Stopping previous Electron instance if running...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$profile = [System.IO.Path]::GetFullPath('%USER_DATA_DIR%');" ^
-  "$running = Get-CimInstance Win32_Process -Filter \"Name = 'electron.exe'\" | Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($profile, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 };" ^
-  "if ($running) { $running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 800 }"
+  "$exe = [System.IO.Path]::GetFullPath('%ELECTRON_EXE%');" ^
+  "Get-Process -Name electron -ErrorAction SilentlyContinue |" ^
+  "  Where-Object { $_.Path -and ($_.Path -ieq $exe) } |" ^
+  "  ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue };" ^
+  "Start-Sleep -Milliseconds 400"
+echo Starting Electron...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$argsList = @('.', '--user-data-dir=%USER_DATA_DIR%'); Start-Process -FilePath '%ELECTRON_EXE%' -WorkingDirectory '%cd%' -ArgumentList $argsList -RedirectStandardOutput '%STDOUT_LOG%' -RedirectStandardError '%STDERR_LOG%'"
+echo Launched. You can close this window.
 exit /b 0
 
 :build_failed

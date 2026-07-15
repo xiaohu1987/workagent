@@ -299,7 +299,36 @@ function registerIpc(): void {
   ipcMain.handle("projects:read-file", (_event, payload: { threadId: string; path: string }) =>
     backend.readProjectFile(payload.threadId, payload.path)
   );
+  ipcMain.handle("projects:write-file", (_event, payload: { threadId: string; path: string; content: string }) =>
+    backend.writeProjectFile(payload.threadId, payload.path, payload.content)
+  );
+  ipcMain.handle("git:snapshot", (_event, threadId: string) => backend.getGitSnapshot(threadId));
+  ipcMain.handle("git:stage-file", (_event, payload: { threadId: string; path: string }) =>
+    backend.stageGitFile(payload.threadId, payload.path)
+  );
+  ipcMain.handle("git:unstage-file", (_event, payload: { threadId: string; path: string }) =>
+    backend.unstageGitFile(payload.threadId, payload.path)
+  );
+  ipcMain.handle("git:revert-file", (_event, payload: { threadId: string; path: string; untracked?: boolean }) =>
+    backend.revertGitFile(payload.threadId, payload.path, payload.untracked)
+  );
+  ipcMain.handle("git:apply-hunk", (_event, payload: {
+    threadId: string;
+    path: string;
+    hunkId: string;
+    source: "staged" | "unstaged";
+    action: "stage" | "unstage" | "revert";
+  }) => backend.applyGitHunk(payload.threadId, payload));
+  ipcMain.handle("git:commit", (_event, payload: { threadId: string; message: string }) =>
+    backend.commitGitChanges(payload.threadId, payload.message)
+  );
+  ipcMain.handle("git:push", (_event, threadId: string) => backend.pushGitChanges(threadId));
+  ipcMain.handle("git:pull", (_event, threadId: string) => backend.pullGitChanges(threadId));
+  ipcMain.handle("git:create-pr", (_event, threadId: string) => backend.createGitPullRequest(threadId));
   ipcMain.handle("threads:delete", (_event, threadId: string) => backend.deleteThread(threadId));
+  ipcMain.handle("threads:clear-conversation", (_event, threadId: string) =>
+    backend.clearThreadConversation(threadId)
+  );
   ipcMain.handle("threads:snapshot", (_event, threadId: string) => backend.getThreadSnapshot(threadId));
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)

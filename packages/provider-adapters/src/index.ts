@@ -262,7 +262,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       body: JSON.stringify({
         model: input.model.id,
         prompt: input.prompt,
-        duration: 5,
+        duration: 10,
         aspect_ratio: "16:9",
         resolution: "480p"
       }),

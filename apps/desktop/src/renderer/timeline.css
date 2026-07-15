@@ -213,6 +213,11 @@
   padding-left: 24px;
 }
 
+.task-timeline .message-card.assistant.commentary {
+  margin-bottom: -2px;
+  color: #d5dde8;
+}
+
 .task-timeline .message-event-stream {
   gap: 10px;
 }
@@ -685,7 +690,9 @@
   min-height: 0;
   overflow: hidden;
   opacity: 0;
-  transition: grid-template-rows 180ms ease, opacity 120ms ease;
+  transition:
+    grid-template-rows var(--motion-base, 180ms) var(--motion-ease, ease),
+    opacity var(--motion-fast, 140ms) ease;
 }
 
 .tool-activity-group.is-expanded .tool-activity-details-shell {

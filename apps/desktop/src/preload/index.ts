@@ -24,7 +24,26 @@ const api = {
   listProjectFiles: (threadId: string) => ipcRenderer.invoke("projects:list-files", threadId),
   readProjectFile: (payload: { threadId: string; path: string }) =>
     ipcRenderer.invoke("projects:read-file", payload),
+  writeProjectFile: (payload: { threadId: string; path: string; content: string }) =>
+    ipcRenderer.invoke("projects:write-file", payload),
+  getGitSnapshot: (threadId: string) => ipcRenderer.invoke("git:snapshot", threadId),
+  stageGitFile: (payload: { threadId: string; path: string }) => ipcRenderer.invoke("git:stage-file", payload),
+  unstageGitFile: (payload: { threadId: string; path: string }) => ipcRenderer.invoke("git:unstage-file", payload),
+  revertGitFile: (payload: { threadId: string; path: string; untracked?: boolean }) =>
+    ipcRenderer.invoke("git:revert-file", payload),
+  applyGitHunk: (payload: {
+    threadId: string;
+    path: string;
+    hunkId: string;
+    source: "staged" | "unstaged";
+    action: "stage" | "unstage" | "revert";
+  }) => ipcRenderer.invoke("git:apply-hunk", payload),
+  commitGitChanges: (payload: { threadId: string; message: string }) => ipcRenderer.invoke("git:commit", payload),
+  pushGitChanges: (threadId: string) => ipcRenderer.invoke("git:push", threadId),
+  pullGitChanges: (threadId: string) => ipcRenderer.invoke("git:pull", threadId),
+  createGitPullRequest: (threadId: string) => ipcRenderer.invoke("git:create-pr", threadId),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
+  clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),
   getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[] }) =>
     ipcRenderer.invoke("threads:send", payload),

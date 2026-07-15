@@ -425,6 +425,51 @@ describe("OpenAiCompatibleProvider", () => {
     });
   });
 
+  it("streams only the decoded assistant_message before a JSON tool batch", async () => {
+    async function* streamDecision() {
+      yield { choices: [{ delta: { content: '{"assistant_message":"I will inspect ' } }] };
+      yield { choices: [{ delta: { content: 'the renderer.","tool_calls":[{"name":"fs.read_file","arguments":{"path":"src/App.tsx"}}],"end_turn":false}' } }] };
+    }
+
+    mocks.chatCreate.mockResolvedValue(streamDecision());
+    const provider: ProviderDefinition = {
+      id: "company-gateway",
+      type: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "secret"
+    };
+    const model: ModelProfile = {
+      id: "test-model",
+      providerId: "company-gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: true,
+      supportsToolCalling: false,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+    const visibleDeltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON only.",
+      transcript: [{ role: "user", content: "Inspect the renderer" }],
+      availableTools: [],
+      model,
+      provider,
+      stream: true,
+      onTextDelta: async (delta) => { visibleDeltas.push(delta); }
+    });
+
+    expect(visibleDeltas.join("")).toBe("I will inspect the renderer.");
+    expect(decision).toMatchObject({
+      assistantMessage: "I will inspect the renderer.",
+      toolCalls: [{ name: "fs.read_file", arguments: { path: "src/App.tsx" } }],
+      endTurn: false
+    });
+  });
+
   it("requires an explicit goal_completed declaration", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [
@@ -713,7 +758,8 @@ describe("OpenAiCompatibleProvider video generation", () => {
       const createInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
       expect(JSON.parse(String(createInit.body))).toMatchObject({
         model: "grok-imagine-video-1.5",
-        prompt: "a red cube rotating slowly"
+        prompt: "a red cube rotating slowly",
+        duration: 10
       });
     } finally {
       vi.unstubAllGlobals();

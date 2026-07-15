@@ -161,11 +161,10 @@ function createSnapshot(path: string, before: string, after: string): ApplyPatch
 }
 
 function resolveWorkspacePath(rootDir: string, targetPath: string): string {
-  if (path.isAbsolute(targetPath)) {
-    throw new Error("Patch paths must be relative to the project folder.");
-  }
   const root = path.resolve(rootDir);
-  const resolved = path.resolve(root, targetPath);
+  const resolved = path.isAbsolute(targetPath)
+    ? path.resolve(targetPath)
+    : path.resolve(root, targetPath);
   const relative = path.relative(root, resolved);
   if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
     return resolved;

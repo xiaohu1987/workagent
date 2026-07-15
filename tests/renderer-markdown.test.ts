@@ -8,6 +8,7 @@ import {
   getProjectFileChangeKinds,
   buildContextUsage,
   buildPlanTimelineItems,
+  getGpaPlanMessageId,
   extractMessageMediaReferences,
   formatComposerAttachments,
   highlightMarkdownCode,
@@ -44,6 +45,25 @@ describe("parseMarkdownBlocks", () => {
     });
 
     expect(items.map((item) => item.status)).toEqual(["completed", "in_progress", "pending"]);
+  });
+
+  it("marks only the current confirmed GPA plan response for bubble rendering", () => {
+    const messages = [
+      { id: "goal", role: "assistant" },
+      { id: "user", role: "user" },
+      { id: "plan", role: "assistant" }
+    ] as Parameters<typeof getGpaPlanMessageId>[0];
+    const state = {
+      stage: "plan" as const,
+      fullAccess: false,
+      knowledgeEnabled: false,
+      planTasks: [],
+      awaitingConfirmation: "plan" as const,
+      updatedAt: "2026-07-15T00:00:00.000Z"
+    };
+
+    expect(getGpaPlanMessageId(messages, state)).toBe("plan");
+    expect(getGpaPlanMessageId(messages, { ...state, awaitingConfirmation: null })).toBeNull();
   });
 
   it("parses a pipe-delimited task breakdown into a table", () => {

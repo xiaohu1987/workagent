@@ -227,6 +227,46 @@ describe("tool activity summaries", () => {
 });
 
 describe("tool timeline grouping", () => {
+  it("interleaves persisted commentary before its tool group and final answer", () => {
+    const commentary: MessageRecord = {
+      id: "commentary-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: "I will inspect the renderer first.",
+      metadataJson: JSON.stringify({ displayKind: "commentary", toolCallIds: ["tool-1"] }),
+      createdAt: "2026-07-15T00:00:00.000Z"
+    };
+    const final: MessageRecord = {
+      ...commentary,
+      id: "commentary-2",
+      content: "The project uses an older solution format, so I will inspect its target framework.",
+      metadataJson: JSON.stringify({ displayKind: "commentary", toolCallIds: ["tool-2"] }),
+      createdAt: "2026-07-15T00:00:02.000Z"
+    };
+    const answer: MessageRecord = {
+      ...commentary,
+      id: "final-1",
+      content: "The renderer has been inspected.",
+      metadataJson: null,
+      createdAt: "2026-07-15T00:00:04.000Z"
+    };
+
+    const entries = buildTimelineEntries(
+      [commentary, final, answer],
+      [
+        makeToolCall({ id: "tool-1", toolName: "shell.exec", startedAt: "2026-07-15T00:00:01.000Z" }),
+        makeToolCall({ id: "tool-2", toolName: "fs.read_file", startedAt: "2026-07-15T00:00:03.000Z" })
+      ],
+      []
+    );
+
+    expect(entries.map((entry) => entry.kind)).toEqual(["message", "tool-group", "message", "tool-group", "message"]);
+    expect(entries[0]).toMatchObject({ kind: "message", message: { id: "commentary-1" } });
+    expect(entries[2]).toMatchObject({ kind: "message", message: { id: "commentary-2" } });
+    expect(entries[4]).toMatchObject({ kind: "message", message: { id: "final-1" } });
+  });
+
   it("groups calls by turn and keeps legacy calls separate", () => {
     const entries = buildTimelineEntries(
       [],

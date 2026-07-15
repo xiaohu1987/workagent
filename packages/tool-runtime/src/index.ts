@@ -537,8 +537,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       "fs.write_file",
       "Write a UTF-8 text file to disk.",
       ["path", "content"],
-      "medium",
-      "deferred"
+      "medium"
     ),
     async (args, ctx) => {
       const filePath = resolveFromCwd(ctx.cwd, String(args.path));
@@ -695,7 +694,26 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "补丁应用被拒绝。" };
       }
-      const result = await applyCodexPatch(patchText, ctx.cwd);
+      let result: Awaited<ReturnType<typeof applyCodexPatch>>;
+      try {
+        result = await applyCodexPatch(patchText, ctx.cwd);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        return {
+          ok: false,
+          content: [
+            `Patch was not applied: ${reason}`,
+            "Re-read the intended target file, then submit only canonical Codex patch syntax:",
+            "*** Begin Patch",
+            "*** Update File: relative/path.ext",
+            "@@",
+            "-exact current text",
+            "+replacement text",
+            "*** End Patch",
+            "Unsupported headings such as *** Changed Range are invalid."
+          ].join("\n")
+        };
+      }
       const symbolLines = result.changes
         .flatMap((change) =>
           (change.symbols ?? []).map(
@@ -1395,6 +1413,14 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
             type: "string",
             description:
               "Detailed English or Chinese image prompt: subject, composition, style, lighting, and constraints."
+          },
+          count: {
+            type: "integer",
+            minimum: 1,
+            maximum: 4,
+            default: 1,
+            description:
+              "Number of separate images to generate. Default to 1; use 2 when the user requests multiple images without an exact number."
           }
         },
         required: ["prompt"]
@@ -1415,26 +1441,39 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         };
       }
       try {
-        const result = await ctx.generateImageWithDefaultModel({
-          prompt,
-          toolCallId: ctx.toolCallId ?? null
-        });
+        const rawCount = Number(args.count ?? 1);
+        const count = Number.isFinite(rawCount)
+          ? Math.min(4, Math.max(1, Math.trunc(rawCount)))
+          : 1;
+        const results = [];
+        for (let index = 0; index < count; index += 1) {
+          results.push(await ctx.generateImageWithDefaultModel({
+            prompt,
+            toolCallId: ctx.toolCallId ?? null
+          }));
+        }
+        const first = results[0]!;
         return {
           ok: true,
           content:
-            `已使用默认图片模型 ${result.modelDisplayName} (${result.modelId}) 生成图片。\n` +
-            `文件：${result.fileName}\n路径：${result.absolutePath}`,
+            `已使用默认图片模型 ${first.modelDisplayName} (${first.modelId}) 生成 ${count} 张图片。\n` +
+            `文件：${results.map((item) => item.fileName).join("、")}`,
           json: {
-            fileName: result.fileName,
-            absolutePath: result.absolutePath,
-            mimeType: result.mimeType,
-            modelId: result.modelId,
-            providerId: result.providerId,
-            modelDisplayName: result.modelDisplayName,
-            attachment: result.attachment,
-            artifactId: result.artifact.id
+            count,
+            fileName: first.fileName,
+            fileNames: results.map((item) => item.fileName),
+            absolutePath: first.absolutePath,
+            absolutePaths: results.map((item) => item.absolutePath),
+            mimeType: first.mimeType,
+            modelId: first.modelId,
+            providerId: first.providerId,
+            modelDisplayName: first.modelDisplayName,
+            attachment: first.attachment,
+            attachments: results.map((item) => item.attachment),
+            artifactId: first.artifact.id,
+            artifactIds: results.map((item) => item.artifact.id)
           },
-          artifacts: [result.artifact]
+          artifacts: results.map((item) => item.artifact)
         };
       } catch (error) {
         return {
@@ -1672,11 +1711,10 @@ function convertUnifiedAddPatch(text: string, requestedPath: unknown): string {
 }
 
 function resolveWorkspacePath(rootDir: string, targetPath: string): string {
-  if (path.isAbsolute(targetPath)) {
-    throw new Error("File paths must be relative to the project folder.");
-  }
   const root = path.resolve(rootDir);
-  const resolved = path.resolve(root, targetPath);
+  const resolved = path.isAbsolute(targetPath)
+    ? path.resolve(targetPath)
+    : path.resolve(root, targetPath);
   const relative = path.relative(root, resolved);
   if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
     return resolved;

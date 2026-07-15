@@ -1,4 +1,4 @@
-import { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createElement, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
@@ -25,6 +25,9 @@ import type {
   ContextCompactionRecord,
   GpaStage,
   GpaState,
+  GitActionResult,
+  GitFileChange,
+  GitSnapshot,
   KnowledgeBaseSummary,
   KnowledgeDocumentRecord,
   KnowledgeImportSource,
@@ -53,9 +56,10 @@ import {
   isThreadExecutionInProgress,
   shouldShowTaskProcessing
 } from "./thread-ui-state";
+import { useMotionPresence } from "./motion-presence";
 
 type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "timeouts" | "update";
-type RightWorkspaceTab = "preview" | "terminal" | "browser" | "files";
+type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
 
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("csharp", csharp);
@@ -132,6 +136,7 @@ type ProjectFileTreeNode = {
 type PreviewCacheEntry = {
   content: string;
   truncated: boolean;
+  binary: boolean;
 };
 
 type FileSnapshot = {
@@ -475,6 +480,7 @@ export function App() {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [isRightWorkspaceOpen, setIsRightWorkspaceOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     getStoredPanelWidth("codexh.sidebar-width", 288, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
   );
@@ -490,8 +496,13 @@ export function App() {
     Record<string, Record<string, TerminalSessionState>>
   >({});
   const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
-  const [previewTabsByThread, setPreviewTabsByThread] = useState<Record<string, string[]>>({});
-  const [activePreviewPathByThread, setActivePreviewPathByThread] = useState<Record<string, string | null>>({});
+  const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
+  const [gitLoading, setGitLoading] = useState(false);
+  const [gitActionBusy, setGitActionBusy] = useState(false);
+  const [gitActionMessage, setGitActionMessage] = useState<string | null>(null);
+  const [gitRefreshRevision, setGitRefreshRevision] = useState(0);
+  const [selectedProjectFileByThread, setSelectedProjectFileByThread] = useState<Record<string, string | null>>({});
+  const [filePreviewPath, setFilePreviewPath] = useState<string | null>(null);
   const [projectFilePreviewsByThread, setProjectFilePreviewsByThread] = useState<
     Record<string, Record<string, PreviewCacheEntry | null>>
   >({});
@@ -521,6 +532,7 @@ export function App() {
   const skipHistoryRenameCommitRef = useRef(false);
   const [editingUserMessage, setEditingUserMessage] = useState<{ id: string; content: string } | null>(null);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const [removingComposerAttachmentId, setRemovingComposerAttachmentId] = useState<string | null>(null);
   const [isContextReportOpen, setIsContextReportOpen] = useState(false);
   const [skills, setSkills] = useState<SkillMetadata[]>([]);
   const [skillUsageStats, setSkillUsageStats] = useState<SkillUsageStats[]>([]);
@@ -614,6 +626,8 @@ export function App() {
   const [isTranscriptAtLatest, setIsTranscriptAtLatest] = useState(true);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [deletingQueuedMessageId, setDeletingQueuedMessageId] = useState<string | null>(null);
+  const [isClearChatConfirmOpen, setIsClearChatConfirmOpen] = useState(false);
+  const [isClearingChat, setIsClearingChat] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatTranscriptRef = useRef<HTMLDivElement | null>(null);
@@ -661,6 +675,7 @@ export function App() {
     // Do not carry a collapsed/hidden state into a new app session.
     setIsSidebarCollapsed(false);
     setIsTerminalOpen(false);
+    setIsRightWorkspaceOpen(false);
     setSidebarWidth((current) =>
       current >= MIN_SIDEBAR_WIDTH && current <= MAX_SIDEBAR_WIDTH ? current : 288
     );
@@ -714,6 +729,7 @@ export function App() {
   function selectThreadId(nextThreadId: string | null) {
     selectedThreadIdRef.current = nextThreadId;
     setSelectedThreadId(nextThreadId);
+    setFilePreviewPath(null);
   }
 
   const currentTerminalTabs = selectedThreadId ? terminalTabsByThread[selectedThreadId] ?? [] : [];
@@ -728,11 +744,12 @@ export function App() {
     selectedThreadId && activeTerminalSessionId
       ? terminalInputsByThread[selectedThreadId]?.[activeTerminalSessionId] ?? ""
       : "";
-  const previewTabs = selectedThreadId ? previewTabsByThread[selectedThreadId] ?? [] : [];
-  const selectedProjectFile = selectedThreadId ? activePreviewPathByThread[selectedThreadId] ?? null : null;
+  const selectedProjectFile = selectedThreadId ? selectedProjectFileByThread[selectedThreadId] ?? null : null;
+  const filePreviewPresence = useMotionPresence(filePreviewPath, 180);
+  const visibleFilePreviewPath = filePreviewPath ?? filePreviewPresence.value;
   const projectFilePreview =
-    selectedThreadId && selectedProjectFile
-      ? projectFilePreviewsByThread[selectedThreadId]?.[selectedProjectFile] ?? null
+    selectedThreadId && visibleFilePreviewPath
+      ? projectFilePreviewsByThread[selectedThreadId]?.[visibleFilePreviewPath] ?? null
       : null;
   const projectToolCalls = snapshot?.thread.id === selectedThreadId ? snapshot.toolCalls : [];
 
@@ -769,6 +786,52 @@ export function App() {
     }));
   }
 
+  function selectTerminalTab(sessionId: string) {
+    if (!selectedThreadId) return;
+    setActiveTerminalTabByThread((current) => ({
+      ...current,
+      [selectedThreadId]: sessionId
+    }));
+  }
+
+  function addTerminalTab() {
+    if (!selectedThreadId) return;
+    const newId = globalThis.crypto.randomUUID();
+    const nextTitle = `终端 ${currentTerminalTabs.length + 1}`;
+    setTerminalTabsByThread((current) => ({
+      ...current,
+      [selectedThreadId]: [...(current[selectedThreadId] ?? []), { id: newId, title: nextTitle }]
+    }));
+    setActiveTerminalTabByThread((current) => ({
+      ...current,
+      [selectedThreadId]: newId
+    }));
+  }
+
+  function closeTerminalTab(sessionId: string) {
+    if (!selectedThreadId) return;
+    const remaining = currentTerminalTabs.filter((tab) => tab.id !== sessionId);
+    setTerminalTabsByThread((current) => ({
+      ...current,
+      [selectedThreadId]: remaining
+    }));
+    setActiveTerminalTabByThread((current) => ({
+      ...current,
+      [selectedThreadId]: remaining[remaining.length - 1]?.id ?? ""
+    }));
+    setTerminalInputsByThread((current) => {
+      const nextSessions = { ...(current[selectedThreadId] ?? {}) };
+      delete nextSessions[sessionId];
+      return { ...current, [selectedThreadId]: nextSessions };
+    });
+    setTerminalSessionsByThread((current) => {
+      const nextSessions = { ...(current[selectedThreadId] ?? {}) };
+      delete nextSessions[sessionId];
+      return { ...current, [selectedThreadId]: nextSessions };
+    });
+    void window.codexh.closeTerminal({ threadId: selectedThreadId, sessionId });
+  }
+
   function updateTerminalSessionState(
     threadId: string,
     sessionId: string,
@@ -783,25 +846,42 @@ export function App() {
     }));
   }
 
+  function selectProjectFile(path: string) {
+    if (!selectedThreadId) {
+      return;
+    }
+    setSelectedProjectFileByThread((current) => ({
+      ...current,
+      [selectedThreadId]: path
+    }));
+  }
+
   function openProjectPreview(path: string) {
     if (!selectedThreadId) {
       return;
     }
-    setPreviewTabsByThread((current) => {
-      const tabs = current[selectedThreadId] ?? [];
-      if (tabs.includes(path)) {
-        return current;
-      }
-      return {
-        ...current,
-        [selectedThreadId]: [...tabs, path]
-      };
-    });
-    setActivePreviewPathByThread((current) => ({
+    selectProjectFile(path);
+    setFilePreviewPath(path);
+  }
+
+  function closeProjectPreview() {
+    setFilePreviewPath(null);
+  }
+
+  async function saveProjectPreview(content: string): Promise<void> {
+    if (!selectedThreadId || !filePreviewPath) {
+      throw new Error("No project file is open.");
+    }
+    const path = filePreviewPath;
+    await window.codexh.writeProjectFile({ threadId: selectedThreadId, path, content });
+    setProjectFilePreviewsByThread((current) => ({
       ...current,
-      [selectedThreadId]: path
+      [selectedThreadId]: {
+        ...(current[selectedThreadId] ?? {}),
+        [path]: { content, truncated: false, binary: false }
+      }
     }));
-    setRightWorkspaceTab("preview");
+    setGitRefreshRevision((current) => current + 1);
   }
 
   useEffect(() => {
@@ -967,6 +1047,7 @@ export function App() {
         payload?: {
           gpa?: GpaState;
           turnRunId?: string;
+          discarded?: boolean;
           delta?: string;
           content?: string;
           title?: string;
@@ -1311,11 +1392,20 @@ export function App() {
         });
         if (status !== "running" && status !== "waiting") {
           clearRuntimeActivity(runtimeThreadId);
+          if (runtimeThreadId === currentSelectedThreadId) {
+            setGitRefreshRevision((current) => current + 1);
+          }
         }
       }
       if (typed.type === "assistant.completed" && typed.payload?.turnRunId) {
-        const { turnRunId, messageId } = typed.payload;
+        const { turnRunId, messageId, discarded } = typed.payload;
         setStreamingAssistants((current) => {
+          if (discarded === true) {
+            if (!current[turnRunId]) return current;
+            const next = { ...current };
+            delete next[turnRunId];
+            return next;
+          }
           const active = current[turnRunId];
           if (!active) {
             return current;
@@ -1350,7 +1440,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!isTerminalOpen || !selectedThreadId || rightWorkspaceTab !== "terminal" || !activeTerminalSessionId) {
+    if (!isTerminalOpen || !selectedThreadId || !activeTerminalSessionId) {
       return;
     }
 
@@ -1378,7 +1468,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeTerminalSessionId, isTerminalOpen, rightWorkspaceTab, selectedThreadId]);
+  }, [activeTerminalSessionId, isTerminalOpen, selectedThreadId]);
 
   useEffect(() => {
     const node = terminalScrollRef.current;
@@ -1388,7 +1478,7 @@ export function App() {
   }, [activeTerminalSession?.output]);
 
   useEffect(() => {
-    if (!isTerminalOpen || !selectedThreadId || (rightWorkspaceTab !== "preview" && rightWorkspaceTab !== "files")) {
+    if (!isRightWorkspaceOpen || !selectedThreadId || rightWorkspaceTab !== "files") {
       return;
     }
 
@@ -1399,22 +1489,21 @@ export function App() {
         return;
       }
       setProjectFiles(entries);
-      setActivePreviewPathByThread((current) => {
-        const nextDefault = entries.find((entry) => entry.kind === "file")?.path ?? null;
+      setSelectedProjectFileByThread((current) => {
         const existing = current[selectedThreadId];
         const existingPath = existing?.replace(/\\/g, "/");
+        const stillValid =
+          existingPath &&
+          entries.some((entry) => entry.path.replace(/\\/g, "/") === existingPath && entry.kind === "file");
         return {
           ...current,
-          [selectedThreadId]:
-            existingPath && entries.some((entry) => entry.path.replace(/\\/g, "/") === existingPath && entry.kind === "file")
-              ? existingPath
-              : nextDefault
+          [selectedThreadId]: stillValid ? existingPath : null
         };
       });
     }).catch(() => {
       if (!cancelled) {
         setProjectFiles([]);
-        setActivePreviewPathByThread((current) => ({
+        setSelectedProjectFileByThread((current) => ({
           ...current,
           [selectedThreadId]: null
         }));
@@ -1428,10 +1517,42 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [isTerminalOpen, rightWorkspaceTab, selectedThreadId]);
+  }, [isRightWorkspaceOpen, rightWorkspaceTab, selectedThreadId]);
 
   useEffect(() => {
-    if (!selectedThreadId || !selectedProjectFile) {
+    if (!isRightWorkspaceOpen || rightWorkspaceTab !== "changes" || !selectedThreadId) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setGitLoading(true);
+      void window.codexh.getGitSnapshot(selectedThreadId).then((next) => {
+        if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
+          setGitSnapshot(next as GitSnapshot);
+        }
+      }).catch((error: unknown) => {
+        if (!cancelled) {
+          setGitSnapshot({
+            available: false,
+            message: error instanceof Error ? error.message : String(error),
+            ahead: 0,
+            behind: 0,
+            canCreatePullRequest: false,
+            files: []
+          });
+        }
+      }).finally(() => {
+        if (!cancelled) setGitLoading(false);
+      });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [gitRefreshRevision, isRightWorkspaceOpen, rightWorkspaceTab, selectedThreadId]);
+
+  useEffect(() => {
+    if (!selectedThreadId || !filePreviewPath) {
       return;
     }
 
@@ -1440,16 +1561,16 @@ export function App() {
       ...current,
       [selectedThreadId]: {
         ...(current[selectedThreadId] ?? {}),
-        [selectedProjectFile]: null
+        [filePreviewPath]: null
       }
     }));
-    void window.codexh.readProjectFile({ threadId: selectedThreadId, path: selectedProjectFile }).then((file) => {
+    void window.codexh.readProjectFile({ threadId: selectedThreadId, path: filePreviewPath }).then((file) => {
       if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
         setProjectFilePreviewsByThread((current) => ({
           ...current,
           [selectedThreadId]: {
             ...(current[selectedThreadId] ?? {}),
-            [selectedProjectFile]: { content: file.content, truncated: file.truncated }
+            [filePreviewPath]: { content: file.content, truncated: file.truncated, binary: file.binary }
           }
         }));
       }
@@ -1459,9 +1580,10 @@ export function App() {
           ...current,
           [selectedThreadId]: {
             ...(current[selectedThreadId] ?? {}),
-            [selectedProjectFile]: {
+            [filePreviewPath]: {
               content: error instanceof Error ? error.message : String(error),
-              truncated: false
+              truncated: false,
+              binary: false
             }
           }
         }));
@@ -1471,17 +1593,27 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedProjectFile, selectedThreadId]);
+  }, [filePreviewPath, selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !notice) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !isClearChatConfirmOpen && !notice && !filePreviewPath) {
       return;
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (filePreviewPath) {
+          closeProjectPreview();
+          return;
+        }
+
         if (notice) {
           dismissNotice(notice.id);
+          return;
+        }
+
+        if (isClearChatConfirmOpen && !isClearingChat) {
+          setIsClearChatConfirmOpen(false);
           return;
         }
 
@@ -1506,7 +1638,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [gpaPlanResumeBusy, gpaPlanResumeDialog, isProjectCreateOpen, isSettingsOpen, notice, updateConfirmDialog]);
+  }, [filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, isClearChatConfirmOpen, isClearingChat, isProjectCreateOpen, isSettingsOpen, notice, updateConfirmDialog]);
 
   useEffect(() => {
     if (!notice || isNoticeHovered) {
@@ -1646,6 +1778,10 @@ export function App() {
   const visibleMessages = useMemo(
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
+  );
+  const gpaPlanMessageId = useMemo(
+    () => getGpaPlanMessageId(visibleMessages, gpaState),
+    [gpaState, visibleMessages]
   );
   const timelineEntries = useMemo(
     () =>
@@ -2395,6 +2531,90 @@ export function App() {
       });
     } finally {
       setDeletingThreadId((current) => (current === thread.id ? null : current));
+    }
+  }
+
+  function requestClearCurrentChat() {
+    if (!selectedThreadId) {
+      return;
+    }
+    if (isThreadExecutionInProgress(selectedThreadStatus)) {
+      showNotice("任务正在执行，请先停止任务再清空聊天记录。");
+      return;
+    }
+    setIsClearChatConfirmOpen(true);
+  }
+
+  async function confirmClearCurrentChat() {
+    const threadId = selectedThreadId;
+    if (!threadId || isClearingChat) {
+      return;
+    }
+
+    setIsClearingChat(true);
+    try {
+      await window.codexh.clearThreadConversation(threadId);
+      delete pendingUserMessagesRef.current[threadId];
+      delete suppressRuntimeProgressRef.current[threadId];
+      gpaSameSessionAutoResumeRef.current.delete(threadId);
+      gpaPlanResumeDismissedRef.current.delete(threadId);
+      gpaPlanResumeAttemptRef.current.delete(threadId);
+      gpaPlanResumeRetryRequiredRef.current.delete(threadId);
+      setStreamingAssistants((current) =>
+        Object.fromEntries(Object.entries(current).filter(([, entry]) => entry.threadId !== threadId))
+      );
+      setRuntimeActivities((current) => {
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+      setCompletedTurnTimers((current) => {
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+      setExpandedRuntimeThreads((current) => {
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+      setTerminalTabsByThread((current) => {
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+      setActiveTerminalTabByThread((current) => {
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+      setTerminalInputsByThread((current) => {
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+      setTerminalSessionsByThread((current) => {
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+      setBrowserTabsByThread((current) => ({ ...current, [threadId]: [] }));
+      setActiveToolCall((current) => current?.threadId === threadId ? null : current);
+      setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+      setComposerSubmission(null);
+      setEditingUserMessage(null);
+      setGpaPlanResumeRetryPrompt(null);
+      setIsTerminalOpen(false);
+      setIsClearChatConfirmOpen(false);
+      await refreshThreads();
+      showNotice("聊天记录已清空。", { tone: "success" });
+      window.setTimeout(() => composerRef.current?.focus(), 0);
+    } catch (error) {
+      showNotice("暂时无法清空聊天记录。", {
+        message: error instanceof Error ? error.message : "请稍后重试。"
+      });
+    } finally {
+      setIsClearingChat(false);
     }
   }
 
@@ -3308,10 +3528,12 @@ export function App() {
   }
 
   function removeComposerAttachment(id: string) {
-    setComposerAttachments((current) => {
-      const removed = current.find((attachment) => attachment.id === id);
-      return current.filter((attachment) => attachment.id !== id);
-    });
+    if (removingComposerAttachmentId) return;
+    setRemovingComposerAttachmentId(id);
+    window.setTimeout(() => {
+      setComposerAttachments((current) => current.filter((attachment) => attachment.id !== id));
+      setRemovingComposerAttachmentId((current) => current === id ? null : current);
+    }, 140);
   }
 
   async function chooseComposerFiles(imagesOnly: boolean) {
@@ -3913,12 +4135,47 @@ export function App() {
     });
   }
 
+  async function runGitAction(action: () => Promise<GitActionResult>) {
+    if (gitActionBusy) return;
+    setGitActionBusy(true);
+    setGitActionMessage(null);
+    try {
+      const result = await action();
+      setGitSnapshot(result.snapshot);
+      setGitActionMessage(result.message);
+    } catch (error) {
+      setGitActionMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGitActionBusy(false);
+    }
+  }
+
+  const historySearchPresence = useMotionPresence(isHistorySearchOpen ? true : null);
+  const settingsPresence = useMotionPresence(isSettingsOpen ? true : null, 220);
+  const projectCreatePresence = useMotionPresence(isProjectCreateOpen ? true : null);
+  const mcpCreatePresence = useMotionPresence(isMcpCreateOpen && mcpCreateDraft ? mcpCreateDraft : null);
+  const visibleMcpCreateDraft = mcpCreateDraft ?? mcpCreatePresence.value;
+  const gpaPlanResumePresence = useMotionPresence(gpaPlanResumeDialog);
+  const visibleGpaPlanResumeDialog = gpaPlanResumeDialog ?? gpaPlanResumePresence.value;
+  const updateConfirmPresence = useMotionPresence(updateConfirmDialog);
+  const visibleUpdateConfirmDialog = updateConfirmDialog ?? updateConfirmPresence.value;
+  const clearChatConfirmPresence = useMotionPresence(isClearChatConfirmOpen ? true : null);
+  const fetchedModelsPresence = useMotionPresence(showFetchedModels ? true : null);
+  const multimodalPickerPresence = useMotionPresence(multimodalPickerRole);
+  const visibleMultimodalPickerRole = multimodalPickerRole ?? multimodalPickerPresence.value;
+  const gpaMenuPresence = useMotionPresence(gpaMenuOpen && gpaMenuPos ? gpaMenuPos : null, 140);
+  const visibleGpaMenuPos = gpaMenuPos ?? gpaMenuPresence.value;
+  const historyContextMenuPresence = useMotionPresence(historyContextMenu, 140);
+  const visibleHistoryContextMenu = historyContextMenu ?? historyContextMenuPresence.value;
+  const skillsSortPresence = useMotionPresence(skillsSortOpen ? true : null, 140);
+  const terminalDrawerPresence = useMotionPresence(isTerminalOpen ? true : null, 220);
+
   return (
     <div
       ref={appShellRef}
       className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
-        isTerminalOpen ? "terminal-open" : ""
-      }`}
+        isRightWorkspaceOpen ? "right-workspace-open" : ""
+      } ${isTerminalOpen ? "terminal-open" : ""}`}
       style={{
         "--sidebar-pane-width": `${sidebarWidth}px`,
         "--right-workspace-pane-width": `${rightWorkspaceWidth}px`
@@ -3990,7 +4247,7 @@ export function App() {
                 return (
                   <div
                     key={thread.id}
-                    className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""} ${isThreadRunning ? "running" : ""}`}
+                    className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""} ${isThreadRunning ? "running" : ""} ${deletingThreadId === thread.id ? "is-removing" : ""}`}
                     title={isThreadRunning ? historyItemAffordance.title : undefined}
                     aria-busy={isThreadRunning}
                     onContextMenu={(event) => {
@@ -4054,23 +4311,24 @@ export function App() {
               })
             )}
           </div>
-          {historyContextMenu ? (
+          {visibleHistoryContextMenu ? (
             <WorkspaceContextMenu
-              x={historyContextMenu.x}
-              y={historyContextMenu.y}
+              x={visibleHistoryContextMenu.x}
+              y={visibleHistoryContextMenu.y}
+              motionPhase={historyContextMenuPresence.phase}
               onClose={() => setHistoryContextMenu(null)}
               actions={[
                 {
                   id: "rename-history-thread",
                   label: "重命名",
                   icon: <IconRename />,
-                  onSelect: () => beginRenameHistoryThread(historyContextMenu.thread)
+                  onSelect: () => beginRenameHistoryThread(visibleHistoryContextMenu.thread)
                 },
                 {
                   id: "toggle-history-pin",
-                  label: historyContextMenu.thread.isPinned ? "取消置顶" : "置顶任务",
+                  label: visibleHistoryContextMenu.thread.isPinned ? "取消置顶" : "置顶任务",
                   icon: <IconPin />,
-                  onSelect: () => void toggleThreadPinned(historyContextMenu.thread)
+                  onSelect: () => void toggleThreadPinned(visibleHistoryContextMenu.thread)
                 }
               ]}
             />
@@ -4097,8 +4355,8 @@ export function App() {
         </button>
       </aside>
 
-      {isHistorySearchOpen ? (
-        <div className="history-search-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setIsHistorySearchOpen(false); }}>
+      {historySearchPresence.value ? (
+        <div className="history-search-overlay motion-overlay" data-motion={historySearchPresence.phase} onMouseDown={(event) => { if (event.target === event.currentTarget) setIsHistorySearchOpen(false); }}>
           <section className="history-search-dialog" role="dialog" aria-modal="true" aria-label="搜索历史对话">
             <div className="history-search-header">
               <strong>搜索历史对话</strong>
@@ -4138,22 +4396,31 @@ export function App() {
       ) : null}
 
       <main className="workspace">
-        {!isTerminalOpen ? (
-          <div className="workspace-controls">
+        <div className="workspace-controls">
             <button
               type="button"
-              className="workspace-control-button"
-              title="显示右侧文件工作区"
-              aria-label="显示右侧文件工作区"
-              onClick={() => {
-                setRightWorkspaceTab("files");
-                setIsTerminalOpen(true);
-              }}
+              className={`workspace-control-button terminal-toggle ${isTerminalOpen ? "active" : ""}`}
+              title={isTerminalOpen ? "收起终端" : "打开终端"}
+              aria-label={isTerminalOpen ? "收起终端" : "打开终端"}
+              onClick={() => setIsTerminalOpen((current) => !current)}
             >
-              <IconFolder />
+              <IconTerminal />
             </button>
+            {!isRightWorkspaceOpen ? (
+              <button
+                type="button"
+                className="workspace-control-button"
+                title="显示右侧文件工作区"
+                aria-label="显示右侧文件工作区"
+                onClick={() => {
+                  setRightWorkspaceTab("files");
+                  setIsRightWorkspaceOpen(true);
+                }}
+              >
+                <IconFolder />
+              </button>
+            ) : null}
           </div>
-        ) : null}
         {(pendingApprovals.length > 0 || pendingPrompts.length > 0) && (
           <div className="pending-strip">
             {pendingApprovals.length > 0 ? (
@@ -4193,18 +4460,23 @@ export function App() {
                 ) : null}
               </div>
             ) : (
-              <div ref={chatTranscriptRef} className="chat-transcript task-timeline">
+              <div key={selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
                 {timelineEntries.map((entry) =>
                   entry.kind === "message" ? (
-                    renderTranscriptMessage(entry.message, activeAssistantLabel, {
-                      editingMessage: editingUserMessage,
-                      onEditDraftChange: (content) =>
-                        setEditingUserMessage((current) => current ? { ...current, content } : current),
-                      onCopy: (content) => void copyUserMessage(content),
-                      onEdit: beginUserMessageEdit,
-                      onEditCancel: cancelUserMessageEdit,
-                      onEditSubmit: () => void submitUserMessageEdit()
-                    })
+                    renderTranscriptMessage(
+                      entry.message,
+                      activeAssistantLabel,
+                      {
+                        editingMessage: editingUserMessage,
+                        onEditDraftChange: (content) =>
+                          setEditingUserMessage((current) => current ? { ...current, content } : current),
+                        onCopy: (content) => void copyUserMessage(content),
+                        onEdit: beginUserMessageEdit,
+                        onEditCancel: cancelUserMessageEdit,
+                        onEditSubmit: () => void submitUserMessageEdit()
+                      },
+                      entry.message.id === gpaPlanMessageId
+                    )
                   ) : entry.kind === "file-summary" ? (
                     <FileChangeSummary
                       key={entry.id}
@@ -4296,7 +4568,7 @@ export function App() {
                     }}
                     onShowBrowser={(snapshot?.browserTabs.length ?? 0) > 0 ? () => {
                       setRightWorkspaceTab("browser");
-                      setIsTerminalOpen(true);
+                      setIsRightWorkspaceOpen(true);
                     } : undefined}
                     onShowDetails={() => {
                       if (!activeRuntimeThreadId) return;
@@ -4385,6 +4657,7 @@ export function App() {
                     <ComposerAttachmentChip
                       key={attachment.id}
                       attachment={attachment}
+                      removing={removingComposerAttachmentId === attachment.id}
                       onRemove={() => removeComposerAttachment(attachment.id)}
                     />
                   ))}
@@ -4489,6 +4762,16 @@ export function App() {
                   ) : null}
                 </div>
                 <div className="composer-toolbar-right">
+                  <button
+                    className="composer-icon-button composer-clear-chat-button"
+                    type="button"
+                    title={isThreadExecutionInProgress(selectedThreadStatus) ? "请先停止任务" : "清空本次聊天"}
+                    aria-label="清空本次聊天"
+                    disabled={!selectedThreadId || showWelcome || isClearingChat || isThreadExecutionInProgress(selectedThreadStatus)}
+                    onClick={requestClearCurrentChat}
+                  >
+                    <IconEraser />
+                  </button>
                   <ComposerModelPicker
                     triggerLabel={currentModelTriggerLabel}
                     providers={composerProviderOptions}
@@ -4518,9 +4801,28 @@ export function App() {
             </div>
           </footer>
         </section>
+        {terminalDrawerPresence.value ? (
+          <section className="workspace-terminal-drawer" data-motion={terminalDrawerPresence.phase} aria-label="终端">
+            <TerminalWorkspace
+              tabs={currentTerminalTabs}
+              activeSessionId={activeTerminalSessionId}
+              shell={activeTerminalSession?.shell ?? "PowerShell"}
+              cwd={activeTerminalSession?.cwd ?? ""}
+              output={activeTerminalSession?.output ?? ""}
+              input={activeTerminalInput}
+              scrollRef={terminalScrollRef}
+              onInputChange={setActiveTerminalInput}
+              onSubmit={submitTerminalInput}
+              onSelectTab={selectTerminalTab}
+              onAddTab={addTerminalTab}
+              onCloseTab={closeTerminalTab}
+              hasThread={Boolean(selectedThreadId)}
+            />
+          </section>
+        ) : null}
       </main>
 
-      {isTerminalOpen ? (
+      {isRightWorkspaceOpen ? (
         <PanelResizeHandle
           pane="right-workspace"
           active={resizingPane === "right-workspace"}
@@ -4529,123 +4831,50 @@ export function App() {
       ) : null}
 
       <RightWorkspacePanel
-          hidden={!isTerminalOpen}
+          hidden={!isRightWorkspaceOpen}
           activeTab={rightWorkspaceTab}
           onTabChange={setRightWorkspaceTab}
-          onHide={() => setIsTerminalOpen(false)}
+          onHide={() => setIsRightWorkspaceOpen(false)}
           projectRoot={selectedThread?.cwd ?? ""}
           onAddAttachment={addComposerAttachment}
           projectFiles={projectFiles}
           projectFilesLoading={isProjectFilesLoading}
-          previewTabs={previewTabs}
+          gitSnapshot={gitSnapshot}
+          gitLoading={gitLoading}
+          gitActionBusy={gitActionBusy}
+          gitActionMessage={gitActionMessage}
+          onGitRefresh={() => {
+            if (!selectedThreadId || gitLoading) return;
+            setGitRefreshRevision((current) => current + 1);
+          }}
+          onGitAction={runGitAction}
+          onGitComment={(content) => { void sendMessage(content); }}
           selectedProjectFile={selectedProjectFile}
-          projectFilePreview={projectFilePreview}
           projectToolCalls={projectToolCalls}
-          onSelectProjectFile={openProjectPreview}
-          onSelectPreviewTab={(path) => {
-            if (!selectedThreadId) {
-              return;
-            }
-            setActivePreviewPathByThread((current) => ({
-              ...current,
-              [selectedThreadId]: path
-            }));
-          }}
-          onClosePreviewTab={(path) => {
-            if (!selectedThreadId) {
-              return;
-            }
-            let nextTabs: string[] = [];
-            setPreviewTabsByThread((current) => ({
-              ...current,
-              [selectedThreadId]: (() => {
-                nextTabs = (current[selectedThreadId] ?? []).filter((entry) => entry !== path);
-                return nextTabs;
-              })()
-            }));
-            setActivePreviewPathByThread((current) => {
-              return {
-                ...current,
-                [selectedThreadId]:
-                  current[selectedThreadId] === path ? nextTabs[nextTabs.length - 1] ?? null : current[selectedThreadId] ?? null
-              };
-            });
-          }}
+          onSelectProjectFile={selectProjectFile}
+          onOpenProjectFile={openProjectPreview}
           browserTabsByThread={browserTabsByThread}
           onCloseBrowserTab={(threadId, tabId) => {
             void window.codexh.closeBrowserTab({ threadId, tabId });
           }}
           threadId={selectedThreadId}
-          terminalTabs={currentTerminalTabs}
-          activeTerminalSessionId={activeTerminalSessionId}
-          shell={activeTerminalSession?.shell ?? "PowerShell"}
-          cwd={activeTerminalSession?.cwd ?? ""}
-          output={activeTerminalSession?.output ?? ""}
-          input={activeTerminalInput}
-          scrollRef={terminalScrollRef}
-          onInputChange={setActiveTerminalInput}
-          onSubmit={submitTerminalInput}
-          onSelectTerminalTab={(sessionId) => {
-            if (!selectedThreadId) {
-              return;
-            }
-            setActiveTerminalTabByThread((current) => ({
-              ...current,
-              [selectedThreadId]: sessionId
-            }));
-          }}
-          onAddTerminalTab={() => {
-            if (!selectedThreadId) {
-              return;
-            }
-            const newId = globalThis.crypto.randomUUID();
-            const nextTitle = `终端 ${currentTerminalTabs.length + 1}`;
-            setTerminalTabsByThread((current) => ({
-              ...current,
-              [selectedThreadId]: [...(current[selectedThreadId] ?? []), { id: newId, title: nextTitle }]
-            }));
-            setActiveTerminalTabByThread((current) => ({
-              ...current,
-              [selectedThreadId]: newId
-            }));
-          }}
-          onCloseTerminalTab={(sessionId) => {
-            if (!selectedThreadId) {
-              return;
-            }
-            const remaining = currentTerminalTabs.filter((tab) => tab.id !== sessionId);
-            setTerminalTabsByThread((current) => ({
-              ...current,
-              [selectedThreadId]: remaining
-            }));
-            setActiveTerminalTabByThread((current) => ({
-              ...current,
-              [selectedThreadId]: remaining[remaining.length - 1]?.id ?? ""
-            }));
-            setTerminalInputsByThread((current) => {
-              const nextSessions = { ...(current[selectedThreadId] ?? {}) };
-              delete nextSessions[sessionId];
-              return {
-                ...current,
-                [selectedThreadId]: nextSessions
-              };
-            });
-            setTerminalSessionsByThread((current) => {
-              const nextSessions = { ...(current[selectedThreadId] ?? {}) };
-              delete nextSessions[sessionId];
-              return {
-                ...current,
-                [selectedThreadId]: nextSessions
-              };
-            });
-            void window.codexh.closeTerminal({ threadId: selectedThreadId, sessionId });
-          }}
-          hasThread={Boolean(selectedThreadId)}
         />
 
-      {isSettingsOpen ? (
+      {visibleFilePreviewPath ? (
+        <FilePreviewDialog
+          path={visibleFilePreviewPath}
+          preview={projectFilePreview}
+          motionPhase={filePreviewPresence.phase}
+          onClose={closeProjectPreview}
+          onAddAttachment={addComposerAttachment}
+          onSave={saveProjectPreview}
+        />
+      ) : null}
+
+      {settingsPresence.value ? (
         <div
-          className="settings-overlay"
+          className="settings-overlay motion-overlay"
+          data-motion={settingsPresence.phase}
           onClick={(event) => {
             if (event.target === event.currentTarget) {
               setIsSettingsOpen(false);
@@ -5378,8 +5607,8 @@ export function App() {
                             <span>{getSkillSortLabel(skillsSortMode)}</span>
                             <IconChevronDown />
                           </button>
-                          {skillsSortOpen ? (
-                            <div className="skills-sort-popover" role="listbox">
+                          {skillsSortPresence.value ? (
+                            <div className="skills-sort-popover" data-motion={skillsSortPresence.phase} role="listbox">
                               {SKILL_SORT_OPTIONS.map(({ value, label }) => (
                                 <button
                                   key={value}
@@ -5754,9 +5983,10 @@ export function App() {
         </div>
       ) : null}
 
-      {isMcpCreateOpen && mcpCreateDraft ? (
+      {mcpCreatePresence.value && visibleMcpCreateDraft ? (
         <div
-          className="project-sheet-overlay mcp-create-overlay"
+          className="project-sheet-overlay mcp-create-overlay motion-overlay"
+          data-motion={mcpCreatePresence.phase}
           onClick={(event) => {
             if (event.target === event.currentTarget) closeMcpCreateSheet();
           }}
@@ -5777,16 +6007,16 @@ export function App() {
               <button type="button" role="tab" aria-selected={mcpCreateMode === "json"} className={mcpCreateMode === "json" ? "active" : ""} onClick={() => {
                 setMcpCreateMode("json");
                 setMcpCreateError(null);
-                if (!mcpJsonDraft) setMcpJsonDraft(JSON.stringify(serializeMcpJsonConfig([mcpCreateDraft]), null, 2));
+                if (!mcpJsonDraft) setMcpJsonDraft(JSON.stringify(serializeMcpJsonConfig([visibleMcpCreateDraft]), null, 2));
               }}>JSON 配置</button>
             </div>
 
             <div className="mcp-create-body">
               {mcpCreateMode === "form" ? (
                 <div className="mcp-editor-grid mcp-create-form">
-                  <label className="settings-field"><span>名称</span><input autoFocus value={mcpCreateDraft.name} placeholder="例如：网页检索" onChange={(event) => { setMcpCreateDraft({ ...mcpCreateDraft, name: event.target.value }); setMcpCreateError(null); }} /></label>
-                  <label className="settings-field"><span>ID</span><input value={mcpCreateDraft.id} onChange={(event) => { setMcpCreateDraft({ ...mcpCreateDraft, id: event.target.value }); setMcpCreateError(null); }} /></label>
-                  <label className="settings-field full"><span>描述</span><input value={mcpCreateDraft.description ?? ""} placeholder="可选" onChange={(event) => setMcpCreateDraft({ ...mcpCreateDraft, description: event.target.value || undefined })} /></label>
+                  <label className="settings-field"><span>名称</span><input autoFocus value={visibleMcpCreateDraft.name} placeholder="例如：网页检索" onChange={(event) => { setMcpCreateDraft({ ...visibleMcpCreateDraft, name: event.target.value }); setMcpCreateError(null); }} /></label>
+                  <label className="settings-field"><span>ID</span><input value={visibleMcpCreateDraft.id} onChange={(event) => { setMcpCreateDraft({ ...visibleMcpCreateDraft, id: event.target.value }); setMcpCreateError(null); }} /></label>
+                  <label className="settings-field full"><span>描述</span><input value={visibleMcpCreateDraft.description ?? ""} placeholder="可选" onChange={(event) => setMcpCreateDraft({ ...visibleMcpCreateDraft, description: event.target.value || undefined })} /></label>
                   <div className="settings-field mcp-transport-field">
                     <span>传输方式</span>
                     <div className="mcp-transport-options" role="radiogroup" aria-label="传输方式">
@@ -5795,7 +6025,7 @@ export function App() {
                         ["sse", "SSE", "事件流"],
                         ["streamable_http", "HTTP", "流式 HTTP"]
                       ].map(([transport, label, hint]) => {
-                        const selected = (mcpCreateDraft.transport ?? "stdio") === transport;
+                        const selected = (visibleMcpCreateDraft.transport ?? "stdio") === transport;
                         return (
                           <button
                             key={transport}
@@ -5805,10 +6035,10 @@ export function App() {
                             className={selected ? "is-selected" : ""}
                             onClick={() => {
                               setMcpCreateDraft({
-                                ...mcpCreateDraft,
+                                ...visibleMcpCreateDraft,
                                 transport,
-                                command: transport === "stdio" ? mcpCreateDraft.command : undefined,
-                                url: transport === "stdio" ? undefined : mcpCreateDraft.url
+                                command: transport === "stdio" ? visibleMcpCreateDraft.command : undefined,
+                                url: transport === "stdio" ? undefined : visibleMcpCreateDraft.url
                               });
                               setMcpCreateError(null);
                             }}
@@ -5822,21 +6052,21 @@ export function App() {
                   </div>
                   <div className="settings-field mcp-create-enabled">
                     <span>状态</span>
-                    <label className={`mcp-enable-switch ${mcpCreateDraft.enabled !== false ? "is-on" : ""}`}>
+                    <label className={`mcp-enable-switch ${visibleMcpCreateDraft.enabled !== false ? "is-on" : ""}`}>
                       <input
                         type="checkbox"
-                        checked={mcpCreateDraft.enabled !== false}
-                        onChange={(event) => setMcpCreateDraft({ ...mcpCreateDraft, enabled: event.target.checked })}
+                        checked={visibleMcpCreateDraft.enabled !== false}
+                        onChange={(event) => setMcpCreateDraft({ ...visibleMcpCreateDraft, enabled: event.target.checked })}
                       />
                       <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
-                      <span className="mcp-enable-label">{mcpCreateDraft.enabled !== false ? "已启用" : "已停用"}</span>
+                      <span className="mcp-enable-label">{visibleMcpCreateDraft.enabled !== false ? "已启用" : "已停用"}</span>
                     </label>
                   </div>
-                  {(mcpCreateDraft.transport ?? "stdio") === "stdio" ? <>
-                    <label className="settings-field full"><span>命令</span><input value={mcpCreateDraft.command ?? ""} placeholder="npx" onChange={(event) => { setMcpCreateDraft({ ...mcpCreateDraft, command: event.target.value }); setMcpCreateError(null); }} /></label>
-                    <label className="settings-field"><span>参数（每行一个）</span><textarea value={(mcpCreateDraft.args ?? []).join("\n")} onChange={(event) => setMcpCreateDraft({ ...mcpCreateDraft, args: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} /></label>
-                    <label className="settings-field"><span>环境变量（KEY=VALUE）</span><textarea value={Object.entries(mcpCreateDraft.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => setMcpCreateDraft({ ...mcpCreateDraft, env: parseMcpEnvironment(event.target.value) })} /></label>
-                  </> : <label className="settings-field full"><span>服务 URL</span><input value={mcpCreateDraft.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => { setMcpCreateDraft({ ...mcpCreateDraft, url: event.target.value }); setMcpCreateError(null); }} /></label>}
+                  {(visibleMcpCreateDraft.transport ?? "stdio") === "stdio" ? <>
+                    <label className="settings-field full"><span>命令</span><input value={visibleMcpCreateDraft.command ?? ""} placeholder="npx" onChange={(event) => { setMcpCreateDraft({ ...visibleMcpCreateDraft, command: event.target.value }); setMcpCreateError(null); }} /></label>
+                    <label className="settings-field"><span>参数（每行一个）</span><textarea value={(visibleMcpCreateDraft.args ?? []).join("\n")} onChange={(event) => setMcpCreateDraft({ ...visibleMcpCreateDraft, args: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} /></label>
+                    <label className="settings-field"><span>环境变量（KEY=VALUE）</span><textarea value={Object.entries(visibleMcpCreateDraft.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => setMcpCreateDraft({ ...visibleMcpCreateDraft, env: parseMcpEnvironment(event.target.value) })} /></label>
+                  </> : <label className="settings-field full"><span>服务 URL</span><input value={visibleMcpCreateDraft.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => { setMcpCreateDraft({ ...visibleMcpCreateDraft, url: event.target.value }); setMcpCreateError(null); }} /></label>}
                   {mcpCreateError ? <p className="mcp-error full">{mcpCreateError}</p> : null}
                 </div>
               ) : (
@@ -5855,9 +6085,10 @@ export function App() {
         </div>
       ) : null}
 
-      {isProjectCreateOpen ? (
+      {projectCreatePresence.value ? (
         <div
-          className="project-sheet-overlay"
+          className="project-sheet-overlay motion-overlay"
+          data-motion={projectCreatePresence.phase}
           onClick={(event) => {
             if (event.target === event.currentTarget) {
               setIsProjectCreateOpen(false);
@@ -5909,9 +6140,10 @@ export function App() {
         </div>
       ) : null}
 
-      {gpaPlanResumeDialog ? (
+      {visibleGpaPlanResumeDialog ? (
         <div
-          className="project-sheet-overlay"
+          className="project-sheet-overlay motion-overlay"
+          data-motion={gpaPlanResumePresence.phase}
           onClick={(event) => {
             if (event.target === event.currentTarget && !gpaPlanResumeBusy) {
               void dismissGpaPlanResumeDialog();
@@ -5922,12 +6154,12 @@ export function App() {
             <div className="project-sheet-header">
               <div className="project-sheet-copy">
                 <strong>
-                  {gpaPlanResumeDialog.step === "ask" ? "发现未完成的 GPA 计划" : "确认继续剩余任务"}
+                  {visibleGpaPlanResumeDialog.step === "ask" ? "发现未完成的 GPA 计划" : "确认继续剩余任务"}
                 </strong>
                 <span>
-                  {gpaPlanResumeDialog.step === "ask"
+                  {visibleGpaPlanResumeDialog.step === "ask"
                     ? "此项目有一份未完成的计划。是否继续完成？"
-                    : `已完成 ${gpaPlanResumeDialog.plan.doneCount} / ${gpaPlanResumeDialog.plan.tasks.length}，剩余 ${gpaPlanResumeDialog.plan.pendingCount} 项。`}
+                    : `已完成 ${visibleGpaPlanResumeDialog.plan.doneCount} / ${visibleGpaPlanResumeDialog.plan.tasks.length}，剩余 ${visibleGpaPlanResumeDialog.plan.pendingCount} 项。`}
                 </span>
               </div>
               <button
@@ -5940,10 +6172,10 @@ export function App() {
               </button>
             </div>
 
-            {gpaPlanResumeDialog.step === "review" ? (
+            {visibleGpaPlanResumeDialog.step === "review" ? (
               <div className="gpa-plan-resume-body">
                 <div className="gpa-plan-resume-progress">
-                  {gpaPlanResumeDialog.plan.tasks.map((task) => (
+                  {visibleGpaPlanResumeDialog.plan.tasks.map((task) => (
                     <div
                       key={task.id}
                       className={`gpa-plan-resume-task ${task.done ? "is-done" : "is-pending"}`}
@@ -5954,8 +6186,8 @@ export function App() {
                     </div>
                   ))}
                 </div>
-                {gpaPlanResumeDialog.plan.body ? (
-                  <pre className="gpa-plan-resume-markdown">{gpaPlanResumeDialog.plan.body.slice(0, 4000)}</pre>
+                {visibleGpaPlanResumeDialog.plan.body ? (
+                  <pre className="gpa-plan-resume-markdown">{visibleGpaPlanResumeDialog.plan.body.slice(0, 4000)}</pre>
                 ) : null}
               </div>
             ) : null}
@@ -5967,13 +6199,13 @@ export function App() {
                 disabled={gpaPlanResumeBusy}
                 onClick={() =>
                   void dismissGpaPlanResumeDialog({
-                    abandon: gpaPlanResumeDialog.step === "ask"
+                    abandon: visibleGpaPlanResumeDialog.step === "ask"
                   })
                 }
               >
-                {gpaPlanResumeDialog.step === "ask" ? "否，废弃此计划" : "取消"}
+                {visibleGpaPlanResumeDialog.step === "ask" ? "否，废弃此计划" : "取消"}
               </button>
-              {gpaPlanResumeDialog.step === "ask" ? (
+              {visibleGpaPlanResumeDialog.step === "ask" ? (
                 <button className="button warm" type="button" onClick={() => void acceptGpaPlanResumeAsk()}>
                   是，查看计划
                 </button>
@@ -5992,9 +6224,64 @@ export function App() {
         </div>
       ) : null}
 
-      {updateConfirmDialog ? (
+      {clearChatConfirmPresence.value ? (
         <div
-          className="project-sheet-overlay"
+          className="project-sheet-overlay motion-overlay"
+          data-motion={clearChatConfirmPresence.phase}
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !isClearingChat) {
+              setIsClearChatConfirmOpen(false);
+            }
+          }}
+        >
+          <div
+            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="clear-chat-confirm-title"
+          >
+            <div className="project-sheet-header delete-confirm-header">
+              <button
+                className="project-sheet-close"
+                type="button"
+                onClick={() => setIsClearChatConfirmOpen(false)}
+                title="关闭"
+                aria-label="关闭"
+                disabled={isClearingChat}
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
+              <strong id="clear-chat-confirm-title">清空本次聊天？</strong>
+              <p>消息、执行记录和本次打开的网页都会被永久删除，且无法恢复。项目文件不会被删除。</p>
+            </div>
+            <div className="project-sheet-actions">
+              <button
+                className="button ghost"
+                type="button"
+                disabled={isClearingChat}
+                onClick={() => setIsClearChatConfirmOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                className="button clear-chat-danger"
+                type="button"
+                disabled={isClearingChat}
+                onClick={() => void confirmClearCurrentChat()}
+              >
+                {isClearingChat ? "正在清空..." : "确认清空"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {visibleUpdateConfirmDialog ? (
+        <div
+          className="project-sheet-overlay motion-overlay"
+          data-motion={updateConfirmPresence.phase}
           onClick={(event) => {
             if (event.target === event.currentTarget) {
               setUpdateConfirmDialog(null);
@@ -6019,11 +6306,11 @@ export function App() {
               </button>
             </div>
             <div className="confirm-sheet-body delete-confirm-body update-confirm-body">
-              <strong id="update-confirm-title">{updateConfirmDialog.title}</strong>
-              <p>{updateConfirmDialog.message}</p>
-              {updateConfirmDialog.details.length > 0 ? (
+              <strong id="update-confirm-title">{visibleUpdateConfirmDialog.title}</strong>
+              <p>{visibleUpdateConfirmDialog.message}</p>
+              {visibleUpdateConfirmDialog.details.length > 0 ? (
                 <ul className="update-confirm-details">
-                  {updateConfirmDialog.details.map((detail) => (
+                  {visibleUpdateConfirmDialog.details.map((detail) => (
                     <li key={detail}>{detail}</li>
                   ))}
                 </ul>
@@ -6034,7 +6321,7 @@ export function App() {
                 取消
               </button>
               <button className="button warm" type="button" onClick={() => void confirmUpdateDialog()}>
-                {updateConfirmDialog.kind === "download" ? "继续下载" : "立即安装并重启"}
+                {visibleUpdateConfirmDialog.kind === "download" ? "继续下载" : "立即安装并重启"}
               </button>
             </div>
           </div>
@@ -6059,8 +6346,8 @@ export function App() {
         </div>
       ) : null}
 
-      {showFetchedModels ? createPortal(
-        <div className="fetch-models-overlay" onMouseDown={(event) => {
+      {fetchedModelsPresence.value ? createPortal(
+        <div className="fetch-models-overlay motion-overlay" data-motion={fetchedModelsPresence.phase} onMouseDown={(event) => {
           if (event.target === event.currentTarget) {
             setShowFetchedModels(false);
           }
@@ -6135,8 +6422,8 @@ export function App() {
         document.body
       ) : null}
 
-      {multimodalPickerRole && configDraft ? createPortal(
-        <div className="fetch-models-overlay" onMouseDown={(event) => {
+      {visibleMultimodalPickerRole && configDraft ? createPortal(
+        <div className="fetch-models-overlay motion-overlay" data-motion={multimodalPickerPresence.phase} onMouseDown={(event) => {
           if (event.target === event.currentTarget) {
             setMultimodalPickerRole(null);
             setMultimodalPickerSelected([]);
@@ -6144,17 +6431,17 @@ export function App() {
         }}>
           <div className="fetch-models-dialog multimodal-picker-dialog" role="dialog" aria-label="选择模型角色">
             <div className="fetch-models-head">
-              <strong>添加到{multimodalPickerRole === "reasoning" ? "推理模型" : multimodalPickerRole === "image" ? "图片模型" : "视频模型"}</strong>
+              <strong>添加到{visibleMultimodalPickerRole === "reasoning" ? "推理模型" : visibleMultimodalPickerRole === "image" ? "图片模型" : "视频模型"}</strong>
               <button type="button" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }} title="关闭"><IconClose /></button>
             </div>
             <div className="fetch-models-list multimodal-picker-list">
               {configDraft.models
-                .filter((model) => multimodalPickerRole === "reasoning"
+                .filter((model) => visibleMultimodalPickerRole === "reasoning"
                   ? !isReasoningModel(model)
-                  : model.role !== multimodalPickerRole)
+                  : model.role !== visibleMultimodalPickerRole)
                 .sort((left, right) => {
                   const score = (model: typeof left) => {
-                    if (multimodalPickerRole === "video") return model.supportsVideoGeneration ? 2 : model.supportsMultimodalInput ? 1 : 0;
+                    if (visibleMultimodalPickerRole === "video") return model.supportsVideoGeneration ? 2 : model.supportsMultimodalInput ? 1 : 0;
                     return model.supportsMultimodalInput ? 1 : 0;
                   };
                   return score(right) - score(left) || left.id.localeCompare(right.id);
@@ -6195,11 +6482,12 @@ export function App() {
         document.body
       ) : null}
 
-      {gpaMenuOpen && gpaMenuPos
+      {visibleGpaMenuPos
         ? createPortal(
             <>
               <div
                 className="gpa-backdrop"
+                data-motion={gpaMenuPresence.phase}
                 onMouseDown={() => {
                   setGpaMenuOpen(false);
                   setGpaMenuPos(null);
@@ -6207,13 +6495,14 @@ export function App() {
               />
               <div
                 className="gpa-popover"
+                data-motion={gpaMenuPresence.phase}
                 role="menu"
                 onMouseEnter={clearComposerAddMenuCloseTimer}
                 onMouseLeave={scheduleComposerAddMenuClose}
                 style={{
                   position: "fixed",
-                  left: gpaMenuPos.left,
-                  top: gpaMenuPos.top,
+                  left: visibleGpaMenuPos.left,
+                  top: visibleGpaMenuPos.top,
                   transform: "translateY(-100%)"
                 }}
               >
@@ -6419,29 +6708,20 @@ function RightWorkspacePanel({
   onAddAttachment,
   projectFiles,
   projectFilesLoading,
-  previewTabs,
+  gitSnapshot,
+  gitLoading,
+  gitActionBusy,
+  gitActionMessage,
+  onGitRefresh,
+  onGitAction,
+  onGitComment,
   selectedProjectFile,
-  projectFilePreview,
   projectToolCalls,
   onSelectProjectFile,
-  onSelectPreviewTab,
-  onClosePreviewTab,
+  onOpenProjectFile,
   browserTabsByThread,
   onCloseBrowserTab,
-  threadId,
-  terminalTabs,
-  activeTerminalSessionId,
-  shell,
-  cwd,
-  output,
-  input,
-  scrollRef,
-  onInputChange,
-  onSubmit,
-  onSelectTerminalTab,
-  onAddTerminalTab,
-  onCloseTerminalTab,
-  hasThread
+  threadId
 }: {
   hidden: boolean;
   activeTab: RightWorkspaceTab;
@@ -6451,42 +6731,35 @@ function RightWorkspacePanel({
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
   projectFiles: ProjectFileEntry[];
   projectFilesLoading: boolean;
-  previewTabs: string[];
+  gitSnapshot: GitSnapshot | null;
+  gitLoading: boolean;
+  gitActionBusy: boolean;
+  gitActionMessage: string | null;
+  onGitRefresh: () => void;
+  onGitAction: (action: () => Promise<GitActionResult>) => void;
+  onGitComment: (content: string) => void;
   selectedProjectFile: string | null;
-  projectFilePreview: PreviewCacheEntry | null;
   projectToolCalls: ToolCallRecord[];
   onSelectProjectFile: (path: string) => void;
-  onSelectPreviewTab: (path: string) => void;
-  onClosePreviewTab: (path: string) => void;
+  onOpenProjectFile: (path: string) => void;
   browserTabsByThread: Record<string, RuntimeThreadSnapshot["browserTabs"]>;
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
   threadId: string | null;
-  terminalTabs: TerminalWorkspaceTab[];
-  activeTerminalSessionId: string | null;
-  shell: string;
-  cwd: string;
-  output: string;
-  input: string;
-  scrollRef: React.RefObject<HTMLPreElement | null>;
-  onInputChange: (value: string) => void;
-  onSubmit: () => void;
-  onSelectTerminalTab: (sessionId: string) => void;
-  onAddTerminalTab: () => void;
-  onCloseTerminalTab: (sessionId: string) => void;
-  hasThread: boolean;
 }) {
   return (
     <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="右侧工作区" aria-hidden={hidden}>
       <header className="right-workspace-header">
         <nav className="right-workspace-tabs" aria-label="工作区标签">
+          <WorkspaceTabButton
+            active={activeTab === "changes"}
+            label="Git"
+            badge={gitSnapshot?.files.length ?? 0}
+            onClick={() => onTabChange("changes")}
+          >
+            <IconFileChanges />
+          </WorkspaceTabButton>
           <WorkspaceTabButton active={activeTab === "files"} label="文件夹" onClick={() => onTabChange("files")}>
             <IconFolder />
-          </WorkspaceTabButton>
-          <WorkspaceTabButton active={activeTab === "preview"} label="查看" onClick={() => onTabChange("preview")}>
-            <IconEye />
-          </WorkspaceTabButton>
-          <WorkspaceTabButton active={activeTab === "terminal"} label="终端" onClick={() => onTabChange("terminal")}>
-            <IconTerminal />
           </WorkspaceTabButton>
           <WorkspaceTabButton active={activeTab === "browser"} label="浏览器" onClick={() => onTabChange("browser")}>
             <IconGlobe />
@@ -6504,35 +6777,6 @@ function RightWorkspacePanel({
       </header>
 
       <div className="right-workspace-content">
-        {activeTab === "preview" ? (
-          <ProjectPreviewWorkspace
-            tabs={previewTabs}
-            selectedPath={selectedProjectFile}
-            preview={projectFilePreview}
-            toolCalls={projectToolCalls}
-            loading={projectFilesLoading}
-            onSelectTab={onSelectPreviewTab}
-            onCloseTab={onClosePreviewTab}
-            onAddAttachment={onAddAttachment}
-          />
-        ) : null}
-        {activeTab === "terminal" ? (
-          <TerminalWorkspace
-            tabs={terminalTabs}
-            activeSessionId={activeTerminalSessionId}
-            shell={shell}
-            cwd={cwd}
-            output={output}
-            input={input}
-            scrollRef={scrollRef}
-            onInputChange={onInputChange}
-            onSubmit={onSubmit}
-            onSelectTab={onSelectTerminalTab}
-            onAddTab={onAddTerminalTab}
-            onCloseTab={onCloseTerminalTab}
-            hasThread={hasThread}
-          />
-        ) : null}
         {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
           <BrowserWorkspace
             key={browserThreadId}
@@ -6543,7 +6787,7 @@ function RightWorkspacePanel({
           />
         ) : null)}
         {activeTab === "browser" && threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
-          <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" />
+          <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里" />
         ) : null}
         {activeTab === "files" ? (
           <ProjectFilesWorkspace
@@ -6552,8 +6796,21 @@ function RightWorkspacePanel({
             loading={projectFilesLoading}
             selectedPath={selectedProjectFile}
             onSelect={onSelectProjectFile}
+            onOpen={onOpenProjectFile}
             projectRoot={projectRoot}
             onAddAttachment={onAddAttachment}
+          />
+        ) : null}
+        {!hidden && activeTab === "changes" ? (
+          <GitChangesWorkspace
+            threadId={threadId}
+            snapshot={gitSnapshot}
+            loading={gitLoading}
+            busy={gitActionBusy}
+            message={gitActionMessage}
+            onRefresh={onGitRefresh}
+            onAction={onGitAction}
+            onComment={onGitComment}
           />
         ) : null}
       </div>
@@ -6564,18 +6821,26 @@ function RightWorkspacePanel({
 function WorkspaceTabButton({
   active,
   label,
+  badge,
   children,
   onClick
 }: {
   active: boolean;
   label: string;
+  badge?: number;
   children: ReactNode;
   onClick: () => void;
 }) {
   return (
-    <button type="button" className={`right-workspace-tab ${active ? "active" : ""}`} onClick={onClick}>
+    <button
+      type="button"
+      className={`right-workspace-tab ${active ? "active" : ""}`}
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+    >
       {children}
-      <span>{label}</span>
+      {badge ? <span className="right-workspace-tab-badge">{badge > 99 ? "99+" : badge}</span> : null}
     </button>
   );
 }
@@ -6640,27 +6905,34 @@ function WorkspaceContextMenu({
   x,
   y,
   actions,
+  motionPhase,
   onClose
 }: {
   x: number;
   y: number;
   actions: WorkspaceContextMenuAction[];
+  motionPhase?: string;
   onClose: () => void;
 }) {
   useEffect(() => {
     const close = () => onClose();
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.stopPropagation();
         onClose();
       }
     };
-    window.addEventListener("pointerdown", close);
+    // Defer so the opening right-click's pointerdown does not instantly dismiss the menu.
+    const timer = window.setTimeout(() => {
+      window.addEventListener("pointerdown", close);
+    }, 0);
     window.addEventListener("resize", close);
-    window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("keydown", closeOnEscape, true);
     return () => {
+      window.clearTimeout(timer);
       window.removeEventListener("pointerdown", close);
       window.removeEventListener("resize", close);
-      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("keydown", closeOnEscape, true);
     };
   }, [onClose]);
 
@@ -6670,6 +6942,7 @@ function WorkspaceContextMenu({
   return createPortal(
     <div
       className="workspace-context-menu"
+      data-motion={motionPhase}
       role="menu"
       style={{ left: Math.max(8, left), top: Math.max(8, top) }}
       onPointerDown={(event) => event.stopPropagation()}
@@ -6696,9 +6969,11 @@ function WorkspaceContextMenu({
 
 function ComposerAttachmentChip({
   attachment,
+  removing,
   onRemove
 }: {
   attachment: ComposerAttachment;
+  removing?: boolean;
   onRemove: () => void;
 }) {
   const detail =
@@ -6721,7 +6996,7 @@ function ComposerAttachmentChip({
 
   return (
     <div
-      className={`composer-attachment-chip ${attachment.kind}`}
+      className={`composer-attachment-chip ${attachment.kind} ${removing ? "is-removing" : ""}`}
       title={attachment.kind === "code" ? attachment.content : attachment.kind === "skill" || attachment.kind === "mcp" ? attachment.description : attachment.path}
     >
       <span className="composer-attachment-icon" aria-hidden="true">{icon}</span>
@@ -6804,40 +7079,345 @@ function LegacyTerminalWorkspace({
   );
 }
 
-function LegacyProjectPreviewWorkspace({
-  selectedPath,
+function FilePreviewDialog({
+  path,
   preview,
-  loading
+  motionPhase,
+  onClose,
+  onAddAttachment,
+  onSave
 }: {
-  selectedPath: string | null;
-  preview: { content: string; truncated: boolean } | null;
-  loading: boolean;
+  path: string;
+  preview: PreviewCacheEntry | null;
+  motionPhase: string | undefined;
+  onClose: () => void;
+  onAddAttachment: (attachment: ComposerAttachmentInput) => void;
+  onSave: (content: string) => Promise<void>;
 }) {
-  if (!selectedPath) {
-    return loading ? (
-      <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取项目文件..." />
-    ) : (
-      <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="从工作区目录树中选择文件" />
-    );
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const contextMenuPresence = useMotionPresence(contextMenu, 140);
+  const visibleContextMenu = contextMenu ?? contextMenuPresence.value;
+  const fileName = path.split(/[\\/]/).pop() || path;
+  const canEdit = Boolean(preview && !preview.truncated && !preview.binary);
+  const isDirty = preview ? draft !== preview.content : false;
+
+  useEffect(() => {
+    setDraft(preview?.content ?? "");
+    setSaveError(null);
+  }, [path, preview?.content]);
+
+  async function saveFile() {
+    if (!canEdit || !isDirty || isSaving) {
+      return;
+    }
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      await onSave(draft);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   return (
-    <section className="project-preview-workspace" aria-label="文件查看">
-      <header className="project-preview-header" title={selectedPath}>
-        <IconFile />
-        <span>{selectedPath}</span>
-      </header>
-      {preview ? (
-        <>
-          <pre className="project-preview-code">{preview.content}</pre>
-          {preview.truncated ? <div className="project-preview-note">文件内容过长，仅显示前 512 KB。</div> : null}
-        </>
-      ) : (
-        <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取文件..." />
-      )}
-    </section>
+    <div
+      className="file-preview-lightbox motion-overlay"
+      data-motion={motionPhase}
+      role="dialog"
+      aria-modal="true"
+      aria-label={path}
+      onClick={onClose}
+    >
+      <div className="file-preview-lightbox-content" onClick={(event) => event.stopPropagation()}>
+        <header className="file-preview-lightbox-head" title={path}>
+          <IconFile />
+          <div className="file-preview-lightbox-title">
+            <strong>{fileName}</strong>
+            <span>{path}</span>
+          </div>
+          <div className="file-preview-lightbox-actions">
+            {canEdit ? (
+              <button
+                type="button"
+                className="file-preview-save-button"
+                onClick={() => void saveFile()}
+                disabled={!isDirty || isSaving}
+                title="保存文件"
+              >
+                <IconCheck />
+                <span>{isSaving ? "保存中..." : "保存"}</span>
+              </button>
+            ) : null}
+            <button type="button" onClick={onClose} title="关闭" aria-label="关闭">
+              <IconClose />
+            </button>
+          </div>
+        </header>
+        {preview ? (
+          <>
+            {canEdit ? (
+              <textarea
+                className="file-preview-editor"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                aria-label={`${path} 内容`}
+                spellCheck={false}
+              />
+            ) : (
+              <ol
+                className="project-preview-code file-preview-lightbox-code"
+                aria-label={`${path} 代码内容`}
+                onContextMenu={(event) => {
+                  const selection = window.getSelection()?.toString() ?? "";
+                  const trimmed = selection.trim();
+                  if (!trimmed) {
+                    return;
+                  }
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setContextMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    selection: trimmed
+                  });
+                }}
+              >
+                {preview.content.split(/\r?\n/).map((line, index) => (
+                  <li key={`${path}-line-${index}`}>
+                    <code>{renderCodePreviewLine(line, `${path}-${index}`)}</code>
+                  </li>
+                ))}
+              </ol>
+            )}
+            {preview.truncated ? <div className="project-preview-note">文件内容过长，仅显示前 512 KB。</div> : null}
+            {preview.binary ? <div className="project-preview-note">二进制文件无法直接编辑。</div> : null}
+            {saveError ? <div className="project-preview-note project-preview-note-error">保存失败：{saveError}</div> : null}
+            {visibleContextMenu ? (
+              <WorkspaceContextMenu
+                x={visibleContextMenu.x}
+                y={visibleContextMenu.y}
+                motionPhase={contextMenuPresence.phase}
+                onClose={() => setContextMenu(null)}
+                actions={[
+                  {
+                    id: "add-selection-to-chat",
+                    label: "添加到聊天",
+                    icon: <IconCompose />,
+                    onSelect: () => onAddAttachment({
+                      kind: "code",
+                      path,
+                      content: visibleContextMenu.selection,
+                      label: "已选代码段",
+                      intent: "reference"
+                    })
+                  }
+                ]}
+              />
+            ) : null}
+          </>
+        ) : (
+          <div className="file-preview-lightbox-loading">
+            <WorkspaceEmptyState icon={<IconSpinner />} title="读取中" message="正在读取文件..." />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
+
+const GitChangesWorkspace = memo(function GitChangesWorkspace({
+  threadId,
+  snapshot,
+  loading,
+  busy,
+  message,
+  onRefresh,
+  onAction,
+  onComment
+}: {
+  threadId: string | null;
+  snapshot: GitSnapshot | null;
+  loading: boolean;
+  busy: boolean;
+  message: string | null;
+  onRefresh: () => void;
+  onAction: (action: () => Promise<GitActionResult>) => void;
+  onComment: (content: string) => void;
+}) {
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [commitMessage, setCommitMessage] = useState("");
+  const files = snapshot?.files ?? [];
+  const selected = files.find((file) => file.path === selectedPath) ?? files[0] ?? null;
+  const hasStagedFiles = files.some((file) => file.staged);
+  const hasCommitsToPush = snapshot?.upstream ? (snapshot.ahead ?? 0) > 0 : Boolean(snapshot?.head);
+  const groups = [
+    { id: "conflicted", label: "冲突", files: files.filter((file) => file.conflicted) },
+    { id: "staged", label: "暂存", files: files.filter((file) => file.staged && !file.conflicted) },
+    { id: "changes", label: "更改", files: files.filter((file) => file.unstaged && !file.untracked && !file.conflicted) },
+    { id: "untracked", label: "未跟踪", files: files.filter((file) => file.untracked) }
+  ];
+
+  if (loading && !snapshot) {
+    return <WorkspaceEmptyState icon={<IconSpinner />} title="Git 变更" message="正在读取 Git 变更..." />;
+  }
+  if (!snapshot?.available) {
+    return <WorkspaceEmptyState icon={<IconFileChanges />} title="Git 变更" message={snapshot?.message ?? "选择项目后查看 Git 变更。"} />;
+  }
+
+  const run = (action: () => Promise<GitActionResult>) => {
+    if (!threadId || busy) return;
+    onAction(action);
+  };
+  const fileAction = (action: "stage" | "unstage" | "revert", file: GitFileChange) => {
+    if (!threadId) return;
+    if (action === "stage") run(() => window.codexh.stageGitFile({ threadId, path: file.path }) as Promise<GitActionResult>);
+    if (action === "unstage") run(() => window.codexh.unstageGitFile({ threadId, path: file.path }) as Promise<GitActionResult>);
+    if (action === "revert") run(() => window.codexh.revertGitFile({ threadId, path: file.path, untracked: file.untracked }) as Promise<GitActionResult>);
+  };
+
+  return (
+    <section className="git-changes-workspace" aria-label="Git 变更">
+      <header className="git-changes-header">
+        <div className="git-branch-summary">
+          <IconFileChanges />
+          <span>{snapshot.branch ?? "detached HEAD"}</span>
+          {snapshot.ahead || snapshot.behind ? <small>{snapshot.ahead ? `↑${snapshot.ahead}` : ""}{snapshot.behind ? ` ↓${snapshot.behind}` : ""}</small> : null}
+        </div>
+        <div className="git-header-actions">
+          <button type="button" className="git-icon-button" title="刷新变更" aria-label="刷新变更" disabled={loading || busy} onClick={onRefresh}><IconRefresh /></button>
+          {snapshot.canCreatePullRequest ? <button type="button" className="git-text-action" disabled={busy} onClick={() => threadId && run(() => window.codexh.createGitPullRequest(threadId) as Promise<GitActionResult>)}>PR</button> : null}
+        </div>
+      </header>
+      {message ? <p className="git-action-message" role="status">{message}</p> : null}
+      <div className="git-changes-body">
+        <aside className="git-file-list" aria-label="变更文件">
+          {groups.map((group) => group.files.length ? (
+            <section key={group.id} className={`git-file-group ${group.id}`}>
+              <h3>{group.label}<span>{group.files.length}</span></h3>
+              {group.files.map((file) => (
+                <button
+                  key={`${group.id}:${file.path}`}
+                  type="button"
+                  className={`git-file-row ${selected?.path === file.path ? "active" : ""}`}
+                  onClick={() => setSelectedPath(file.path)}
+                  title={file.path}
+                >
+                  <IconFile />
+                  <span>{file.path}</span>
+                  <small>{file.additions ? `+${file.additions}` : ""}{file.deletions ? ` −${file.deletions}` : ""}</small>
+                </button>
+              ))}
+            </section>
+          ) : null)}
+          {files.length === 0 ? <WorkspaceEmptyState icon={<IconFileChanges />} title="没有变更" message="工作区没有未提交的修改。" /> : null}
+        </aside>
+        <div className="git-diff-pane">
+          {selected ? (
+            <>
+              <header className="git-diff-header">
+                <span title={selected.path}>{selected.path}</span>
+                <div>
+                  {selected.unstaged || selected.untracked ? <button type="button" disabled={busy} title="暂存文件" onClick={() => fileAction("stage", selected)}><IconPlus /></button> : null}
+                  {selected.staged ? <button type="button" disabled={busy} title="取消暂存" onClick={() => fileAction("unstage", selected)}><IconUndo /></button> : null}
+                  {selected.unstaged || selected.untracked ? <button type="button" disabled={busy} title="撤销未暂存修改" onClick={() => fileAction("revert", selected)}><IconTrash /></button> : null}
+                </div>
+              </header>
+              {selected.conflicted ? <p className="git-conflict-notice">此文件存在冲突，请先在编辑器或终端中解决。</p> : null}
+              {selected.binary ? <p className="git-binary-notice">二进制文件不支持按块查看，可使用文件级操作。</p> : null}
+              <div className="git-diff-scroll">
+                <GitHunkList file={selected} source="staged" busy={busy} threadId={threadId} onAction={onAction} onComment={onComment} />
+                <GitHunkList file={selected} source="unstaged" busy={busy} threadId={threadId} onAction={onAction} onComment={onComment} />
+                {!selected.binary && selected.stagedHunks.length + selected.unstagedHunks.length === 0 ? <WorkspaceEmptyState icon={<IconEye />} title="没有文本差异" message="此文件没有可显示的文本差异。" /> : null}
+              </div>
+            </>
+          ) : <WorkspaceEmptyState icon={<IconFileChanges />} title="选择文件" message="选择一个文件查看差异。" />}
+        </div>
+      </div>
+      <footer className="git-commit-bar">
+        <input
+          value={commitMessage}
+          onChange={(event) => setCommitMessage(event.target.value)}
+          placeholder={hasStagedFiles ? "提交说明" : "提交说明（请先暂存文件）"}
+          disabled={busy}
+        />
+        <button
+          type="button"
+          title={hasStagedFiles ? "提交已暂存变更" : "请先暂存文件"}
+          aria-label={hasStagedFiles ? "提交已暂存变更" : "请先暂存文件"}
+          disabled={busy || !commitMessage.trim() || !hasStagedFiles || !threadId}
+          onClick={() => threadId && run(() => window.codexh.commitGitChanges({ threadId, message: commitMessage }) as Promise<GitActionResult>)}
+        >
+          <IconCheck />
+        </button>
+        <button
+          type="button"
+          className="git-push-button"
+          title={hasCommitsToPush ? "推送提交" : "没有待推送的提交"}
+          aria-label={hasCommitsToPush ? "推送提交" : "没有待推送的提交"}
+          disabled={busy || !snapshot.branch || !hasCommitsToPush || !threadId}
+          onClick={() => threadId && run(() => window.codexh.pushGitChanges(threadId) as Promise<GitActionResult>)}
+        >
+          <IconArrowUp />
+        </button>
+      </footer>
+    </section>
+  );
+}, (previous, next) =>
+  previous.threadId === next.threadId &&
+  previous.snapshot === next.snapshot &&
+  previous.loading === next.loading &&
+  previous.busy === next.busy &&
+  previous.message === next.message
+);
+
+const GitHunkList = memo(function GitHunkList({
+  file,
+  source,
+  busy,
+  threadId,
+  onAction,
+  onComment
+}: {
+  file: GitFileChange;
+  source: "staged" | "unstaged";
+  busy: boolean;
+  threadId: string | null;
+  onAction: (action: () => Promise<GitActionResult>) => void;
+  onComment: (content: string) => void;
+}) {
+  const hunks = source === "staged" ? file.stagedHunks : file.unstagedHunks;
+  if (hunks.length === 0) return null;
+  return (
+    <section className={`git-hunk-list ${source}`}>
+      <h3>{source === "staged" ? "已暂存" : "未暂存"}</h3>
+      {hunks.map((hunk) => (
+        <article className="git-hunk" key={hunk.id}>
+          <header>
+            <code>{hunk.header}</code>
+            <div>
+              {source === "unstaged" ? <button type="button" disabled={busy || !threadId} title="暂存此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, path: file.path, hunkId: hunk.id, source, action: "stage" }) as Promise<GitActionResult>)}><IconPlus /></button> : null}
+              {source === "staged" ? <button type="button" disabled={busy || !threadId} title="取消暂存此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, path: file.path, hunkId: hunk.id, source, action: "unstage" }) as Promise<GitActionResult>)}><IconUndo /></button> : null}
+              {source === "unstaged" ? <button type="button" disabled={busy || !threadId} title="撤销此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, path: file.path, hunkId: hunk.id, source, action: "revert" }) as Promise<GitActionResult>)}><IconTrash /></button> : null}
+              <button type="button" title="让 Codex 处理此块" onClick={() => onComment(`请审查并处理以下 Git 修改：\n文件：${file.path}\n范围：${hunk.header}\n\n${hunk.lines.map((line) => `${line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "}${line.content}`).join("\n")}`)}><IconComment /></button>
+            </div>
+          </header>
+          <ol>
+            {hunk.lines.map((line, index) => (
+              <li key={`${hunk.id}:${index}`} className={line.kind}>
+                <span>{line.oldLine ?? ""}</span><span>{line.newLine ?? ""}</span><code>{line.content}</code>
+              </li>
+            ))}
+          </ol>
+        </article>
+      ))}
+    </section>
+  );
+});
 
 function ProjectFilesWorkspace({
   files,
@@ -6845,6 +7425,7 @@ function ProjectFilesWorkspace({
   loading,
   selectedPath,
   onSelect,
+  onOpen,
   projectRoot,
   onAddAttachment
 }: {
@@ -6853,12 +7434,15 @@ function ProjectFilesWorkspace({
   loading: boolean;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onOpen: (path: string) => void;
   projectRoot: string;
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
 }) {
   const [query, setQuery] = useState("");
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: ProjectFileTreeNode } | null>(null);
+  const contextMenuPresence = useMotionPresence(contextMenu, 140);
+  const visibleContextMenu = contextMenu ?? contextMenuPresence.value;
   const tree = useMemo(() => buildProjectFileTree(files), [files]);
   const changeKinds = useMemo(() => getProjectFileChangeKinds(toolCalls), [toolCalls]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -6868,11 +7452,11 @@ function ProjectFilesWorkspace({
   }, [tree]);
 
   if (loading) {
-    return <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取项目文件..." />;
+    return <WorkspaceEmptyState icon={<IconSpinner />} title="读取中" message="正在读取项目文件..." />;
   }
 
   if (files.length === 0) {
-    return <WorkspaceEmptyState icon={<IconFolder />} message="当前项目文件夹没有可显示的文件" />;
+    return <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="当前项目文件夹没有可显示的文件" />;
   }
 
   return (
@@ -6904,37 +7488,47 @@ function ProjectFilesWorkspace({
             });
           }}
           onSelect={onSelect}
+          onOpen={onOpen}
           onContextMenu={(event, node) => {
             event.preventDefault();
             setContextMenu({ x: event.clientX, y: event.clientY, node });
           }}
         />
       </div>
-      {contextMenu ? (
+      {visibleContextMenu ? (
         <WorkspaceContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
+          x={visibleContextMenu.x}
+          y={visibleContextMenu.y}
+          motionPhase={contextMenuPresence.phase}
           onClose={() => setContextMenu(null)}
           actions={[
+            ...(visibleContextMenu.node.kind === "file"
+              ? [{
+                  id: "open-file-preview",
+                  label: "查看",
+                  icon: <IconEye />,
+                  onSelect: () => onOpen(visibleContextMenu.node.path)
+                }]
+              : []),
             {
               id: "copy-path",
               label: "复制路径",
               icon: <IconCopy />,
-              onSelect: () => void navigator.clipboard.writeText(resolveProjectFilePath(projectRoot, contextMenu.node.path))
+              onSelect: () => void navigator.clipboard.writeText(resolveProjectFilePath(projectRoot, visibleContextMenu.node.path))
             },
             {
               id: "add-file-to-chat",
               label: "添加到聊天",
               icon: <IconCompose />,
               onSelect: () => {
-                const target = resolveProjectFilePath(projectRoot, contextMenu.node.path);
-                const folderManifest = contextMenu.node.kind === "directory"
-                  ? buildProjectFolderManifest(contextMenu.node)
+                const target = resolveProjectFilePath(projectRoot, visibleContextMenu.node.path);
+                const folderManifest = visibleContextMenu.node.kind === "directory"
+                  ? buildProjectFolderManifest(visibleContextMenu.node)
                   : null;
                 onAddAttachment({
-                  kind: contextMenu.node.kind === "directory" ? "folder" : "file",
+                  kind: visibleContextMenu.node.kind === "directory" ? "folder" : "file",
                   path: target,
-                  label: contextMenu.node.name,
+                  label: visibleContextMenu.node.name,
                   entries: folderManifest?.entries,
                   entriesTruncated: folderManifest?.truncated
                 });
@@ -6956,6 +7550,7 @@ function ProjectFileTreeRows({
   changeKinds,
   onToggle,
   onSelect,
+  onOpen,
   onContextMenu
 }: {
   nodes: ProjectFileTreeNode[];
@@ -6966,6 +7561,7 @@ function ProjectFileTreeRows({
   changeKinds: Map<string, ProjectFileChangeKind>;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
+  onOpen: (path: string) => void;
   onContextMenu: (event: React.MouseEvent<HTMLButtonElement>, node: ProjectFileTreeNode) => void;
 }): ReactNode {
   return nodes.map((node) => {
@@ -6987,9 +7583,20 @@ function ProjectFileTreeRows({
           aria-level={depth + 1}
           aria-expanded={isDirectory ? isExpanded : undefined}
           aria-selected={isDirectory ? undefined : selectedPath === node.path}
-          onClick={() => isDirectory ? onToggle(node.path) : onSelect(node.path)}
+          title={isDirectory ? node.path : `${node.path}（双击查看）`}
+          onClick={() => {
+            if (isDirectory) {
+              onToggle(node.path);
+              return;
+            }
+            onSelect(node.path);
+          }}
+          onDoubleClick={() => {
+            if (!isDirectory) {
+              onOpen(node.path);
+            }
+          }}
           onContextMenu={(event) => onContextMenu(event, node)}
-          title={node.path}
         >
           {isDirectory ? (
             <span className={`project-file-disclosure ${isExpanded ? "is-expanded" : ""}`} aria-hidden><IconChevronRight /></span>
@@ -7010,6 +7617,7 @@ function ProjectFileTreeRows({
             changeKinds={changeKinds}
             onToggle={onToggle}
             onSelect={onSelect}
+            onOpen={onOpen}
             onContextMenu={onContextMenu}
           />
         ) : null}
@@ -7215,7 +7823,7 @@ function LegacyBrowserWorkspace({
 }) {
   const activeTab = tabs.find((tab) => tab.isActive) ?? tabs[0];
   if (!activeTab || !threadId) {
-    return <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" />;
+    return <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里" />;
   }
 
   return (
@@ -7277,14 +7885,14 @@ function TerminalWorkspace({
   hasThread: boolean;
 }) {
   if (!hasThread) {
-    return <WorkspaceEmptyState icon={<IconTerminal />} message="选择一个任务后即可使用终端。" />;
+    return <WorkspaceEmptyState icon={<IconTerminal />} title="打开终端" message="选择一个任务后即可使用终端。" />;
   }
 
   if (tabs.length === 0) {
     return (
       <section className="terminal-workspace" aria-label="终端">
         <WorkspaceSubtabStrip items={[]} addLabel="新建终端" onAdd={onAddTab} />
-        <WorkspaceEmptyState icon={<IconTerminal />} message="新建一个终端后即可开始输入命令。" />
+        <WorkspaceEmptyState icon={<IconTerminal />} title="打开终端" message="新建一个终端后即可开始输入命令。" />
       </section>
     );
   }
@@ -7330,158 +7938,6 @@ function TerminalWorkspace({
           spellCheck={false}
         />
       </div>
-    </section>
-  );
-}
-
-function ProjectPreviewWorkspace({
-  tabs,
-  selectedPath,
-  preview,
-  toolCalls,
-  loading,
-  onSelectTab,
-  onCloseTab,
-  onAddAttachment
-}: {
-  tabs: string[];
-  selectedPath: string | null;
-  preview: PreviewCacheEntry | null;
-  toolCalls: ToolCallRecord[];
-  loading: boolean;
-  onSelectTab: (path: string) => void;
-  onCloseTab: (path: string) => void;
-  onAddAttachment: (attachment: ComposerAttachmentInput) => void;
-}) {
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
-  const [viewMode, setViewMode] = useState<"content" | "diff">("content");
-  if (tabs.length === 0) {
-    return loading ? (
-      <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取项目文件..." />
-    ) : (
-      <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="从工作区目录树中选择文件" />
-    );
-  }
-
-  const currentPath = selectedPath ?? tabs[0];
-  if (!currentPath) {
-    return <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="从工作区目录树中选择文件" />;
-  }
-  const snapshot = getLatestFileSnapshot(toolCalls, currentPath);
-  const diffLines = snapshot ? buildFileSnapshotDiff(snapshot.before, snapshot.after) : [];
-
-  return (
-    <section className="project-preview-workspace" aria-label="文件查看">
-      <WorkspaceSubtabStrip
-        items={tabs.map((path) => ({
-          id: path,
-          label: path.split(/[\\/]/).pop() || path,
-          title: path,
-          active: path === currentPath,
-          icon: <IconFile />,
-          onClick: () => onSelectTab(path),
-          onClose: () => onCloseTab(path)
-        }))}
-      />
-      <header className="project-preview-header project-preview-breadcrumb" title={currentPath}>
-        <IconFile />
-        {currentPath.split(/[\\/]/).map((segment, index, segments) => (
-          <span key={`${segment}-${index}`} className={index === segments.length - 1 ? "is-current" : ""}>
-            {index > 0 ? <i aria-hidden><IconChevronRight /></i> : null}
-            {segment}
-          </span>
-        ))}
-        <div className="project-preview-mode-switch" role="group" aria-label="文件查看模式">
-          <button
-            type="button"
-            className={viewMode === "content" ? "active" : ""}
-            onClick={() => setViewMode("content")}
-          >内容</button>
-          <button
-            type="button"
-            className={viewMode === "diff" ? "active" : ""}
-            onClick={() => setViewMode("diff")}
-          >Diff</button>
-        </div>
-      </header>
-      {viewMode === "diff" ? (
-        snapshot ? (
-          <>
-            <ol className="project-preview-code project-preview-diff" aria-label={`${currentPath} 快照 Diff`}>
-              {diffLines.map((line, index) => (
-                <li key={`${currentPath}-diff-${index}`} className={`is-${line.kind}`}>
-                  <code>
-                    <span className="project-preview-diff-marker" aria-hidden="true">{getFileSnapshotDiffMarker(line.kind)}</span>
-                    <span>{line.content}</span>
-                  </code>
-                </li>
-              ))}
-            </ol>
-            {snapshot.beforeTruncated || snapshot.afterTruncated ? <div className="project-preview-note">快照内容过长，仅显示前 512 KB。</div> : null}
-          </>
-        ) : (
-          <WorkspaceEmptyState icon={<IconEye />} title="暂无快照 Diff" message="此文件还没有本任务保存的修改前后快照。" />
-        )
-      ) : preview ? (
-        <>
-          <ol
-            className="project-preview-code"
-            aria-label={`${currentPath} 代码内容`}
-            onContextMenu={(event) => {
-              const selection = window.getSelection()?.toString().trim() ?? "";
-              if (!selection) {
-                return;
-              }
-              event.preventDefault();
-              setContextMenu({ x: event.clientX, y: event.clientY, selection });
-            }}
-          >
-            {preview.content.split(/\r?\n/).map((line, index) => (
-              <li key={`${currentPath}-line-${index}`}>
-                <code>{renderCodePreviewLine(line, `${currentPath}-${index}`)}</code>
-              </li>
-            ))}
-          </ol>
-          {preview.truncated ? <div className="project-preview-note">文件内容过长，仅显示前 512 KB。</div> : null}
-          {contextMenu ? (
-            <WorkspaceContextMenu
-              x={contextMenu.x}
-              y={contextMenu.y}
-              onClose={() => setContextMenu(null)}
-              actions={[
-                {
-                  id: "add-selection-to-chat",
-                  label: "添加到聊天",
-                  icon: <IconCompose />,
-                  onSelect: () => onAddAttachment({
-                    kind: "code",
-                    path: currentPath,
-                    content: contextMenu.selection,
-                    label: "已选代码段",
-                    intent: "reference"
-                  })
-                },
-                {
-                  id: "edit-selection",
-                  label: "编辑",
-                  icon: <IconCompose />,
-                  onSelect: () => {
-                    onAddAttachment({
-                    kind: "code",
-                    path: currentPath,
-                    content: contextMenu.selection,
-                    label: "待编辑代码段",
-                    intent: "edit"
-                  });
-                  }
-                }
-              ]}
-            />
-          ) : null}
-        </>
-      ) : (
-        <WorkspaceEmptyState icon={<IconSpinner />} message="正在读取文件..." />
-      )}
     </section>
   );
 }
@@ -7631,7 +8087,7 @@ function BrowserWorkspace({
 }) {
   const activeTab = tabs.find((tab) => tab.isActive) ?? tabs[0];
   if (!activeTab || !threadId) {
-    return visible ? <WorkspaceEmptyState icon={<IconGlobe />} message="任务打开的网页会显示在这里" /> : null;
+    return visible ? <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里" /> : null;
   }
 
   return (
@@ -7720,11 +8176,11 @@ function BrowserTabWebview({
   );
 }
 
-function WorkspaceEmptyState({ icon, title, message }: { icon: ReactNode; title?: string; message: string }) {
+function WorkspaceEmptyState({ icon, title, message }: { icon: ReactNode; title: string; message: string }) {
   return (
-    <div className={`right-workspace-empty-state ${title ? "open-file" : ""}`}>
+    <div className="right-workspace-empty-state">
       <span aria-hidden="true">{icon}</span>
-      {title ? <strong>{title}</strong> : null}
+      <strong>{title}</strong>
       <p>{message}</p>
     </div>
   );
@@ -7821,6 +8277,7 @@ function ComposerSelect({
   disabled?: boolean;
 }) {
   const [isOpen, setIsOpen] = useState(false);
+  const menuPresence = useMotionPresence(isOpen ? true : null, 140);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const selectedOption = options.find((option) => option.value === value) ?? null;
 
@@ -7875,8 +8332,8 @@ function ComposerSelect({
         </span>
       </button>
 
-      {isOpen ? (
-        <div className="composer-select-menu" role="listbox">
+      {menuPresence.value ? (
+        <div className="composer-select-menu" data-motion={menuPresence.phase} role="listbox">
           {options.map((option) => (
             <button
               key={option.value}
@@ -7932,6 +8389,7 @@ function ContextUsageControl({
   onToggle: () => void;
   onClose: () => void;
 }) {
+  const reportPresence = useMotionPresence(open ? true : null, 140);
   useEffect(() => {
     if (!open) {
       return;
@@ -7967,14 +8425,14 @@ function ContextUsageControl({
           <span>{usage.percentage}%</span>
         </span>
       </button>
-      {open ? <ContextUsageReport usage={usage} onClose={onClose} /> : null}
+      {reportPresence.value ? <ContextUsageReport usage={usage} motionPhase={reportPresence.phase} onClose={onClose} /> : null}
     </div>
   );
 }
 
-function ContextUsageReport({ usage, onClose }: { usage: ContextUsage; onClose: () => void }) {
+function ContextUsageReport({ usage, motionPhase, onClose }: { usage: ContextUsage; motionPhase?: string; onClose: () => void }) {
   return (
-    <section className="context-usage-report" aria-label="上下文占用详情">
+    <section className="context-usage-report" data-motion={motionPhase} aria-label="上下文占用详情">
       <header>
         <div>
           <strong>上下文占用</strong>
@@ -8036,6 +8494,7 @@ function ComposerModelPicker({
   disabled: boolean;
 }) {
   const [isOpen, setIsOpen] = useState(false);
+  const menuPresence = useMotionPresence(isOpen ? true : null, 140);
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [hoveredProviderId, setHoveredProviderId] = useState<string | null>(null);
   const [modelsOpenRight, setModelsOpenRight] = useState(false);
@@ -8223,8 +8682,8 @@ function ComposerModelPicker({
         </span>
       </button>
 
-      {isOpen ? (
-        <div className="composer-model-picker-menu" role="listbox">
+      {menuPresence.value ? (
+        <div className="composer-model-picker-menu" data-motion={menuPresence.phase} role="listbox">
           <ul
             className="composer-model-picker-providers"
             onMouseLeave={handleProviderLeave}
@@ -8363,7 +8822,7 @@ export function buildTimelineEntries(
 
   }
 
-  const toolEntries = buildToolGroupTimelineEntries(toolCalls);
+  const toolEntries = buildToolGroupTimelineEntries(toolCalls, messages);
 
   // While a thread is running, only suppress the in-progress turn's file summary.
   // Prior turns' "主要改动文件" must stay visible.
@@ -8390,25 +8849,70 @@ export function buildTimelineEntries(
   return collapseDirectoryReadMessages(sortedEntries);
 }
 
-function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[]): TimelineEntry[] {
-  const groups = new Map<string, ToolCallRecord[]>();
+function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[], messages: MessageRecord[]): TimelineEntry[] {
+  const callsById = new Map(toolCalls.map((toolCall) => [toolCall.id, toolCall]));
+  const assignedCallIds = new Set<string>();
+  const entries: TimelineEntry[] = [];
 
-  for (const toolCall of toolCalls) {
-    // Legacy calls without a turn id remain independently inspectable instead
-    // of being merged into an unrelated task.
-    const groupId = toolCall.turnRunId || `legacy-${toolCall.id}`;
-    groups.set(groupId, [...(groups.get(groupId) ?? []), toolCall]);
+  // New commentary messages explicitly identify the tool batch they introduce.
+  // That preserves the Codex-style "commentary -> tools -> commentary" rhythm.
+  for (const message of messages) {
+    const toolCallIds = getCommentaryToolCallIds(message);
+    const groupedToolCalls = toolCallIds
+      .map((toolCallId) => callsById.get(toolCallId))
+      .filter((toolCall): toolCall is ToolCallRecord => !!toolCall && !assignedCallIds.has(toolCall.id));
+    if (groupedToolCalls.length === 0) continue;
+
+    for (const toolCall of groupedToolCalls) assignedCallIds.add(toolCall.id);
+    entries.push(createToolGroupTimelineEntry(`commentary-${message.id}`, message.createdAt, groupedToolCalls));
   }
 
-  return [...groups.entries()].map(([turnRunId, groupedToolCalls]) => ({
-    kind: "tool-group" as const,
-    id: `tool-group-${turnRunId}`,
-    createdAt: groupedToolCalls.reduce(
-      (earliest, toolCall) => Date.parse(toolCall.startedAt) < Date.parse(earliest) ? toolCall.startedAt : earliest,
-      groupedToolCalls[0]?.startedAt ?? new Date(0).toISOString()
-    ),
-    toolCalls: groupedToolCalls.sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
-  }));
+  // Older messages predate commentary metadata. Infer their batches from the
+  // latest assistant text in the same turn so historical threads also read in
+  // chronological segments instead of one large turn-wide tool block.
+  const fallbackMessagesByTurn = new Map<string, MessageRecord[]>();
+  for (const message of messages) {
+    if (message.role !== "assistant" || !message.turnRunId || isPatchAssistantMessage(message.content)) continue;
+    fallbackMessagesByTurn.set(message.turnRunId, [...(fallbackMessagesByTurn.get(message.turnRunId) ?? []), message]);
+  }
+  const fallbackGroups = new Map<string, { createdAt: string; toolCalls: ToolCallRecord[] }>();
+  for (const toolCall of toolCalls) {
+    if (assignedCallIds.has(toolCall.id)) continue;
+    const precedingMessage = [...(fallbackMessagesByTurn.get(toolCall.turnRunId) ?? [])]
+      .filter((message) => Date.parse(message.createdAt) <= Date.parse(toolCall.startedAt))
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
+    const groupId = precedingMessage ? `message-${precedingMessage.id}` : toolCall.turnRunId || `legacy-${toolCall.id}`;
+    const createdAt = precedingMessage?.createdAt ?? toolCall.startedAt;
+    const group = fallbackGroups.get(groupId) ?? { createdAt, toolCalls: [] };
+    group.toolCalls.push(toolCall);
+    fallbackGroups.set(groupId, group);
+  }
+
+  for (const [groupId, group] of fallbackGroups) {
+    entries.push(createToolGroupTimelineEntry(groupId, group.createdAt, group.toolCalls));
+  }
+  return entries;
+}
+
+function createToolGroupTimelineEntry(groupId: string, createdAt: string, toolCalls: ToolCallRecord[]): TimelineEntry {
+  return {
+    kind: "tool-group",
+    id: `tool-group-${groupId}`,
+    createdAt,
+    toolCalls: [...toolCalls].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
+  };
+}
+
+function getCommentaryToolCallIds(message: MessageRecord): string[] {
+  if (message.role !== "assistant" || !message.metadataJson) return [];
+  try {
+    const metadata = JSON.parse(message.metadataJson) as { displayKind?: unknown; toolCallIds?: unknown };
+    return metadata.displayKind === "commentary" && Array.isArray(metadata.toolCallIds)
+      ? metadata.toolCallIds.filter((toolCallId): toolCallId is string => typeof toolCallId === "string")
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function getTurnSummaryCreatedAt(
@@ -8741,6 +9245,8 @@ function FileChangeSummary({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [diffPreview, setDiffPreview] = useState<{ file: FileChangeSummaryItem; anchor: DOMRect } | null>(null);
+  const diffPreviewPresence = useMotionPresence(diffPreview, 140);
+  const visibleDiffPreview = diffPreview ?? diffPreviewPresence.value;
   const hoverTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
   useEffect(() => () => {
@@ -8844,10 +9350,11 @@ function FileChangeSummary({
           ))}
         </ul>
       </section>
-      {diffPreview?.file.snapshot ? (
+      {visibleDiffPreview?.file.snapshot ? (
         <FileSnapshotDiffPopover
-          file={diffPreview.file}
-          anchor={diffPreview.anchor}
+          file={visibleDiffPreview.file}
+          anchor={visibleDiffPreview.anchor}
+          motionPhase={diffPreviewPresence.phase}
           onMouseEnter={clearPreviewCloseTimer}
           onMouseLeave={scheduleDiffPreviewClose}
         />
@@ -8859,11 +9366,13 @@ function FileChangeSummary({
 function FileSnapshotDiffPopover({
   file,
   anchor,
+  motionPhase,
   onMouseEnter,
   onMouseLeave
 }: {
   file: FileChangeSummaryItem;
   anchor: DOMRect;
+  motionPhase?: string;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -8880,6 +9389,7 @@ function FileSnapshotDiffPopover({
   return createPortal(
     <aside
       className="generated-file-diff-popover"
+      data-motion={motionPhase}
       aria-label={`${file.path} 快照 Diff`}
       style={style}
       onMouseEnter={onMouseEnter}
@@ -9129,6 +9639,11 @@ export function buildPlanTimelineItems(state: GpaState): PlanTimelineItem[] {
         label: phase.label,
         status: index < current ? "completed" : index === current ? "in_progress" : "pending" as const
       }));
+}
+
+export function getGpaPlanMessageId(messages: MessageRecord[], state: GpaState): string | null {
+  if (state.awaitingConfirmation !== "plan") return null;
+  return [...messages].reverse().find((message) => message.role === "assistant")?.id ?? null;
 }
 
 function PlanTimeline({ state }: { state: GpaState }) {
@@ -9461,7 +9976,7 @@ function QueuedMessageList({
   return (
     <section className={`composer-queue ${hasProject ? "has-project" : ""}`} aria-label="排队消息">
       {visible.map((message) => (
-        <div key={message.id} className="composer-queue-item">
+        <div key={message.id} className={`composer-queue-item ${deletingId === message.id ? "is-removing" : ""}`}>
           <span className="composer-queue-label">排队中</span>
           <span className="composer-queue-preview" title={message.displayContent}>{message.displayContent}</span>
           {message.attachments.length > 0 ? <span className="composer-queue-attachments">{message.attachments.length} 个附件</span> : null}
@@ -10129,7 +10644,8 @@ type UserMessageActions = {
 function renderTranscriptMessage(
   message: MessageRecord,
   assistantLabel: string,
-  userMessageActions: UserMessageActions
+  userMessageActions: UserMessageActions,
+  isGpaPlanMessage = false
 ) {
   const displayContent = getDisplayMessageContent(message);
   if (message.role === "assistant" && !displayContent.trim()) {
@@ -10145,13 +10661,44 @@ function renderTranscriptMessage(
   }
 
   return (
-    <article id={`transcript-message-${message.id}`} key={message.id} className={`message-card ${message.role}`}>
+    <article
+      id={`transcript-message-${message.id}`}
+      key={message.id}
+      className={`message-card ${message.role}${getMessageDisplayKind(message) === "commentary" ? " commentary" : ""}`}
+    >
       <div className="message-header">
         <span className={`message-author ${message.role}`}>{renderRole(message.role, assistantLabel)}</span>
         <span className="timestamp">{formatRelativeTime(message.createdAt)}</span>
       </div>
-      <div className="message-flat-body">{renderMessageContent(message, displayContent)}</div>
+      <div className="message-flat-body">
+        {isGpaPlanMessage ? (
+          <GpaPlanMessageBubble>{renderMessageContent(message, displayContent)}</GpaPlanMessageBubble>
+        ) : renderMessageContent(message, displayContent)}
+      </div>
     </article>
+  );
+}
+
+function GpaPlanMessageBubble({ children }: { children: ReactNode }) {
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <section className={`gpa-plan-message ${expanded ? "is-expanded" : "is-collapsed"}`} aria-label="GPA 计划">
+      <header className="gpa-plan-message-head">
+        <span className="gpa-plan-message-title"><IconGpa />GPA 计划</span>
+        <button
+          type="button"
+          className="gpa-plan-message-toggle"
+          aria-expanded={expanded}
+          aria-label={expanded ? "收起 GPA 计划" : "展开 GPA 计划"}
+          title={expanded ? "收起 GPA 计划" : "展开 GPA 计划"}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <IconChevronDown />
+        </button>
+      </header>
+      {expanded ? <div className="gpa-plan-message-content">{children}</div> : null}
+    </section>
   );
 }
 
@@ -10360,6 +10907,8 @@ function isVideoAttachment(attachment: MessageAttachment): boolean {
 
 function MessageAttachmentGallery({ threadId, attachments }: { threadId: string; attachments: MessageAttachment[] }) {
   const [preview, setPreview] = useState<MessageMediaPreview | null>(null);
+  const previewPresence = useMotionPresence(preview);
+  const visiblePreview = preview ?? previewPresence.value;
   if (attachments.length === 0) return null;
   const mediaCount = attachments.filter((attachment) => attachment.kind === "image" || isVideoAttachment(attachment)).length;
   return (
@@ -10409,7 +10958,7 @@ function MessageAttachmentGallery({ threadId, attachments }: { threadId: string;
           );
         })}
       </div>
-      {preview ? <MessageMediaLightbox preview={preview} onClose={() => setPreview(null)} /> : null}
+      {visiblePreview ? <MessageMediaLightbox preview={visiblePreview} motionPhase={previewPresence.phase} onClose={() => setPreview(null)} /> : null}
     </>
   );
 }
@@ -10512,9 +11061,9 @@ function MessageAttachmentVideo({
   );
 }
 
-function MessageMediaLightbox({ preview, onClose }: { preview: MessageMediaPreview; onClose: () => void }) {
+function MessageMediaLightbox({ preview, motionPhase, onClose }: { preview: MessageMediaPreview; motionPhase?: string; onClose: () => void }) {
   return createPortal(
-    <div className="message-image-lightbox" role="dialog" aria-modal="true" aria-label={preview.name} onClick={onClose}>
+    <div className="message-image-lightbox motion-overlay" data-motion={motionPhase} role="dialog" aria-modal="true" aria-label={preview.name} onClick={onClose}>
       <div className="message-image-lightbox-content" onClick={(event) => event.stopPropagation()}>
         <div className="message-image-lightbox-head">
           <span title={preview.name}>{preview.name}</span>
@@ -10547,6 +11096,8 @@ type MessageMediaReference = { source: string; kind: "local" | "url" };
 function MessageDetectedMediaGallery({ content }: { content: string }) {
   const references = extractMessageMediaReferences(content);
   const [preview, setPreview] = useState<MessageMediaPreview | null>(null);
+  const previewPresence = useMotionPresence(preview);
+  const visiblePreview = preview ?? previewPresence.value;
   if (references.length === 0) return null;
   return (
     <>
@@ -10564,7 +11115,7 @@ function MessageDetectedMediaGallery({ content }: { content: string }) {
           />
         ))}
       </div>
-      {preview ? <MessageMediaLightbox preview={preview} onClose={() => setPreview(null)} /> : null}
+      {visiblePreview ? <MessageMediaLightbox preview={visiblePreview} motionPhase={previewPresence.phase} onClose={() => setPreview(null)} /> : null}
     </>
   );
 }
@@ -11317,6 +11868,16 @@ function formatUpdatePhase(phase: UpdateState["phase"]): string {
   }
 }
 
+function getMessageDisplayKind(message: MessageRecord): string | null {
+  if (!message.metadataJson) return null;
+  try {
+    const displayKind = JSON.parse(message.metadataJson).displayKind;
+    return typeof displayKind === "string" ? displayKind : null;
+  } catch {
+    return null;
+  }
+}
+
 function formatUpdateDownloadSize(receivedBytes?: number, totalBytes?: number): string {
   const received = formatByteSize(receivedBytes ?? 0);
   return totalBytes && totalBytes > 0 ? `${received} / ${formatByteSize(totalBytes)}` : `${received} 已下载`;
@@ -11639,6 +12200,13 @@ function MarkdownMessageImage({ source, alt }: { source: string; alt: string }) 
   const isLocal = isAbsoluteLocalPath(source);
   const [previewSource, setPreviewSource] = useState<string | null>(isLocal ? null : source);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const lightboxPreview = useMemo<MessageMediaPreview | null>(() => previewSource ? {
+    source: previewSource,
+    name: alt || getFileLeafName(source),
+    kind: "image",
+    ...(isLocal ? { localPath: source } : { url: source })
+  } : null, [alt, isLocal, previewSource, source]);
+  const lightboxPresence = useMotionPresence(previewOpen ? lightboxPreview : null);
   useEffect(() => {
     if (!isLocal) return;
     let cancelled = false;
@@ -11652,14 +12220,10 @@ function MarkdownMessageImage({ source, alt }: { source: string; alt: string }) 
     <button className="markdown-image-button" type="button" onClick={() => setPreviewOpen(true)} title={`查看原图：${alt || getFileLeafName(source)}`}>
       <img className="markdown-image" src={previewSource} alt={alt} />
     </button>
-    {previewOpen ? (
+    {lightboxPresence.value ? (
       <MessageMediaLightbox
-        preview={{
-          source: previewSource,
-          name: alt || getFileLeafName(source),
-          kind: "image",
-          ...(isLocal ? { localPath: source } : { url: source })
-        }}
+        preview={lightboxPresence.value}
+        motionPhase={lightboxPresence.phase}
         onClose={() => setPreviewOpen(false)}
       />
     ) : null}
@@ -12653,11 +13217,40 @@ function IconTrash() {
   );
 }
 
+function IconEraser() {
+  return (
+    <SvgIcon size={16}>
+      <path d="m5.25 12.5 6.9-6.9a1.5 1.5 0 0 1 2.1 0l2.15 2.15a1.5 1.5 0 0 1 0 2.1L9.75 16.5H7.1l-1.85-1.85a1.5 1.5 0 0 1 0-2.15Z" />
+      <path d="m10.25 7.5 4.25 4.25" />
+      <path d="M9.75 16.5h7.5" />
+    </SvgIcon>
+  );
+}
+
 function IconRefresh() {
   return (
     <SvgIcon size={16}>
       <path d="M19 8.5V4.5l-1.7 1.7A7.1 7.1 0 0 0 5.6 8.1" />
       <path d="M5 15.5v4l1.7-1.7a7.1 7.1 0 0 0 11.7-1.9" />
+    </SvgIcon>
+  );
+}
+
+function IconUndo() {
+  return (
+    <SvgIcon size={16}>
+      <path d="M9 7 5 11l4 4" />
+      <path d="M5.5 11H14a4.5 4.5 0 0 1 0 9H11" />
+    </SvgIcon>
+  );
+}
+
+function IconComment() {
+  return (
+    <SvgIcon size={16}>
+      <path d="M5 5.5h14v10H10l-4 3v-3H5z" />
+      <path d="M8 9h8" />
+      <path d="M8 12h5" />
     </SvgIcon>
   );
 }
