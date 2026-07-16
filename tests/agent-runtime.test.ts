@@ -7,6 +7,9 @@ import {
   buildUserMessageMetadata,
   buildBrowserTestChoiceQuestion,
   resolveBrowserTestChoice,
+  buildBrowserWorkspaceRecoveryQuestion,
+  resolveBrowserWorkspaceRecoveryChoice,
+  isBrowserWorkspaceUnavailableError,
   isBrowserTestToolCall,
   classifySuccessfulToolEvidence,
   createManagedWriteCompletionState,
@@ -1402,6 +1405,25 @@ describe("GPA plan validation", () => {
     expect(instruction).toContain("T2: Implement battle effects");
     expect(instruction).toContain("Before the next tool call");
     expect(instruction).toContain("completed_task_ids");
+  });
+});
+
+describe("browser workspace recovery", () => {
+  it("offers a skip-by-default choice when the Browser workspace is unavailable", () => {
+    const question = buildBrowserWorkspaceRecoveryQuestion();
+
+    expect(question.options.find((option) => option.id === "skip")?.recommended).toBe(true);
+    expect(resolveBrowserWorkspaceRecoveryChoice({ [question.id]: "retry" })).toBe("retry");
+    expect(resolveBrowserWorkspaceRecoveryChoice({ [question.id]: "skip" })).toBe("skip");
+  });
+
+  it("recognizes the Browser workspace readiness error without catching other browser failures", () => {
+    expect(isBrowserWorkspaceUnavailableError(
+      "browser.inspect_page",
+      "Tool execution failed: Browser tab is not ready. Open the Browser workspace and retry."
+    )).toBe(true);
+    expect(isBrowserWorkspaceUnavailableError("browser.open_tab", "Tool execution failed: fetch failed")).toBe(true);
+    expect(isBrowserWorkspaceUnavailableError("browser.inspect_page", "Page selector was not found")).toBe(false);
   });
 });
 

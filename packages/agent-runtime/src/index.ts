@@ -262,8 +262,10 @@ interface BrowserCompletionRequirement {
 }
 
 export type BrowserTestChoice = "run" | "skip";
+export type BrowserWorkspaceRecoveryChoice = "retry" | "skip";
 
 export const BROWSER_TEST_CHOICE_QUESTION_ID = "browser_testing";
+export const BROWSER_WORKSPACE_RECOVERY_QUESTION_ID = "browser_workspace_recovery";
 export const RUN_BROWSER_TESTS_OPTION_ID = "run_browser_tests";
 export const SKIP_BROWSER_TESTS_OPTION_ID = "skip_browser_tests";
 
@@ -1039,7 +1041,7 @@ class ThreadSessionRuntime {
           kind: "generic",
           allowSkip: false,
           questions: [buildBrowserTestChoiceQuestion()],
-          timeoutMs: 3_000,
+          timeoutMs: 30_000,
           defaultAnswers: { [BROWSER_TEST_CHOICE_QUESTION_ID]: SKIP_BROWSER_TESTS_OPTION_ID }
         });
         const choice = resolveBrowserTestChoice(answers) ?? "skip";
@@ -1138,6 +1140,17 @@ class ThreadSessionRuntime {
           repeatedTaskFailure = { taskKey, attempts, lastError };
         }
         return attempts;
+      };
+      const requestBrowserWorkspaceRecovery = async (): Promise<BrowserWorkspaceRecoveryChoice> => {
+        const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+          title: "浏览器工作区未打开",
+          kind: "generic",
+          allowSkip: false,
+          questions: [buildBrowserWorkspaceRecoveryQuestion()],
+          timeoutMs: 30_000,
+          defaultAnswers: { [BROWSER_WORKSPACE_RECOVERY_QUESTION_ID]: "skip" }
+        });
+        return resolveBrowserWorkspaceRecoveryChoice(answers) ?? "skip";
       };
 
       const appendBlockedToolCallResult = (toolCall: RuntimeToolCall, reason: string) => {
@@ -2818,6 +2831,22 @@ class ThreadSessionRuntime {
               }
             }
           } else {
+            if (isBrowserWorkspaceUnavailableError(toolCall.name, result.content)) {
+              const recoveryChoice = await requestBrowserWorkspaceRecovery();
+              browserVerificationEvidence.testChoice = recoveryChoice === "retry" ? "run" : "skip";
+              await this.services.log("browser.workspace_unavailable", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                recoveryChoice
+              });
+              transcript.push({
+                role: "user",
+                content: recoveryChoice === "retry"
+                  ? "The user opened the Browser workspace. Retry the required browser verification using the current browser state."
+                  : "The Browser workspace is unavailable and the user chose to skip browser verification. Do not call browser tools again; continue with available file, build, or test evidence."
+              });
+              continue;
+            }
             if (MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
               transcript.push({
                 role: "user",
@@ -3931,6 +3960,44 @@ export function buildGpaPlanProgressRecoveryInstruction(
     `You declared PLAN task completion for: ${declarations.flatMap((item) => item.taskIds).join(", ")}.`,
     "Do not mark a task complete from prose alone. After successful tool results, return a structured decision whose completed_task_ids cumulatively lists every completed PLAN task ID. Keep completion_evidence for the final validated response."
   ].join(" ");
+}
+
+export function buildBrowserWorkspaceRecoveryQuestion() {
+  return {
+    id: BROWSER_WORKSPACE_RECOVERY_QUESTION_ID,
+    label: "浏览器验证",
+    prompt: "浏览器工作区尚未打开，无法继续页面验证。",
+    options: [
+      {
+        id: "retry",
+        label: "打开后重试",
+        description: "打开浏览器工作区后，继续当前页面验证。",
+        recommended: false
+      },
+      {
+        id: "skip",
+        label: "跳过验证",
+        description: "不再等待浏览器，使用文件或测试结果继续任务。",
+        recommended: true
+      }
+    ],
+    allowFreeText: false
+  };
+}
+
+export function resolveBrowserWorkspaceRecoveryChoice(
+  answers: Record<string, string>
+): BrowserWorkspaceRecoveryChoice | undefined {
+  const answer = answers[BROWSER_WORKSPACE_RECOVERY_QUESTION_ID];
+  if (answer === "retry") return "retry";
+  if (answer === "skip") return "skip";
+  return undefined;
+}
+
+export function isBrowserWorkspaceUnavailableError(toolName: string, content: string): boolean {
+  if (!isBrowserTestToolCall(toolName)) return false;
+  return /Browser tab is not ready\. Open the Browser workspace and retry\./i.test(content) ||
+    (toolName === "browser.open_tab" && /\bfetch failed\b/i.test(content));
 }
 
 export function buildGpaPlanProgressCheckpointInstruction(task: GpaState["planTasks"][number]): string {
