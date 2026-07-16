@@ -17,6 +17,7 @@ import {
   createManagedWriteRecoveryState,
   validateManagedWriteRecoveryToolCall,
   advanceManagedWriteRecovery,
+  buildGpaPlanProgressCheckpointInstruction,
   buildGpaPlanProgressRecoveryInstruction,
   validateActCompletion,
   buildActCompletionRecoveryInstruction,
@@ -547,6 +548,50 @@ describe("GPA ACT completion evidence", () => {
     expect(result.missingBrowserVerification).toEqual([]);
   });
 
+  it("accepts fast completion for frontend work with delivery and deterministic verification", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-ui",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\index.html"]
+    });
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "test-ui",
+      toolName: "shell.exec",
+      hasPriorDelivery: true
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "页面已实现并通过构建验证；未执行完整浏览器验收。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-ui", kind: "delivery" },
+          { taskId: "T1", toolCallId: "test-ui", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, verification],
+      browserVerification: {
+        fastPathEligible: true,
+        desktopOnly: false,
+        canvasRequired: false,
+        desktopAssertionCount: 0,
+        mobileAssertionCount: 0,
+        desktopScreenshotCount: 0,
+        mobileScreenshotCount: 0,
+        screenshotAttachmentCount: 0,
+        modelSupportsMultimodalInput: true
+      }
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.missingBrowserVerification).toEqual([]);
+  });
+
   it("accepts deterministic browser verification for a non-multimodal model when disclosed", () => {
     const delivery = classifySuccessfulToolEvidence({
       toolCallId: "patch-ui",
@@ -748,33 +793,38 @@ describe("ordinary managed-write completion", () => {
 describe("managed-write recovery", () => {
   const workspaceCwd = "C:\\project";
 
-  it("requires a target read after a failed managed write", () => {
+  it("normalizes patch delimiters and only blocks another managed write during recovery", () => {
     const state = createManagedWriteRecoveryState();
     advanceManagedWriteRecovery(state, {
       toolName: "apply_patch",
-      argumentsJson: { patch: "*** Begin Patch\n*** Update File: src/app.ts\n@@\n-old\n+new\n*** End Patch" },
+      argumentsJson: { patch: "*** Begin Patch ***\n*** Update File: src/app.ts ***\n@@\n-old\n+new\n*** End Patch" },
       ok: false,
       workspaceCwd
     });
 
     expect(validateManagedWriteRecoveryToolCall(
       state,
-      { name: "shell.exec", arguments: { command: "Set-Content src/app.ts new" } },
+      { name: "fs.write_file", arguments: { path: "src/app.ts", content: "new" } },
       workspaceCwd
     )).toMatchObject({ allowed: false });
     expect(validateManagedWriteRecoveryToolCall(
       state,
       { name: "fs.read_file", arguments: { path: "src/other.ts" } },
       workspaceCwd
-    )).toMatchObject({ allowed: false });
+    )).toMatchObject({ allowed: true });
     expect(validateManagedWriteRecoveryToolCall(
       state,
       { name: "fs.read_file", arguments: { path: "src/app.ts" } },
       workspaceCwd
     )).toMatchObject({ allowed: true });
+    expect(validateManagedWriteRecoveryToolCall(
+      state,
+      { name: "shell.exec", arguments: { command: "Get-Content src/app.ts" } },
+      workspaceCwd
+    )).toMatchObject({ allowed: true });
   });
 
-  it("permits only a managed retry after the required read", () => {
+  it("permits diagnostics after the required read while retaining the managed retry", () => {
     const state = createManagedWriteRecoveryState();
     advanceManagedWriteRecovery(state, {
       toolName: "fs.write_file",
@@ -794,7 +844,7 @@ describe("managed-write recovery", () => {
       state,
       { name: "shell.exec", arguments: { command: "echo new" } },
       workspaceCwd
-    )).toMatchObject({ allowed: false });
+    )).toMatchObject({ allowed: true });
     expect(validateManagedWriteRecoveryToolCall(
       state,
       { name: "fs.write_file", arguments: { path: "src/app.ts", content: "new" } },
@@ -823,6 +873,8 @@ describe("browser test choice", () => {
       "run_browser_tests",
       "skip_browser_tests"
     ]);
+    expect(question.options[0]?.recommended).toBe(false);
+    expect(question.options[1]?.recommended).toBe(true);
   });
 
   it("resolves both browser test choices and ignores unknown answers", () => {
@@ -1110,7 +1162,7 @@ describe("GPA plan validation", () => {
     ).toMatchObject({ stage: "plan", awaitingConfirmation: null, planTasks: [] });
   });
 
-  it("preserves a GPA confirmation deadline for a valid pending plan", () => {
+  it("clears legacy GPA confirmation deadlines so the plan waits for the user", () => {
     const deadline = "2026-07-15T12:00:10.000Z";
     expect(parseGpaState(JSON.stringify({
       stage: "plan",
@@ -1120,7 +1172,7 @@ describe("GPA plan validation", () => {
       confirmationExpiresAt: deadline,
       planTasks: [{ id: "T1", title: "Implement timeout", done: false }],
       updatedAt: "2026-07-15T12:00:00.000Z"
-    }))).toMatchObject({ awaitingConfirmation: "plan", confirmationExpiresAt: deadline });
+    }))).toMatchObject({ awaitingConfirmation: "plan", confirmationExpiresAt: null });
   });
 
   it("marks completed plan tasks as done during ACT progress", () => {
@@ -1236,6 +1288,18 @@ describe("GPA plan validation", () => {
 
     expect(progress).toMatchObject({ completedTaskIds: ["T1"], inferredTaskIds: [] });
     expect(buildGpaPlanProgressRecoveryInstruction(progress.declarations)).toContain("completed_task_ids");
+  });
+
+  it("requires an explicit decision at a plan progress checkpoint", () => {
+    const instruction = buildGpaPlanProgressCheckpointInstruction({
+      id: "T2",
+      title: "Implement battle effects",
+      done: false
+    });
+
+    expect(instruction).toContain("T2: Implement battle effects");
+    expect(instruction).toContain("Before the next tool call");
+    expect(instruction).toContain("completed_task_ids");
   });
 });
 

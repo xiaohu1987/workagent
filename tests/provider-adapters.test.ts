@@ -838,6 +838,7 @@ describe("decision system prompt", () => {
     expect(prompt).toContain("Do not repeat it");
     expect(prompt).toContain("goal_completed");
     expect(prompt).toContain("shell.exec");
+    expect(prompt).toContain("For every GPA ACT decision, include completed_task_ids");
   });
 });
 

@@ -115,6 +115,10 @@ export class GitService {
     return this.mutate(cwd, ["add", "--", filePath], `已暂存 ${filePath}`);
   }
 
+  public async stageAll(cwd: string): Promise<GitActionResult> {
+    return this.mutate(cwd, ["add", "-A"], "已暂存所有变更");
+  }
+
   public async unstageFile(cwd: string, filePath: string): Promise<GitActionResult> {
     return this.mutate(cwd, ["restore", "--staged", "--", filePath], `已取消暂存 ${filePath}`);
   }

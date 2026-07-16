@@ -28,6 +28,7 @@ const api = {
     ipcRenderer.invoke("projects:write-file", payload),
   getGitSnapshot: (threadId: string) => ipcRenderer.invoke("git:snapshot", threadId),
   stageGitFile: (payload: { threadId: string; path: string }) => ipcRenderer.invoke("git:stage-file", payload),
+  stageAllGitChanges: (threadId: string) => ipcRenderer.invoke("git:stage-all", threadId),
   unstageGitFile: (payload: { threadId: string; path: string }) => ipcRenderer.invoke("git:unstage-file", payload),
   revertGitFile: (payload: { threadId: string; path: string; untracked?: boolean }) =>
     ipcRenderer.invoke("git:revert-file", payload),

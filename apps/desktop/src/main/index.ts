@@ -124,8 +124,13 @@ function createTray(): void {
 }
 
 function notifyMinimizedToTray(): void {
-  const title = "CodeXH";
-  const body = "应用已最小化到系统托盘，不会退出。点击托盘图标可重新打开。";
+  showSystemNotification(
+    "CodeXH",
+    "应用已最小化到系统托盘，不会退出。点击托盘图标可重新打开。"
+  );
+}
+
+function showSystemNotification(title: string, body: string): void {
   const iconPath = resolveTrayIconPath();
 
   if (Notification.isSupported()) {
@@ -146,6 +151,44 @@ function notifyMinimizedToTray(): void {
       content: body,
       ...(iconPath ? { icon: iconPath } : { iconType: "info" })
     });
+  }
+}
+
+function isMainWindowMinimizedOrHidden(): boolean {
+  return !mainWindow || mainWindow.isMinimized() || !mainWindow.isVisible();
+}
+
+function notifyBackgroundRuntimeEvent(event: {
+  type: string;
+  payload: Record<string, unknown>;
+}): void {
+  if (!isMainWindowMinimizedOrHidden()) {
+    return;
+  }
+
+  if (event.type === "approval.requested") {
+    showSystemNotification("需要确认操作", "任务正在等待你的操作确认。");
+    return;
+  }
+
+  if (event.type === "user-input.requested") {
+    showSystemNotification("需要补充信息", "任务正在等待你的回答后继续执行。");
+    return;
+  }
+
+  if (event.type === "gpa.updated") {
+    const gpa = event.payload.gpa as { awaitingConfirmation?: unknown } | undefined;
+    if (gpa?.awaitingConfirmation === "goal" || gpa?.awaitingConfirmation === "plan") {
+      showSystemNotification("GPA 计划待确认", "请确认目标或计划以继续执行任务。");
+    }
+    return;
+  }
+
+  if (event.type === "thread.updated") {
+    const thread = event.payload.thread as { status?: unknown } | undefined;
+    if (thread?.status === "completed") {
+      showSystemNotification("任务已完成", "任务执行完成，可以查看结果。");
+    }
   }
 }
 
@@ -202,6 +245,7 @@ async function createWindow(): Promise<void> {
   });
 
   backend.onEvent((event) => {
+    notifyBackgroundRuntimeEvent(event);
     mainWindow?.webContents.send("runtime:event", event);
   });
 
@@ -314,6 +358,7 @@ function registerIpc(): void {
   ipcMain.handle("git:stage-file", (_event, payload: { threadId: string; path: string }) =>
     backend.stageGitFile(payload.threadId, payload.path)
   );
+  ipcMain.handle("git:stage-all", (_event, threadId: string) => backend.stageAllGitChanges(threadId));
   ipcMain.handle("git:unstage-file", (_event, payload: { threadId: string; path: string }) =>
     backend.unstageGitFile(payload.threadId, payload.path)
   );

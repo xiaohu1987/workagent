@@ -578,7 +578,6 @@ export function App() {
   const [composerSubmission, setComposerSubmission] = useState<ComposerSubmission | null>(null);
   const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
   const [completedTurnTimers, setCompletedTurnTimers] = useState<Record<string, { startedAt: string; completedAt: string }>>({});
-  const [expandedRuntimeThreads, setExpandedRuntimeThreads] = useState<Record<string, boolean>>({});
   const [input, setInput] = useState("");
   const [isHistorySearchOpen, setIsHistorySearchOpen] = useState(false);
   const [historySearchQuery, setHistorySearchQuery] = useState("");
@@ -983,7 +982,6 @@ export function App() {
         entries: [{ id: `submitted-${createdAt}`, kind: "status", label: "消息已发送，正在准备任务", createdAt }]
       }
     }));
-    setExpandedRuntimeThreads((current) => ({ ...current, [threadId]: false }));
   }
 
   function appendRuntimeStatus(threadId: string, label: string, createdAt = new Date().toISOString()) {
@@ -1087,12 +1085,6 @@ export function App() {
         }));
       }
     }
-    setExpandedRuntimeThreads((current) => {
-      if (!(threadId in current)) return current;
-      const next = { ...current };
-      delete next[threadId];
-      return next;
-    });
   }
 
   useEffect(() => {
@@ -1887,11 +1879,16 @@ export function App() {
     : null;
   const activeRuntimeActivity = activeRuntimeThreadId ? runtimeActivities[activeRuntimeThreadId] ?? null : null;
   const completedTurnTimer = activeRuntimeThreadId ? completedTurnTimers[activeRuntimeThreadId] ?? null : null;
-  const isRuntimeActivityExpanded = activeRuntimeThreadId ? !!expandedRuntimeThreads[activeRuntimeThreadId] : false;
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
-  const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(isTaskProcessing);
+  // A model may be thinking between tool calls. Keep the same live heartbeat
+  // until the runtime explicitly completes the turn, rather than freezing the
+  // elapsed timer at the last completed tool call.
+  const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
+    isTaskProcessing,
+    Boolean(activeRuntimeActivity) && !completedTurnTimer
+  );
   const taskProcessingLabel = useMemo(
     () =>
       activeToolCall?.threadId === activeSnapshotThreadId
@@ -2887,9 +2884,6 @@ export function App() {
   async function cancelGpaRevision() {
     setGpaRevisionOpen(false);
     setGpaRevisionDraft("");
-    if (selectedThreadId) {
-      await window.codexh.resetGpaConfirmationTimeout(selectedThreadId);
-    }
   }
 
   async function submitGpaRevision() {
@@ -2981,10 +2975,12 @@ export function App() {
     setGpaMenuPos(null);
     if (selectedThreadId) {
       try {
-        const handled = await maybeHandleIncompleteGpaPlan(selectedThreadId, {
-          preferAutoSameSession: true,
-          forcePrompt: true
-        });
+          const handled = await maybeHandleIncompleteGpaPlan(selectedThreadId, {
+            // Enabling GPA is an explicit decision point. Even plans from this
+            // session require confirmation before execution resumes.
+            preferAutoSameSession: false,
+            forcePrompt: true
+          });
         if (handled) {
           return;
         }
@@ -4372,24 +4368,44 @@ export function App() {
           ) : null}
         </div>
 
-        <button
-          className="sidebar-settings"
-          onClick={() => {
-            if (config) {
-              resetConfigDraft(config);
-            }
-            setSettingsTab("provider");
-            setIsSettingsOpen(true);
-          }}
-        >
-          <span className="sidebar-settings-main">
-            <IconGear />
-            <span>设置</span>
-          </span>
+        <div className="sidebar-settings">
+          <button
+            type="button"
+            className="sidebar-settings-button"
+            onClick={() => {
+              if (config) {
+                resetConfigDraft(config);
+              }
+              setSettingsTab("provider");
+              setIsSettingsOpen(true);
+            }}
+          >
+            <span className="sidebar-settings-main">
+              <IconGear />
+              <span>设置</span>
+            </span>
+          </button>
+          {getSidebarUpdateReminder(updateState?.phase) ? (
+            <button
+              type="button"
+              className={`sidebar-update-reminder ${updateState?.phase}`}
+              title="打开更新设置"
+              onClick={() => {
+                if (config) {
+                  resetConfigDraft(config);
+                }
+                setSettingsTab("update");
+                setIsSettingsOpen(true);
+              }}
+            >
+              <span className="sidebar-update-reminder-dot" aria-hidden="true" />
+              <span>{getSidebarUpdateReminder(updateState?.phase)}</span>
+            </button>
+          ) : null}
           <span className="sidebar-settings-help">
             <IconHelpCircle />
           </span>
-        </button>
+        </div>
       </aside>
 
       {historySearchPresence.value ? (
@@ -4555,7 +4571,6 @@ export function App() {
                 {(gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan") && !gpaConfirmationSubmitting ? (
                   <GpaConfirmationCard
                     stage={gpaState.awaitingConfirmation}
-                    expiresAt={gpaState.confirmationExpiresAt}
                     disabled={gpaRevisionSubmitting || gpaConfirmationSubmitting}
                     isEditing={gpaRevisionOpen}
                     revisionDraft={gpaRevisionDraft}
@@ -4595,28 +4610,6 @@ export function App() {
                     }
                     active
                     entries={activeRuntimeActivity?.entries ?? []}
-                    screenshots={getRuntimeBrowserScreenshotPaths(activeRuntimeActivity?.entries ?? [], snapshot?.artifacts ?? [])}
-                    expanded={isRuntimeActivityExpanded}
-                    onToggle={() => {
-                      if (!activeRuntimeThreadId) return;
-                      setExpandedRuntimeThreads((current) => ({
-                        ...current,
-                        [activeRuntimeThreadId]: !current[activeRuntimeThreadId]
-                      }));
-                    }}
-                    onShowBrowser={(snapshot?.browserTabs.length ?? 0) > 0 ? () => {
-                      setRightWorkspaceTab("browser");
-                      setRightWorkspaceExpandedTab("browser");
-                      setIsRightWorkspaceOpen(true);
-                    } : undefined}
-                    onShowDetails={() => {
-                      if (!activeRuntimeThreadId) return;
-                      setExpandedRuntimeThreads((current) => ({ ...current, [activeRuntimeThreadId]: true }));
-                    }}
-                    onRefresh={() => {
-                      if (activeRuntimeThreadId) void refreshSnapshot(activeRuntimeThreadId);
-                    }}
-                    onInterrupt={() => void interruptActiveThread()}
                   />
                 ) : completedTurnTimer ? (
                   <TurnElapsedBanner
@@ -7053,6 +7046,9 @@ function ComposerAttachmentChip({
   removing?: boolean;
   onRemove: () => void;
 }) {
+  const [preview, setPreview] = useState<MessageMediaPreview | null>(null);
+  const previewPresence = useMotionPresence(preview);
+  const visiblePreview = preview ?? previewPresence.value;
   const detail =
     attachment.kind === "code"
       ? `${attachment.path} · ${attachment.content.split(/\r?\n/).length} 行`
@@ -7071,25 +7067,57 @@ function ComposerAttachmentChip({
             : attachment.kind === "mcp" ? <IconMcp />
               : <IconFile />;
 
+  async function previewImage() {
+    if (attachment.kind !== "image") return;
+    const source = attachment.previewUrl
+      ?? (attachment.path
+        ? await window.codexh.previewLocalImage({ absolutePath: attachment.path }).catch(() => null)
+        : null);
+    if (!source) return;
+    setPreview({
+      source,
+      name: attachment.label,
+      kind: "image",
+      ...(attachment.path ? { localPath: attachment.path } : {})
+    });
+  }
+
   return (
     <div
       className={`composer-attachment-chip ${attachment.kind} ${removing ? "is-removing" : ""}`}
       title={attachment.kind === "code" ? attachment.content : attachment.kind === "skill" || attachment.kind === "mcp" ? attachment.description : attachment.path}
     >
-      <span className="composer-attachment-icon" aria-hidden="true">{icon}</span>
-      {attachment.kind === "image" && attachment.previewUrl ? (
-        <img className="composer-attachment-thumbnail" src={attachment.previewUrl} alt="" />
-      ) : null}
-      <span className="composer-attachment-copy">
-        <strong>
-          <span>{attachment.label}</span>
-          {attachment.kind === "skill" ? <em className="composer-attachment-kind">Skill</em> : null}
-        </strong>
-        <small>{detail}</small>
-      </span>
-      <button type="button" title="移除" aria-label={`移除 ${attachment.label}`} onClick={onRemove}>
+      {attachment.kind === "image" ? (
+        <button
+          className="composer-attachment-preview"
+          type="button"
+          title={`查看原图：${attachment.label}`}
+          aria-label={`查看原图：${attachment.label}`}
+          onClick={() => void previewImage()}
+        >
+          <span className="composer-attachment-icon" aria-hidden="true">{icon}</span>
+          {attachment.previewUrl ? <img className="composer-attachment-thumbnail" src={attachment.previewUrl} alt="" /> : null}
+          <span className="composer-attachment-copy">
+            <strong><span>{attachment.label}</span></strong>
+            <small>{detail}</small>
+          </span>
+        </button>
+      ) : (
+        <>
+          <span className="composer-attachment-icon" aria-hidden="true">{icon}</span>
+          <span className="composer-attachment-copy">
+            <strong>
+              <span>{attachment.label}</span>
+              {attachment.kind === "skill" ? <em className="composer-attachment-kind">Skill</em> : null}
+            </strong>
+            <small>{detail}</small>
+          </span>
+        </>
+      )}
+      <button className="composer-attachment-remove" type="button" title="移除" aria-label={`移除 ${attachment.label}`} onClick={onRemove}>
         <IconClose />
       </button>
+      {visiblePreview ? <MessageMediaLightbox preview={visiblePreview} motionPhase={previewPresence.phase} onClose={() => setPreview(null)} /> : null}
     </div>
   );
 }
@@ -7366,6 +7394,7 @@ const GitChangesWorkspace = memo(function GitChangesWorkspace({
   const files = snapshot?.files ?? [];
   const selected = files.find((file) => file.path === selectedPath) ?? files[0] ?? null;
   const hasStagedFiles = files.some((file) => file.staged);
+  const hasUnstagedFiles = files.some((file) => file.unstaged || file.untracked);
   const hasCommitsToPush = snapshot?.upstream ? (snapshot.ahead ?? 0) > 0 : Boolean(snapshot?.head);
   const groups = [
     { id: "conflicted", label: "冲突", files: files.filter((file) => file.conflicted) },
@@ -7401,6 +7430,16 @@ const GitChangesWorkspace = memo(function GitChangesWorkspace({
           {snapshot.ahead || snapshot.behind ? <small>{snapshot.ahead ? `↑${snapshot.ahead}` : ""}{snapshot.behind ? ` ↓${snapshot.behind}` : ""}</small> : null}
         </div>
         <div className="git-header-actions">
+          <button
+            type="button"
+            className="git-text-action"
+            title={snapshot.upstream ? "拉取远端更新" : "当前分支没有上游分支"}
+            disabled={busy || !threadId || !snapshot.upstream}
+            onClick={() => threadId && run(() => window.codexh.pullGitChanges(threadId) as Promise<GitActionResult>)}
+          >
+            <IconArrowDown />
+            <span>拉取</span>
+          </button>
           <button type="button" className="git-icon-button" title="刷新变更" aria-label="刷新变更" disabled={loading || busy} onClick={onRefresh}><IconRefresh /></button>
           {snapshot.canCreatePullRequest ? <button type="button" className="git-text-action" disabled={busy} onClick={() => threadId && run(() => window.codexh.createGitPullRequest(threadId) as Promise<GitActionResult>)}>PR</button> : null}
         </div>
@@ -7451,20 +7490,32 @@ const GitChangesWorkspace = memo(function GitChangesWorkspace({
         </div>
       </div>
       <footer className="git-commit-bar">
+        <button
+          type="button"
+          className="git-stage-all-button"
+          title={hasUnstagedFiles ? "暂存所有工作区变更" : "没有可暂存的变更"}
+          disabled={busy || !threadId || !hasUnstagedFiles}
+          onClick={() => threadId && run(() => window.codexh.stageAllGitChanges(threadId) as Promise<GitActionResult>)}
+        >
+          <IconPlus />
+          <span>暂存全部</span>
+        </button>
         <input
           value={commitMessage}
           onChange={(event) => setCommitMessage(event.target.value)}
-          placeholder={hasStagedFiles ? "提交说明" : "提交说明（请先暂存文件）"}
+          placeholder={hasStagedFiles ? "提交说明" : "提交说明（可先暂存全部）"}
           disabled={busy}
         />
         <button
           type="button"
+          className="git-commit-button"
           title={hasStagedFiles ? "提交已暂存变更" : "请先暂存文件"}
           aria-label={hasStagedFiles ? "提交已暂存变更" : "请先暂存文件"}
           disabled={busy || !commitMessage.trim() || !hasStagedFiles || !threadId}
           onClick={() => threadId && run(() => window.codexh.commitGitChanges({ threadId, message: commitMessage }) as Promise<GitActionResult>)}
         >
           <IconCheck />
+          <span>提交</span>
         </button>
         <button
           type="button"
@@ -7475,6 +7526,7 @@ const GitChangesWorkspace = memo(function GitChangesWorkspace({
           onClick={() => threadId && run(() => window.codexh.pushGitChanges(threadId) as Promise<GitActionResult>)}
         >
           <IconArrowUp />
+          <span>推送</span>
         </button>
       </footer>
     </section>
@@ -8898,11 +8950,12 @@ function ComposerModelPicker({
 }
 
 export function shouldShowRuntimeActivityPanel(
-  isTaskProcessing: boolean
+  isTaskProcessing: boolean,
+  hasActiveRuntimeActivity = false
 ): boolean {
-  // The persistent activity panel is the execution heartbeat. Tool summaries
-  // and streamed text supplement it, but must never hide it while Stop is shown.
-  return isTaskProcessing;
+  // The persistent activity panel is the execution heartbeat between tool calls
+  // and while the model is thinking.
+  return isTaskProcessing || hasActiveRuntimeActivity;
 }
 
 export function buildTimelineEntries(
@@ -9780,8 +9833,20 @@ export function buildPlanTimelineItems(state: GpaState): PlanTimelineItem[] {
 }
 
 export function getGpaPlanMessageId(messages: MessageRecord[], state: GpaState): string | null {
-  if (state.awaitingConfirmation !== "plan") return null;
-  return [...messages].reverse().find((message) => message.role === "assistant")?.id ?? null;
+  if ((state.stage !== "plan" && state.stage !== "act") || state.planTasks.length === 0) {
+    return null;
+  }
+  const taskHeadingPatterns = state.planTasks.map((task) => new RegExp(
+    `(?:^|\\n)\\s*###\\s*${escapeRegExp(task.id)}\\s*:`,
+    "i"
+  ));
+  return [...messages].reverse().find(
+    (message) => message.role === "assistant" && taskHeadingPatterns.every((pattern) => pattern.test(message.content))
+  )?.id ?? null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function PlanTimeline({ state }: { state: GpaState }) {
@@ -9966,115 +10031,24 @@ function RuntimeActivityPanel({
   label,
   startedAt,
   active,
-  entries,
-  screenshots,
-  expanded,
-  onToggle,
-  onShowBrowser,
-  onShowDetails,
-  onRefresh,
-  onInterrupt
+  entries
 }: {
   label: string;
   startedAt?: string;
   active?: boolean;
   entries: RuntimeActivityEntry[];
-  screenshots: string[];
-  expanded: boolean;
-  onToggle: () => void;
-  onShowBrowser?: () => void;
-  onShowDetails: () => void;
-  onRefresh: () => void;
-  onInterrupt: () => void;
 }) {
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
-  const toolEntries = entries.filter(
-    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
-  );
-  const latestOutput = [...entries].reverse().find((entry) => entry.kind === "output");
-  const completedToolCount = entries.filter(
-    (entry) => entry.kind === "tool" && entry.toolCall.status === "completed"
-  ).length;
-  const failedToolCount = entries.filter(
-    (entry) => entry.kind === "tool" && (entry.toolCall.status === "failed" || entry.toolCall.status === "denied")
-  ).length;
   const resolvedStartedAt = startedAt || getRuntimeActivityStartedAt(entries);
   const elapsedMs = useElapsedClock(resolvedStartedAt, active !== false);
-  const isWaitingForFirstUpdate = entries.length <= 1;
-  const isSlowStart = isWaitingForFirstUpdate && elapsedMs >= 5_000;
-  const isUnresponsive = isWaitingForFirstUpdate && elapsedMs >= 15_000;
-  const displayLabel = isSlowStart
-    ? `\u6b63\u5728\u542f\u52a8\u4efb\u52a1 \u00b7 \u5df2\u7b49\u5f85 ${formatElapsedClock(elapsedMs)}`
-    : label;
+  const displayLabel = latestStatus?.label ?? label;
   return (
-    <section className={`runtime-activity-panel ${expanded ? "expanded" : ""} ${isSlowStart ? "slow-start" : ""}`} aria-live="polite">
-      {resolvedStartedAt ? (
-        <TurnElapsedBanner startedAt={resolvedStartedAt} active={active !== false} />
-      ) : null}
-      <button
-        type="button"
-        className="runtime-activity-toggle"
-        aria-expanded={expanded}
-        onClick={onToggle}
-      >
+    <section className="runtime-activity-panel" aria-live="polite">
+      <div className="runtime-activity-current">
         <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
-        <span>{displayLabel}</span>
-        <span className="runtime-activity-chevron" aria-hidden="true" />
-      </button>
-      {isSlowStart ? (
-        <div className="runtime-slow-start">
-          <span>{isUnresponsive ? "\u8fd8\u6ca1\u6536\u5230\u4efb\u52a1\u8fd0\u884c\u72b6\u6001" : "\u542f\u52a8\u8017\u65f6\u6bd4\u5e73\u65f6\u66f4\u957f"}</span>
-          {isUnresponsive ? (
-            <span className="runtime-slow-start-actions">
-              <button type="button" title="\u67e5\u770b\u8fd0\u884c\u8be6\u60c5" aria-label="\u67e5\u770b\u8fd0\u884c\u8be6\u60c5" onClick={onShowDetails}>
-                <IconEye />
-              </button>
-              <button type="button" title="\u5237\u65b0\u4efb\u52a1\u72b6\u6001" aria-label="\u5237\u65b0\u4efb\u52a1\u72b6\u6001" onClick={onRefresh}>
-                <IconRefresh />
-              </button>
-              <button type="button" className="danger" title="\u505c\u6b62\u6267\u884c" aria-label="\u505c\u6b62\u6267\u884c" onClick={onInterrupt}>
-                <IconStop />
-              </button>
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-      {onShowBrowser ? (
-        <button type="button" className="runtime-show-browser" onClick={onShowBrowser}>
-          <IconGlobe />
-          <span>显示页面</span>
-        </button>
-      ) : null}
-      {expanded ? (
-        <div className="runtime-activity-details">
-          <div className="runtime-activity-status-row current">
-            <span className="runtime-activity-status-dot" aria-hidden="true" />
-            <span>{latestStatus?.label ?? label}</span>
-          </div>
-          {completedToolCount > 0 ? (
-            <div className="runtime-activity-status-row summary">
-              <span className="runtime-activity-status-check" aria-hidden="true">✓</span>
-              <span>已完成 {completedToolCount} 个工具操作</span>
-            </div>
-          ) : null}
-          {failedToolCount > 0 ? (
-            <div className="runtime-activity-status-row failed">
-              <span className="runtime-activity-status-check" aria-hidden="true">!</span>
-              <span>{`\u6709 ${failedToolCount} \u9879\u64cd\u4f5c\u5931\u8d25`}</span>
-            </div>
-          ) : null}
-          {toolEntries.map((entry) => <ToolActivityRow key={entry.id} toolCall={entry.toolCall} compact />)}
-          {latestOutput?.kind === "output" ? (
-            <RuntimeActivityOutputRow key={latestOutput.id} label={latestOutput.label} content={latestOutput.content} />
-          ) : null}
-          {screenshots.length > 0 ? (
-            <div className="runtime-browser-screenshots">
-              <span>页面验证截图 · {screenshots.length}</span>
-              <MessageDetectedMediaGallery content={screenshots.join("\n")} />
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+        <strong>{displayLabel}</strong>
+        {resolvedStartedAt ? <time>{formatElapsedClock(elapsedMs)}</time> : null}
+      </div>
     </section>
   );
 }
@@ -10136,7 +10110,6 @@ function QueuedMessageList({
 
 function GpaConfirmationCard({
   stage,
-  expiresAt,
   disabled,
   isEditing,
   revisionDraft,
@@ -10148,7 +10121,6 @@ function GpaConfirmationCard({
   onRevisionSubmit
 }: {
   stage: Exclude<GpaStage, "off" | "act">;
-  expiresAt?: string | null;
   disabled: boolean;
   isEditing: boolean;
   revisionDraft: string;
@@ -10159,18 +10131,7 @@ function GpaConfirmationCard({
   onRevisionCancel: () => void;
   onRevisionSubmit: () => void;
 }) {
-  const autoConfirmedRef = useRef(false);
   const isPlan = stage === "plan";
-  useEffect(() => {
-    if (isEditing || disabled || !expiresAt || autoConfirmedRef.current) return;
-    const timer = window.setTimeout(() => {
-      if (!autoConfirmedRef.current) {
-        autoConfirmedRef.current = true;
-        onConfirm();
-      }
-    }, Math.max(0, Date.parse(expiresAt) - Date.now()));
-    return () => window.clearTimeout(timer);
-  }, [disabled, expiresAt, isEditing, onConfirm]);
   const title = isPlan ? "确认计划" : "确认目标";
   const description = isPlan
     ? "计划确认后将直接进入执行阶段。"
@@ -10218,7 +10179,6 @@ function GpaConfirmationCard({
       <div className="gpa-confirmation-copy">
         <strong>{title}</strong>
         <span>{description}</span>
-        {!isEditing ? <InteractionCountdown expiresAt={expiresAt} timeoutLabel="后将自动继续" /> : null}
       </div>
       <div className="gpa-confirmation-actions">
         <button className="gpa-confirmation-button secondary" type="button" onClick={onRevise} disabled={disabled}>
@@ -10326,6 +10286,12 @@ function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
   const [expanded, setExpanded] = useState(false);
   const { runningCall, status, summary } = getToolActivityPresentation(toolCalls);
 
+  // The persistent runtime panel shows the current tool. Add this group to the
+  // transcript only after every call in it is complete, so the state is not duplicated.
+  if (runningCall) {
+    return null;
+  }
+
   return (
     <section className={`tool-activity-group ${status} ${expanded ? "is-expanded" : ""}`}>
       <button
@@ -10342,7 +10308,6 @@ function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
           <strong>{summary.title}</strong>
           {summary.detail ? <span>{summary.detail}</span> : null}
         </span>
-        {runningCall ? <span className="tool-activity-running">进行中</span> : null}
         <span className="tool-activity-chevron" aria-hidden />
       </button>
       <div className="tool-activity-details-shell">
@@ -12226,14 +12191,13 @@ function CopyTextButton({ content }: { content: string }) {
   }, []);
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(content);
+    if (await copyTextToClipboard(content)) {
       setCopied(true);
       if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
       resetTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setCopied(false);
+      return;
     }
+    setCopied(false);
   }
 
   return (
@@ -12247,6 +12211,30 @@ function CopyTextButton({ content }: { content: string }) {
       <IconCopy />
     </button>
   );
+}
+
+export function getSidebarUpdateReminder(phase?: UpdateState["phase"]): string | null {
+  if (phase === "available") return "有更新";
+  if (phase === "downloading") return "下载中";
+  if (phase === "downloaded") return "可安装";
+  return null;
+}
+
+async function copyTextToClipboard(content: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(content);
+    return true;
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = content;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return copied;
+  }
 }
 
 function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
@@ -13505,6 +13493,15 @@ function IconArrowUp() {
     <SvgIcon>
       <path d="M12 18V6" />
       <path d="m7 11 5-5 5 5" />
+    </SvgIcon>
+  );
+}
+
+function IconArrowDown() {
+  return (
+    <SvgIcon>
+      <path d="M12 6v12" />
+      <path d="m7 13 5 5 5-5" />
     </SvgIcon>
   );
 }

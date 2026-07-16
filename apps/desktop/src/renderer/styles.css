@@ -369,6 +369,7 @@ pre {
 
 .sidebar-settings {
   justify-content: space-between;
+  gap: 8px;
   min-height: 68px;
   padding: 0 22px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
@@ -5655,6 +5656,82 @@ select:focus {
   object-fit: cover;
 }
 
+.sidebar-settings-button {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-update-reminder {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(109, 209, 149, 0.34);
+  border-radius: 6px;
+  color: #97dfad;
+  background: rgba(67, 160, 102, 0.12);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-update-reminder:hover,
+.sidebar-update-reminder:focus-visible {
+  border-color: rgba(109, 209, 149, 0.68);
+  color: #d6f5df;
+  background: rgba(67, 160, 102, 0.2);
+  outline: none;
+}
+
+.sidebar-update-reminder-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.sidebar-update-reminder.downloading {
+  border-color: rgba(130, 181, 255, 0.34);
+  color: #9ec5ff;
+  background: rgba(74, 139, 217, 0.12);
+}
+
+.composer-attachment-preview {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: zoom-in;
+}
+
+.composer-attachment-preview:hover .composer-attachment-thumbnail,
+.composer-attachment-preview:focus-visible .composer-attachment-thumbnail {
+  outline: 1px solid rgba(232, 154, 210, 0.8);
+  outline-offset: 2px;
+}
+
+.composer-attachment-preview:focus-visible {
+  border-radius: 4px;
+  outline: 1px solid rgba(232, 154, 210, 0.8);
+  outline-offset: 2px;
+}
+
 .message-attachment-gallery {
   display: flex;
   flex-wrap: wrap;
@@ -6197,7 +6274,7 @@ select:focus {
   font-size: 11px;
 }
 
-.composer-attachment-chip > button {
+.composer-attachment-remove {
   display: grid;
   flex: 0 0 auto;
   width: 20px;
@@ -6209,12 +6286,12 @@ select:focus {
   cursor: pointer;
 }
 
-.composer-attachment-chip > button:hover {
+.composer-attachment-remove:hover {
   color: #fff;
   background: rgba(255, 255, 255, 0.12);
 }
 
-.composer-attachment-chip > button svg { width: 13px; height: 13px; }
+.composer-attachment-remove svg { width: 13px; height: 13px; }
 
 .composer-toolbar {
   margin-top: 10px;
@@ -6483,10 +6560,36 @@ select:focus {
 }
 
 .runtime-activity-panel {
-  width: 100%;
-  margin: 2px 0 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 4px 0 8px;
   color: #9ea7b4;
   font-size: 12px;
+}
+
+.runtime-activity-current {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 27px;
+  gap: 8px;
+  color: #aeb8c5;
+}
+
+.runtime-activity-current strong {
+  overflow: hidden;
+  color: #c9d1db;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-activity-current time {
+  flex: 0 0 auto;
+  color: #778291;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .composer-submission-status {
@@ -8439,9 +8542,17 @@ select:focus {
 }
 
 .git-text-action {
+  display: inline-flex;
   height: 25px;
+  align-items: center;
+  gap: 4px;
   padding: 0 6px;
   font-size: 11px;
+}
+
+.git-text-action svg {
+  width: 13px;
+  height: 13px;
 }
 
 .git-icon-button:hover,
@@ -8692,6 +8803,30 @@ select:focus {
 .git-commit-bar button svg {
   width: 14px;
   height: 14px;
+}
+
+.git-commit-bar .git-stage-all-button,
+.git-commit-bar .git-commit-button,
+.git-commit-bar .git-push-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-width: 0;
+  gap: 4px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.git-commit-bar .git-stage-all-button {
+  color: #d9e9ff;
+  background: rgba(79, 139, 214, 0.16);
+}
+
+.git-commit-bar .git-stage-all-button:not(:disabled):hover {
+  background: rgba(79, 139, 214, 0.34);
 }
 
 .git-commit-bar button:not(:disabled):hover {
@@ -9191,19 +9326,21 @@ select:focus {
 
 .markdown-code-scroll {
   margin: 0;
-  overflow-x: auto;
+  overflow-x: hidden;
   padding: 7px 0 10px;
   color: #d9dee8;
   font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   tab-size: 2;
 }
 
 .markdown-code-lines {
   display: block;
-  min-width: max-content;
+  min-width: 0;
+  width: 100%;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -9212,8 +9349,8 @@ select:focus {
 
 .markdown-code-lines li {
   display: grid;
-  grid-template-columns: 42px max-content;
-  min-width: max-content;
+  grid-template-columns: 42px minmax(0, 1fr);
+  min-width: 0;
   min-height: 19px;
   padding-right: 14px;
   counter-increment: markdown-code-line;
@@ -9233,12 +9370,16 @@ select:focus {
 
 .markdown-code-block code {
   display: block;
+  min-width: 0;
   padding-left: 12px;
   border-radius: 0;
   color: inherit;
   background: transparent;
   font-family: inherit;
   font-size: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .markdown-code-block .hljs-comment,
@@ -9307,7 +9448,7 @@ select:focus {
   color: #aeb9c8;
   background: rgba(10, 11, 14, 0.78);
   cursor: pointer;
-  opacity: 0;
+  opacity: 1;
   transition: opacity 140ms ease, color 140ms ease, background 140ms ease, border-color 140ms ease;
 }
 

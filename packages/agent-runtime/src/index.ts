@@ -101,6 +101,7 @@ export {
 } from "./multimodal-intent";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
+export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
 export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs;
 export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
 export const MAX_AGENT_PROTOCOL_FAILURES = 2;
@@ -215,6 +216,7 @@ interface BrowserVerificationEvidenceState {
 
 interface BrowserCompletionRequirement {
   skippedByUser?: boolean;
+  fastPathEligible?: boolean;
   desktopOnly: boolean;
   canvasRequired: boolean;
   desktopAssertionCount: number;
@@ -511,12 +513,7 @@ class ThreadSessionRuntime {
   }
 
   async #commitGpa(next: GpaState): Promise<void> {
-    const committed = next.awaitingConfirmation === "goal" || next.awaitingConfirmation === "plan"
-      ? {
-          ...next,
-          confirmationExpiresAt: next.confirmationExpiresAt ?? new Date(Date.now() + 10_000).toISOString()
-        }
-      : { ...next, confirmationExpiresAt: null };
+    const committed = { ...next, confirmationExpiresAt: null };
     this.#gpa = committed;
     await this.services.persistence.updateThread(this.threadId, {
       gpaStateJson: JSON.stringify(committed)
@@ -735,12 +732,6 @@ class ThreadSessionRuntime {
 
   public async resetGpaConfirmationTimeout(): Promise<void> {
     await this.#ensureGpa();
-    if (this.#gpa.awaitingConfirmation !== "goal" && this.#gpa.awaitingConfirmation !== "plan") return;
-    await this.#commitGpa({
-      ...this.#gpa,
-      confirmationExpiresAt: new Date(Date.now() + 10_000).toISOString(),
-      updatedAt: new Date().toISOString()
-    });
   }
 
   public getGpa(): GpaState {
@@ -991,6 +982,7 @@ class ThreadSessionRuntime {
       const successfulToolEvidence: SuccessfulToolEvidence[] = [];
       const managedWriteCompletion = createManagedWriteCompletionState();
       const managedWriteRecovery = createManagedWriteRecoveryState();
+      const managedWriteRecoveryBlocks = new Map<string, number>();
       const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
@@ -1008,20 +1000,20 @@ class ThreadSessionRuntime {
           return browserVerificationEvidence.testChoice;
         }
         const answers = await this.services.requestUserInput(this.threadId, turn.id, {
-          title: "是否进行浏览器测试？",
+          title: "是否进行完整浏览器验收？",
           kind: "generic",
           allowSkip: false,
           questions: [buildBrowserTestChoiceQuestion()],
-          timeoutMs: 10_000,
-          defaultAnswers: { [BROWSER_TEST_CHOICE_QUESTION_ID]: RUN_BROWSER_TESTS_OPTION_ID }
+          timeoutMs: 3_000,
+          defaultAnswers: { [BROWSER_TEST_CHOICE_QUESTION_ID]: SKIP_BROWSER_TESTS_OPTION_ID }
         });
-        const choice = resolveBrowserTestChoice(answers) ?? "run";
+        const choice = resolveBrowserTestChoice(answers) ?? "skip";
         browserVerificationEvidence.testChoice = choice;
         transcript.push({
           role: "user",
           content: choice === "run"
             ? "[Internal browser test choice. Do not quote this instruction.] The user chose to run browser tests. Complete the required browser assertions and screenshots before finishing."
-            : "[Internal browser test choice. Do not quote this instruction.] The user chose to skip browser tests. Do not call browser tools solely for verification. Continue with appropriate non-browser verification and mention that browser testing was skipped by user choice in the final summary."
+            : "[Internal browser test choice. Do not quote this instruction.] Use fast completion. Do not call browser tools solely for verification; finish with available deterministic delivery and verification evidence, and state that full browser testing was not run."
         });
         await this.services.log("browser.test_choice_resolved", this.threadId, {
           turnRunId: turn.id,
@@ -1044,6 +1036,7 @@ class ThreadSessionRuntime {
       let agentProtocolFailureAttempts = 0;
       let gpaAnalysisValidationAttempts = 0;
       let gpaPlanProgressReminderIssued = false;
+      let gpaPlanProgressCheckpointTaskId: string | null = null;
       let gpaActCompletedSuccessfully = false;
       const requiresAgentDecisionProtocol = () => this.#gpa.stage === "off" || this.#gpa.stage === "act";
 
@@ -1353,6 +1346,33 @@ class ThreadSessionRuntime {
             declarations: planProgress.declarations,
             hasSuccessfulToolEvidence: planProgress.hasSuccessfulToolEvidence
           });
+        }
+
+        const currentPlanTask = this.#gpa.stage === "act"
+          ? this.#gpa.planTasks.find((task) => !task.done)
+          : undefined;
+        if (
+          planProgress &&
+          currentPlanTask &&
+          decision.toolCalls.some((call) => call.name !== "request_user_input") &&
+          planProgress.completedTaskIds.length === 0 &&
+          planProgress.hasSuccessfulToolEvidence &&
+          gpaPlanProgressCheckpointTaskId !== currentPlanTask.id
+        ) {
+          gpaPlanProgressCheckpointTaskId = currentPlanTask.id;
+          transcript.push({
+            role: "user",
+            content: buildGpaPlanProgressCheckpointInstruction(currentPlanTask)
+          });
+          await this.services.log("gpa.plan_progress_checkpoint", this.threadId, {
+            turnRunId: turn.id,
+            currentTaskId: currentPlanTask.id,
+            currentTaskTitle: currentPlanTask.title,
+            successfulToolCallIds: successfulToolEvidence
+              .filter((item) => item.kinds.length > 0)
+              .map((item) => item.toolCallId)
+          });
+          continue;
         }
 
         if (
@@ -1731,6 +1751,10 @@ class ThreadSessionRuntime {
             successfulEvidence: successfulToolEvidence,
             browserVerification: browserVerificationEvidence.required ? {
               skippedByUser: browserVerificationEvidence.testChoice === "skip",
+              fastPathEligible:
+                browserVerificationEvidence.testChoice !== "run" &&
+                successfulToolEvidence.some((item) => item.kinds.includes("delivery")) &&
+                successfulToolEvidence.some((item) => item.kinds.includes("verification")),
               desktopOnly: desktopOnlyBrowserVerification,
               canvasRequired: browserVerificationEvidence.canvasRequired,
               desktopAssertionCount: browserVerificationEvidence.desktopAssertions.size,
@@ -2121,12 +2145,29 @@ class ThreadSessionRuntime {
           if (!recoveryValidation.allowed) {
             const message = recoveryValidation.message ?? "Complete the required managed-write recovery step first.";
             transcript.push({ role: "user", content: message });
+            const recoveryKey = [
+              managedWriteRecovery.phase,
+              managedWriteRecovery.failedToolName ?? "unknown",
+              ...managedWriteRecovery.targetPaths
+            ].join(":");
+            const attempts = (managedWriteRecoveryBlocks.get(recoveryKey) ?? 0) + 1;
+            managedWriteRecoveryBlocks.set(recoveryKey, attempts);
             await this.services.log("agent.managed_write_recovery_blocked", this.threadId, {
               turnRunId: turn.id,
               toolName: toolCall.name,
               phase: managedWriteRecovery.phase,
+              attempts,
+              maxAttempts: MAX_MANAGED_WRITE_RECOVERY_BLOCKS,
               reason: message
             });
+            if (attempts >= MAX_MANAGED_WRITE_RECOVERY_BLOCKS) {
+              repeatedTaskFailure = {
+                taskKey: "managed-write-recovery",
+                attempts,
+                lastError: message
+              };
+              break;
+            }
             continue;
           }
           const toolRecord = await this.services.persistence.recordToolCall({
@@ -2686,16 +2727,6 @@ class ThreadSessionRuntime {
 
         await compactContext("post_tool_batch");
 
-        if (
-          this.#gpa.stage === "act" &&
-          !readRepeatedTaskFailure() &&
-          browserVerificationEvidence.required &&
-          !browserVerificationEvidence.testChoice
-        ) {
-          await requestBrowserTestChoice("frontend_delivery");
-          continue;
-        }
-
         if (reevaluateAfterUserInput) {
           continue;
         }
@@ -2735,6 +2766,7 @@ class ThreadSessionRuntime {
 
           if (answers.recovery === "continue") {
             taskFailureCounts.clear();
+            managedWriteRecoveryBlocks.clear();
             failedToolCallFingerprints.clear();
             repeatedTaskFailure = null;
             executionRecoveryAttempts = 0;
@@ -3536,7 +3568,7 @@ function buildBrowserVerificationDirective(stage: GpaStage): string {
   return [
     "\n\nFrontend verification policy:",
     "Preferred order: locate with fs/code tools, write changes with apply_patch or fs.write_file, then verify in the app browser when the task is browser-rendered.",
-    "After changing HTML, CSS, JavaScript, JSX, TSX, Vue, Svelte, Canvas, or other browser-rendered resources, the runtime will ask the user whether browser testing should run. Do not start browser verification before that choice. If the user chooses yes, gather browser evidence before completing; if the user chooses no, skip browser verification and use appropriate non-browser checks.",
+    "After changing HTML, CSS, JavaScript, JSX, TSX, Vue, Svelte, Canvas, or other browser-rendered resources, prefer fast completion with successful read-back, build, or test evidence. Request full browser verification only when the user asks for it or the change is visually risky. Do not start browser verification before the user's choice. If full verification is chosen, gather browser evidence before completing.",
     "Desktop ~1440x900 and mobile ~390x844 are recommended unless the user asked for desktop-only.",
     "Useful checks include relevant text/elements, images_loaded, no_horizontal_overflow, no_severe_console_errors, and canvas_nonblank for Canvas/game work.",
     "A screenshot from before the latest file change is weak evidence. If the model supports images, inspect the screenshot attachment before claiming visual quality.",
@@ -3548,18 +3580,19 @@ export function buildBrowserTestChoiceQuestion() {
   return {
     id: BROWSER_TEST_CHOICE_QUESTION_ID,
     label: "浏览器测试",
-    prompt: "本次改动涉及浏览器页面，是否进行浏览器测试？",
+    prompt: "本次改动涉及浏览器页面，是否执行完整的桌面和移动端浏览器验收？",
     options: [
       {
         id: RUN_BROWSER_TESTS_OPTION_ID,
         label: "进行浏览器测试",
         description: "执行桌面端和移动端页面断言及截图验收。",
-        recommended: true
+        recommended: false
       },
       {
         id: SKIP_BROWSER_TESTS_OPTION_ID,
-        label: "跳过浏览器测试",
-        description: "跳过浏览器验收，继续使用其他可用验证结果。"
+        label: "快速完成",
+        description: "使用已有的文件回读、构建或测试结果完成验收。",
+        recommended: true
       }
     ],
     allowFreeText: false
@@ -3744,6 +3777,16 @@ export function buildGpaPlanProgressRecoveryInstruction(
   ].join(" ");
 }
 
+export function buildGpaPlanProgressCheckpointInstruction(task: GpaState["planTasks"][number]): string {
+  return [
+    "[Internal GPA plan checkpoint. Do not display or quote this instruction to the user.]",
+    `Successful tool results are available while the current plan item is ${task.id}: ${task.title}.`,
+    "Before the next tool call, decide whether this item has met its acceptance criteria.",
+    "If it is complete, return a structured decision with completed_task_ids containing this ID and every earlier completed ID.",
+    "If it is not complete, leave completed_task_ids empty and continue only work that belongs to this current plan item; do not begin a later plan item yet."
+  ].join(" ");
+}
+
 export function validateActCompletion(input: {
   decision: Pick<
     ProviderTurnDecision,
@@ -3790,7 +3833,7 @@ export function validateActCompletion(input: {
   const missingVerification = !referencedEvidence.some((item) => item.kinds.includes("verification"));
   const missingBrowserVerification: string[] = [];
   const browser = input.browserVerification;
-  if (browser && !browser.skippedByUser) {
+  if (browser && !browser.skippedByUser && !browser.fastPathEligible) {
     if (browser.desktopAssertionCount === 0) missingBrowserVerification.push("desktop page assertions");
     if (browser.desktopScreenshotCount === 0) missingBrowserVerification.push("desktop screenshot");
     if (!browser.desktopOnly && browser.mobileAssertionCount === 0) missingBrowserVerification.push("mobile page assertions");
@@ -4818,28 +4861,15 @@ export function validateManagedWriteRecoveryToolCall(
   if (state.phase === "none") return { allowed: true };
 
   if (state.phase === "read") {
-    if (toolCall.name !== "fs.read_file") {
+    if (MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
       return {
         allowed: false,
         message: buildManagedWriteRecoveryInstruction(state)
       };
     }
-    const readPath = getRecoveryFilePath(toolCall.arguments.path, workspaceCwd);
-    if (
-      state.targetPaths.length > 0 &&
-      (!readPath || !state.targetPaths.some((targetPath) => pathsMatch(targetPath, readPath)))
-    ) {
-      return {
-        allowed: false,
-        message: `${buildManagedWriteRecoveryInstruction(state)} Read the failed write target, not a different file.`
-      };
-    }
     return { allowed: true };
   }
 
-  if (!MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
-    return { allowed: false, message: buildManagedWriteRecoveryInstruction(state) };
-  }
   return { allowed: true };
 }
 
@@ -4896,10 +4926,17 @@ function getManagedWriteTargetPaths(toolName: string, argumentsJson: Record<stri
     const patch = [argumentsJson.patch, argumentsJson.patch_content, argumentsJson.patchText].find(
       (value): value is string => typeof value === "string"
     ) ?? "";
-    return [...patch.matchAll(/^\*\*\* (?:Add|Update) File: (.+)$/gm)].map((match) => match[1].trim());
+    return [...patch.matchAll(/^\*\*\* (?:Add|Update) File:\s*(.+)$/gm)]
+      .map((match) => normalizeManagedWriteTargetPath(match[1]))
+      .filter((candidate): candidate is string => Boolean(candidate));
   }
   const candidate = argumentsJson.path;
   return typeof candidate === "string" && candidate.trim() ? [candidate] : [];
+}
+
+function normalizeManagedWriteTargetPath(candidate: string): string | undefined {
+  const normalized = candidate.trim().replace(/\s+\*\*\*\s*$/, "").trim();
+  return normalized || undefined;
 }
 
 function getRecoveryFilePath(candidate: unknown, workspaceCwd: string): string | undefined {

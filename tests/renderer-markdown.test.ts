@@ -47,23 +47,24 @@ describe("parseMarkdownBlocks", () => {
     expect(items.map((item) => item.status)).toEqual(["completed", "in_progress", "pending"]);
   });
 
-  it("marks only the current confirmed GPA plan response for bubble rendering", () => {
+  it("keeps the confirmed GPA plan response framed during ACT", () => {
     const messages = [
       { id: "goal", role: "assistant" },
       { id: "user", role: "user" },
-      { id: "plan", role: "assistant" }
+      { id: "plan", role: "assistant", content: "### T1: Build the feature" },
+      { id: "act", role: "assistant", content: "Implementing T1 now." }
     ] as Parameters<typeof getGpaPlanMessageId>[0];
     const state = {
       stage: "plan" as const,
       fullAccess: false,
       knowledgeEnabled: false,
-      planTasks: [],
+      planTasks: [{ id: "T1", title: "Build the feature", done: false }],
       awaitingConfirmation: "plan" as const,
       updatedAt: "2026-07-15T00:00:00.000Z"
     };
 
     expect(getGpaPlanMessageId(messages, state)).toBe("plan");
-    expect(getGpaPlanMessageId(messages, { ...state, awaitingConfirmation: null })).toBeNull();
+    expect(getGpaPlanMessageId(messages, { ...state, stage: "act", awaitingConfirmation: null })).toBe("plan");
   });
 
   it("parses a pipe-delimited task breakdown into a table", () => {

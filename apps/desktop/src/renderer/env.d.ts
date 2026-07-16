@@ -37,6 +37,7 @@ declare global {
       writeProjectFile: (payload: { threadId: string; path: string; content: string }) => Promise<{ path: string }>;
       getGitSnapshot: (threadId: string) => Promise<any>;
       stageGitFile: (payload: { threadId: string; path: string }) => Promise<any>;
+      stageAllGitChanges: (threadId: string) => Promise<any>;
       unstageGitFile: (payload: { threadId: string; path: string }) => Promise<any>;
       revertGitFile: (payload: { threadId: string; path: string; untracked?: boolean }) => Promise<any>;
       applyGitHunk: (payload: {
@@ -48,6 +49,7 @@ declare global {
       }) => Promise<any>;
       commitGitChanges: (payload: { threadId: string; message: string }) => Promise<any>;
       pushGitChanges: (threadId: string) => Promise<any>;
+      pullGitChanges: (threadId: string) => Promise<any>;
       createGitPullRequest: (threadId: string) => Promise<any>;
       deleteThread: (threadId: string) => Promise<void>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;

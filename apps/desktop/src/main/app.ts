@@ -60,7 +60,7 @@ import {
 } from "./storage";
 
 type ResolverMap<T> = Map<string, (value: T) => void>;
-const INTERACTION_TIMEOUT_MS = 10_000;
+const INTERACTION_TIMEOUT_MS = 30_000;
 
 async function seedBundledSkills(layout: Pick<HomeLayout, "skillsSystemDir" | "skillsImportedDir" | "skillsInstalledDir">): Promise<number> {
   if (!app.isPackaged) {
@@ -528,6 +528,10 @@ export class DesktopBackend {
 
   public stageGitFile(threadId: string, path: string): Promise<GitActionResult> {
     return this.#git.stageFile(this.getProjectDirectory(threadId), path);
+  }
+
+  public stageAllGitChanges(threadId: string): Promise<GitActionResult> {
+    return this.#git.stageAll(this.getProjectDirectory(threadId));
   }
 
   public unstageGitFile(threadId: string, path: string): Promise<GitActionResult> {

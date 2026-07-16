@@ -13,6 +13,7 @@ import {
   getToolProcessingLabel,
   getToolActivityPresentation,
   getToolActivitySummary,
+  getSidebarUpdateReminder,
   shouldShowRuntimeActivityPanel,
   isFileWriteTool,
   isPatchAssistantMessage,
@@ -152,9 +153,20 @@ describe("file write transcript filtering", () => {
 });
 
 describe("runtime activity visibility", () => {
-  it("keeps the execution heartbeat visible for every active task", () => {
+  it("keeps the execution heartbeat visible while a tool is running and between tool calls", () => {
     expect(shouldShowRuntimeActivityPanel(true)).toBe(true);
+    expect(shouldShowRuntimeActivityPanel(false, true)).toBe(true);
     expect(shouldShowRuntimeActivityPanel(false)).toBe(false);
+  });
+});
+
+describe("sidebar update reminder", () => {
+  it("only shows a reminder when an update needs user attention", () => {
+    expect(getSidebarUpdateReminder("available")).toBe("有更新");
+    expect(getSidebarUpdateReminder("downloading")).toBe("下载中");
+    expect(getSidebarUpdateReminder("downloaded")).toBe("可安装");
+    expect(getSidebarUpdateReminder("up-to-date")).toBeNull();
+    expect(getSidebarUpdateReminder("checking")).toBeNull();
   });
 });
 
