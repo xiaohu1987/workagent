@@ -158,6 +158,28 @@ describe("applyCodexPatch", () => {
     expect(result.changes[0]?.applyMode).toBe("text");
   });
 
+  it("matches LF patch hunks against CRLF files and preserves CRLF on write", async () => {
+    const root = await makeTempDir();
+    const filePath = path.join(root, "windows.js");
+    await fs.writeFile(filePath, "function greet() {\r\n  return 'old';\r\n}\r\n", "utf8");
+
+    await applyCodexPatch(
+      `*** Begin Patch
+*** Update File: windows.js
+@@
+ function greet() {
+-  return 'old';
++  return 'new';
+ }
+*** End Patch`,
+      root
+    );
+
+    await expect(fs.readFile(filePath, "utf8")).resolves.toBe(
+      "function greet() {\r\n  return 'new';\r\n}\r\n"
+    );
+  });
+
   it("does not write any file when a later hunk fails preflight", async () => {
     const root = await makeTempDir();
     const first = path.join(root, "first.txt");

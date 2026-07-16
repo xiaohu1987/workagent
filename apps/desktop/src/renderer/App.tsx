@@ -1378,6 +1378,13 @@ export function App() {
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "function_call_protocol_compatibility") {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          appendRuntimeStatus(typed.threadId, "模型服务工具调用不兼容，正在切换兼容模式重试", typed.createdAt);
+          setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        }
+        return;
+      }
       if (typed.type === "agent.context_compacted" && typed.threadId) {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
           appendRuntimeStatus(typed.threadId, "上下文已自动压缩，继续分析中", typed.createdAt);
@@ -1422,9 +1429,12 @@ export function App() {
         const runtimeThreadId = typed.threadId;
         const status = typed.payload.thread.status;
         const resumePlan = gpaPlanResumeAttemptRef.current.get(runtimeThreadId);
-        if (status === "failed" && resumePlan) {
-          gpaPlanResumeAttemptRef.current.delete(runtimeThreadId);
+        if (status === "failed") {
+          if (resumePlan) {
+            gpaPlanResumeAttemptRef.current.delete(runtimeThreadId);
+          }
           gpaPlanResumeRetryRequiredRef.current.add(runtimeThreadId);
+          void promptGpaPlanRetryAfterFailure(runtimeThreadId);
         } else if (status === "completed" && resumePlan) {
           gpaPlanResumeAttemptRef.current.delete(runtimeThreadId);
           gpaPlanResumeRetryRequiredRef.current.delete(runtimeThreadId);
@@ -2417,6 +2427,20 @@ export function App() {
     setGpaPlanResumeDialog({ step: "ask", plan, threadId });
     return true;
   }
+
+  async function promptGpaPlanRetryAfterFailure(threadId: string): Promise<void> {
+    try {
+      const plan = (await window.codexh.getProjectGpaPlan(threadId)) as GpaPlanResumePreview | null;
+      if (!plan || plan.status !== "in_progress" || plan.pendingCount === 0) {
+        return;
+      }
+      gpaPlanResumeRetryRequiredRef.current.add(threadId);
+      setGpaPlanResumeRetryPrompt({ threadId, plan });
+    } catch {
+      // Failure recovery must never hide the original runtime error.
+    }
+  }
+
   async function refreshSkills() {
     const [nextSkills, nextStats] = await Promise.all([
       window.codexh.listSkills(selectedThread?.cwd) as Promise<SkillMetadata[]>,
@@ -4551,6 +4575,7 @@ export function App() {
                     <ToolActivityGroup key={entry.id} toolCalls={entry.toolCalls} />
                   )
                 )}
+                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -4627,43 +4652,36 @@ export function App() {
           <footer
             className={[
               "composer-shell",
-              queuedMessages.length > 0 ? "has-queue" : "",
-              gpaState.stage !== "off" ? "has-plan" : ""
+              queuedMessages.length > 0 ? "has-queue" : ""
             ].filter(Boolean).join(" ")}
             style={(() => {
-              const hasPlan = gpaState.stage !== "off";
               const queueCount = queuedMessages.length;
-              if (!hasPlan && queueCount === 0) return undefined;
-              const planSpace = hasPlan ? 40 : 0;
+              if (queueCount === 0) return undefined;
               const queueSpace = queueCount > 0 ? queueCount * 40 : 0;
-              const stackGap = hasPlan && queueCount > 0 ? 6 : 0;
-              const floatSpace = 6 + planSpace + stackGap + queueSpace + 8;
+              const floatSpace = 6 + queueSpace + 8;
               return {
                 "--queued-message-space": `${Math.max(48, floatSpace)}px`,
                 "--queued-message-scroll-offset": `${Math.max(3, floatSpace - 5)}px`
               } as CSSProperties;
             })()}
           >
-            {gpaState.stage !== "off" || queuedMessages.length > 0 ? (
+            {queuedMessages.length > 0 ? (
               <div
                 className={`composer-float-stack ${selectedProjectCwd ? "has-project" : ""}`}
                 aria-label="输入框上方浮层"
               >
-                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
-                {queuedMessages.length > 0 ? (
-                  <QueuedMessageList
-                    messages={queuedMessages}
-                    hasProject={!!selectedProjectCwd}
-                    deletingId={deletingQueuedMessageId}
-                    onDelete={(id) => void deleteQueuedMessage(id)}
-                  />
-                ) : null}
+                <QueuedMessageList
+                  messages={queuedMessages}
+                  hasProject={!!selectedProjectCwd}
+                  deletingId={deletingQueuedMessageId}
+                  onDelete={(id) => void deleteQueuedMessage(id)}
+                />
               </div>
             ) : null}
             {!showWelcome && !isTranscriptAtLatest ? (
               <button
                 type="button"
-                className={`scroll-to-latest-button ${queuedMessages.length > 0 || gpaState.stage !== "off" ? "with-queue" : ""}`}
+                className={`scroll-to-latest-button ${queuedMessages.length > 0 ? "with-queue" : ""}`}
                 title="定位到最新消息"
                 aria-label="定位到最新消息"
                 onClick={() => scrollTranscriptToLatest("smooth")}
@@ -5810,15 +5828,15 @@ export function App() {
                                 <label className="settings-field"><span>名称</span><input value={server.name} onChange={(event) => updateMcpServerDraft(server.id, { name: event.target.value })} /></label>
                                 <label className="settings-field"><span>ID</span><input value={server.id} onChange={(event) => updateMcpServerDraft(server.id, { id: event.target.value.trim() })} /></label>
                                 <label className="settings-field full"><span>描述</span><input value={server.description ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { description: event.target.value || undefined })} /></label>
-                                <label className="settings-field"><span>传输方式</span><select value={server.transport ?? "stdio"} onChange={(event) => updateMcpServerDraft(server.id, { transport: event.target.value, command: event.target.value === "stdio" ? server.command : undefined, url: event.target.value === "stdio" ? undefined : server.url })}><option value="stdio">stdio</option><option value="sse">SSE</option><option value="streamable_http">HTTP</option></select></label>
+                                <label className="settings-field"><span>传输方式</span><ComposerSelect className="mcp-select" ariaLabel="传输方式" value={server.transport ?? "stdio"} onChange={(transport) => updateMcpServerDraft(server.id, { transport, command: transport === "stdio" ? server.command : undefined, url: transport === "stdio" ? undefined : server.url })} options={[{ value: "stdio", label: "stdio" }, { value: "sse", label: "SSE" }, { value: "streamable_http", label: "HTTP" }]} placeholder="选择传输方式" /></label>
                                 {isStdio ? <>
                                   <label className="settings-field full"><span>命令</span><input value={server.command ?? ""} placeholder="npx" onChange={(event) => updateMcpServerDraft(server.id, { command: event.target.value })} /></label>
                                   <label className="settings-field"><span>参数（每行一个）</span><textarea value={(server.args ?? []).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { args: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} /></label>
                                   <label className="settings-field"><span>环境变量（KEY=VALUE）</span><textarea value={Object.entries(server.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { env: parseMcpEnvironment(event.target.value) })} /></label>
                                 </> : <>
                                   <label className="settings-field full"><span>服务 URL</span><input value={server.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => updateMcpServerDraft(server.id, { url: event.target.value })} /></label>
-                                  <label className="settings-field"><span>认证方式</span><select value={server.auth?.mode ?? "none"} onChange={(event) => updateMcpServerDraft(server.id, { auth: { mode: event.target.value as "none" | "bearer_env" | "oauth" } })}><option value="none">无认证</option><option value="bearer_env">Bearer 环境变量</option><option value="oauth">OAuth</option></select></label>
-                                  <label className="settings-field"><span>默认工具审批</span><select value={server.defaultToolsApprovalMode ?? "prompt"} onChange={(event) => updateMcpServerDraft(server.id, { defaultToolsApprovalMode: event.target.value as "auto" | "prompt" | "writes" | "approve" })}><option value="prompt">每次确认</option><option value="auto">自动执行</option><option value="writes">写入时确认</option><option value="approve">高风险确认</option></select></label>
+                                  <label className="settings-field"><span>认证方式</span><ComposerSelect className="mcp-select" ariaLabel="认证方式" value={server.auth?.mode ?? "none"} onChange={(mode) => updateMcpServerDraft(server.id, { auth: { mode: mode as "none" | "bearer_env" | "oauth" } })} options={[{ value: "none", label: "无认证" }, { value: "bearer_env", label: "Bearer 环境变量" }, { value: "oauth", label: "OAuth" }]} placeholder="选择认证方式" /></label>
+                                  <label className="settings-field"><span>默认工具审批</span><ComposerSelect className="mcp-select" ariaLabel="默认工具审批" value={server.defaultToolsApprovalMode ?? "prompt"} onChange={(defaultToolsApprovalMode) => updateMcpServerDraft(server.id, { defaultToolsApprovalMode: defaultToolsApprovalMode as "auto" | "prompt" | "writes" | "approve" })} options={[{ value: "prompt", label: "每次确认" }, { value: "auto", label: "自动执行" }, { value: "writes", label: "写入时确认" }, { value: "approve", label: "高风险确认" }]} placeholder="选择审批方式" /></label>
                                   {server.auth?.mode === "bearer_env" ? <label className="settings-field full"><span>Bearer Token 环境变量</span><input value={server.auth.bearerTokenEnvVar ?? ""} placeholder="MCP_TOKEN" onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, bearerTokenEnvVar: event.target.value } })} /></label> : null}
                                   {server.auth?.mode === "oauth" ? <>
                                     <label className="settings-field"><span>OAuth Client ID</span><input value={server.auth.oauthClientId ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, oauthClientId: event.target.value } })} /></label>
@@ -8459,13 +8477,17 @@ function ComposerSelect({
   options,
   onChange,
   placeholder,
-  disabled = false
+  disabled = false,
+  className = "",
+  ariaLabel
 }: {
   value: string;
   options: ComposerSelectOption[];
   onChange: (value: string) => void;
   placeholder: string;
   disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const menuPresence = useMotionPresence(isOpen ? true : null, 140);
@@ -8504,7 +8526,7 @@ function ComposerSelect({
   }, [isOpen]);
 
   return (
-    <div ref={rootRef} className={`composer-select ${isOpen ? "open" : ""} ${disabled ? "disabled" : ""}`}>
+    <div ref={rootRef} className={`composer-select ${className} ${isOpen ? "open" : ""} ${disabled ? "disabled" : ""}`}>
       <button
         type="button"
         className="composer-select-trigger"
@@ -8515,6 +8537,7 @@ function ComposerSelect({
         }}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
+        aria-label={ariaLabel}
         disabled={disabled}
       >
         <span className="composer-select-value">{selectedOption?.label ?? placeholder}</span>
@@ -10206,15 +10229,15 @@ function GpaPlanResumeRetryConfirmationCard({
   return (
     <section className="gpa-confirmation gpa-resume-retry" aria-label="确认继续 GPA 计划">
       <div className="gpa-confirmation-copy">
-        <strong>GPA 计划执行失败</strong>
-        <span>请先重新选择可用模型，确认后继续剩余 {pendingCount} 项任务。</span>
+        <strong>GPA 计划已暂停</strong>
+        <span>剩余 {pendingCount} 项任务尚未完成。是否从下一项继续执行？</span>
       </div>
       <div className="gpa-confirmation-actions">
         <button className="gpa-confirmation-button secondary" type="button" onClick={onDismiss} disabled={disabled}>
           暂不继续
         </button>
         <button className="gpa-confirmation-button primary" type="button" onClick={onConfirm} disabled={disabled}>
-          {disabled ? "正在继续..." : "确认继续"}
+          {disabled ? "正在重试..." : "重试剩余任务"}
         </button>
       </div>
     </section>
@@ -10300,10 +10323,7 @@ function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
         aria-expanded={expanded}
         onClick={() => setExpanded((current) => !current)}
       >
-        <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={runningCall?.toolName ?? toolCalls[0]?.toolName ?? ""} /></span>
-        <span className={`tool-activity-live-indicator ${runningCall ? "is-active" : ""}`} aria-hidden="true">
-          <span className="task-processing-dots"><i /><i /><i /></span>
-        </span>
+        <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={toolCalls[0]?.toolName ?? ""} /></span>
         <span className="tool-activity-summary-copy">
           <strong>{summary.title}</strong>
           {summary.detail ? <span>{summary.detail}</span> : null}

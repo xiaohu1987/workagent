@@ -706,17 +706,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         const reason = error instanceof Error ? error.message : String(error);
         return {
           ok: false,
-          content: [
-            `Patch was not applied: ${reason}`,
-            "Re-read the intended target file, then submit only canonical Codex patch syntax:",
-            "*** Begin Patch",
-            "*** Update File: relative/path.ext",
-            "@@",
-            "-exact current text",
-            "+replacement text",
-            "*** End Patch",
-            "Unsupported headings such as *** Changed Range are invalid."
-          ].join("\n")
+          content: buildApplyPatchFailureMessage(reason)
         };
       }
       const symbolLines = result.changes
@@ -1679,6 +1669,38 @@ function createTextSnapshot(path: string, before: string, after: string) {
     beforeTruncated: before.length > FILE_SNAPSHOT_TEXT_LIMIT,
     afterTruncated: after.length > FILE_SNAPSHOT_TEXT_LIMIT
   };
+}
+
+export function buildApplyPatchFailureMessage(reason: string): string {
+  if (/^Ambiguous patch hunk matched \d+ locations;/i.test(reason)) {
+    return [
+      "Patch was not applied because its target text appears in multiple locations.",
+      `Details: ${reason}`,
+      "Read the target function or component, then create one minimal *** Update File patch with unique surrounding lines copied from the current file.",
+      "Do not resend this patch unchanged."
+    ].join("\n");
+  }
+
+  if (/Patch hunk context\/removal block was not found in the target file\./i.test(reason)) {
+    return [
+      "Patch was not applied because the target file no longer contains the exact text used by the patch.",
+      `Details: ${reason}`,
+      "Read the exact target file now, then create one minimal *** Update File patch using text copied from its current contents.",
+      "Do not resend this patch unchanged."
+    ].join("\n");
+  }
+
+  return [
+    `Patch was not applied: ${reason}`,
+    "Re-read the intended target file, then submit only canonical Codex patch syntax:",
+    "*** Begin Patch",
+    "*** Update File: relative/path.ext",
+    "@@",
+    "-exact current text",
+    "+replacement text",
+    "*** End Patch",
+    "Unsupported headings such as *** Changed Range are invalid."
+  ].join("\n");
 }
 
 function normalizeApplyPatchInput(args: Record<string, unknown>): string {

@@ -199,6 +199,7 @@
 .task-timeline .message-user-text,
 .task-timeline .message-markdown,
 .task-timeline .event-markdown,
+.task-timeline .event-commentary-markdown,
 .task-timeline .event-final-markdown {
   font-size: 14px;
   line-height: 1.62;

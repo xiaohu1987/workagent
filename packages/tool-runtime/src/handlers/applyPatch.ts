@@ -428,14 +428,16 @@ async function applyHunks(
   hunks: Array<{ lines: string[] }>,
   filePath: string
 ): Promise<{ content: string; additions: number; deletions: number; applyMode: PatchApplyMode }> {
-  let current = original.split("\n");
+  const lineEnding = original.includes("\r\n") ? "\r\n" : "\n";
+  const normalizedOriginal = original.replace(/\r\n?/g, "\n");
+  let current = normalizedOriginal.split("\n");
   // Preserve trailing newline semantics: split keeps final empty string when file ends with \n
   let additions = 0;
   let deletions = 0;
   let applyMode: PatchApplyMode = "text";
 
   const language = languageFromPath(filePath);
-  let symbols = language ? await extractSymbols(original, language) : null;
+  let symbols = language ? await extractSymbols(normalizedOriginal, language) : null;
 
   for (const hunk of hunks) {
     const counts = countHunkEdits(hunk);
@@ -455,7 +457,7 @@ async function applyHunks(
   }
 
   return {
-    content: current.join("\n"),
+    content: current.join(lineEnding),
     additions,
     deletions,
     applyMode: language ? applyMode : "text"

@@ -4429,8 +4429,7 @@ select:focus {
   padding-top: 48px;
 }
 
-.composer-shell.has-queue,
-.composer-shell.has-plan {
+.composer-shell.has-queue {
   padding-top: var(--queued-message-space);
 }
 
@@ -9797,8 +9796,6 @@ select:focus {
 
 .event-commentary-markdown {
   color: #eef2f8;
-  font-size: 16px;
-  line-height: 1.66;
 }
 
 .event-commentary-markdown p {
@@ -9811,8 +9808,13 @@ select:focus {
 
 .event-final-markdown {
   color: #f7f9fc;
+}
+
+.message-markdown,
+.event-commentary-markdown,
+.event-final-markdown {
   font-size: 16px;
-  line-height: 1.74;
+  line-height: 1.7;
 }
 
 .event-stack {
@@ -13444,6 +13446,69 @@ select {
 }
 
 :root { interpolate-size: allow-keywords; }
+
+/* Native select popups do not reliably inherit the app's dark theme on Windows. */
+select {
+  color-scheme: dark;
+}
+
+select option,
+select optgroup {
+  color: #f3f4f6;
+  background-color: #121216;
+}
+
+select option:checked {
+  color: #f8fbff;
+  background-color: #25262b;
+}
+
+.mcp-select {
+  width: 100%;
+}
+
+.mcp-select .composer-select-trigger {
+  min-height: 34px;
+  height: 34px;
+  padding: 0 10px;
+  border-color: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #f3f4f6;
+  font-size: 13px;
+  background: #121216;
+}
+
+.mcp-select .composer-select-trigger:hover:not(:disabled),
+.mcp-select.open .composer-select-trigger {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: #17181d;
+}
+
+.mcp-select .composer-select-menu {
+  top: calc(100% + 4px);
+  bottom: auto;
+  gap: 2px;
+  padding: 4px;
+  border-color: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: #17181d;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.38);
+  z-index: 30;
+}
+
+.mcp-select .composer-select-option {
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 5px;
+  color: #d0d2d8;
+  font-size: 12px;
+}
+
+.mcp-select .composer-select-option:hover,
+.mcp-select .composer-select-option.selected {
+  color: #f5f5f6;
+  background: #25262b;
+}
 
 :is(
   .context-compaction-notice,

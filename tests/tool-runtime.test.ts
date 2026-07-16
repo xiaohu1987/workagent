@@ -6,6 +6,7 @@ import {
   buildCodeSearchCommand,
   MAX_CODE_SEARCH_RESULT_LINES,
   ToolRuntime,
+  buildApplyPatchFailureMessage,
   canonicalizeToolName,
   type ToolRuntimeContext
 } from "@tool-runtime";
@@ -17,6 +18,31 @@ describe("canonicalizeToolName", () => {
     expect(canonicalizeToolName("generate_image")).toBe("image.generate");
     expect(canonicalizeToolName("video_gen")).toBe("video.generate");
     expect(canonicalizeToolName("image.generate")).toBe("image.generate");
+  });
+});
+
+describe("apply-patch failures", () => {
+  it("explains how to resolve an ambiguous hunk match", () => {
+    const message = buildApplyPatchFailureMessage(
+      "Ambiguous patch hunk matched 85 locations; add more unique context or target a specific symbol."
+    );
+
+    expect(message).toContain("appears in multiple locations");
+    expect(message).toContain("target function or component");
+    expect(message).toContain("unique surrounding lines");
+    expect(message).toContain("Do not resend this patch unchanged");
+    expect(message).not.toContain("Unsupported headings");
+  });
+
+  it("treats a missing removal block as stale file context instead of invalid syntax", () => {
+    const message = buildApplyPatchFailureMessage(
+      "Patch hunk context/removal block was not found in the target file."
+    );
+
+    expect(message).toContain("no longer contains the exact text");
+    expect(message).toContain("Read the exact target file now");
+    expect(message).toContain("Do not resend this patch unchanged");
+    expect(message).not.toContain("Unsupported headings");
   });
 });
 
