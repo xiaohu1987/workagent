@@ -4423,6 +4423,162 @@ select:focus {
   min-height: 100%;
 }
 
+.welcome-empty-state {
+  display: grid;
+  align-content: center;
+  width: min(920px, 100%);
+  margin: 0 auto;
+  padding: 28px 0 44px;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: 0 8px;
+}
+
+.welcome-panel {
+  position: relative;
+  display: grid;
+  gap: 24px;
+  width: 100%;
+  padding: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(16, 16, 19, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.welcome-panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 84px;
+  height: 2px;
+  background: #f07b48;
+}
+
+.welcome-panel.project::before {
+  background: #64a8ff;
+}
+
+.welcome-intro {
+  display: grid;
+  gap: 8px;
+  max-width: 540px;
+}
+
+.welcome-eyebrow {
+  color: #7f8996;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.welcome-panel h1 {
+  margin: 0;
+  color: #f3f4f6;
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.welcome-panel h1 span {
+  color: #f07b48;
+}
+
+.welcome-panel.project h1 span {
+  color: #64a8ff;
+}
+
+.welcome-intro p {
+  margin: 0;
+  color: #8f939d;
+  font-size: 14px;
+}
+
+.welcome-card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.welcome-card {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  gap: 12px;
+  min-height: 148px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #d9dce2;
+  background: #101013;
+  cursor: pointer;
+  text-align: left;
+}
+
+.welcome-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--welcome-accent, #f07b48);
+  opacity: 0.7;
+}
+
+.welcome-card::after {
+  content: "";
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 7px;
+  height: 7px;
+  border-top: 1px solid var(--welcome-accent, #f07b48);
+  border-right: 1px solid var(--welcome-accent, #f07b48);
+  opacity: 0.8;
+}
+
+.welcome-card.blue { --welcome-accent: #64a8ff; }
+.welcome-card.violet { --welcome-accent: #bf8cff; }
+.welcome-card.green { --welcome-accent: #59d68d; }
+.welcome-card.orange { --welcome-accent: #f07b48; }
+
+.welcome-card:hover,
+.welcome-card:focus-visible {
+  border-color: color-mix(in srgb, var(--welcome-accent) 55%, transparent);
+  background: #18181d;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  outline: none;
+}
+
+.welcome-card-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: var(--welcome-accent, #f07b48);
+  background: color-mix(in srgb, var(--welcome-accent) 12%, #121216);
+  border: 1px solid color-mix(in srgb, var(--welcome-accent) 25%, transparent);
+}
+
+.welcome-card strong {
+  align-self: end;
+  color: #eef0f4;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.welcome-card-action {
+  color: var(--welcome-accent, #f07b48);
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .welcome-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 .composer-shell {
   width: min(1120px, calc(100% - 80px));
   margin: 0 auto 12px;

@@ -501,6 +501,37 @@ const WELCOME_CARDS: WelcomeCard[] = [
   }
 ];
 
+const CHAT_WELCOME_CARDS: WelcomeCard[] = [
+  {
+    id: "analyze",
+    title: "分析一个问题",
+    prompt: "请帮我拆解这个问题，梳理关键事实、判断依据和下一步。",
+    accentClass: "blue",
+    icon: <IconExplore />
+  },
+  {
+    id: "write",
+    title: "起草一段内容",
+    prompt: "请根据我的目标起草一份清晰、可直接使用的内容。",
+    accentClass: "violet",
+    icon: <IconBuild />
+  },
+  {
+    id: "translate",
+    title: "翻译与润色",
+    prompt: "请翻译并润色下面的内容，保留原意并让表达自然准确。",
+    accentClass: "green",
+    icon: <IconReview />
+  },
+  {
+    id: "learn",
+    title: "解释一个概念",
+    prompt: "请用清晰的例子解释这个概念，并指出容易混淆的地方。",
+    accentClass: "orange",
+    icon: <IconFix />
+  }
+];
+
 const PROVIDER_TYPE_OPTIONS: ProviderTypeOption[] = [
   { value: "openai-compatible", label: "OpenAI Chat Completions" },
   { value: "anthropic", label: "Anthropic Messages" },
@@ -1912,6 +1943,8 @@ export function App() {
   );
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
   const showWelcome = timelineEntries.length === 0;
+  const isProjectWelcome = selectedThread?.mode === "project";
+  const welcomeCards = isProjectWelcome ? WELCOME_CARDS : CHAT_WELCOME_CARDS;
   const latestVisibleMessageId = timelineEntries[timelineEntries.length - 1]?.id ?? null;
   const settingsProvider = useMemo(() => {
     if (!configDraft) {
@@ -4534,7 +4567,32 @@ export function App() {
               <div className="welcome-empty-state">
                 {composerSubmission ? (
                   <ComposerSubmissionStatus submission={composerSubmission} />
-                ) : null}
+                ) : (
+                  <section className={`welcome-panel ${isProjectWelcome ? "project" : "chat"}`} aria-label="开始新任务">
+                    <div className="welcome-intro">
+                      <span className="welcome-eyebrow">{isProjectWelcome ? "PROJECT WORKSPACE" : "CODEXH CHAT"}</span>
+                      <h1>{isProjectWelcome ? <>从项目的<span>下一步</span>开始</> : <>从一个清晰的<span>问题</span>开始</>}</h1>
+                      <p>{isProjectWelcome ? "检查代码、实现功能，或直接描述需要修改的内容。" : "描述你的目标，或选择一个常用的对话起点。"}</p>
+                    </div>
+                    <div className="welcome-card-grid">
+                      {welcomeCards.map((card) => (
+                        <button
+                          key={card.id}
+                          type="button"
+                          className={`welcome-card ${card.accentClass}`}
+                          onClick={() => {
+                            setInput(card.prompt);
+                            window.setTimeout(() => composerRef.current?.focus(), 0);
+                          }}
+                        >
+                          <span className="welcome-card-icon" aria-hidden>{card.icon}</span>
+                          <strong>{card.title}</strong>
+                          <span className="welcome-card-action">填入任务</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
               </div>
             ) : (
               <div key={selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
