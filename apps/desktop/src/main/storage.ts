@@ -24,6 +24,7 @@ import type {
   ModelProfile,
   PluginRecord,
   ProjectPluginBinding,
+  QuickNoteRecord,
   RememberedApprovalRecord,
   QueuedMessageRecord,
   ProviderDefinition,
@@ -574,6 +575,11 @@ export class DatabaseService {
       );
       CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunk_fts USING fts5 (
         chunk_id UNINDEXED, title, content, source_path, locator
+      );
+      CREATE TABLE IF NOT EXISTS quick_notes (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL,
+        knowledge_base_id TEXT NOT NULL, knowledge_source_path TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS browser_tabs (
         id TEXT PRIMARY KEY,
@@ -1533,6 +1539,44 @@ export class DatabaseService {
         record.updatedAt
       );
     return record;
+  }
+
+  public findKnowledgeBase(scope: string, displayName: string): KnowledgeBaseRecord | null {
+    const row = this.#db.prepare("SELECT * FROM knowledge_bases WHERE scope = ? AND display_name = ? ORDER BY created_at LIMIT 1").get(scope, displayName) as any;
+    return row ? { id: row.id, scope: row.scope, projectId: row.project_id, displayName: row.display_name, bundleRoot: row.bundle_root, okfVersion: row.okf_version, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at } : null;
+  }
+
+  public listQuickNotes(): QuickNoteRecord[] {
+    return this.#db.prepare("SELECT * FROM quick_notes ORDER BY updated_at DESC").all().map((row: any) => ({
+      id: row.id, title: row.title, content: row.content, knowledgeBaseId: row.knowledge_base_id,
+      knowledgeSourcePath: row.knowledge_source_path, createdAt: row.created_at, updatedAt: row.updated_at
+    }));
+  }
+
+  public getQuickNote(id: string): QuickNoteRecord | null {
+    const row = this.#db.prepare("SELECT * FROM quick_notes WHERE id = ?").get(id) as any;
+    return row ? { id: row.id, title: row.title, content: row.content, knowledgeBaseId: row.knowledge_base_id, knowledgeSourcePath: row.knowledge_source_path, createdAt: row.created_at, updatedAt: row.updated_at } : null;
+  }
+
+  public upsertQuickNote(input: Omit<QuickNoteRecord, "createdAt" | "updatedAt">): QuickNoteRecord {
+    const current = this.getQuickNote(input.id);
+    const record: QuickNoteRecord = { ...input, createdAt: current?.createdAt ?? nowIso(), updatedAt: nowIso() };
+    this.#db.prepare("INSERT INTO quick_notes (id, title, content, knowledge_base_id, knowledge_source_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, knowledge_base_id = excluded.knowledge_base_id, knowledge_source_path = excluded.knowledge_source_path, updated_at = excluded.updated_at")
+      .run(record.id, record.title, record.content, record.knowledgeBaseId, record.knowledgeSourcePath, record.createdAt, record.updatedAt);
+    return record;
+  }
+
+  public deleteQuickNote(id: string): void {
+    this.#db.prepare("DELETE FROM quick_notes WHERE id = ?").run(id);
+  }
+
+  public deleteKnowledgeDocumentBySourcePath(knowledgeBaseId: string, sourcePath: string): void {
+    const row = this.#db.prepare("SELECT id FROM knowledge_documents WHERE knowledge_base_id = ? AND source_path = ?").get(knowledgeBaseId, sourcePath) as { id?: string } | undefined;
+    if (!row?.id) return;
+    const chunks = this.#db.prepare("SELECT id FROM knowledge_chunks WHERE document_id = ?").all(row.id) as Array<{ id: string }>;
+    for (const chunk of chunks) this.#db.prepare("DELETE FROM knowledge_chunk_fts WHERE chunk_id = ?").run(chunk.id);
+    this.#db.prepare("DELETE FROM knowledge_chunks WHERE document_id = ?").run(row.id);
+    this.#db.prepare("DELETE FROM knowledge_documents WHERE id = ?").run(row.id);
   }
 
   public updateKnowledgeBase(id: string, patch: Partial<KnowledgeBaseRecord>): void {

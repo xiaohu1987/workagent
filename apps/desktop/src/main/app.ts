@@ -30,6 +30,7 @@ import type {
   PluginRecord,
   ProviderDefinition,
   ProjectPluginBinding,
+  QuickNoteRecord,
   RuntimeEvent,
   RuntimeThreadSnapshot,
   ThreadRecord,
@@ -2011,6 +2012,46 @@ export class DesktopBackend {
           : "原对话已删除"
       };
     });
+  }
+
+  public listQuickNotes(): QuickNoteRecord[] {
+    return this.#db.listQuickNotes();
+  }
+
+  public saveQuickNote(input: { id?: string; title?: string; content: string }): QuickNoteRecord {
+    const content = input.content.trim();
+    if (!content) throw new Error("笔记内容不能为空。");
+    const title = input.title?.trim() || "未命名笔记";
+    const existing = input.id ? this.#db.getQuickNote(input.id) : null;
+    const knowledgeBase = existing ? this.#db.getKnowledgeBase(existing.knowledgeBaseId) : this.#db.findKnowledgeBase("global", "随手记");
+    const base = knowledgeBase ?? this.#db.createKnowledgeBase({
+      scope: "global",
+      projectId: null,
+      displayName: "随手记",
+      bundleRoot: path.join(this.#layout.globalBundlesDir, "quick-notes"),
+      okfVersion: "0.1",
+      status: "ready"
+    });
+    const id = existing?.id ?? input.id ?? randomUUID();
+    const sourcePath = existing?.knowledgeSourcePath ?? `quick-notes/${id}.md`;
+    this.storeKnowledgeDocument(base.id, {
+      title,
+      body: content,
+      sourcePath,
+      sourceHash: createHash("sha256").update(`${title}\n${content}`).digest("hex"),
+      mimeHint: "text/markdown"
+    });
+    const note = this.#db.upsertQuickNote({ id, title, content, knowledgeBaseId: base.id, knowledgeSourcePath: sourcePath });
+    this.#db.updateKnowledgeBase(base.id, { status: "ready" });
+    return note;
+  }
+
+  public deleteQuickNote(id: string): void {
+    const note = this.#db.getQuickNote(id);
+    if (!note) return;
+    this.#db.deleteKnowledgeDocumentBySourcePath(note.knowledgeBaseId, note.knowledgeSourcePath);
+    this.#db.deleteQuickNote(id);
+    this.#db.updateKnowledgeBase(note.knowledgeBaseId, { status: "ready" });
   }
 
   public listKnowledgeBaseDocuments(knowledgeBaseId: string): KnowledgeDocumentRecord[] {

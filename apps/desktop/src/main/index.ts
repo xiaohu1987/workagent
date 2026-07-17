@@ -485,6 +485,9 @@ function registerIpc(): void {
   );
   ipcMain.handle("knowledge:refresh", (_event, knowledgeBaseId: string) => backend.refreshKnowledgeBase(knowledgeBaseId));
   ipcMain.handle("knowledge:delete", (_event, knowledgeBaseId: string) => backend.deleteKnowledgeBase(knowledgeBaseId));
+  ipcMain.handle("quick-notes:list", () => backend.listQuickNotes());
+  ipcMain.handle("quick-notes:save", (_event, payload: { id?: string; title?: string; content: string }) => backend.saveQuickNote(payload));
+  ipcMain.handle("quick-notes:delete", (_event, id: string) => backend.deleteQuickNote(id));
   ipcMain.handle("browser:open", (_event, payload) => backend.openBrowserTab(payload.threadId, payload.url));
   ipcMain.handle("browser:navigate", (_event, payload) =>
     backend.navigateBrowserTab(payload.threadId, payload.tabId, payload.url)

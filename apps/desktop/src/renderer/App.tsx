@@ -278,7 +278,13 @@ function composerAttachmentKey(attachment: ComposerAttachment | ComposerAttachme
     case "mcp":
       return `${attachment.kind}:${attachment.serverId}`;
     default:
-      return `${attachment.kind}:${attachment.path}`;
+      // Clipboard images do not have a filesystem path. Include their data URL so
+      // separately pasted screenshots are not incorrectly collapsed into one item.
+      if (attachment.path) return `${attachment.kind}:${attachment.path}`;
+      if (attachment.file) {
+        return `${attachment.kind}:${attachment.file.name}:${attachment.file.size}:${attachment.file.lastModified}:${attachment.previewUrl ?? ""}`;
+      }
+      return `${attachment.kind}:${attachment.label}`;
   }
 }
 
@@ -610,6 +616,14 @@ export function App() {
   const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
   const [completedTurnTimers, setCompletedTurnTimers] = useState<Record<string, { startedAt: string; completedAt: string }>>({});
   const [input, setInput] = useState("");
+  const [isQuickNotesOpen, setIsQuickNotesOpen] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [quickNotes, setQuickNotes] = useState<Array<{ id: string; title: string; content: string; updatedAt: string }>>([]);
+  const [selectedQuickNoteId, setSelectedQuickNoteId] = useState<string | null>(null);
+  const [quickNoteTitle, setQuickNoteTitle] = useState("");
+  const [quickNoteContent, setQuickNoteContent] = useState("");
+  const [quickNoteSaving, setQuickNoteSaving] = useState(false);
+  const [quickNoteStatus, setQuickNoteStatus] = useState("尚未保存");
   const [isHistorySearchOpen, setIsHistorySearchOpen] = useState(false);
   const [historySearchQuery, setHistorySearchQuery] = useState("");
   const [historySearchResults, setHistorySearchResults] = useState<HistorySearchResult[]>([]);
@@ -2942,6 +2956,50 @@ export function App() {
     setGpaRevisionDraft("");
   }
 
+  async function openQuickNotes() {
+    setIsQuickNotesOpen(true);
+    try {
+      const notes = await window.codexh.listQuickNotes();
+      setQuickNotes(notes);
+      const first = notes[0];
+      setSelectedQuickNoteId(first?.id ?? null);
+      setQuickNoteTitle(first?.title ?? "");
+      setQuickNoteContent(first?.content ?? "");
+      setQuickNoteStatus(first ? "已同步至全局知识库" : "新建笔记后保存至全局知识库");
+    } catch (error) {
+      showNotice("无法读取随手记", { message: error instanceof Error ? error.message : "请稍后重试。" });
+    }
+  }
+
+  function selectQuickNote(note: { id: string; title: string; content: string }) {
+    setSelectedQuickNoteId(note.id);
+    setQuickNoteTitle(note.title);
+    setQuickNoteContent(note.content);
+    setQuickNoteStatus("已同步至全局知识库");
+  }
+
+  async function saveQuickNote() {
+    if (!quickNoteContent.trim()) {
+      setQuickNoteStatus("请先填写笔记内容");
+      return;
+    }
+    setQuickNoteSaving(true);
+    setQuickNoteStatus("正在同步至全局知识库...");
+    try {
+      const note = await window.codexh.saveQuickNote({ id: selectedQuickNoteId ?? undefined, title: quickNoteTitle, content: quickNoteContent });
+      const notes = await window.codexh.listQuickNotes();
+      setQuickNotes(notes);
+      setSelectedQuickNoteId(note.id);
+      setQuickNoteTitle(note.title);
+      setQuickNoteContent(note.content);
+      setQuickNoteStatus("已同步至全局知识库");
+    } catch (error) {
+      setQuickNoteStatus(error instanceof Error ? error.message : "保存失败，请稍后重试。");
+    } finally {
+      setQuickNoteSaving(false);
+    }
+  }
+
   async function submitGpaRevision() {
     const revision = gpaRevisionDraft.trim();
     if (!revision) {
@@ -4297,8 +4355,19 @@ export function App() {
               <strong>Code<span className="sidebar-brand-accent">XH</span></strong>
               <span>AI Workspace</span>
             </div>
-            <button
-              className="sidebar-search"
+            <div className="sidebar-brand-tools">
+              <button
+                className="sidebar-search sidebar-quick-notes"
+              type="button"
+              title="随手记"
+              aria-label="随手记"
+              onClick={() => void openQuickNotes()}
+            >
+              <IconNotebook />
+              </button>
+              <button
+                className="sidebar-search"
+              type="button"
               title="搜索历史对话"
               onClick={() => {
                 setHistorySearchQuery("");
@@ -4308,6 +4377,7 @@ export function App() {
             >
               <IconSearch />
             </button>
+          </div>
           </div>
 
           <div className="sidebar-nav">
@@ -4458,9 +4528,9 @@ export function App() {
               <span>{getSidebarUpdateReminder(updateState?.phase)}</span>
             </button>
           ) : null}
-          <span className="sidebar-settings-help">
+          <button type="button" className="sidebar-settings-help" title="产品说明与使用指南" aria-label="产品说明与使用指南" onClick={() => setIsHelpOpen(true)}>
             <IconHelpCircle />
-          </span>
+          </button>
         </div>
       </aside>
 
@@ -6089,6 +6159,76 @@ export function App() {
               </div>
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {isHelpOpen ? (
+        <div className="project-sheet-overlay help-overlay motion-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setIsHelpOpen(false); }}>
+          <section className="project-sheet help-sheet" role="dialog" aria-modal="true" aria-labelledby="help-title">
+            <header className="project-sheet-header">
+              <div className="project-sheet-copy"><strong id="help-title">CodeXH 使用指南</strong><span>产品功能与常用工作流</span></div>
+              <button className="project-sheet-close" type="button" title="关闭" aria-label="关闭" onClick={() => setIsHelpOpen(false)}><IconClose /></button>
+            </header>
+            <div className="help-layout">
+              <div className="help-content">
+                <section id="help-overview" className="help-overview"><span>CODEXH WORKSPACE</span><h2>为开发工作准备的 AI 工作台</h2><p>把对话、项目文件、终端、浏览器、知识库、技能和 MCP 工具放在同一个任务上下文中。</p><div><b>对话驱动</b><b>项目上下文</b><b>工具协作</b></div></section>
+                <section id="help-task" className="help-feature"><h3><span><IconCompose /></span>开始一个任务</h3><ol><li><b>01</b> 点击“新建任务”进行普通问答、代码分析或内容处理。</li><li><b>02</b> 点击“新建项目”选择工作目录，让 AI 读取项目文件、使用终端并处理 Git 工作流。</li><li><b>03</b> 在输入框写清目标、约束和预期结果，必要时附上文件或图片后发送。</li></ol></section>
+                <section className="help-feature"><h3><span><IconFolder /></span>项目工作区</h3><p>项目模式提供文件浏览、预览、终端、Git 状态与变更操作。右侧工具区可在文件、终端和浏览器间切换；涉及外部影响的操作会根据权限设置请求确认。</p></section>
+                <section id="help-chat" className="help-feature"><h3><span><IconImage /></span>对话与附件</h3><p>侧栏保留任务历史，放大镜可检索历史内容。输入框支持拖拽、文件选择和粘贴图片；可一次附加多张图片，单次最多 16 个二进制附件。发送前请确认所选模型支持多模态输入。</p></section>
+                <section id="help-knowledge" className="help-feature"><h3><span><IconKnowledge /></span>知识库与随手记</h3><p>知识库可导入文档、文件夹、网页或浏览器页面，用于后续检索。侧栏笔记本图标打开“随手记”：笔记按 Markdown 保存，并同步到全局知识库。不要把密码、密钥或其他敏感信息写入可检索笔记。</p></section>
+                <section className="help-feature"><h3><span><IconSkills /></span>技能、MCP 与 GPA</h3><p>技能为任务提供专门流程和工具说明；MCP 用于连接外部服务；GPA 适合目标明确的项目任务，会按目标、计划、执行逐步推进。它们均可在设置和任务上下文中配置。</p></section>
+                <section id="help-security" className="help-feature help-safety"><h3><span><IconShield /></span>设置与安全</h3><p>设置中管理模型提供商、默认模型、权限、MCP、技能和更新。使用第三方模型或 MCP 前，核对服务地址、凭据范围和数据处理规则；任何有副作用的命令都应在确认影响后执行。</p></section>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isQuickNotesOpen ? (
+        <div className="project-sheet-overlay quick-notes-overlay motion-overlay" onClick={(event) => {
+          if (event.target === event.currentTarget) setIsQuickNotesOpen(false);
+        }}>
+          <section className="project-sheet quick-notes-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-notes-title">
+            <header className="project-sheet-header">
+              <div className="project-sheet-copy">
+                <strong id="quick-notes-title">随手记</strong>
+                <span>保存后同步至全局知识库</span>
+              </div>
+              <button className="project-sheet-close" type="button" title="关闭" aria-label="关闭" onClick={() => setIsQuickNotesOpen(false)}>
+                <IconClose />
+              </button>
+            </header>
+            <div className="quick-notes-layout">
+              <aside className="quick-notes-list">
+                <div className="quick-notes-list-header">
+                  <span>笔记</span>
+                  <button type="button" title="新建笔记" aria-label="新建笔记" className="quick-notes-add" onClick={() => { setSelectedQuickNoteId(null); setQuickNoteTitle(""); setQuickNoteContent(""); setQuickNoteStatus("尚未保存"); }}><IconPlus /></button>
+                </div>
+                {quickNotes.length ? (
+                  <div className="quick-notes-items">
+                    {quickNotes.map((note) => (
+                      <button key={note.id} type="button" className={`quick-notes-item ${note.id === selectedQuickNoteId ? "selected" : ""}`} onClick={() => selectQuickNote(note)}>
+                        <strong>{note.title}</strong>
+                        <span>{new Date(note.updatedAt).toLocaleString()}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : <div className="quick-notes-empty">新建一条笔记，记录随时浮现的想法。</div>}
+              </aside>
+              <div className="quick-notes-editor">
+                <input className="quick-notes-title-input" value={quickNoteTitle} onChange={(event) => setQuickNoteTitle(event.target.value)} placeholder="笔记标题" autoFocus />
+                <div className="quick-notes-markdown-bar" aria-label="Markdown 编辑器">
+                  <strong>Markdown</strong>
+                  <span># 标题 · **加粗** · - 列表 · ```代码```</span>
+                </div>
+                <textarea className="quick-notes-content-input" value={quickNoteContent} onChange={(event) => setQuickNoteContent(event.target.value)} placeholder="# 写下内容\n\n支持 Markdown 格式..." spellCheck={false} />
+                <footer className="quick-notes-footer">
+                  <span>{quickNoteStatus}</span>
+                  <button type="button" className="button primary" disabled={quickNoteSaving} onClick={() => void saveQuickNote()}>{quickNoteSaving ? "保存中..." : "保存"}</button>
+                </footer>
+              </div>
+            </div>
+          </section>
         </div>
       ) : null}
 
@@ -13263,6 +13403,17 @@ function IconSearch() {
     <SvgIcon>
       <circle cx="11" cy="11" r="6.5" />
       <path d="m16 16 4 4" />
+    </SvgIcon>
+  );
+}
+
+function IconNotebook() {
+  return (
+    <SvgIcon>
+      <path d="M7 4.5h9.5a2 2 0 0 1 2 2v12a1.5 1.5 0 0 1-1.5 1.5H7z" />
+      <path d="M7 4.5v15" />
+      <path d="M4.5 7h2.5M4.5 11h2.5M4.5 15h2.5" />
+      <path d="M10.5 9h5M10.5 13h5" />
     </SvgIcon>
   );
 }

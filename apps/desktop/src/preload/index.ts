@@ -111,6 +111,9 @@ const api = {
     threadId?: string;
   }) => ipcRenderer.invoke("knowledge:import", payload),
   listKnowledgeBases: () => ipcRenderer.invoke("knowledge:list"),
+  listQuickNotes: () => ipcRenderer.invoke("quick-notes:list"),
+  saveQuickNote: (payload: { id?: string; title?: string; content: string }) => ipcRenderer.invoke("quick-notes:save", payload),
+  deleteQuickNote: (id: string) => ipcRenderer.invoke("quick-notes:delete", id),
   listKnowledgeDocuments: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:documents", knowledgeBaseId),
   refreshKnowledgeBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:refresh", knowledgeBaseId),
   deleteKnowledgeBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:delete", knowledgeBaseId),

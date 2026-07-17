@@ -41,6 +41,16 @@ export type ApprovalResolutionMode = "once" | "session" | "remember";
 export type InteractionResolutionSource = "user" | "timeout";
 export type SkillScope = "repo" | "user" | "system" | "admin";
 export type KnowledgeScope = "global" | "project" | "imported";
+
+export interface QuickNoteRecord {
+  id: string;
+  title: string;
+  content: string;
+  knowledgeBaseId: string;
+  knowledgeSourcePath: string;
+  createdAt: string;
+  updatedAt: string;
+}
 export type ProviderType =
   | "mock"
   | "openai-compatible"
