@@ -62,9 +62,11 @@ import {
   MAX_REPEATED_TASK_FAILURES,
   MAX_MODEL_TIMEOUT_RETRIES,
   parseGpaState,
+  normalizeSequentialPlanTasks,
   parseGpaCompletedTaskDeclarations,
   applyCompletedPlanTasks,
   resolveGpaPlanProgress,
+  buildGpaPlanSequenceRecoveryInstruction,
   parseMultimodalIntentClassification,
   buildMultimodalIntentClassifySystemPrompt,
   buildMultimodalIntentClassifyTranscript,
@@ -264,6 +266,7 @@ describe("commentary messages", () => {
     expect(isSafeCommentaryMessage('{"assistant_message":"I will inspect","tool_calls":[]}')).toBe(false);
     expect(isSafeCommentaryMessage("<tool_calls>[{\"name\":\"fs.read_file\"}]</tool_calls>")).toBe(false);
     expect(isSafeCommentaryMessage("*** Begin Patch\n*** Update File: src/App.tsx\n*** End Patch")).toBe(false);
+    expect(isSafeCommentaryMessage("先只提交 T1，证据严格使用运行时已列出的 tool_call_id。")).toBe(false);
   });
 });
 
@@ -1335,6 +1338,34 @@ describe("GPA plan validation", () => {
     expect(applyCompletedPlanTasks(next, ["T1"])).toBe(next);
   });
 
+  it("does not mark a later GPA task done before the current task", () => {
+    const state = parseGpaState(JSON.stringify({
+      stage: "act",
+      fullAccess: false,
+      knowledgeEnabled: false,
+      awaitingConfirmation: null,
+      planTasks: [
+        { id: "T1", title: "Inspect", done: false },
+        { id: "T2", title: "Implement", done: false }
+      ],
+      updatedAt: "2026-07-14T01:00:00.000Z"
+    }));
+
+    expect(applyCompletedPlanTasks(state, ["T2"])).toBe(state);
+  });
+
+  it("repairs persisted plans that marked a later task complete out of order", () => {
+    expect(normalizeSequentialPlanTasks([
+      { id: "T1", title: "Inspect", done: true },
+      { id: "T2", title: "Implement", done: false },
+      { id: "T3", title: "Verify", done: true }
+    ])).toEqual([
+      { id: "T1", title: "Inspect", done: true },
+      { id: "T2", title: "Implement", done: false },
+      { id: "T3", title: "Verify", done: false }
+    ]);
+  });
+
   it("parses explicit Chinese and English completed task declarations", () => {
     const tasks = [
       { id: "T1", title: "Inspect files", done: false },
@@ -1430,6 +1461,39 @@ describe("GPA plan validation", () => {
 
     expect(progress).toMatchObject({ completedTaskIds: ["T1"], inferredTaskIds: [] });
     expect(buildGpaPlanProgressRecoveryInstruction(progress.declarations)).toContain("completed_task_ids");
+  });
+
+  it("accepts only the current task and rejects later task declarations", () => {
+    const progress = resolveGpaPlanProgress({
+      reportedTaskIds: ["T3"],
+      planTasks: [
+        { id: "T1", title: "Inspect files", done: true },
+        { id: "T2", title: "Implement UI", done: false },
+        { id: "T3", title: "Verify the result", done: false }
+      ],
+      successfulEvidence: [{ toolCallId: "read-1", toolName: "fs.read_file", kinds: ["observation"] }]
+    });
+
+    expect(progress.completedTaskIds).toEqual([]);
+    expect(progress.outOfOrderTaskIds).toEqual(["T3"]);
+    expect(buildGpaPlanSequenceRecoveryInstruction({
+      currentTask: { id: "T2", title: "Implement UI", done: false },
+      outOfOrderTaskIds: progress.outOfOrderTaskIds
+    })).toContain("T2: Implement UI");
+  });
+
+  it("advances only one contiguous task even when the model reports multiple tasks", () => {
+    const progress = resolveGpaPlanProgress({
+      reportedTaskIds: ["T1", "T2"],
+      planTasks: [
+        { id: "T1", title: "Inspect files", done: false },
+        { id: "T2", title: "Implement UI", done: false }
+      ],
+      successfulEvidence: [{ toolCallId: "write-1", toolName: "apply_patch", kinds: ["delivery"] }]
+    });
+
+    expect(progress.completedTaskIds).toEqual(["T1"]);
+    expect(progress.outOfOrderTaskIds).toEqual(["T2"]);
   });
 
   it("requires an explicit decision at a plan progress checkpoint", () => {

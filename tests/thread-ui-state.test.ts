@@ -17,6 +17,7 @@ import {
   shouldShowRuntimeActivityPanel,
   isFileWriteTool,
   isPatchAssistantMessage,
+  isInternalAgentProtocolMessage,
   reconcilePendingUserMessages
 } from "../apps/desktop/src/renderer/App";
 import type { MessageRecord, ToolCallRecord } from "../packages/shared-types/src";
@@ -149,6 +150,11 @@ describe("file write transcript filtering", () => {
     expect(isFileWriteTool("apply_patch")).toBe(true);
     expect(isFileWriteTool("fs.write_file")).toBe(true);
     expect(isFileWriteTool("fs.read_file")).toBe(false);
+  });
+
+  it("hides internal agent protocol echoes from the transcript", () => {
+    expect(isInternalAgentProtocolMessage("先只提交 T1，证据严格使用 tool_call_id。")).toBe(true);
+    expect(isInternalAgentProtocolMessage("已完成文件读取并继续实现。")).toBe(false);
   });
 });
 

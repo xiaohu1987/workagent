@@ -1922,7 +1922,8 @@ export function App() {
           (entry) =>
             entry.threadId === activeSnapshotThreadId &&
             entry.content &&
-            !isPatchAssistantMessage(entry.content)
+            !isPatchAssistantMessage(entry.content) &&
+            !isInternalAgentProtocolMessage(entry.content)
         )
         .sort((left, right) => left.turnRunId.localeCompare(right.turnRunId))
         .at(-1) ?? null,
@@ -4736,7 +4737,6 @@ export function App() {
                     <ToolActivityGroup key={entry.id} toolCalls={entry.toolCalls} />
                   )
                 )}
-                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -4850,16 +4850,21 @@ export function App() {
                 <IconChevronDown />
               </button>
             ) : null}
-            {selectedProjectCwd ? (
-              <button
-                type="button"
-                className="composer-project-pill"
-                title={`打开文件夹：${selectedProjectCwd}`}
-                onClick={() => void openProjectFolder(selectedProjectCwd)}
-              >
-                <IconFolder />
-                <span>{getFileLeafName(selectedProjectCwd)}</span>
-              </button>
+            {selectedProjectCwd || gpaState.stage !== "off" ? (
+              <div className="composer-meta-row">
+                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
+                {selectedProjectCwd ? (
+                  <button
+                    type="button"
+                    className="composer-project-pill"
+                    title={`打开文件夹：${selectedProjectCwd}`}
+                    onClick={() => void openProjectFolder(selectedProjectCwd)}
+                  >
+                    <IconFolder />
+                    <span>{getFileLeafName(selectedProjectCwd)}</span>
+                  </button>
+                ) : null}
+              </div>
             ) : null}
             <div className="chat-composer">
               {composerAttachments.length > 0 ? (
@@ -6224,7 +6229,11 @@ export function App() {
         }}>
           <section className="project-sheet quick-notes-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-notes-title">
             <header className="project-sheet-header">
-              <span id="quick-notes-title" className="quick-notes-header-status">{quickNoteStatus}</span>
+              <div className="quick-notes-header-title">
+                <span className="quick-notes-header-icon" aria-hidden="true"><IconKnowledge /></span>
+                <strong id="quick-notes-title">随手记</strong>
+                <span className="quick-notes-header-scope">全局知识库</span>
+              </div>
               <button className="project-sheet-close" type="button" title="关闭" aria-label="关闭" onClick={() => setIsQuickNotesOpen(false)}>
                 <IconClose />
               </button>
@@ -6253,7 +6262,7 @@ export function App() {
                 </div>
                 <textarea className="quick-notes-content-input quick-notes-plain-editor" value={quickNoteContent} onChange={(event) => { quickNoteContentRef.current = event.target.value; setQuickNoteContent(event.target.value); setQuickNoteStatus("尚未保存"); }} placeholder="在这里开始写作..." spellCheck={false} />
                 <footer className="quick-notes-footer">
-                  <span>{quickNoteStatus}</span>
+                  <span className={`quick-notes-status ${quickNoteStatus.includes("已同步") ? "is-synced" : ""}`}>{quickNoteStatus}</span>
                   <button type="button" className="button primary" disabled={quickNoteSaving} onClick={() => void saveQuickNote()}>{quickNoteSaving ? "保存中..." : "保存"}</button>
                 </footer>
               </div>
@@ -9252,7 +9261,11 @@ export function buildTimelineEntries(
   const messageEntries: TimelineEntry[] = [];
 
   for (const message of messages) {
-    if (message.role === "tool" || isPatchAssistantMessage(message.content)) {
+    if (
+      message.role === "tool" ||
+      isPatchAssistantMessage(message.content) ||
+      (message.role === "assistant" && isInternalAgentProtocolMessage(message.content))
+    ) {
       continue;
     }
 
@@ -9315,7 +9328,12 @@ function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[], messages: Me
   // chronological segments instead of one large turn-wide tool block.
   const fallbackMessagesByTurn = new Map<string, MessageRecord[]>();
   for (const message of messages) {
-    if (message.role !== "assistant" || !message.turnRunId || isPatchAssistantMessage(message.content)) continue;
+    if (
+      message.role !== "assistant" ||
+      !message.turnRunId ||
+      isPatchAssistantMessage(message.content) ||
+      isInternalAgentProtocolMessage(message.content)
+    ) continue;
     fallbackMessagesByTurn.set(message.turnRunId, [...(fallbackMessagesByTurn.get(message.turnRunId) ?? []), message]);
   }
   const fallbackGroups = new Map<string, { createdAt: string; toolCalls: ToolCallRecord[] }>();
@@ -9387,6 +9405,10 @@ export function isFileWriteTool(toolName: string): boolean {
 
 export function isPatchAssistantMessage(content: string): boolean {
   return /^\s*(?:```(?:diff|patch)?\s*)?\*\*\* Begin Patch\b/m.test(content);
+}
+
+export function isInternalAgentProtocolMessage(content: string): boolean {
+  return /\b(?:tool_call_id|completed_task_ids|completion_evidence)\b/i.test(content);
 }
 
 function collapseDirectoryReadMessages(entries: TimelineEntry[]): TimelineEntry[] {

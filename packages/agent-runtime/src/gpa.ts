@@ -32,7 +32,9 @@ export function parseGpaState(json: string | null | undefined): GpaState {
       parsed.stage === "goal" || parsed.stage === "plan" || parsed.stage === "act"
         ? parsed.stage
         : "off";
-    const planTasks = Array.isArray(parsed.planTasks) ? parsed.planTasks : [];
+    const planTasks = normalizeSequentialPlanTasks(
+      Array.isArray(parsed.planTasks) ? parsed.planTasks : []
+    );
     // A PLAN confirmation is meaningful only after a visible, parsed task list
     // has been persisted. Clear stale states written by older runtimes.
     const awaitingConfirmation =
@@ -63,7 +65,10 @@ export function gpaStageAllowsTools(state: GpaState): boolean {
   return state.stage === "off" || state.stage === "act";
 }
 
-/** Marks matching plan tasks as done; returns the same state reference when unchanged. */
+/**
+ * GPA plans execute in order. A completed task can only advance the first
+ * unfinished item, preventing later tasks from bypassing their prerequisites.
+ */
 export function applyCompletedPlanTasks(state: GpaState, completedTaskIds: string[]): GpaState {
   if (!completedTaskIds.length || !state.planTasks.length) {
     return state;
@@ -71,15 +76,36 @@ export function applyCompletedPlanTasks(state: GpaState, completedTaskIds: strin
   const completed = new Set(
     completedTaskIds.map((id) => id.trim().toUpperCase()).filter(Boolean)
   );
+  const currentTask = state.planTasks.find((task) => !task.done);
+  if (!currentTask || !completed.has(currentTask.id.toUpperCase())) {
+    return state;
+  }
   let changed = false;
   const planTasks = state.planTasks.map((task) => {
-    if (!completed.has(task.id.toUpperCase()) || task.done) {
+    if (task.id !== currentTask.id || task.done) {
       return task;
     }
     changed = true;
     return { ...task, done: true };
   });
   return changed ? { ...state, planTasks } : state;
+}
+
+export function normalizeSequentialPlanTasks(tasks: GpaState["planTasks"]): GpaState["planTasks"] {
+  let encounteredPendingTask = false;
+  let changed = false;
+  const normalized = tasks.map((task) => {
+    if (!task.done) {
+      encounteredPendingTask = true;
+      return task;
+    }
+    if (!encounteredPendingTask) {
+      return task;
+    }
+    changed = true;
+    return { ...task, done: false };
+  });
+  return changed ? normalized : tasks;
 }
 
 export interface GpaCompletedTaskDeclaration {
@@ -167,7 +193,7 @@ export function buildGpaSystemDirective(
       "5) 汇报：输出当前任务结果与下一步计划；如需用户决策，列出明确选项；",
       "6) 停止并上报：需求变更/范围蔓延、技术方案不可行/阻塞、自检未通过且无法自行修复、需要用户做选型/优先级决策。",
       "7) 每一轮 ACT decision 都必须包含 completed_task_ids：未完成新任务时返回 []；完成任务时返回累计已完成的全部任务 ID（不要攒到最后才一次性提交）。",
-      "8) 当前计划项通过验收后，必须先提交包含该 ID 的 decision，才可以开始后续计划项；不要让文件操作或进度文案替代计划状态更新。",
+      "8) 当前计划项通过验收后，必须先提交包含该 ID 的 decision，才可以开始后续计划项。每个 decision 只能新增完成当前最早未完成的一个任务；不得跳过中间任务、提前标记收尾或验收任务完成。不要让文件操作或进度文案替代计划状态更新。",
       "9) 最终完成时必须返回 completed_task_ids，覆盖已确认 PLAN 的全部任务；completion_evidence 必须按任务引用真实成功的 tool_call_id，并区分 observation、delivery、verification。没有交付和验证证据时不得声明 goal_completed。"
     ].join("\n")
   };

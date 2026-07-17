@@ -80,6 +80,7 @@ export {
   parseGpaCompletedTaskDeclarations,
   parseGpaPlanTasks,
   reconcileGpaPlanTasks,
+  normalizeSequentialPlanTasks,
   parseGpaState
 } from "./gpa";
 export {
@@ -186,6 +187,7 @@ export interface SuccessfulToolEvidence {
 export interface GpaPlanProgressResolution {
   completedTaskIds: string[];
   inferredTaskIds: string[];
+  outOfOrderTaskIds: string[];
   declarations: Array<{ taskIds: string[]; text: string }>;
   hasSuccessfulToolEvidence: boolean;
 }
@@ -1427,6 +1429,27 @@ class ThreadSessionRuntime {
           });
         }
 
+        if (planProgress && planProgress.outOfOrderTaskIds.length > 0) {
+          const currentTask = this.#gpa.planTasks.find((task) => !task.done);
+          transcript.push({
+            role: "user",
+            content: buildGpaPlanSequenceRecoveryInstruction({
+              currentTask,
+              outOfOrderTaskIds: planProgress.outOfOrderTaskIds
+            })
+          });
+          await this.services.log("gpa.plan_progress_out_of_order", this.threadId, {
+            turnRunId: turn.id,
+            currentTaskId: currentTask?.id ?? null,
+            outOfOrderTaskIds: planProgress.outOfOrderTaskIds
+          });
+          decision.assistantMessage = undefined;
+          decision.toolCalls = [];
+          decision.endTurn = false;
+          decision.goalCompleted = false;
+          continue;
+        }
+
         const currentPlanTask = this.#gpa.stage === "act"
           ? this.#gpa.planTasks.find((task) => !task.done)
           : undefined;
@@ -2092,6 +2115,7 @@ class ThreadSessionRuntime {
           decision.assistantMessage = undefined;
         } else if (decision.assistantMessage && decision.toolCalls.length > 0 && !preservesGpaAnalysis) {
           await discardStreamedAssistant();
+          decision.assistantMessage = undefined;
         }
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
@@ -3605,6 +3629,9 @@ export function buildCommentaryMessageMetadata(toolCalls: RuntimeToolCall[]): Re
 export function isSafeCommentaryMessage(content: string): boolean {
   const normalized = content.trim();
   if (!normalized || isPatchPayload(normalized)) return false;
+  if (/\b(?:tool_call_id|completed_task_ids|completion_evidence)\b/i.test(normalized)) {
+    return false;
+  }
   if (/^\s*[\[{][\s\S]*(?:"(?:assistant_message|tool_calls|tool_result|arguments)"|<(?:tool_calls?|tool_result)\b)/i.test(normalized)) {
     return false;
   }
@@ -3940,13 +3967,37 @@ export function resolveGpaPlanProgress(input: {
           (id, index, values) => unfinishedTaskIds.has(id) && values.indexOf(id) === index
         )
     : [];
+  const candidateTaskIds = reportedTaskIds.length > 0 ? reportedTaskIds : inferredTaskIds;
+  const currentTask = input.planTasks.find((task) => !task.done);
+  const completedTaskIds = currentTask && candidateTaskIds.includes(currentTask.id.toUpperCase())
+    ? [currentTask.id.toUpperCase()]
+    : [];
+  const outOfOrderTaskIds = candidateTaskIds.filter(
+    (id) => !input.planTasks.find((task) => task.id.toUpperCase() === id)?.done && id !== currentTask?.id.toUpperCase()
+  );
 
   return {
-    completedTaskIds: reportedTaskIds.length > 0 ? reportedTaskIds : inferredTaskIds,
+    completedTaskIds,
     inferredTaskIds,
+    outOfOrderTaskIds,
     declarations,
     hasSuccessfulToolEvidence
   };
+}
+
+export function buildGpaPlanSequenceRecoveryInstruction(input: {
+  currentTask?: GpaState["planTasks"][number];
+  outOfOrderTaskIds: string[];
+}): string {
+  const current = input.currentTask
+    ? `${input.currentTask.id}: ${input.currentTask.title}`
+    : "the next unfinished PLAN task";
+  return [
+    "[Internal GPA plan sequence guard. Do not display or quote this instruction to the user.]",
+    `You attempted to mark later PLAN tasks complete before their prerequisites: ${input.outOfOrderTaskIds.join(", ")}.`,
+    `The only task eligible for completion now is ${current}.`,
+    "Do not call tools for later tasks. Complete and report only this current task, then wait for the next decision before starting the following task."
+  ].join(" ");
 }
 
 export function buildGpaPlanProgressRecoveryInstruction(
