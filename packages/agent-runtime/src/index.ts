@@ -221,7 +221,7 @@ export interface ManagedWriteCompletionValidationResult {
 }
 
 export interface ManagedWriteRecoveryState {
-  phase: "none" | "read" | "write";
+  phase: "none" | "read" | "directory" | "write";
   failedToolName?: "apply_patch" | "fs.write_file";
   targetPaths: string[];
 }
@@ -1018,6 +1018,7 @@ class ThreadSessionRuntime {
       const successfulToolEvidence: SuccessfulToolEvidence[] = [];
       const managedWriteCompletion = createManagedWriteCompletionState();
       const managedWriteRecovery = createManagedWriteRecoveryState();
+      let pendingFileReadRecovery: RuntimeToolCall | null = null;
       const managedWriteRecoveryBlocks = new Map<string, number>();
       const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
       const failedToolCallFingerprints = new Map<string, number>();
@@ -1669,6 +1670,28 @@ class ThreadSessionRuntime {
             turnRunId: turn.id,
             failedToolName: managedWriteRecovery.failedToolName,
             path: forcedManagedWriteRecoveryCall.arguments.path
+          });
+        }
+
+        if (!forcedManagedWriteRecoveryCall && pendingFileReadRecovery) {
+          const forcedFileReadRecoveryCall = pendingFileReadRecovery;
+          pendingFileReadRecovery = null;
+          const recoveryFingerprint = createToolCallFingerprint(
+            forcedFileReadRecoveryCall.name,
+            forcedFileReadRecoveryCall.arguments
+          );
+          successfulToolCallFingerprints.delete(recoveryFingerprint);
+          successfulReusableToolResults.delete(recoveryFingerprint);
+          decision = {
+            ...decision,
+            assistantMessage: undefined,
+            toolCalls: [forcedFileReadRecoveryCall],
+            endTurn: false,
+            goalCompleted: false
+          };
+          await this.services.log("agent.file_read_recovery_directory_forced", this.threadId, {
+            turnRunId: turn.id,
+            directoryPath: forcedFileReadRecoveryCall.arguments.path
           });
         }
 
@@ -2878,6 +2901,14 @@ class ThreadSessionRuntime {
             failedToolCallFingerprints.set(toolCallFingerprint, attempts);
             await registerTaskFailure(toolTaskKey, result.content);
             if (attempts >= 2) {
+              const forcedRecoveryCall = createFailedFileReadRecoveryToolCall(
+                toolCall,
+                workspaceCwd,
+                randomUUID()
+              );
+              if (forcedRecoveryCall) {
+                pendingFileReadRecovery = forcedRecoveryCall;
+              }
               await this.services.log("agent.strategy_switch_requested", this.threadId, {
                 turnRunId: turn.id,
                 toolName: toolCall.name,
@@ -5128,12 +5159,39 @@ export function createManagedWriteRecoveryReadToolCall(
   state: ManagedWriteRecoveryState,
   id: string
 ): RuntimeToolCall | null {
-  const targetPath = state.phase === "read" ? state.targetPaths[0] : undefined;
+  const targetPath = state.phase === "read" || state.phase === "directory"
+    ? state.targetPaths[0]
+    : undefined;
   if (!targetPath) return null;
   return {
     id,
-    name: "fs.read_file",
+    name: state.phase === "directory" ? "fs.read_directory" : "fs.read_file",
     arguments: { path: targetPath }
+  };
+}
+
+/**
+ * After two identical file-read failures, inspect its parent directory instead
+ * of relying on the model to choose a different diagnostic call.
+ */
+export function createFailedFileReadRecoveryToolCall(
+  toolCall: Pick<RuntimeToolCall, "name" | "arguments">,
+  workspaceCwd: string,
+  id: string
+): RuntimeToolCall | null {
+  if (toolCall.name !== "fs.read_file") return null;
+  const requestedPath = toolCall.arguments.path;
+  if (typeof requestedPath !== "string" || !requestedPath.trim()) return null;
+
+  const filePath = getRecoveryFilePath(requestedPath, workspaceCwd);
+  if (!filePath) return null;
+  const directoryPath = path.dirname(filePath);
+  if (pathsMatch(directoryPath, filePath)) return null;
+
+  return {
+    id,
+    name: "fs.read_directory",
+    arguments: { path: directoryPath }
   };
 }
 
@@ -5168,16 +5226,34 @@ export function advanceManagedWriteRecovery(
   }
 ): void {
   if ((input.toolName === "apply_patch" || input.toolName === "fs.write_file") && !input.ok) {
-    state.phase = "read";
+    const addOnlyTargetPaths = input.toolName === "apply_patch"
+      ? getManagedWriteAddOnlyTargetPaths(input.argumentsJson)
+      : [];
+    state.phase = addOnlyTargetPaths.length > 0 ? "directory" : "read";
     state.failedToolName = input.toolName;
-    state.targetPaths = getManagedWriteTargetPaths(input.toolName, input.argumentsJson)
+    state.targetPaths = (addOnlyTargetPaths.length > 0 ? addOnlyTargetPaths : getManagedWriteTargetPaths(input.toolName, input.argumentsJson))
       .map((candidate) => getRecoveryFilePath(candidate, input.workspaceCwd))
+      .map((candidate) => state.phase === "directory" && candidate ? path.dirname(candidate) : candidate)
       .filter((candidate): candidate is string => Boolean(candidate));
     return;
   }
 
   if (state.phase === "read" && input.toolName === "fs.read_file" && input.ok && input.readPath) {
     const matchedTargetIndex = state.targetPaths.findIndex((targetPath) => pathsMatch(targetPath, input.readPath!));
+    if (matchedTargetIndex >= 0) {
+      state.targetPaths.splice(matchedTargetIndex, 1);
+    }
+    if (state.targetPaths.length === 0) {
+      state.phase = "write";
+    }
+    return;
+  }
+
+  if (state.phase === "directory" && input.toolName === "fs.read_directory" && input.ok) {
+    const directoryPath = getRecoveryFilePath(input.argumentsJson.path, input.workspaceCwd);
+    const matchedTargetIndex = directoryPath
+      ? state.targetPaths.findIndex((targetPath) => pathsMatch(targetPath, directoryPath))
+      : -1;
     if (matchedTargetIndex >= 0) {
       state.targetPaths.splice(matchedTargetIndex, 1);
     }
@@ -5195,9 +5271,10 @@ export function advanceManagedWriteRecovery(
 }
 
 export function buildManagedWriteRecoveryInstruction(state: ManagedWriteRecoveryState): string {
+  const inspectTool = state.phase === "directory" ? "fs.read_directory" : "fs.read_file";
   const target = state.targetPaths.length > 0
-    ? `Read the failed target first with fs.read_file: ${state.targetPaths.join(", ")}.`
-    : "Read the intended target first with fs.read_file.";
+    ? `Inspect the failed target with ${inspectTool}: ${state.targetPaths.join(", ")}.`
+    : `Inspect the intended target first with ${inspectTool}.`;
   const next = state.phase === "write"
     ? "Now retry with apply_patch or fs.write_file."
     : target;
@@ -5226,6 +5303,17 @@ function getManagedWriteTargetPaths(toolName: string, argumentsJson: Record<stri
   }
   const candidate = argumentsJson.path;
   return typeof candidate === "string" && candidate.trim() ? [candidate] : [];
+}
+
+function getManagedWriteAddOnlyTargetPaths(argumentsJson: Record<string, unknown>): string[] {
+  const patch = [argumentsJson.patch, argumentsJson.patch_content, argumentsJson.patchText].find(
+    (value): value is string => typeof value === "string"
+  ) ?? "";
+  const addPaths = [...patch.matchAll(/^\s*\*+\s*Add\s+File:\s*(.+)$/gim)]
+    .map((match) => normalizeManagedWriteTargetPath(match[1]))
+    .filter((candidate): candidate is string => Boolean(candidate));
+  const hasNonAddMutation = /^\s*\*+\s*(?:Update|Delete)\s+File:/gim.test(patch);
+  return hasNonAddMutation ? [] : [...new Set(addPaths)];
 }
 
 function normalizeManagedWriteTargetPath(candidate: string): string | undefined {

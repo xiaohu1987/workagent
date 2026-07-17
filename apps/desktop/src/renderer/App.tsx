@@ -6811,14 +6811,16 @@ export function App() {
                         <span className="gpa-popover-item-hint">选择图片作为视觉参考</span>
                       </span>
                     </button>
+                    <div
+                      className="composer-add-menu-item-with-submenu"
+                      onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("skills"); }}
+                    >
                     <button
                       type="button"
                       className="gpa-popover-item composer-add-menu-parent"
                       role="menuitem"
-                      data-composer-add-menu-view="skills"
                       aria-haspopup="menu"
                       aria-expanded={composerAddMenuView === "skills"}
-                      onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("skills"); }}
                       onFocus={() => setComposerAddMenuView("skills")}
                     >
                       <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
@@ -6828,6 +6830,41 @@ export function App() {
                       </span>
                       <IconChevronRight />
                     </button>
+                    {composerAddMenuView === "skills" ? (
+                      <div className="composer-add-menu-submenu" onMouseEnter={clearComposerAddMenuCloseTimer}>
+                        <div className="composer-add-menu-submenu-title">Skills</div>
+                        <div className="composer-add-menu-list">
+                          {skills.length > 0 ? skills.map((skill) => (
+                            <button
+                              key={skill.id}
+                              className="gpa-popover-item"
+                              role="menuitem"
+                              onClick={() => {
+                                addComposerAttachment({
+                                  kind: "skill",
+                                  skillId: skill.id,
+                                  label: skill.displayName ?? skill.name,
+                                  description: skill.shortDescription ?? skill.description
+                                });
+                                setGpaMenuOpen(false);
+                                setGpaMenuPos(null);
+                              }}
+                            >
+                              <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
+                              <span className="gpa-popover-item-copy">
+                                <span className="gpa-popover-item-title">{skill.displayName ?? skill.name}</span>
+                                <span className="gpa-popover-item-hint">{skill.shortDescription ?? skill.description}</span>
+                              </span>
+                            </button>
+                          )) : <span className="composer-add-menu-empty">No skills available</span>}
+                        </div>
+                      </div>
+                    ) : null}
+                    </div>
+                    <div
+                      className="composer-add-menu-item-with-submenu"
+                      onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("mcp"); }}
+                    >
                     <button
                       type="button"
                       className="gpa-popover-item composer-add-menu-parent"
@@ -6845,10 +6882,42 @@ export function App() {
                       </span>
                       <IconChevronRight />
                     </button>
+                    {composerAddMenuView === "mcp" ? (
+                      <div className="composer-add-menu-submenu" onMouseEnter={clearComposerAddMenuCloseTimer}>
+                        <div className="composer-add-menu-submenu-title">MCP 服务</div>
+                        <div className="composer-add-menu-list">
+                          {(config?.mcpServers ?? []).filter((server) => server.enabled).map((server) => (
+                            <button
+                              key={server.id}
+                              className="gpa-popover-item"
+                              role="menuitem"
+                              onClick={() => {
+                                addComposerAttachment({
+                                  kind: "mcp",
+                                  serverId: server.id,
+                                  label: server.name,
+                                  description: server.url ?? server.command ?? server.id
+                                });
+                                setGpaMenuOpen(false);
+                                setGpaMenuPos(null);
+                              }}
+                            >
+                              <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span>
+                              <span className="gpa-popover-item-copy">
+                                <span className="gpa-popover-item-title">{server.name}</span>
+                                <span className="gpa-popover-item-hint">{server.url ?? server.command ?? server.id}</span>
+                              </span>
+                            </button>
+                          ))}
+                          {(config?.mcpServers ?? []).filter((server) => server.enabled).length === 0 ? <span className="composer-add-menu-empty">没有已启用的 MCP 服务</span> : null}
+                        </div>
+                      </div>
+                    ) : null}
+                    </div>
                     <div className="gpa-popover-divider" />
                 </>
                 {composerAddMenuView === "skills" ? (
-                  <div className="composer-add-menu-submenu" data-composer-add-menu-view="skills" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("skills"); }}>
+                  <div className="composer-add-menu-submenu composer-add-menu-submenu-legacy" data-composer-add-menu-view="skills" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("skills"); }}>
                     <div className="composer-add-menu-submenu-title">Skills</div>
                     <div className="composer-add-menu-list">
                       {skills.length > 0 ? skills.map((skill) => (
@@ -6878,7 +6947,7 @@ export function App() {
                   </div>
                 ) : null}
                 {composerAddMenuView === "mcp" ? (
-                  <div className="composer-add-menu-submenu" data-composer-add-menu-view="mcp" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("mcp"); }}>
+                  <div className="composer-add-menu-submenu composer-add-menu-submenu-legacy" data-composer-add-menu-view="mcp" onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("mcp"); }}>
                     <div className="composer-add-menu-submenu-title">MCP 服务</div>
                     <div className="composer-add-menu-list">
                       {(config?.mcpServers ?? []).filter((server) => server.enabled).map((server) => (

@@ -11320,12 +11320,20 @@ select:focus {
   background: rgba(255, 255, 255, 0.1);
 }
 
+.composer-add-menu-item-with-submenu {
+  position: relative;
+}
+
+.composer-add-menu-item-with-submenu > .gpa-popover-item {
+  width: 100%;
+}
+
 .composer-add-menu-submenu {
   position: absolute;
-  left: calc(100% - 1px);
-  bottom: 18px;
+  z-index: 2;
+  top: 0;
+  left: calc(100% + 6px);
   width: 252px;
-  margin-left: 0;
   padding: 4px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
@@ -11338,19 +11346,12 @@ select:focus {
   top: 0;
   right: 100%;
   bottom: 0;
-  width: 1px;
+  width: 6px;
   content: "";
 }
 
-/* Align each flyout with the row that opened it instead of the bottom of the root menu. */
-.composer-add-menu-submenu[data-composer-add-menu-view="skills"] {
-  top: 138px;
-  bottom: auto;
-}
-
-.composer-add-menu-submenu[data-composer-add-menu-view="mcp"] {
-  top: 206px;
-  bottom: auto;
+.composer-add-menu-submenu-legacy {
+  display: none;
 }
 
 .composer-add-menu-submenu-title {

@@ -28,6 +28,7 @@ import {
   buildProgressOnlyCompletionRecoveryInstruction,
   buildExecutionRecoveryInstruction,
   buildStrategySwitchInstruction,
+  createFailedFileReadRecoveryToolCall,
   buildRepeatedTaskRecoveryMessage,
   buildRuntimeFailureRecoveryMessage,
   AgentModelCompatibilityError,
@@ -1338,6 +1339,22 @@ describe("GPA plan validation", () => {
     expect(applyCompletedPlanTasks(next, ["T1"])).toBe(next);
   });
 
+  it("inspects the parent directory for a failed Add File patch", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: { patch: "*** Begin Patch\n*** Add File: docs/new-file.md\n+content\n*** End Patch" },
+      ok: false,
+      workspaceCwd: "C:\\project"
+    });
+
+    expect(createManagedWriteRecoveryReadToolCall(state, "recovery-directory")).toEqual({
+      id: "recovery-directory",
+      name: "fs.read_directory",
+      arguments: { path: "C:\\project\\docs" }
+    });
+  });
+
   it("does not mark a later GPA task done before the current task", () => {
     const state = parseGpaState(JSON.stringify({
       stage: "act",
@@ -1550,6 +1567,18 @@ describe("GPA user-input tool batches", () => {
 });
 
 describe("strategy switching", () => {
+  it("forces a parent-directory inspection after repeated file read failures", () => {
+    expect(createFailedFileReadRecoveryToolCall(
+      { name: "fs.read_file", arguments: { path: "docs/missing.md" } },
+      "C:\\project",
+      "recovery-directory"
+    )).toEqual({
+      id: "recovery-directory",
+      name: "fs.read_directory",
+      arguments: { path: "C:\\project\\docs" }
+    });
+  });
+
   it("blocks the same failed patch and directs the model to inspect before a different patch", () => {
     const instruction = buildStrategySwitchInstruction({
       toolName: "apply_patch",
