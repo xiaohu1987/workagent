@@ -2021,8 +2021,8 @@ export class DesktopBackend {
   public saveQuickNote(input: { id?: string; title?: string; content: string }): QuickNoteRecord {
     const content = input.content.trim();
     if (!content) throw new Error("笔记内容不能为空。");
-    const title = input.title?.trim() || "未命名笔记";
     const existing = input.id ? this.#db.getQuickNote(input.id) : null;
+    const title = existing?.title || input.title?.trim() || buildThreadTitleFromFirstMessage(content);
     const knowledgeBase = existing ? this.#db.getKnowledgeBase(existing.knowledgeBaseId) : this.#db.findKnowledgeBase("global", "随手记");
     const base = knowledgeBase ?? this.#db.createKnowledgeBase({
       scope: "global",
@@ -2052,6 +2052,19 @@ export class DesktopBackend {
     this.#db.deleteKnowledgeDocumentBySourcePath(note.knowledgeBaseId, note.knowledgeSourcePath);
     this.#db.deleteQuickNote(id);
     this.#db.updateKnowledgeBase(note.knowledgeBaseId, { status: "ready" });
+  }
+
+  public async createQuickNoteWithAi(prompt: string, context: string): Promise<string> {
+    const provider = this.#config.providers.find((item) => item.id === this.#config.defaultProvider);
+    const model = this.#config.models.find((item) => item.providerId === this.#config.defaultProvider && item.id === this.#config.defaultModel);
+    if (!provider || !model) throw new Error("请先在设置中配置默认文本模型。");
+    const decision = await this.#providerFactory.create(provider).runTurn({
+      systemPrompt: "你是笔记写作助手。仅返回可直接插入 Markdown 笔记的正文，不要解释。",
+      transcript: [{ role: "user", content: `创作要求：${prompt}\n\n当前笔记：\n${context.slice(0, 12_000)}` }],
+      availableTools: [], model, provider
+    });
+    if (!decision.assistantMessage?.trim()) throw new Error("模型没有返回可插入内容。");
+    return decision.assistantMessage.trim();
   }
 
   public listKnowledgeBaseDocuments(knowledgeBaseId: string): KnowledgeDocumentRecord[] {

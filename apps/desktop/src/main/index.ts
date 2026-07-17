@@ -488,6 +488,7 @@ function registerIpc(): void {
   ipcMain.handle("quick-notes:list", () => backend.listQuickNotes());
   ipcMain.handle("quick-notes:save", (_event, payload: { id?: string; title?: string; content: string }) => backend.saveQuickNote(payload));
   ipcMain.handle("quick-notes:delete", (_event, id: string) => backend.deleteQuickNote(id));
+  ipcMain.handle("quick-notes:ai-create", (_event, payload: { prompt: string; context: string }) => backend.createQuickNoteWithAi(payload.prompt, payload.context));
   ipcMain.handle("browser:open", (_event, payload) => backend.openBrowserTab(payload.threadId, payload.url));
   ipcMain.handle("browser:navigate", (_event, payload) =>
     backend.navigateBrowserTab(payload.threadId, payload.tabId, payload.url)

@@ -160,59 +160,73 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       ...(!nativeTools && input.model.supportsJsonOutput ? { response_format: { type: "json_object" as const } } : {})
     };
 
-    if (!nativeTools && input.stream && input.model.supportsStreaming) {
-      const stream = await this.#client.chat.completions.create(
+    if (input.stream && input.model.supportsStreaming) {
+      const streamResponse = await this.#client.chat.completions.create(
         { ...request, stream: true },
         { signal: input.abortSignal }
       ) as any;
+      if (!isAsyncIterable(streamResponse)) {
+        return parseOpenAiCompatibleResponse(streamResponse, Boolean(nativeTools), input);
+      }
+      const stream = streamResponse;
       let text = "";
       let visibleText = "";
+      const streamedNativeCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
       for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta?.content ?? "";
-        if (!delta) {
-          continue;
-        }
-        text += delta;
-        const nextVisibleText = extractVisibleStreamText(text);
-        if (nextVisibleText.startsWith(visibleText)) {
-          const visibleDelta = nextVisibleText.slice(visibleText.length);
-          if (visibleDelta) {
-            await input.onTextDelta?.(visibleDelta);
+        const delta = chunk.choices[0]?.delta;
+        const content = delta?.content ?? "";
+        if (content) {
+          text += content;
+          const nextVisibleText = extractVisibleStreamText(text);
+          if (nextVisibleText.startsWith(visibleText)) {
+            const visibleDelta = nextVisibleText.slice(visibleText.length);
+            if (visibleDelta) {
+              await input.onTextDelta?.(visibleDelta);
+            }
           }
+          visibleText = nextVisibleText;
         }
-        visibleText = nextVisibleText;
+
+        for (const toolCall of delta?.tool_calls ?? []) {
+          const index = typeof toolCall.index === "number" ? toolCall.index : 0;
+          const current = streamedNativeCalls.get(index) ?? { arguments: "" };
+          if (typeof toolCall.id === "string" && toolCall.id) current.id = toolCall.id;
+          if (typeof toolCall.function?.name === "string" && toolCall.function.name) {
+            current.name = toolCall.function.name;
+          }
+          if (typeof toolCall.function?.arguments === "string") {
+            current.arguments += toolCall.function.arguments;
+          }
+          streamedNativeCalls.set(index, current);
+        }
       }
-      return parseDecisionFromText(text.trim());
+      const nativeCalls = [...streamedNativeCalls.entries()]
+        .sort(([left], [right]) => left - right)
+        .flatMap(([, call]) => {
+          const name = call.name ? originalToolName(call.name, input.availableTools) : null;
+          if (!name) return [];
+          return [{
+            id: call.id || crypto.randomUUID(),
+            name,
+            arguments: parseNativeToolArguments(call.arguments)
+          }];
+        });
+      if (nativeCalls.length > 0) {
+        return {
+          assistantMessage: text.trim() || undefined,
+          toolCalls: nativeCalls,
+          endTurn: false,
+          goalCompleted: false,
+          isStructured: true
+        };
+      }
+      return nativeTools ? nativeTextDecision(text.trim()) : parseDecisionFromText(text.trim());
     }
 
     const response = await this.#client.chat.completions.create(request, {
       signal: input.abortSignal
     });
-    const message = response.choices[0]?.message;
-    const nativeCalls = message?.tool_calls?.flatMap((call) => {
-      if (call.type !== "function") return [];
-      const name = originalToolName(call.function.name, input.availableTools);
-      if (!name) return [];
-      return [{
-        id: call.id || crypto.randomUUID(),
-        name,
-        arguments: parseNativeToolArguments(call.function.arguments)
-      }];
-    }) ?? [];
-    if (nativeCalls.length > 0) {
-      return withOutputTokens({
-        assistantMessage: message?.content?.trim() || undefined,
-        toolCalls: nativeCalls,
-        endTurn: false,
-        goalCompleted: false,
-        isStructured: true
-      }, response.usage?.completion_tokens);
-    }
-    const text = message?.content?.trim() || "";
-    return withOutputTokens(
-      nativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
-      response.usage?.completion_tokens
-    );
+    return parseOpenAiCompatibleResponse(response, Boolean(nativeTools), input);
   }
 
   public async generateImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }) {
@@ -337,6 +351,42 @@ function parseNativeToolArguments(value: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return Boolean(value && typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function");
+}
+
+function parseOpenAiCompatibleResponse(
+  response: any,
+  hasNativeTools: boolean,
+  input: ProviderTurnInput
+): ProviderTurnDecision {
+  const message = response.choices[0]?.message;
+  const nativeCalls = message?.tool_calls?.flatMap((call: any) => {
+    if (call.type !== "function") return [];
+    const name = originalToolName(call.function.name, input.availableTools);
+    if (!name) return [];
+    return [{
+      id: call.id || crypto.randomUUID(),
+      name,
+      arguments: parseNativeToolArguments(call.function.arguments)
+    }];
+  }) ?? [];
+  if (nativeCalls.length > 0) {
+    return withOutputTokens({
+      assistantMessage: message?.content?.trim() || undefined,
+      toolCalls: nativeCalls,
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    }, response.usage?.completion_tokens);
+  }
+  const text = message?.content?.trim() || "";
+  return withOutputTokens(
+    hasNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
+    response.usage?.completion_tokens
+  );
 }
 
 function objectToolArguments(value: unknown): Record<string, unknown> {
@@ -1017,10 +1067,10 @@ function extractVisibleStreamText(text: string): string {
     }
   }
 
-  // Do not render a fallback stream. Some compatible models emit raw tool
-  // payloads without a reliable wrapper; the runtime publishes only a parsed,
-  // validated assistant message to the transcript.
-  return "";
+  const trimmed = text.trimStart();
+  // Suppress structured protocol payloads until their assistant_message can be decoded.
+  if (trimmed.startsWith("{") || trimmed.startsWith("<")) return "";
+  return text;
 }
 
 function parseClarification(value: unknown): ProviderTurnDecision["clarification"] | undefined {

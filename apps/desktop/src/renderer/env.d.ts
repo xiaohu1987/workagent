@@ -35,6 +35,7 @@ declare global {
       listQuickNotes: () => Promise<Array<{ id: string; title: string; content: string; knowledgeBaseId: string; knowledgeSourcePath: string; createdAt: string; updatedAt: string }>>;
       saveQuickNote: (payload: { id?: string; title?: string; content: string }) => Promise<{ id: string; title: string; content: string; knowledgeBaseId: string; knowledgeSourcePath: string; createdAt: string; updatedAt: string }>;
       deleteQuickNote: (id: string) => Promise<void>;
+      createQuickNoteWithAi: (payload: { prompt: string; context: string }) => Promise<string>;
       listProjectFiles: (threadId: string) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
       readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
       writeProjectFile: (payload: { threadId: string; path: string; content: string }) => Promise<{ path: string }>;

@@ -114,6 +114,7 @@ const api = {
   listQuickNotes: () => ipcRenderer.invoke("quick-notes:list"),
   saveQuickNote: (payload: { id?: string; title?: string; content: string }) => ipcRenderer.invoke("quick-notes:save", payload),
   deleteQuickNote: (id: string) => ipcRenderer.invoke("quick-notes:delete", id),
+  createQuickNoteWithAi: (payload: { prompt: string; context: string }) => ipcRenderer.invoke("quick-notes:ai-create", payload),
   listKnowledgeDocuments: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:documents", knowledgeBaseId),
   refreshKnowledgeBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:refresh", knowledgeBaseId),
   deleteKnowledgeBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:delete", knowledgeBaseId),

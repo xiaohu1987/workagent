@@ -624,6 +624,11 @@ export function App() {
   const [quickNoteContent, setQuickNoteContent] = useState("");
   const [quickNoteSaving, setQuickNoteSaving] = useState(false);
   const [quickNoteStatus, setQuickNoteStatus] = useState("尚未保存");
+  const [renamingQuickNoteId, setRenamingQuickNoteId] = useState<string | null>(null);
+  const [quickNoteRenameDraft, setQuickNoteRenameDraft] = useState("");
+  const [quickNoteListMenu, setQuickNoteListMenu] = useState<{ x: number; y: number; note: { id: string; title: string; content: string } } | null>(null);
+  const [quickNoteDeleteConfirm, setQuickNoteDeleteConfirm] = useState<{ id: string; title: string } | null>(null);
+  const quickNoteContentRef = useRef("");
   const [isHistorySearchOpen, setIsHistorySearchOpen] = useState(false);
   const [historySearchQuery, setHistorySearchQuery] = useState("");
   const [historySearchResults, setHistorySearchResults] = useState<HistorySearchResult[]>([]);
@@ -2965,6 +2970,7 @@ export function App() {
       setSelectedQuickNoteId(first?.id ?? null);
       setQuickNoteTitle(first?.title ?? "");
       setQuickNoteContent(first?.content ?? "");
+      quickNoteContentRef.current = first?.content ?? "";
       setQuickNoteStatus(first ? "已同步至全局知识库" : "新建笔记后保存至全局知识库");
     } catch (error) {
       showNotice("无法读取随手记", { message: error instanceof Error ? error.message : "请稍后重试。" });
@@ -2975,29 +2981,57 @@ export function App() {
     setSelectedQuickNoteId(note.id);
     setQuickNoteTitle(note.title);
     setQuickNoteContent(note.content);
+    quickNoteContentRef.current = note.content;
     setQuickNoteStatus("已同步至全局知识库");
   }
 
   async function saveQuickNote() {
-    if (!quickNoteContent.trim()) {
+    const content = quickNoteContentRef.current;
+    if (!content.trim()) {
       setQuickNoteStatus("请先填写笔记内容");
       return;
     }
     setQuickNoteSaving(true);
     setQuickNoteStatus("正在同步至全局知识库...");
     try {
-      const note = await window.codexh.saveQuickNote({ id: selectedQuickNoteId ?? undefined, title: quickNoteTitle, content: quickNoteContent });
+      const note = await window.codexh.saveQuickNote({ id: selectedQuickNoteId ?? undefined, title: quickNoteTitle, content });
       const notes = await window.codexh.listQuickNotes();
       setQuickNotes(notes);
       setSelectedQuickNoteId(note.id);
       setQuickNoteTitle(note.title);
       setQuickNoteContent(note.content);
+      quickNoteContentRef.current = note.content;
       setQuickNoteStatus("已同步至全局知识库");
+      showNotice("随手记已保存", { tone: "success", message: "已同步至全局知识库。" });
     } catch (error) {
       setQuickNoteStatus(error instanceof Error ? error.message : "保存失败，请稍后重试。");
     } finally {
       setQuickNoteSaving(false);
     }
+  }
+
+  async function renameQuickNote(note: { id: string; content: string }) {
+    const title = quickNoteRenameDraft.trim();
+    if (!title) return;
+    const saved = await window.codexh.saveQuickNote({ id: note.id, title, content: note.content });
+    setQuickNotes(await window.codexh.listQuickNotes());
+    if (selectedQuickNoteId === saved.id) setQuickNoteStatus("标题已更新并同步至全局知识库");
+    setRenamingQuickNoteId(null);
+  }
+
+  async function deleteQuickNote(note: { id: string }) {
+    setQuickNoteDeleteConfirm(null);
+    await window.codexh.deleteQuickNote(note.id);
+    const notes = await window.codexh.listQuickNotes();
+    setQuickNotes(notes);
+    const next = notes[0];
+    setSelectedQuickNoteId(next?.id ?? null);
+    setQuickNoteTitle(next?.title ?? "");
+    setQuickNoteContent(next?.content ?? "");
+    quickNoteContentRef.current = next?.content ?? "";
+    setQuickNoteListMenu(null);
+    setQuickNoteStatus(next ? "已同步至全局知识库" : "新建笔记后保存至全局知识库");
+    showNotice("随手记已删除", { tone: "success" });
   }
 
   async function submitGpaRevision() {
@@ -6190,10 +6224,7 @@ export function App() {
         }}>
           <section className="project-sheet quick-notes-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-notes-title">
             <header className="project-sheet-header">
-              <div className="project-sheet-copy">
-                <strong id="quick-notes-title">随手记</strong>
-                <span>保存后同步至全局知识库</span>
-              </div>
+              <span id="quick-notes-title" className="quick-notes-header-status">{quickNoteStatus}</span>
               <button className="project-sheet-close" type="button" title="关闭" aria-label="关闭" onClick={() => setIsQuickNotesOpen(false)}>
                 <IconClose />
               </button>
@@ -6202,13 +6233,13 @@ export function App() {
               <aside className="quick-notes-list">
                 <div className="quick-notes-list-header">
                   <span>笔记</span>
-                  <button type="button" title="新建笔记" aria-label="新建笔记" className="quick-notes-add" onClick={() => { setSelectedQuickNoteId(null); setQuickNoteTitle(""); setQuickNoteContent(""); setQuickNoteStatus("尚未保存"); }}><IconPlus /></button>
+                  <button type="button" title="新建笔记" aria-label="新建笔记" className="quick-notes-add" onClick={() => { setSelectedQuickNoteId(null); setQuickNoteTitle(""); setQuickNoteContent(""); quickNoteContentRef.current = ""; setQuickNoteStatus("尚未保存"); }}><IconPlus /></button>
                 </div>
                 {quickNotes.length ? (
                   <div className="quick-notes-items">
                     {quickNotes.map((note) => (
-                      <button key={note.id} type="button" className={`quick-notes-item ${note.id === selectedQuickNoteId ? "selected" : ""}`} onClick={() => selectQuickNote(note)}>
-                        <strong>{note.title}</strong>
+                      <button key={note.id} type="button" className={`quick-notes-item ${note.id === selectedQuickNoteId ? "selected" : ""}`} onClick={() => selectQuickNote(note)} onContextMenu={(event) => { event.preventDefault(); setQuickNoteListMenu({ x: event.clientX, y: event.clientY, note }); }}>
+                        {renamingQuickNoteId === note.id ? <input autoFocus value={quickNoteRenameDraft} onChange={(event) => setQuickNoteRenameDraft(event.target.value)} onClick={(event) => event.stopPropagation()} onBlur={() => void renameQuickNote(note)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") setRenamingQuickNoteId(null); }} /> : <strong>{note.title}</strong>}
                         <span>{new Date(note.updatedAt).toLocaleString()}</span>
                       </button>
                     ))}
@@ -6216,18 +6247,19 @@ export function App() {
                 ) : <div className="quick-notes-empty">新建一条笔记，记录随时浮现的想法。</div>}
               </aside>
               <div className="quick-notes-editor">
-                <input className="quick-notes-title-input" value={quickNoteTitle} onChange={(event) => setQuickNoteTitle(event.target.value)} placeholder="笔记标题" autoFocus />
-                <div className="quick-notes-markdown-bar" aria-label="Markdown 编辑器">
-                  <strong>Markdown</strong>
-                  <span># 标题 · **加粗** · - 列表 · ```代码```</span>
+                <div className="quick-notes-markdown-bar" aria-label="文档编辑器">
+                  <strong>文档</strong>
+                  <span>富文本编辑 · 右键插入内容</span>
                 </div>
-                <textarea className="quick-notes-content-input" value={quickNoteContent} onChange={(event) => setQuickNoteContent(event.target.value)} placeholder="# 写下内容\n\n支持 Markdown 格式..." spellCheck={false} />
+                <textarea className="quick-notes-content-input quick-notes-plain-editor" value={quickNoteContent} onChange={(event) => { quickNoteContentRef.current = event.target.value; setQuickNoteContent(event.target.value); setQuickNoteStatus("尚未保存"); }} placeholder="在这里开始写作..." spellCheck={false} />
                 <footer className="quick-notes-footer">
                   <span>{quickNoteStatus}</span>
                   <button type="button" className="button primary" disabled={quickNoteSaving} onClick={() => void saveQuickNote()}>{quickNoteSaving ? "保存中..." : "保存"}</button>
                 </footer>
               </div>
             </div>
+            {quickNoteListMenu ? <div className="quick-notes-list-context-menu" style={{ left: quickNoteListMenu.x, top: quickNoteListMenu.y }} onMouseLeave={() => setQuickNoteListMenu(null)}><button type="button" onClick={() => { setRenamingQuickNoteId(quickNoteListMenu.note.id); setQuickNoteRenameDraft(quickNoteListMenu.note.title); setQuickNoteListMenu(null); }}>重命名</button><button type="button" className="danger" onClick={() => { setQuickNoteDeleteConfirm({ id: quickNoteListMenu.note.id, title: quickNoteListMenu.note.title }); setQuickNoteListMenu(null); }}>删除</button></div> : null}
+            {quickNoteDeleteConfirm ? <div className="quick-notes-confirm-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickNoteDeleteConfirm(null); }}><section className="quick-notes-confirm-dialog" role="alertdialog" aria-modal="true"><strong>删除随手记？</strong><p>“{quickNoteDeleteConfirm.title}”及其对应的全局知识库内容将被删除。</p><footer><button type="button" onClick={() => setQuickNoteDeleteConfirm(null)}>取消</button><button type="button" className="danger" onClick={() => void deleteQuickNote(quickNoteDeleteConfirm)}>删除</button></footer></section></div> : null}
           </section>
         </div>
       ) : null}
@@ -8739,7 +8771,7 @@ function ComposerSelect({
       >
         <span className="composer-select-value">{selectedOption?.label ?? placeholder}</span>
         <span className="composer-select-chevron">
-          <IconChevronRight />
+          <IconChevronDown />
         </span>
       </button>
 

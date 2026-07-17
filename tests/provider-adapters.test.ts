@@ -470,6 +470,98 @@ describe("OpenAiCompatibleProvider", () => {
     });
   });
 
+  it("streams a final assistant_message when native tools are available but unused", async () => {
+    async function* streamFinalAnswer() {
+      yield { choices: [{ delta: { content: '{"assistant_message":"Streaming ' } }] };
+      yield { choices: [{ delta: { content: 'works","tool_calls":[],"end_turn":true,"goal_completed":true}' } }] };
+    }
+
+    mocks.chatCreate.mockResolvedValue(streamFinalAnswer());
+    const provider: ProviderDefinition = {
+      id: "company-gateway",
+      type: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "secret"
+    };
+    const model: ModelProfile = {
+      id: "test-model",
+      providerId: "company-gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: true,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+    const visibleDeltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return a JSON decision.",
+      transcript: [{ role: "user", content: "Reply normally" }],
+      availableTools: [{ name: "fs.read_file", description: "Read a file", inputSchema: { type: "object" }, riskLevel: "low" }],
+      model,
+      provider,
+      stream: true,
+      onTextDelta: async (delta) => { visibleDeltas.push(delta); }
+    });
+
+    expect(visibleDeltas.join("")).toBe("Streaming works");
+    expect(decision).toMatchObject({
+      assistantMessage: "Streaming works",
+      toolCalls: [],
+      endTurn: true,
+      goalCompleted: true
+    });
+  });
+
+  it("accumulates native tool-call fragments without streaming their payload", async () => {
+    const nativeName = nativeToolName("fs.read_file");
+    async function* streamToolCall() {
+      yield { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", function: { name: nativeName, arguments: '{"path":"src/' } }] } }] };
+      yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'App.tsx"}' } }] } }] };
+    }
+
+    mocks.chatCreate.mockResolvedValue(streamToolCall());
+    const provider: ProviderDefinition = {
+      id: "company-gateway",
+      type: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "secret"
+    };
+    const model: ModelProfile = {
+      id: "test-model",
+      providerId: "company-gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: true,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+    const visibleDeltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use tools when needed.",
+      transcript: [{ role: "user", content: "Read the file" }],
+      availableTools: [{ name: "fs.read_file", description: "Read a file", inputSchema: { type: "object" }, riskLevel: "low" }],
+      model,
+      provider,
+      stream: true,
+      onTextDelta: async (delta) => { visibleDeltas.push(delta); }
+    });
+
+    expect(visibleDeltas).toEqual([]);
+    expect(decision).toMatchObject({
+      toolCalls: [{ id: "call-1", name: "fs.read_file", arguments: { path: "src/App.tsx" } }],
+      endTurn: false,
+      goalCompleted: false
+    });
+  });
+
   it("requires an explicit goal_completed declaration", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [
