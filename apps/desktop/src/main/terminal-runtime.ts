@@ -69,7 +69,9 @@ export class TerminalRuntime {
     child.stderr.on("data", (chunk) => append(chunk, session.stderrDecoder));
     child.on("error", (error) => append(`\nTerminal error: ${error.message}\n`));
     child.on("exit", (code) => {
-      this.#sessions.delete(key);
+      if (this.#sessions.get(key) === session) {
+        this.#sessions.delete(key);
+      }
       const trailing = `${session.stdoutDecoder?.decode() ?? ""}${session.stderrDecoder?.decode() ?? ""}`;
       if (trailing) {
         append(trailing);
@@ -192,25 +194,48 @@ export class TerminalRuntime {
     active.child.stdin.write(`${input}\n`);
   }
 
-  public close(threadId: string, sessionId?: string): void {
+  public async close(threadId: string, sessionId?: string): Promise<void> {
     if (sessionId) {
       const key = this.#sessionKey(threadId, sessionId);
       const session = this.#sessions.get(key);
       if (!session) {
         return;
       }
-      session.child.kill();
-      this.#sessions.delete(key);
+      await this.#closeSession(key, session);
       return;
     }
 
-    for (const [key, session] of this.#sessions.entries()) {
-      if (session.threadId !== threadId) {
-        continue;
-      }
-      session.child.kill();
-      this.#sessions.delete(key);
+    await Promise.all(
+      [...this.#sessions.entries()]
+        .filter(([, session]) => session.threadId === threadId)
+        .map(([key, session]) => this.#closeSession(key, session))
+    );
+  }
+
+  async #closeSession(key: string, session: TerminalSession): Promise<void> {
+    this.#sessions.delete(key);
+    if (session.child.exitCode !== null) {
+      return;
     }
+
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        session.child.off("exit", onExit);
+        resolve();
+      }, 2_000);
+      const onExit = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      session.child.once("exit", onExit);
+      try {
+        session.child.kill();
+      } catch {
+        clearTimeout(timeout);
+        session.child.off("exit", onExit);
+        resolve();
+      }
+    });
   }
 
   #publish(session: TerminalSession, value: string): void {

@@ -355,10 +355,10 @@ export class DesktopBackend {
       throw new Error("任务正在执行，暂时不能删除。");
     }
 
+    await this.#terminal.close(threadId);
     await this.removeThreadOutputDir(thread);
     this.#db.deleteThread(threadId);
     this.#browser.clearThread(threadId);
-    this.#terminal.close(threadId);
     this.#runtime.forgetThread(threadId);
   }
 
@@ -370,12 +370,12 @@ export class DesktopBackend {
 
     await this.#runtime.abandonGpaPlanFile(threadId);
     this.#runtime.forgetThread(threadId);
+    await this.#terminal.close(threadId);
     for (const tab of this.#db.listBrowserTabs(threadId)) {
       this.releaseBrowserTabContents(threadId, tab.id);
     }
     this.#browser.clearThread(threadId);
     const updated = this.#db.clearThreadConversation(threadId);
-    this.#terminal.close(threadId);
     this.#runtime.ensureThread(threadId);
     await this.emit({
       type: "thread.updated",
@@ -413,8 +413,8 @@ export class DesktopBackend {
     );
   }
 
-  public closeTerminal(threadId: string, sessionId?: string): void {
-    this.#terminal.close(threadId, sessionId);
+  public async closeTerminal(threadId: string, sessionId?: string): Promise<void> {
+    await this.#terminal.close(threadId, sessionId);
   }
 
   public async listProjectFiles(threadId: string): Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>> {
@@ -632,6 +632,15 @@ export class DesktopBackend {
       createdAt: new Date().toISOString()
     });
     this.#runtime.wakeQueuedMessages(threadId);
+  }
+
+  public async replaceMessage(threadId: string, messageId: string, content: string): Promise<void> {
+    const thread = this.#db.getThread(threadId);
+    if (thread.status === "running" || thread.status === "waiting") {
+      throw new Error("Stop the active task before editing a message.");
+    }
+    this.#db.truncateConversationFromMessage(threadId, messageId);
+    await this.sendMessage(threadId, content);
   }
 
   public async deleteQueuedMessage(threadId: string, id: string): Promise<void> {

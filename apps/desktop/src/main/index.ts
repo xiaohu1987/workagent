@@ -386,6 +386,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)
   );
+  ipcMain.handle("threads:replace-message", (_event, payload: { threadId: string; messageId: string; content: string }) =>
+    backend.replaceMessage(payload.threadId, payload.messageId, payload.content)
+  );
   ipcMain.handle("threads:queue:delete", (_event, payload: { threadId: string; id: string }) =>
     backend.deleteQueuedMessage(payload.threadId, payload.id)
   );

@@ -937,6 +937,44 @@ export class DatabaseService {
     return this.getThread(threadId);
   }
 
+  public truncateConversationFromMessage(threadId: string, messageId: string): void {
+    const target = this.#db
+      .prepare("SELECT id, role, created_at FROM messages WHERE id = ? AND thread_id = ?")
+      .get(messageId, threadId) as { id: string; role: string; created_at: string } | undefined;
+    if (!target || target.role !== "user") {
+      throw new Error("The message to edit is no longer available.");
+    }
+
+    this.#db.exec("BEGIN");
+    try {
+      const affectedMessages = this.#db
+        .prepare("SELECT id, turn_run_id FROM messages WHERE thread_id = ? AND created_at >= ?")
+        .all(threadId, target.created_at) as Array<{ id: string; turn_run_id: string | null }>;
+      const turnIds = [...new Set(affectedMessages.map((message) => message.turn_run_id).filter((id): id is string => !!id))];
+      const messageIds = affectedMessages.map((message) => message.id);
+      const placeholders = (values: string[]) => values.map(() => "?").join(", ");
+
+      if (turnIds.length > 0) {
+        const turnPlaceholders = placeholders(turnIds);
+        this.#db.prepare(`DELETE FROM tool_calls WHERE thread_id = ? AND turn_run_id IN (${turnPlaceholders})`).run(threadId, ...turnIds);
+        this.#db.prepare(`DELETE FROM approval_records WHERE thread_id = ? AND turn_run_id IN (${turnPlaceholders})`).run(threadId, ...turnIds);
+        this.#db.prepare(`DELETE FROM user_input_prompts WHERE thread_id = ? AND turn_run_id IN (${turnPlaceholders})`).run(threadId, ...turnIds);
+        this.#db.prepare(`DELETE FROM artifacts WHERE thread_id = ? AND turn_run_id IN (${turnPlaceholders})`).run(threadId, ...turnIds);
+        this.#db.prepare(`DELETE FROM turn_runs WHERE thread_id = ? AND id IN (${turnPlaceholders})`).run(threadId, ...turnIds);
+      }
+      if (messageIds.length > 0) {
+        this.#db.prepare(`DELETE FROM artifacts WHERE thread_id = ? AND message_id IN (${placeholders(messageIds)})`).run(threadId, ...messageIds);
+      }
+      this.#db.prepare("DELETE FROM messages WHERE thread_id = ? AND created_at >= ?").run(threadId, target.created_at);
+      this.#db.prepare("DELETE FROM queued_messages WHERE thread_id = ?").run(threadId);
+      this.#db.prepare("UPDATE threads SET status = 'idle', gpa_state_json = NULL, updated_at = ? WHERE id = ?").run(nowIso(), threadId);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   public listMessages(threadId: string): MessageRecord[] {
     return this.#db
       .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC")

@@ -48,6 +48,8 @@ const api = {
   getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[] }) =>
     ipcRenderer.invoke("threads:send", payload),
+  replaceMessage: (payload: { threadId: string; messageId: string; content: string }) =>
+    ipcRenderer.invoke("threads:replace-message", payload),
   deleteQueuedMessage: (payload: { threadId: string; id: string }) =>
     ipcRenderer.invoke("threads:queue:delete", payload),
   importAttachments: (payload: { threadId: string; attachments: unknown[] }) =>

@@ -58,8 +58,10 @@ set "DIST_RENDERER_DIR=%DIST_DIR%\renderer"
 set "DIST_RENDERER_INDEX=%DIST_RENDERER_DIR%\index.html"
 
 :check_dist
-if /i "%~1"=="--rebuild" goto :build
-if exist "%DIST_MAIN%" if exist "%DIST_PRELOAD%" if exist "%DIST_RENDERER_INDEX%" goto :launch
+if /i "%~1"=="--skip-build" (
+  if exist "%DIST_MAIN%" if exist "%DIST_PRELOAD%" if exist "%DIST_RENDERER_INDEX%" goto :launch
+  goto :error
+)
 
 :build
 if not exist "%EVITE_CLI%" (
@@ -79,7 +81,7 @@ if defined NODE_PATH (
   set "NODE_PATH=%EVITE_LOCAL_NODE_MODULES%;%EVITE_PNPM_NODE_MODULES%;%cd%\node_modules\.pnpm\node_modules"
 )
 
-echo [1/2] Building dist because it is missing or --rebuild was requested...
+echo [1/2] Building the latest dist...
 "%NODE_EXE%" "%EVITE_CLI%" build --config apps\desktop\electron.vite.config.ts
 if errorlevel 1 goto :build_failed
 if not exist "%DIST_MAIN%" goto :error

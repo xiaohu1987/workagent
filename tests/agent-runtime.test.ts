@@ -14,7 +14,6 @@ import {
   classifySuccessfulToolEvidence,
   createManagedWriteCompletionState,
   recordManagedWriteResult,
-  recordManagedWriteReadback,
   validateManagedWriteCompletion,
   buildManagedWriteCompletionRecoveryInstruction,
   createManagedWriteRecoveryState,
@@ -41,6 +40,8 @@ import {
   buildBlockedToolCallTranscriptResult,
   clearReusableObservationFingerprints,
   isReusableSuccessfulToolCall,
+  MAX_AGENT_PROTOCOL_FAILURES,
+  MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
   MAX_MODEL_TOOL_RESULT_CHARACTERS,
   MAX_MCP_TOOL_RESULT_CHARACTERS,
   summarizeToolResultForModel,
@@ -267,6 +268,10 @@ describe("commentary messages", () => {
 });
 
 describe("premature completion recovery", () => {
+  it("allows more recovery attempts for progress-only completions than protocol errors", () => {
+    expect(MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES).toBeGreaterThan(MAX_AGENT_PROTOCOL_FAILURES);
+  });
+
   it("recognizes an English promise to continue as progress commentary", () => {
     expect(isProgressOnlyAssistantMessage(
       "I see those calls were already made. Let me look at the specific directories."
@@ -811,7 +816,7 @@ describe("ordinary managed-write completion", () => {
     expect(result.reasons).toContain("No successful managed file delivery was verified.");
   });
 
-  it("rejects a readback of a different file", () => {
+  it("accepts a successful write without requiring a separate readback", () => {
     const state = createManagedWriteCompletionState();
     recordManagedWriteResult(state, {
       toolCallId: "patch-a",
@@ -819,28 +824,11 @@ describe("ordinary managed-write completion", () => {
       ok: true,
       verifiedPaths: ["C:\\project\\src\\A.ts"]
     });
-    recordManagedWriteReadback(state, "C:\\project\\src\\B.ts");
-
-    const result = validateManagedWriteCompletion(state);
-
-    expect(result.valid).toBe(false);
-    expect(result.missingReadbackPaths).toEqual(["C:\\project\\src\\A.ts"]);
-  });
-
-  it("accepts a successful write after its exact target is read back", () => {
-    const state = createManagedWriteCompletionState();
-    recordManagedWriteResult(state, {
-      toolCallId: "write-a",
-      toolName: "fs.write_file",
-      ok: true,
-      verifiedPaths: ["C:\\project\\src\\A.ts"]
-    });
-    recordManagedWriteReadback(state, "C:\\project\\src\\A.ts");
 
     expect(validateManagedWriteCompletion(state).valid).toBe(true);
   });
 
-  it("requires every delivered patch target to be read back", () => {
+  it("accepts every verified target from a multi-file patch", () => {
     const state = createManagedWriteCompletionState();
     recordManagedWriteResult(state, {
       toolCallId: "patch-many",
@@ -848,12 +836,8 @@ describe("ordinary managed-write completion", () => {
       ok: true,
       verifiedPaths: ["C:\\project\\src\\A.ts", "C:\\project\\src\\B.ts"]
     });
-    recordManagedWriteReadback(state, "C:\\project\\src\\A.ts");
 
-    const result = validateManagedWriteCompletion(state);
-
-    expect(result.valid).toBe(false);
-    expect(result.missingReadbackPaths).toEqual(["C:\\project\\src\\B.ts"]);
+    expect(validateManagedWriteCompletion(state).valid).toBe(true);
   });
 
   it("does not gate ordinary analysis or shell commands", () => {
@@ -865,17 +849,17 @@ describe("ordinary managed-write completion", () => {
     expect(validateManagedWriteCompletion(shellOnly).valid).toBe(true);
   });
 
-  it("builds a path-specific recovery instruction", () => {
+  it("builds a recovery instruction after a failed delivery", () => {
     const state = createManagedWriteCompletionState();
     recordManagedWriteResult(state, {
-      toolCallId: "patch-a",
+      toolCallId: "patch-failed",
       toolName: "apply_patch",
-      ok: true,
-      verifiedPaths: ["C:\\project\\src\\A.ts"]
+      ok: false,
+      failureSummary: "Patch context did not match"
     });
 
     expect(buildManagedWriteCompletionRecoveryInstruction(validateManagedWriteCompletion(state)))
-      .toContain("C:\\project\\src\\A.ts");
+      .toContain("Inspect the failed target");
   });
 });
 
@@ -927,6 +911,59 @@ describe("managed-write recovery", () => {
       name: "fs.read_file",
       arguments: { path: "C:\\project\\src\\app.ts" }
     });
+  });
+
+  it("extracts a target path from a malformed patch before retrying", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: { patch: "*** Changed Range\n*** Update File: src/app.ts ***\n@@\n-old\n+new" },
+      ok: false,
+      workspaceCwd
+    });
+
+    expect(createManagedWriteRecoveryReadToolCall(state, "recovery-read")).toEqual({
+      id: "recovery-read",
+      name: "fs.read_file",
+      arguments: { path: "C:\\project\\src\\app.ts" }
+    });
+  });
+
+  it("reads every failed patch target before allowing a retry", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: {
+        patch: "*** Begin Patch\n*** Update File: src/first.ts\n*** Update File: src/second.ts\n*** End Patch"
+      },
+      ok: false,
+      workspaceCwd
+    });
+
+    advanceManagedWriteRecovery(state, {
+      toolName: "fs.read_file",
+      argumentsJson: { path: "src/first.ts" },
+      ok: true,
+      workspaceCwd,
+      readPath: "C:\\project\\src\\first.ts"
+    });
+
+    expect(state.phase).toBe("read");
+    expect(createManagedWriteRecoveryReadToolCall(state, "second-read")).toEqual({
+      id: "second-read",
+      name: "fs.read_file",
+      arguments: { path: "C:\\project\\src\\second.ts" }
+    });
+
+    advanceManagedWriteRecovery(state, {
+      toolName: "fs.read_file",
+      argumentsJson: { path: "src/second.ts" },
+      ok: true,
+      workspaceCwd,
+      readPath: "C:\\project\\src\\second.ts"
+    });
+
+    expect(state.phase).toBe("write");
   });
 
   it("permits diagnostics after the required read while retaining the managed retry", () => {

@@ -2637,11 +2637,6 @@ export function App() {
         delete next[threadId];
         return next;
       });
-      setExpandedRuntimeThreads((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
       setTerminalTabsByThread((current) => {
         const next = { ...current };
         delete next[threadId];
@@ -2855,8 +2850,12 @@ export function App() {
       return;
     }
 
-    await sendMessage(content);
+    const threadId = selectedThreadId;
+    const messageId = editingUserMessage.id;
+    if (!threadId) return;
+    await window.codexh.replaceMessage({ threadId, messageId, content });
     setEditingUserMessage(null);
+    await refreshSnapshot(threadId);
   }
 
   async function handleGpaStageSelect(stage: GpaStage) {

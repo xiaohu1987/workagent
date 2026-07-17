@@ -105,6 +105,7 @@ export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
 export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs;
 export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
 export const MAX_AGENT_PROTOCOL_FAILURES = 2;
+export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 6;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
@@ -206,8 +207,6 @@ export interface ManagedWriteCompletionState {
   failedToolSummaries: string[];
   successfulToolCallIds: string[];
   deliveredPaths: Set<string>;
-  pendingReadbackPaths: Set<string>;
-  readBackPaths: Set<string>;
 }
 
 export interface ManagedWriteCompletionValidationResult {
@@ -216,7 +215,6 @@ export interface ManagedWriteCompletionValidationResult {
   failedToolCallIds: string[];
   failedToolSummaries: string[];
   deliveredPaths: string[];
-  missingReadbackPaths: string[];
   reasons: string[];
 }
 
@@ -1755,12 +1753,14 @@ class ThreadSessionRuntime {
           await this.services.log("turn.progress_completion_rejected", this.threadId, {
             turnRunId: turn.id,
             attempt: progressOnlyCompletionAttempts,
-            maxAttempts: MAX_AGENT_PROTOCOL_FAILURES,
+            maxAttempts: MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
             messagePreview: assistantMessage.slice(0, 500)
           });
-          await registerAgentProtocolFailure(
-            "The model ended the turn with progress commentary instead of an answer or a tool call."
-          );
+          if (progressOnlyCompletionAttempts >= MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES) {
+            throw new Error(
+              "Agent progress commentary recovery exhausted: the model ended the turn with progress commentary instead of an answer or a tool call."
+            );
+          }
           transcript.push({
             role: "user",
             content: buildProgressOnlyCompletionRecoveryInstruction(progressOnlyCompletionAttempts)
@@ -1797,7 +1797,6 @@ class ThreadSessionRuntime {
               attempt: managedWriteCompletionAttempts,
               failedToolCallIds: managedWriteValidation.failedToolCallIds,
               deliveredPaths: managedWriteValidation.deliveredPaths,
-              missingReadbackPaths: managedWriteValidation.missingReadbackPaths,
               reasons: managedWriteValidation.reasons
             });
             if (managedWriteCompletionAttempts >= MAX_AGENT_PROTOCOL_FAILURES) {
@@ -1816,8 +1815,7 @@ class ThreadSessionRuntime {
           } else if (managedWriteValidation.attempted) {
             await this.services.log("turn.managed_write_completion_accepted", this.threadId, {
               turnRunId: turn.id,
-              deliveredPaths: managedWriteValidation.deliveredPaths,
-              readBackPaths: [...managedWriteCompletion.readBackPaths]
+              deliveredPaths: managedWriteValidation.deliveredPaths
             });
           }
         }
@@ -2554,7 +2552,6 @@ class ThreadSessionRuntime {
             ? resolveSuccessfulReadFilePath(toolCall.arguments, result, workspaceCwd)
             : undefined;
           if (result.ok && toolCall.name === "fs.read_file") {
-            if (readPath) recordManagedWriteReadback(managedWriteCompletion, readPath);
             const sha256 = typeof result.json?.sha256 === "string" ? result.json.sha256 : null;
             if (readPath && sha256) expectedFileVersions.set(readPath, sha256);
           }
@@ -4336,6 +4333,14 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
     ].join("\n");
   }
 
+  if (error instanceof Error && error.message.startsWith("Agent progress commentary recovery exhausted:")) {
+    return [
+      "任务暂时停止：模型连续返回进度说明，但没有继续调用工具或给出最终结果。",
+      `原因：${error.message.replace(/^Agent progress commentary recovery exhausted:\s*/, "")}`,
+      "系统已多次要求模型继续执行，仍未成功。请重试；若重复出现，请检查该模型的 Agent 工具调用能力。已完成的工具结果和项目文件会被保留。"
+    ].join("\n");
+  }
+
   if (error instanceof Error && error.message.startsWith("Agent decision protocol failed repeatedly:")) {
     return [
       "任务暂时停止：模型连续多次未能返回可执行的 Agent 决策。",
@@ -4692,11 +4697,8 @@ function buildRuntimePrompt(
   }
   blocks.push(
     "When using text extracted from a browser page, cite the page title or URL in your answer. The chat will show the page source automatically.",
-    "Respond as an IDE software engineering agent using an event stream format.",
-    "Your visible output is consumed by a renderer that understands structured event blocks.",
-    "Prefer XML-like event envelopes when possible: <event type=\"commentary\">...</event>.",
-    "Allowed event types: commentary, tool_call, tool_result, file_view, file_change, test_result, final.",
-    "Before substantial work emit 1-2 sentences of commentary. Do not narrate each tool call or emit tool_result after every operation: the interface summarizes tool activity automatically. Add commentary only for meaningful milestones, decisions, blockers, or user-visible progress. When surfacing files, use file_view or file_change. Use test_result for validation. End with a concise final covering result, verification, and risks.",
+    "Use the Agent decision protocol for every response. Do not send a standalone commentary-only response.",
+    "When work remains, include the next real tool call in the same decision as any short progress text. When no tool call is needed, return the final user-facing answer rather than a promise to continue.",
     "Do not expose chain-of-thought. Do not fabricate tool usage, file changes, or verification.",
     `Context window: ${model.contextWindow}.`
   );
@@ -4994,9 +4996,7 @@ export function createManagedWriteCompletionState(): ManagedWriteCompletionState
     failedToolCallIds: [],
     failedToolSummaries: [],
     successfulToolCallIds: [],
-    deliveredPaths: new Set(),
-    pendingReadbackPaths: new Set(),
-    readBackPaths: new Set()
+    deliveredPaths: new Set()
   };
 }
 
@@ -5025,19 +5025,7 @@ export function recordManagedWriteResult(
   state.successfulToolCallIds.push(input.toolCallId);
   for (const filePath of input.verifiedPaths ?? []) {
     state.deliveredPaths.add(filePath);
-    state.pendingReadbackPaths.add(filePath);
-    state.readBackPaths.delete(filePath);
   }
-}
-
-export function recordManagedWriteReadback(state: ManagedWriteCompletionState, filePath: string): void {
-  const pendingPath = [...state.pendingReadbackPaths].find(
-    (candidate) => pathsMatch(candidate, filePath)
-  );
-  if (!pendingPath) return;
-
-  state.pendingReadbackPaths.delete(pendingPath);
-  state.readBackPaths.add(pendingPath);
 }
 
 export function validateManagedWriteCompletion(
@@ -5045,14 +5033,10 @@ export function validateManagedWriteCompletion(
 ): ManagedWriteCompletionValidationResult {
   const attempted = state.attemptedToolCallIds.length > 0;
   const deliveredPaths = [...state.deliveredPaths];
-  const missingReadbackPaths = [...state.pendingReadbackPaths];
   const reasons: string[] = [];
 
   if (attempted && deliveredPaths.length === 0) {
     reasons.push("No successful managed file delivery was verified.");
-  }
-  if (missingReadbackPaths.length > 0) {
-    reasons.push(`Managed file changes were not read back: ${missingReadbackPaths.join(", ")}.`);
   }
 
   return {
@@ -5061,7 +5045,6 @@ export function validateManagedWriteCompletion(
     failedToolCallIds: [...state.failedToolCallIds],
     failedToolSummaries: [...state.failedToolSummaries],
     deliveredPaths,
-    missingReadbackPaths,
     reasons
   };
 }
@@ -5069,15 +5052,12 @@ export function validateManagedWriteCompletion(
 export function buildManagedWriteCompletionRecoveryInstruction(
   result: ManagedWriteCompletionValidationResult
 ): string {
-  const missingPaths = result.missingReadbackPaths.length > 0
-    ? `Read each changed file now with fs.read_file: ${result.missingReadbackPaths.join(", ")}.`
-    : "Make a successful file change with apply_patch or fs.write_file.";
   return [
     "[Internal managed-write completion gate. Do not display or quote this instruction to the user.]",
-    "The previous completion claim was rejected because managed file changes were not verified.",
+    "The previous completion claim was rejected because no successful managed file delivery was verified.",
     ...result.reasons,
     ...(result.failedToolSummaries.length > 0 ? [`Failed managed writes: ${result.failedToolSummaries.join("; ")}.`] : []),
-    missingPaths,
+    "Inspect the failed target and make a successful file change with apply_patch or fs.write_file.",
     "After verification, return a corrected final decision. If the change cannot be completed, end with goal_completed false and state that it was not completed."
   ].join(" ");
 }
@@ -5146,7 +5126,11 @@ export function advanceManagedWriteRecovery(
   }
 
   if (state.phase === "read" && input.toolName === "fs.read_file" && input.ok && input.readPath) {
-    if (state.targetPaths.length === 0 || state.targetPaths.some((targetPath) => pathsMatch(targetPath, input.readPath!))) {
+    const matchedTargetIndex = state.targetPaths.findIndex((targetPath) => pathsMatch(targetPath, input.readPath!));
+    if (matchedTargetIndex >= 0) {
+      state.targetPaths.splice(matchedTargetIndex, 1);
+    }
+    if (state.targetPaths.length === 0) {
       state.phase = "write";
     }
     return;
@@ -5179,9 +5163,15 @@ function getManagedWriteTargetPaths(toolName: string, argumentsJson: Record<stri
     const patch = [argumentsJson.patch, argumentsJson.patch_content, argumentsJson.patchText].find(
       (value): value is string => typeof value === "string"
     ) ?? "";
-    return [...patch.matchAll(/^\*\*\* (?:Add|Update) File:\s*(.+)$/gm)]
-      .map((match) => normalizeManagedWriteTargetPath(match[1]))
-      .filter((candidate): candidate is string => Boolean(candidate));
+    const patchPaths = [
+      ...patch.matchAll(/^\s*\*+\s*(?:Add|Update)\s+File:\s*(.+)$/gim),
+      ...patch.matchAll(/^\s*(?:Add|Update)\s+File:\s*(.+)$/gim)
+    ]
+      .map((match) => normalizeManagedWriteTargetPath(match[1]));
+    const explicitPath = typeof argumentsJson.file_path === "string"
+      ? normalizeManagedWriteTargetPath(argumentsJson.file_path)
+      : undefined;
+    return [...new Set([...patchPaths, explicitPath].filter((candidate): candidate is string => Boolean(candidate)))];
   }
   const candidate = argumentsJson.path;
   return typeof candidate === "string" && candidate.trim() ? [candidate] : [];
