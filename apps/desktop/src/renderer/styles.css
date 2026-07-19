@@ -9416,6 +9416,35 @@ select:focus {
 
 .message-browser-source:hover { background: rgba(92, 169, 239, 0.16); }
 
+.message-browser-sources-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid rgba(92, 169, 239, 0.22);
+  border-radius: 4px;
+  color: #a7cdf8;
+  background: rgba(92, 169, 239, 0.04);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.message-browser-sources-toggle:hover {
+  color: #d4e8ff;
+  background: rgba(92, 169, 239, 0.14);
+}
+
+.message-browser-sources-toggle svg {
+  width: 13px;
+  height: 13px;
+  transition: transform 140ms ease;
+}
+
+.message-browser-sources-toggle.is-expanded svg { transform: rotate(180deg); }
+
 .message-browser-source svg {
   flex: 0 0 auto;
   width: 13px;
@@ -11329,29 +11358,17 @@ select:focus {
 }
 
 .composer-add-menu-submenu {
-  position: absolute;
-  z-index: 2;
-  top: 0;
-  left: calc(100% + 6px);
+  position: fixed;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
   width: 252px;
   padding: 4px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.46);
   background: #202023;
-}
-
-.composer-add-menu-submenu::before {
-  position: absolute;
-  top: 0;
-  right: 100%;
-  bottom: 0;
-  width: 6px;
-  content: "";
-}
-
-.composer-add-menu-submenu-legacy {
-  display: none;
+  overflow: hidden;
 }
 
 .composer-add-menu-submenu-title {
@@ -11375,7 +11392,8 @@ select:focus {
 
 .composer-add-menu-list {
   display: grid;
-  max-height: 340px;
+  min-height: 0;
+  flex: 0 1 auto;
   overflow-y: auto;
 }
 
