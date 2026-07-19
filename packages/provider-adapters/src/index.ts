@@ -16,7 +16,7 @@ import type {
 
 export interface ProviderAdapter {
   runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision>;
-  generateImage?(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<{ data: Uint8Array; mimeType: string }>;
+  generateImage?(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult>;
   generateVideo?(input: {
     model: ModelProfile;
     prompt: string;
@@ -30,6 +30,15 @@ export type ProviderFetch = (
   input: RequestInfo | URL,
   init?: RequestInit
 ) => Promise<Response>;
+
+export type ImageGenerationProtocol = "gpt-image-api" | "gpt-responses" | "grok-images" | "openai-compatible";
+
+export interface GeneratedImageResult {
+  data: Uint8Array;
+  mimeType: string;
+  protocol: ImageGenerationProtocol;
+  responseModel?: string;
+}
 
 export class ProviderFactory {
   readonly #fetch: ProviderFetch;
@@ -229,7 +238,18 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
     return parseOpenAiCompatibleResponse(response, Boolean(nativeTools), input);
   }
 
-  public async generateImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }) {
+  public async generateImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
+    const protocol = imageGenerationProtocolForModel(input.model);
+    if (protocol === "gpt-image-api") {
+      return this.generateGptImage(input);
+    }
+    if (protocol === "gpt-responses") {
+      return this.generateGptResponsesImage(input);
+    }
+    if (protocol === "grok-images") {
+      return this.generateGrokImage(input);
+    }
+
     const response = await this.#client.images.generate({
       model: input.model.id,
       prompt: input.prompt,
@@ -239,17 +259,97 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
     }, { signal: input.abortSignal });
     const image = response.data?.[0];
     if (image?.b64_json) {
-      return { data: Buffer.from(image.b64_json, "base64"), mimeType: "image/png" };
+      return { data: Buffer.from(image.b64_json, "base64"), mimeType: "image/png", protocol };
     }
     if (image?.url) {
       const downloaded = await this.#fetch(image.url, { signal: input.abortSignal });
       if (!downloaded.ok) throw new Error(`Image download failed: HTTP ${downloaded.status}`);
       return {
         data: new Uint8Array(await downloaded.arrayBuffer()),
-        mimeType: downloaded.headers.get("content-type")?.split(";")[0] || "image/png"
+        mimeType: downloaded.headers.get("content-type")?.split(";")[0] || "image/png",
+        protocol
       };
     }
     throw new Error("The image generation service returned no image data.");
+  }
+
+  private async generateGptImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
+    return this.requestImage(
+      "/images/generations",
+      {
+        model: input.model.id,
+        prompt: input.prompt,
+        n: 1,
+        size: "1024x1024",
+        quality: "medium",
+        output_format: "png"
+      },
+      input.abortSignal,
+      "GPT Image generation request",
+      "gpt-image-api"
+    );
+  }
+
+  private async generateGptResponsesImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
+    return this.requestImage(
+      "/responses",
+      {
+        model: input.model.id,
+        input: input.prompt,
+        tools: [{ type: "image_generation", action: "generate" }]
+      },
+      input.abortSignal,
+      "GPT Responses image generation request",
+      "gpt-responses"
+    );
+  }
+
+  private async generateGrokImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
+    return this.requestImage(
+      "/images/generations",
+      {
+        model: input.model.id,
+        prompt: input.prompt,
+        n: 1
+      },
+      input.abortSignal,
+      "Grok image generation request",
+      "grok-images"
+    );
+  }
+
+  private async requestImage(
+    endpoint: string,
+    payload: Record<string, unknown>,
+    abortSignal: AbortSignal | undefined,
+    label: string,
+    protocol: ImageGenerationProtocol
+  ): Promise<GeneratedImageResult> {
+    const baseUrl = normalizeProviderBaseUrl(this.provider.baseUrl);
+    if (!baseUrl) {
+      throw new Error(`Provider ${this.provider.id} is missing baseUrl for image generation.`);
+    }
+    const response = await this.#fetch(`${baseUrl}${endpoint}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${resolveApiKey(this.provider)}`,
+        "Content-Type": "application/json",
+        ...(this.provider.headers ?? {})
+      },
+      body: JSON.stringify(payload),
+      signal: abortSignal
+    });
+    const responsePayload = await readJsonResponse(response, label);
+    const image = extractGeneratedImagePayload(responsePayload);
+    if (!image) {
+      throw new Error(`${label} returned no image data.`);
+    }
+    const downloaded = await downloadGeneratedImage(image, abortSignal, this.#fetch);
+    return {
+      ...downloaded,
+      protocol,
+      responseModel: readString(responsePayload.model) ?? readString(responsePayload.model_id) ?? undefined
+    };
   }
 
   public async generateVideo(input: {
@@ -582,6 +682,14 @@ function normalizeProviderBaseUrl(baseUrl: string | undefined): string | null {
   return baseUrl.trim().replace(/\/$/, "");
 }
 
+export function imageGenerationProtocolForModel(model: Pick<ModelProfile, "id" | "displayName">): ImageGenerationProtocol {
+  const identity = `${model.id} ${model.displayName}`.toLowerCase();
+  if (/\bgpt-image(?:[-_]|\b)/.test(identity)) return "gpt-image-api";
+  if (/\bgpt-5(?:[._-]|\b)/.test(identity)) return "gpt-responses";
+  if (/\bgrok(?:[-_][a-z0-9]+)*[-_]imagine[-_]image\b/.test(identity)) return "grok-images";
+  return "openai-compatible";
+}
+
 async function readJsonResponse(response: Response, label: string): Promise<Record<string, unknown>> {
   const text = await response.text();
   let payload: unknown = null;
@@ -658,6 +766,39 @@ function extractGeneratedVideoPayload(payload: Record<string, unknown>): { url?:
   return null;
 }
 
+function extractGeneratedImagePayload(payload: Record<string, unknown>): { url?: string; b64?: string; mimeType?: string } | null {
+  const directUrl = readString(payload.url) ?? readString(payload.image_url) ?? readString(payload.imageUrl);
+  const directB64 = readString(payload.b64_json) ?? readString(payload.b64Json) ?? readString(payload.base64);
+  if (directUrl || directB64) {
+    return {
+      url: directUrl ?? undefined,
+      b64: directB64 ?? undefined,
+      mimeType: readString(payload.mime_type) ?? readString(payload.mimeType) ?? readString(payload.output_format) ?? undefined
+    };
+  }
+
+  const result = readString(payload.result);
+  if (result) {
+    return { b64: result, mimeType: readString(payload.output_format) ?? "image/png" };
+  }
+
+  for (const value of [payload.image, payload.data, payload.output]) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item && typeof item === "object") {
+          const nested = extractGeneratedImagePayload(item as Record<string, unknown>);
+          if (nested) return nested;
+        }
+      }
+    } else if (value && typeof value === "object") {
+      const nested = extractGeneratedImagePayload(value as Record<string, unknown>);
+      if (nested) return nested;
+    }
+  }
+
+  return null;
+}
+
 function extractVideoErrorMessage(payload: Record<string, unknown>): string | null {
   const error = payload.error;
   if (typeof error === "string" && error.trim()) {
@@ -705,6 +846,40 @@ async function downloadGeneratedVideo(
     data: new Uint8Array(await downloaded.arrayBuffer()),
     mimeType: downloaded.headers.get("content-type")?.split(";")[0] || video.mimeType || "video/mp4"
   };
+}
+
+async function downloadGeneratedImage(
+  image: { url?: string; b64?: string; mimeType?: string },
+  abortSignal?: AbortSignal,
+  fetchImpl: ProviderFetch = (input, init) => globalThis.fetch(input, init)
+): Promise<{ data: Uint8Array; mimeType: string }> {
+  if (image.b64) {
+    const encoded = image.b64.replace(/^data:image\/[^;]+;base64,/i, "");
+    return {
+      data: Buffer.from(encoded, "base64"),
+      mimeType: normalizeImageMimeType(image.mimeType)
+    };
+  }
+  if (!image.url) {
+    throw new Error("The image generation service returned no image data.");
+  }
+  const downloaded = await fetchImpl(image.url, { signal: abortSignal });
+  if (!downloaded.ok) {
+    throw new Error(`Image download failed: HTTP ${downloaded.status}`);
+  }
+  return {
+    data: new Uint8Array(await downloaded.arrayBuffer()),
+    mimeType: downloaded.headers.get("content-type")?.split(";")[0] || normalizeImageMimeType(image.mimeType)
+  };
+}
+
+function normalizeImageMimeType(value: string | undefined): string {
+  const normalized = value?.toLowerCase().trim();
+  if (!normalized) return "image/png";
+  if (normalized.startsWith("image/")) return normalized;
+  if (normalized === "jpg") return "image/jpeg";
+  if (["jpeg", "png", "webp", "gif"].includes(normalized)) return `image/${normalized}`;
+  return "image/png";
 }
 
 export class GeneratedVideoDownloadError extends Error {

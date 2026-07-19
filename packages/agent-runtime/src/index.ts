@@ -3349,6 +3349,7 @@ class ThreadSessionRuntime {
     modelId: string;
     providerId: string;
     modelDisplayName: string;
+    generationProtocol: string;
     attachment: MessageAttachment;
     artifact: ArtifactRecord;
   }> {
@@ -3411,6 +3412,8 @@ class ThreadSessionRuntime {
       modelId: target.model.id,
       providerId: target.provider.id,
       fileName,
+      generationProtocol: image.protocol,
+      responseModel: image.responseModel ?? null,
       promptPreview: input.prompt.slice(0, 200)
     });
     return {
@@ -3420,6 +3423,7 @@ class ThreadSessionRuntime {
       modelId: target.model.id,
       providerId: target.provider.id,
       modelDisplayName: target.model.displayName || target.model.id,
+      generationProtocol: image.protocol,
       attachment,
       artifact
     };

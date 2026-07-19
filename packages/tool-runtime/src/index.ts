@@ -141,6 +141,7 @@ export interface ToolRuntimeContext {
     modelId: string;
     providerId: string;
     modelDisplayName: string;
+    generationProtocol?: string;
     attachment: MessageAttachment;
     artifact: ArtifactRecord;
   }>;
@@ -1474,6 +1475,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
             modelId: first.modelId,
             providerId: first.providerId,
             modelDisplayName: first.modelDisplayName,
+            generationProtocol: first.generationProtocol,
             attachment: first.attachment,
             attachments: results.map((item) => item.attachment),
             artifactId: first.artifact.id,

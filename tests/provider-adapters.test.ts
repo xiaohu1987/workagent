@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, nativeToolName, parseDecisionFromText, ProviderFactory } from "@provider-adapters";
+import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, nativeToolName, parseDecisionFromText, ProviderFactory } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -82,6 +82,81 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.openAIConstructor.mockReset();
     mocks.anthropicCreate.mockReset();
     mocks.anthropicConstructor.mockReset();
+  });
+
+  it("routes GPT Image models through the Image API request shape", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      model: "gpt-image-2",
+      data: [{ b64_json: Buffer.from("gpt-image").toString("base64") }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "openai-images", type: "openai-compatible", baseUrl: "https://api.example/v1", apiKey: "secret"
+    });
+    const result = await adapter.generateImage!({
+      model: {
+        id: "gpt-image-2", providerId: "openai-images", displayName: "GPT Image 2", contextWindow: 128_000,
+        supportsStreaming: false, supportsToolCalling: false, supportsParallelToolCalls: false, supportsJsonOutput: false,
+        supportsMultimodalInput: true, supportsReasoningSummary: false
+      },
+      prompt: "a red lantern in snow"
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example/v1/images/generations", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      model: "gpt-image-2", prompt: "a red lantern in snow", n: 1, size: "1024x1024", quality: "medium", output_format: "png"
+    });
+    expect(result).toMatchObject({ protocol: "gpt-image-api", responseModel: "gpt-image-2", mimeType: "image/png" });
+  });
+
+  it("routes GPT-5 image generation through Responses", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      output: [{ type: "image_generation_call", result: Buffer.from("response-image").toString("base64") }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "openai-responses", type: "openai-compatible", baseUrl: "https://api.example/v1", apiKey: "secret"
+    });
+    const result = await adapter.generateImage!({
+      model: {
+        id: "gpt-5.6", providerId: "openai-responses", displayName: "GPT-5.6", contextWindow: 128_000,
+        supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: false, supportsJsonOutput: true,
+        supportsMultimodalInput: true, supportsReasoningSummary: false
+      },
+      prompt: "a blue bird"
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example/v1/responses");
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      model: "gpt-5.6", input: "a blue bird", tools: [{ type: "image_generation", action: "generate" }]
+    });
+    expect(result.protocol).toBe("gpt-responses");
+  });
+
+  it("routes Grok Image models without GPT-only output parameters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: Buffer.from("grok-image").toString("base64") }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "grok-images", type: "openai-compatible", baseUrl: "https://api.example/v1", apiKey: "secret"
+    });
+    const result = await adapter.generateImage!({
+      model: {
+        id: "grok-imagine-image", providerId: "grok-images", displayName: "Grok Imagine Image", contextWindow: 128_000,
+        supportsStreaming: false, supportsToolCalling: false, supportsParallelToolCalls: false, supportsJsonOutput: false,
+        supportsMultimodalInput: true, supportsReasoningSummary: false
+      },
+      prompt: "a cat in a library"
+    });
+
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      model: "grok-imagine-image", prompt: "a cat in a library", n: 1
+    });
+    expect(result.protocol).toBe("grok-images");
+  });
+
+  it("recognizes image model families from their configured model names", () => {
+    expect(imageGenerationProtocolForModel({ id: "gpt-image-2", displayName: "GPT Image 2" })).toBe("gpt-image-api");
+    expect(imageGenerationProtocolForModel({ id: "gpt-5.6", displayName: "GPT-5.6" })).toBe("gpt-responses");
+    expect(imageGenerationProtocolForModel({ id: "grok-imagine-image", displayName: "Grok Imagine Image" })).toBe("grok-images");
   });
 
   it("uses chat completions for openai-compatible providers", async () => {
