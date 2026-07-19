@@ -6,6 +6,7 @@ import {
   isSafeCommentaryMessage,
   buildUserMessageMetadata,
   buildBrowserTestChoiceQuestion,
+  buildAgentProtocolRecoveryQuestion,
   resolveBrowserTestChoice,
   buildBrowserWorkspaceRecoveryQuestion,
   resolveBrowserWorkspaceRecoveryChoice,
@@ -42,6 +43,8 @@ import {
   clearReusableObservationFingerprints,
   isReusableSuccessfulToolCall,
   MAX_AGENT_PROTOCOL_FAILURES,
+  MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES,
+  AGENT_PROTOCOL_RECOVERY_QUESTION_ID,
   MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
   MAX_MODEL_TOOL_RESULT_CHARACTERS,
   MAX_MCP_TOOL_RESULT_CHARACTERS,
@@ -310,6 +313,22 @@ describe("Agent model compatibility failures", () => {
     expect(message).toContain("invalid JSON decision");
     expect(message).toContain("稍后重试");
     expect(message).not.toContain("切换");
+  });
+});
+
+describe("Agent decision protocol recovery", () => {
+  it("offers another five recovery batches and defaults to continuing", () => {
+    const question = buildAgentProtocolRecoveryQuestion("invalid JSON decision envelope");
+
+    expect(question).toMatchObject({
+      id: AGENT_PROTOCOL_RECOVERY_QUESTION_ID,
+      allowFreeText: false,
+      options: [
+        { id: "continue", recommended: true },
+        { id: "stop" }
+      ]
+    });
+    expect(question.prompt).toContain(String(MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES));
   });
 });
 

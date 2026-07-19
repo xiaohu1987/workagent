@@ -113,6 +113,9 @@ export const CONTEXT_COMPACTION_TARGET = 0.45;
 export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 32_000;
 export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
 export const MAX_CONTEXT_MESSAGE_TOKENS = 24_000;
+export const MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES = 5;
+export const AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS = 30_000;
+export const AGENT_PROTOCOL_RECOVERY_QUESTION_ID = "agent_protocol_recovery";
 
 export function isUpstreamContextOverflowError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -1073,6 +1076,7 @@ class ThreadSessionRuntime {
       let upstreamContextRecoveryAttempts = 0;
       let functionCallProtocolRecoveryAttempts = 0;
       let agentProtocolFailureAttempts = 0;
+      let agentProtocolAutoRecoveryBatches = 0;
       let gpaAnalysisValidationAttempts = 0;
       let gpaPlanProgressReminderIssued = false;
       let gpaPlanProgressCheckpointTaskId: string | null = null;
@@ -1121,9 +1125,54 @@ class ThreadSessionRuntime {
           incompatible: false,
           exhausted
         });
-        if (exhausted) {
-          throw new Error(`Agent decision protocol failed repeatedly: ${reason}`);
+        if (!exhausted) {
+          return;
         }
+
+        if (agentProtocolAutoRecoveryBatches < MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES) {
+          agentProtocolAutoRecoveryBatches += 1;
+          agentProtocolFailureAttempts = 0;
+          await this.services.log("agent.model_protocol_auto_retry", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            batch: agentProtocolAutoRecoveryBatches,
+            maxBatches: MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES,
+            reason
+          });
+          await this.services.emit({
+            type: "agent.retrying",
+            threadId: this.threadId,
+            payload: {
+              attempt: agentProtocolAutoRecoveryBatches,
+              maxAttempts: MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES,
+              reason: "agent_decision_protocol"
+            },
+            createdAt: new Date().toISOString()
+          });
+          return;
+        }
+
+        const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+          title: "模型决策连续失败",
+          kind: "generic",
+          allowSkip: false,
+          questions: [buildAgentProtocolRecoveryQuestion(reason)],
+          timeoutMs: AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS,
+          defaultAnswers: { [AGENT_PROTOCOL_RECOVERY_QUESTION_ID]: "continue" }
+        });
+        if (answers[AGENT_PROTOCOL_RECOVERY_QUESTION_ID] === "continue") {
+          agentProtocolAutoRecoveryBatches = 0;
+          agentProtocolFailureAttempts = 0;
+          executionRecoveryAttempts = 0;
+          await this.services.log("agent.model_protocol_retry_continued", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            nextBatchLimit: MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES
+          });
+          return;
+        }
+
+        throw new Error(`Agent decision protocol failed repeatedly: ${reason}`);
       };
 
       const registerTaskFailure = async (taskKey: string, lastError: string, logKind?: string) => {
@@ -3837,6 +3886,28 @@ export function buildBrowserTestChoiceQuestion() {
         label: "快速完成",
         description: "使用已有的文件回读、构建或测试结果完成验收。",
         recommended: true
+      }
+    ],
+    allowFreeText: false
+  };
+}
+
+export function buildAgentProtocolRecoveryQuestion(reason: string) {
+  return {
+    id: AGENT_PROTOCOL_RECOVERY_QUESTION_ID,
+    label: "是否继续重试",
+    prompt: `当前模型已连续 ${MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES} 轮无法返回可执行的 Agent 决策。${reason}`,
+    options: [
+      {
+        id: "continue",
+        label: "继续重试",
+        description: `继续后会自动再尝试 ${MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES} 轮。30 秒内未选择将默认继续。`,
+        recommended: true
+      },
+      {
+        id: "stop",
+        label: "停止任务",
+        description: "停止当前任务并保留已经完成的工具结果和项目文件。"
       }
     ],
     allowFreeText: false

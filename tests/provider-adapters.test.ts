@@ -1051,6 +1051,20 @@ describe("parseDecisionFromText", () => {
     });
   });
 
+  it("selects an Agent decision when a gateway prepends a separate JSON payload", () => {
+    const decision = parseDecisionFromText([
+      "gateway metadata: {\"request_id\":\"req-123\",\"cached\":false}",
+      "{\"assistant_message\":\"Inspecting files\",\"tool_calls\":[{\"name\":\"fs.read_directory\",\"arguments\":{\"path\":\".\"}}],\"end_turn\":false,\"goal_completed\":false}"
+    ].join("\n"));
+
+    expect(decision).toMatchObject({
+      assistantMessage: "Inspecting files",
+      toolCalls: [{ name: "fs.read_directory", arguments: { path: "." } }],
+      endTurn: false,
+      isStructured: true
+    });
+  });
+
   it("repairs tagged JSON and XML tool arguments returned as text", () => {
     const tagged = parseDecisionFromText(
       "<tool_calls>[{name: 'fs.read_file', arguments: '{path: \\\"README.md\\\",}',}]</tool_calls>"
