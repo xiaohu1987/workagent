@@ -1951,6 +1951,11 @@ export function App() {
     () => buildConversationTurnItems(visibleMessages, snapshot?.toolCalls ?? [], selectedThread?.cwd),
     [selectedThread?.cwd, snapshot?.toolCalls, visibleMessages]
   );
+  const currentSubagents = useMemo(
+    () => snapshot?.subagents ?? [],
+    [snapshot?.subagents]
+  );
+  const hasActiveSubagents = currentSubagents.some((agent) => agent.status === "running" || agent.status === "waiting");
   const activeStreamingAssistant = useMemo(
     () =>
       Object.values(streamingAssistants)
@@ -4765,24 +4770,22 @@ export function App() {
         )}
 
         <section className="chat-canvas">
+          {!showWelcome && currentSubagents.length > 0 && hasActiveSubagents ? (
+            <SubagentActivityList
+              agents={currentSubagents}
+              runtimeActivities={runtimeActivities}
+              onInterrupt={(agent) => {
+                if (!selectedThreadId) return;
+                void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
+                  .then(() => refreshSnapshot(selectedThreadId));
+              }}
+            />
+          ) : null}
           <div
             ref={chatScrollRef}
-            className={`chat-scroll ${showWelcome ? "welcome-mode" : ""}`}
+            className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${currentSubagents.length > 0 && hasActiveSubagents ? "has-subagent-overlay" : ""}`}
             onScroll={handleTranscriptScroll}
           >
-            {!showWelcome ? (
-              snapshot?.subagents?.length ? (
-                <SubagentActivityList
-                  agents={snapshot.subagents}
-                  onOpen={(threadId) => void openThread(threadId, { scrollToLatest: true })}
-                  onInterrupt={(agent) => {
-                    if (!selectedThreadId) return;
-                    void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
-                      .then(() => refreshSnapshot(selectedThreadId));
-                  }}
-                />
-              ) : null
-            ) : null}
             {!showWelcome ? (
               <div className="conversation-turn-rail-shell">
                 <ConversationTurnRail turns={conversationTurns} />
@@ -10449,18 +10452,44 @@ function formatElapsedClock(durationMs: number): string {
 
 function SubagentActivityList({
   agents,
-  onOpen,
+  runtimeActivities,
   onInterrupt
 }: {
   agents: ThreadRecord[];
-  onOpen: (threadId: string) => void;
+  runtimeActivities: Record<string, RuntimeActivity>;
   onInterrupt: (agent: ThreadRecord) => void;
 }) {
+  const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
+  const activeCount = agents.filter((agent) => agent.status === "running" || agent.status === "waiting").length;
+  const failedCount = agents.filter((agent) => agent.status === "failed").length;
+  const completedCount = agents.filter((agent) => agent.status === "completed").length;
+  const stoppedCount = agents.filter((agent) => agent.status === "idle").length;
+  const summaryLabel = activeCount > 0
+    ? `${activeCount} 个运行中`
+    : failedCount > 0
+      ? `${failedCount} 个需处理`
+      : completedCount === agents.length
+        ? `${completedCount} 个已完成`
+        : stoppedCount > 0
+          ? `${stoppedCount} 个已停止`
+          : `${agents.length} 个已结束`;
+
   return (
-    <section className="agent-activity-list" aria-label="子智能体活动">
-      <div className="agent-activity-heading">子智能体</div>
-      {agents.map((agent) => {
+    <section className="agent-activity-list" aria-label="子智能体活动" tabIndex={0}>
+      <div className="agent-activity-summary" aria-live="polite">
+        <span className={`agent-activity-indicator ${activeCount > 0 ? "running" : failedCount > 0 ? "failed" : "completed"}`} aria-hidden="true" />
+        <IconSkills />
+        <span className="agent-activity-heading">子智能体</span>
+        <span className="agent-activity-count">{summaryLabel}</span>
+        <IconChevronDown />
+      </div>
+      <div className="agent-activity-details">
+        {agents.map((agent) => {
         const active = agent.status === "running" || agent.status === "waiting";
+        const runtimeActivity = runtimeActivities[agent.id];
+        const runtimeLabel = getSubagentRuntimeLabel(runtimeActivity);
+        const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity);
+        const title = getSubagentTitle(agent);
         const statusLabel = agent.status === "completed"
           ? "已完成"
           : agent.status === "failed"
@@ -10471,10 +10500,21 @@ function SubagentActivityList({
                 ? "运行中"
                 : "已停止";
         return (
-          <div key={agent.id} className={`agent-activity-row ${agent.status}`}>
-            <button type="button" className="agent-activity-main" onClick={() => onOpen(agent.id)} title="打开子任务">
-              <span className="agent-activity-path">{agent.agentPath}</span>
-              <span className="agent-activity-task">{agent.lastTaskMessage || agent.agentRole || "子任务"}</span>
+          <div key={agent.id} className={`agent-activity-row ${agent.status} ${expandedAgentId === agent.id ? "is-open" : ""}`}>
+            <button
+              type="button"
+              className="agent-activity-main"
+              aria-expanded={expandedAgentId === agent.id}
+              onClick={() => setExpandedAgentId((current) => current === agent.id ? null : agent.id)}
+              title={expandedAgentId === agent.id ? "收起子任务详情" : "展开子任务详情"}
+            >
+              <span className="agent-activity-title-row">
+                <span className="agent-activity-title">{title}</span>
+                <span className="agent-activity-path">{agent.agentPath}</span>
+              </span>
+              <span key={`${agent.id}-${runtimeLabel ?? "preparing"}`} className="agent-activity-task agent-runtime-update">
+                {runtimeLabel ?? "正在准备任务"}
+              </span>
             </button>
             <span className="agent-activity-status">{statusLabel}</span>
             {active ? (
@@ -10482,11 +10522,54 @@ function SubagentActivityList({
                 停止
               </button>
             ) : null}
+            {expandedAgentId === agent.id ? (
+              <div className="agent-activity-task-detail">
+                <div className="agent-activity-detail-heading">运行动态</div>
+                {runtimeHistory.length > 0 ? (
+                  <div className="agent-activity-runtime-history">
+                    {runtimeHistory.map((entry) => <span key={entry.id}>{entry.label}</span>)}
+                  </div>
+                ) : <div className="agent-activity-runtime-empty">正在等待子智能体返回运行状态。</div>}
+                <div className="agent-activity-detail-heading">任务说明</div>
+                <div className="agent-activity-task-prompt">{agent.lastTaskMessage || agent.agentRole || "该子任务暂无任务说明。"}</div>
+              </div>
+            ) : null}
           </div>
         );
-      })}
+        })}
+      </div>
     </section>
   );
+}
+
+function getSubagentTitle(agent: ThreadRecord): string {
+  return agent.agentRole?.trim() || "子任务分析";
+}
+
+function getSubagentRuntimeLabel(activity: RuntimeActivity | undefined): string | null {
+  if (!activity) return null;
+  const activeTool = [...activity.entries].reverse().find(
+    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool" && entry.toolCall.status === "running"
+  );
+  if (activeTool) return getToolProcessingLabel(activeTool.toolCall.toolName, activeTool.toolCall.argumentsJson);
+  const latestStatus = [...activity.entries].reverse().find(
+    (entry): entry is Extract<RuntimeActivityEntry, { kind: "status" }> => entry.kind === "status"
+  );
+  return latestStatus?.label ?? null;
+}
+
+function getSubagentRuntimeHistory(activity: RuntimeActivity | undefined): Array<{ id: string; label: string }> {
+  if (!activity) return [];
+  return activity.entries.slice(-5).reverse().map((entry) => ({
+    id: entry.id,
+    label: entry.kind === "tool"
+      ? entry.toolCall.status === "running"
+        ? getToolProcessingLabel(entry.toolCall.toolName, entry.toolCall.argumentsJson)
+        : `${entry.toolCall.status === "failed" ? "工具失败" : "已完成"} · ${entry.toolCall.toolName}`
+      : entry.kind === "status"
+        ? entry.label
+        : entry.label
+  }));
 }
 
 function TurnElapsedBanner({
@@ -10833,15 +10916,10 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
 const ToolActivityGroup = memo(function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
   const [expanded, setExpanded] = useState(false);
   const { runningCall, status, summary } = getToolActivityPresentation(toolCalls);
-
-  // The persistent runtime panel shows the current tool. Add this group to the
-  // transcript only after every call in it is complete, so the state is not duplicated.
-  if (runningCall) {
-    return null;
-  }
+  const isRunning = Boolean(runningCall);
 
   return (
-    <section className={`tool-activity-group ${status} ${expanded ? "is-expanded" : ""}`}>
+    <section className={`tool-activity-group ${status} ${expanded ? "is-expanded" : ""}`} aria-live="polite">
       <button
         type="button"
         className="tool-activity-summary"
@@ -10853,6 +10931,8 @@ const ToolActivityGroup = memo(function ToolActivityGroup({ toolCalls }: { toolC
           <strong>{summary.title}</strong>
           {summary.detail ? <span>{summary.detail}</span> : null}
         </span>
+        <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : "已完成"}</span>
+        <span className="tool-activity-summary-count">{toolCalls.length} 项</span>
         <span className="tool-activity-chevron" aria-hidden />
       </button>
       <div className="tool-activity-details-shell">

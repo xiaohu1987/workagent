@@ -2271,6 +2271,44 @@ class ThreadSessionRuntime {
           (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") &&
           decision.toolCalls.length === 1 &&
           decision.toolCalls[0]?.name === "request_user_input";
+
+        const currentChildAgents = thread.parentThreadId
+          ? []
+          : await this.services.listSubagents(this.threadId);
+        const hasActiveChildAgents = currentChildAgents.length > 0
+          && await this.services.hasActiveSubagents(this.threadId);
+        if (hasActiveChildAgents) {
+          const coordinationCalls = decision.toolCalls.filter((toolCall) =>
+            canonicalizeToolName(toolCall.name).startsWith("multi_agents.")
+          );
+          if (decision.assistantMessage) {
+            await discardStreamedAssistant();
+            decision.assistantMessage = undefined;
+          }
+          // Keep the root agent in coordination mode while child work is in
+          // flight. It may manage the child tree, but cannot publish a partial
+          // report or start duplicating the children's analysis locally.
+          decision = {
+            ...decision,
+            toolCalls: coordinationCalls.length > 0
+              ? coordinationCalls
+              : [{ id: randomUUID(), name: "multi_agents.wait", arguments: { timeoutMs: 30_000 } }],
+            endTurn: false,
+            goalCompleted: false
+          };
+        }
+
+        const isPrematureRootReport = currentChildAgents.length > 0
+          && Boolean(decision.assistantMessage)
+          && (decision.toolCalls.length > 0 || !decision.endTurn);
+        if (isPrematureRootReport) {
+          // Child work is already complete, but the root is still performing
+          // coordination. Reserve the only visible report for the terminal
+          // decision so the main chat cannot receive a partial second report.
+          await discardStreamedAssistant();
+          decision.assistantMessage = undefined;
+        }
+
         if (
           decision.assistantMessage &&
           decision.toolCalls.length > 0 &&
@@ -2395,6 +2433,7 @@ class ThreadSessionRuntime {
           rawToolCall.name = toolCall.name;
           let toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
           let toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+          const isRepeatableCoordinationTool = toolCall.name === "multi_agents.wait" || toolCall.name === "multi_agents.list";
           const browserTabs = await this.services.listBrowserTabs(this.threadId);
           const duplicateCreatedFile = getAddedPatchFiles(toolCall.arguments).find((filePath) =>
             successfullyCreatedFiles.has(filePath)
@@ -2416,7 +2455,7 @@ class ThreadSessionRuntime {
             }
             continue;
           }
-          if (successfulToolCallFingerprints.has(toolCallFingerprint)) {
+          if (!isRepeatableCoordinationTool && successfulToolCallFingerprints.has(toolCallFingerprint)) {
             const retargetedToolCall = retargetStaleBrowserObservationToolCall(toolCall, browserTabs);
             if (retargetedToolCall) {
               toolCall = retargetedToolCall;
@@ -2465,7 +2504,7 @@ class ThreadSessionRuntime {
             }
           }
           const failedCallAttempts = failedToolCallFingerprints.get(toolCallFingerprint) ?? 0;
-          if (failedCallAttempts >= 2) {
+          if (!isRepeatableCoordinationTool && failedCallAttempts >= 2) {
             const lastError =
               `The identical tool call ${toolCall.name} already failed ${failedCallAttempts} times.`;
             appendBlockedToolCallResult(toolCall, lastError);
@@ -4676,9 +4715,12 @@ function buildMultiAgentDirective(thread: ThreadRecord): string {
     return "Multi-agent delegation is disabled for this task. Do not call multi_agents tools.";
   }
   return [
-    "You are the root agent and must synthesize child-agent results into one final answer.",
-    "You may proactively delegate independent, bounded research, review, or diagnostic work.",
-    "Do not delegate ordered work or tasks that require shared mutable file writes.",
+    "You are the root agent and must synthesize child-agent results into exactly one final consolidated answer.",
+    "Prefer proactively delegating independent, bounded research, review, or diagnostic work when it can make meaningful progress in parallel.",
+    "For non-trivial tasks, first consider whether there is at least one independent bounded slice worth delegating before proceeding alone.",
+    "Before spawning another child, inspect multi_agents.list and reuse any existing child with an overlapping role or file scope for the current user request.",
+    "Keep child reports in their child threads; do not emit a separate root-thread report for partial child results.",
+    "Do not delegate trivial work, ordered work, or tasks that require shared mutable file writes.",
     "Use multi_agents.wait before finalizing while child agents are active."
   ].join(" ");
 }

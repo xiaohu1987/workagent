@@ -1281,7 +1281,9 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       const timeoutMs = typeof args.timeoutMs === "number" ? args.timeoutMs : undefined;
       const result = await ctx.waitForSubagents({ agents, timeoutMs });
       return {
-        ok: !result.timedOut,
+        // A timeout is a valid status update, not a failed tool execution. The
+        // root runtime decides whether it must continue waiting.
+        ok: true,
         content: JSON.stringify(result),
         json: { agents: result.agents, timedOut: result.timedOut }
       };

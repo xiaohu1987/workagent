@@ -595,33 +595,6 @@
 
 .tool-activity-summary-icon svg { width: 15px; height: 15px; }
 
-.tool-activity-live-indicator {
-  display: inline-grid;
-  flex: 0 0 14px;
-  width: 14px;
-  height: 14px;
-  place-items: center;
-  opacity: 0;
-  transition: opacity 150ms ease;
-}
-
-.tool-activity-live-indicator.is-active { opacity: 1; }
-
-.tool-activity-live-indicator .task-processing-dots {
-  gap: 3px;
-  height: 12px;
-}
-
-.tool-activity-live-indicator .task-processing-dots i {
-  width: 3px;
-  height: 3px;
-  background: #7da9d5;
-  animation: task-processing-dot 1.05s ease-in-out infinite;
-  animation-play-state: paused;
-}
-
-.tool-activity-live-indicator.is-active .task-processing-dots i { animation-play-state: running; }
-
 .tool-activity-summary-copy {
   display: flex;
   align-items: baseline;

@@ -546,9 +546,7 @@ export class DesktopBackend {
       toolCalls: this.#db.listToolCalls(threadId),
       contextCompaction: this.#db.getLatestContextCompaction(threadId),
       gpa: this.getGpaState(threadId),
-      subagents: this.#db
-        .listAgentTree(thread.rootThreadId)
-        .filter((agent) => agent.id !== thread.id && agent.agentPath.startsWith(`${thread.agentPath}/`))
+      subagents: this.getCurrentRequestSubagents(thread)
     };
   }
 
@@ -2519,15 +2517,25 @@ export class DesktopBackend {
       throw new Error("Multi-agent delegation is disabled for this task.");
     }
     const tree = this.#db.listAgentTree(parent.rootThreadId);
+    const root = this.#db.getThread(parent.rootThreadId);
+    const delegatedForCurrentRequest = this.getCurrentRequestSubagents(root, tree);
     const depth = Math.max(0, parent.agentPath.split("/").filter(Boolean).length - 1);
     if (depth >= this.#config.multiAgent.maxDepth) {
       throw new Error(`Maximum child-agent depth (${this.#config.multiAgent.maxDepth}) reached.`);
     }
-    if (tree.length - 1 >= this.#config.multiAgent.maxSubagentsPerRoot) {
-      throw new Error(`Maximum child-agent count (${this.#config.multiAgent.maxSubagentsPerRoot}) reached for this task.`);
+    if (delegatedForCurrentRequest.length >= this.#config.multiAgent.maxSubagentsPerRoot) {
+      throw new Error(`Maximum child-agent count (${this.#config.multiAgent.maxSubagentsPerRoot}) reached for this user request.`);
     }
+    const duplicate = delegatedForCurrentRequest.find((item) => isOverlappingSubagentAssignment(input, item));
+    if (duplicate) {
+      throw new Error(
+        `An overlapping child-agent task already exists for this user request (${duplicate.agentPath}). ` +
+        "Use multi_agents.wait or multi_agents.followup_task instead of spawning a duplicate."
+      );
+    }
+
     const activeCount = tree.filter((item) =>
-      item.id !== parent.rootThreadId && (item.status === "running" || item.status === "waiting")
+      item.id !== parent.rootThreadId && this.isSubagentActive(item)
     ).length;
     if (activeCount >= this.#config.multiAgent.maxConcurrentSubagents) {
       throw new Error(`All ${this.#config.multiAgent.maxConcurrentSubagents} child-agent slots are busy. Wait for a child to finish first.`);
@@ -2622,12 +2630,11 @@ export class DesktopBackend {
 
   public async listSubagents(parentThreadId: string): Promise<ThreadRecord[]> {
     const parent = this.#db.getThread(parentThreadId);
-    return this.#db.listAgentTree(parent.rootThreadId)
-      .filter((item) => item.id !== parentThreadId && item.agentPath.startsWith(`${parent.agentPath}/`));
+    return this.getCurrentRequestSubagents(parent);
   }
 
   private async hasActiveSubagents(parentThreadId: string): Promise<boolean> {
-    return (await this.listSubagents(parentThreadId)).some((item) => item.status === "running" || item.status === "waiting");
+    return (await this.listSubagents(parentThreadId)).some((item) => this.isSubagentActive(item));
   }
 
   private async waitForSubagents(
@@ -2640,11 +2647,10 @@ export class DesktopBackend {
       ? input.agents.map((agent) => this.resolveAgent(parentThreadId, agent).id)
       : (await this.listSubagents(parentThreadId)).map((item) => item.id);
     if (targetIds.length === 0) return { agents: [], timedOut: false };
-    const isReady = () => targetIds
-      .map((id) => this.#db.getThread(id))
-      .filter((item) => item.status !== "running" && item.status !== "waiting");
-    const initial = isReady();
-    if (initial.length > 0) return { agents: initial.map((item) => this.buildSubagentEnvelope(item)), timedOut: false };
+    const getTargets = () => targetIds.map((id) => this.#db.getThread(id));
+    const allFinished = (agents: ThreadRecord[]) => agents.every((agent) => !this.isSubagentActive(agent));
+    const initial = getTargets();
+    if (allFinished(initial)) return { agents: initial.map((item) => this.buildSubagentEnvelope(item)), timedOut: false };
 
     return new Promise<SubagentWaitResult>((resolve) => {
       let settled = false;
@@ -2660,13 +2666,35 @@ export class DesktopBackend {
         resolve(value);
       };
       const poll = () => {
-        const ready = isReady();
-        if (ready.length > 0) finish({ agents: ready.map((item) => this.buildSubagentEnvelope(item)), timedOut: false });
+        const agents = getTargets();
+        if (allFinished(agents)) finish({ agents: agents.map((item) => this.buildSubagentEnvelope(item)), timedOut: false });
       };
       timer = setInterval(poll, 250);
-      timeout = setTimeout(() => finish({ agents: [], timedOut: true }), timeoutMs);
+      timeout = setTimeout(() => {
+        const agents = getTargets();
+        finish({ agents: agents.map((item) => this.buildSubagentEnvelope(item)), timedOut: true });
+      }, timeoutMs);
       input.abortSignal?.addEventListener("abort", onAbort, { once: true });
     });
+  }
+
+  private isSubagentActive(thread: ThreadRecord): boolean {
+    return thread.status === "running"
+      || thread.status === "waiting"
+      || this.#db.listQueuedMessages(thread.id).some((message) => message.status === "queued" || message.status === "dispatching");
+  }
+
+  private getCurrentRequestSubagents(parent: ThreadRecord, tree = this.#db.listAgentTree(parent.rootThreadId)): ThreadRecord[] {
+    const latestRootUserMessage = [...this.#db.listMessages(parent.rootThreadId)]
+      .reverse()
+      .find((message) => message.role === "user");
+    const requestStartedAt = latestRootUserMessage ? Date.parse(latestRootUserMessage.createdAt) : Number.NEGATIVE_INFINITY;
+
+    return tree.filter((item) =>
+      item.id !== parent.id
+      && item.agentPath.startsWith(`${parent.agentPath}/`)
+      && Date.parse(item.createdAt) >= requestStartedAt
+    );
   }
 
   public async interruptAgent(parentThreadId: string, agent: string): Promise<SubagentResultEnvelope> {
@@ -3203,6 +3231,38 @@ function normalizeAgentSegment(value: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
   return normalized || "agent";
+}
+
+function isOverlappingSubagentAssignment(
+  input: { prompt: string; role: string },
+  existing: Pick<ThreadRecord, "agentRole" | "lastTaskMessage">
+): boolean {
+  const requestedRole = normalizeDelegationRole(input.role);
+  const existingRole = normalizeDelegationRole(existing.agentRole ?? "");
+  if (requestedRole && requestedRole === existingRole) {
+    return true;
+  }
+
+  const requestedFiles = extractDelegatedFileScopes(input.prompt);
+  const existingFiles = extractDelegatedFileScopes(existing.lastTaskMessage ?? "");
+  let sharedFiles = 0;
+  for (const file of requestedFiles) {
+    if (existingFiles.has(file)) sharedFiles += 1;
+  }
+  return sharedFiles >= 2;
+}
+
+function normalizeDelegationRole(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s\W_]+/g, "");
+}
+
+function extractDelegatedFileScopes(prompt: string): Set<string> {
+  const scopes = new Set<string>();
+  const normalized = prompt.toLowerCase().replace(/\\/g, "/");
+  for (const match of normalized.matchAll(/(?:[a-z0-9_-]+\/)*[a-z0-9_-]+\.(?:[a-z0-9]{1,8})/g)) {
+    scopes.add(match[0]);
+  }
+  return scopes;
 }
 
 function buildChildAgentPrompt(parent: ThreadRecord, child: ThreadRecord, prompt: string): string {
