@@ -2,6 +2,8 @@ export { modelJsonCandidates, tryParseModelJson } from "./model-json";
 
 export type ThreadMode = "project" | "chat";
 export type WorkspaceKind = "project" | "projectless";
+export type MultiAgentMode = "disabled" | "proactive";
+export type ChildAgentWritePolicy = "read-only";
 export type GpaStage = "off" | "goal" | "plan" | "act";
 export interface GpaPlanTask {
   id: string;
@@ -79,6 +81,34 @@ export interface ThreadRecord {
   isPinned: boolean;
   pinnedAt: string | null;
   gpaStateJson: string | null;
+  parentThreadId: string | null;
+  rootThreadId: string;
+  agentPath: string;
+  agentRole: string | null;
+  lastTaskMessage: string | null;
+  multiAgentMode: MultiAgentMode;
+}
+
+export interface MultiAgentSettings {
+  defaultMode: MultiAgentMode;
+  maxConcurrentSubagents: number;
+  maxSubagentsPerRoot: number;
+  maxDepth: number;
+  childWritePolicy: ChildAgentWritePolicy;
+}
+
+export interface SubagentResultEnvelope {
+  status: "queued" | "running" | "waiting" | "completed" | "failed" | "interrupted";
+  summary: string;
+  evidence: string[];
+  errors: string[];
+  agentPath: string;
+  threadId: string;
+}
+
+export interface SubagentWaitResult {
+  agents: SubagentResultEnvelope[];
+  timedOut: boolean;
 }
 
 export interface MessageRecord {
@@ -583,6 +613,7 @@ export interface AppConfig {
     approvals: ApprovalMode;
     inAppBrowser: boolean;
   };
+  multiAgent: MultiAgentSettings;
   timeouts: RuntimeTimeoutSettings;
   /** Optional per-workspace overrides keyed by normalized absolute workspace path. */
   projectExecutionPolicies?: Record<string, ProjectExecutionPolicy>;
@@ -762,6 +793,7 @@ export interface RuntimeThreadSnapshot {
   toolCalls: ToolCallRecord[];
   contextCompaction: ContextCompactionRecord | null;
   gpa: GpaState | null;
+  subagents: ThreadRecord[];
 }
 
 export type GitDiffLineKind = "context" | "added" | "removed" | "meta";

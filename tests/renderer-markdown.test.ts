@@ -8,6 +8,7 @@ import {
   getProjectFileChangeKinds,
   buildContextUsage,
   buildPlanTimelineItems,
+  getActivePlanTimelineItem,
   getGpaPlanMessageId,
   extractMessageMediaReferences,
   formatComposerAttachments,
@@ -45,6 +46,19 @@ describe("parseMarkdownBlocks", () => {
     });
 
     expect(items.map((item) => item.status)).toEqual(["completed", "in_progress", "pending"]);
+  });
+
+  it("does not retain the last completed task as bottom progress", () => {
+    const items = buildPlanTimelineItems({
+      stage: "act",
+      fullAccess: false,
+      knowledgeEnabled: false,
+      planTasks: [{ id: "T1", title: "Completed", done: true }],
+      awaitingConfirmation: null,
+      updatedAt: "2026-07-20T00:00:00.000Z"
+    });
+
+    expect(getActivePlanTimelineItem(items)).toBeNull();
   });
 
   it("keeps the confirmed GPA plan response framed during ACT", () => {

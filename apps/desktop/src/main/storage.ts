@@ -21,6 +21,7 @@ import type {
   McpServerConfig,
   MessageAttachment,
   MessageRecord,
+  MultiAgentSettings,
   ModelProfile,
   PluginRecord,
   ProjectPluginBinding,
@@ -34,6 +35,23 @@ import type {
   TurnRunRecord,
   UserInputPrompt
 } from "@shared-types";
+
+function normalizeMultiAgentSettings(value?: Partial<MultiAgentSettings> | null): MultiAgentSettings {
+  const source = value ?? {};
+  const clamp = (input: unknown, fallback: number, minimum: number, maximum: number) => {
+    const numeric = typeof input === "number" && Number.isFinite(input) ? Math.round(input) : fallback;
+    return Math.min(maximum, Math.max(minimum, numeric));
+  };
+  return {
+    // Older settings may contain the retired explicit mode. Keep delegation
+    // enabled by treating it as proactive instead of silently turning it off.
+    defaultMode: source.defaultMode === "disabled" ? "disabled" : "proactive",
+    maxConcurrentSubagents: clamp(source.maxConcurrentSubagents, 3, 1, 3),
+    maxSubagentsPerRoot: clamp(source.maxSubagentsPerRoot, 8, 1, 8),
+    maxDepth: clamp(source.maxDepth, 3, 1, 3),
+    childWritePolicy: "read-only"
+  };
+}
 
 export interface HomeLayout {
   root: string;
@@ -177,6 +195,13 @@ export function defaultConfig(): AppConfig {
       approvals: "prompt",
       inAppBrowser: true
     },
+    multiAgent: {
+      defaultMode: "proactive",
+      maxConcurrentSubagents: 3,
+      maxSubagentsPerRoot: 8,
+      maxDepth: 3,
+      childWritePolicy: "read-only"
+    },
     timeouts: normalizeRuntimeTimeouts(),
     projectExecutionPolicies: {},
     mcpServers: []
@@ -295,6 +320,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       approvals: parsed.desktop?.approvals ?? 'prompt',
       inAppBrowser: parsed.desktop?.inAppBrowser ?? true
     },
+    multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     timeouts: normalizeRuntimeTimeouts(parsed.timeouts),
     projectExecutionPolicies: normalizeProjectExecutionPolicies(parsed.projectExecutionPolicies),
     mcpServers: ((parsed.mcpServers ?? []) as Array<Record<string, unknown>>).map((item) => ({
@@ -323,6 +349,7 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     routing: config.routing,
     multimodal: config.multimodal,
     desktop: config.desktop,
+    multiAgent: normalizeMultiAgentSettings(config.multiAgent),
     timeouts: normalizeRuntimeTimeouts(config.timeouts),
     projectExecutionPolicies: normalizeProjectExecutionPolicies(config.projectExecutionPolicies),
     providers: Object.fromEntries(config.providers.map((provider) => [provider.id, provider])),
@@ -426,7 +453,13 @@ export class DatabaseService {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         is_pinned INTEGER NOT NULL DEFAULT 0,
-        pinned_at TEXT
+        pinned_at TEXT,
+        parent_thread_id TEXT,
+        root_thread_id TEXT,
+        agent_path TEXT NOT NULL DEFAULT '/root',
+        agent_role TEXT,
+        last_task_message TEXT,
+        multi_agent_mode TEXT NOT NULL DEFAULT 'proactive'
       );
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -653,6 +686,13 @@ export class DatabaseService {
     this.ensureColumn("threads", "gpa_state_json", "TEXT");
     this.ensureColumn("threads", "is_pinned", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("threads", "pinned_at", "TEXT");
+    this.ensureColumn("threads", "parent_thread_id", "TEXT");
+    this.ensureColumn("threads", "root_thread_id", "TEXT");
+    this.ensureColumn("threads", "agent_path", "TEXT NOT NULL DEFAULT '/root'");
+    this.ensureColumn("threads", "agent_role", "TEXT");
+    this.ensureColumn("threads", "last_task_message", "TEXT");
+    this.ensureColumn("threads", "multi_agent_mode", "TEXT NOT NULL DEFAULT 'proactive'");
+    this.#db.prepare("UPDATE threads SET root_thread_id = id WHERE root_thread_id IS NULL OR root_thread_id = ''").run();
     this.ensureColumn("user_input_prompts", "kind", "TEXT NOT NULL DEFAULT 'generic'");
     this.ensureColumn("user_input_prompts", "allow_skip", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("user_input_prompts", "answers_json", "TEXT");
@@ -672,11 +712,30 @@ export class DatabaseService {
     this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
   }
 
-  public listThreads(): ThreadRecord[] {
+  public listThreads(includeSubagents = false): ThreadRecord[] {
     return this.#db
-      .prepare("SELECT * FROM threads ORDER BY is_pinned DESC, pinned_at DESC, created_at DESC, rowid DESC")
+      .prepare(`SELECT * FROM threads ${includeSubagents ? "" : "WHERE parent_thread_id IS NULL"} ORDER BY is_pinned DESC, pinned_at DESC, created_at DESC, rowid DESC`)
       .all()
       .map(mapThreadRow);
+  }
+
+  public listAgentTree(rootThreadId: string): ThreadRecord[] {
+    return this.#db
+      .prepare("SELECT * FROM threads WHERE root_thread_id = ? ORDER BY agent_path ASC, created_at ASC")
+      .all(rootThreadId)
+      .map(mapThreadRow);
+  }
+
+  public listChildThreads(parentThreadId: string): ThreadRecord[] {
+    return this.#db
+      .prepare("SELECT * FROM threads WHERE parent_thread_id = ? ORDER BY created_at ASC")
+      .all(parentThreadId)
+      .map(mapThreadRow);
+  }
+
+  public findAgentThread(rootThreadId: string, agentPath: string): ThreadRecord | null {
+    const row = this.#db.prepare("SELECT * FROM threads WHERE root_thread_id = ? AND agent_path = ?").get(rootThreadId, agentPath);
+    return row ? mapThreadRow(row) : null;
   }
 
   public searchThreads(query: string, limit = 50): ThreadSearchResult[] {
@@ -718,10 +777,18 @@ export class DatabaseService {
     cwd?: string | null;
     modelId: string;
     providerId: string;
+    parentThreadId?: string | null;
+    rootThreadId?: string | null;
+    agentPath?: string;
+    agentRole?: string | null;
+    lastTaskMessage?: string | null;
+    multiAgentMode?: ThreadRecord["multiAgentMode"];
+    status?: ThreadRecord["status"];
   }): ThreadRecord {
     const now = nowIso();
+    const id = randomUUID();
     const thread: ThreadRecord = {
-      id: randomUUID(),
+      id,
       title: input.title,
       mode: input.mode,
       workspaceKind: input.workspaceKind,
@@ -730,14 +797,20 @@ export class DatabaseService {
       workspaceId: input.cwd ? hashPath(input.cwd) : null,
       modelId: input.modelId,
       providerId: input.providerId,
-      status: "idle",
+      status: input.status ?? "idle",
       selectedSkillIds: [],
       knowledgeBaseIds: [],
       createdAt: now,
       updatedAt: now,
       isPinned: false,
       pinnedAt: null,
-      gpaStateJson: null
+      gpaStateJson: null,
+      parentThreadId: input.parentThreadId ?? null,
+      rootThreadId: input.rootThreadId ?? id,
+      agentPath: input.agentPath ?? "/root",
+      agentRole: input.agentRole ?? null,
+      lastTaskMessage: input.lastTaskMessage ?? null,
+      multiAgentMode: input.multiAgentMode ?? "proactive"
     };
 
     this.#db
@@ -745,8 +818,9 @@ export class DatabaseService {
         INSERT INTO threads (
           id, title, mode, workspace_kind, cwd, project_id, workspace_id,
           model_id, provider_id, status, selected_skill_ids_json,
-          knowledge_base_ids_json, created_at, updated_at, is_pinned, pinned_at, gpa_state_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          knowledge_base_ids_json, created_at, updated_at, is_pinned, pinned_at, gpa_state_json,
+          parent_thread_id, root_thread_id, agent_path, agent_role, last_task_message, multi_agent_mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         thread.id,
@@ -765,7 +839,13 @@ export class DatabaseService {
         thread.updatedAt,
         Number(thread.isPinned),
         thread.pinnedAt,
-        thread.gpaStateJson
+        thread.gpaStateJson,
+        thread.parentThreadId,
+        thread.rootThreadId,
+        thread.agentPath,
+        thread.agentRole,
+        thread.lastTaskMessage,
+        thread.multiAgentMode
       );
 
     return thread;
@@ -792,7 +872,9 @@ export class DatabaseService {
         UPDATE threads
         SET title = ?, mode = ?, workspace_kind = ?, cwd = ?, project_id = ?, workspace_id = ?,
             model_id = ?, provider_id = ?, status = ?, selected_skill_ids_json = ?,
-            knowledge_base_ids_json = ?, updated_at = ?, is_pinned = ?, pinned_at = ?, gpa_state_json = ?
+            knowledge_base_ids_json = ?, updated_at = ?, is_pinned = ?, pinned_at = ?, gpa_state_json = ?,
+            parent_thread_id = ?, root_thread_id = ?, agent_path = ?, agent_role = ?,
+            last_task_message = ?, multi_agent_mode = ?
         WHERE id = ?
       `)
       .run(
@@ -811,6 +893,12 @@ export class DatabaseService {
         Number(next.isPinned),
         next.pinnedAt,
         next.gpaStateJson,
+        next.parentThreadId,
+        next.rootThreadId,
+        next.agentPath,
+        next.agentRole,
+        next.lastTaskMessage,
+        next.multiAgentMode,
         threadId
       );
 
@@ -1135,6 +1223,27 @@ export class DatabaseService {
         next.errorMessage,
         turnRunId
       );
+  }
+
+  public getLatestTurnRun(threadId: string): TurnRunRecord | null {
+    const row = this.#db
+      .prepare("SELECT * FROM turn_runs WHERE thread_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
+      .get(threadId) as any;
+    if (!row) return null;
+    return {
+      id: row.id,
+      threadId: row.thread_id,
+      kind: row.kind,
+      status: row.status,
+      providerId: row.provider_id,
+      modelId: row.model_id,
+      resolvedModelSnapshotJson: row.resolved_model_snapshot_json,
+      promptTokens: row.prompt_tokens,
+      completionTokens: row.completion_tokens,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      errorMessage: row.error_message
+    };
   }
 
   public recordToolCall(input: Omit<ToolCallRecord, "id" | "startedAt" | "completedAt">): ToolCallRecord {
@@ -2135,7 +2244,13 @@ function mapThreadRow(row: any): ThreadRecord {
     updatedAt: row.updated_at,
     isPinned: Boolean(row.is_pinned),
     pinnedAt: row.pinned_at ?? null,
-    gpaStateJson: row.gpa_state_json ?? null
+    gpaStateJson: row.gpa_state_json ?? null,
+    parentThreadId: row.parent_thread_id ?? null,
+    rootThreadId: row.root_thread_id || row.id,
+    agentPath: row.agent_path || "/root",
+    agentRole: row.agent_role ?? null,
+    lastTaskMessage: row.last_task_message ?? null,
+    multiAgentMode: row.multi_agent_mode === "disabled" ? "disabled" : "proactive"
   };
 }
 

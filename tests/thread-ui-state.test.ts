@@ -16,8 +16,8 @@ import {
   getSidebarUpdateReminder,
   shouldShowRuntimeActivityPanel,
   isFileWriteTool,
-  isPatchAssistantMessage,
   isInternalAgentProtocolMessage,
+  isPatchAssistantMessage,
   reconcilePendingUserMessages
 } from "../apps/desktop/src/renderer/App";
 import type { MessageRecord, ToolCallRecord } from "../packages/shared-types/src";
@@ -40,6 +40,11 @@ function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
 }
 
 describe("thread UI state helpers", () => {
+  it("hides incomplete agent decision JSON from the chat transcript", () => {
+    expect(isInternalAgentProtocolMessage('{"assistant_message": "正在检查服务')).toBe(true);
+    expect(isInternalAgentProtocolMessage("普通的助手回复")).toBe(false);
+  });
+
   it("treats running and waiting threads as executing", () => {
     expect(isThreadExecutionInProgress("running")).toBe(true);
     expect(isThreadExecutionInProgress("waiting")).toBe(true);
@@ -214,7 +219,7 @@ describe("tool activity summaries", () => {
 
     expect(summary).toEqual({
       title: "\u5df2\u5b8c\u6210\u67e5\u8be2\u4e0e\u8bfb\u53d6",
-      detail: "\u67e5\u8be2 1 \u6b21 \u00b7 \u8bfb\u53d6 1 \u9879 \u00b7 \u4fee\u6539 1 \u4e2a\u6587\u4ef6 \u00b7 \u9a8c\u8bc1 1 \u6b21"
+      detail: "\u67e5\u8be2 1 \u6b21 \u00b7 \u8bfb\u53d6 1 \u9879 \u00b7 \u5199\u5165 1 \u6b21\uff08\u6d89\u53ca 1 \u4e2a\u6587\u4ef6\uff09 \u00b7 \u9a8c\u8bc1 1 \u6b21"
     });
   });
 

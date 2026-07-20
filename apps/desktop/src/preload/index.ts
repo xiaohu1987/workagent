@@ -7,6 +7,8 @@ const api = {
     ipcRenderer.invoke("threads:set-pinned", payload),
   renameThread: (payload: { threadId: string; title: string }) =>
     ipcRenderer.invoke("threads:rename", payload),
+  setThreadMultiAgentMode: (payload: { threadId: string; mode: "disabled" | "proactive" }) =>
+    ipcRenderer.invoke("threads:set-multi-agent-mode", payload),
   createThread: (payload: {
     title: string;
     mode: "project" | "chat";
@@ -63,6 +65,9 @@ const api = {
   rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) =>
     ipcRenderer.invoke("threads:reject-multimodal", payload),
   interruptThread: (threadId: string) => ipcRenderer.invoke("threads:interrupt", threadId),
+  listSubagents: (threadId: string) => ipcRenderer.invoke("multi-agents:list", threadId),
+  interruptAgent: (payload: { threadId: string; agent: string }) =>
+    ipcRenderer.invoke("multi-agents:interrupt", payload),
   updateThreadModelSelection: (payload: { threadId: string; providerId: string; modelId: string }) =>
     ipcRenderer.invoke("threads:update-model", payload),
   addThreadSkill: (payload: { threadId: string; skillId: string }) =>

@@ -37,6 +37,7 @@ import type {
   KnowledgeImportSource,
   KnowledgeScope,
   MessageAttachment,
+  MultiAgentMode,
   MessageRecord,
   McpServerConfig,
   ModelProfile,
@@ -64,6 +65,7 @@ import { useMotionPresence } from "./motion-presence";
 
 type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "timeouts" | "update";
 type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
+const BROWSER_WORKSPACE_RECOVERY_QUESTION_ID = "browser_workspace_recovery";
 
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("c", c);
@@ -608,6 +610,7 @@ export function App() {
   const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
+  const snapshotThreadIdRef = useRef<string | null>(null);
   const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
@@ -656,6 +659,7 @@ export function App() {
     updatedAt: ""
   });
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
+  const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
   const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp">("root");
   const [composerAddSubmenuPosition, setComposerAddSubmenuPosition] = useState<{ left: number; top: number; anchorTop: number; maxHeight: number } | null>(null);
@@ -1168,6 +1172,7 @@ export function App() {
           completedAt?: string;
           message?: { role?: MessageRecord["role"] };
           thread?: ThreadRecord;
+          childThread?: ThreadRecord;
           modelId?: string;
           agentCapability?: ModelProfile["agentCapability"];
           agentCapabilityCheckedAt?: string;
@@ -1410,12 +1415,17 @@ export function App() {
         if (suppressRuntimeProgressRef.current[typed.threadId]) {
           return;
         }
-        appendRuntimeOutput(
-          typed.threadId,
-          typed.payload.title ?? "待整理的模型执行输出",
-          typed.payload.content,
-          typed.createdAt
-        );
+        const turnRunId = typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : null;
+        if (turnRunId) {
+          // Internal recovery output may be malformed decision JSON. It is not
+          // user-facing content and must not remain as a stale streaming block.
+          setStreamingAssistants((current) => {
+            if (!current[turnRunId]) return current;
+            const next = { ...current };
+            delete next[turnRunId];
+            return next;
+          });
+        }
         appendRuntimeStatus(typed.threadId, "正在校验并整理结果", typed.createdAt);
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
@@ -1479,6 +1489,9 @@ export function App() {
       }
       if (typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
         const runtimeThreadId = typed.threadId;
+        if (typed.payload.childThread && runtimeThreadId === currentSelectedThreadId) {
+          void refreshSnapshot(runtimeThreadId);
+        }
         const status = typed.payload.thread.status;
         const resumePlan = gpaPlanResumeAttemptRef.current.get(runtimeThreadId);
         if (status === "failed") {
@@ -1774,10 +1787,31 @@ export function App() {
   }, [exitingNoticeId, notice]);
 
   const selectedThread = useMemo(
-    () => threads.find((thread) => thread.id === selectedThreadId) ?? null,
-    [threads, selectedThreadId]
+    () => threads.find((thread) => thread.id === selectedThreadId) ??
+      (snapshot?.thread.id === selectedThreadId ? snapshot.thread : null),
+    [threads, selectedThreadId, snapshot?.thread]
   );
+  useEffect(() => {
+    snapshotThreadIdRef.current = snapshot?.thread.id ?? null;
+  }, [snapshot?.thread.id]);
   const selectedProjectCwd = selectedThread?.mode === "project" ? selectedThread.cwd ?? null : null;
+
+  useEffect(() => {
+    if (selectedThread) {
+      setMultiAgentMode(selectedThread.multiAgentMode === "disabled" ? "disabled" : "proactive");
+    }
+  }, [selectedThread?.id, selectedThread?.multiAgentMode, config?.multiAgent?.defaultMode]);
+
+  async function updateMultiAgentMode(mode: MultiAgentMode) {
+    setMultiAgentMode(mode);
+    if (!selectedThreadId) return;
+    try {
+      await window.codexh.setThreadMultiAgentMode({ threadId: selectedThreadId, mode });
+      await refreshSnapshot(selectedThreadId);
+    } catch (error) {
+      showNotice("多智能体模式更新失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
 
   useEffect(() => {
     if (isSettingsOpen && settingsTab === "skills") {
@@ -1945,6 +1979,12 @@ export function App() {
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
+  // Active-task submissions are steering updates. The runtime consumes them at
+  // the next safe decision boundary, so they belong in the transcript instead
+  // of flashing as a separate pending task in the composer.
+  const displayedQueuedMessages = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime
+    ? []
+    : queuedMessages;
   // A model may be thinking between tool calls. Keep the same live heartbeat
   // until the runtime explicitly completes the turn, rather than freezing the
   // elapsed timer at the last completed tool call.
@@ -2134,8 +2174,12 @@ export function App() {
     cancelPendingAutoScrollFrame();
     autoScrollFrameRef.current = window.requestAnimationFrame(() => {
       autoScrollFrameRef.current = null;
+      const targetTop = Math.max(0, node.scrollHeight - node.clientHeight);
+      if (behavior === "auto" && Math.abs(node.scrollTop - targetTop) < 1) {
+        return;
+      }
       node.scrollTo({
-        top: node.scrollHeight,
+        top: targetTop,
         left: 0,
         behavior
       });
@@ -2240,9 +2284,19 @@ export function App() {
       return;
     }
 
-    scrollTranscriptToLatest("smooth");
+    // Runtime updates can arrive several times per second. Following them
+    // smoothly restarts the scroll animation and makes the transcript jitter.
+    scrollTranscriptToLatest();
     settleAutoScroll(activeSnapshotThreadStatus);
-  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, latestVisibleMessageId, showWelcome, visibleMessages.length]);
+  }, [
+    activeSnapshotThreadId,
+    activeSnapshotThreadStatus,
+    activeStreamingAssistant?.content,
+    latestVisibleMessageId,
+    showRuntimeActivityPanel,
+    showWelcome,
+    visibleMessages.length
+  ]);
 
   useEffect(() => {
     const transcriptNode = chatTranscriptRef.current;
@@ -2313,6 +2367,8 @@ export function App() {
     const targetThreadId =
       currentSelectedThreadId && nextThreads.some((thread) => thread.id === currentSelectedThreadId)
         ? currentSelectedThreadId
+        : currentSelectedThreadId && snapshotThreadIdRef.current === currentSelectedThreadId
+          ? currentSelectedThreadId
         : nextThreads[0]?.id ?? null;
 
     if (targetThreadId !== currentSelectedThreadId) {
@@ -2830,7 +2886,7 @@ export function App() {
         ? "继续"
         : forcedContent ?? inputContent);
     const queueingBehindActiveTask = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime;
-    const optimisticMessage = !options?.internal && !queueingBehindActiveTask
+    const optimisticMessage = !options?.internal
       ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments)
       : null;
     if (!options?.internal && !queueingBehindActiveTask) {
@@ -2925,6 +2981,9 @@ export function App() {
     setGpaMenuOpen(false);
     setGpaMenuPos(null);
     const threadId = selectedThreadId;
+    if (stage !== "off" && multiAgentMode !== "proactive") {
+      await updateMultiAgentMode("proactive");
+    }
     if (threadId) {
       await window.codexh.setGpaStage({ threadId, stage });
     }
@@ -3016,10 +3075,17 @@ export function App() {
   async function renameQuickNote(note: { id: string; content: string }) {
     const title = quickNoteRenameDraft.trim();
     if (!title) return;
-    const saved = await window.codexh.saveQuickNote({ id: note.id, title, content: note.content });
-    setQuickNotes(await window.codexh.listQuickNotes());
-    if (selectedQuickNoteId === saved.id) setQuickNoteStatus("标题已更新并同步至全局知识库");
-    setRenamingQuickNoteId(null);
+    try {
+      const saved = await window.codexh.saveQuickNote({ id: note.id, title, content: note.content });
+      setQuickNotes(await window.codexh.listQuickNotes());
+      if (selectedQuickNoteId === saved.id) {
+        setQuickNoteTitle(saved.title);
+        setQuickNoteStatus("标题已更新并同步至全局知识库");
+      }
+      setRenamingQuickNoteId(null);
+    } catch (error) {
+      showNotice("重命名失败", { message: error instanceof Error ? error.message : "请稍后重试。" });
+    }
   }
 
   async function deleteQuickNote(note: { id: string }) {
@@ -3124,6 +3190,9 @@ export function App() {
     }
     setGpaMenuOpen(false);
     setGpaMenuPos(null);
+    if (multiAgentMode !== "proactive") {
+      await updateMultiAgentMode("proactive");
+    }
     if (selectedThreadId) {
       try {
           const handled = await maybeHandleIncompleteGpaPlan(selectedThreadId, {
@@ -3289,6 +3358,11 @@ export function App() {
   }
 
   async function answerPendingPrompt(prompt: UserInputPrompt, answers: Record<string, string>) {
+    if (answers[BROWSER_WORKSPACE_RECOVERY_QUESTION_ID] === "retry") {
+      setRightWorkspaceTab("browser");
+      setRightWorkspaceExpandedTab("browser");
+      setIsRightWorkspaceOpen(true);
+    }
     setResolvingPromptId(prompt.id);
     setSnapshot((current) => {
       if (!current || current.thread.id !== prompt.threadId) {
@@ -4697,6 +4771,19 @@ export function App() {
             onScroll={handleTranscriptScroll}
           >
             {!showWelcome ? (
+              snapshot?.subagents?.length ? (
+                <SubagentActivityList
+                  agents={snapshot.subagents}
+                  onOpen={(threadId) => void openThread(threadId, { scrollToLatest: true })}
+                  onInterrupt={(agent) => {
+                    if (!selectedThreadId) return;
+                    void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
+                      .then(() => refreshSnapshot(selectedThreadId));
+                  }}
+                />
+              ) : null
+            ) : null}
+            {!showWelcome ? (
               <div className="conversation-turn-rail-shell">
                 <ConversationTurnRail turns={conversationTurns} />
               </div>
@@ -4846,36 +4933,37 @@ export function App() {
           <footer
             className={[
               "composer-shell",
-              queuedMessages.length > 0 ? "has-queue" : ""
+              displayedQueuedMessages.length > 0 ? "has-queue" : ""
             ].filter(Boolean).join(" ")}
             style={(() => {
-              const queueCount = queuedMessages.length;
+              const queueCount = displayedQueuedMessages.length;
               if (queueCount === 0) return undefined;
-              const queueSpace = queueCount > 0 ? queueCount * 40 : 0;
-              const floatSpace = 6 + queueSpace + 8;
+              const queueSpace = queueCount * 40;
+              const floatSpace = 8 + queueSpace;
               return {
                 "--queued-message-space": `${Math.max(48, floatSpace)}px`,
                 "--queued-message-scroll-offset": `${Math.max(3, floatSpace - 5)}px`
               } as CSSProperties;
             })()}
           >
-            {queuedMessages.length > 0 ? (
+            {displayedQueuedMessages.length > 0 ? (
               <div
                 className={`composer-float-stack ${selectedProjectCwd ? "has-project" : ""}`}
                 aria-label="输入框上方浮层"
               >
                 <QueuedMessageList
-                  messages={queuedMessages}
+                  messages={displayedQueuedMessages}
                   hasProject={!!selectedProjectCwd}
                   deletingId={deletingQueuedMessageId}
                   onDelete={(id) => void deleteQueuedMessage(id)}
+                  onSteer={(content) => void sendMessage(content)}
                 />
               </div>
             ) : null}
             {!showWelcome && !isTranscriptAtLatest ? (
               <button
                 type="button"
-                className={`scroll-to-latest-button ${queuedMessages.length > 0 ? "with-queue" : ""}`}
+                className={`scroll-to-latest-button ${displayedQueuedMessages.length > 0 ? "with-queue" : ""}`}
                 title="定位到最新消息"
                 aria-label="定位到最新消息"
                 onClick={() => scrollTranscriptToLatest("smooth")}
@@ -4885,7 +4973,7 @@ export function App() {
             ) : null}
             {selectedProjectCwd || gpaState.stage !== "off" ? (
               <div className="composer-meta-row">
-                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} /> : null}
+                {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} isRunning={isThreadExecutionInProgress(selectedThreadStatus)} /> : null}
                 {selectedProjectCwd ? (
                   <button
                     type="button"
@@ -4964,6 +5052,21 @@ export function App() {
                       <IconPlus />
                     </button>
                   </div>
+                  {multiAgentMode === "proactive" ? (
+                    <span className={`composer-mode-chip composer-mode-chip-agent composer-mode-chip-agent-${multiAgentMode}`} title="子智能体">
+                      <IconSkills />
+                      <span>子智能体</span>
+                      <button
+                        className="composer-mode-chip-remove"
+                        type="button"
+                        title="移除子智能体委派"
+                        aria-label="移除子智能体委派"
+                        onClick={() => void updateMultiAgentMode("disabled")}
+                      >
+                        <IconClose />
+                      </button>
+                    </span>
+                  ) : null}
                   {gpaState.fullAccess ? (
                     <span className="composer-mode-chip composer-mode-chip-full-access" title="完全访问：执行时不再请求确认">
                       <IconShield />
@@ -6914,6 +7017,18 @@ export function App() {
                     <span className="gpa-popover-item-hint">允许本对话检索本地知识库</span>
                   </span>
                   {gpaState.knowledgeEnabled ? <span className="gpa-popover-item-check">已开启</span> : null}
+                </button>
+                <button
+                  className={`gpa-popover-item gpa-popover-item-agent ${multiAgentMode === "proactive" ? "is-active" : ""}`}
+                  role="menuitem"
+                  onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
+                  onClick={() => void updateMultiAgentMode(multiAgentMode === "proactive" ? "disabled" : "proactive")}
+                >
+                  <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
+                  <span className="gpa-popover-item-copy">
+                    <span className="gpa-popover-item-title">子智能体</span>
+                    <span className="gpa-popover-item-hint">自动拆分可并行的探索、审查与诊断工作</span>
+                  </span>
                 </button>
                 <button
                   className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
@@ -9459,7 +9574,13 @@ export function isPatchAssistantMessage(content: string): boolean {
 }
 
 export function isInternalAgentProtocolMessage(content: string): boolean {
-  return /\b(?:tool_call_id|completed_task_ids|completion_evidence)\b/i.test(content);
+  if (/\b(?:tool_call_id|completed_task_ids|completion_evidence)\b/i.test(content)) {
+    return true;
+  }
+  // Decision envelopes sometimes arrive malformed while streaming. Treat a
+  // leading assistant_message object as protocol content even before the rest
+  // of its keys have arrived, so it cannot be rendered as a sticky JSON block.
+  return /^\s*(?:```json\s*)?\{[\s\S]{0,240}"assistant_message"\s*:/i.test(content);
 }
 
 function collapseDirectoryReadMessages(entries: TimelineEntry[]): TimelineEntry[] {
@@ -10154,7 +10275,11 @@ export function buildPlanTimelineItems(state: GpaState): PlanTimelineItem[] {
         id: phase.id,
         label: phase.label,
         status: index < current ? "completed" : index === current ? "in_progress" : "pending" as const
-      }));
+    }));
+}
+
+export function getActivePlanTimelineItem(items: PlanTimelineItem[]): PlanTimelineItem | null {
+  return items.find((item) => item.status === "in_progress") ?? null;
 }
 
 export function getGpaPlanMessageId(messages: MessageRecord[], state: GpaState): string | null {
@@ -10174,10 +10299,20 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function PlanTimeline({ state }: { state: GpaState }) {
+function PlanTimeline({ state, isRunning }: { state: GpaState; isRunning: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const items = buildPlanTimelineItems(state);
-  const currentItem = items.find((item) => item.status === "in_progress") ?? items.at(-1);
+  const completedCount = items.filter((item) => item.status === "completed").length;
+  const isFinalizing = items.length > 0 && completedCount === items.length && state.stage === "act";
+  const currentItem = getActivePlanTimelineItem(items) ?? (isFinalizing ? {
+    id: "finalizing",
+    label: isRunning
+      ? `计划 ${completedCount}/${items.length} 已完成，正在最终验证`
+      : `计划 ${completedCount}/${items.length} 已完成`,
+    status: isRunning ? "in_progress" as const : "completed" as const
+  } : null);
+
+  if (!currentItem) return null;
 
   return (
     <section className={`composer-plan ${expanded ? "is-expanded" : ""}`} aria-label="Updated Plan">
@@ -10310,6 +10445,48 @@ function formatElapsedClock(durationMs: number): string {
   return `${seconds}s`;
 }
 
+function SubagentActivityList({
+  agents,
+  onOpen,
+  onInterrupt
+}: {
+  agents: ThreadRecord[];
+  onOpen: (threadId: string) => void;
+  onInterrupt: (agent: ThreadRecord) => void;
+}) {
+  return (
+    <section className="agent-activity-list" aria-label="子智能体活动">
+      <div className="agent-activity-heading">子智能体</div>
+      {agents.map((agent) => {
+        const active = agent.status === "running" || agent.status === "waiting";
+        const statusLabel = agent.status === "completed"
+          ? "已完成"
+          : agent.status === "failed"
+            ? "失败"
+            : agent.status === "waiting"
+              ? "等待中"
+              : active
+                ? "运行中"
+                : "已停止";
+        return (
+          <div key={agent.id} className={`agent-activity-row ${agent.status}`}>
+            <button type="button" className="agent-activity-main" onClick={() => onOpen(agent.id)} title="打开子任务">
+              <span className="agent-activity-path">{agent.agentPath}</span>
+              <span className="agent-activity-task">{agent.lastTaskMessage || agent.agentRole || "子任务"}</span>
+            </button>
+            <span className="agent-activity-status">{statusLabel}</span>
+            {active ? (
+              <button type="button" className="agent-activity-stop" title="停止子任务" onClick={() => onInterrupt(agent)}>
+                停止
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 function TurnElapsedBanner({
   startedAt,
   completedAt,
@@ -10395,13 +10572,17 @@ function QueuedMessageList({
   messages,
   hasProject,
   deletingId,
-  onDelete
+  onDelete,
+  onSteer
 }: {
   messages: QueuedMessageRecord[];
   hasProject: boolean;
   deletingId: string | null;
   onDelete: (id: string) => void;
+  onSteer: (content: string) => void;
 }) {
+  const [isSteering, setIsSteering] = useState(false);
+  const [steeringDraft, setSteeringDraft] = useState("");
   const visible = messages.filter(
     (message) =>
       !message.content.trimStart().startsWith("[internal:") &&
@@ -10410,13 +10591,30 @@ function QueuedMessageList({
   if (visible.length === 0) {
     return null;
   }
+  const submitSteering = () => {
+    const content = steeringDraft.trim();
+    if (!content) return;
+    onSteer(content);
+    setSteeringDraft("");
+    setIsSteering(false);
+  };
   return (
     <section className={`composer-queue ${hasProject ? "has-project" : ""}`} aria-label="排队消息">
-      {visible.map((message) => (
+      {visible.map((message, index) => (
         <div key={message.id} className={`composer-queue-item ${deletingId === message.id ? "is-removing" : ""}`}>
-          <span className="composer-queue-label">排队中</span>
+          <span className="composer-queue-index" aria-hidden>{index + 1}</span>
+          <span className="composer-queue-label">{index === 0 ? "下一项" : "待处理"}</span>
           <span className="composer-queue-preview" title={message.displayContent}>{message.displayContent}</span>
           {message.attachments.length > 0 ? <span className="composer-queue-attachments">{message.attachments.length} 个附件</span> : null}
+          <button
+            type="button"
+            className={`composer-queue-steer ${isSteering ? "is-active" : ""}`}
+            title="引导当前任务"
+            aria-label="引导当前任务"
+            onClick={() => setIsSteering(true)}
+          >
+            <IconCompose />
+          </button>
           <button
             type="button"
             className="composer-queue-delete"
@@ -10429,6 +10627,29 @@ function QueuedMessageList({
           </button>
         </div>
       ))}
+      {isSteering ? (
+        <div className="composer-queue-steer-editor">
+          <input
+            autoFocus
+            value={steeringDraft}
+            placeholder="补充要求，任务会在下一步继续执行"
+            onChange={(event) => setSteeringDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitSteering();
+              }
+              if (event.key === "Escape") {
+                setIsSteering(false);
+                setSteeringDraft("");
+              }
+            }}
+          />
+          <button type="button" title="发送引导" aria-label="发送引导" disabled={!steeringDraft.trim()} onClick={submitSteering}>
+            <IconArrowUp />
+          </button>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -10607,7 +10828,7 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
   );
 }
 
-function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
+const ToolActivityGroup = memo(function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
   const [expanded, setExpanded] = useState(false);
   const { runningCall, status, summary } = getToolActivityPresentation(toolCalls);
 
@@ -10639,6 +10860,20 @@ function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
       </div>
     </section>
   );
+}, (previous, next) => areToolActivityGroupsEqual(previous.toolCalls, next.toolCalls));
+
+function areToolActivityGroupsEqual(previous: ToolCallRecord[], next: ToolCallRecord[]) {
+  if (previous === next) return true;
+  if (previous.length !== next.length) return false;
+  return previous.every((call, index) => {
+    const candidate = next[index];
+    return candidate?.id === call.id
+      && candidate.status === call.status
+      && candidate.startedAt === call.startedAt
+      && candidate.completedAt === call.completedAt
+      && candidate.argumentsJson === call.argumentsJson
+      && candidate.resultJson === call.resultJson;
+  });
 }
 
 function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallRecord; compact?: boolean }) {
@@ -10723,16 +10958,20 @@ export function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?
 
   const counts = { search: 0, read: 0, write: 0, verify: 0, browser: 0, other: 0 };
   const failedCalls = toolCalls.filter((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
+  const writtenPaths = new Set<string>();
   for (const toolCall of toolCalls) {
     const kind = getToolActivityKind(toolCall);
     counts[kind] += 1;
+    if (kind === "write" && toolCall.status === "completed") {
+      for (const target of getToolWriteTargets(toolCall)) writtenPaths.add(target);
+    }
   }
 
   const subject = getToolActivitySubject(counts);
   const completedDetail = [
     counts.search ? `\u67e5\u8be2 ${counts.search} \u6b21` : "",
     counts.read ? `\u8bfb\u53d6 ${counts.read} \u9879` : "",
-    counts.write ? `\u4fee\u6539 ${counts.write} \u4e2a\u6587\u4ef6` : "",
+    counts.write ? `\u5199\u5165 ${counts.write} \u6b21\uff08\u6d89\u53ca ${writtenPaths.size} \u4e2a\u6587\u4ef6\uff09` : "",
     counts.verify ? `\u9a8c\u8bc1 ${counts.verify} \u6b21` : "",
     counts.browser ? `\u9875\u9762\u64cd\u4f5c ${counts.browser} \u6b21` : "",
     counts.other ? `\u5176\u4ed6\u5904\u7406 ${counts.other} \u6b21` : ""
@@ -10749,6 +10988,19 @@ export function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?
     title: `\u5df2\u5b8c\u6210${subject}`,
     detail: completedDetail || `\u5df2\u5904\u7406 ${toolCalls.length} \u6b65`
   };
+}
+
+function getToolWriteTargets(toolCall: ToolCallRecord): string[] {
+  const input = parseTimelineJson(toolCall.argumentsJson);
+  if (toolCall.toolName === "fs.write_file") {
+    const path = input.path ?? input.filePath;
+    return typeof path === "string" && path.trim() ? [path.trim()] : [];
+  }
+
+  const patch = typeof input.patch === "string" ? input.patch : "";
+  return [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)]
+    .map((match) => match[1]?.trim())
+    .filter((path): path is string => !!path);
 }
 
 export function getToolActivityPresentation(toolCalls: ToolCallRecord[]) {
@@ -10913,6 +11165,7 @@ function UserInputPromptCard({
 }) {
   const [selected, setSelected] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [resolvedPlanExpanded, setResolvedPlanExpanded] = useState(false);
   const pending = prompt.status === "pending";
   const canSubmit = prompt.questions.every((question) => {
     const hasOptions = (question.options?.length ?? 0) > 0;
@@ -10920,6 +11173,48 @@ function UserInputPromptCard({
   });
 
   if (!pending) {
+    if (prompt.kind === "gpa_plan_clarification") {
+      const answers = prompt.questions.map((question) => {
+        const rawAnswer = prompt.answers?.[question.id] ?? "";
+        const selectedOption = question.options?.find((option) => option.id === rawAnswer);
+        const note = prompt.answers?.[`${question.id}__note`]?.replace(/^__note__:/, "").trim();
+        return {
+          id: question.id,
+          question: question.prompt.trim() || question.label,
+          answer: rawAnswer === "__skip__"
+            ? "保持原计划"
+            : (selectedOption?.label ?? rawAnswer.replace(/^__custom__:/, "")) || "未选择",
+          note
+        };
+      });
+      const detailsId = `gpa-plan-answers-${prompt.id}`;
+      return (
+        <section className={`user-input-prompt-card resolved gpa-plan-answers ${resolvedPlanExpanded ? "is-expanded" : "is-collapsed"}`} aria-label={`已询问 ${answers.length} 个问题`}>
+          <button
+            type="button"
+            className="gpa-plan-answers-toggle"
+            aria-expanded={resolvedPlanExpanded}
+            aria-controls={detailsId}
+            onClick={() => setResolvedPlanExpanded((current) => !current)}
+          >
+            <span className="gpa-plan-answers-icon" aria-hidden><IconChecklist /></span>
+            <span>已询问 {answers.length} 个问题</span>
+            {resolvedPlanExpanded ? <IconChevronDown /> : null}
+          </button>
+          {resolvedPlanExpanded ? (
+            <div id={detailsId} className="gpa-plan-answers-details">
+              {answers.map((entry) => (
+                <div key={entry.id} className="gpa-plan-answer">
+                  <span className="gpa-plan-answer-question">{entry.question}</span>
+                  <span className="gpa-plan-answer-value">{entry.answer}</span>
+                  {entry.note ? <span className="gpa-plan-answer-note">{entry.note}</span> : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      );
+    }
     const skipped = Object.values(prompt.answers ?? {}).includes("__skip__");
     const firstQuestion = prompt.questions[0];
     const rawAnswer = firstQuestion ? prompt.answers?.[firstQuestion.id] ?? "" : "";
@@ -11072,6 +11367,10 @@ function renderTranscriptMessage(
   userMessageActions: UserMessageActions,
   isGpaPlanMessage = false
 ) {
+  const gpaTaskProgress = getGpaTaskProgress(message);
+  if (gpaTaskProgress) {
+    return <GpaTaskProgressMessage key={message.id} message={message} task={gpaTaskProgress} />;
+  }
   const displayContent = getDisplayMessageContent(message);
   if (message.role === "assistant" && !displayContent.trim()) {
     return null;
@@ -11100,6 +11399,22 @@ function renderTranscriptMessage(
           <GpaPlanMessageBubble>{renderMessageContent(message, displayContent)}</GpaPlanMessageBubble>
         ) : renderMessageContent(message, displayContent)}
       </div>
+    </article>
+  );
+}
+
+type GpaTaskProgress = {
+  taskId: string;
+  taskTitle: string;
+};
+
+function GpaTaskProgressMessage({ message, task }: { message: MessageRecord; task: GpaTaskProgress }) {
+  return (
+    <article key={message.id} className="gpa-task-progress-message" aria-label={`${task.taskId} 已完成`}>
+      <span className="gpa-task-progress-icon" aria-hidden><IconCheck /></span>
+      <span className="gpa-task-progress-copy"><strong>{task.taskId}</strong><span>{task.taskTitle}</span></span>
+      <span className="gpa-task-progress-status">已完成</span>
+      <span className="gpa-task-progress-time">{formatRelativeTime(message.createdAt)}</span>
     </article>
   );
 }
@@ -12319,6 +12634,29 @@ function getMessageDisplayKind(message: MessageRecord): string | null {
   }
 }
 
+function getGpaTaskProgress(message: MessageRecord): GpaTaskProgress | null {
+  if (message.role !== "assistant" || !message.metadataJson) return null;
+  try {
+    const metadata = JSON.parse(message.metadataJson) as {
+      displayKind?: unknown;
+      taskId?: unknown;
+      taskTitle?: unknown;
+      status?: unknown;
+    };
+    if (
+      metadata.displayKind !== "gpa-task-progress" ||
+      metadata.status !== "completed" ||
+      typeof metadata.taskId !== "string" ||
+      typeof metadata.taskTitle !== "string"
+    ) {
+      return null;
+    }
+    return { taskId: metadata.taskId, taskTitle: metadata.taskTitle };
+  } catch {
+    return null;
+  }
+}
+
 function formatUpdateDownloadSize(receivedBytes?: number, totalBytes?: number): string {
   const received = formatByteSize(receivedBytes ?? 0);
   return totalBytes && totalBytes > 0 ? `${received} / ${formatByteSize(totalBytes)}` : `${received} 已下载`;
@@ -12945,6 +13283,7 @@ function cloneConfig(config: AppConfig): AppConfig {
         defaultModelId: multimodal.video?.defaultModelId
       }
     },
+    multiAgent: { ...config.multiAgent },
     desktop: { ...config.desktop },
     timeouts: { ...config.timeouts },
     mcpServers: config.mcpServers.map((server) => ({
@@ -13561,6 +13900,19 @@ function IconCheck() {
   return (
     <SvgIcon>
       <path d="m6 12.5 3.8 3.8L18 8.2" />
+    </SvgIcon>
+  );
+}
+
+function IconChecklist() {
+  return (
+    <SvgIcon>
+      <path d="m3.5 6 1.5 1.5L7.5 4.5" />
+      <path d="M10.5 6h10" />
+      <circle cx="5" cy="12" r="1.3" />
+      <path d="M10.5 12h10" />
+      <path d="m3.5 17 1.5 1.5 2.5-3" />
+      <path d="M10.5 18h10" />
     </SvgIcon>
   );
 }

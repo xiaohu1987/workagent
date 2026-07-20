@@ -23,6 +23,8 @@ import type {
   RuntimeToolCall,
   SkillMetadata,
   ThreadRecord,
+  SubagentResultEnvelope,
+  SubagentWaitResult,
   ToolCallRecord,
   ToolResult,
   ToolSpecDefinition,
@@ -276,6 +278,7 @@ interface RuntimePersistence {
   getThread(threadId: string): Promise<ThreadRecord>;
   updateThread(threadId: string, patch: Partial<ThreadRecord>): Promise<ThreadRecord>;
   listMessages(threadId: string): Promise<MessageRecord[]>;
+  listQueuedMessages(threadId: string): Promise<QueuedMessageRecord[]>;
   claimNextQueuedMessage(threadId: string): Promise<QueuedMessageRecord | null>;
   completeQueuedMessage(id: string): Promise<void>;
   createMessage(input: Omit<MessageRecord, "id" | "createdAt">): Promise<MessageRecord>;
@@ -308,7 +311,13 @@ interface RuntimeServices {
   listFiles(dir: string): Promise<string[]>;
   readFile(filePath: string): Promise<string>;
   writeFile(filePath: string, content: string): Promise<void>;
-  runTerminalCommand(threadId: string, cwd: string, command: string): Promise<{ output: string; localUrl?: string }>;
+  runTerminalCommand(
+    threadId: string,
+    cwd: string,
+    command: string,
+    input?: { onStalled?: () => Promise<string | null> }
+  ): Promise<{ output: string; localUrl?: string; stalled?: boolean; diagnosis?: string }>;
+  cancelTerminalCommands(threadId: string, reason?: string): Promise<void> | void;
   requestApproval(threadId: string, turnRunId: string, input: {
     title: string;
     description: string;
@@ -327,7 +336,14 @@ interface RuntimeServices {
     prompt: string;
     role: string;
     modelId?: string;
-  }): Promise<string>;
+    systemOverride?: boolean;
+  }): Promise<{ threadId: string; agentPath: string; status: ThreadRecord["status"] }>;
+  sendAgentMessage(parentThreadId: string, input: { agent: string; message: string }): Promise<SubagentResultEnvelope>;
+  followupAgentTask(parentThreadId: string, input: { agent: string; prompt: string }): Promise<SubagentResultEnvelope>;
+  waitForSubagents(parentThreadId: string, input: { agents?: string[]; timeoutMs?: number; abortSignal?: AbortSignal }): Promise<SubagentWaitResult>;
+  interruptAgent(parentThreadId: string, agent: string): Promise<SubagentResultEnvelope>;
+  listSubagents(parentThreadId: string): Promise<ThreadRecord[]>;
+  hasActiveSubagents(parentThreadId: string): Promise<boolean>;
   webSearch(threadId: string, query: string): Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage(threadId: string, url: string): Promise<{ title: string; url: string; text: string }>;
   findInPage(url: string, pattern: string): Promise<string[]>;
@@ -479,6 +495,9 @@ class ThreadSessionRuntime {
   #abortController: AbortController | null = null;
   #activeTurnRunId: string | null = null;
   #running = false;
+  #stopping = false;
+  #busy = false;
+  readonly #idleWaiters: Array<() => void> = [];
   #gpa: GpaState = { ...DEFAULT_GPA_STATE };
   #gpaLoaded = false;
   #useFunctionCallCompatibilityTranscript = false;
@@ -492,6 +511,7 @@ class ThreadSessionRuntime {
     if (this.#running) {
       return;
     }
+    this.#stopping = false;
     this.#running = true;
     void this.submissionLoop();
   }
@@ -509,11 +529,38 @@ class ThreadSessionRuntime {
   }
 
   public stop(): void {
-    if (!this.#running) {
+    if (!this.#running && !this.#busy) {
       return;
     }
+    this.#stopping = true;
     this.#running = false;
     this.#queue.push({ type: "shutdown" });
+  }
+
+  public async waitForIdle(timeoutMs = 5000): Promise<boolean> {
+    if (!this.#busy) {
+      return true;
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        const index = this.#idleWaiters.indexOf(onIdle);
+        if (index >= 0) this.#idleWaiters.splice(index, 1);
+        resolve(value);
+      };
+      const onIdle = () => finish(true);
+      const timeout = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+      this.#idleWaiters.push(onIdle);
+      if (!this.#busy) finish(true);
+    });
+  }
+
+  #notifyIdle(): void {
+    if (this.#busy) return;
+    for (const waiter of [...this.#idleWaiters]) waiter();
   }
 
   async #ensureGpa(): Promise<GpaState> {
@@ -793,37 +840,47 @@ class ThreadSessionRuntime {
   }
 
   private async drainQueuedMessages(): Promise<void> {
-    while (!this.#activeTurnRunId) {
-      const queued = await this.services.persistence.claimNextQueuedMessage(this.threadId);
-      if (!queued) {
-        return;
-      }
-      await this.services.emit({
-        type: "queue.updated",
-        threadId: this.threadId,
-        payload: { queueItemId: queued.id, action: "dispatching" },
-        createdAt: new Date().toISOString()
-      });
-      try {
-        await this.runTurn(queued.content, queued.attachments, queued.displayContent);
-      } catch (error) {
-        console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
-        await this.services.log("turn.unhandled_error", this.threadId, {
-          error: error instanceof Error ? error.message : String(error)
-        });
-      } finally {
-        await this.services.persistence.completeQueuedMessage(queued.id);
+    this.#busy = true;
+    try {
+      while (!this.#activeTurnRunId && !this.#stopping) {
+        const queued = await this.services.persistence.claimNextQueuedMessage(this.threadId);
+        if (!queued) {
+          return;
+        }
         await this.services.emit({
           type: "queue.updated",
           threadId: this.threadId,
-          payload: { queueItemId: queued.id, action: "dispatched" },
+          payload: { queueItemId: queued.id, action: "dispatching" },
           createdAt: new Date().toISOString()
         });
+        try {
+          await this.runTurn(queued.content, queued.attachments, queued.displayContent);
+        } catch (error) {
+          console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
+          await this.services.log("turn.unhandled_error", this.threadId, {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        } finally {
+          await this.services.persistence.completeQueuedMessage(queued.id);
+          await this.services.emit({
+            type: "queue.updated",
+            threadId: this.threadId,
+            payload: { queueItemId: queued.id, action: "dispatched" },
+            createdAt: new Date().toISOString()
+          });
+        }
       }
+    } finally {
+      this.#busy = false;
+      this.#notifyIdle();
     }
   }
 
-  private async runTurn(initialInput: string, attachments: MessageAttachment[] = [], displayContent?: string): Promise<void> {
+  private async runTurn(
+    initialInput: string,
+    attachments: MessageAttachment[] = [],
+    displayContent?: string
+  ): Promise<void> {
     const thread = await this.services.persistence.getThread(this.threadId);
     const gpa = await this.#ensureGpa();
     const knowledgeEnabled = gpa.knowledgeEnabled;
@@ -884,7 +941,8 @@ class ThreadSessionRuntime {
     const { tools, mcpTools } = await this.buildVisibleTools(
       activeMcpServerIds,
       knowledgeEnabled,
-      agentToolsEnabled
+      agentToolsEnabled,
+      thread.parentThreadId !== null
     );
     const selectedMcpToolsOnly = selectedMcpServerIds.length > 0
       ? tools.filter((tool) => tool.name === "mcp.list_tools" || tool.name === "mcp.call")
@@ -1011,6 +1069,38 @@ class ThreadSessionRuntime {
 
       try {
         let transcript = compactTranscript(history);
+      const absorbSteeringMessages = async (): Promise<number> => {
+        let absorbedCount = 0;
+        while (!abortController.signal.aborted) {
+          const steering = await this.services.persistence.claimNextQueuedMessage(this.threadId);
+          if (!steering) return absorbedCount;
+
+          const userMessage = await this.recordMessage(
+            "user",
+            steering.content,
+            turn.id,
+            buildUserMessageMetadata(steering.content, steering.displayContent, steering.attachments)
+          );
+          transcript.push({
+            role: "user",
+            content: buildSteeringTranscriptContent(steering.content),
+            attachments: steering.attachments
+          });
+          await this.services.persistence.completeQueuedMessage(steering.id);
+          await this.services.emit({
+            type: "queue.updated",
+            threadId: this.threadId,
+            payload: { queueItemId: steering.id, action: "steered", messageId: userMessage.id },
+            createdAt: new Date().toISOString()
+          });
+          await this.services.log("turn.steered", this.threadId, {
+            turnRunId: turn.id,
+            queueItemId: steering.id
+          });
+          absorbedCount += 1;
+        }
+        return absorbedCount;
+      };
       const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
       const policyKey = normalizeWorkspacePolicyKey(workspaceCwd);
       const executionPolicy = this.services.config.projectExecutionPolicies?.[policyKey] ?? DEFAULT_PROJECT_EXECUTION_POLICY;
@@ -1081,6 +1171,7 @@ class ThreadSessionRuntime {
       let gpaPlanProgressReminderIssued = false;
       let gpaPlanProgressCheckpointTaskId: string | null = null;
       let gpaActCompletedSuccessfully = false;
+      let gpaFinalizationToolBatches = 0;
       const requiresAgentDecisionProtocol = () => this.#gpa.stage === "off" || this.#gpa.stage === "act";
 
       if (this.#gpa.stage === "act" && this.#gpa.planTasks.length === 0) {
@@ -1234,6 +1325,9 @@ class ThreadSessionRuntime {
       };
 
       while (!repeatedTaskFailure) {
+        // A user may steer the active task while a model request or tool batch is running.
+        // Consume those updates only at this decision boundary, never by aborting in-flight work.
+        await absorbSteeringMessages();
         const prompt = buildRuntimePrompt(
           model,
           skillContext,
@@ -1260,9 +1354,10 @@ class ThreadSessionRuntime {
           interruptedVisibleContent = "";
         };
         const modelTurnAbortController = createChildAbortController(abortController.signal);
+        const multiAgentDirective = buildMultiAgentDirective(thread);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${availableToolsPrompt}`;
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${buildQueuedTaskGuidance()}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}`;
         const compactContext = async (
           trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery",
           force = false
@@ -1441,16 +1536,35 @@ class ThreadSessionRuntime {
             })
           : null;
         if (planProgress && planProgress.completedTaskIds.length > 0) {
+          const completedBeforeUpdate = new Set(
+            this.#gpa.planTasks.filter((task) => task.done).map((task) => task.id)
+          );
           const progressed = applyCompletedPlanTasks(
             this.#gpa,
             planProgress.completedTaskIds
           );
           if (progressed !== this.#gpa) {
+            const newlyCompletedTasks = progressed.planTasks.filter(
+              (task) => task.done && !completedBeforeUpdate.has(task.id)
+            );
             await this.#commitGpa({
               ...progressed,
               updatedAt: new Date().toISOString()
             });
             await this.#persistGpaPlanFile({ status: "in_progress", tasks: progressed.planTasks });
+            for (const task of newlyCompletedTasks) {
+              await this.recordMessage(
+                "assistant",
+                `GPA task ${task.id} completed: ${task.title}`,
+                turn.id,
+                {
+                  displayKind: "gpa-task-progress",
+                  taskId: task.id,
+                  taskTitle: task.title,
+                  status: "completed"
+                }
+              );
+            }
           }
           if (planProgress.inferredTaskIds.length > 0) {
             await this.services.log("gpa.plan_progress_inferred", this.threadId, {
@@ -1498,6 +1612,39 @@ class ThreadSessionRuntime {
           decision.endTurn = false;
           decision.goalCompleted = false;
           continue;
+        }
+
+        const gpaPlanFinished = this.#gpa.stage === "act"
+          && this.#gpa.planTasks.length > 0
+          && this.#gpa.planTasks.every((task) => task.done);
+        if (gpaPlanFinished && decision.toolCalls.length > 0) {
+          const containsProjectWrite = decision.toolCalls.some((call) =>
+            MANAGED_WRITE_TOOL_NAMES.has(canonicalizeToolName(call.name))
+          );
+          const blockedToolNames = decision.toolCalls.map((call) => call.name);
+          gpaFinalizationToolBatches += 1;
+          if (containsProjectWrite || gpaFinalizationToolBatches > 2) {
+            decision.assistantMessage = undefined;
+            decision.toolCalls = [];
+            decision.endTurn = false;
+            decision.goalCompleted = false;
+            transcript.push({
+              role: "user",
+              content: [
+                "[Internal GPA finalization gate. Do not display this instruction to the user.]",
+                "All PLAN tasks are already complete. Do not modify project files or create evidence/marker files.",
+                "Use the successful tool results already available as completion_evidence and return the final structured decision now.",
+                "At most two read-only verification batches are allowed after the final task completes."
+              ].join(" ")
+            });
+            await this.services.log("gpa.finalization_tool_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolNames: blockedToolNames,
+              containsProjectWrite,
+              finalizationToolBatches: gpaFinalizationToolBatches
+            });
+            continue;
+          }
         }
 
         const currentPlanTask = this.#gpa.stage === "act"
@@ -2229,6 +2376,25 @@ class ThreadSessionRuntime {
           }
         }
 
+        if (decision.toolCalls.length === 0 && decision.endTurn && await absorbSteeringMessages() > 0) {
+          await discardStreamedAssistant();
+          decision.assistantMessage = undefined;
+          decision.endTurn = false;
+          decision.goalCompleted = false;
+          continue;
+        }
+
+        if (decision.toolCalls.length === 0 && decision.endTurn && await this.services.hasActiveSubagents(this.threadId)) {
+          transcript.push({
+            role: "user",
+            content: "[Internal multi-agent completion gate] Active child agents still exist. Call multi_agents.wait or multi_agents.interrupt before returning a final answer."
+          });
+          decision.assistantMessage = undefined;
+          decision.endTurn = false;
+          decision.goalCompleted = false;
+          continue;
+        }
+
         if (decision.toolCalls.length === 0 && decision.endTurn) {
           await this.services.persistence.finishTurn(turn.id, {
             status: "completed",
@@ -2400,7 +2566,7 @@ class ThreadSessionRuntime {
             threadId: this.threadId,
             turnRunId: turn.id,
             toolName: toolCall.name,
-            argumentsJson: JSON.stringify(toolCall.arguments),
+            argumentsJson: redactSensitiveText(JSON.stringify(toolCall.arguments)),
             resultJson: null,
             status: "running",
             riskLevel: "medium",
@@ -2458,8 +2624,16 @@ class ThreadSessionRuntime {
                     command = prepared.command;
                   }
                 }
-                return this.services.runTerminalCommand(this.threadId, workspaceCwd, command);
+                return this.services.runTerminalCommand(this.threadId, workspaceCwd, command, {
+                  onStalled: () => this.diagnoseStalledTerminalCommand({
+                    thread,
+                    turnId: turn.id,
+                    initialInput,
+                    command
+                  })
+                });
               },
+              cancelActiveTerminalCommands: (reason) => this.services.cancelTerminalCommands(this.threadId, reason),
               requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
               requestUserInput: (input) => {
                 const isGpaClarification = this.#gpa.stage !== "off";
@@ -2473,6 +2647,11 @@ class ThreadSessionRuntime {
               requestUserInputEnabled: this.#gpa.stage !== "off",
               webFrontendGuard,
               spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
+              sendAgentMessage: (input) => this.services.sendAgentMessage(this.threadId, input),
+              followupAgentTask: (input) => this.services.followupAgentTask(this.threadId, input),
+              waitForSubagents: (input) => this.services.waitForSubagents(this.threadId, input),
+              interruptAgent: (agent) => this.services.interruptAgent(this.threadId, agent),
+              listSubagents: () => this.services.listSubagents(this.threadId),
               webSearch: (query) => trackOpenedBrowserTabs(
                 () => this.services.webSearch(this.threadId, query)
               ),
@@ -2601,6 +2780,7 @@ class ThreadSessionRuntime {
                 }
               },
               deferredToolSpecs: mcpTools,
+              readOnlyAgent: thread.parentThreadId !== null,
               hiddenToolNames: [
                 ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read"]),
                 ...(this.#gpa.stage === "off" ? ["request_user_input"] : []),
@@ -2700,8 +2880,8 @@ class ThreadSessionRuntime {
               createdAt: new Date().toISOString()
             });
           }
-          const resultJson = JSON.stringify({ ...result, json: sanitizedResult.json });
-          const eventResultJson = JSON.stringify(sanitizedResult);
+          const resultJson = redactSensitiveText(JSON.stringify({ ...result, json: sanitizedResult.json }));
+          const eventResultJson = redactSensitiveText(JSON.stringify(sanitizedResult));
           const status = result.ok ? "completed" : "failed";
           await this.services.persistence.finishToolCall(toolRecord.id, {
             status,
@@ -2728,7 +2908,7 @@ class ThreadSessionRuntime {
             collectBrowserSources(toolCall.name, sanitizedResult, browserSources);
           }
 
-          const modelContent = summarizeToolResultForModel(toolCall.name, sanitizedResult);
+          const modelContent = redactSensitiveText(summarizeToolResultForModel(toolCall.name, sanitizedResult));
           const toolMessage = await this.recordMessage(
             "tool",
             `${toolCall.name}\n${modelContent}`,
@@ -2741,6 +2921,17 @@ class ThreadSessionRuntime {
             toolCallId: toolCall.id,
             toolResultOk: result.ok
           });
+          if (!result.ok && toolCall.name === "shell.exec" && isTerminalCommandTimeout(result.content)) {
+            await this.services.log("terminal.command_timeout_recovery", this.threadId, {
+              turnRunId: turn.id,
+              toolCallId: toolRecord.id,
+              toolName: toolCall.name
+            });
+            transcript.push({
+              role: "user",
+              content: buildTimedOutDeploymentRecoveryInstruction()
+            });
+          }
           if (result.ok && result.attachments?.length && model.supportsMultimodalInput) {
             transcript.push({
               role: "user",
@@ -3227,10 +3418,65 @@ class ThreadSessionRuntime {
     }
   }
 
+  private async diagnoseStalledTerminalCommand(input: {
+    thread: ThreadRecord;
+    turnId: string;
+    initialInput: string;
+    command: string;
+  }): Promise<string | null> {
+    let systemOverride = false;
+    if (input.thread.multiAgentMode === "disabled") {
+      const answers = await this.services.requestUserInput(this.threadId, input.turnId, {
+        title: "命令已 5 分钟无响应",
+        kind: "generic",
+        allowSkip: false,
+        timeoutMs: 30_000,
+        defaultAnswers: { delegation: "continue_without_subagent" },
+        questions: [{
+          id: "delegation",
+          label: "是否使用子智能体检查",
+          prompt: "是否启动只读子智能体检查服务状态并诊断这条仍在运行的命令？",
+          options: [
+            {
+              id: "start_subagent",
+              label: "启动诊断子智能体",
+              description: "检查公开服务端点，并返回继续等待或中断命令的建议。"
+            },
+            {
+              id: "continue_without_subagent",
+              label: "继续等待",
+              description: "不启动子智能体，保持该命令继续运行。",
+              recommended: true
+            }
+          ]
+        }]
+      });
+      if (answers.delegation !== "start_subagent") {
+        return "未启动诊断子智能体。命令会继续运行，因为选择了继续等待或确认已超时。";
+      }
+      systemOverride = true;
+    }
+
+    const child = await this.services.spawnChildAgent(this.threadId, {
+      role: "deployment-observer",
+      prompt: buildStalledCommandObserverPrompt(input.initialInput, input.command),
+      systemOverride
+    });
+    const waited = await this.services.waitForSubagents(this.threadId, {
+      agents: [child.agentPath],
+      timeoutMs: 120_000
+    });
+    if (waited.timedOut) {
+      return `Diagnostic subagent ${child.agentPath} is still running. Keep the command running and inspect the child task before deciding whether to interrupt.`;
+    }
+    return JSON.stringify({ diagnosticSubagent: waited.agents[0] ?? null });
+  }
+
   private async buildVisibleTools(
     accessibleMcpServerIds: string[],
     knowledgeEnabled: boolean,
-    agentToolsEnabled: boolean
+    agentToolsEnabled: boolean,
+    childReadOnly = false
   ) {
     await this.services.mcp.refresh(accessibleMcpServerIds);
     const mcpTools = await this.services.mcp.listToolSpecs(accessibleMcpServerIds);
@@ -3246,13 +3492,54 @@ class ThreadSessionRuntime {
       if (tool.name === "video.generate") return videoReady;
       return true;
     });
+    const childForbiddenTools = new Set([
+      "apply_patch",
+      "fs.write_file",
+      "shell.exec",
+      "shell.cancel_active",
+      "request_user_input",
+      "git.stage_file",
+      "git.stage_all",
+      "git.unstage_file",
+      "git.revert_file",
+      "git.apply_hunk",
+      "git.commit",
+      "git.push",
+      "git.pull",
+      "git.create_pr",
+      "git.worktree_add",
+      "git.worktree_remove",
+      "request_permissions",
+      "mcp.call",
+      "image.generate",
+      "video.generate",
+      "browser.open_tab",
+      "browser.click",
+      "browser.fill",
+      "browser.select_option",
+      "browser.press_key",
+      "browser.navigate",
+      "browser.reload",
+      "browser.back",
+      "browser.forward",
+      "browser.go_back",
+      "browser.go_forward",
+      "browser.focus_tab",
+      "browser.scroll",
+      "browser.set_viewport",
+      "browser.capture_screenshot",
+      "browser.capture_snapshot"
+    ]);
+    const visibleDirectTools = childReadOnly
+      ? withMedia.filter((tool) => !childForbiddenTools.has(tool.name))
+      : withMedia;
     return {
       tools: !agentToolsEnabled
         ? []
         : gpaEnabled
-        ? withMedia
-        : withMedia.filter((tool) => tool.name !== "request_user_input"),
-      mcpTools
+        ? visibleDirectTools
+        : visibleDirectTools.filter((tool) => tool.name !== "request_user_input"),
+      mcpTools: childReadOnly ? [] : mcpTools
     };
   }
 
@@ -4419,6 +4706,39 @@ export function buildExecutionRecoveryInstruction(input: {
   ].join(" ");
 }
 
+export function buildQueuedTaskGuidance(): string {
+  return [
+    "[User steering guidance] New user messages can be appended to this active task between decision cycles.",
+    "Treat each [User steering update] as a higher-priority update to the current request, while preserving completed work and continuing the same task.",
+    "Do not claim the task was interrupted or start a separate task. Never abandon an in-flight tool call; apply the update at the next decision boundary.",
+    "When the combined request is complete, return the final decision promptly."
+  ].join(" ");
+}
+
+export function buildSteeringTranscriptContent(content: string): string {
+  return `[User steering update]\n${content}`;
+}
+
+function buildMultiAgentDirective(thread: ThreadRecord): string {
+  if (thread.parentThreadId) {
+    return [
+      "You are a child agent in a hierarchical multi-agent run.",
+      `Your agent path is ${thread.agentPath}; parent path is ${thread.agentPath.split("/").slice(0, -1).join("/") || "/root"}.`,
+      "Stay within the assigned bounded task, use read-only tools, and return summary, evidence, and errors.",
+      "Do not claim file changes or completion for work you did not perform."
+    ].join(" ");
+  }
+  if (thread.multiAgentMode === "disabled") {
+    return "Multi-agent delegation is disabled for this task. Do not call multi_agents tools.";
+  }
+  return [
+    "You are the root agent and must synthesize child-agent results into one final answer.",
+    "You may proactively delegate independent, bounded research, review, or diagnostic work.",
+    "Do not delegate ordered work or tasks that require shared mutable file writes.",
+    "Use multi_agents.wait before finalizing while child agents are active."
+  ].join(" ");
+}
+
 export function buildStrategySwitchInstruction(input: {
   toolName: string;
   taskKey: string;
@@ -4556,6 +4876,10 @@ export class AgentRuntimeService {
     return this.#sessions.get(threadId)?.interrupt() ?? false;
   }
 
+  public waitForIdle(threadId: string, timeoutMs = 5000): Promise<boolean> {
+    return this.#sessions.get(threadId)?.waitForIdle(timeoutMs) ?? Promise.resolve(true);
+  }
+
   public async setGpaStage(threadId: string, stage: GpaStage): Promise<void> {
     const runtime = this.ensureThread(threadId);
     await runtime.setGpaStage(stage);
@@ -4594,12 +4918,13 @@ export class AgentRuntimeService {
     return this.ensureThread(threadId).getGpa();
   }
 
-  public forgetThread(threadId: string): void {
+  public async forgetThread(threadId: string): Promise<void> {
     const runtime = this.#sessions.get(threadId);
     if (!runtime) {
       return;
     }
     runtime.stop();
+    await runtime.waitForIdle(5000);
     this.#sessions.delete(threadId);
   }
 }
@@ -5559,6 +5884,36 @@ function resolveModel(config: AppConfig, modelId: string): ModelProfile {
     throw new Error(`Unknown model: ${modelId}`);
   }
   return model;
+}
+
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(/((?:"?(?:password|passphrase|api[_-]?key|token|secret)"?)\s*[:=]\s*["']?)([^\s"',;})]+)/gi, "$1[REDACTED]")
+    .replace(/(authorization\s*:\s*bearer\s+)[^\s"'}]+/gi, "$1[REDACTED]")
+    .replace(/(https?:\/\/[^:\s/@]+:)[^@\s/]+(@)/gi, "$1[REDACTED]$2");
+}
+
+function isTerminalCommandTimeout(content: string): boolean {
+  return /command (?:timed out|produced no output|is still running after)|timed out after \d+ms/i.test(content);
+}
+
+function buildTimedOutDeploymentRecoveryInstruction(): string {
+  return [
+    "[Internal terminal timeout recovery] The command may have started a remote deployment or service before its local process stopped responding.",
+    "Do not rerun the same deployment command yet. First inspect the original task and prior command output for the target host, ports, and health endpoints.",
+    "Run short, read-only health checks with connection and total time limits. For a website deployment, verify both the frontend page and backend API with HTTP status checks (for example curl --connect-timeout 10 --max-time 20).",
+    "If the intended endpoints return successful responses, treat the deployment as running, report the evidence, and only investigate remaining failures. Retry deployment only after a failed health check identifies the missing service."
+  ].join(" ");
+}
+
+function buildStalledCommandObserverPrompt(initialInput: string, command: string): string {
+  return [
+    "A parent terminal command has run without completing for five minutes. Diagnose its current state without changing files, servers, processes, or external systems.",
+    "Use read-only web tools to test any public host, port, frontend URL, backend API, or health endpoint mentioned in the parent task. Do not use shell commands or browser interaction tools.",
+    "Return a concise structured recommendation with one of: continue waiting, interrupt the parent command, or repair required. Include HTTP status evidence and explain uncertainty.",
+    `Parent task: ${redactSensitiveText(initialInput)}`,
+    `Stalled command: ${redactSensitiveText(command)}`
+  ].join("\n\n");
 }
 
 function resolveProvider(config: AppConfig, providerId: string) {

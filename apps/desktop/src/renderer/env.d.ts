@@ -21,6 +21,7 @@ declare global {
       searchThreads: (query: string) => Promise<Array<{ thread: ThreadRecord; snippet: string | null; score: number }>>;
       setThreadPinned: (payload: { threadId: string; isPinned: boolean }) => Promise<ThreadRecord>;
       renameThread: (payload: { threadId: string; title: string }) => Promise<ThreadRecord>;
+      setThreadMultiAgentMode: (payload: { threadId: string; mode: "disabled" | "proactive" }) => Promise<ThreadRecord>;
       createThread: (payload: {
         title: string;
         mode: "project" | "chat";
@@ -71,6 +72,8 @@ declare global {
       previewLocalImage: (payload: { absolutePath: string }) => Promise<string>;
       rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) => Promise<void>;
       interruptThread: (threadId: string) => Promise<void>;
+      listSubagents: (threadId: string) => Promise<ThreadRecord[]>;
+      interruptAgent: (payload: { threadId: string; agent: string }) => Promise<any>;
       updateThreadModelSelection: (payload: {
         threadId: string;
         providerId: string;

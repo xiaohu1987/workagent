@@ -311,6 +311,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:rename", (_event, payload: { threadId: string; title: string }) =>
     backend.renameThread(payload.threadId, payload.title)
   );
+  ipcMain.handle("threads:set-multi-agent-mode", (_event, payload: { threadId: string; mode: "disabled" | "proactive" }) =>
+    backend.setThreadMultiAgentMode(payload.threadId, payload.mode)
+  );
   ipcMain.handle("projects:choose-directory", async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({
       defaultPath: defaultPath || undefined,
@@ -408,6 +411,10 @@ function registerIpc(): void {
     backend.rejectUnsupportedMultimodalInput(payload.threadId, payload.content)
   );
   ipcMain.handle("threads:interrupt", (_event, threadId: string) => backend.interruptThread(threadId));
+  ipcMain.handle("multi-agents:list", (_event, threadId: string) => backend.listSubagents(threadId));
+  ipcMain.handle("multi-agents:interrupt", (_event, payload: { threadId: string; agent: string }) =>
+    backend.interruptAgent(payload.threadId, payload.agent)
+  );
   ipcMain.handle("threads:update-model", (_event, payload) =>
     backend.updateThreadModelSelection(payload.threadId, payload.providerId, payload.modelId)
   );

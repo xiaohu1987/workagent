@@ -47,6 +47,61 @@ describe("apply-patch failures", () => {
 });
 
 describe("ToolRuntime", () => {
+  it("hard-blocks mutating tools for read-only child agents", async () => {
+    const runtime = new ToolRuntime();
+    const context = { cwd: process.cwd(), readOnlyAgent: true } as unknown as ToolRuntimeContext;
+
+    const patch = await runtime.execute({
+      id: "child-patch",
+      name: "apply_patch",
+      arguments: { patch: "*** Begin Patch\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch" }
+    }, context);
+    const command = await runtime.execute({
+      id: "child-command",
+      name: "shell.exec",
+      arguments: { command: "echo should-not-run" }
+    }, context);
+    const cancel = await runtime.execute({
+      id: "child-cancel-command",
+      name: "shell.cancel_active",
+      arguments: {}
+    }, context);
+    const browser = await runtime.execute({
+      id: "child-browser",
+      name: "browser.open_tab",
+      arguments: { url: "https://example.com" }
+    }, context);
+    const image = await runtime.execute({
+      id: "child-image",
+      name: "image.generate",
+      arguments: { prompt: "should-not-generate" }
+    }, context);
+
+    expect(patch.ok).toBe(false);
+    expect(patch.content).toContain("read-only");
+    expect(command.ok).toBe(false);
+    expect(command.content).toContain("read-only");
+    expect(cancel.ok).toBe(false);
+    expect(cancel.content).toContain("read-only");
+    expect(browser.ok).toBe(false);
+    expect(browser.content).toContain("read-only");
+    expect(image.ok).toBe(false);
+    expect(image.content).toContain("read-only");
+  });
+
+  it("surfaces an explicit timeout from multi-agent wait", async () => {
+    const runtime = new ToolRuntime();
+    const waitForSubagents = vi.fn().mockResolvedValue({ agents: [], timedOut: true });
+    const result = await runtime.execute(
+      { id: "agent-wait", name: "multi_agents.wait", arguments: { timeoutMs: 250 } },
+      { cwd: process.cwd(), waitForSubagents } as unknown as ToolRuntimeContext
+    );
+
+    expect(waitForSubagents).toHaveBeenCalledWith({ agents: undefined, timeoutMs: 250 });
+    expect(result.ok).toBe(false);
+    expect(result.json).toMatchObject({ agents: [], timedOut: true });
+  });
+
   it("defaults image generation to one image and honors a requested count", async () => {
     let sequence = 0;
     const generateImageWithDefaultModel = vi.fn(async () => {

@@ -33,6 +33,8 @@ import type {
   QuickNoteRecord,
   RuntimeEvent,
   RuntimeThreadSnapshot,
+  SubagentResultEnvelope,
+  SubagentWaitResult,
   ThreadRecord,
   ToolSpecDefinition,
   UserInputQuestion,
@@ -156,6 +158,7 @@ export class DesktopBackend {
         getThread: async (threadId) => this.#db.getThread(threadId),
         updateThread: async (threadId, patch) => this.#db.updateThread(threadId, patch),
         listMessages: async (threadId) => this.#db.listMessages(threadId),
+        listQueuedMessages: async (threadId) => this.#db.listQueuedMessages(threadId),
         claimNextQueuedMessage: async (threadId) => this.#db.claimNextQueuedMessage(threadId),
         completeQueuedMessage: async (id) => this.#db.completeQueuedMessage(id),
         createMessage: async (input) => this.#db.createMessage(input),
@@ -183,17 +186,24 @@ export class DesktopBackend {
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf8");
       },
-      runTerminalCommand: async (threadId, cwd, command) =>
+      runTerminalCommand: async (threadId, cwd, command, input) =>
         this.#terminal.execute(threadId, cwd, command, (data) => {
           void this.emitTerminalOutput(threadId, data);
         }, (url) => {
           void this.openLocalServerUrl(threadId, url);
-        }),
+        }, "default", undefined, input?.onStalled),
+      cancelTerminalCommands: async (threadId, reason) => this.#terminal.cancelCommands(threadId, reason),
       requestApproval: async (threadId, turnRunId, input) =>
         this.requestApproval(threadId, turnRunId, input),
       requestUserInput: async (threadId, turnRunId, input) =>
         this.requestUserInput(threadId, turnRunId, input),
       spawnChildAgent: async (parentThreadId, input) => this.spawnChildAgent(parentThreadId, input),
+      sendAgentMessage: async (parentThreadId, input) => this.sendAgentMessage(parentThreadId, input),
+      followupAgentTask: async (parentThreadId, input) => this.followupAgentTask(parentThreadId, input),
+      waitForSubagents: async (parentThreadId, input) => this.waitForSubagents(parentThreadId, input),
+      interruptAgent: async (parentThreadId, agent) => this.interruptAgent(parentThreadId, agent),
+      listSubagents: async (parentThreadId) => this.listSubagents(parentThreadId),
+      hasActiveSubagents: async (parentThreadId) => this.hasActiveSubagents(parentThreadId),
       webSearch: async (threadId, query) => this.webSearch(threadId, query),
       openPage: async (threadId, url) => this.openPage(threadId, url),
       findInPage: async (url, pattern) => this.findInPage(url, pattern),
@@ -352,7 +362,21 @@ export class DesktopBackend {
 
   public async deleteThread(threadId: string): Promise<void> {
     const thread = this.#db.getThread(threadId);
-    if (thread.status === "running" || thread.status === "waiting") {
+    const descendants = this.#db.listAgentTree(thread.rootThreadId)
+      .filter((item) => item.id !== thread.id && item.agentPath.startsWith(`${thread.agentPath}/`))
+      .sort((left, right) => right.agentPath.length - left.agentPath.length);
+    if (thread.status === "running" || thread.status === "waiting" || descendants.some((item) => item.status === "running" || item.status === "waiting")) {
+      await this.interruptThread(threadId);
+      return this.deleteThread(threadId);
+    }
+    for (const child of descendants) {
+      await this.#terminal.close(child.id);
+      await this.removeThreadOutputDir(child);
+      this.#browser.clearThread(child.id);
+      await this.#runtime.forgetThread(child.id);
+      this.#db.deleteThread(child.id);
+    }
+    if ((thread.status as ThreadRecord["status"]) === "running" || (thread.status as ThreadRecord["status"]) === "waiting") {
       throw new Error("任务正在执行，暂时不能删除。");
     }
 
@@ -360,17 +384,29 @@ export class DesktopBackend {
     await this.removeThreadOutputDir(thread);
     this.#db.deleteThread(threadId);
     this.#browser.clearThread(threadId);
-    this.#runtime.forgetThread(threadId);
+    await this.#runtime.forgetThread(threadId);
   }
 
   public async clearThreadConversation(threadId: string): Promise<ThreadRecord> {
     const thread = this.#db.getThread(threadId);
-    if (thread.status === "running" || thread.status === "waiting") {
+    const descendants = this.#db.listAgentTree(thread.rootThreadId)
+      .filter((item) => item.id !== thread.id && item.agentPath.startsWith(`${thread.agentPath}/`));
+    if (thread.status === "running" || thread.status === "waiting" || descendants.some((item) => item.status === "running" || item.status === "waiting")) {
+      await this.interruptThread(threadId);
+      return this.clearThreadConversation(threadId);
+    }
+    for (const child of descendants) {
+      await this.#terminal.close(child.id);
+      this.#browser.clearThread(child.id);
+      await this.#runtime.forgetThread(child.id);
+      this.#db.clearThreadConversation(child.id);
+    }
+    if ((thread.status as ThreadRecord["status"]) === "running" || (thread.status as ThreadRecord["status"]) === "waiting") {
       throw new Error("任务正在执行，请先停止任务再清空聊天记录。");
     }
 
     await this.#runtime.abandonGpaPlanFile(threadId);
-    this.#runtime.forgetThread(threadId);
+    await this.#runtime.forgetThread(threadId);
     await this.#terminal.close(threadId);
     for (const tab of this.#db.listBrowserTabs(threadId)) {
       this.releaseBrowserTabContents(threadId, tab.id);
@@ -509,7 +545,10 @@ export class DesktopBackend {
       projectPlugins: this.listProjectPluginsForThread(thread),
       toolCalls: this.#db.listToolCalls(threadId),
       contextCompaction: this.#db.getLatestContextCompaction(threadId),
-      gpa: this.getGpaState(threadId)
+      gpa: this.getGpaState(threadId),
+      subagents: this.#db
+        .listAgentTree(thread.rootThreadId)
+        .filter((agent) => agent.id !== thread.id && agent.agentPath.startsWith(`${thread.agentPath}/`))
     };
   }
 
@@ -603,7 +642,13 @@ export class DesktopBackend {
     await this.#runtime.setKnowledgeEnabled(threadId, knowledgeEnabled);
   }
 
-  public async sendMessage(threadId: string, content: string, attachments: MessageAttachment[] = [], displayContent?: string): Promise<void> {
+  public async sendMessage(
+    threadId: string,
+    content: string,
+    attachments: MessageAttachment[] = [],
+    displayContent?: string,
+    dispatch = true
+  ): Promise<void> {
     await this.initializeDeferredServices();
     const thread = this.#db.getThread(threadId);
     const isFirstThreadMessage = this.#db.listMessages(threadId).length === 0 && this.#db.listQueuedMessages(threadId).length === 0;
@@ -632,7 +677,21 @@ export class DesktopBackend {
       payload: { queueItemId: queued.id, action: "queued" },
       createdAt: new Date().toISOString()
     });
-    this.#runtime.wakeQueuedMessages(threadId);
+    if (dispatch) {
+      this.#runtime.wakeQueuedMessages(threadId);
+    }
+  }
+
+  public async setThreadMultiAgentMode(threadId: string, mode: ThreadRecord["multiAgentMode"]): Promise<ThreadRecord> {
+    const nextMode = mode === "disabled" ? "disabled" : "proactive";
+    const updated = this.#db.updateThread(threadId, { multiAgentMode: nextMode });
+    await this.emit({
+      type: "thread.updated",
+      threadId,
+      payload: { thread: updated },
+      createdAt: new Date().toISOString()
+    });
+    return updated;
   }
 
   public async replaceMessage(threadId: string, messageId: string, content: string): Promise<void> {
@@ -783,7 +842,18 @@ export class DesktopBackend {
   }
 
   public async interruptThread(threadId: string): Promise<void> {
+    const thread = this.#db.getThread(threadId);
+    const descendants = this.#db.listAgentTree(thread.rootThreadId)
+      .filter((item) => item.id !== thread.id && item.agentPath.startsWith(`${thread.agentPath}/`))
+      .sort((left, right) => right.agentPath.length - left.agentPath.length);
+    for (const child of descendants) {
+      await this.interruptThread(child.id);
+    }
     this.#runtime.interrupt(threadId);
+    this.#terminal.cancelCommands(threadId, "Task interrupted.");
+    // Let the aborted turn finish its persistence/finally cleanup before a
+    // caller deletes or clears this thread and its descendants.
+    await this.#runtime.waitForIdle(threadId, 5000);
     // Always force the persisted execution state idle. The turn may still be in
     // "preparing" (DB still idle/completed) when the user hits Stop; skipping
     // cleanup here leaves the UI and queue believing work is still running.
@@ -2022,7 +2092,7 @@ export class DesktopBackend {
     const content = input.content.trim();
     if (!content) throw new Error("笔记内容不能为空。");
     const existing = input.id ? this.#db.getQuickNote(input.id) : null;
-    const title = existing?.title || input.title?.trim() || buildThreadTitleFromFirstMessage(content);
+    const title = input.title?.trim() || existing?.title || buildThreadTitleFromFirstMessage(content);
     const knowledgeBase = existing ? this.#db.getKnowledgeBase(existing.knowledgeBaseId) : this.#db.findKnowledgeBase("global", "随手记");
     const base = knowledgeBase ?? this.#db.createKnowledgeBase({
       scope: "global",
@@ -2442,20 +2512,177 @@ export class DesktopBackend {
 
   private async spawnChildAgent(
     parentThreadId: string,
-    input: { prompt: string; role: string; modelId?: string }
-  ): Promise<string> {
+    input: { prompt: string; role: string; modelId?: string; systemOverride?: boolean }
+  ): Promise<{ threadId: string; agentPath: string; status: ThreadRecord["status"] }> {
     const parent = this.#db.getThread(parentThreadId);
+    if (parent.multiAgentMode === "disabled" && !input.systemOverride) {
+      throw new Error("Multi-agent delegation is disabled for this task.");
+    }
+    const tree = this.#db.listAgentTree(parent.rootThreadId);
+    const depth = Math.max(0, parent.agentPath.split("/").filter(Boolean).length - 1);
+    if (depth >= this.#config.multiAgent.maxDepth) {
+      throw new Error(`Maximum child-agent depth (${this.#config.multiAgent.maxDepth}) reached.`);
+    }
+    if (tree.length - 1 >= this.#config.multiAgent.maxSubagentsPerRoot) {
+      throw new Error(`Maximum child-agent count (${this.#config.multiAgent.maxSubagentsPerRoot}) reached for this task.`);
+    }
+    const activeCount = tree.filter((item) =>
+      item.id !== parent.rootThreadId && (item.status === "running" || item.status === "waiting")
+    ).length;
+    if (activeCount >= this.#config.multiAgent.maxConcurrentSubagents) {
+      throw new Error(`All ${this.#config.multiAgent.maxConcurrentSubagents} child-agent slots are busy. Wait for a child to finish first.`);
+    }
+
     await this.refreshSkills(parent.cwd);
+    const role = normalizeAgentSegment(input.role);
+    const siblingPaths = new Set(this.#db.listChildThreads(parent.id).map((item) => item.agentPath));
+    let suffix = 1;
+    let agentPath = `${parent.agentPath}/${role}`;
+    while (siblingPaths.has(agentPath)) {
+      suffix += 1;
+      agentPath = `${parent.agentPath}/${role}-${suffix}`;
+    }
     const thread = this.#db.createThread({
       title: `${input.role}: ${input.prompt.slice(0, 40)}`,
       mode: parent.mode,
       workspaceKind: parent.workspaceKind,
       cwd: parent.cwd,
       modelId: input.modelId ?? parent.modelId,
-      providerId: parent.providerId
+      providerId: parent.providerId,
+      parentThreadId: parent.id,
+      rootThreadId: parent.rootThreadId,
+      agentPath,
+      agentRole: input.role,
+      lastTaskMessage: input.prompt,
+      multiAgentMode: parent.multiAgentMode,
+      status: "running"
     });
-    await this.sendMessage(thread.id, input.prompt);
-    return thread.id;
+    this.#db.updateThread(thread.id, {
+      selectedSkillIds: parent.selectedSkillIds,
+      knowledgeBaseIds: parent.knowledgeBaseIds
+    });
+    await this.sendMessage(thread.id, buildChildAgentPrompt(parent, thread, input.prompt));
+    await this.emitAgentTreeUpdated(parent.rootThreadId);
+    return { threadId: thread.id, agentPath: thread.agentPath, status: "running" };
+  }
+
+  private resolveAgent(parentThreadId: string, agent: string): ThreadRecord {
+    const parent = this.#db.getThread(parentThreadId);
+    const tree = this.#db.listAgentTree(parent.rootThreadId);
+    const normalized = agent.trim();
+    const result = tree.find((item) => item.id === normalized || item.agentPath === normalized);
+    if (!result || result.id === parentThreadId || !result.agentPath.startsWith(`${parent.agentPath}/`)) {
+      throw new Error(`Unknown child agent: ${agent}`);
+    }
+    return result;
+  }
+
+  private buildSubagentEnvelope(thread: ThreadRecord): SubagentResultEnvelope {
+    const messages = this.#db.listMessages(thread.id);
+    const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+    const summary = lastAssistant?.content?.trim() || thread.lastTaskMessage || "No final result was returned.";
+    const latestTurn = this.#db.getLatestTurnRun(thread.id);
+    const hasQueuedMessage = this.#db.listQueuedMessages(thread.id)
+      .some((message) => message.status === "queued" || message.status === "dispatching");
+    const status = thread.status === "running" || thread.status === "waiting"
+      ? thread.status
+      : hasQueuedMessage
+        ? "queued"
+        : latestTurn?.status === "interrupted"
+        ? "interrupted"
+        : thread.status === "idle"
+          ? "queued"
+          : thread.status;
+    const errors = [
+      ...(latestTurn?.errorMessage ? [latestTurn.errorMessage] : []),
+      ...(thread.status === "failed" && !latestTurn?.errorMessage ? [summary] : [])
+    ];
+    return {
+      status: status as SubagentResultEnvelope["status"],
+      summary,
+      evidence: messages.filter((message) => message.role === "tool").slice(-8).map((message) => message.content.slice(0, 500)),
+      errors,
+      agentPath: thread.agentPath,
+      threadId: thread.id
+    };
+  }
+
+  private async sendAgentMessage(parentThreadId: string, input: { agent: string; message: string }): Promise<SubagentResultEnvelope> {
+    const child = this.resolveAgent(parentThreadId, input.agent);
+    await this.sendMessage(child.id, input.message, [], undefined, false);
+    await this.emitAgentTreeUpdated(child.rootThreadId);
+    return this.buildSubagentEnvelope(child);
+  }
+
+  private async followupAgentTask(parentThreadId: string, input: { agent: string; prompt: string }): Promise<SubagentResultEnvelope> {
+    const child = this.resolveAgent(parentThreadId, input.agent);
+    await this.sendMessage(child.id, input.prompt);
+    return { ...this.buildSubagentEnvelope(this.#db.getThread(child.id)), status: "running" };
+  }
+
+  public async listSubagents(parentThreadId: string): Promise<ThreadRecord[]> {
+    const parent = this.#db.getThread(parentThreadId);
+    return this.#db.listAgentTree(parent.rootThreadId)
+      .filter((item) => item.id !== parentThreadId && item.agentPath.startsWith(`${parent.agentPath}/`));
+  }
+
+  private async hasActiveSubagents(parentThreadId: string): Promise<boolean> {
+    return (await this.listSubagents(parentThreadId)).some((item) => item.status === "running" || item.status === "waiting");
+  }
+
+  private async waitForSubagents(
+    parentThreadId: string,
+    input: { agents?: string[]; timeoutMs?: number; abortSignal?: AbortSignal }
+  ): Promise<SubagentWaitResult> {
+    const parent = this.#db.getThread(parentThreadId);
+    const timeoutMs = Math.min(30_000, Math.max(250, Math.round(input.timeoutMs ?? 30_000)));
+    const targetIds = input.agents?.length
+      ? input.agents.map((agent) => this.resolveAgent(parentThreadId, agent).id)
+      : (await this.listSubagents(parentThreadId)).map((item) => item.id);
+    if (targetIds.length === 0) return { agents: [], timedOut: false };
+    const isReady = () => targetIds
+      .map((id) => this.#db.getThread(id))
+      .filter((item) => item.status !== "running" && item.status !== "waiting");
+    const initial = isReady();
+    if (initial.length > 0) return { agents: initial.map((item) => this.buildSubagentEnvelope(item)), timedOut: false };
+
+    return new Promise<SubagentWaitResult>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setInterval> | undefined;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => finish({ agents: [], timedOut: false });
+      const finish = (value: SubagentWaitResult) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearInterval(timer);
+        if (timeout) clearTimeout(timeout);
+        input.abortSignal?.removeEventListener("abort", onAbort);
+        resolve(value);
+      };
+      const poll = () => {
+        const ready = isReady();
+        if (ready.length > 0) finish({ agents: ready.map((item) => this.buildSubagentEnvelope(item)), timedOut: false });
+      };
+      timer = setInterval(poll, 250);
+      timeout = setTimeout(() => finish({ agents: [], timedOut: true }), timeoutMs);
+      input.abortSignal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  public async interruptAgent(parentThreadId: string, agent: string): Promise<SubagentResultEnvelope> {
+    const child = this.resolveAgent(parentThreadId, agent);
+    await this.interruptThread(child.id);
+    return this.buildSubagentEnvelope(this.#db.getThread(child.id));
+  }
+
+  private async emitAgentTreeUpdated(rootThreadId: string): Promise<void> {
+    const root = this.#db.getThread(rootThreadId);
+    await this.emit({
+      type: "thread.updated",
+      threadId: root.id,
+      payload: { thread: root },
+      createdAt: new Date().toISOString()
+    });
   }
 
   private async buildKnowledgeContext(threadId: string): Promise<string | null> {
@@ -2651,8 +2878,28 @@ export class DesktopBackend {
   private async emit(event: RuntimeEvent): Promise<void> {
     this.#db.addRuntimeEvent(event);
     this.#events.emit("runtime-event", event);
+    if (event.type === "thread.updated") {
+      if (!event.threadId) {
+        return;
+      }
+      let subject: ThreadRecord | null = null;
+      try {
+        subject = this.#db.getThread(event.threadId);
+      } catch {
+        subject = null;
+      }
+      if (subject?.parentThreadId) {
+        const root = this.#db.getThread(subject.rootThreadId);
+        this.#events.emit("runtime-event", {
+          type: "thread.updated",
+          threadId: root.id,
+          payload: { thread: root, childThread: subject },
+          createdAt: new Date().toISOString()
+        } satisfies RuntimeEvent);
+      }
+    }
     if (event.type !== "assistant.delta") {
-      await this.#logs.append("runtime.event", { event }, event.threadId);
+      await this.#logs.append("runtime.event", { event: sanitizeRuntimeEventForLog(event) }, event.threadId);
     }
   }
 
@@ -2873,6 +3120,20 @@ export class DesktopBackend {
   }
 }
 
+function sanitizeRuntimeEventForLog(event: RuntimeEvent): RuntimeEvent {
+  if (event.type !== "assistant.execution_output" || typeof event.payload?.content !== "string") {
+    return event;
+  }
+  const { content, ...payload } = event.payload;
+  return {
+    ...event,
+    payload: {
+      ...payload,
+      content: `[internal execution output omitted; ${content.length} characters]`
+    }
+  };
+}
+
 function normalizeAppConfig(config: AppConfig): AppConfig {
   const fallback = defaultConfig();
   const providers = config.providers.length ? [...config.providers] : fallback.providers;
@@ -2923,8 +3184,37 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       video: normalizeMultimodalDefaults(config.multimodal?.video, nextModels, "video")
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
-    timeouts: normalizeRuntimeTimeouts(config.timeouts)
+    timeouts: normalizeRuntimeTimeouts(config.timeouts),
+    multiAgent: {
+      defaultMode: config.multiAgent?.defaultMode === "disabled" ? "disabled" : "proactive",
+      maxConcurrentSubagents: Math.min(3, Math.max(1, Math.round(config.multiAgent?.maxConcurrentSubagents ?? fallback.multiAgent.maxConcurrentSubagents))),
+      maxSubagentsPerRoot: Math.min(8, Math.max(1, Math.round(config.multiAgent?.maxSubagentsPerRoot ?? fallback.multiAgent.maxSubagentsPerRoot))),
+      maxDepth: Math.min(3, Math.max(1, Math.round(config.multiAgent?.maxDepth ?? fallback.multiAgent.maxDepth))),
+      childWritePolicy: "read-only"
+    }
   };
+}
+
+function normalizeAgentSegment(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return normalized || "agent";
+}
+
+function buildChildAgentPrompt(parent: ThreadRecord, child: ThreadRecord, prompt: string): string {
+  return [
+    `[Internal child-agent task ${child.agentPath}]`,
+    `Parent agent: ${parent.agentPath}`,
+    "You are a bounded child agent. Work independently on the assigned task and return a concise structured result.",
+    "This task is read-only: do not edit files, run mutating shell commands, commit, push, or change external state.",
+    "Include summary, concrete evidence (paths, symbols, or commands inspected), and errors or uncertainty.",
+    "Assigned task:",
+    prompt
+  ].join("\n\n");
 }
 
 function normalizeMultimodalDefaults(

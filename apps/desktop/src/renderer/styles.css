@@ -4975,13 +4975,40 @@ select:focus {
   color: #e5edf8;
 }
 
+.gpa-task-progress-message {
+  display: flex;
+  align-items: center;
+  width: min(100%, 1040px);
+  min-height: 28px;
+  gap: 8px;
+  padding: 0 4px;
+  color: #89929d;
+  font-size: 13px;
+}
+
+.gpa-task-progress-icon {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #78c99b;
+}
+
+.gpa-task-progress-icon svg { width: 14px; height: 14px; }
+.gpa-task-progress-copy { display: inline-flex; min-width: 0; gap: 6px; }
+.gpa-task-progress-copy strong { color: #c4cbd5; font-weight: 600; }
+.gpa-task-progress-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gpa-task-progress-status { color: #78c99b; }
+.gpa-task-progress-time { margin-left: auto; color: #68717d; font-size: 12px; }
+
 .composer-queue {
   position: static;
   top: auto;
   left: auto;
   width: 100%;
   display: grid;
-  gap: 6px;
+  gap: 4px;
   z-index: 1;
 }
 
@@ -4991,7 +5018,7 @@ select:focus {
 
 .composer-queue-item {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr) max-content 24px;
+  grid-template-columns: 18px max-content minmax(0, 1fr) max-content 24px 24px;
   align-items: center;
   min-height: 34px;
   gap: 8px;
@@ -5004,6 +5031,18 @@ select:focus {
 }
 
 .composer-queue-item:hover { background: #28282c; }
+
+.composer-queue-index {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid rgba(130, 170, 218, 0.24);
+  border-radius: 50%;
+  color: #9db8d8;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
 
 .composer-queue-label {
   color: #8390a0;
@@ -5037,7 +5076,7 @@ select:focus {
   color: #7f8996;
   background: transparent;
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.58;
   transition: color 140ms ease, background 140ms ease, opacity 140ms ease;
 }
 
@@ -5977,6 +6016,84 @@ select:focus {
   background: #303033;
   box-shadow: none;
   padding: 14px 14px 12px;
+}
+
+.composer-queue-steer {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  color: #82b7f5;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.72;
+  transition: color 140ms ease, background 140ms ease, opacity 140ms ease;
+}
+
+.composer-queue-steer svg { width: 14px; height: 14px; }
+
+.composer-queue-item:hover .composer-queue-steer,
+.composer-queue-steer:hover,
+.composer-queue-steer:focus-visible,
+.composer-queue-steer.is-active {
+  color: #c5e0ff;
+  background: rgba(83, 154, 244, 0.16);
+  opacity: 1;
+}
+
+.composer-queue-steer-editor {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  gap: 6px;
+  padding: 4px 5px 4px 10px;
+  border: 1px solid rgba(94, 164, 255, 0.3);
+  border-radius: 8px;
+  background: #1b1d21;
+}
+
+.composer-queue-steer-editor input {
+  min-width: 0;
+  flex: 1;
+  height: 24px;
+  padding: 0 2px;
+  border: 0;
+  outline: 0;
+  color: #e7edf7;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+}
+
+.composer-queue-steer-editor input::placeholder { color: #788494; }
+
+.composer-queue-steer-editor button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  color: #bcdcff;
+  background: rgba(83, 154, 244, 0.18);
+  cursor: pointer;
+}
+
+.composer-queue-steer-editor button:disabled { opacity: 0.38; cursor: default; }
+.composer-queue-steer-editor button svg { width: 14px; height: 14px; }
+
+/* The model picker is rendered inside the composer, so its parent must rise
+   above the adjacent GPA plan stacking context while the picker is open. */
+.chat-composer:has(.composer-model-picker.open) {
+  z-index: 5;
+}
+
+.chat-composer:has(.composer-model-picker.open) .composer-model-picker-menu {
+  z-index: 30;
 }
 
 .chat-composer textarea {
@@ -8560,6 +8677,134 @@ select:focus {
 .user-input-prompt-resolved-mark { display: grid; width: 15px; height: 15px; place-items: center; color: #78c99b; }
 .user-input-prompt-resolved-mark svg { width: 14px; height: 14px; }
 .user-input-prompt-card.interrupted .user-input-prompt-resolved-mark { color: #a28a7c; }
+
+.user-input-prompt-card.resolved.gpa-plan-answers {
+  display: grid;
+  width: 100%;
+  min-height: 0;
+  gap: 14px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 0;
+  color: #aeb4bd;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-activity-list {
+  display: grid;
+  gap: 4px;
+  margin: 10px auto 12px;
+  width: min(100%, 860px);
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,.08));
+  padding-bottom: 8px;
+}
+
+.agent-activity-heading {
+  color: var(--text-muted, #8d99aa);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.agent-activity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-left: 2px solid rgba(141,153,170,.36);
+}
+
+.agent-activity-row.running { border-left-color: #69a8ff; }
+.agent-activity-row.completed { border-left-color: #55c98a; }
+.agent-activity-row.failed { border-left-color: #ed7b7b; }
+
+.agent-activity-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-activity-path,
+.agent-activity-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-activity-path { color: var(--text-primary, #e9eef7); font-size: 12px; }
+.agent-activity-task { color: var(--text-muted, #8d99aa); font-size: 11px; }
+.agent-activity-status { color: var(--text-muted, #8d99aa); font-size: 11px; white-space: nowrap; }
+.agent-activity-stop { border: 0; background: transparent; color: #ed8e8e; cursor: pointer; font-size: 11px; }
+
+.composer-mode-chip.composer-mode-chip-agent-proactive {
+  color: #c5a6ff;
+  border-color: rgba(181, 132, 255, 0.34);
+  background: rgba(137, 82, 220, 0.14);
+}
+.composer-mode-chip-agent-disabled { color: var(--text-muted, #8d99aa); }
+.gpa-popover-section-label { padding: 8px 12px 4px; color: var(--text-muted, #8d99aa); font-size: 11px; }
+
+@media (max-width: 680px) {
+  .agent-activity-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .agent-activity-status { grid-column: 2; grid-row: 1; }
+  .agent-activity-stop { grid-column: 2; grid-row: 2; }
+}
+
+.gpa-plan-answers-toggle {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 32px;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+}
+
+.gpa-plan-answers-toggle:hover { color: #e0e4e9; }
+
+.gpa-plan-answers-icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.gpa-plan-answers-icon svg { width: 19px; height: 19px; }
+
+.gpa-plan-answers-toggle > svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 140ms ease;
+}
+
+.gpa-plan-answers.is-expanded .gpa-plan-answers-toggle > svg { transform: rotate(180deg); }
+
+.gpa-plan-answers-details {
+  display: grid;
+  gap: 16px;
+  padding-left: 30px;
+}
+
+.gpa-plan-answer { display: grid; gap: 4px; }
+.gpa-plan-answer-question { color: #c1c6ce; font-size: 14px; line-height: 1.5; }
+.gpa-plan-answer-value { color: #7f8792; font-size: 14px; line-height: 1.5; }
+.gpa-plan-answer-note { color: #7f8792; font-size: 14px; line-height: 1.5; }
 
 .delete-confirm-actions {
   gap: 8px;
@@ -11410,6 +11655,11 @@ select:focus {
   color: #f59e52;
   border-color: rgba(245, 158, 82, 0.28);
   background: rgba(245, 158, 82, 0.12);
+}
+
+.gpa-popover-item-agent .gpa-popover-item-icon {
+  color: #c5a6ff;
+  background: rgba(137, 82, 220, 0.17);
 }
 
 .gpa-popover-item-gpa .gpa-popover-item-icon {

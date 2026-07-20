@@ -12,6 +12,9 @@ import type {
   BrowserTabRecord,
   KnowledgeBaseRecord,
   RuntimeToolCall,
+  SubagentResultEnvelope,
+  SubagentWaitResult,
+  ThreadRecord,
   ProjectExecutionPolicy,
   ToolResult,
   ToolSearchResult,
@@ -61,6 +64,7 @@ export interface ToolRuntimeContext {
   readFile: (filePath: string) => Promise<string>;
   writeFile: (filePath: string, content: string) => Promise<void>;
   runTerminalCommand?: (command: string) => Promise<TerminalCommandResult>;
+  cancelActiveTerminalCommands?: (reason?: string) => Promise<void> | void;
   requestApproval: (input: {
     title: string;
     description: string;
@@ -74,7 +78,16 @@ export interface ToolRuntimeContext {
   requestUserInputEnabled?: boolean;
   /** When true, block Python scaffolding for HTML/CSS/JS delivery tasks. */
   webFrontendGuard?: boolean;
-  spawnChildAgent: (input: { prompt: string; role: string; modelId?: string }) => Promise<string>;
+  spawnChildAgent: (input: { prompt: string; role: string; modelId?: string }) => Promise<{
+    threadId: string;
+    agentPath: string;
+    status: ThreadRecord["status"];
+  }>;
+  sendAgentMessage: (input: { agent: string; message: string }) => Promise<SubagentResultEnvelope>;
+  followupAgentTask: (input: { agent: string; prompt: string }) => Promise<SubagentResultEnvelope>;
+  waitForSubagents: (input: { agents?: string[]; timeoutMs?: number }) => Promise<SubagentWaitResult>;
+  interruptAgent: (agent: string) => Promise<SubagentResultEnvelope>;
+  listSubagents: () => Promise<ThreadRecord[]>;
   webSearch: (query: string) => Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage: (url: string) => Promise<{ title: string; url: string; text: string }>;
   findInPage: (url: string, pattern: string) => Promise<string[]>;
@@ -169,6 +182,8 @@ export interface ToolRuntimeContext {
   callMcpTool: (server: string, tool: string, argumentsJson: Record<string, unknown>) => Promise<any>;
   deferredToolSpecs?: ToolSpecDefinition[];
   hiddenToolNames?: string[];
+  /** Hard runtime guard for child agents; hiding schemas alone is insufficient. */
+  readOnlyAgent?: boolean;
   loadSkill?: (skillId: string) => Promise<{ skill: { qualifiedName: string; domain?: string; scope: string }; content: string }>;
 }
 
@@ -186,6 +201,8 @@ interface ToolRegistration {
 type TerminalCommandResult = {
   output: string;
   localUrl?: string;
+  stalled?: boolean;
+  diagnosis?: string;
 };
 
 const TOOL_ALIASES: Record<string, string> = {
@@ -205,6 +222,16 @@ const TOOL_ALIASES: Record<string, string> = {
   "video-gen": "video.generate",
   generate_video: "video.generate"
 };
+
+const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
+  "apply_patch", "fs.write_file", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call",
+  "image.generate", "video.generate",
+  "git.stage_file", "git.stage_all", "git.unstage_file", "git.revert_file", "git.apply_hunk",
+  "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
+  "browser.open_tab", "browser.click", "browser.fill", "browser.select_option", "browser.press_key",
+  "browser.navigate", "browser.reload", "browser.back", "browser.forward", "browser.go_back", "browser.go_forward",
+  "browser.focus_tab", "browser.scroll", "browser.set_viewport", "browser.capture_screenshot", "browser.capture_snapshot"
+]);
 
 export function canonicalizeToolName(name: string): string {
   const trimmed = name.trim();
@@ -248,6 +275,13 @@ export class ToolRuntime {
     call: RuntimeToolCall,
     ctx: ToolRuntimeContext
   ): Promise<ToolResult> {
+    const canonicalName = canonicalizeToolName(call.name);
+    if (ctx.readOnlyAgent && CHILD_READ_ONLY_FORBIDDEN_TOOLS.has(canonicalName)) {
+      return {
+        ok: false,
+        content: `Child agents are read-only; ${canonicalName} is unavailable.`
+      };
+    }
     let registration =
       this.#registry.get(call.name) ||
       this.#registry.get(canonicalizeToolName(call.name)) ||
@@ -674,9 +708,15 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       }
       const terminal = await runShell(command, ctx);
       return {
-        ok: true,
+        ok: terminal.stalled !== true,
         content: terminal.output,
-        json: { command, output: terminal.output, localUrl: terminal.localUrl }
+        json: {
+          command,
+          output: terminal.output,
+          localUrl: terminal.localUrl,
+          stalled: terminal.stalled,
+          diagnosis: terminal.diagnosis
+        }
       };
     }
   );
@@ -1167,18 +1207,100 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("multi_agents.spawn", "Spawn a child agent session.", ["prompt", "role"], "medium"),
+    spec("multi_agents.spawn", "Spawn a bounded child agent session for independent research, review, or diagnosis.", ["prompt", "role"], "medium"),
     async (args, ctx) => {
-      const childThreadId = await ctx.spawnChildAgent({
+      const child = await ctx.spawnChildAgent({
         prompt: String(args.prompt ?? ""),
         role: String(args.role ?? "implementer"),
         modelId: typeof args.modelId === "string" ? args.modelId : undefined
       });
       return {
         ok: true,
-        content: `Spawned child thread ${childThreadId}`,
-        json: { childThreadId }
+        content: `Spawned ${child.agentPath} (${child.status})`,
+        json: child
       };
+    }
+  );
+
+  runtime.register(
+    spec("shell.cancel_active", "Stop active shell commands for the current task after diagnosis confirms they should be interrupted.", [], "medium"),
+    async (args, ctx) => {
+      if (!ctx.cancelActiveTerminalCommands) {
+        return { ok: false, content: "No active terminal command controller is available." };
+      }
+      const reason = typeof args.reason === "string" ? args.reason : "Cancelled after diagnostic review.";
+      const approved = await ctx.requestApproval({
+        title: "Stop active command",
+        description: reason,
+        riskLevel: "medium",
+        payload: { reason }
+      });
+      if (!approved) {
+        return { ok: false, content: "Stopping the active command was denied." };
+      }
+      await ctx.cancelActiveTerminalCommands(reason);
+      return { ok: true, content: "Requested termination of active shell commands.", json: { reason } };
+    }
+  );
+
+  runtime.register(
+    spec("multi_agents.send_message", "Queue additional context for an existing child agent without starting a turn.", ["agent", "message"], "low"),
+    async (args, ctx) => {
+      const result = await ctx.sendAgentMessage({
+        agent: String(args.agent ?? ""),
+        message: String(args.message ?? "")
+      });
+      return { ok: true, content: JSON.stringify(result), json: { ...result } };
+    }
+  );
+
+  runtime.register(
+    spec("multi_agents.followup_task", "Resume an existing child agent with a bounded follow-up task.", ["agent", "prompt"], "low"),
+    async (args, ctx) => {
+      const result = await ctx.followupAgentTask({ agent: String(args.agent ?? ""), prompt: String(args.prompt ?? "") });
+      return { ok: result.status !== "failed", content: JSON.stringify(result), json: { ...result } };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "multi_agents.wait",
+      description: "Wait for one or more child agents to reach a terminal state.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          agents: { type: "array", items: { type: "string" } },
+          timeoutMs: { type: "integer", minimum: 250, maximum: 30000 }
+        },
+        required: []
+      },
+      riskLevel: "low"
+    },
+    async (args, ctx) => {
+      const agents = Array.isArray(args.agents) ? args.agents.map(String) : undefined;
+      const timeoutMs = typeof args.timeoutMs === "number" ? args.timeoutMs : undefined;
+      const result = await ctx.waitForSubagents({ agents, timeoutMs });
+      return {
+        ok: !result.timedOut,
+        content: JSON.stringify(result),
+        json: { agents: result.agents, timedOut: result.timedOut }
+      };
+    }
+  );
+
+  runtime.register(
+    spec("multi_agents.interrupt", "Interrupt an existing child agent while preserving its context.", ["agent"], "medium"),
+    async (args, ctx) => {
+      const result = await ctx.interruptAgent(String(args.agent ?? ""));
+      return { ok: true, content: JSON.stringify(result), json: { ...result } };
+    }
+  );
+
+  runtime.register(
+    spec("multi_agents.list", "List the current child-agent tree and statuses.", [], "low"),
+    async (_args, ctx) => {
+      const agents = await ctx.listSubagents();
+      return { ok: true, content: JSON.stringify(agents), json: { agents } };
     }
   );
 
