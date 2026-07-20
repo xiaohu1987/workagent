@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { SkillMetadata } from "@shared-types";
 import {
   createToolCallFingerprint,
   createCommentaryMessageKey,
@@ -76,6 +77,8 @@ import {
   buildMultimodalIntentClassifyTranscript,
   canStartGpaStage,
   buildRecommendedSkillSuggestionInstruction,
+  injectAutoLoadedSkillCalls,
+  resolveAutoLoadSkillIds,
   formatGpaPlanMarkdown,
   parseGpaPlanMarkdown,
   gpaPlanHasIncompleteTasks,
@@ -1776,7 +1779,89 @@ describe("GPA soft skill suggestion", () => {
     expect(text).toContain("skill-1");
     expect(text).not.toContain("before other tools");
   });
-});describe("GPA plan markdown file", () => {
+});
+
+describe("automatic Skill loading", () => {
+  const codingSkill: SkillMetadata = {
+    id: "coding-skill-id",
+    name: "plan-and-patch",
+    qualifiedName: "workspace:plan-and-patch",
+    description: "Make code changes safely.",
+    scope: "user",
+    rootPath: "C:\\skills",
+    skillPath: "C:\\skills\\plan-and-patch\\SKILL.md",
+    metadataPath: null,
+    dependencies: [],
+    allowImplicitInvocation: true,
+    products: [],
+    contentHash: "coding"
+  };
+  const testingSkill: SkillMetadata = {
+    ...codingSkill,
+    id: "testing-skill-id",
+    name: "test-driven-development",
+    qualifiedName: "workspace:test-driven-development",
+    allowImplicitInvocation: false,
+    contentHash: "testing"
+  };
+  const workCall = { id: "work-1", name: "code.search", arguments: { query: "TODO" } };
+
+  it("loads eligible coding Skills before the first real tool call", () => {
+    const result = injectAutoLoadedSkillCalls({
+      toolCalls: [workCall],
+      autoLoadSkillIds: [codingSkill.id],
+      availableSkills: [codingSkill, testingSkill],
+      loadedSkillIds: new Set()
+    });
+
+    expect(result.injectedSkillIds).toEqual([codingSkill.id]);
+    expect(result.toolCalls.map((call) => call.name)).toEqual(["skills.load", "code.search"]);
+    expect(result.toolCalls[0]?.arguments).toEqual({ skill_id: codingSkill.id });
+  });
+
+  it("does not duplicate a Skill the model requested using its name", () => {
+    const result = injectAutoLoadedSkillCalls({
+      toolCalls: [
+        { id: "load-1", name: "skills.load", arguments: { skill_id: codingSkill.name } },
+        workCall
+      ],
+      autoLoadSkillIds: [codingSkill.id],
+      availableSkills: [codingSkill],
+      loadedSkillIds: new Set()
+    });
+
+    expect(result.injectedSkillIds).toEqual([]);
+    expect(result.toolCalls).toHaveLength(2);
+  });
+
+  it("does not reload a Skill that was already loaded by its qualified name", () => {
+    const result = injectAutoLoadedSkillCalls({
+      toolCalls: [workCall],
+      autoLoadSkillIds: [codingSkill.id],
+      availableSkills: [codingSkill],
+      loadedSkillIds: new Set([codingSkill.qualifiedName])
+    });
+
+    expect(result.injectedSkillIds).toEqual([]);
+    expect(result.toolCalls).toEqual([workCall]);
+  });
+
+  it("only auto-selects recommended Skills that permit implicit invocation", () => {
+    expect(resolveAutoLoadSkillIds({
+      explicitSkillIds: [],
+      recommendedSkillIds: [codingSkill.id, testingSkill.id],
+      availableSkills: [codingSkill, testingSkill],
+    })).toEqual([codingSkill.id]);
+
+    expect(resolveAutoLoadSkillIds({
+      explicitSkillIds: [testingSkill.id],
+      recommendedSkillIds: [],
+      availableSkills: [codingSkill, testingSkill]
+    })).toEqual([testingSkill.id]);
+  });
+});
+
+describe("GPA plan markdown file", () => {
   it("round-trips tasks and status through markdown", () => {
     const markdown = formatGpaPlanMarkdown({
       status: "in_progress",

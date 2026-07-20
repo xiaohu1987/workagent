@@ -4,7 +4,7 @@ import path from "node:path";
 import { discoverSkillRoots, loadSkillsFromRoots, normalizeSkillDomain } from "./loader";
 import { renderAvailableSkills } from "./render";
 
-const DOMAIN_HINTS: Array<{ domain: string; patterns: RegExp }> = [
+const DOMAIN_HINTS: Array<{ domain: string; patterns: RegExp[] }> = [
   {
     domain: "前端",
     patterns: [/网页|前端|html|css|javascript|js|ui|界面|小游戏|纯前端|react|vue|落地页|页面/i]

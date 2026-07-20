@@ -4469,6 +4469,93 @@ export function App() {
   const visibleHistoryContextMenu = historyContextMenu ?? historyContextMenuPresence.value;
   const skillsSortPresence = useMotionPresence(skillsSortOpen ? true : null, 140);
   const terminalDrawerPresence = useMotionPresence(isTerminalOpen ? true : null, 220);
+  const projectHistoryGroups = useMemo(() => {
+    const groups = new Map<string, { cwd: string; threads: ThreadRecord[]; updatedAt: number }>();
+
+    for (const thread of threads) {
+      if (thread.mode !== "project" || !thread.cwd) continue;
+
+      const key = thread.cwd.replace(/\\/g, "/").toLocaleLowerCase();
+      const updatedAt = Date.parse(thread.updatedAt);
+      const existing = groups.get(key);
+      if (existing) {
+        existing.threads.push(thread);
+        existing.updatedAt = Math.max(existing.updatedAt, Number.isFinite(updatedAt) ? updatedAt : 0);
+      } else {
+        groups.set(key, {
+          cwd: thread.cwd,
+          threads: [thread],
+          updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0
+        });
+      }
+    }
+
+    return [...groups.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+  }, [threads]);
+  const standaloneHistoryThreads = useMemo(
+    () => threads.filter((thread) => thread.mode !== "project" || !thread.cwd),
+    [threads]
+  );
+  const recentProjectPaths = useMemo(
+    () => projectHistoryGroups.slice(0, 6).map((group) => group.cwd),
+    [projectHistoryGroups]
+  );
+
+  function renderHistoryThread(thread: ThreadRecord) {
+    const historyItemAffordance = getHistoryItemAffordance(thread.status);
+    const isThreadRunning = historyItemAffordance.kind === "running-indicator";
+    const isRenaming = renamingHistoryThread?.id === thread.id;
+
+    return (
+      <div
+        key={thread.id}
+        className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""} ${isThreadRunning ? "running" : ""} ${deletingThreadId === thread.id ? "is-removing" : ""}`}
+        title={isThreadRunning ? historyItemAffordance.title : undefined}
+        aria-busy={isThreadRunning}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setHistoryContextMenu({ x: event.clientX, y: event.clientY, thread });
+        }}
+      >
+        {isRenaming ? (
+          <input
+            className="history-item-rename-input"
+            autoFocus
+            value={renamingHistoryThread.title}
+            aria-label="重命名任务"
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => {
+              setRenamingHistoryThread({ id: thread.id, title: event.target.value });
+            }}
+            onBlur={(event) => {
+              void commitRenameHistoryThread(event.currentTarget.value);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                event.currentTarget.blur();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                cancelRenameHistoryThread();
+              }
+            }}
+            onClick={(event) => event.stopPropagation()}
+          />
+        ) : (
+          <button
+            type="button"
+            className="history-item-main"
+            onClick={() => {
+              void openThread(thread.id, { scrollToLatest: true });
+            }}
+          >
+            <span className="history-item-label">{thread.title}</span>
+            {thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -4545,67 +4632,33 @@ export function App() {
             </button>
           </div>
 
-          <div className="sidebar-section-title">任务历史</div>
+          <div className="sidebar-section-title">项目</div>
 
-              <div className="history-list">
+          <div className="history-list">
             {threads.length === 0 ? (
               <div className="history-empty">还没有任务</div>
             ) : (
-              threads.map((thread) => {
-                const historyItemAffordance = getHistoryItemAffordance(thread.status);
-                const isThreadRunning = historyItemAffordance.kind === "running-indicator";
-                const isRenaming = renamingHistoryThread?.id === thread.id;
-
-                return (
-                  <div
-                    key={thread.id}
-                    className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""} ${isThreadRunning ? "running" : ""} ${deletingThreadId === thread.id ? "is-removing" : ""}`}
-                    title={isThreadRunning ? historyItemAffordance.title : undefined}
-                    aria-busy={isThreadRunning}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      setHistoryContextMenu({ x: event.clientX, y: event.clientY, thread });
-                    }}
-                  >
-                    {isRenaming ? (
-                      <input
-                        className="history-item-rename-input"
-                        autoFocus
-                        value={renamingHistoryThread.title}
-                        aria-label="重命名任务"
-                        onFocus={(event) => event.currentTarget.select()}
-                        onChange={(event) => {
-                          setRenamingHistoryThread({ id: thread.id, title: event.target.value });
-                        }}
-                        onBlur={(event) => {
-                          void commitRenameHistoryThread(event.currentTarget.value);
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            event.currentTarget.blur();
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            cancelRenameHistoryThread();
-                          }
-                        }}
-                        onClick={(event) => event.stopPropagation()}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        className="history-item-main"
-                        onClick={() => {
-                          void openThread(thread.id, { scrollToLatest: true });
-                        }}
-                      >
-                        <span className="history-item-label">{thread.title}</span>
-                        {thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}
-                      </button>
-                    )}
-                  </div>
-                );
-              })
+              <>
+                {projectHistoryGroups.map((group) => (
+                  <section className="history-project-group" key={group.cwd} aria-label={`项目 ${getFileLeafName(group.cwd)}`}>
+                    <div className="history-project-heading" title={group.cwd}>
+                      <IconFolder />
+                      <span>{getFileLeafName(group.cwd)}</span>
+                    </div>
+                    <div className="history-project-threads">
+                      {group.threads.map(renderHistoryThread)}
+                    </div>
+                  </section>
+                ))}
+                {standaloneHistoryThreads.length > 0 ? (
+                  <section className="history-project-group history-standalone-group" aria-label="其他任务">
+                    {projectHistoryGroups.length > 0 ? <div className="history-standalone-heading">其他任务</div> : null}
+                    <div className="history-project-threads">
+                      {standaloneHistoryThreads.map(renderHistoryThread)}
+                    </div>
+                  </section>
+                ) : null}
+              </>
             )}
           </div>
           {visibleHistoryContextMenu ? (
@@ -6553,6 +6606,26 @@ export function App() {
                 </button>
               </div>
             </label>
+            {recentProjectPaths.length > 0 ? (
+              <div className="recent-projects" aria-label="最近项目">
+                <span className="recent-projects-label">最近项目</span>
+                <div className="recent-projects-list">
+                  {recentProjectPaths.map((projectPath) => (
+                    <button
+                      className={`recent-project-button ${projectPathDraft === projectPath ? "selected" : ""}`}
+                      type="button"
+                      key={projectPath}
+                      title={projectPath}
+                      onClick={() => setProjectPathDraft(projectPath)}
+                    >
+                      <IconFolder />
+                      <span className="recent-project-name">{getFileLeafName(projectPath)}</span>
+                      <span className="recent-project-path">{projectPath}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <div className="project-sheet-actions">
               <button className="button ghost" onClick={() => setIsProjectCreateOpen(false)}>
                 取消

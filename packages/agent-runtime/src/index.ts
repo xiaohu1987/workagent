@@ -916,6 +916,11 @@ class ThreadSessionRuntime {
       .filter((skill) => !thread.selectedSkillIds.includes(skill.id))
       .slice(0, 3)
       .map((skill) => skill.id);
+    const autoLoadSkillIds = resolveAutoLoadSkillIds({
+      explicitSkillIds: thread.selectedSkillIds,
+      recommendedSkillIds,
+      availableSkills
+    });
     const skillContext = this.services.skills.buildContext(availableSkills, {
       explicitSkillIds: thread.selectedSkillIds,
       recommendedSkillIds
@@ -1089,8 +1094,8 @@ class ThreadSessionRuntime {
       const browserSources = new Map<string, BrowserSourceReference>();
       const visibleAssistantMessages = new Set<string>();
       const visibleCommentaryMessages = new Set<string>();
-      const loadedSkillIds = new Set<string>(thread.selectedSkillIds);
-      let skillForceReminderIssued = false;
+      const loadedSkillIds = new Set<string>();
+      let skillAutoLoadIssued = false;
       let terminalThread: ThreadRecord | null = null;
       const taskFailureCounts = new Map<string, number>();
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
@@ -1857,40 +1862,25 @@ class ThreadSessionRuntime {
         }
 
         if (
-          this.#gpa.stage === "act" &&
-          recommendedSkillIds.length > 0 &&
-          !skillForceReminderIssued &&
+          requiresAgentDecisionProtocol() &&
+          autoLoadSkillIds.length > 0 &&
+          !skillAutoLoadIssued &&
           decision.toolCalls.length > 0
         ) {
-          const loadsRecommended = decision.toolCalls.some((call) => {
-            if (canonicalizeToolName(call.name) !== "skills.load") {
-              return false;
-            }
-            const skillId = String(call.arguments.skill_id ?? "");
-            return recommendedSkillIds.includes(skillId) ||
-              availableSkills.some(
-                (skill) =>
-                  recommendedSkillIds.includes(skill.id) &&
-                  (skill.id === skillId || skill.name === skillId || skill.qualifiedName === skillId)
-              );
+          const autoLoad = injectAutoLoadedSkillCalls({
+            toolCalls: decision.toolCalls,
+            autoLoadSkillIds,
+            availableSkills,
+            loadedSkillIds
           });
-          const alreadyLoadedRecommended = recommendedSkillIds.some((id) => loadedSkillIds.has(id));
-          const hasNonSkillWork = decision.toolCalls.some((call) => {
-            const name = canonicalizeToolName(call.name);
-            return name !== "skills.load" && name !== "request_user_input";
-          });
-          if (hasNonSkillWork && !loadsRecommended && !alreadyLoadedRecommended) {
-            skillForceReminderIssued = true;
-            const recommended = availableSkills.filter((skill) =>
-              recommendedSkillIds.includes(skill.id)
-            );
-            transcript.push({
-              role: "user",
-              content: buildRecommendedSkillSuggestionInstruction(recommended)
-            });
-            await this.services.log("skill.load_suggested", this.threadId, {
+          if (autoLoad.injectedSkillIds.length > 0) {
+            skillAutoLoadIssued = true;
+            decision.toolCalls = autoLoad.toolCalls;
+            await this.services.log("skill.load_auto_injected", this.threadId, {
               turnRunId: turn.id,
-              recommendedSkillIds
+              skillIds: autoLoad.injectedSkillIds,
+              recommendedSkillIds,
+              explicitSkillIds: thread.selectedSkillIds
             });
           }
         }
@@ -5447,6 +5437,71 @@ export function buildRecommendedSkillSuggestionInstruction(
     "Consider calling skills.load for one of these skill_id values when helpful; continue with other tools if you already know the needed approach:",
     ...lines
   ].join("\n");
+}
+
+/**
+ * Ensures selected and implicitly eligible skills are available before the
+ * agent starts real work, while preserving model-requested skill loads.
+ */
+export function injectAutoLoadedSkillCalls(input: {
+  toolCalls: RuntimeToolCall[];
+  autoLoadSkillIds: string[];
+  availableSkills: SkillMetadata[];
+  loadedSkillIds: ReadonlySet<string>;
+}): { toolCalls: RuntimeToolCall[]; injectedSkillIds: string[] } {
+  const requestedSkillIds = new Set(
+    input.toolCalls
+      .filter((call) => canonicalizeToolName(call.name) === "skills.load")
+      .map((call) => String(call.arguments.skill_id ?? ""))
+  );
+  const hasNonSkillWork = input.toolCalls.some((call) => {
+    const name = canonicalizeToolName(call.name);
+    return name !== "skills.load" && name !== "request_user_input";
+  });
+  if (!hasNonSkillWork) {
+    return { toolCalls: input.toolCalls, injectedSkillIds: [] };
+  }
+
+  const injectedSkillIds = input.autoLoadSkillIds.filter((skillId) => {
+    const skill = input.availableSkills.find((entry) => entry.id === skillId);
+    if (!skill) {
+      return false;
+    }
+    const identifiers = [skill.id, skill.name, skill.qualifiedName];
+    return !identifiers.some(
+      (identifier) => input.loadedSkillIds.has(identifier) || requestedSkillIds.has(identifier)
+    );
+  });
+  if (injectedSkillIds.length === 0) {
+    return { toolCalls: input.toolCalls, injectedSkillIds };
+  }
+
+  return {
+    toolCalls: [
+      ...injectedSkillIds.map((skillId) => ({
+        id: randomUUID(),
+        name: "skills.load",
+        arguments: { skill_id: skillId }
+      })),
+      ...input.toolCalls
+    ],
+    injectedSkillIds
+  };
+}
+
+export function resolveAutoLoadSkillIds(input: {
+  explicitSkillIds: string[];
+  recommendedSkillIds: string[];
+  availableSkills: SkillMetadata[];
+}): string[] {
+  const explicitSkillIds = new Set(input.explicitSkillIds);
+  const recommendedSkillIds = new Set(input.recommendedSkillIds);
+  return [...new Set(
+    input.availableSkills
+      .filter((skill) => explicitSkillIds.has(skill.id) ||
+        (recommendedSkillIds.has(skill.id) && skill.allowImplicitInvocation))
+      .map((skill) => skill.id)
+  )];
 }
 
 export function sanitizeToolResultForTranscript(toolName: string, result: ToolResult): ToolResult {
