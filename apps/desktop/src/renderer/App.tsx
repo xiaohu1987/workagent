@@ -7022,13 +7022,15 @@ export function App() {
                   className={`gpa-popover-item gpa-popover-item-agent ${multiAgentMode === "proactive" ? "is-active" : ""}`}
                   role="menuitem"
                   onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  onClick={() => void updateMultiAgentMode(multiAgentMode === "proactive" ? "disabled" : "proactive")}
+                  disabled={multiAgentMode === "proactive"}
+                  onClick={() => void updateMultiAgentMode("proactive")}
                 >
                   <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
                   <span className="gpa-popover-item-copy">
                     <span className="gpa-popover-item-title">子智能体</span>
                     <span className="gpa-popover-item-hint">自动拆分可并行的探索、审查与诊断工作</span>
                   </span>
+                  {multiAgentMode === "proactive" ? <span className="gpa-popover-item-check">已开启</span> : null}
                 </button>
                 <button
                   className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
