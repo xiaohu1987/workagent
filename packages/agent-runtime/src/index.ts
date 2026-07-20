@@ -1069,38 +1069,6 @@ class ThreadSessionRuntime {
 
       try {
         let transcript = compactTranscript(history);
-      const absorbSteeringMessages = async (): Promise<number> => {
-        let absorbedCount = 0;
-        while (!abortController.signal.aborted) {
-          const steering = await this.services.persistence.claimNextQueuedMessage(this.threadId);
-          if (!steering) return absorbedCount;
-
-          const userMessage = await this.recordMessage(
-            "user",
-            steering.content,
-            turn.id,
-            buildUserMessageMetadata(steering.content, steering.displayContent, steering.attachments)
-          );
-          transcript.push({
-            role: "user",
-            content: buildSteeringTranscriptContent(steering.content),
-            attachments: steering.attachments
-          });
-          await this.services.persistence.completeQueuedMessage(steering.id);
-          await this.services.emit({
-            type: "queue.updated",
-            threadId: this.threadId,
-            payload: { queueItemId: steering.id, action: "steered", messageId: userMessage.id },
-            createdAt: new Date().toISOString()
-          });
-          await this.services.log("turn.steered", this.threadId, {
-            turnRunId: turn.id,
-            queueItemId: steering.id
-          });
-          absorbedCount += 1;
-        }
-        return absorbedCount;
-      };
       const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
       const policyKey = normalizeWorkspacePolicyKey(workspaceCwd);
       const executionPolicy = this.services.config.projectExecutionPolicies?.[policyKey] ?? DEFAULT_PROJECT_EXECUTION_POLICY;
@@ -1325,9 +1293,6 @@ class ThreadSessionRuntime {
       };
 
       while (!repeatedTaskFailure) {
-        // A user may steer the active task while a model request or tool batch is running.
-        // Consume those updates only at this decision boundary, never by aborting in-flight work.
-        await absorbSteeringMessages();
         const prompt = buildRuntimePrompt(
           model,
           skillContext,
@@ -1357,7 +1322,7 @@ class ThreadSessionRuntime {
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${buildQueuedTaskGuidance()}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}`;
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}`;
         const compactContext = async (
           trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery",
           force = false
@@ -2374,14 +2339,6 @@ class ThreadSessionRuntime {
               });
             }
           }
-        }
-
-        if (decision.toolCalls.length === 0 && decision.endTurn && await absorbSteeringMessages() > 0) {
-          await discardStreamedAssistant();
-          decision.assistantMessage = undefined;
-          decision.endTurn = false;
-          decision.goalCompleted = false;
-          continue;
         }
 
         if (decision.toolCalls.length === 0 && decision.endTurn && await this.services.hasActiveSubagents(this.threadId)) {
@@ -4704,19 +4661,6 @@ export function buildExecutionRecoveryInstruction(input: {
     "Call the next real tool now. For requested file changes, call apply_patch with the complete patch in tool_calls; never place the patch or a claim of completion in assistant_message.",
     "Only return end_turn: true after real tool results prove every requested deliverable is complete."
   ].join(" ");
-}
-
-export function buildQueuedTaskGuidance(): string {
-  return [
-    "[User steering guidance] New user messages can be appended to this active task between decision cycles.",
-    "Treat each [User steering update] as a higher-priority update to the current request, while preserving completed work and continuing the same task.",
-    "Do not claim the task was interrupted or start a separate task. Never abandon an in-flight tool call; apply the update at the next decision boundary.",
-    "When the combined request is complete, return the final decision promptly."
-  ].join(" ");
-}
-
-export function buildSteeringTranscriptContent(content: string): string {
-  return `[User steering update]\n${content}`;
 }
 
 function buildMultiAgentDirective(thread: ThreadRecord): string {

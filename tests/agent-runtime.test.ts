@@ -5,8 +5,6 @@ import {
   buildCommentaryMessageMetadata,
   isSafeCommentaryMessage,
   buildUserMessageMetadata,
-  buildQueuedTaskGuidance,
-  buildSteeringTranscriptContent,
   buildBrowserTestChoiceQuestion,
   buildAgentProtocolRecoveryQuestion,
   resolveBrowserTestChoice,
@@ -92,16 +90,6 @@ describe("user message context persistence", () => {
     const metadata = buildUserMessageMetadata(initialInput, "Inspect this folder", []);
 
     expect(metadata).toEqual({ displayContent: "Inspect this folder" });
-  });
-});
-
-describe("active task steering", () => {
-  it("marks follow-up messages as updates to the active task", () => {
-    expect(buildSteeringTranscriptContent("also update the tests")).toBe(
-      "[User steering update]\nalso update the tests"
-    );
-    expect(buildQueuedTaskGuidance()).toContain("between decision cycles");
-    expect(buildQueuedTaskGuidance()).toContain("Never abandon an in-flight tool call");
   });
 });
 
