@@ -34,9 +34,11 @@ import type {
   QuickNoteRecord,
   RuntimeEvent,
   RuntimeThreadSnapshot,
+  SkillMetadata,
   SubagentResultEnvelope,
   SubagentWaitResult,
   ThreadRecord,
+  ToolCallRecord,
   ToolSpecDefinition,
   UserInputQuestion,
   UserInputPrompt
@@ -46,9 +48,15 @@ import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@age
 import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
-import { hashDirectory, PluginRuntime } from "@plugin-runtime";
+import { hashDirectory, PluginRuntime, type PluginInstallProgress } from "@plugin-runtime";
 import { ProviderFactory } from "@provider-adapters";
-import { SkillsManager } from "@skills-runtime";
+import {
+  SkillsManager,
+  buildUserWorkflowPrompt,
+  normalizeUserSkillName,
+  parseUserWorkflowDraft,
+  renderUserWorkflowSkill
+} from "@skills-runtime";
 import { ToolRuntime } from "@tool-runtime";
 import { DatabaseRuntime } from "@database-runtime";
 import { RuntimeLogWriter } from "./runtime-log";
@@ -112,6 +120,29 @@ async function pathExists(targetPath: string): Promise<boolean> {
 function isPathWithinDirectory(root: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function userWorkflowToolCall(call: ToolCallRecord) {
+  return {
+    name: call.toolName,
+    argumentsJson: call.argumentsJson,
+    resultJson: call.resultJson,
+    status: call.status
+  };
+}
+
+async function reserveUserSkillDirectory(root: string, baseName: string): Promise<string> {
+  await fs.mkdir(root, { recursive: true });
+  for (let suffix = 1; suffix <= 999; suffix += 1) {
+    const directory = path.join(root, suffix === 1 ? baseName : `${baseName}-${suffix}`);
+    try {
+      await fs.mkdir(directory);
+      return directory;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("无法为用户技能分配唯一目录。");
 }
 
 async function seedBundledPlugins(layout: Pick<HomeLayout, "pluginsInstalledDir" | "pluginsDisabledDir">): Promise<string[]> {
@@ -299,6 +330,7 @@ export class DesktopBackend {
       listDatabaseSources: async (ids) => this.listDatabaseSources(ids),
       describeDatabaseSchema: async (sourceId, schema) => this.describeDatabaseSchema(sourceId, schema),
       queryDatabase: async (sourceId, sql, parameters, maxRows) => this.queryDatabase(sourceId, sql, parameters, maxRows),
+      executeDatabase: async (sourceId, sql, parameters, operation) => this.executeDatabase(sourceId, sql, parameters, operation),
       markModelAgentIncompatible: async (threadId, modelId, reason) =>
         this.markModelAgentIncompatible(threadId, modelId, reason),
       emit: async (event) => this.emit(event),
@@ -467,6 +499,10 @@ export class DesktopBackend {
 
   private async queryDatabase(sourceId: string, sql: string, parameters: unknown[], maxRows?: number) {
     return this.#databases.query(this.requireDatabaseConnection(sourceId), sql, parameters, maxRows);
+  }
+
+  private async executeDatabase(sourceId: string, sql: string, parameters: unknown[], operation: "insert" | "update" | "delete") {
+    return this.#databases.execute(this.requireDatabaseConnection(sourceId), sql, parameters, operation);
   }
 
   public async refreshMcpTools(serverId?: string) {
@@ -1042,6 +1078,69 @@ export class DesktopBackend {
     await this.refreshSkills(cwd);
   }
 
+  public listUserSkills(): SkillMetadata[] {
+    return this.#skills.list().filter((skill) =>
+      !skill.pluginId &&
+      skill.scope === "user" &&
+      isPathWithinDirectory(this.#layout.skillsDraftsDir, path.dirname(skill.skillPath))
+    );
+  }
+
+  public async generateUserSkill(threadId: string, requestedName?: string): Promise<SkillMetadata> {
+    await this.initializeDeferredServices();
+    const thread = this.#db.getThread(threadId);
+    if (thread.parentThreadId) throw new Error("只能从主聊天生成用户技能。");
+    const messages = this.#db.listMessages(threadId)
+      .filter((message) => message.role === "user" || message.role === "assistant" || message.role === "tool")
+      .map((message) => ({ role: message.role, content: message.content }));
+    const toolCalls = this.#db.listToolCalls(threadId).map(userWorkflowToolCall);
+    if (messages.length === 0 && toolCalls.length === 0) throw new Error("所选聊天没有可提炼的内容。");
+
+    const selection = resolveThreadModelSelection(this.#config, thread.providerId, thread.modelId);
+    const provider = this.#config.providers.find((entry) => entry.id === selection.providerId);
+    const model = this.#config.models.find((entry) => entry.id === selection.modelId && entry.providerId === selection.providerId);
+    if (!provider || !model || model.role !== "reasoning") throw new Error("所选聊天没有可用的推理模型。");
+    const prompt = buildUserWorkflowPrompt({ title: thread.title, messages, toolCalls });
+    const timeout = new AbortController();
+    const timeoutId = this.#config.timeouts.modelDecisionMs > 0
+      ? setTimeout(() => timeout.abort(), this.#config.timeouts.modelDecisionMs)
+      : null;
+
+    try {
+      const decision = await this.#providerFactory.create(provider).runTurn({
+        systemPrompt: "You create concise reusable Codex skills from completed conversations. Return exactly the requested JSON object and never call tools.",
+        transcript: [{ role: "user", content: prompt }],
+        availableTools: [],
+        model: { ...model, supportsStreaming: false },
+        provider,
+        stream: false,
+        abortSignal: timeout.signal
+      });
+      const generatedDraft = parseUserWorkflowDraft(decision.assistantMessage ?? "", thread.title);
+      const draft = requestedName?.trim()
+        ? { ...generatedDraft, name: normalizeUserSkillName(requestedName) }
+        : generatedDraft;
+      const skillDirectory = await reserveUserSkillDirectory(this.#layout.skillsDraftsDir, draft.name);
+      const skillPath = path.join(skillDirectory, "SKILL.md");
+      try {
+        await fs.writeFile(skillPath, renderUserWorkflowSkill({ ...draft, name: path.basename(skillDirectory) }), "utf8");
+        await this.refreshSkills();
+        const skill = this.#skills.list().find((entry) => path.resolve(entry.skillPath) === path.resolve(skillPath));
+        if (!skill) throw new Error("用户技能已生成，但未能载入 Skill 索引。");
+        return skill;
+      } catch (error) {
+        await fs.rm(skillDirectory, { recursive: true, force: true });
+        await this.refreshSkills().catch(() => undefined);
+        throw error;
+      }
+    } catch (error) {
+      if (timeout.signal.aborted) throw new Error("生成用户技能超时，请检查模型连接后重试。");
+      throw error;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+
   public async fetchProviderModels(input: {
     baseUrl?: string;
     apiKey?: string;
@@ -1404,13 +1503,16 @@ export class DesktopBackend {
     return this.#db.listPlugins();
   }
 
-  public async installPlugin(source: string): Promise<PluginRecord> {
-    const plugin = await this.#plugins.installFromSource(source, this.#layout.pluginsInstalledDir);
+  public async installPlugin(source: string, onProgress?: (progress: PluginInstallProgress) => void): Promise<PluginRecord> {
+    const plugin = await this.#plugins.installFromSource(source, this.#layout.pluginsInstalledDir, onProgress);
+    onProgress?.({ percent: 86, stage: "正在登记插件" });
     await fs.rm(path.join(this.#layout.pluginsDisabledDir, `${plugin.id}.removed`), { force: true });
     const sourceHash = await hashDirectory(plugin.installPath);
     this.#db.upsertPlugin(plugin, sourceHash);
+    onProgress?.({ percent: 93, stage: "正在加载插件能力" });
     await this.refreshMcpConfiguration();
     await this.refreshSkills();
+    onProgress?.({ percent: 100, stage: "插件安装完成" });
     return plugin;
   }
 
@@ -1446,7 +1548,7 @@ export class DesktopBackend {
       throw new Error("Only independently installed or imported skills can be removed here.");
     }
     const skillDirectory = path.dirname(skill.skillPath);
-    const allowedRoots = [this.#layout.skillsImportedDir, this.#layout.skillsInstalledDir];
+    const allowedRoots = [this.#layout.skillsImportedDir, this.#layout.skillsInstalledDir, this.#layout.skillsDraftsDir];
     if (!allowedRoots.some((root) => isPathWithinDirectory(root, skillDirectory))) {
       throw new Error("Refusing to remove a skill outside the managed user skill directories.");
     }

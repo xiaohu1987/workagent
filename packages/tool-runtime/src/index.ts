@@ -184,6 +184,7 @@ export interface ToolRuntimeContext {
   listDatabaseSources?: () => Promise<Array<{ id: string; name: string; engine: string; host: string; port: number; database: string }>>;
   describeDatabaseSchema?: (sourceId: string, schema?: string) => Promise<any>;
   queryDatabase?: (sourceId: string, sql: string, parameters: unknown[], maxRows?: number) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number; durationMs: number }>;
+  executeDatabase?: (sourceId: string, sql: string, parameters: unknown[], operation: "insert" | "update" | "delete") => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number; durationMs: number }>;
   deferredToolSpecs?: ToolSpecDefinition[];
   hiddenToolNames?: string[];
   /** Hard runtime guard for child agents; hiding schemas alone is insufficient. */
@@ -228,7 +229,7 @@ const TOOL_ALIASES: Record<string, string> = {
 };
 
 const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
-  "apply_patch", "fs.write_file", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.federated_query",
+  "apply_patch", "fs.write_file", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
   "image.generate", "video.generate",
   "git.stage_file", "git.stage_all", "git.unstage_file", "git.revert_file", "git.apply_hunk",
   "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
@@ -1707,7 +1708,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("database.list_sources", "List configured read-only database sources available to this chat.", [], "low"),
+    spec("database.list_sources", "List configured database sources available to this chat and their configured permissions.", [], "low"),
     async (_args, ctx) => {
       const sources = await ctx.listDatabaseSources?.() ?? [];
       return { ok: true, content: JSON.stringify(sources, null, 2), json: { sources } };
@@ -1731,12 +1732,24 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     {
       name: "database.query",
-      description: "Execute one parameterized, read-only SELECT query against a configured database source.",
+      description: "Execute one parameterized SELECT query against a configured database source. The configured per-connection row limit is always enforced, with a maximum of 1,000 rows.",
       inputSchema: { type: "object", properties: { sourceId: { type: "string" }, sql: { type: "string" }, parameters: { type: "array" }, maxRows: { type: "number" } }, required: ["sourceId", "sql"] },
       riskLevel: "low"
     },
     async (args, ctx) => executeDatabaseQuery(args, ctx)
   );
+
+  for (const operation of ["insert", "update", "delete"] as const) {
+    runtime.register(
+      {
+        name: `database.${operation}`,
+        description: `Execute one parameterized ${operation.toUpperCase()} statement against a configured database source. This requires the connection permission and explicit user confirmation.`,
+        inputSchema: { type: "object", properties: { sourceId: { type: "string" }, sql: { type: "string" }, parameters: { type: "array" } }, required: ["sourceId", "sql"] },
+        riskLevel: "high"
+      },
+      async (args, ctx) => executeDatabaseMutation(operation, args, ctx)
+    );
+  }
 
   runtime.register(
     {
@@ -1808,6 +1821,21 @@ async function executeDatabaseQuery(args: Record<string, unknown>, ctx: ToolRunt
     Array.isArray(args.parameters) ? args.parameters : [],
     typeof args.maxRows === "number" ? args.maxRows : undefined
   );
+  return compactDatabaseResult(result);
+}
+
+async function executeDatabaseMutation(operation: "insert" | "update" | "delete", args: Record<string, unknown>, ctx: ToolRuntimeContext): Promise<ToolResult> {
+  if (!ctx.executeDatabase) return { ok: false, content: "Database access is unavailable." };
+  const sourceId = String(args.sourceId ?? "");
+  const sql = String(args.sql ?? "");
+  const approved = await ctx.requestApproval({
+    title: `执行数据库${operation === "insert" ? "新增" : operation === "update" ? "更新" : "删除"}`,
+    description: `${sourceId}: ${sql.slice(0, 240)}`,
+    riskLevel: "high",
+    payload: { sourceId, operation, sql: sql.slice(0, 1_000) }
+  });
+  if (!approved) return { ok: false, content: "Database mutation was denied." };
+  const result = await ctx.executeDatabase(sourceId, sql, Array.isArray(args.parameters) ? args.parameters : [], operation);
   return compactDatabaseResult(result);
 }
 

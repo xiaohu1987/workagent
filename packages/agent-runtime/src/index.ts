@@ -381,6 +381,7 @@ interface RuntimeServices {
   listDatabaseSources(ids?: string[]): Promise<Array<{ id: string; name: string; engine: string; host: string; port: number; database: string }>>;
   describeDatabaseSchema(sourceId: string, schema?: string): Promise<any>;
   queryDatabase(sourceId: string, sql: string, parameters: unknown[], maxRows?: number): Promise<any>;
+  executeDatabase(sourceId: string, sql: string, parameters: unknown[], operation: "insert" | "update" | "delete"): Promise<any>;
   markModelAgentIncompatible(threadId: string, modelId: string, reason: string): Promise<void>;
   emit(event: RuntimeEvent): Promise<void>;
   log(kind: string, threadId: string, payload: Record<string, unknown>): Promise<void>;
@@ -2781,6 +2782,10 @@ class ThreadSessionRuntime {
               queryDatabase: async (sourceId, sql, parameters, maxRows) => {
                 if (!activeDatabaseConnectionIds.includes(sourceId)) throw new Error(`Database source is unavailable: ${sourceId}`);
                 return this.services.queryDatabase(sourceId, sql, parameters, maxRows);
+              },
+              executeDatabase: async (sourceId, sql, parameters, operation) => {
+                if (!activeDatabaseConnectionIds.includes(sourceId)) throw new Error(`Database source is unavailable: ${sourceId}`);
+                return this.services.executeDatabase(sourceId, sql, parameters, operation);
               },
               deferredToolSpecs: mcpTools,
               readOnlyAgent: thread.parentThreadId !== null,
@@ -5186,6 +5191,7 @@ function buildRuntimePrompt(
   }
   blocks.push(
     "When using text extracted from a browser page, cite the page title or URL in your answer. The chat will show the page source automatically.",
+    "When a report, database result, trend, category comparison, proportion, or distribution is materially clearer as a chart, include a fenced `echarts` code block containing one strict JSON ECharts option object. Use no JavaScript functions or expressions, no remote images, and keep chart data bounded. Include a meaningful title, tooltip, legend or axes when applicable, then state the main takeaway in normal text after the chart. Do not add charts to ordinary answers, trivial single values, or data that is not usefully visualized.",
     "Use the Agent decision protocol for every response. Do not send a standalone commentary-only response.",
     "When work remains, include the next real tool call in the same decision as any short progress text. When no tool call is needed, return the final user-facing answer rather than a promise to continue.",
     "Do not expose chain-of-thought. Do not fabricate tool usage, file changes, or verification.",

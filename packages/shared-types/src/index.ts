@@ -485,6 +485,7 @@ export interface McpServerConfig {
 
 export type DatabaseEngine = "postgresql" | "mysql" | "sqlserver";
 export type DatabaseTlsMode = "disable" | "require" | "verify";
+export type DatabasePermission = "query" | "insert" | "update" | "delete";
 
 /** Connection metadata only. Credentials live in the encrypted desktop store. */
 export interface DatabaseConnectionConfig {
@@ -498,6 +499,10 @@ export interface DatabaseConnectionConfig {
   tlsMode: DatabaseTlsMode;
   credentialRef: string;
   enabled: boolean;
+  /** Operations that the assistant may execute for this connection. */
+  permissions: DatabasePermission[];
+  /** Result-row limit for a single query. Runtime-enforced with a hard cap of 1,000. */
+  maxRows: number;
 }
 
 export type McpToolApprovalMode = "auto" | "prompt" | "writes" | "approve";

@@ -459,11 +459,20 @@ function registerIpc(): void {
   });
   ipcMain.handle("skills:usage-stats", () => backend.getSkillUsageStats());
   ipcMain.handle("skills:remove", (_event, skillId: string) => backend.removeSkill(skillId));
+  ipcMain.handle("user-skills:list", async () => {
+    await backend.initializeDeferredServices();
+    return backend.listUserSkills();
+  });
+  ipcMain.handle("user-skills:generate", (_event, threadId: string, skillName?: string) => backend.generateUserSkill(threadId, skillName));
   ipcMain.handle("plugins:list", async () => {
     await backend.initializeDeferredServices();
     return backend.listPlugins();
   });
-  ipcMain.handle("plugins:install", (_event, source: string) => backend.installPlugin(source));
+  ipcMain.handle("plugins:install", (event, source: string) =>
+    backend.installPlugin(source, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send("plugins:install-progress", progress);
+    })
+  );
   ipcMain.handle("plugins:remove", (_event, pluginId: string) => backend.removePlugin(pluginId));
   ipcMain.handle("plugins:set-enabled", (_event, payload) =>
     backend.setThreadPluginEnabled(payload.threadId, payload.pluginId, payload.enabled)

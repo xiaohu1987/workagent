@@ -2299,7 +2299,15 @@ function normalizeDatabaseConnections(value: unknown): DatabaseConnectionConfig[
       port: typeof raw.port === "number" && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536 ? raw.port : defaults[engine],
       tlsMode: raw.tlsMode === "disable" || raw.tlsMode === "require" || raw.tlsMode === "verify" ? raw.tlsMode : "require",
       credentialRef: typeof raw.credentialRef === "string" && raw.credentialRef.trim() ? raw.credentialRef.trim() : `database:${id}`,
-      enabled: raw.enabled !== false
+      enabled: raw.enabled !== false,
+      permissions: Array.isArray(raw.permissions)
+        ? [...new Set(raw.permissions.filter((permission): permission is DatabaseConnectionConfig["permissions"][number] =>
+            permission === "query" || permission === "insert" || permission === "update" || permission === "delete"
+          ))]
+        : ["query"],
+      maxRows: typeof raw.maxRows === "number" && Number.isFinite(raw.maxRows)
+        ? Math.min(1_000, Math.max(1, Math.round(raw.maxRows)))
+        : 200
     } satisfies DatabaseConnectionConfig];
   });
 }

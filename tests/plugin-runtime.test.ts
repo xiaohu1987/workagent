@@ -87,7 +87,8 @@ describe("PluginRuntime", () => {
     );
 
     const runtime = new PluginRuntime();
-    const installed = await runtime.installFromSource(pluginSource, installedRoot);
+    const progress: Array<{ percent: number; stage: string }> = [];
+    const installed = await runtime.installFromSource(pluginSource, installedRoot, (event) => progress.push(event));
     const plugins = await runtime.discoverInstalledPlugins(installedRoot);
     const roots = await runtime.collectPluginSkillRoots(plugins, [installed.id]);
     const manifest = await runtime.readManifest(installed.installPath);
@@ -101,5 +102,6 @@ describe("PluginRuntime", () => {
     expect(manifest?.mcpServers[0]?.id).toBe("superpowers:repoinfo");
     expect(mcpServers[0]?.command).toBe("node");
     expect(bootstrap).toContain("Use superpowers first");
+    expect(progress.map((event) => event.percent)).toEqual([5, 35, 72, 80]);
   });
 });

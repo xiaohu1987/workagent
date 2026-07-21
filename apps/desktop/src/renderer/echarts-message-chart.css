@@ -1,0 +1,208 @@
+.message-chart {
+  width: 100%;
+  margin: 16px 0;
+  overflow: hidden;
+  border: 1px solid rgba(183, 162, 255, 0.18);
+  border-radius: 8px;
+  background: #101217;
+}
+
+.message-chart-header,
+.message-chart-dialog-header,
+.message-chart-error-header {
+  display: flex;
+  align-items: center;
+}
+
+.message-chart-header {
+  min-height: 40px;
+  gap: 12px;
+  padding: 5px 7px 5px 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.message-chart-header > span,
+.message-chart-dialog-header > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: #e8ebf2;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-chart-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+
+.message-chart-actions button,
+.message-chart-dialog-header > button,
+.message-chart-error-header > button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #929baa;
+  background: transparent;
+  cursor: pointer;
+}
+
+.message-chart-actions button:hover:not(:disabled),
+.message-chart-actions button:focus-visible,
+.message-chart-dialog-header > button:hover,
+.message-chart-dialog-header > button:focus-visible,
+.message-chart-error-header > button:hover,
+.message-chart-error-header > button:focus-visible {
+  border-color: rgba(183, 162, 255, 0.18);
+  color: #f1edff;
+  background: rgba(183, 162, 255, 0.09);
+  outline: none;
+}
+
+.message-chart-actions button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.message-chart-actions svg,
+.message-chart-dialog-header > button svg,
+.message-chart-error-header > button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.message-chart-canvas {
+  width: 100%;
+  height: 360px;
+}
+
+.message-chart-canvas.is-expanded {
+  min-height: 0;
+  height: 100%;
+}
+
+.message-chart-load-error {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  padding: 24px;
+  color: #e6a5aa;
+  font-size: 12px;
+}
+
+.message-chart-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1002;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(3, 4, 7, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+.message-chart-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(1180px, calc(100vw - 56px));
+  height: min(780px, calc(100vh - 56px));
+  overflow: hidden;
+  border: 1px solid rgba(183, 162, 255, 0.25);
+  border-radius: 8px;
+  background: #101217;
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.58);
+}
+
+.message-chart-dialog-header {
+  min-height: 46px;
+  gap: 5px;
+  padding: 7px 9px 7px 15px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.message-chart-error {
+  display: grid;
+  gap: 9px;
+  margin: 16px 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(231, 133, 141, 0.25);
+  border-radius: 8px;
+  background: rgba(102, 35, 44, 0.15);
+}
+
+.message-chart-error-header {
+  gap: 10px;
+}
+
+.message-chart-error-header > div {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 2px;
+}
+
+.message-chart-error-header strong {
+  color: #f0c3c6;
+  font-size: 13px;
+}
+
+.message-chart-error-header span {
+  color: #b99095;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.message-chart-error details {
+  color: #c3a8ac;
+  font-size: 11px;
+}
+
+.message-chart-error summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.message-chart-error pre {
+  max-height: 220px;
+  margin: 8px 0 0;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 6px;
+  color: #d6c8ca;
+  background: rgba(0, 0, 0, 0.24);
+  font: 11px/1.5 "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 640px) {
+  .message-chart-canvas {
+    height: 300px;
+  }
+
+  .message-chart-lightbox {
+    padding: 12px;
+  }
+
+  .message-chart-dialog {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-chart-lightbox {
+    backdrop-filter: none;
+  }
+}

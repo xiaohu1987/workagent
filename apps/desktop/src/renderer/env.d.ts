@@ -96,8 +96,11 @@ declare global {
         lastUsedAt: string | null;
       }>>;
       removeSkill: (skillId: string) => Promise<void>;
+      listUserSkills: () => Promise<SkillMetadata[]>;
+      generateUserSkill: (threadId: string, skillName?: string) => Promise<SkillMetadata>;
       listPlugins: () => Promise<any[]>;
       installPlugin: (source: string) => Promise<any>;
+      onPluginInstallProgress: (listener: (progress: { percent: number; stage: string }) => void) => () => void;
       removePlugin: (pluginId: string) => Promise<void>;
       setThreadPluginEnabled: (payload: {
         threadId: string;

@@ -37,29 +37,41 @@ interface PluginStartupContext {
   manifest: PluginManifestSummary | null;
 }
 
+export interface PluginInstallProgress {
+  percent: number;
+  stage: string;
+}
+
 export class PluginRuntime {
   public async installFromSource(
     source: string,
-    installedDir: string
+    installedDir: string,
+    onProgress?: (progress: PluginInstallProgress) => void
   ): Promise<PluginRecord> {
     const normalized = normalizePluginSource(source);
     const localName = repoNameFromSource(normalized);
     const targetDir = path.join(installedDir, localName);
+    onProgress?.({ percent: 5, stage: "准备安装插件" });
 
     if (await exists(targetDir)) {
       if (await exists(path.join(targetDir, ".git"))) {
+        onProgress?.({ percent: 35, stage: "正在更新插件仓库" });
         await runCommand("git", ["-C", targetDir, "pull", "--ff-only"], installedDir);
       }
     } else if (await exists(source)) {
+      onProgress?.({ percent: 35, stage: "正在复制本地插件文件" });
       await fs.cp(source, targetDir, { recursive: true });
     } else {
+      onProgress?.({ percent: 35, stage: "正在下载插件仓库" });
       await runCommand("git", ["clone", "--depth", "1", normalized, targetDir], installedDir);
     }
 
+    onProgress?.({ percent: 72, stage: "正在校验插件清单" });
     const plugin = await this.readInstalledPlugin(targetDir, normalized);
     if (!plugin) {
       throw new Error(`Installed source ${source} is missing .codex-plugin/plugin.json.`);
     }
+    onProgress?.({ percent: 80, stage: "插件文件已就绪" });
     return plugin;
   }
 

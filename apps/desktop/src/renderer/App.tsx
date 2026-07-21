@@ -27,6 +27,7 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   ContextCompactionRecord,
+  DatabasePermission,
   DatabaseConnectionConfig,
   GpaStage,
   GpaState,
@@ -64,11 +65,16 @@ import {
   shouldShowTaskProcessing
 } from "./thread-ui-state";
 import { useMotionPresence } from "./motion-presence";
+import { EChartsMessageChart } from "./EChartsMessageChart";
 
-type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "plugins" | "mcp" | "database" | "timeouts" | "update";
+type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "plugins" | "userSkills" | "mcp" | "database" | "timeouts" | "update";
 type ManagedRemoval =
   | { kind: "plugin"; plugin: PluginRecord }
   | { kind: "skill"; skill: SkillMetadata };
+type UserSkillGenerationDialog = {
+  thread: ThreadRecord;
+  name: string;
+};
 type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
 const BROWSER_WORKSPACE_RECOVERY_QUESTION_ID = "browser_workspace_recovery";
 
@@ -237,6 +243,20 @@ type ComposerBinaryAttachment = {
   previewUrl?: string;
 };
 
+export function isPersistentComposerContextKind(kind: string): boolean {
+  return kind === "skill" || kind === "mcp" || kind === "database";
+}
+
+export function retainPersistentComposerContexts<T extends { kind: string }>(attachments: T[]): T[] {
+  return attachments.filter((attachment) => isPersistentComposerContextKind(attachment.kind));
+}
+
+export function isGeneratedUserSkill(skill: Pick<SkillMetadata, "pluginId" | "scope" | "skillPath">): boolean {
+  return !skill.pluginId &&
+    skill.scope === "user" &&
+    /[\\/]skills[\\/]drafts[\\/]/i.test(skill.skillPath);
+}
+
 type BrowserWebviewElement = HTMLElement & {
   getWebContentsId: () => number;
 };
@@ -358,6 +378,7 @@ type MarkdownBlock =
   | { kind: "ordered-list"; items: string[] }
   | { kind: "blockquote"; lines: string[] }
   | { kind: "code"; language?: string; content: string }
+  | { kind: "echarts"; content: string }
   | { kind: "table"; headers: string[]; rows: string[][] };
 
 type AppNoticeTone = "success" | "warning";
@@ -486,7 +507,15 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "timeouts", label: "超时设置", hint: "模型请求、重试和视频生成的等待时间" },
   { id: "plugins", label: "插件管理", hint: "安装插件并管理当前聊天或项目的启用状态" },
+  { id: "userSkills", label: "用户技能", hint: "从历史聊天提炼可复用的工作流技能" },
   { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
+];
+
+const DATABASE_PERMISSION_OPTIONS: Array<{ value: DatabasePermission; label: string }> = [
+  { value: "query", label: "查询" },
+  { value: "insert", label: "新增" },
+  { value: "update", label: "更新" },
+  { value: "delete", label: "删除" }
 ];
 
 const WELCOME_CARDS: WelcomeCard[] = [
@@ -748,6 +777,10 @@ export function App() {
   const [isKnowledgeImporting, setIsKnowledgeImporting] = useState(false);
   const [pluginSource, setPluginSource] = useState("https://github.com/obra/superpowers");
   const [isInstallingPlugin, setIsInstallingPlugin] = useState(false);
+  const [pluginInstallProgress, setPluginInstallProgress] = useState<{ percent: number; stage: string } | null>(null);
+  const [userSkills, setUserSkills] = useState<SkillMetadata[]>([]);
+  const [isGeneratingUserSkill, setIsGeneratingUserSkill] = useState(false);
+  const [userSkillGenerationDialog, setUserSkillGenerationDialog] = useState<UserSkillGenerationDialog | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
@@ -781,6 +814,8 @@ export function App() {
     void window.codexh.getUpdateState().then(setUpdateState).catch(() => undefined);
     return window.codexh.onUpdateState(setUpdateState);
   }, []);
+
+  useEffect(() => window.codexh.onPluginInstallProgress(setPluginInstallProgress), []);
 
   useEffect(() => {
     if (!isHistorySearchOpen) return;
@@ -1852,6 +1887,12 @@ export function App() {
     }
   }, [isSettingsOpen, settingsTab, selectedThread?.cwd]);
 
+  useEffect(() => {
+    if (isSettingsOpen && settingsTab === "userSkills") {
+      void refreshUserSkills();
+    }
+  }, [isSettingsOpen, settingsTab]);
+
   const visibleSkills = useMemo(() => {
     const query = skillsSearchQuery.trim().toLowerCase();
     const statsByKey = new Map<string, SkillUsageStats>();
@@ -1959,7 +2000,13 @@ export function App() {
     return new Set(selectedThread?.selectedPluginIds ?? []);
   }, [selectedThread?.id, selectedThread?.mode, selectedThread?.selectedPluginIds, workflowBindings]);
   const visibleComposerSkills = useMemo(
-    () => skills.filter((skill) => !skill.pluginId || enabledPluginIds.has(skill.pluginId)),
+    () => skills
+      .filter((skill) => !skill.pluginId || enabledPluginIds.has(skill.pluginId))
+      .sort((left, right) => {
+        const userSkillOrder = Number(isGeneratedUserSkill(right)) - Number(isGeneratedUserSkill(left));
+        if (userSkillOrder !== 0) return userSkillOrder;
+        return (left.displayName ?? left.name).localeCompare(right.displayName ?? right.name);
+      }),
     [enabledPluginIds, skills]
   );
   useEffect(() => {
@@ -2023,7 +2070,7 @@ export function App() {
   );
   const composerPrimaryAction = getComposerPrimaryActionState(
     selectedThreadStatus,
-    input.trim() || composerAttachments.length > 0 ? "content" : ""
+    input.trim() || composerAttachments.some((attachment) => !isPersistentComposerContextKind(attachment.kind)) ? "content" : ""
   );
   const isActiveThreadExecuting = composerPrimaryAction.kind === "interrupt";
   const activeRuntimeThreadId = activeSnapshotThreadId ?? selectedThreadId;
@@ -2176,6 +2223,8 @@ export function App() {
         return "Skill 管理";
       case "plugins":
         return "插件管理";
+      case "userSkills":
+        return "用户技能";
       case "mcp":
         return "MCP 管理";
       case "knowledge":
@@ -2635,6 +2684,10 @@ export function App() {
     setSkillUsageStats(nextStats);
   }
 
+  async function refreshUserSkills() {
+    setUserSkills(await window.codexh.listUserSkills());
+  }
+
   async function refreshPlugins() {
     setPlugins((await window.codexh.listPlugins()) as PluginRecord[]);
   }
@@ -2879,7 +2932,8 @@ export function App() {
     options?: { internal?: boolean; displayContent?: string }
   ) {
     const inputContent = (forcedContent ?? input.trim()).trim();
-    if (!inputContent && (forcedContent || composerAttachments.length === 0)) {
+    const hasOneShotAttachment = composerAttachments.some((attachment) => !isPersistentComposerContextKind(attachment.kind));
+    if (!inputContent && (forcedContent || !hasOneShotAttachment)) {
       return;
     }
 
@@ -2917,7 +2971,7 @@ export function App() {
       await window.codexh.rejectUnsupportedMultimodal({ threadId, content: inputContent });
       setComposerSubmission(null);
       setInput("");
-      setComposerAttachments([]);
+      setComposerAttachments(retainPersistentComposerContexts);
       setGpaComposerSelected(false);
       showNotice("此模型不支持多模态", {
         message: "已在对话中返回原因，请切换到支持多模态输入的模型后再重试。"
@@ -3000,7 +3054,7 @@ export function App() {
     }
     if (!forcedContent) {
       setInput("");
-      setComposerAttachments([]);
+      setComposerAttachments(retainPersistentComposerContexts);
     }
     clearAutoScrollReleaseTimer();
     shouldAutoScrollRef.current = true;
@@ -3662,6 +3716,7 @@ export function App() {
     }
 
     setIsInstallingPlugin(true);
+    setPluginInstallProgress({ percent: 2, stage: "正在开始安装" });
     try {
       const plugin = await window.codexh.installPlugin(source);
       await Promise.all([refreshPlugins(), refreshSkills()]);
@@ -3672,6 +3727,28 @@ export function App() {
       });
     } finally {
       setIsInstallingPlugin(false);
+      setPluginInstallProgress(null);
+    }
+  }
+
+  function openUserSkillGenerationDialog(thread: ThreadRecord) {
+    if (thread.parentThreadId || thread.status === "running" || isGeneratingUserSkill) return;
+    setUserSkillGenerationDialog({ thread, name: thread.title.slice(0, 64) });
+  }
+
+  async function generateUserSkill(dialog: UserSkillGenerationDialog) {
+    const skillName = dialog.name.trim();
+    if (!skillName || dialog.thread.parentThreadId || dialog.thread.status === "running" || isGeneratingUserSkill) return;
+    setIsGeneratingUserSkill(true);
+    try {
+      const skill = await window.codexh.generateUserSkill(dialog.thread.id, skillName);
+      await Promise.all([refreshUserSkills(), refreshSkills()]);
+      setUserSkillGenerationDialog(null);
+      showNotice(`已生成用户技能：${skill.displayName ?? skill.name}`, { tone: "success" });
+    } catch (error) {
+      showNotice("生成用户技能失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsGeneratingUserSkill(false);
     }
   }
 
@@ -3685,7 +3762,7 @@ export function App() {
         await Promise.all([refreshPlugins(), refreshSkills(), refreshThreads()]);
       } else {
         await window.codexh.removeSkill(target.skill.id);
-        await refreshSkills();
+        await Promise.all([refreshSkills(), refreshUserSkills()]);
       }
       setManagedRemoval(null);
       showNotice(target.kind === "plugin" ? "插件已移除" : "Skill 已移除", { tone: "success" });
@@ -3998,7 +4075,7 @@ export function App() {
     setConfigDraft((current) => current ? {
       ...cloneConfig(current),
       databaseConnections: [...current.databaseConnections, {
-        id, name: "", engine: "postgresql", host: "", port: 5432, database: "", username: "", tlsMode: "require", credentialRef: `database:${id}`, enabled: true
+        id, name: "", engine: "postgresql", host: "", port: 5432, database: "", username: "", tlsMode: "require", credentialRef: `database:${id}`, enabled: true, permissions: ["query"], maxRows: 200
       }]
     } : current);
     setEditingDatabaseConnectionId(id);
@@ -4744,6 +4821,8 @@ export function App() {
   const visibleUpdateConfirmDialog = updateConfirmDialog ?? updateConfirmPresence.value;
   const historyThreadDeleteConfirmPresence = useMotionPresence(historyThreadDeleteConfirmation);
   const visibleHistoryThreadDeleteConfirmation = historyThreadDeleteConfirmation ?? historyThreadDeleteConfirmPresence.value;
+  const userSkillGenerationDialogPresence = useMotionPresence(userSkillGenerationDialog);
+  const visibleUserSkillGenerationDialog = userSkillGenerationDialog ?? userSkillGenerationDialogPresence.value;
   const managedRemovalPresence = useMotionPresence(managedRemoval);
   const visibleManagedRemoval = managedRemoval ?? managedRemovalPresence.value;
   const clearChatConfirmPresence = useMotionPresence(isClearChatConfirmOpen ? true : null);
@@ -4955,6 +5034,14 @@ export function App() {
               motionPhase={historyContextMenuPresence.phase}
               onClose={() => setHistoryContextMenu(null)}
               actions={[
+                ...(!visibleHistoryContextMenu.thread.parentThreadId && visibleHistoryContextMenu.thread.status !== "running"
+                  ? [{
+                      id: "extract-history-thread-skill",
+                      label: isGeneratingUserSkill ? "正在提炼技能..." : "提炼技能",
+                      icon: <IconSkills />,
+                      onSelect: () => openUserSkillGenerationDialog(visibleHistoryContextMenu.thread)
+                    }]
+                  : []),
                 {
                   id: "rename-history-thread",
                   label: "重命名",
@@ -6455,7 +6542,7 @@ export function App() {
                 <div className="settings-section database-settings-section">
                   <div className="config-block database-config-block">
                     <div className="section-copy-with-action">
-                      <div><strong>数据库连接</strong><span>仅执行只读查询。密码由系统加密保存，不会写入配置文件。</span></div>
+                      <div><strong>数据库连接</strong><span>按连接权限执行查询或数据变更。密码由系统加密保存，不会写入配置文件。</span></div>
                       <button className="button primary" type="button" onClick={addDatabaseConnection} disabled={!configDraft}>添加数据库</button>
                     </div>
                     <div className="mcp-server-list database-connection-list">
@@ -6494,9 +6581,42 @@ export function App() {
                             <label className="settings-field"><span>类型</span><ComposerSelect className="mcp-select" ariaLabel="数据库类型" value={connection.engine} onChange={(value) => { const engine = value as DatabaseConnectionConfig["engine"]; updateDatabaseDraft(connection.id, { engine, port: engine === "postgresql" ? 5432 : engine === "mysql" ? 3306 : 1433 }); }} options={[{ value: "postgresql", label: "PostgreSQL" }, { value: "mysql", label: "MySQL" }, { value: "sqlserver", label: "SQL Server" }]} placeholder="选择数据库类型" /></label>
                             <label className="settings-field"><span>主机</span><input value={connection.host} onChange={(event) => updateDatabaseDraft(connection.id, { host: event.target.value })} /></label>
                             <label className="settings-field"><span>端口</span><input type="number" value={connection.port} onChange={(event) => updateDatabaseDraft(connection.id, { port: Number(event.target.value) })} /></label>
-                            <label className="settings-field"><span>数据库</span>{databaseOptions.length > 0 ? <ComposerSelect className="mcp-select database-catalog-select" ariaLabel="数据库" value={connection.database} onChange={(database) => updateDatabaseDraft(connection.id, { database })} options={databaseOptions} placeholder="测试连接后选择数据库" searchable searchPlaceholder="筛选数据库" emptyLabel="未找到匹配的数据库" /> : <input value={connection.database} onChange={(event) => updateDatabaseDraft(connection.id, { database: event.target.value })} />}</label>
+                            <label className="settings-field"><span>数据库</span>{databaseOptions.length > 0 ? <ComposerSelect className="mcp-select database-catalog-select" ariaLabel="数据库" value={connection.database} onChange={(database) => updateDatabaseDraft(connection.id, { database })} options={databaseOptions} placeholder="测试连接后选择数据库" /> : <input value={connection.database} onChange={(event) => updateDatabaseDraft(connection.id, { database: event.target.value })} />}</label>
                             <label className="settings-field"><span>用户名</span><input value={connection.username} onChange={(event) => updateDatabaseDraft(connection.id, { username: event.target.value })} /></label>
                             <label className="settings-field"><span>TLS</span><ComposerSelect className="mcp-select" ariaLabel="TLS 设置" value={connection.tlsMode} onChange={(value) => updateDatabaseDraft(connection.id, { tlsMode: value as DatabaseConnectionConfig["tlsMode"] })} options={[{ value: "require", label: "加密" }, { value: "verify", label: "验证证书" }, { value: "disable", label: "关闭" }]} placeholder="选择 TLS 设置" /></label>
+                            <fieldset className="database-permission-field">
+                              <legend>权限</legend>
+                              <div className="database-permission-options">
+                                {DATABASE_PERMISSION_OPTIONS.map((permission) => (
+                                  <label key={permission.value} className="database-permission-option">
+                                    <input
+                                      type="checkbox"
+                                      checked={connection.permissions.includes(permission.value)}
+                                      onChange={(event) => updateDatabaseDraft(connection.id, {
+                                        permissions: event.target.checked
+                                          ? [...new Set([...connection.permissions, permission.value])]
+                                          : connection.permissions.filter((value) => value !== permission.value)
+                                      })}
+                                    />
+                                    <span>{permission.label}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </fieldset>
+                            <label className="settings-field database-row-limit-field">
+                              <span>查询最大数量</span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={1000}
+                                value={connection.maxRows}
+                                disabled={!connection.permissions.includes("query")}
+                                onChange={(event) => updateDatabaseDraft(connection.id, {
+                                  maxRows: Math.min(1000, Math.max(1, Number(event.target.value) || 1))
+                                })}
+                              />
+                              <small>每次查询最多 1000 条，运行时会再次限制。</small>
+                            </label>
                             <label className="settings-field database-password-field"><span>密码</span><div className="database-password-control"><input type="password" value={databasePasswordDrafts[connection.id] ?? ""} placeholder={hasSavedCredential ? "已安全保存，输入可更新" : "输入数据库密码"} onChange={(event) => setDatabasePasswordDrafts((current) => ({ ...current, [connection.id]: event.target.value }))} />{hasSavedCredential ? <span className="database-credential-status">已保存</span> : null}</div><small>留空测试时会使用已加密保存的密码。</small></label>
                           </div> : null}
                           <div className="mcp-server-row-actions">
@@ -6698,6 +6818,12 @@ export function App() {
                         {isInstallingPlugin ? "正在安装..." : "安装插件"}
                       </button>
                     </div>
+                    {isInstallingPlugin && pluginInstallProgress ? <div className="plugin-install-progress" role="status" aria-live="polite">
+                      <div className="plugin-install-progress-copy"><span>{pluginInstallProgress.stage}</span><span>{pluginInstallProgress.percent}%</span></div>
+                      <div className="plugin-install-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pluginInstallProgress.percent}>
+                        <span style={{ width: `${Math.max(0, Math.min(100, pluginInstallProgress.percent))}%` }} />
+                      </div>
+                    </div> : null}
                   </div>
 
                   <div className="config-block plugin-library-card">
@@ -6732,6 +6858,40 @@ export function App() {
                           </article>
                         );
                       })}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {settingsTab === "userSkills" ? (
+                <div className="settings-section user-skill-settings-section">
+                  <div className="config-block user-skill-library-block">
+                    <div className="section-copy">
+                      <strong>已生成技能</strong>
+                      <span>在历史聊天上右键选择“提炼技能”后，生成的工作流会显示在这里，并可在后续聊天中复用。</span>
+                    </div>
+                    <div className="stack-list user-skill-list">
+                      {userSkills.length > 0 ? userSkills.map((skill) => (
+                        <article key={skill.id} className="stack-card user-skill-record">
+                          <div className="user-skill-record-main">
+                            <span className="plugin-record-icon" aria-hidden><IconSkills /></span>
+                            <div className="user-skill-record-copy">
+                              <strong>{skill.displayName ?? skill.name}</strong>
+                              <p>{skill.description}</p>
+                              <span title={skill.skillPath}>{skill.skillPath}</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="button ghost danger-icon-button"
+                            title={`删除 ${skill.displayName ?? skill.name}`}
+                            aria-label={`删除 ${skill.displayName ?? skill.name}`}
+                            onClick={() => setManagedRemoval({ kind: "skill", skill })}
+                          >
+                            <IconTrash />
+                          </button>
+                        </article>
+                      )) : <div className="detail-empty">尚未生成用户技能。</div>}
                     </div>
                   </div>
                 </div>
@@ -7152,6 +7312,69 @@ export function App() {
                 onClick={() => void confirmClearCurrentChat()}
               >
                 {isClearingChat ? "正在清空..." : "确认清空"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {visibleUserSkillGenerationDialog ? (
+        <div
+          className="project-sheet-overlay motion-overlay"
+          data-motion={userSkillGenerationDialogPresence.phase}
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !isGeneratingUserSkill) {
+              setUserSkillGenerationDialog(null);
+            }
+          }}
+        >
+          <div className="project-sheet confirm-sheet user-skill-generation-sheet" role="dialog" aria-modal="true" aria-labelledby="user-skill-generation-title">
+            <div className="project-sheet-header">
+              <div className="project-sheet-copy">
+                <strong id="user-skill-generation-title">提炼技能</strong>
+                <span>描述和工作流将根据所选聊天自动生成。</span>
+              </div>
+              <button
+                className="project-sheet-close"
+                type="button"
+                onClick={() => setUserSkillGenerationDialog(null)}
+                title="关闭"
+                aria-label="关闭"
+                disabled={isGeneratingUserSkill}
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="confirm-sheet-body user-skill-generation-body">
+              <p>将从“{visibleUserSkillGenerationDialog.thread.title}”提炼可复用的用户技能。</p>
+              <label className="settings-field user-skill-name-field">
+                <span>技能名称</span>
+                <input
+                  autoFocus
+                  value={visibleUserSkillGenerationDialog.name}
+                  onChange={(event) => setUserSkillGenerationDialog((current) => current ? { ...current, name: event.target.value } : current)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && visibleUserSkillGenerationDialog.name.trim() && !isGeneratingUserSkill) {
+                      void generateUserSkill(visibleUserSkillGenerationDialog);
+                    }
+                  }}
+                  maxLength={64}
+                  placeholder="例如：月度报表生成"
+                  disabled={isGeneratingUserSkill}
+                />
+                <small>支持中文、字母、数字和连字符。</small>
+              </label>
+            </div>
+            <div className="project-sheet-actions">
+              <button className="button ghost" type="button" disabled={isGeneratingUserSkill} onClick={() => setUserSkillGenerationDialog(null)}>取消</button>
+              <button
+                className="button primary"
+                type="button"
+                disabled={!visibleUserSkillGenerationDialog.name.trim() || isGeneratingUserSkill}
+                aria-busy={isGeneratingUserSkill}
+                onClick={() => void generateUserSkill(visibleUserSkillGenerationDialog)}
+              >
+                {isGeneratingUserSkill ? <><IconSpinner /><span className="user-skill-generating-label">正在生成<span className="user-skill-generating-dots" aria-hidden="true"><i /><i /><i /></span></span></> : "确认生成"}
               </button>
             </div>
           </div>
@@ -7660,29 +7883,32 @@ export function App() {
                         );
                       }) : <span className="composer-add-menu-empty">没有已安装的插件</span>
                     ) : composerAddMenuView === "skills" ? (
-                      visibleComposerSkills.length > 0 ? visibleComposerSkills.map((skill) => (
-                        <button
-                          key={skill.id}
-                          className="gpa-popover-item"
-                          role="menuitem"
-                          onClick={() => {
-                            addComposerAttachment({
-                              kind: "skill",
-                              skillId: skill.id,
-                              label: skill.displayName ?? skill.name,
-                              description: skill.shortDescription ?? skill.description
-                            });
-                            setGpaMenuOpen(false);
-                            setGpaMenuPos(null);
-                          }}
-                        >
-                          <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
-                          <span className="gpa-popover-item-copy">
-                            <span className="gpa-popover-item-title">{skill.displayName ?? skill.name}</span>
-                            <span className="gpa-popover-item-hint">{skill.shortDescription ?? skill.description}</span>
-                          </span>
-                        </button>
-                      )) : <span className="composer-add-menu-empty">没有可用的 Skills</span>
+                      visibleComposerSkills.length > 0 ? visibleComposerSkills.map((skill) => {
+                        const isUserSkill = isGeneratedUserSkill(skill);
+                        return (
+                          <button
+                            key={skill.id}
+                            className={`gpa-popover-item${isUserSkill ? " is-user-skill" : ""}`}
+                            role="menuitem"
+                            onClick={() => {
+                              addComposerAttachment({
+                                kind: "skill",
+                                skillId: skill.id,
+                                label: skill.displayName ?? skill.name,
+                                description: skill.shortDescription ?? skill.description
+                              });
+                              setGpaMenuOpen(false);
+                              setGpaMenuPos(null);
+                            }}
+                          >
+                            <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
+                            <span className="gpa-popover-item-copy">
+                              <span className="gpa-popover-item-title">{skill.displayName ?? skill.name}</span>
+                              <span className="gpa-popover-item-hint">{skill.shortDescription ?? skill.description}</span>
+                            </span>
+                          </button>
+                        );
+                      }) : <span className="composer-add-menu-empty">没有可用的 Skills</span>
                     ) : composerAddMenuView === "mcp" ? (
                       <>
                         {(config?.mcpServers ?? []).filter((server) => server.enabled).map((server) => (
@@ -13492,6 +13718,8 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
           </div>
         </div>
       );
+    case "echarts":
+      return <EChartsMessageChart key={key} configText={block.content} />;
     case "table":
       return (
         <div key={key} className="markdown-table-wrap">
@@ -13806,11 +14034,10 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
 
     if (codeFence) {
       if (trimmed.startsWith("```")) {
-        blocks.push({
-          kind: "code",
-          language: codeFence.language,
-          content: codeFence.lines.join("\n")
-        });
+        const content = codeFence.lines.join("\n");
+        blocks.push(codeFence.language?.trim().toLowerCase() === "echarts"
+          ? { kind: "echarts", content }
+          : { kind: "code", language: codeFence.language, content });
         codeFence = null;
       } else {
         codeFence.lines.push(rawLine);
@@ -14819,7 +15046,7 @@ function IconComment() {
 
 function IconSpinner() {
   return (
-    <SvgIcon size={16}>
+    <SvgIcon size={16} className="icon-spinner">
       <circle cx="12" cy="12" r="6.75" opacity="0.22" />
       <path d="M18.75 12a6.75 6.75 0 0 0-6.75-6.75" />
     </SvgIcon>

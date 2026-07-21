@@ -84,8 +84,15 @@ const api = {
   listSkills: (cwd?: string | null) => ipcRenderer.invoke("skills:list", cwd),
   getSkillUsageStats: () => ipcRenderer.invoke("skills:usage-stats"),
   removeSkill: (skillId: string) => ipcRenderer.invoke("skills:remove", skillId),
+  listUserSkills: () => ipcRenderer.invoke("user-skills:list"),
+  generateUserSkill: (threadId: string, skillName?: string) => ipcRenderer.invoke("user-skills:generate", threadId, skillName),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),
+  onPluginInstallProgress: (listener: (progress: unknown) => void) => {
+    const wrapped = (_event: unknown, progress: unknown) => listener(progress);
+    ipcRenderer.on("plugins:install-progress", wrapped);
+    return () => ipcRenderer.removeListener("plugins:install-progress", wrapped);
+  },
   removePlugin: (pluginId: string) => ipcRenderer.invoke("plugins:remove", pluginId),
   setThreadPluginEnabled: (payload: { threadId: string; pluginId: string; enabled: boolean }) =>
     ipcRenderer.invoke("plugins:set-enabled", payload),

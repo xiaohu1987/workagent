@@ -13,11 +13,55 @@ import {
   extractMessageMediaReferences,
   formatComposerAttachments,
   highlightMarkdownCode,
+  isGeneratedUserSkill,
+  retainPersistentComposerContexts,
   parseMarkdownBlocks,
   resolveProjectFilePath
 } from "../apps/desktop/src/renderer/App";
+import { ECHARTS_CONFIG_MAX_BYTES, parseEChartsConfig } from "../apps/desktop/src/renderer/EChartsMessageChart";
 
 describe("parseMarkdownBlocks", () => {
+  it("recognizes user skills generated from chat drafts", () => {
+    expect(isGeneratedUserSkill({
+      pluginId: undefined,
+      scope: "user",
+      skillPath: "C:\\Users\\test\\.codexh\\skills\\drafts\\monthly-report\\SKILL.md"
+    })).toBe(true);
+    expect(isGeneratedUserSkill({
+      pluginId: undefined,
+      scope: "user",
+      skillPath: "C:\\Users\\test\\.codexh\\skills\\imported\\monthly-report\\SKILL.md"
+    })).toBe(false);
+    expect(isGeneratedUserSkill({
+      pluginId: "superpowers",
+      scope: "user",
+      skillPath: "C:\\Users\\test\\.codexh\\skills\\drafts\\monthly-report\\SKILL.md"
+    })).toBe(false);
+  });
+
+  it("keeps selected skill, MCP, and database contexts after a send", () => {
+    expect(retainPersistentComposerContexts([
+      { kind: "file", label: "report.xlsx" },
+      { kind: "image", label: "chart.png" },
+      { kind: "code", label: "query.ts" },
+      { kind: "skill", label: "数据分析" },
+      { kind: "mcp", label: "项目服务" },
+      { kind: "database", label: "分析库" }
+    ])).toEqual([
+      { kind: "skill", label: "数据分析" },
+      { kind: "mcp", label: "项目服务" },
+      { kind: "database", label: "分析库" }
+    ]);
+  });
+
+  it("parses only a closed echarts fence as a chart block", () => {
+    const content = '{"title":{"text":"Sales"},"series":[{"type":"bar","data":[1,2]}]}';
+
+    expect(parseMarkdownBlocks(`\`\`\`echarts\n${content}\n\`\`\``)).toEqual([{ kind: "echarts", content }]);
+    expect(parseMarkdownBlocks(`\`\`\`echarts\n${content}`)).toEqual([{ kind: "code", language: "echarts", content }]);
+    expect(parseMarkdownBlocks(`\`\`\`json\n${content}\n\`\`\``)).toEqual([{ kind: "code", language: "json", content }]);
+  });
+
   it("highlights fenced C# code and escapes source HTML", () => {
     const highlighted = highlightMarkdownCode('string title = "<script>";', "csharp");
 
@@ -338,5 +382,21 @@ describe("parseMarkdownBlocks", () => {
     });
 
     expect(usage.segments.find((segment) => segment.id === "conversation")?.tokens).toBeLessThan(4_000);
+  });
+});
+
+describe("parseEChartsConfig", () => {
+  it("accepts a strict JSON option and reserves canvas space for the legend", () => {
+    const result = parseEChartsConfig('{"title":{"text":"月度销售额"},"legend":{},"xAxis":{"data":["1月"]},"series":[{"type":"bar","data":[120]}]}');
+
+    expect(result).toMatchObject({ ok: true, title: "月度销售额", option: { aria: { enabled: true }, legend: { top: 12 }, grid: { top: 58, containLabel: true } } });
+    if (result.ok) expect(result.option.title).toBeUndefined();
+  });
+
+  it("rejects invalid roots, dangerous keys, remote images, and oversized input", () => {
+    expect(parseEChartsConfig("[]")).toMatchObject({ ok: false });
+    expect(parseEChartsConfig('{"__proto__":{"polluted":true}}')).toMatchObject({ ok: false });
+    expect(parseEChartsConfig('{"series":[{"symbol":"image://https://example.com/a.png"}]}')).toMatchObject({ ok: false });
+    expect(parseEChartsConfig(" ".repeat(ECHARTS_CONFIG_MAX_BYTES + 1))).toMatchObject({ ok: false });
   });
 });
