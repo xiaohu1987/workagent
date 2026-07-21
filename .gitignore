@@ -3,6 +3,7 @@ dist/
 tmp/
 build/
 release/
+/release-plugin-verify*/
 log/
 .tmp-wts/
 
@@ -17,3 +18,7 @@ Thumbs.db
 
 # Fetched at package time via scripts/fetch-tree-sitter-grammars.mjs
 assets/tree-sitter-grammars/*.wasm
+
+# Local bundled-plugin sources are not distributed with the application.
+/assets/bundled-plugins/
+/scripts/stage-bundled-plugins.mjs

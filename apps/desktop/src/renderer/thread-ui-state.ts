@@ -22,6 +22,14 @@ export function isThreadExecutionInProgress(status?: ThreadRecord["status"] | nu
 }
 
 /** Whether the chat should show the live "执行中/正在思考" processing UI. */
+export function shouldPreservePreparingRuntime(
+  status: ThreadRecord["status"] | null | undefined,
+  queuedMessageCount: number,
+  runtimeObserved: boolean
+): boolean {
+  return !isThreadExecutionInProgress(status) && queuedMessageCount > 0 && !runtimeObserved;
+}
+
 export function shouldShowTaskProcessing(
   status: ThreadRecord["status"] | null | undefined,
   isPreparing: boolean

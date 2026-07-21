@@ -597,11 +597,8 @@
 
 .tool-activity-summary-copy {
   display: flex;
-  align-items: baseline;
   flex: 1;
   min-width: 0;
-  gap: 6px;
-  overflow: hidden;
 }
 
 .tool-activity-summary-copy strong {
@@ -612,23 +609,6 @@
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tool-activity-summary-copy span {
-  flex: 1;
-  overflow: hidden;
-  color: #778391;
-  font-family: inherit;
-  font-size: 11px;
-  line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-activity-summary-copy span::before {
-  content: "\00b7";
-  margin-right: 6px;
-  color: #55606d;
 }
 
 .tool-activity-running { display: none; }

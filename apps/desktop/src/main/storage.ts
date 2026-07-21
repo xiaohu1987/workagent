@@ -449,6 +449,7 @@ export class DatabaseService {
         provider_id TEXT NOT NULL,
         status TEXT NOT NULL,
         selected_skill_ids_json TEXT NOT NULL,
+        selected_plugin_ids_json TEXT NOT NULL DEFAULT '[]',
         knowledge_base_ids_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -684,6 +685,7 @@ export class DatabaseService {
     this.ensureColumn("approval_records", "resolution_mode", "TEXT");
     this.ensureColumn("approval_records", "resolved_at", "TEXT");
     this.ensureColumn("threads", "gpa_state_json", "TEXT");
+    this.ensureColumn("threads", "selected_plugin_ids_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("threads", "is_pinned", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("threads", "pinned_at", "TEXT");
     this.ensureColumn("threads", "parent_thread_id", "TEXT");
@@ -799,6 +801,7 @@ export class DatabaseService {
       providerId: input.providerId,
       status: input.status ?? "idle",
       selectedSkillIds: [],
+      selectedPluginIds: [],
       knowledgeBaseIds: [],
       createdAt: now,
       updatedAt: now,
@@ -817,10 +820,10 @@ export class DatabaseService {
       .prepare(`
         INSERT INTO threads (
           id, title, mode, workspace_kind, cwd, project_id, workspace_id,
-          model_id, provider_id, status, selected_skill_ids_json,
+          model_id, provider_id, status, selected_skill_ids_json, selected_plugin_ids_json,
           knowledge_base_ids_json, created_at, updated_at, is_pinned, pinned_at, gpa_state_json,
           parent_thread_id, root_thread_id, agent_path, agent_role, last_task_message, multi_agent_mode
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         thread.id,
@@ -834,6 +837,7 @@ export class DatabaseService {
         thread.providerId,
         thread.status,
         JSON.stringify(thread.selectedSkillIds),
+        JSON.stringify(thread.selectedPluginIds),
         JSON.stringify(thread.knowledgeBaseIds),
         thread.createdAt,
         thread.updatedAt,
@@ -871,7 +875,7 @@ export class DatabaseService {
       .prepare(`
         UPDATE threads
         SET title = ?, mode = ?, workspace_kind = ?, cwd = ?, project_id = ?, workspace_id = ?,
-            model_id = ?, provider_id = ?, status = ?, selected_skill_ids_json = ?,
+            model_id = ?, provider_id = ?, status = ?, selected_skill_ids_json = ?, selected_plugin_ids_json = ?,
             knowledge_base_ids_json = ?, updated_at = ?, is_pinned = ?, pinned_at = ?, gpa_state_json = ?,
             parent_thread_id = ?, root_thread_id = ?, agent_path = ?, agent_role = ?,
             last_task_message = ?, multi_agent_mode = ?
@@ -888,6 +892,7 @@ export class DatabaseService {
         next.providerId,
         next.status,
         JSON.stringify(next.selectedSkillIds),
+        JSON.stringify(next.selectedPluginIds),
         JSON.stringify(next.knowledgeBaseIds),
         next.updatedAt,
         Number(next.isPinned),
@@ -2011,6 +2016,20 @@ export class DatabaseService {
       }));
   }
 
+  public deletePlugin(pluginId: string): void {
+    this.#db.exec("BEGIN");
+    try {
+      this.#db.prepare("DELETE FROM project_plugin_bindings WHERE plugin_id = ?").run(pluginId);
+      this.#db.prepare("DELETE FROM plugin_hook_runs WHERE plugin_id = ?").run(pluginId);
+      this.#db.prepare("DELETE FROM plugin_versions WHERE plugin_id = ?").run(pluginId);
+      this.#db.prepare("DELETE FROM plugins WHERE id = ?").run(pluginId);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   public setProjectPluginBinding(
     projectId: string,
     pluginId: string,
@@ -2239,6 +2258,7 @@ function mapThreadRow(row: any): ThreadRecord {
     providerId: row.provider_id,
     status: row.status,
     selectedSkillIds: JSON.parse(row.selected_skill_ids_json ?? "[]"),
+    selectedPluginIds: JSON.parse(row.selected_plugin_ids_json ?? "[]"),
     knowledgeBaseIds: JSON.parse(row.knowledge_base_ids_json ?? "[]"),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

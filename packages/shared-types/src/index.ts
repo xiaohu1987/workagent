@@ -75,6 +75,7 @@ export interface ThreadRecord {
   providerId: string;
   status: ThreadStatus;
   selectedSkillIds: string[];
+  selectedPluginIds: string[];
   knowledgeBaseIds: string[];
   createdAt: string;
   updatedAt: string;

@@ -59,11 +59,15 @@ import {
   getDeleteThreadBlockedMessage,
   getHistoryItemAffordance,
   isThreadExecutionInProgress,
+  shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
 } from "./thread-ui-state";
 import { useMotionPresence } from "./motion-presence";
 
-type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "agent" | "mcp" | "timeouts" | "update";
+type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "plugins" | "mcp" | "timeouts" | "update";
+type ManagedRemoval =
+  | { kind: "plugin"; plugin: PluginRecord }
+  | { kind: "skill"; skill: SkillMetadata };
 type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
 const BROWSER_WORKSPACE_RECOVERY_QUESTION_ID = "browser_workspace_recovery";
 
@@ -475,6 +479,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "timeouts", label: "超时设置", hint: "模型请求、重试和视频生成的等待时间" },
+  { id: "plugins", label: "插件管理", hint: "安装插件并管理当前聊天或项目的启用状态" },
   { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
 ];
 
@@ -611,6 +616,8 @@ export function App() {
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
   const snapshotThreadIdRef = useRef<string | null>(null);
+  const pluginToggleQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pluginEnabledStateRef = useRef<Map<string, boolean>>(new Map());
   const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
   const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
@@ -650,6 +657,8 @@ export function App() {
   const [skillsSortOpen, setSkillsSortOpen] = useState(false);
   const skillsSortMenuRef = useRef<HTMLDivElement | null>(null);
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
+  const [managedRemoval, setManagedRemoval] = useState<ManagedRemoval | null>(null);
+  const [removingManagedItem, setRemovingManagedItem] = useState(false);
   const [gpaState, setGpaState] = useState<GpaState>({
     stage: "off",
     fullAccess: false,
@@ -661,7 +670,7 @@ export function App() {
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
-  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp">("root");
+  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "plugins" | "skills" | "mcp">("root");
   const [composerAddSubmenuPosition, setComposerAddSubmenuPosition] = useState<{ left: number; top: number; anchorTop: number; maxHeight: number } | null>(null);
   const composerAddSubmenuRef = useRef<HTMLDivElement | null>(null);
   const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
@@ -725,6 +734,7 @@ export function App() {
   const [knowledgeBusyId, setKnowledgeBusyId] = useState<string | null>(null);
   const [isKnowledgeImporting, setIsKnowledgeImporting] = useState(false);
   const [pluginSource, setPluginSource] = useState("https://github.com/obra/superpowers");
+  const [isInstallingPlugin, setIsInstallingPlugin] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
@@ -737,6 +747,7 @@ export function App() {
   const [exitingNoticeId, setExitingNoticeId] = useState<number | null>(null);
   const [isTranscriptAtLatest, setIsTranscriptAtLatest] = useState(true);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
+  const [historyThreadDeleteConfirmation, setHistoryThreadDeleteConfirmation] = useState<ThreadRecord | null>(null);
   const [deletingQueuedMessageId, setDeletingQueuedMessageId] = useState<string | null>(null);
   const [isClearChatConfirmOpen, setIsClearChatConfirmOpen] = useState(false);
   const [isClearingChat, setIsClearingChat] = useState(false);
@@ -1173,6 +1184,7 @@ export function App() {
           message?: { role?: MessageRecord["role"] };
           thread?: ThreadRecord;
           childThread?: ThreadRecord;
+          pluginChanged?: { pluginId: string; enabled: boolean };
           modelId?: string;
           agentCapability?: ModelProfile["agentCapability"];
           agentCapabilityCheckedAt?: string;
@@ -1190,6 +1202,7 @@ export function App() {
         };
       };
       const currentSelectedThreadId = selectedThreadIdRef.current;
+      const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
       if (typed.type === "terminal.output" && typed.threadId === currentSelectedThreadId) {
         const sessionId = typeof typed.payload?.sessionId === "string" ? typed.payload.sessionId : "default";
         updateTerminalSessionState(currentSelectedThreadId, sessionId, (current) => ({
@@ -1487,7 +1500,7 @@ export function App() {
           );
         }
       }
-      if (typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
+      if (!isPluginStateUpdate && typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
         const runtimeThreadId = typed.threadId;
         if (typed.payload.childThread && runtimeThreadId === currentSelectedThreadId) {
           void refreshSnapshot(runtimeThreadId);
@@ -1545,19 +1558,21 @@ export function App() {
           };
         });
       }
-      void refreshThreads();
+      if (!isPluginStateUpdate) {
+        void refreshThreads();
 
-      if (!typed.threadId || typed.threadId === currentSelectedThreadId) {
-        void refreshSnapshot(typed.threadId ?? currentSelectedThreadId);
-      }
+        if (!typed.threadId || typed.threadId === currentSelectedThreadId) {
+          void refreshSnapshot(typed.threadId ?? currentSelectedThreadId);
+        }
 
-      if (
-        typed.type === "thread.updated" ||
-        typed.type === "browser.updated" ||
-        typed.type === "knowledge.imported"
-      ) {
-        void refreshPlugins();
-        void refreshSkills();
+        if (
+          typed.type === "thread.updated" ||
+          typed.type === "browser.updated" ||
+          typed.type === "knowledge.imported"
+        ) {
+          void refreshPlugins();
+          void refreshSkills();
+        }
       }
     });
     return dispose;
@@ -1720,7 +1735,7 @@ export function App() {
   }, [filePreviewPath, selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !isClearChatConfirmOpen && !notice && !filePreviewPath) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !notice && !filePreviewPath) {
       return;
     }
 
@@ -1738,6 +1753,11 @@ export function App() {
 
         if (isClearChatConfirmOpen && !isClearingChat) {
           setIsClearChatConfirmOpen(false);
+          return;
+        }
+
+        if (historyThreadDeleteConfirmation && !deletingThreadId) {
+          setHistoryThreadDeleteConfirmation(null);
           return;
         }
 
@@ -1762,7 +1782,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, isClearChatConfirmOpen, isClearingChat, isProjectCreateOpen, isSettingsOpen, notice, updateConfirmDialog]);
+  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isProjectCreateOpen, isSettingsOpen, notice, updateConfirmDialog]);
 
   useEffect(() => {
     if (!notice || isNoticeHovered) {
@@ -1787,8 +1807,8 @@ export function App() {
   }, [exitingNoticeId, notice]);
 
   const selectedThread = useMemo(
-    () => threads.find((thread) => thread.id === selectedThreadId) ??
-      (snapshot?.thread.id === selectedThreadId ? snapshot.thread : null),
+    () => (snapshot?.thread.id === selectedThreadId ? snapshot.thread : null) ??
+      threads.find((thread) => thread.id === selectedThreadId) ?? null,
     [threads, selectedThreadId, snapshot?.thread]
   );
   useEffect(() => {
@@ -1837,6 +1857,8 @@ export function App() {
       };
 
     const filtered = skills.filter((skill) => {
+      // Plugin-owned Skills are managed with their plugin, not as standalone Skills.
+      if (skill.pluginId) return false;
       if (!query) return true;
       const haystack = [
         skill.displayName ?? "",
@@ -1917,6 +1939,22 @@ export function App() {
   );
   const canImportProjectKnowledge = selectedThread?.mode === "project" && !!selectedThread.cwd;
   const workflowBindings = snapshot?.projectPlugins ?? [];
+  const enabledPluginIds = useMemo(() => {
+    if (selectedThread?.mode === "project") {
+      return new Set(workflowBindings.filter((item) => item.binding?.enabled).map((item) => item.plugin.id));
+    }
+    return new Set(selectedThread?.selectedPluginIds ?? []);
+  }, [selectedThread?.id, selectedThread?.mode, selectedThread?.selectedPluginIds, workflowBindings]);
+  const visibleComposerSkills = useMemo(
+    () => skills.filter((skill) => !skill.pluginId || enabledPluginIds.has(skill.pluginId)),
+    [enabledPluginIds, skills]
+  );
+  useEffect(() => {
+    if (!selectedThreadId) return;
+    for (const plugin of plugins) {
+      pluginEnabledStateRef.current.set(`${selectedThreadId}:${plugin.id}`, enabledPluginIds.has(plugin.id));
+    }
+  }, [enabledPluginIds, plugins, selectedThreadId]);
   const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
   const selectedMessages = snapshot?.messages ?? [];
   const queuedMessages = snapshot?.queuedMessages ?? [];
@@ -1994,8 +2032,7 @@ export function App() {
   // until the runtime explicitly completes the turn, rather than freezing the
   // elapsed timer at the last completed tool call.
   const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
-    isTaskProcessing,
-    Boolean(activeRuntimeActivity) && !completedTurnTimer
+    isTaskProcessing
   );
   const taskProcessingLabel = useMemo(
     () =>
@@ -2124,6 +2161,8 @@ export function App() {
         return "多模态模型";
       case "skills":
         return "Skill 管理";
+      case "plugins":
+        return "插件管理";
       case "mcp":
         return "MCP 管理";
       case "knowledge":
@@ -2407,7 +2446,24 @@ export function App() {
         ...next,
         messages: remaining.length > 0 ? [...next.messages, ...remaining] : next.messages
       });
+      setThreads((current) => current.map((thread) =>
+        thread.id === next.thread.id ? next.thread : thread
+      ));
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: next.browserTabs }));
+      if (!isThreadExecutionInProgress(next.thread.status)) {
+        // A refresh can observe completion before its final runtime event reaches
+        // the renderer. Do not let an old activity record keep the thinking UI alive.
+        clearRuntimeActivity(threadId);
+        setRuntimeProgress((current) => {
+          if (current?.threadId !== threadId) return current;
+          return shouldPreservePreparingRuntime(
+            next.thread.status,
+            next.queuedMessages.length,
+            current.runtimeObserved
+          ) ? current : null;
+        });
+        setActiveToolCall((current) => current?.threadId === threadId ? null : current);
+      }
       if (next.gpa) {
         const gpa =
           next.thread.mode !== "project" && next.gpa.stage !== "off"
@@ -2696,13 +2752,19 @@ export function App() {
       return;
     }
 
-    void confirmDeleteHistoryThread(thread);
+    setHistoryThreadDeleteConfirmation(thread);
   }
 
-  async function confirmDeleteHistoryThread(thread: ThreadRecord) {
+  async function confirmDeleteHistoryThread() {
+    const thread = historyThreadDeleteConfirmation;
+    if (!thread || deletingThreadId) {
+      return;
+    }
+
     setDeletingThreadId(thread.id);
     try {
       await window.codexh.deleteThread(thread.id);
+      setHistoryThreadDeleteConfirmation(null);
       await refreshThreads();
       showNotice("任务已删除。", { tone: "success" });
     } catch (error) {
@@ -3571,13 +3633,49 @@ export function App() {
   }
 
   async function installPlugin() {
-    if (!pluginSource.trim()) {
+    const source = pluginSource.trim();
+    if (!source) {
+      showNotice("请输入插件仓库地址");
       return;
     }
 
-    await window.codexh.installPlugin(pluginSource.trim());
-    await refreshPlugins();
-    await refreshSkills();
+    if (isInstallingPlugin) {
+      return;
+    }
+
+    setIsInstallingPlugin(true);
+    try {
+      const plugin = await window.codexh.installPlugin(source);
+      await Promise.all([refreshPlugins(), refreshSkills()]);
+      showNotice(`已安装插件：${plugin.name}`, { tone: "success" });
+    } catch (error) {
+      showNotice("安装插件失败", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setIsInstallingPlugin(false);
+    }
+  }
+
+  async function confirmManagedRemoval() {
+    const target = managedRemoval;
+    if (!target || removingManagedItem) return;
+    setRemovingManagedItem(true);
+    try {
+      if (target.kind === "plugin") {
+        await window.codexh.removePlugin(target.plugin.id);
+        await Promise.all([refreshPlugins(), refreshSkills(), refreshThreads()]);
+      } else {
+        await window.codexh.removeSkill(target.skill.id);
+        await refreshSkills();
+      }
+      setManagedRemoval(null);
+      showNotice(target.kind === "plugin" ? "插件已移除" : "Skill 已移除", { tone: "success" });
+    } catch (error) {
+      showNotice("移除失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setRemovingManagedItem(false);
+    }
   }
 
   async function saveConfigDraft() {
@@ -3796,7 +3894,7 @@ export function App() {
     }, 160);
   }
 
-  function openComposerAddSubmenu(view: "skills" | "mcp", target: HTMLElement) {
+  function openComposerAddSubmenu(view: "plugins" | "skills" | "mcp", target: HTMLElement) {
     clearComposerAddMenuCloseTimer();
     const rect = target.getBoundingClientRect();
     const viewportMargin = 12;
@@ -3834,6 +3932,61 @@ export function App() {
       setComposerAttachments((current) => current.filter((attachment) => attachment.id !== id));
       setRemovingComposerAttachmentId((current) => current === id ? null : current);
     }, 140);
+  }
+
+  function applyPluginEnabledLocally(threadId: string, pluginId: string, enabled: boolean) {
+    const updateIds = (ids: string[]) => enabled
+      ? [...new Set([...ids, pluginId])]
+      : ids.filter((id) => id !== pluginId);
+
+    setThreads((current) => current.map((thread) =>
+      thread.id === threadId && thread.mode !== "project"
+        ? { ...thread, selectedPluginIds: updateIds(thread.selectedPluginIds) }
+        : thread
+    ));
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      if (current.thread.mode !== "project") {
+        return { ...current, thread: { ...current.thread, selectedPluginIds: updateIds(current.thread.selectedPluginIds) } };
+      }
+      return {
+        ...current,
+        projectPlugins: current.projectPlugins.map((item) =>
+          item.plugin.id === pluginId
+            ? {
+                ...item,
+                binding: {
+                  ...(item.binding ?? { projectId: current.thread.projectId ?? "", pluginId }),
+                  enabled
+                }
+              }
+            : item
+        )
+      };
+    });
+  }
+
+  function setThreadPluginEnabled(pluginId: string, enabled: boolean) {
+    const threadId = selectedThreadId;
+    if (!threadId) return;
+    const stateKey = `${threadId}:${pluginId}`;
+    const previous = pluginEnabledStateRef.current.get(stateKey) ?? enabledPluginIds.has(pluginId);
+    if (previous === enabled) return;
+
+    pluginEnabledStateRef.current.set(stateKey, enabled);
+    applyPluginEnabledLocally(threadId, pluginId, enabled);
+    pluginToggleQueueRef.current = pluginToggleQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await window.codexh.setThreadPluginEnabled({ threadId, pluginId, enabled });
+        } catch (error) {
+          if (pluginEnabledStateRef.current.get(stateKey) !== enabled) return;
+          pluginEnabledStateRef.current.set(stateKey, previous);
+          applyPluginEnabledLocally(threadId, pluginId, previous);
+          showNotice("更新插件状态失败", { message: error instanceof Error ? error.message : String(error) });
+        }
+      });
   }
 
   async function chooseComposerFiles(imagesOnly: boolean) {
@@ -4459,6 +4612,10 @@ export function App() {
   const visibleGpaPlanResumeDialog = gpaPlanResumeDialog ?? gpaPlanResumePresence.value;
   const updateConfirmPresence = useMotionPresence(updateConfirmDialog);
   const visibleUpdateConfirmDialog = updateConfirmDialog ?? updateConfirmPresence.value;
+  const historyThreadDeleteConfirmPresence = useMotionPresence(historyThreadDeleteConfirmation);
+  const visibleHistoryThreadDeleteConfirmation = historyThreadDeleteConfirmation ?? historyThreadDeleteConfirmPresence.value;
+  const managedRemovalPresence = useMotionPresence(managedRemoval);
+  const visibleManagedRemoval = managedRemoval ?? managedRemovalPresence.value;
   const clearChatConfirmPresence = useMotionPresence(isClearChatConfirmOpen ? true : null);
   const fetchedModelsPresence = useMotionPresence(showFetchedModels ? true : null);
   const multimodalPickerPresence = useMotionPresence(multimodalPickerRole);
@@ -5056,6 +5213,19 @@ export function App() {
                   ))}
                 </div>
               ) : null}
+              {plugins.filter((plugin) => enabledPluginIds.has(plugin.id)).length > 0 ? (
+                <div className="composer-attachments" aria-label="当前启用的插件">
+                  {plugins.filter((plugin) => enabledPluginIds.has(plugin.id)).map((plugin) => (
+                    <div key={plugin.id} className="composer-attachment-chip skill" title={`${plugin.name} · ${selectedThread?.mode === "project" ? "当前项目" : "当前聊天"}`}>
+                      <span className="composer-attachment-icon" aria-hidden><IconSkills /></span>
+                      <span className="composer-attachment-copy"><strong><span>{plugin.name}</span></strong></span>
+                      <button type="button" className="composer-attachment-remove" aria-label={`停用 ${plugin.name}`} onClick={() => void setThreadPluginEnabled(plugin.id, false)}>
+                        <IconClose />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               <textarea
                 ref={composerRef}
                 value={input}
@@ -5417,20 +5587,18 @@ export function App() {
 
                               <label className="settings-field full">
                                 <span>模式设置</span>
-                                <select
+                                <ComposerSelect
+                                  className="form-select provider-type-select"
+                                  ariaLabel="模式设置"
                                   value={settingsProvider.type}
-                                  onChange={(event) =>
+                                  onChange={(type) =>
                                     updateProviderDraft(settingsProvider.id, {
-                                      type: event.target.value as ProviderType
+                                      type: type as ProviderType
                                     })
                                   }
-                                >
-                                  {PROVIDER_TYPE_OPTIONS.map((option) => (
-                                    <option key={option.value} value={option.value}>
-                                      {option.label}
-                                    </option>
-                                  ))}
-                                </select>
+                                  options={PROVIDER_TYPE_OPTIONS}
+                                  placeholder="选择模式"
+                                />
                               </label>
 
                               <label className="settings-field">
@@ -5848,11 +6016,18 @@ export function App() {
                         </label>
                         <label className="settings-field">
                           <span>可见范围</span>
-                          <select value={knowledgeScope} onChange={(event) => setKnowledgeScope(event.target.value as KnowledgeScope)}>
-                            <option value="global">全局知识库</option>
-                            <option value="project">项目知识库</option>
-                            <option value="imported">仅当前会话导入</option>
-                          </select>
+                          <ComposerSelect
+                            className="form-select knowledge-scope-select"
+                            ariaLabel="可见范围"
+                            value={knowledgeScope}
+                            onChange={(scope) => setKnowledgeScope(scope as KnowledgeScope)}
+                            options={[
+                              { value: "global", label: "全局知识库" },
+                              { value: "project", label: "项目知识库" },
+                              { value: "imported", label: "仅当前会话导入" }
+                            ]}
+                            placeholder="选择可见范围"
+                          />
                         </label>
                         {knowledgeScope === "project" && !canImportProjectKnowledge ? <div className="knowledge-scope-warning">项目知识库需要先切换到项目聊天。</div> : null}
                         <details className="knowledge-format-details">
@@ -5990,8 +6165,8 @@ export function App() {
                 <div className="settings-section">
                   <div className="config-block skills-config-block">
                     <div className="section-copy">
-                      <strong>已加载 Skills</strong>
-                      <span>展示当前应用可见的技能清单、作用域、领域与调用统计。</span>
+                      <strong>独立 Skills</strong>
+                      <span>展示系统、用户和项目 Skill。插件内的 Skill 请在“插件管理”中查看和移除。</span>
                     </div>
                     <div className="skills-toolbar">
                       <div className="skills-search-wrap">
@@ -6042,17 +6217,16 @@ export function App() {
                     </div>
                     <div className="skills-list">
                       {visibleSkills.length ? visibleSkills.map(({ skill, stats }) => {
-                        const scopeLabel = skill.pluginId ? "插件" : skill.scope;
-                        const scopeClass = skill.pluginId
-                          ? "plugin"
-                          : skill.scope === "system"
-                            ? "system"
-                            : skill.scope === "repo"
-                              ? "repo"
-                              : "user";
+                        const scopeLabel = skill.scope;
+                        const scopeClass = skill.scope === "system"
+                          ? "system"
+                          : skill.scope === "repo"
+                            ? "repo"
+                            : "user";
                         const successLabel = stats.callCount > 0
                           ? `${Math.round(stats.successRate * 100)}%`
                           : "—";
+                        const canRemove = !skill.pluginId && skill.scope === "user";
                         return (
                           <article key={skill.id} className="skill-row">
                             <div className="skill-row-main">
@@ -6078,9 +6252,20 @@ export function App() {
                                 <span className="skill-row-path" title={skill.skillPath}>{skill.skillPath}</span>
                               </div>
                             </div>
+                            {canRemove ? (
+                              <button
+                                type="button"
+                                className="button ghost danger-icon-button skill-remove-button"
+                                title={`移除 ${skill.displayName ?? skill.qualifiedName}`}
+                                aria-label={`移除 ${skill.displayName ?? skill.qualifiedName}`}
+                                onClick={() => setManagedRemoval({ kind: "skill", skill })}
+                              >
+                                <IconTrash />
+                              </button>
+                            ) : null}
                           </article>
                         );
-                      }) : <div className="detail-empty">{skillsSearchQuery.trim() ? "没有匹配的 Skill。" : "尚未加载 Skills。"}</div>}
+                      }) : <div className="detail-empty">{skillsSearchQuery.trim() ? "没有匹配的 Skill。" : "尚未加载独立 Skill。"}</div>}
                     </div>
                   </div>
                 </div>
@@ -6234,22 +6419,24 @@ export function App() {
                                            <span className="mcp-tool-name">{tool.name}</span>
                                          </label>
                                          <span className="mcp-tool-description" title={tool.description}>{tool.description || "无描述"}</span>
-                                         <select
-                                           className="mcp-tool-approval"
-                                           aria-label={`${tool.name} 的审批策略`}
+                                         <ComposerSelect
+                                           className="mcp-tool-approval-select"
+                                           ariaLabel={`${tool.name} 的审批策略`}
                                            value={policy?.approvalMode ?? server.defaultToolsApprovalMode ?? "prompt"}
-                                           onChange={(event) => updateMcpServerDraft(server.id, {
+                                           onChange={(approvalMode) => updateMcpServerDraft(server.id, {
                                              tools: {
                                                ...(server.tools ?? {}),
-                                               [tool.name]: { ...policy, approvalMode: event.target.value as "auto" | "prompt" | "writes" | "approve" }
+                                               [tool.name]: { ...policy, approvalMode: approvalMode as "auto" | "prompt" | "writes" | "approve" }
                                              }
                                            })}
-                                         >
-                                           <option value="auto">自动</option>
-                                           <option value="prompt">每次确认</option>
-                                           <option value="writes">写入确认</option>
-                                           <option value="approve">高风险确认</option>
-                                         </select>
+                                           options={[
+                                             { value: "auto", label: "自动" },
+                                             { value: "prompt", label: "每次确认" },
+                                             { value: "writes", label: "写入确认" },
+                                             { value: "approve", label: "高风险确认" }
+                                           ]}
+                                           placeholder="选择审批策略"
+                                         />
                                        </div>
                                      );
                                    })}
@@ -6293,64 +6480,61 @@ export function App() {
                 </div>
               ) : null}
 
-              {settingsTab === "agent" ? (
-                <div className="settings-section">
+              {settingsTab === "plugins" ? (
+                <div className="settings-section plugin-settings-section">
                   <div className="config-block">
                     <div className="section-copy">
                       <strong>安装机器人工作流包</strong>
                       <span>支持从 GitHub 仓库地址安装，例如 `obra/superpowers`。</span>
                     </div>
-                    <div className="action-row stretch">
+                    <div className="action-row stretch plugin-install-row">
                       <input
                         value={pluginSource}
                         onChange={(event) => setPluginSource(event.target.value)}
                         placeholder="GitHub 仓库地址或 owner/repo"
+                        disabled={isInstallingPlugin}
                       />
-                      <button className="button primary" onClick={() => void installPlugin()}>
-                        安装插件
+                      <button
+                        className="button primary"
+                        type="button"
+                        onClick={() => void installPlugin()}
+                        disabled={!pluginSource.trim() || isInstallingPlugin}
+                        aria-busy={isInstallingPlugin}
+                      >
+                        {isInstallingPlugin ? "正在安装..." : "安装插件"}
                       </button>
                     </div>
                   </div>
 
-                  <div className="config-block">
+                  <div className="config-block plugin-library-card">
                     <div className="section-copy">
-                      <strong>项目机器人</strong>
-                      <span>只有项目模式线程可以启用项目级机器人 Workflow Pack。</span>
+                      <strong>已安装插件</strong>
+                      <span>在聊天输入框的“插件”菜单中选择后，AI 会自动匹配其中的 Skill。这里仅用于安装和查看已安装的能力包。</span>
                     </div>
-                    <div className="stack-list">
+                    <div className="stack-list plugin-record-list">
                       {plugins.map((plugin) => {
-                        const binding =
-                          workflowBindings.find((item) => item.plugin.id === plugin.id)?.binding ?? null;
-                        const canToggle = selectedThread?.mode === "project";
-                        const enabled = binding?.enabled ?? false;
-
                         return (
-                          <article key={plugin.id} className="stack-card">
-                            <div className="stack-card-header">
-                              <strong>{plugin.name}</strong>
-                              <span className="pill">{plugin.version}</span>
+                          <article key={plugin.id} className="stack-card plugin-record">
+                            <div className="plugin-record-main">
+                              <span className="plugin-record-icon" aria-hidden><IconSkills /></span>
+                              <div className="plugin-record-copy">
+                                <div className="stack-card-header">
+                                  <strong>{plugin.name}</strong>
+                                  <span className="pill plugin-version-pill">v{plugin.version}</span>
+                                </div>
+                                <p className="plugin-record-source">{plugin.source}</p>
+                                <span className="plugin-record-path" title={plugin.installPath}>{plugin.installPath}</span>
+                              </div>
                             </div>
-                            <p>{plugin.source}</p>
-                            <span>{plugin.installPath}</span>
-                            <div className="action-row">
-                              <button
-                                className="button secondary"
-                                onClick={() =>
-                                  selectedThreadId &&
-                                  void window.codexh.setProjectPluginEnabled({
-                                    threadId: selectedThreadId,
-                                    pluginId: plugin.id,
-                                    enabled: !enabled
-                                  })
-                                }
-                                disabled={!canToggle}
-                              >
-                                {enabled ? "停用当前项目工作流" : "为当前项目启用"}
-                              </button>
-                              {!canToggle ? (
-                                <span className="subtle-inline">仅项目模式线程可启用</span>
-                              ) : null}
-                            </div>
+                            <button
+                              type="button"
+                              className="button ghost danger-icon-button plugin-remove-button"
+                              title={`移除 ${plugin.name}`}
+                              aria-label={`移除 ${plugin.name}`}
+                              onClick={() => setManagedRemoval({ kind: "plugin", plugin })}
+                            >
+                              <IconTrash />
+                            </button>
                           </article>
                         );
                       })}
@@ -6780,6 +6964,94 @@ export function App() {
         </div>
       ) : null}
 
+      {visibleManagedRemoval ? (
+        <div
+          className="project-sheet-overlay motion-overlay"
+          data-motion={managedRemovalPresence.phase}
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !removingManagedItem) {
+              setManagedRemoval(null);
+            }
+          }}
+        >
+          <div className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="managed-removal-title">
+            <div className="project-sheet-header delete-confirm-header">
+              <button className="project-sheet-close" type="button" onClick={() => setManagedRemoval(null)} disabled={removingManagedItem} title="关闭" aria-label="关闭">
+                <IconClose />
+              </button>
+            </div>
+            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
+              <strong id="managed-removal-title">{visibleManagedRemoval.kind === "plugin" ? "移除插件？" : "移除 Skill？"}</strong>
+              <p>
+                {visibleManagedRemoval.kind === "plugin"
+                  ? `“${visibleManagedRemoval.plugin.name}”及其所有 Skill、项目绑定和聊天选择都会被移除。`
+                  : `“${visibleManagedRemoval.skill.displayName ?? visibleManagedRemoval.skill.qualifiedName}”及其关联文件会被移除。`}
+              </p>
+            </div>
+            <div className="project-sheet-actions">
+              <button className="button ghost" type="button" disabled={removingManagedItem} onClick={() => setManagedRemoval(null)}>取消</button>
+              <button className="button clear-chat-danger" type="button" disabled={removingManagedItem} onClick={() => void confirmManagedRemoval()}>
+                {removingManagedItem ? "正在移除..." : "确认移除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {visibleHistoryThreadDeleteConfirmation ? (
+        <div
+          className="project-sheet-overlay motion-overlay"
+          data-motion={historyThreadDeleteConfirmPresence.phase}
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !deletingThreadId) {
+              setHistoryThreadDeleteConfirmation(null);
+            }
+          }}
+        >
+          <div
+            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="history-thread-delete-confirm-title"
+          >
+            <div className="project-sheet-header delete-confirm-header">
+              <button
+                className="project-sheet-close"
+                type="button"
+                onClick={() => setHistoryThreadDeleteConfirmation(null)}
+                title="关闭"
+                aria-label="关闭"
+                disabled={Boolean(deletingThreadId)}
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
+              <strong id="history-thread-delete-confirm-title">删除历史任务？</strong>
+              <p>“{visibleHistoryThreadDeleteConfirmation.title}”的消息、执行记录、附件和子任务都会被永久删除，且无法恢复。</p>
+            </div>
+            <div className="project-sheet-actions">
+              <button
+                className="button ghost"
+                type="button"
+                disabled={Boolean(deletingThreadId)}
+                onClick={() => setHistoryThreadDeleteConfirmation(null)}
+              >
+                取消
+              </button>
+              <button
+                className="button clear-chat-danger"
+                type="button"
+                disabled={Boolean(deletingThreadId)}
+                onClick={() => void confirmDeleteHistoryThread()}
+              >
+                {deletingThreadId ? "正在删除..." : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {visibleUpdateConfirmDialog ? (
         <div
           className="project-sheet-overlay motion-overlay"
@@ -7025,6 +7297,26 @@ export function App() {
                     </button>
                     <div
                       className="composer-add-menu-item-with-submenu"
+                      onMouseEnter={(event) => openComposerAddSubmenu("plugins", event.currentTarget)}
+                    >
+                    <button
+                      type="button"
+                      className="gpa-popover-item composer-add-menu-parent"
+                      role="menuitem"
+                      aria-haspopup="menu"
+                      aria-expanded={composerAddMenuView === "plugins"}
+                      onFocus={(event) => openComposerAddSubmenu("plugins", event.currentTarget)}
+                    >
+                      <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
+                      <span className="gpa-popover-item-copy">
+                        <span className="gpa-popover-item-title">插件</span>
+                        <span className="gpa-popover-item-hint">启用当前聊天可用的能力包</span>
+                      </span>
+                      <IconChevronRight />
+                    </button>
+                    </div>
+                    <div
+                      className="composer-add-menu-item-with-submenu"
                       onMouseEnter={(event) => openComposerAddSubmenu("skills", event.currentTarget)}
                     >
                     <button
@@ -7144,11 +7436,31 @@ export function App() {
                   onMouseLeave={scheduleComposerAddMenuClose}
                 >
                   <div className="composer-add-menu-submenu-title">
-                    {composerAddMenuView === "skills" ? "Skills" : "MCP 服务"}
+                    {composerAddMenuView === "plugins" ? "插件" : composerAddMenuView === "skills" ? "Skills" : "MCP 服务"}
                   </div>
                   <div className="composer-add-menu-list">
-                    {composerAddMenuView === "skills" ? (
-                      skills.length > 0 ? skills.map((skill) => (
+                    {composerAddMenuView === "plugins" ? (
+                      plugins.length > 0 ? plugins.map((plugin) => {
+                        const enabled = enabledPluginIds.has(plugin.id);
+                        return (
+                          <button
+                            key={plugin.id}
+                            className={`gpa-popover-item ${enabled ? "is-active" : ""}`}
+                            role="menuitemcheckbox"
+                            aria-checked={enabled}
+                            onClick={() => void setThreadPluginEnabled(plugin.id, !enabled)}
+                          >
+                            <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
+                            <span className="gpa-popover-item-copy">
+                              <span className="gpa-popover-item-title">{plugin.name}</span>
+                              <span className="gpa-popover-item-hint">{plugin.version} · {selectedThread?.mode === "project" ? "项目" : "当前聊天"}</span>
+                            </span>
+                            {enabled ? <span className="gpa-popover-item-check">已启用</span> : null}
+                          </button>
+                        );
+                      }) : <span className="composer-add-menu-empty">没有已安装的插件</span>
+                    ) : composerAddMenuView === "skills" ? (
+                      visibleComposerSkills.length > 0 ? visibleComposerSkills.map((skill) => (
                         <button
                           key={skill.id}
                           className="gpa-popover-item"
@@ -9455,12 +9767,11 @@ function ComposerModelPicker({
 }
 
 export function shouldShowRuntimeActivityPanel(
-  isTaskProcessing: boolean,
-  hasActiveRuntimeActivity = false
+  isTaskProcessing: boolean
 ): boolean {
-  // The persistent activity panel is the execution heartbeat between tool calls
-  // and while the model is thinking.
-  return isTaskProcessing || hasActiveRuntimeActivity;
+  // Runtime entries are display history, not an execution source of truth.
+  // The persisted thread state determines whether the live heartbeat is visible.
+  return isTaskProcessing;
 }
 
 export function buildTimelineEntries(
@@ -10988,8 +11299,9 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
 
 const ToolActivityGroup = memo(function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
   const [expanded, setExpanded] = useState(false);
-  const { runningCall, status, summary } = getToolActivityPresentation(toolCalls);
+  const { runningCall, status } = getToolActivityPresentation(toolCalls);
   const isRunning = Boolean(runningCall);
+  const conciseLabel = getConciseToolActivityLabel(toolCalls, runningCall);
 
   return (
     <section className={`tool-activity-group ${status} ${expanded ? "is-expanded" : ""}`} aria-live="polite">
@@ -10998,12 +11310,10 @@ const ToolActivityGroup = memo(function ToolActivityGroup({ toolCalls }: { toolC
         className="tool-activity-summary"
         aria-expanded={expanded}
         onClick={() => setExpanded((current) => !current)}
+        aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : "已完成"}，${toolCalls.length} 项`}
       >
         <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={toolCalls[0]?.toolName ?? ""} /></span>
-        <span className="tool-activity-summary-copy">
-          <strong>{summary.title}</strong>
-          {summary.detail ? <span>{summary.detail}</span> : null}
-        </span>
+        <span className="tool-activity-summary-copy"><strong>{conciseLabel}</strong></span>
         <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : "已完成"}</span>
         <span className="tool-activity-summary-count">{toolCalls.length} 项</span>
         <span className="tool-activity-chevron" aria-hidden />
@@ -11143,6 +11453,35 @@ export function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?
     title: `\u5df2\u5b8c\u6210${subject}`,
     detail: completedDetail || `\u5df2\u5904\u7406 ${toolCalls.length} \u6b65`
   };
+}
+
+function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord): string {
+  if (runningCall) {
+    switch (getToolActivityKind(runningCall)) {
+      case "search": return "正在搜索项目";
+      case "read": return "正在查看文件";
+      case "write": return "正在编辑文件";
+      case "verify": return "正在验证结果";
+      case "browser": return "正在浏览网页";
+      default: return "正在运行命令";
+    }
+  }
+
+  const counts = { search: 0, read: 0, write: 0, verify: 0, browser: 0, other: 0 };
+  for (const toolCall of toolCalls) counts[getToolActivityKind(toolCall)] += 1;
+
+  const commandCount = toolCalls.filter((toolCall) =>
+    toolCall.toolName === "shell.exec" || toolCall.toolName === "execute_command"
+  ).length;
+  const labels = [
+    counts.write ? "编辑了文件" : "",
+    commandCount ? (commandCount > 1 ? "运行了多个命令" : "运行了命令") : "",
+    !counts.write && counts.read ? (counts.read > 1 ? "查看了多个文件" : "查看了文件") : "",
+    !counts.write && !counts.read && counts.search ? "搜索了项目" : "",
+    !counts.write && !counts.read && !counts.search && counts.browser ? "浏览了网页" : ""
+  ].filter(Boolean);
+
+  return labels.slice(0, 2).join("，") || "完成了多个操作";
 }
 
 function getToolWriteTargets(toolCall: ToolCallRecord): string[] {

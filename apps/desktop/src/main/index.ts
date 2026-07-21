@@ -194,6 +194,9 @@ function notifyBackgroundRuntimeEvent(event: {
 
 async function createWindow(): Promise<void> {
   await backend.initialize();
+  // Start discovery before the renderer is interactive so the first send is
+  // unlikely to wait for plugin, Skill, and MCP setup.
+  void backend.initializeDeferredServices();
   const updatePaths = backend.getUpdatePaths();
   updates = new UpdateService({
     currentVersion: app.getVersion(),
@@ -282,9 +285,6 @@ async function createWindow(): Promise<void> {
 
   mainWindow.webContents.setZoomFactor(0.9);
   void updates.check();
-  setTimeout(() => {
-    void backend.initializeDeferredServices();
-  }, 250);
 }
 
 function reportStartupError(error: unknown): void {
@@ -457,13 +457,15 @@ function registerIpc(): void {
     return backend.listSkills();
   });
   ipcMain.handle("skills:usage-stats", () => backend.getSkillUsageStats());
+  ipcMain.handle("skills:remove", (_event, skillId: string) => backend.removeSkill(skillId));
   ipcMain.handle("plugins:list", async () => {
     await backend.initializeDeferredServices();
     return backend.listPlugins();
   });
   ipcMain.handle("plugins:install", (_event, source: string) => backend.installPlugin(source));
+  ipcMain.handle("plugins:remove", (_event, pluginId: string) => backend.removePlugin(pluginId));
   ipcMain.handle("plugins:set-enabled", (_event, payload) =>
-    backend.setProjectPluginEnabled(payload.threadId, payload.pluginId, payload.enabled)
+    backend.setThreadPluginEnabled(payload.threadId, payload.pluginId, payload.enabled)
   );
   ipcMain.handle("config:get", () => {
     console.log("[ipc] config:get requested");

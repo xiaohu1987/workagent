@@ -90,6 +90,45 @@ async function seedBundledSkills(layout: Pick<HomeLayout, "skillsSystemDir" | "s
   return copied;
 }
 
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isPathWithinDirectory(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+async function seedBundledPlugins(layout: Pick<HomeLayout, "pluginsInstalledDir" | "pluginsDisabledDir">): Promise<string[]> {
+  if (!app.isPackaged) {
+    return [];
+  }
+
+  const bundledRoot = path.join(process.resourcesPath, "seed-plugins");
+  try {
+    const entries = await fs.readdir(bundledRoot, { withFileTypes: true });
+    const seeded: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const source = path.join(bundledRoot, entry.name);
+      const destination = path.join(layout.pluginsInstalledDir, entry.name);
+      const removalMarker = path.join(layout.pluginsDisabledDir, `${entry.name}.removed`);
+      if (await pathExists(destination) || await pathExists(removalMarker)) continue;
+      await fs.cp(source, destination, { recursive: true, force: false, errorOnExist: true, preserveTimestamps: true });
+      seeded.push(entry.name);
+    }
+    return seeded;
+  } catch {
+    // A release without bundled plugins remains usable and never overwrites local plugins.
+    return [];
+  }
+}
+
 export class DesktopBackend {
   readonly #events = new EventEmitter();
   readonly #approvalResolvers: ResolverMap<boolean> = new Map();
@@ -123,6 +162,7 @@ export class DesktopBackend {
   #mcpOAuth!: McpOAuthService;
   #logs!: RuntimeLogWriter;
   #deferredServices: Promise<void> | null = null;
+  #backgroundSkillRefresh: Promise<void> | null = null;
 
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
@@ -131,6 +171,7 @@ export class DesktopBackend {
       new McpCredentialStore(path.join(path.dirname(this.#layout.configFile), "mcp-credentials.json"))
     );
     const bundledSkillFileCount = await seedBundledSkills(this.#layout);
+    const bundledPluginIds = await seedBundledPlugins(this.#layout);
     this.#config = await loadConfig(this.#layout.configFile);
     this.#db = new DatabaseService(this.#layout.dbFile);
     this.#db.recoverInterruptedThreads();
@@ -250,7 +291,11 @@ export class DesktopBackend {
     for (const threadId of this.#db.listQueuedMessageThreadIds()) {
       this.#runtime.wakeQueuedMessages(threadId);
     }
-    await this.#logs.append("backend.initialized", { logsDir: this.#layout.logsDir, bundledSkillFileCount });
+    await this.#logs.append("backend.initialized", {
+      logsDir: this.#layout.logsDir,
+      bundledSkillFileCount,
+      bundledPluginIds
+    });
   }
 
   public initializeDeferredServices(): Promise<void> {
@@ -355,7 +400,7 @@ export class DesktopBackend {
       modelId: selection.modelId,
       providerId: selection.providerId
     });
-    void this.refreshSkills(thread.cwd);
+    this.refreshSkillsInBackground(thread.cwd);
     this.#runtime.ensureThread(thread.id);
     return thread;
   }
@@ -662,7 +707,6 @@ export class DesktopBackend {
       });
     }
 
-    await this.refreshSkills(thread.cwd);
     const queued = this.#db.enqueueQueuedMessage({
       threadId,
       content,
@@ -678,6 +722,9 @@ export class DesktopBackend {
     if (dispatch) {
       this.#runtime.wakeQueuedMessages(threadId);
     }
+    // Skill discovery walks user, project, and plugin directories. It must not
+    // hold up a message that can run using the current catalog.
+    this.refreshSkillsInBackground(thread.cwd);
   }
 
   public async setThreadMultiAgentMode(threadId: string, mode: ThreadRecord["multiAgentMode"]): Promise<ThreadRecord> {
@@ -1248,6 +1295,7 @@ export class DesktopBackend {
 
   public async installPlugin(source: string): Promise<PluginRecord> {
     const plugin = await this.#plugins.installFromSource(source, this.#layout.pluginsInstalledDir);
+    await fs.rm(path.join(this.#layout.pluginsDisabledDir, `${plugin.id}.removed`), { force: true });
     const sourceHash = await hashDirectory(plugin.installPath);
     this.#db.upsertPlugin(plugin, sourceHash);
     await this.refreshMcpConfiguration();
@@ -1255,19 +1303,76 @@ export class DesktopBackend {
     return plugin;
   }
 
-  public setProjectPluginEnabled(threadId: string, pluginId: string, enabled: boolean): ProjectPluginBinding {
-    const thread = this.#db.getThread(threadId);
-    if (thread.mode !== "project" || !thread.projectId) {
-      throw new Error("Workflow packs can only be enabled for project-mode threads.");
+  public async removePlugin(pluginId: string): Promise<void> {
+    const plugin = this.#db.listPlugins().find((item) => item.id === pluginId);
+    if (!plugin) {
+      throw new Error(`Plugin ${pluginId} is not installed.`);
     }
-    const binding = this.#db.setProjectPluginBinding(thread.projectId, pluginId, enabled);
-    void this.emit({
+    if (!isPathWithinDirectory(this.#layout.pluginsInstalledDir, plugin.installPath)) {
+      throw new Error("Refusing to remove a plugin outside the managed plugin directory.");
+    }
+
+    await fs.rm(plugin.installPath, { recursive: true, force: false });
+    await fs.writeFile(path.join(this.#layout.pluginsDisabledDir, `${plugin.id}.removed`), "", "utf8");
+    this.#db.deletePlugin(plugin.id);
+    for (const thread of this.#db.listThreads(true)) {
+      if (thread.selectedPluginIds.includes(plugin.id)) {
+        this.#db.updateThread(thread.id, {
+          selectedPluginIds: thread.selectedPluginIds.filter((id) => id !== plugin.id)
+        });
+      }
+    }
+    await this.refreshMcpConfiguration();
+    await this.refreshSkills();
+  }
+
+  public async removeSkill(skillId: string): Promise<void> {
+    const skill = this.#skills.list().find((item) => item.id === skillId);
+    if (!skill) {
+      throw new Error("Skill is no longer available.");
+    }
+    if (skill.pluginId || skill.scope !== "user") {
+      throw new Error("Only independently installed or imported skills can be removed here.");
+    }
+    const skillDirectory = path.dirname(skill.skillPath);
+    const allowedRoots = [this.#layout.skillsImportedDir, this.#layout.skillsInstalledDir];
+    if (!allowedRoots.some((root) => isPathWithinDirectory(root, skillDirectory))) {
+      throw new Error("Refusing to remove a skill outside the managed user skill directories.");
+    }
+
+    await fs.rm(skillDirectory, { recursive: true, force: false });
+    for (const thread of this.#db.listThreads(true)) {
+      if (thread.selectedSkillIds.includes(skill.id)) {
+        this.#db.updateThread(thread.id, {
+          selectedSkillIds: thread.selectedSkillIds.filter((id) => id !== skill.id)
+        });
+      }
+    }
+    await this.refreshSkills();
+  }
+
+  public async setThreadPluginEnabled(threadId: string, pluginId: string, enabled: boolean): Promise<ThreadRecord> {
+    const thread = this.#db.getThread(threadId);
+    if (!this.#db.listPlugins().some((plugin) => plugin.id === pluginId)) {
+      throw new Error(`Plugin ${pluginId} is not installed.`);
+    }
+    const updated = thread.mode === "project" && thread.projectId
+      ? thread
+      : this.#db.updateThread(threadId, {
+          selectedPluginIds: enabled
+            ? [...new Set([...thread.selectedPluginIds, pluginId])]
+            : thread.selectedPluginIds.filter((id) => id !== pluginId)
+        });
+    if (thread.mode === "project" && thread.projectId) {
+      this.#db.setProjectPluginBinding(thread.projectId, pluginId, enabled);
+    }
+    await this.emit({
       type: "thread.updated",
       threadId,
-      payload: { projectPluginBinding: binding },
+      payload: { thread: updated, pluginChanged: { pluginId, enabled } },
       createdAt: new Date().toISOString()
     });
-    return binding;
+    return updated;
   }
 
   public async openBrowserTab(threadId: string, url: string) {
@@ -2567,6 +2672,7 @@ export class DesktopBackend {
     });
     this.#db.updateThread(thread.id, {
       selectedSkillIds: parent.selectedSkillIds,
+      selectedPluginIds: parent.selectedPluginIds,
       knowledgeBaseIds: parent.knowledgeBaseIds
     });
     await this.sendMessage(thread.id, buildChildAgentPrompt(parent, thread, input.prompt));
@@ -2729,18 +2835,15 @@ export class DesktopBackend {
 
   private async buildWorkflowPackContext(threadId: string): Promise<string | null> {
     const thread = this.#db.getThread(threadId);
-    if (thread.mode !== "project" || !thread.projectId) {
-      return null;
-    }
-
-    const enabledPlugins = this.listProjectPluginsForThread(thread).filter((item) => item.binding?.enabled);
+    const enabledPluginIds = new Set(await this.getEnabledPluginIdsForThread(threadId));
+    const enabledPlugins = this.#db.listPlugins().filter((plugin) => enabledPluginIds.has(plugin.id));
     if (enabledPlugins.length === 0) {
       return null;
     }
 
     const blocks: string[] = ["Active workflow packs:"];
-    for (const item of enabledPlugins) {
-      const startup = await this.#plugins.collectStartupContext(item.plugin);
+    for (const plugin of enabledPlugins) {
+      const startup = await this.#plugins.collectStartupContext(plugin);
       const sessionStartHooks =
         startup.manifest?.hooks.filter((hook) => hook.eventName.toLowerCase() === "sessionstart") ?? [];
       const hookName = sessionStartHooks.length > 0 ? "SessionStart" : "startup_context";
@@ -2750,13 +2853,13 @@ export class DesktopBackend {
           ? "Plugin declares SessionStart hooks but no native startup context was produced."
           : "Plugin has no startup context.";
       this.#db.recordPluginHookRun(
-        thread.projectId,
-        item.plugin.id,
+        thread.projectId ?? thread.id,
+        plugin.id,
         hookName,
         startup.content ? "success" : "skipped",
         hookMessage
       );
-      blocks.push(`## ${item.plugin.name}`);
+      blocks.push(`## ${plugin.name}`);
       if (startup.content) {
         blocks.push(startup.content.slice(0, 4_000));
       }
@@ -2943,7 +3046,11 @@ export class DesktopBackend {
     await this.syncInstalledPlugins();
     await this.refreshMcpConfiguration(false);
     await this.refreshSkills();
-    await this.#mcp.refresh();
+    void this.#mcp.refresh().catch(async (error) => {
+      await this.#logs.append("mcp.background_refresh_failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
     await this.#logs.append("backend.deferred_initialization_completed", {
       pluginCount: this.#db.listPlugins().length,
       skillCount: this.#skills.list().length,
@@ -2954,6 +3061,24 @@ export class DesktopBackend {
   private async refreshSkills(cwd?: string | null): Promise<void> {
     const pluginRoots = await this.#plugins.collectPluginSkillRoots(this.#db.listPlugins());
     await this.#skills.refresh(this.#layout.root, cwd, pluginRoots);
+  }
+
+  private refreshSkillsInBackground(cwd?: string | null): void {
+    if (this.#backgroundSkillRefresh) {
+      return;
+    }
+    const refresh = this.refreshSkills(cwd);
+    this.#backgroundSkillRefresh = refresh;
+    void refresh.catch(async (error) => {
+      await this.#logs.append("skills.background_refresh_failed", {
+        cwd: cwd ?? null,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }).finally(() => {
+      if (this.#backgroundSkillRefresh === refresh) {
+        this.#backgroundSkillRefresh = null;
+      }
+    });
   }
 
   private async refreshMcpConfiguration(connect = true): Promise<void> {
@@ -3001,13 +3126,11 @@ export class DesktopBackend {
 
   private async getEnabledPluginIdsForThread(threadId: string): Promise<string[]> {
     const thread = this.#db.getThread(threadId);
-    if (!thread.projectId) {
-      return [];
-    }
-    return this.#db
-      .listProjectPluginBindings(thread.projectId)
-      .filter((binding) => binding.enabled)
-      .map((binding) => binding.pluginId);
+    const configuredIds = thread.mode === "project" && thread.projectId
+      ? this.#db.listProjectPluginBindings(thread.projectId).filter((binding) => binding.enabled).map((binding) => binding.pluginId)
+      : thread.selectedPluginIds;
+    const installedIds = new Set(this.#db.listPlugins().map((plugin) => plugin.id));
+    return [...new Set(configuredIds)].filter((pluginId) => installedIds.has(pluginId));
   }
 
   private async getAccessibleMcpServerIdsForThread(threadId: string): Promise<string[]> {

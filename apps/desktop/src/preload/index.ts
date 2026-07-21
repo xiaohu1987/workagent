@@ -83,9 +83,11 @@ const api = {
     ipcRenderer.invoke("threads:open-file-location", payload),
   listSkills: (cwd?: string | null) => ipcRenderer.invoke("skills:list", cwd),
   getSkillUsageStats: () => ipcRenderer.invoke("skills:usage-stats"),
+  removeSkill: (skillId: string) => ipcRenderer.invoke("skills:remove", skillId),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),
-  setProjectPluginEnabled: (payload: { threadId: string; pluginId: string; enabled: boolean }) =>
+  removePlugin: (pluginId: string) => ipcRenderer.invoke("plugins:remove", pluginId),
+  setThreadPluginEnabled: (payload: { threadId: string; pluginId: string; enabled: boolean }) =>
     ipcRenderer.invoke("plugins:set-enabled", payload),
   getConfig: async () => {
     console.log("[preload] config:get invoke");

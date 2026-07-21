@@ -95,9 +95,11 @@ declare global {
         successRate: number;
         lastUsedAt: string | null;
       }>>;
+      removeSkill: (skillId: string) => Promise<void>;
       listPlugins: () => Promise<any[]>;
       installPlugin: (source: string) => Promise<any>;
-      setProjectPluginEnabled: (payload: {
+      removePlugin: (pluginId: string) => Promise<void>;
+      setThreadPluginEnabled: (payload: {
         threadId: string;
         pluginId: string;
         enabled: boolean;

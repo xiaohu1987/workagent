@@ -5,6 +5,7 @@ import {
   getDeleteThreadBlockedMessage,
   getHistoryItemAffordance,
   isThreadExecutionInProgress,
+  shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
 } from "../apps/desktop/src/renderer/thread-ui-state";
 import {
@@ -59,6 +60,13 @@ describe("thread UI state helpers", () => {
     expect(shouldShowTaskProcessing("idle", false)).toBe(false);
     expect(shouldShowTaskProcessing("completed", false)).toBe(false);
     expect(shouldShowTaskProcessing("failed", false)).toBe(false);
+  });
+
+  it("keeps a just-submitted message out of the queue during the runtime handoff", () => {
+    expect(shouldPreservePreparingRuntime("idle", 1, false)).toBe(true);
+    expect(shouldPreservePreparingRuntime("running", 1, false)).toBe(false);
+    expect(shouldPreservePreparingRuntime("idle", 0, false)).toBe(false);
+    expect(shouldPreservePreparingRuntime("idle", 1, true)).toBe(false);
   });
 
   it("shows a spinner affordance for executing history items", () => {
@@ -164,9 +172,8 @@ describe("file write transcript filtering", () => {
 });
 
 describe("runtime activity visibility", () => {
-  it("keeps the execution heartbeat visible while a tool is running and between tool calls", () => {
+  it("only keeps the execution heartbeat visible while the task is still active", () => {
     expect(shouldShowRuntimeActivityPanel(true)).toBe(true);
-    expect(shouldShowRuntimeActivityPanel(false, true)).toBe(true);
     expect(shouldShowRuntimeActivityPanel(false)).toBe(false);
   });
 });

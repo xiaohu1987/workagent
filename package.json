@@ -1,7 +1,7 @@
 {
   "name": "codexh-desktop-agent",
   "private": true,
-  "version": "2.1.4",
+  "version": "2.1.6",
   "description": "A desktop coding and workflow agent inspired by the codexh design document.",
   "main": "dist/main/index.js",
   "type": "module",
