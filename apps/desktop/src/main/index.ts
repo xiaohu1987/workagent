@@ -4,6 +4,7 @@ import fsp from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { DatabaseConnectionConfig } from "@shared-types";
 import { DesktopBackend } from "./app";
 import { UpdateService } from "./update-service";
 
@@ -479,6 +480,21 @@ function registerIpc(): void {
     return config;
   });
   ipcMain.handle("config:save", (_event, config) => backend.saveConfig(config));
+  ipcMain.handle("databases:list", () => backend.listDatabaseSources());
+  ipcMain.handle("databases:credential-connection-ids", () => backend.listDatabaseCredentialConnectionIds());
+  ipcMain.handle("databases:test", async (_event, payload?: { connection?: unknown; password?: string }) => {
+    try {
+      if (!payload?.connection) throw new Error("缺少数据库连接配置。");
+      const result = await backend.testDatabaseConnection(payload.connection as DatabaseConnectionConfig, payload.password);
+      return { ok: true as const, result };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[database] connection test failed", { message });
+      return { ok: false as const, error: message };
+    }
+  });
+  ipcMain.handle("databases:save-credential", (_event, payload) => backend.saveDatabaseCredential(payload.connectionId, payload.password));
+  ipcMain.handle("databases:delete-credential", (_event, connectionId: string) => backend.deleteDatabaseCredential(connectionId));
   ipcMain.handle("mcp:list", async () => {
     await backend.initializeDeferredServices();
     return backend.listMcpServers();

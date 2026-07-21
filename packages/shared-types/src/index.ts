@@ -483,6 +483,23 @@ export interface McpServerConfig {
   enabled: boolean;
 }
 
+export type DatabaseEngine = "postgresql" | "mysql" | "sqlserver";
+export type DatabaseTlsMode = "disable" | "require" | "verify";
+
+/** Connection metadata only. Credentials live in the encrypted desktop store. */
+export interface DatabaseConnectionConfig {
+  id: string;
+  name: string;
+  engine: DatabaseEngine;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  tlsMode: DatabaseTlsMode;
+  credentialRef: string;
+  enabled: boolean;
+}
+
 export type McpToolApprovalMode = "auto" | "prompt" | "writes" | "approve";
 
 export interface McpToolPolicy {
@@ -619,6 +636,7 @@ export interface AppConfig {
   /** Optional per-workspace overrides keyed by normalized absolute workspace path. */
   projectExecutionPolicies?: Record<string, ProjectExecutionPolicy>;
   mcpServers: McpServerConfig[];
+  databaseConnections: DatabaseConnectionConfig[];
 }
 
 export interface ProviderTurnDecision {

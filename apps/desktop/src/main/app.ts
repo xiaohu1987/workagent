@@ -14,6 +14,7 @@ import type {
   BrowserAssertionResult,
   BrowserTabRecord,
   BrowserViewport,
+  DatabaseConnectionConfig,
   GitActionResult,
   GitSnapshot,
   GpaStage,
@@ -49,6 +50,7 @@ import { hashDirectory, PluginRuntime } from "@plugin-runtime";
 import { ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { ToolRuntime } from "@tool-runtime";
+import { DatabaseRuntime } from "@database-runtime";
 import { RuntimeLogWriter } from "./runtime-log";
 import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime } from "./terminal-runtime";
@@ -64,6 +66,14 @@ import {
 
 type ResolverMap<T> = Map<string, (value: T) => void>;
 const INTERACTION_TIMEOUT_MS = 30_000;
+
+function redactDatabaseErrorMessage(message: string, password?: string): string {
+  let redacted = message;
+  if (password) redacted = redacted.split(password).join("[redacted]");
+  return redacted
+    .replace(/\b(password|passwd|pwd)\s*([=:])\s*[^\s,;]+/gi, "$1$2[redacted]")
+    .slice(0, 1_000);
+}
 
 async function seedBundledSkills(layout: Pick<HomeLayout, "skillsSystemDir" | "skillsImportedDir" | "skillsInstalledDir">): Promise<number> {
   if (!app.isPackaged) {
@@ -160,6 +170,8 @@ export class DesktopBackend {
   #runtime!: AgentRuntimeService;
   #mcp!: McpManager;
   #mcpOAuth!: McpOAuthService;
+  #databaseCredentials!: McpCredentialStore;
+  #databases!: DatabaseRuntime;
   #logs!: RuntimeLogWriter;
   #deferredServices: Promise<void> | null = null;
   #backgroundSkillRefresh: Promise<void> | null = null;
@@ -170,9 +182,11 @@ export class DesktopBackend {
     this.#mcpOAuth = new McpOAuthService(
       new McpCredentialStore(path.join(path.dirname(this.#layout.configFile), "mcp-credentials.json"))
     );
+    this.#databaseCredentials = new McpCredentialStore(this.#layout.credentialsFile);
     const bundledSkillFileCount = await seedBundledSkills(this.#layout);
     const bundledPluginIds = await seedBundledPlugins(this.#layout);
     this.#config = await loadConfig(this.#layout.configFile);
+    this.#databases = new DatabaseRuntime((connection) => this.#databaseCredentials.read<string>(connection.credentialRef));
     this.#db = new DatabaseService(this.#layout.dbFile);
     this.#db.recoverInterruptedThreads();
     this.removePersistedBrowserErrorTabs();
@@ -217,6 +231,8 @@ export class DesktopBackend {
       getEnabledPluginIdsForThread: async (threadId) => this.getEnabledPluginIdsForThread(threadId),
       getAccessibleMcpServerIdsForThread: async (threadId) =>
         this.getAccessibleMcpServerIdsForThread(threadId),
+      getAccessibleDatabaseConnectionIdsForThread: async () =>
+        this.#config.databaseConnections.filter((connection) => connection.enabled).map((connection) => connection.id),
       listKnowledgeBases: async (threadId) => this.listVisibleKnowledgeBases(threadId),
       searchKnowledge: async (query, ids) => this.#db.searchKnowledgeChunks(query, ids),
       readKnowledgeConcept: async (conceptId) => this.#db.getKnowledgeChunk(conceptId) ?? this.#db.getKnowledgeConcept(conceptId),
@@ -280,6 +296,9 @@ export class DesktopBackend {
       getMcpToolApprovalMode: (server, tool) => this.#mcp.getToolApprovalMode(server, tool),
       callMcpTool: async (server, tool, argumentsJson) =>
         this.#mcp.callTool(server, tool, argumentsJson),
+      listDatabaseSources: async (ids) => this.listDatabaseSources(ids),
+      describeDatabaseSchema: async (sourceId, schema) => this.describeDatabaseSchema(sourceId, schema),
+      queryDatabase: async (sourceId, sql, parameters, maxRows) => this.queryDatabase(sourceId, sql, parameters, maxRows),
       markModelAgentIncompatible: async (threadId, modelId, reason) =>
         this.markModelAgentIncompatible(threadId, modelId, reason),
       emit: async (event) => this.emit(event),
@@ -362,6 +381,92 @@ export class DesktopBackend {
 
   public async testMcpServer(config: McpServerConfig) {
     return this.#mcp.testConfig({ ...config, source: "config", pluginId: undefined });
+  }
+
+  public listDatabaseSources(ids?: string[]) {
+    const allowed = ids ? new Set(ids) : null;
+    return this.#config.databaseConnections
+      .filter((connection) => connection.enabled && (!allowed || allowed.has(connection.id)))
+      .map(({ credentialRef: _credentialRef, ...connection }) => connection);
+  }
+
+  public async listDatabaseCredentialConnectionIds(): Promise<string[]> {
+    const records = await Promise.all(this.#config.databaseConnections.map(async (connection) => ({
+      id: connection.id,
+      hasCredential: await this.#databaseCredentials.has(connection.credentialRef)
+    })));
+    return records.filter((record) => record.hasCredential).map((record) => record.id);
+  }
+
+  public async testDatabaseConnection(connection: DatabaseConnectionConfig, password?: string) {
+    const testId = randomUUID();
+    const startedAt = Date.now();
+    const details = {
+      testId,
+      connectionId: connection.id,
+      engine: connection.engine,
+      host: connection.host,
+      port: connection.port,
+      database: connection.database,
+      tlsMode: connection.tlsMode,
+      credentialSource: password ? "input" : "saved"
+    };
+    await this.#logs.append("database.connection_test_started", details);
+    try {
+      const result = await this.#databases.test(connection, password);
+      await this.#logs.append("database.connection_test_succeeded", {
+        ...details,
+        durationMs: Date.now() - startedAt
+      });
+      return result;
+    } catch (error) {
+      const typed = error as NodeJS.ErrnoException & {
+        errno?: number;
+        sqlState?: string;
+        syscall?: string;
+        fatal?: boolean;
+        databaseStage?: string;
+      };
+      await this.#logs.append("database.connection_test_failed", {
+        ...details,
+        durationMs: Date.now() - startedAt,
+        errorName: typed.name || "Error",
+        errorCode: typed.code ?? null,
+        errorNumber: typeof typed.errno === "number" ? typed.errno : null,
+        errorSqlState: typeof typed.sqlState === "string" ? typed.sqlState : null,
+        errorSystemCall: typeof typed.syscall === "string" ? typed.syscall : null,
+        errorFatal: typeof typed.fatal === "boolean" ? typed.fatal : null,
+        errorStage: typeof typed.databaseStage === "string" ? typed.databaseStage : "unknown",
+        errorMessage: redactDatabaseErrorMessage(typed.message || String(error), password)
+      });
+      throw error;
+    }
+  }
+
+  public async saveDatabaseCredential(connectionId: string, password: string): Promise<void> {
+    const connection = this.#config.databaseConnections.find((entry) => entry.id === connectionId);
+    if (!connection) throw new Error(`Unknown database connection: ${connectionId}`);
+    if (!password) throw new Error("A password is required.");
+    await this.#databaseCredentials.write(connection.credentialRef, password);
+  }
+
+  public async deleteDatabaseCredential(connectionId: string): Promise<void> {
+    const connection = this.#config.databaseConnections.find((entry) => entry.id === connectionId);
+    if (connection) await this.#databaseCredentials.remove(connection.credentialRef);
+  }
+
+  private requireDatabaseConnection(sourceId: string): DatabaseConnectionConfig {
+    const connection = this.#config.databaseConnections.find((entry) => entry.id === sourceId && entry.enabled);
+    if (!connection) throw new Error(`Database source is unavailable: ${sourceId}`);
+    return connection;
+  }
+
+  private async describeDatabaseSchema(sourceId: string, schema?: string) {
+    return this.#databases.describeSchema(this.requireDatabaseConnection(sourceId), schema);
+  }
+
+  private async queryDatabase(sourceId: string, sql: string, parameters: unknown[], maxRows?: number) {
+    return this.#databases.query(this.requireDatabaseConnection(sourceId), sql, parameters, maxRows);
   }
 
   public async refreshMcpTools(serverId?: string) {
@@ -1229,6 +1334,12 @@ export class DesktopBackend {
       source: "config",
       pluginId: undefined
     }));
+    const previousDatabaseConnections = this.#config.databaseConnections;
+    this.#config.databaseConnections = normalized.databaseConnections;
+    const nextCredentialRefs = new Set(normalized.databaseConnections.map((connection) => connection.credentialRef));
+    await Promise.all(previousDatabaseConnections
+      .filter((connection) => !nextCredentialRefs.has(connection.credentialRef))
+      .map((connection) => this.#databaseCredentials.remove(connection.credentialRef)));
 
     await saveConfig(this.#layout.configFile, this.#config);
     await this.#logs.append("config.timeouts_updated", {
@@ -3342,7 +3453,8 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       maxSubagentsPerRoot: Math.min(8, Math.max(1, Math.round(config.multiAgent?.maxSubagentsPerRoot ?? fallback.multiAgent.maxSubagentsPerRoot))),
       maxDepth: Math.min(3, Math.max(1, Math.round(config.multiAgent?.maxDepth ?? fallback.multiAgent.maxDepth))),
       childWritePolicy: "read-only"
-    }
+    },
+    databaseConnections: Array.isArray(config.databaseConnections) ? config.databaseConnections : []
   };
 }
 

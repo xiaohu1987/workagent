@@ -34,7 +34,9 @@
       "@plugin-runtime/*": ["packages/plugin-runtime/src/*"],
       "@plugin-runtime": ["packages/plugin-runtime/src/index.ts"],
       "@provider-adapters/*": ["packages/provider-adapters/src/*"],
-      "@provider-adapters": ["packages/provider-adapters/src/index.ts"]
+      "@provider-adapters": ["packages/provider-adapters/src/index.ts"],
+      "@database-runtime/*": ["packages/database-runtime/src/*"],
+      "@database-runtime": ["packages/database-runtime/src/index.ts"]
     }
   }
 }

@@ -305,6 +305,7 @@ interface RuntimeServices {
   buildWorkflowPackContext(threadId: string): Promise<string | null>;
   getEnabledPluginIdsForThread(threadId: string): Promise<string[]>;
   getAccessibleMcpServerIdsForThread(threadId: string): Promise<string[]>;
+  getAccessibleDatabaseConnectionIdsForThread(threadId: string): Promise<string[]>;
   listKnowledgeBases(threadId: string): Promise<any[]>;
   searchKnowledge(query: string, knowledgeBaseIds?: string[]): Promise<any[]>;
   readKnowledgeConcept(conceptId: string): Promise<any | null>;
@@ -377,6 +378,9 @@ interface RuntimeServices {
   getMcpPrompt(server: string, name: string, args?: Record<string, string>): Promise<any>;
   getMcpToolApprovalMode(server: string, tool: string): "auto" | "prompt" | "writes" | "approve";
   callMcpTool(server: string, tool: string, argumentsJson: Record<string, unknown>): Promise<any>;
+  listDatabaseSources(ids?: string[]): Promise<Array<{ id: string; name: string; engine: string; host: string; port: number; database: string }>>;
+  describeDatabaseSchema(sourceId: string, schema?: string): Promise<any>;
+  queryDatabase(sourceId: string, sql: string, parameters: unknown[], maxRows?: number): Promise<any>;
   markModelAgentIncompatible(threadId: string, modelId: string, reason: string): Promise<void>;
   emit(event: RuntimeEvent): Promise<void>;
   log(kind: string, threadId: string, payload: Record<string, unknown>): Promise<void>;
@@ -894,6 +898,9 @@ class ThreadSessionRuntime {
     const activeMcpServerIds = selectedMcpServerIds.length > 0
       ? selectedMcpServerIds
       : accessibleMcpServerIds;
+    const accessibleDatabaseConnectionIds = await this.services.getAccessibleDatabaseConnectionIdsForThread(this.threadId);
+    const selectedDatabaseConnectionIds = extractSelectedDatabaseConnectionIds(initialInput).filter((id) => accessibleDatabaseConnectionIds.includes(id));
+    const activeDatabaseConnectionIds = selectedDatabaseConnectionIds.length > 0 ? selectedDatabaseConnectionIds : accessibleDatabaseConnectionIds;
     const visibleKnowledgeBases = knowledgeEnabled
       ? await this.services.listKnowledgeBases(this.threadId)
       : [];
@@ -2765,6 +2772,16 @@ class ThreadSessionRuntime {
                   throw error;
                 }
               },
+              databaseSourceIds: activeDatabaseConnectionIds,
+              listDatabaseSources: () => this.services.listDatabaseSources(activeDatabaseConnectionIds),
+              describeDatabaseSchema: async (sourceId, schema) => {
+                if (!activeDatabaseConnectionIds.includes(sourceId)) throw new Error(`Database source is unavailable: ${sourceId}`);
+                return this.services.describeDatabaseSchema(sourceId, schema);
+              },
+              queryDatabase: async (sourceId, sql, parameters, maxRows) => {
+                if (!activeDatabaseConnectionIds.includes(sourceId)) throw new Error(`Database source is unavailable: ${sourceId}`);
+                return this.services.queryDatabase(sourceId, sql, parameters, maxRows);
+              },
               deferredToolSpecs: mcpTools,
               readOnlyAgent: thread.parentThreadId !== null,
               hiddenToolNames: [
@@ -2866,8 +2883,11 @@ class ThreadSessionRuntime {
               createdAt: new Date().toISOString()
             });
           }
-          const resultJson = redactSensitiveText(JSON.stringify({ ...result, json: sanitizedResult.json }));
-          const eventResultJson = redactSensitiveText(JSON.stringify(sanitizedResult));
+          const persistedResult = toolCall.name.startsWith("database.")
+            ? summarizeDatabaseToolResultForPersistence(sanitizedResult)
+            : { ...result, json: sanitizedResult.json };
+          const resultJson = redactSensitiveText(JSON.stringify(persistedResult));
+          const eventResultJson = redactSensitiveText(JSON.stringify(persistedResult));
           const status = result.ok ? "completed" : "failed";
           await this.services.persistence.finishToolCall(toolRecord.id, {
             status,
@@ -3497,6 +3517,10 @@ class ThreadSessionRuntime {
       "git.worktree_remove",
       "request_permissions",
       "mcp.call",
+      "database.list_sources",
+      "database.describe_schema",
+      "database.query",
+      "database.federated_query",
       "image.generate",
       "video.generate",
       "browser.open_tab",
@@ -5010,6 +5034,13 @@ export function extractSelectedMcpServerIds(input: string): string[] {
   return [...serverIds];
 }
 
+export function extractSelectedDatabaseConnectionIds(input: string): string[] {
+  const ids = new Set<string>();
+  const pattern = /\[Selected database\]\s*\r?\n\s*id:\s*([^\s\r\n]+)/gi;
+  for (const match of input.matchAll(pattern)) ids.add(match[1]!);
+  return [...ids];
+}
+
 export function formatAvailableTools(
   tools: ToolSpecDefinition[],
   options: { includeSchemas?: boolean } = {}
@@ -5909,6 +5940,24 @@ export function summarizeToolResultForModel(toolName: string, result: ToolResult
     ].join("\n");
   }
   return truncateCharacters(summarized, MAX_MODEL_TOOL_RESULT_CHARACTERS);
+}
+
+function summarizeDatabaseToolResultForPersistence(result: ToolResult): ToolResult {
+  const json = result.json ?? {};
+  return {
+    ok: result.ok,
+    content: result.ok
+      ? `Database query completed: ${String(json.rowCount ?? json.returnedRows ?? 0)} row(s).`
+      : result.content,
+    json: {
+      rowCount: json.rowCount,
+      returnedRows: json.returnedRows,
+      durationMs: json.durationMs,
+      truncated: json.truncated,
+      federated: json.federated,
+      sourceCount: json.sourceCount
+    }
+  };
 }
 
 function truncateCharacters(content: string, limit: number): string {

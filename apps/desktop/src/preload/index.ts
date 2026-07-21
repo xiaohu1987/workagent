@@ -101,6 +101,11 @@ const api = {
     return result;
   },
   saveConfig: (config: unknown) => ipcRenderer.invoke("config:save", config),
+  listDatabases: () => ipcRenderer.invoke("databases:list"),
+  listDatabaseCredentialConnectionIds: () => ipcRenderer.invoke("databases:credential-connection-ids"),
+  testDatabase: (payload: { connection: unknown; password?: string }) => ipcRenderer.invoke("databases:test", payload),
+  saveDatabaseCredential: (payload: { connectionId: string; password: string }) => ipcRenderer.invoke("databases:save-credential", payload),
+  deleteDatabaseCredential: (connectionId: string) => ipcRenderer.invoke("databases:delete-credential", connectionId),
   listMcpServers: () => ipcRenderer.invoke("mcp:list"),
   testMcpServer: (config: unknown) => ipcRenderer.invoke("mcp:test", config),
   refreshMcpTools: (serverId?: string) => ipcRenderer.invoke("mcp:refresh-tools", serverId),

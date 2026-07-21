@@ -106,6 +106,14 @@ declare global {
       }) => Promise<any>;
       getConfig: () => Promise<any>;
       saveConfig: (config: unknown) => Promise<void>;
+      listDatabases: () => Promise<any[]>;
+      listDatabaseCredentialConnectionIds: () => Promise<string[]>;
+      testDatabase: (payload: { connection: unknown; password?: string }) => Promise<
+        | { ok: true; result: { version: string; schemas: string[]; databases: string[] } }
+        | { ok: false; error: string }
+      >;
+      saveDatabaseCredential: (payload: { connectionId: string; password: string }) => Promise<void>;
+      deleteDatabaseCredential: (connectionId: string) => Promise<void>;
       listMcpServers: () => Promise<any[]>;
       testMcpServer: (config: unknown) => Promise<{ tools: any[]; resources: any[]; resourceTemplates: any[]; prompts: any[] }>;
       refreshMcpTools: (serverId?: string) => Promise<any[]>;

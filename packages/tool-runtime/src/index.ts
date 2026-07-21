@@ -180,6 +180,10 @@ export interface ToolRuntimeContext {
   getMcpPrompt: (server: string, name: string, args?: Record<string, string>) => Promise<any>;
   getMcpToolApprovalMode: (server: string, tool: string) => "auto" | "prompt" | "writes" | "approve";
   callMcpTool: (server: string, tool: string, argumentsJson: Record<string, unknown>) => Promise<any>;
+  databaseSourceIds?: string[];
+  listDatabaseSources?: () => Promise<Array<{ id: string; name: string; engine: string; host: string; port: number; database: string }>>;
+  describeDatabaseSchema?: (sourceId: string, schema?: string) => Promise<any>;
+  queryDatabase?: (sourceId: string, sql: string, parameters: unknown[], maxRows?: number) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number; durationMs: number }>;
   deferredToolSpecs?: ToolSpecDefinition[];
   hiddenToolNames?: string[];
   /** Hard runtime guard for child agents; hiding schemas alone is insufficient. */
@@ -224,7 +228,7 @@ const TOOL_ALIASES: Record<string, string> = {
 };
 
 const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
-  "apply_patch", "fs.write_file", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call",
+  "apply_patch", "fs.write_file", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.federated_query",
   "image.generate", "video.generate",
   "git.stage_file", "git.stage_all", "git.unstage_file", "git.revert_file", "git.apply_hunk",
   "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
@@ -1703,6 +1707,48 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
+    spec("database.list_sources", "List configured read-only database sources available to this chat.", [], "low"),
+    async (_args, ctx) => {
+      const sources = await ctx.listDatabaseSources?.() ?? [];
+      return { ok: true, content: JSON.stringify(sources, null, 2), json: { sources } };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "database.describe_schema",
+      description: "Read visible schemas, tables, and columns from one configured database source.",
+      inputSchema: { type: "object", properties: { sourceId: { type: "string" }, schema: { type: "string" } }, required: ["sourceId"] },
+      riskLevel: "low"
+    },
+    async (args, ctx) => {
+      if (!ctx.describeDatabaseSchema) return { ok: false, content: "Database access is unavailable." };
+      const result = await ctx.describeDatabaseSchema(String(args.sourceId), typeof args.schema === "string" ? args.schema : undefined);
+      return { ok: true, content: JSON.stringify(result, null, 2), json: result };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "database.query",
+      description: "Execute one parameterized, read-only SELECT query against a configured database source.",
+      inputSchema: { type: "object", properties: { sourceId: { type: "string" }, sql: { type: "string" }, parameters: { type: "array" }, maxRows: { type: "number" } }, required: ["sourceId", "sql"] },
+      riskLevel: "low"
+    },
+    async (args, ctx) => executeDatabaseQuery(args, ctx)
+  );
+
+  runtime.register(
+    {
+      name: "database.federated_query",
+      description: "Run bounded read-only source queries and join their results in memory. Supports inner and left equality joins.",
+      inputSchema: { type: "object", properties: { sources: { type: "array" }, joins: { type: "array" }, select: { type: "array" }, groupBy: { type: "array" }, aggregates: { type: "array" }, orderBy: { type: "string" }, orderDirection: { type: "string" }, limit: { type: "number" } }, required: ["sources", "joins"] },
+      riskLevel: "low"
+    },
+    async (args, ctx) => executeFederatedQuery(args, ctx)
+  );
+
+  runtime.register(
     {
       name: "mcp.call",
       description: "Call a tool on a configured MCP server. For repository inspection tools, use their path, cursor, maxResults, and maxDepth arguments; start shallow and continue with nextCursor instead of requesting a whole repository.",
@@ -1752,6 +1798,92 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       };
     }
   );
+}
+
+async function executeDatabaseQuery(args: Record<string, unknown>, ctx: ToolRuntimeContext): Promise<ToolResult> {
+  if (!ctx.queryDatabase) return { ok: false, content: "Database access is unavailable." };
+  const result = await ctx.queryDatabase(
+    String(args.sourceId ?? ""),
+    String(args.sql ?? ""),
+    Array.isArray(args.parameters) ? args.parameters : [],
+    typeof args.maxRows === "number" ? args.maxRows : undefined
+  );
+  return compactDatabaseResult(result);
+}
+
+async function executeFederatedQuery(args: Record<string, unknown>, ctx: ToolRuntimeContext): Promise<ToolResult> {
+  if (!ctx.queryDatabase) return { ok: false, content: "Database access is unavailable." };
+  const sources = Array.isArray(args.sources) ? args.sources : [];
+  if (sources.length < 2) return { ok: false, content: "Federated queries require at least two source queries." };
+  if (sources.length > 8) return { ok: false, content: "A federated query supports at most eight source queries." };
+  const results = await Promise.all(sources.map(async (entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Each source must be an object.");
+    const source = entry as Record<string, unknown>;
+    const alias = typeof source.alias === "string" ? source.alias.trim() : "";
+    const sourceId = typeof source.sourceId === "string" ? source.sourceId.trim() : "";
+    const sql = typeof source.sql === "string" ? source.sql : "";
+    if (!alias || !sourceId || !sql) throw new Error("Each source requires alias, sourceId, and sql.");
+    const query = await ctx.queryDatabase!(sourceId, sql, Array.isArray(source.parameters) ? source.parameters : [], 1_000);
+    return { alias, rows: query.rows };
+  }));
+  const totalRows = results.reduce((total, result) => total + result.rows.length, 0);
+  if (totalRows > 5_000) return { ok: false, content: "Federated input exceeds the 5,000 row limit." };
+  const byAlias = new Map(results.map((result) => [result.alias, result.rows]));
+  const joins = Array.isArray(args.joins) ? args.joins : [];
+  if (joins.length !== sources.length - 1) return { ok: false, content: "Federated queries require one join for each source after the first." };
+  let joined: Array<Record<string, unknown>> = results[0]!.rows.map((row) => prefixRow(results[0]!.alias, row));
+  const joinedAliases = new Set([results[0]!.alias]);
+  for (const join of joins) {
+    if (!join || typeof join !== "object" || Array.isArray(join)) return { ok: false, content: "Each join must be an object." };
+    const item = join as Record<string, unknown>;
+    const leftAlias = String(item.leftAlias ?? ""); const leftColumn = String(item.leftColumn ?? "");
+    const rightAlias = String(item.rightAlias ?? ""); const rightColumn = String(item.rightColumn ?? "");
+    const kind = item.kind === "left" ? "left" : "inner";
+    if (!joinedAliases.has(leftAlias) || joinedAliases.has(rightAlias) || !byAlias.has(rightAlias) || !leftColumn || !rightColumn) return { ok: false, content: "Joins must extend the joined sources with explicit aliases and columns." };
+    const index = new Map<string, Array<Record<string, unknown>>>();
+    for (const row of byAlias.get(rightAlias)!) { const key = federationKey(row[rightColumn]); if (key !== null) (index.get(key) ?? index.set(key, []).get(key)!).push(row); }
+    const next: Array<Record<string, unknown>> = [];
+    for (const row of joined) {
+      const matches = index.get(federationKey(row[`${leftAlias}.${leftColumn}`]) ?? "") ?? [];
+      if (matches.length) for (const match of matches) next.push({ ...row, ...prefixRow(rightAlias, match) });
+      else if (kind === "left") next.push(row);
+      if (next.length >= 1_000) break;
+    }
+    joined = next; joinedAliases.add(rightAlias);
+  }
+  const aggregates = Array.isArray(args.aggregates) ? args.aggregates : [];
+  const groupBy = Array.isArray(args.groupBy) ? args.groupBy.filter((field): field is string => typeof field === "string") : [];
+  if (aggregates.length > 0) joined = aggregateFederatedRows(joined, groupBy, aggregates);
+  const select = Array.isArray(args.select) ? args.select.filter((field): field is string => typeof field === "string") : [];
+  if (select.length > 0) joined = joined.map((row) => Object.fromEntries(select.map((field) => [field, row[field]])));
+  const orderBy = typeof args.orderBy === "string" ? args.orderBy : "";
+  if (orderBy) joined.sort((left, right) => String(left[orderBy] ?? "").localeCompare(String(right[orderBy] ?? "")) * (args.orderDirection === "desc" ? -1 : 1));
+  const limit = Math.min(Math.max(1, typeof args.limit === "number" ? Math.floor(args.limit) : 200), 1_000);
+  return compactDatabaseResult({ rows: joined.slice(0, limit), rowCount: joined.length, durationMs: 0 }, { federated: true, sourceCount: results.length });
+}
+
+function prefixRow(alias: string, row: Record<string, unknown>): Record<string, unknown> { return Object.fromEntries(Object.entries(row).map(([key, value]) => [`${alias}.${key}`, value])); }
+function federationKey(value: unknown): string | null { if (value === null || value === undefined) return null; if (typeof value === "number") return `number:${String(value)}`; return `${typeof value}:${String(value)}`; }
+function aggregateFederatedRows(rows: Array<Record<string, unknown>>, groupBy: string[], aggregates: unknown[]): Array<Record<string, unknown>> {
+  const groups = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const key = JSON.stringify(groupBy.map((field) => row[field] ?? null));
+    const output = groups.get(key) ?? Object.fromEntries(groupBy.map((field) => [field, row[field]]));
+    for (const aggregate of aggregates) {
+      if (!aggregate || typeof aggregate !== "object" || Array.isArray(aggregate)) continue;
+      const item = aggregate as Record<string, unknown>; const op = String(item.op ?? "count").toLowerCase(); const field = String(item.field ?? ""); const alias = String(item.as ?? `${op}_${field || "rows"}`); const value = row[field];
+      if (op === "count") output[alias] = Number(output[alias] ?? 0) + 1;
+      else if (op === "sum" || op === "avg") { output[`__sum_${alias}`] = Number(output[`__sum_${alias}`] ?? 0) + Number(value ?? 0); output[`__count_${alias}`] = Number(output[`__count_${alias}`] ?? 0) + (value == null ? 0 : 1); output[alias] = op === "sum" ? output[`__sum_${alias}`] : Number(output[`__sum_${alias}`]) / Math.max(1, Number(output[`__count_${alias}`])); }
+      else if (op === "min" || op === "max") { const current = output[alias]; if (current === undefined || (op === "min" ? String(value) < String(current) : String(value) > String(current))) output[alias] = value; }
+    }
+    groups.set(key, output);
+  }
+  return [...groups.values()].map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("__"))));
+}
+function compactDatabaseResult(result: { rows: Array<Record<string, unknown>>; rowCount: number; durationMs: number }, extra: Record<string, unknown> = {}): ToolResult {
+  const rows = result.rows.slice(0, 200); const json = { ...extra, rows, rowCount: result.rowCount, returnedRows: rows.length, durationMs: result.durationMs, truncated: result.rows.length > rows.length };
+  const content = JSON.stringify(json, null, 2);
+  return { ok: true, content: content.length > 50_000 ? `${content.slice(0, 50_000)}\n[Database result truncated]` : content, json };
 }
 
 function spec(

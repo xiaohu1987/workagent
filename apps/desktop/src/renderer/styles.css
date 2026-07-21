@@ -14402,6 +14402,59 @@ select option:checked {
   background: #25262b;
 }
 
+.composer-select-options {
+  display: grid;
+  gap: 2px;
+}
+
+.composer-select-search {
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  outline: none;
+  color: #f0f2f5;
+  background: #101116;
+  font-size: 12px;
+}
+
+.composer-select-search:focus {
+  border-color: rgba(78, 163, 242, 0.62);
+  box-shadow: 0 0 0 2px rgba(78, 163, 242, 0.12);
+}
+
+.composer-select-empty {
+  display: block;
+  padding: 9px;
+  color: #8a94a2;
+  font-size: 12px;
+  text-align: center;
+}
+
+.database-catalog-select .composer-select-menu {
+  width: max(100%, 280px);
+  gap: 6px;
+}
+
+.database-catalog-select .composer-select-options {
+  max-height: 224px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-color: rgba(126, 145, 168, 0.6) transparent;
+  scrollbar-width: thin;
+}
+
+.database-catalog-select .composer-select-options::-webkit-scrollbar {
+  width: 7px;
+}
+
+.database-catalog-select .composer-select-options::-webkit-scrollbar-thumb {
+  border: 2px solid #17181d;
+  border-radius: 999px;
+  background: rgba(126, 145, 168, 0.6);
+}
+
 .knowledge-import-column .knowledge-scope-select .composer-select-trigger {
   min-height: 36px;
   height: 36px;
@@ -15167,6 +15220,196 @@ select option:checked {
   .plugin-record-source,
   .plugin-record-path {
     max-width: min(100%, 520px);
+  }
+}
+
+/* Database connections use the same compact configuration treatment as MCP rows. */
+.database-settings-section {
+  gap: 14px;
+}
+
+.database-config-block {
+  gap: 16px;
+}
+
+.database-connection-list {
+  gap: 12px;
+}
+
+.database-connection-card {
+  gap: 14px;
+  padding: 16px;
+}
+
+.database-connection-card-header {
+  align-items: center;
+}
+
+.database-connection-title,
+.database-password-control,
+.database-enabled-switch,
+.database-connection-actions {
+  display: flex;
+  align-items: center;
+}
+
+.database-connection-title {
+  min-width: 0;
+  gap: 8px;
+}
+
+.database-engine-badge,
+.database-credential-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid rgba(96, 157, 225, 0.24);
+  border-radius: 999px;
+  color: #91baf0;
+  background: rgba(43, 111, 181, 0.12);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.database-credential-detected {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(72, 174, 120, 0.36);
+  border-radius: 999px;
+  color: #8ce1ad;
+  background: rgba(52, 135, 91, 0.2);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.database-connection-grid {
+  gap: 10px 12px;
+}
+
+.database-connection-grid .settings-field {
+  gap: 5px;
+}
+
+.database-connection-grid .settings-field input,
+.database-connection-grid .settings-field select {
+  min-height: 38px;
+  height: 38px;
+  padding: 0 11px;
+  border-radius: 8px;
+}
+
+.database-password-field small {
+  color: #7d8795;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.database-password-control {
+  position: relative;
+}
+
+.database-password-control input {
+  width: 100%;
+  padding-right: 64px !important;
+}
+
+.database-credential-status {
+  position: absolute;
+  right: 8px;
+  min-height: 19px;
+  color: #86c9a7;
+  border-color: rgba(72, 174, 120, 0.26);
+  background: rgba(52, 135, 91, 0.14);
+}
+
+.database-status-field {
+  align-content: start;
+}
+
+.database-enabled-switch {
+  position: relative;
+  width: fit-content;
+  min-height: 38px;
+  gap: 8px;
+  color: #8a94a2;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.database-enabled-switch input {
+  position: absolute;
+  width: 1px !important;
+  min-width: 1px !important;
+  height: 1px !important;
+  min-height: 1px !important;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.database-enabled-switch-track {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.database-enabled-switch-track span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #9aa4b2;
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.database-enabled-switch.is-enabled {
+  color: #d6e6f8;
+}
+
+.database-enabled-switch.is-enabled .database-enabled-switch-track {
+  border-color: rgba(76, 158, 237, 0.62);
+  background: rgba(51, 129, 205, 0.78);
+}
+
+.database-enabled-switch.is-enabled .database-enabled-switch-track span {
+  transform: translateX(14px);
+  background: #eff7ff;
+}
+
+.database-enabled-switch input:focus-visible + .database-enabled-switch-track {
+  outline: 2px solid rgba(104, 184, 255, 0.78);
+  outline-offset: 2px;
+}
+
+.database-connection-actions {
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.database-connection-actions .subtle-inline {
+  color: #85909f;
+}
+
+@media (max-width: 720px) {
+  .database-connection-actions {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

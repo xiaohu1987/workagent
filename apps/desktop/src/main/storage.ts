@@ -19,6 +19,7 @@ import type {
   KnowledgeDocumentRecord,
   KnowledgeImportSource,
   McpServerConfig,
+  DatabaseConnectionConfig,
   MessageAttachment,
   MessageRecord,
   MultiAgentSettings,
@@ -62,6 +63,7 @@ export interface HomeLayout {
   logsDir: string;
   tmpDir: string;
   cacheDir: string;
+  credentialsFile: string;
   globalKnowledgeDir: string;
   globalBundlesDir: string;
   skillsSystemDir: string;
@@ -89,6 +91,7 @@ export async function ensureHomeLayout(): Promise<HomeLayout> {
     logsDir: path.join(root, "logs"),
     tmpDir: path.join(root, "tmp"),
     cacheDir: path.join(root, "cache"),
+    credentialsFile: path.join(root, "credentials.json"),
     globalKnowledgeDir: path.join(root, "knowledge", "global"),
     globalBundlesDir: path.join(root, "knowledge", "global", "bundles"),
     skillsSystemDir: path.join(root, "skills", "system"),
@@ -204,7 +207,8 @@ export function defaultConfig(): AppConfig {
     },
     timeouts: normalizeRuntimeTimeouts(),
     projectExecutionPolicies: {},
-    mcpServers: []
+    mcpServers: [],
+    databaseConnections: []
   };
 }
 
@@ -338,7 +342,8 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       tools: normalizeMcpTools(item.tools),
       source: 'config',
       enabled: item.enabled !== false
-    })) satisfies McpServerConfig[]
+    })) satisfies McpServerConfig[],
+    databaseConnections: normalizeDatabaseConnections(parsed.databaseConnections)
   };
 }
 
@@ -368,7 +373,8 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
       defaultToolsApprovalMode: server.defaultToolsApprovalMode,
       tools: server.tools,
       enabled: server.enabled
-    }))
+    })),
+    databaseConnections: normalizeDatabaseConnections(config.databaseConnections)
   };
 
   await fs.writeFile(configFile, TOML.stringify(tomlObject as any), "utf8");
@@ -2272,6 +2278,30 @@ function mapThreadRow(row: any): ThreadRecord {
     lastTaskMessage: row.last_task_message ?? null,
     multiAgentMode: row.multi_agent_mode === "disabled" ? "disabled" : "proactive"
   };
+}
+
+function normalizeDatabaseConnections(value: unknown): DatabaseConnectionConfig[] {
+  if (!Array.isArray(value)) return [];
+  const defaults: Record<DatabaseConnectionConfig["engine"], number> = { postgresql: 5432, mysql: 3306, sqlserver: 1433 };
+  const ids = new Set<string>();
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const raw = item as Record<string, unknown>;
+    const engine = raw.engine === "postgresql" || raw.engine === "mysql" || raw.engine === "sqlserver" ? raw.engine : null;
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    const host = typeof raw.host === "string" ? raw.host.trim() : "";
+    const database = typeof raw.database === "string" ? raw.database.trim() : "";
+    const username = typeof raw.username === "string" ? raw.username.trim() : "";
+    if (!engine || !id || !host || !database || !username || ids.has(id)) return [];
+    ids.add(id);
+    return [{
+      id, name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : id, engine, host, database, username,
+      port: typeof raw.port === "number" && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536 ? raw.port : defaults[engine],
+      tlsMode: raw.tlsMode === "disable" || raw.tlsMode === "require" || raw.tlsMode === "verify" ? raw.tlsMode : "require",
+      credentialRef: typeof raw.credentialRef === "string" && raw.credentialRef.trim() ? raw.credentialRef.trim() : `database:${id}`,
+      enabled: raw.enabled !== false
+    } satisfies DatabaseConnectionConfig];
+  });
 }
 
 function mapMessageRow(row: any): MessageRecord {

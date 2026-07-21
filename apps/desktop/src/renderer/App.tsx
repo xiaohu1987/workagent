@@ -27,6 +27,7 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   ContextCompactionRecord,
+  DatabaseConnectionConfig,
   GpaStage,
   GpaState,
   GitActionResult,
@@ -64,7 +65,7 @@ import {
 } from "./thread-ui-state";
 import { useMotionPresence } from "./motion-presence";
 
-type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "plugins" | "mcp" | "timeouts" | "update";
+type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "plugins" | "mcp" | "database" | "timeouts" | "update";
 type ManagedRemoval =
   | { kind: "plugin"; plugin: PluginRecord }
   | { kind: "skill"; skill: SkillMetadata };
@@ -217,13 +218,15 @@ type ComposerAttachment =
   | { id: string; kind: "file" | "folder" | "image"; path: string; label: string; file?: File; previewUrl?: string; entries?: string[]; entriesTruncated?: boolean }
   | { id: string; kind: "code"; path: string; content: string; label: string; intent: "reference" | "edit" }
   | { id: string; kind: "skill"; skillId: string; label: string; description: string }
-  | { id: string; kind: "mcp"; serverId: string; label: string; description: string };
+  | { id: string; kind: "mcp"; serverId: string; label: string; description: string }
+  | { id: string; kind: "database"; connectionId: string; label: string; description: string };
 
 type ComposerAttachmentInput =
   | { kind: "file" | "folder" | "image"; path: string; label: string; file?: File; previewUrl?: string; entries?: string[]; entriesTruncated?: boolean }
   | { kind: "code"; path: string; content: string; label: string; intent: "reference" | "edit" }
   | { kind: "skill"; skillId: string; label: string; description: string }
-  | { kind: "mcp"; serverId: string; label: string; description: string };
+  | { kind: "mcp"; serverId: string; label: string; description: string }
+  | { kind: "database"; connectionId: string; label: string; description: string };
 
 type ComposerBinaryAttachment = {
   id: string;
@@ -283,6 +286,8 @@ function composerAttachmentKey(attachment: ComposerAttachment | ComposerAttachme
       return `${attachment.kind}:${attachment.skillId}`;
     case "mcp":
       return `${attachment.kind}:${attachment.serverId}`;
+    case "database":
+      return `${attachment.kind}:${attachment.connectionId}`;
     default:
       // Clipboard images do not have a filesystem path. Include their data URL so
       // separately pasted screenshots are not incorrectly collapsed into one item.
@@ -477,6 +482,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "multimodal", label: "多模态", hint: "配置生图模型与视频模型" },
   { id: "skills", label: "Skill 管理", hint: "已加载技能与来源范围" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
+  { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "timeouts", label: "超时设置", hint: "模型请求、重试和视频生成的等待时间" },
   { id: "plugins", label: "插件管理", hint: "安装插件并管理当前聊天或项目的启用状态" },
@@ -670,7 +676,7 @@ export function App() {
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
-  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "plugins" | "skills" | "mcp">("root");
+  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "plugins" | "skills" | "mcp" | "database">("root");
   const [composerAddSubmenuPosition, setComposerAddSubmenuPosition] = useState<{ left: number; top: number; anchorTop: number; maxHeight: number } | null>(null);
   const composerAddSubmenuRef = useRef<HTMLDivElement | null>(null);
   const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
@@ -707,6 +713,13 @@ export function App() {
   const [mcpCreateError, setMcpCreateError] = useState<string | null>(null);
   const [mcpJsonDraft, setMcpJsonDraft] = useState("");
   const [mcpJsonError, setMcpJsonError] = useState<string | null>(null);
+  const [databasePasswordDrafts, setDatabasePasswordDrafts] = useState<Record<string, string>>({});
+  const [savedDatabaseCredentialIds, setSavedDatabaseCredentialIds] = useState<Set<string>>(() => new Set());
+  const [editingDatabaseConnectionId, setEditingDatabaseConnectionId] = useState<string | null>(null);
+  const [testingDatabaseConnectionId, setTestingDatabaseConnectionId] = useState<string | null>(null);
+  const [savingDatabaseCredentialId, setSavingDatabaseCredentialId] = useState<string | null>(null);
+  const [changingDatabaseEnabledId, setChangingDatabaseEnabledId] = useState<string | null>(null);
+  const [databaseCatalogs, setDatabaseCatalogs] = useState<Record<string, string[]>>({});
   const [mcpTestResults, setMcpTestResults] = useState<Record<string, { tools: Array<{ name: string; description: string }>; resources: Array<{ uri: string; name: string }>; resourceTemplates: Array<{ uriTemplate: string; name: string }>; prompts: Array<{ name: string; description: string }> }>>({});
   const [mcpAuthBusyId, setMcpAuthBusyId] = useState<string | null>(null);
   const [settingsProviderId, setSettingsProviderId] = useState<string | null>(null);
@@ -2631,6 +2644,11 @@ export function App() {
       const nextConfig = (await window.codexh.getConfig()) as AppConfig;
       setConfig(nextConfig);
       resetConfigDraft(nextConfig, preferredProviderId);
+      try {
+        setSavedDatabaseCredentialIds(new Set(await window.codexh.listDatabaseCredentialConnectionIds()));
+      } catch {
+        setSavedDatabaseCredentialIds(new Set());
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       showNotice(`加载模型配置失败：${message}`);
@@ -3678,7 +3696,7 @@ export function App() {
     }
   }
 
-  async function saveConfigDraft() {
+  async function saveConfigDraft(options?: { showSuccessNotice?: boolean }) {
     if (!config || !configDraft) {
       return;
     }
@@ -3692,10 +3710,12 @@ export function App() {
     const preferredProviderId = settingsProviderId;
     await window.codexh.saveConfig(nextConfig);
     setConfig(nextConfig);
-    showNotice("配置已保存。", {
-      message: "聊天区已同步最新的供应商和模型列表。",
-      tone: "success"
-    });
+    if (options?.showSuccessNotice !== false) {
+      showNotice("配置已保存。", {
+        message: "聊天区已同步最新的供应商和模型列表。",
+        tone: "success"
+      });
+    }
     await refreshConfig(preferredProviderId);
     await refreshThreads();
     await refreshMcpServers();
@@ -3894,7 +3914,7 @@ export function App() {
     }, 160);
   }
 
-  function openComposerAddSubmenu(view: "plugins" | "skills" | "mcp", target: HTMLElement) {
+  function openComposerAddSubmenu(view: "plugins" | "skills" | "mcp" | "database", target: HTMLElement) {
     clearComposerAddMenuCloseTimer();
     const rect = target.getBoundingClientRect();
     const viewportMargin = 12;
@@ -3932,6 +3952,116 @@ export function App() {
       setComposerAttachments((current) => current.filter((attachment) => attachment.id !== id));
       setRemovingComposerAttachmentId((current) => current === id ? null : current);
     }, 140);
+  }
+
+  function updateDatabaseDraft(id: string, patch: Partial<DatabaseConnectionConfig>) {
+    setConfigDraft((current) => current ? {
+      ...cloneConfig(current),
+      databaseConnections: current.databaseConnections.map((connection) => connection.id === id ? { ...connection, ...patch } : connection)
+    } : current);
+  }
+
+  async function setDatabaseConnectionEnabled(connection: DatabaseConnectionConfig, enabled: boolean) {
+    const persistedConnection = config?.databaseConnections.find((entry) => entry.id === connection.id);
+    if (!config || !persistedConnection) {
+      updateDatabaseDraft(connection.id, { enabled });
+      return;
+    }
+
+    const previousConfig = config;
+    const nextConfig = cloneConfig(config);
+    nextConfig.databaseConnections = nextConfig.databaseConnections.map((entry) => entry.id === connection.id ? { ...entry, enabled } : entry);
+    updateDatabaseDraft(connection.id, { enabled });
+    setConfig(nextConfig);
+    setChangingDatabaseEnabledId(connection.id);
+    try {
+      await window.codexh.saveConfig(buildConfigToSave(nextConfig, previousConfig, providerSecretDrafts));
+      showNotice(enabled ? "数据库已启用" : "数据库已停用", {
+        message: enabled ? "该数据库现在可在聊天中调用。" : "该数据库已从聊天可用数据源中移除。",
+        tone: "success"
+      });
+    } catch (error) {
+      updateDatabaseDraft(connection.id, { enabled: persistedConnection.enabled });
+      setConfig(previousConfig);
+      showNotice("数据库状态保存失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
+    } finally {
+      setChangingDatabaseEnabledId((current) => current === connection.id ? null : current);
+    }
+  }
+
+  function addDatabaseConnection() {
+    if (!configDraft) return;
+    const base = "database";
+    let index = 1;
+    while (configDraft.databaseConnections.some((connection) => connection.id === `${base}-${index}`)) index += 1;
+    const id = `${base}-${index}`;
+    setConfigDraft((current) => current ? {
+      ...cloneConfig(current),
+      databaseConnections: [...current.databaseConnections, {
+        id, name: "", engine: "postgresql", host: "", port: 5432, database: "", username: "", tlsMode: "require", credentialRef: `database:${id}`, enabled: true
+      }]
+    } : current);
+    setEditingDatabaseConnectionId(id);
+  }
+
+  function removeDatabaseConnection(id: string) {
+    setConfigDraft((current) => current ? {
+      ...cloneConfig(current),
+      databaseConnections: current.databaseConnections.filter((connection) => connection.id !== id)
+    } : current);
+    setEditingDatabaseConnectionId((current) => current === id ? null : current);
+    setDatabasePasswordDrafts((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+  }
+
+  async function testDatabaseConnection(connection: DatabaseConnectionConfig) {
+    const password = databasePasswordDrafts[connection.id] ?? "";
+    setTestingDatabaseConnectionId(connection.id);
+    try {
+      const response = await window.codexh.testDatabase({ connection, password: password || undefined });
+      if (!response.ok) throw new Error(response.error);
+      const result = response.result;
+      setDatabaseCatalogs((current) => ({ ...current, [connection.id]: result.databases }));
+      showNotice(`${connection.name || connection.id} 连接成功`, { tone: "success", message: result.version });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showNotice(
+        message.startsWith("No password is available") ? "未找到已保存的数据库密码" : "数据库连接失败",
+        {
+          message: message.startsWith("No password is available") ? "请输入密码后保存，或直接在密码框中输入后测试。" : message,
+          tone: "warning"
+        }
+      );
+    } finally {
+      setTestingDatabaseConnectionId((current) => current === connection.id ? null : current);
+    }
+  }
+
+  async function saveDatabaseConnection(connection: DatabaseConnectionConfig) {
+    const password = databasePasswordDrafts[connection.id] ?? "";
+    setSavingDatabaseCredentialId(connection.id);
+    try {
+      await saveConfigDraft({ showSuccessNotice: false });
+      if (password) {
+        await window.codexh.saveDatabaseCredential({ connectionId: connection.id, password });
+        setDatabasePasswordDrafts((current) => ({ ...current, [connection.id]: "" }));
+        setSavedDatabaseCredentialIds((current) => new Set(current).add(connection.id));
+      }
+      setEditingDatabaseConnectionId(null);
+      showNotice("数据库连接已保存", {
+        message: password
+          ? "密码已加密保存，可直接测试连接或在聊天中调用该数据库。"
+          : "连接配置已保存。",
+        tone: "success"
+      });
+    } catch (error) {
+      showNotice("数据库连接保存失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
+    } finally {
+      setSavingDatabaseCredentialId((current) => current === connection.id ? null : current);
+    }
   }
 
   function applyPluginEnabledLocally(threadId: string, pluginId: string, enabled: boolean) {
@@ -6321,6 +6451,70 @@ export function App() {
                 </div>
               ) : null}
 
+              {settingsTab === "database" ? (
+                <div className="settings-section database-settings-section">
+                  <div className="config-block database-config-block">
+                    <div className="section-copy-with-action">
+                      <div><strong>数据库连接</strong><span>仅执行只读查询。密码由系统加密保存，不会写入配置文件。</span></div>
+                      <button className="button primary" type="button" onClick={addDatabaseConnection} disabled={!configDraft}>添加数据库</button>
+                    </div>
+                    <div className="mcp-server-list database-connection-list">
+                      {(configDraft?.databaseConnections ?? []).map((connection) => {
+                        const hasSavedCredential = savedDatabaseCredentialIds.has(connection.id);
+                        const isTesting = testingDatabaseConnectionId === connection.id;
+                        const isSavingPassword = savingDatabaseCredentialId === connection.id;
+                        const isChangingEnabled = changingDatabaseEnabledId === connection.id;
+                        const isEditing = editingDatabaseConnectionId === connection.id;
+                        const engineLabel = connection.engine === "postgresql" ? "PostgreSQL" : connection.engine === "mysql" ? "MySQL" : "SQL Server";
+                        const target = `${connection.username || "user"}@${connection.host || "host"}:${connection.port}/${connection.database || "database"}`;
+                        const databaseOptions = [...new Set([connection.database, ...(databaseCatalogs[connection.id] ?? [])])].filter(Boolean).map((database) => ({ value: database, label: database }));
+                        return (
+                        <article key={connection.id} className={`mcp-server-row database-connection-row ${isEditing ? "is-editing" : ""} ${connection.enabled ? "is-enabled" : "is-disabled"}`}>
+                          <div className="mcp-server-row-top">
+                            <div className="mcp-server-row-main">
+                              <div className="mcp-server-row-title">
+                                <span className="mcp-server-row-icon" aria-hidden><IconMcp /></span>
+                                <strong>{connection.name || connection.id}</strong>
+                                <span className="mcp-transport-pill">{engineLabel}</span>
+                                <span className={`mcp-status-pill ${connection.enabled ? "ready" : "disabled"}`}>{connection.enabled ? "启用" : "停用"}</span>
+                              </div>
+                              {!isEditing ? <span className="mcp-server-row-target" title={target}>{target}</span> : null}
+                            </div>
+                            <div className="mcp-server-row-side">
+                              <label className={`mcp-enable-switch ${connection.enabled ? "is-on" : ""}`}>
+                                <input type="checkbox" checked={connection.enabled} disabled={isChangingEnabled} onChange={(event) => void setDatabaseConnectionEnabled(connection, event.target.checked)} />
+                                <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
+                                <span className="mcp-enable-label">{connection.enabled ? "启用" : "停用"}</span>
+                              </label>
+                            </div>
+                          </div>
+                          {isEditing ? <div className="mcp-editor-grid database-connection-grid">
+                            <label className="settings-field"><span>名称</span><input value={connection.name} onChange={(event) => updateDatabaseDraft(connection.id, { name: event.target.value })} /></label>
+                            <label className="settings-field"><span>ID</span><input value={connection.id} disabled /></label>
+                            <label className="settings-field"><span>类型</span><ComposerSelect className="mcp-select" ariaLabel="数据库类型" value={connection.engine} onChange={(value) => { const engine = value as DatabaseConnectionConfig["engine"]; updateDatabaseDraft(connection.id, { engine, port: engine === "postgresql" ? 5432 : engine === "mysql" ? 3306 : 1433 }); }} options={[{ value: "postgresql", label: "PostgreSQL" }, { value: "mysql", label: "MySQL" }, { value: "sqlserver", label: "SQL Server" }]} placeholder="选择数据库类型" /></label>
+                            <label className="settings-field"><span>主机</span><input value={connection.host} onChange={(event) => updateDatabaseDraft(connection.id, { host: event.target.value })} /></label>
+                            <label className="settings-field"><span>端口</span><input type="number" value={connection.port} onChange={(event) => updateDatabaseDraft(connection.id, { port: Number(event.target.value) })} /></label>
+                            <label className="settings-field"><span>数据库</span>{databaseOptions.length > 0 ? <ComposerSelect className="mcp-select database-catalog-select" ariaLabel="数据库" value={connection.database} onChange={(database) => updateDatabaseDraft(connection.id, { database })} options={databaseOptions} placeholder="测试连接后选择数据库" searchable searchPlaceholder="筛选数据库" emptyLabel="未找到匹配的数据库" /> : <input value={connection.database} onChange={(event) => updateDatabaseDraft(connection.id, { database: event.target.value })} />}</label>
+                            <label className="settings-field"><span>用户名</span><input value={connection.username} onChange={(event) => updateDatabaseDraft(connection.id, { username: event.target.value })} /></label>
+                            <label className="settings-field"><span>TLS</span><ComposerSelect className="mcp-select" ariaLabel="TLS 设置" value={connection.tlsMode} onChange={(value) => updateDatabaseDraft(connection.id, { tlsMode: value as DatabaseConnectionConfig["tlsMode"] })} options={[{ value: "require", label: "加密" }, { value: "verify", label: "验证证书" }, { value: "disable", label: "关闭" }]} placeholder="选择 TLS 设置" /></label>
+                            <label className="settings-field database-password-field"><span>密码</span><div className="database-password-control"><input type="password" value={databasePasswordDrafts[connection.id] ?? ""} placeholder={hasSavedCredential ? "已安全保存，输入可更新" : "输入数据库密码"} onChange={(event) => setDatabasePasswordDrafts((current) => ({ ...current, [connection.id]: event.target.value }))} />{hasSavedCredential ? <span className="database-credential-status">已保存</span> : null}</div><small>留空测试时会使用已加密保存的密码。</small></label>
+                          </div> : null}
+                          <div className="mcp-server-row-actions">
+                            <button className="button secondary" type="button" onClick={() => setEditingDatabaseConnectionId(isEditing ? null : connection.id)}>{isEditing ? "收起" : "编辑"}</button>
+                            <button className="button secondary" type="button" disabled={isTesting || isSavingPassword} onClick={() => void testDatabaseConnection(connection)}>{isTesting ? "测试中..." : "测试连接"}</button>
+                            <button className="button secondary" type="button" disabled={isSavingPassword || isTesting} onClick={() => void saveDatabaseConnection(connection)}>{isSavingPassword ? "保存中..." : "保存"}</button>
+                            <button className="button ghost" type="button" onClick={() => removeDatabaseConnection(connection.id)}>删除</button>
+                            {isEditing ? <span className="mcp-test-summary">{hasSavedCredential ? "密码已由系统加密保存。" : "输入并保存密码后可随时测试连接。"}</span> : null}
+                          </div>
+                        </article>
+                        );
+                      })}
+                      {(configDraft?.databaseConnections ?? []).length === 0 ? <div className="detail-empty">尚未配置数据库连接。</div> : null}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               {settingsTab === "mcp" ? (
                 <div className="settings-section mcp-settings-section">
                   <div className="config-block mcp-service-config">
@@ -7356,6 +7550,12 @@ export function App() {
                       <IconChevronRight />
                     </button>
                     </div>
+                    <div className="composer-add-menu-item-with-submenu" onMouseEnter={(event) => openComposerAddSubmenu("database", event.currentTarget)}>
+                      <button className="gpa-popover-item composer-add-menu-parent" type="button" role="menuitem" aria-haspopup="menu" aria-expanded={composerAddMenuView === "database"} onFocus={(event) => openComposerAddSubmenu("database", event.currentTarget)}>
+                        <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span><span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">数据库</span><span className="gpa-popover-item-hint">限定本轮可查询的数据源</span></span>
+                        <IconChevronRight />
+                      </button>
+                    </div>
                     <div className="gpa-popover-divider" />
                 </>
                 <button
@@ -7436,7 +7636,7 @@ export function App() {
                   onMouseLeave={scheduleComposerAddMenuClose}
                 >
                   <div className="composer-add-menu-submenu-title">
-                    {composerAddMenuView === "plugins" ? "插件" : composerAddMenuView === "skills" ? "Skills" : "MCP 服务"}
+                    {composerAddMenuView === "plugins" ? "插件" : composerAddMenuView === "skills" ? "Skills" : composerAddMenuView === "mcp" ? "MCP 服务" : "数据库"}
                   </div>
                   <div className="composer-add-menu-list">
                     {composerAddMenuView === "plugins" ? (
@@ -7483,7 +7683,7 @@ export function App() {
                           </span>
                         </button>
                       )) : <span className="composer-add-menu-empty">没有可用的 Skills</span>
-                    ) : (
+                    ) : composerAddMenuView === "mcp" ? (
                       <>
                         {(config?.mcpServers ?? []).filter((server) => server.enabled).map((server) => (
                           <button
@@ -7509,6 +7709,15 @@ export function App() {
                           </button>
                         ))}
                         {(config?.mcpServers ?? []).filter((server) => server.enabled).length === 0 ? <span className="composer-add-menu-empty">没有已启用的 MCP 服务</span> : null}
+                      </>
+                    ) : (
+                      <>
+                        {(config?.databaseConnections ?? []).filter((connection) => connection.enabled).map((connection) => (
+                          <button key={connection.id} className="gpa-popover-item" role="menuitem" onClick={() => { addComposerAttachment({ kind: "database", connectionId: connection.id, label: connection.name, description: `${connection.engine} · ${connection.host}:${connection.port}/${connection.database}` }); setGpaMenuOpen(false); setGpaMenuPos(null); }}>
+                            <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span><span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">{connection.name}</span><span className="gpa-popover-item-hint">{connection.engine} · {connection.host}</span></span>
+                          </button>
+                        ))}
+                        {(config?.databaseConnections ?? []).filter((connection) => connection.enabled).length === 0 ? <span className="composer-add-menu-empty">没有已启用的数据库</span> : null}
                       </>
                     )}
                   </div>
@@ -7864,7 +8073,7 @@ function ComposerAttachmentChip({
   const detail =
     attachment.kind === "code"
       ? `${attachment.path} · ${attachment.content.split(/\r?\n/).length} 行`
-      : attachment.kind === "skill" || attachment.kind === "mcp"
+      : attachment.kind === "skill" || attachment.kind === "mcp" || attachment.kind === "database"
         ? attachment.description
         : attachment.kind === "folder"
           ? "文件夹"
@@ -7876,7 +8085,7 @@ function ComposerAttachmentChip({
       : attachment.kind === "code" ? <IconCode />
         : attachment.kind === "image" ? <IconImage />
           : attachment.kind === "skill" ? <IconSkills />
-            : attachment.kind === "mcp" ? <IconMcp />
+          : attachment.kind === "mcp" || attachment.kind === "database" ? <IconMcp />
               : <IconFile />;
 
   async function previewImage() {
@@ -7897,7 +8106,7 @@ function ComposerAttachmentChip({
   return (
     <div
       className={`composer-attachment-chip ${attachment.kind} ${removing ? "is-removing" : ""}`}
-      title={attachment.kind === "code" ? attachment.content : attachment.kind === "skill" || attachment.kind === "mcp" ? attachment.description : attachment.path}
+      title={attachment.kind === "code" ? attachment.content : attachment.kind === "skill" || attachment.kind === "mcp" || attachment.kind === "database" ? attachment.description : attachment.path}
     >
       {attachment.kind === "image" ? (
         <button
@@ -8698,6 +8907,9 @@ export function formatComposerAttachments(attachments: ComposerAttachment[]): st
           "This request requires querying this MCP server before answering."
         ].join("\n");
       }
+      if (attachment.kind === "database") {
+        return ["[Selected database]", `id: ${attachment.connectionId}`, `${attachment.label}: ${attachment.description}`, "Use only this selected database source for this request when database access is needed."].join("\n");
+      }
       if (attachment.kind === "image") {
         return `[Attached image]\n${attachment.path}\nUse the image attachment as visual reference when the selected model supports image input.`;
       }
@@ -9273,7 +9485,10 @@ function ComposerSelect({
   placeholder,
   disabled = false,
   className = "",
-  ariaLabel
+  ariaLabel,
+  searchable = false,
+  searchPlaceholder = "筛选选项",
+  emptyLabel = "没有可用选项"
 }: {
   value: string;
   options: ComposerSelectOption[];
@@ -9282,11 +9497,18 @@ function ComposerSelect({
   disabled?: boolean;
   className?: string;
   ariaLabel?: string;
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  emptyLabel?: string;
 }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const menuPresence = useMotionPresence(isOpen ? true : null, 140);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const selectedOption = options.find((option) => option.value === value) ?? null;
+  const visibleOptions = searchable
+    ? options.filter((option) => option.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    : options;
 
   useEffect(() => {
     if (disabled && isOpen) {
@@ -9296,6 +9518,7 @@ function ComposerSelect({
 
   useEffect(() => {
     if (!isOpen) {
+      setQuery("");
       return;
     }
 
@@ -9342,21 +9565,25 @@ function ComposerSelect({
 
       {menuPresence.value ? (
         <div className="composer-select-menu" data-motion={menuPresence.phase} role="listbox">
-          {options.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={`composer-select-option ${option.value === value ? "selected" : ""}`}
-              onClick={() => {
-                onChange(option.value);
-                setIsOpen(false);
-              }}
-              role="option"
-              aria-selected={option.value === value}
-            >
-              {option.label}
-            </button>
-          ))}
+          {searchable ? <input className="composer-select-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchPlaceholder} aria-label={searchPlaceholder} autoFocus /> : null}
+          <div className="composer-select-options">
+            {visibleOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`composer-select-option ${option.value === value ? "selected" : ""}`}
+                onClick={() => {
+                  onChange(option.value);
+                  setIsOpen(false);
+                }}
+                role="option"
+                aria-selected={option.value === value}
+              >
+                {option.label}
+              </button>
+            ))}
+            {visibleOptions.length === 0 ? <span className="composer-select-empty">{emptyLabel}</span> : null}
+          </div>
         </div>
       ) : null}
     </div>
@@ -13784,7 +14011,8 @@ function cloneConfig(config: AppConfig): AppConfig {
       ...server,
       args: server.args ? [...server.args] : undefined,
       env: server.env ? { ...server.env } : undefined
-    }))
+    })),
+    databaseConnections: config.databaseConnections.map((connection) => ({ ...connection }))
   };
 }
 
@@ -14306,11 +14534,24 @@ function getDisplayMessageContent(message: MessageRecord): string {
     return "继续";
   }
 
+  if (message.role === "user") {
+    return stripSelectedDatabaseContext(message.content);
+  }
+
   if (message.role !== "assistant") {
     return message.content;
   }
 
   return stripAssistantToolMarkup(message.content);
+}
+
+function stripSelectedDatabaseContext(content: string): string {
+  return content
+    .replace(
+      /\n{0,2}\[Selected database\]\s*\r?\n\s*id:[^\r\n]*\r?\n[^\r\n]*\r?\nUse only this selected database source for this request when database access is needed\./gi,
+      ""
+    )
+    .trim();
 }
 
 function stripAssistantToolMarkup(content: string): string {

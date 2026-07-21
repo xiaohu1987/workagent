@@ -18,7 +18,8 @@ export default defineConfig({
       "@knowledge-runtime": path.resolve(root, "packages/knowledge-runtime/src/index.ts"),
       "@mcp-runtime": path.resolve(root, "packages/mcp-runtime/src/index.ts"),
       "@plugin-runtime": path.resolve(root, "packages/plugin-runtime/src/index.ts"),
-      "@provider-adapters": path.resolve(root, "packages/provider-adapters/src/index.ts")
+      "@provider-adapters": path.resolve(root, "packages/provider-adapters/src/index.ts"),
+      "@database-runtime": path.resolve(root, "packages/database-runtime/src/index.ts")
     }
   }
 });

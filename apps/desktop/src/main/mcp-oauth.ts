@@ -19,6 +19,11 @@ export class McpCredentialStore {
     return JSON.parse(safeStorage.decryptString(Buffer.from(encrypted, "base64"))) as T;
   }
 
+  /** Checks encrypted credential metadata without decrypting the stored value. */
+  public async has(key: string): Promise<boolean> {
+    return key in await this.readAll();
+  }
+
   public async write(key: string, value: unknown): Promise<void> {
     if (!safeStorage.isEncryptionAvailable()) throw new Error("Operating-system credential encryption is unavailable.");
     const values = await this.readAll();
