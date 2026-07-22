@@ -4,8 +4,20 @@ import fsp from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { DatabaseConnectionConfig } from "@shared-types";
+import type {
+  DatabaseConnectionConfig,
+  NotificationNavigationTarget,
+  RuntimeEvent,
+  SkillLabEvent,
+  ThreadStatus
+} from "@shared-types";
 import { DesktopBackend } from "./app";
+import {
+  resolveRuntimeSystemNotification,
+  resolveSkillLabSystemNotification,
+  takeSystemNotificationForDelivery,
+  type SystemNotificationRequest
+} from "./notification-policy";
 import { UpdateService } from "./update-service";
 
 protocol.registerSchemesAsPrivileged([
@@ -30,8 +42,11 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 let rendererServer: http.Server | null = null;
+let pendingTrayNotificationClick: (() => void) | null = null;
 const backend = new DesktopBackend();
 let updates: UpdateService | null = null;
+const runtimeThreadStatuses = new Map<string, ThreadStatus>();
+const deliveredSystemNotificationKeys = new Set<string>();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const sessionDataDir = path.join(app.getPath("userData"), "session-data");
@@ -120,7 +135,12 @@ function createTray(): void {
   tray.on("click", () => showMainWindow());
   tray.on("double-click", () => showMainWindow());
   if (process.platform === "win32") {
-    tray.on("balloon-click", () => showMainWindow());
+    tray.on("balloon-click", () => {
+      showMainWindow();
+      const callback = pendingTrayNotificationClick;
+      pendingTrayNotificationClick = null;
+      callback?.();
+    });
   }
 }
 
@@ -131,7 +151,7 @@ function notifyMinimizedToTray(): void {
   );
 }
 
-function showSystemNotification(title: string, body: string): void {
+function showSystemNotification(title: string, body: string, onClick?: () => void): void {
   const iconPath = resolveTrayIconPath();
 
   if (Notification.isSupported()) {
@@ -141,12 +161,16 @@ function showSystemNotification(title: string, body: string): void {
       ...(iconPath ? { icon: iconPath } : {}),
       silent: false
     });
-    notification.on("click", () => showMainWindow());
+    notification.on("click", () => {
+      showMainWindow();
+      onClick?.();
+    });
     notification.show();
     return;
   }
 
   if (process.platform === "win32") {
+    pendingTrayNotificationClick = onClick ?? null;
     tray?.displayBalloon({
       title,
       content: body,
@@ -159,42 +183,40 @@ function isMainWindowMinimizedOrHidden(): boolean {
   return !mainWindow || mainWindow.isMinimized() || !mainWindow.isVisible();
 }
 
-function notifyBackgroundRuntimeEvent(event: {
-  type: string;
-  payload: Record<string, unknown>;
-}): void {
-  if (!isMainWindowMinimizedOrHidden()) {
-    return;
-  }
+function openNotificationCenter(target: NotificationNavigationTarget): void {
+  showMainWindow();
+  mainWindow?.webContents.send("notifications:open", target);
+}
 
-  if (event.type === "approval.requested") {
-    showSystemNotification("需要确认操作", "任务正在等待你的操作确认。");
-    return;
-  }
+function deliverSystemNotification(request: SystemNotificationRequest | null): void {
+  const deliverable = takeSystemNotificationForDelivery(
+    request,
+    isMainWindowMinimizedOrHidden(),
+    deliveredSystemNotificationKeys
+  );
+  if (!deliverable) return;
+  showSystemNotification(deliverable.title, deliverable.body, () => openNotificationCenter(deliverable.target));
+}
 
-  if (event.type === "user-input.requested") {
-    showSystemNotification("需要补充信息", "任务正在等待你的回答后继续执行。");
-    return;
+function notifyBackgroundRuntimeEvent(event: RuntimeEvent): void {
+  const notificationThreadId = event.notificationThreadId ?? event.threadId;
+  const previousStatus = notificationThreadId ? runtimeThreadStatuses.get(notificationThreadId) : undefined;
+  deliverSystemNotification(resolveRuntimeSystemNotification(event, previousStatus));
+  if (event.type === "thread.updated" && event.threadId) {
+    const thread = event.payload.thread as { status?: ThreadStatus } | undefined;
+    if (thread?.status) runtimeThreadStatuses.set(event.threadId, thread.status);
   }
+}
 
-  if (event.type === "gpa.updated") {
-    const gpa = event.payload.gpa as { awaitingConfirmation?: unknown } | undefined;
-    if (gpa?.awaitingConfirmation === "goal" || gpa?.awaitingConfirmation === "plan") {
-      showSystemNotification("GPA 计划待确认", "请确认目标或计划以继续执行任务。");
-    }
-    return;
-  }
-
-  if (event.type === "thread.updated") {
-    const thread = event.payload.thread as { status?: unknown } | undefined;
-    if (thread?.status === "completed") {
-      showSystemNotification("任务已完成", "任务执行完成，可以查看结果。");
-    }
-  }
+function notifyBackgroundSkillLabEvent(event: SkillLabEvent): void {
+  deliverSystemNotification(resolveSkillLabSystemNotification(event));
 }
 
 async function createWindow(): Promise<void> {
   await backend.initialize();
+  for (const thread of backend.listThreads()) {
+    runtimeThreadStatuses.set(thread.id, thread.status);
+  }
   // Start discovery before the renderer is interactive so the first send is
   // unlikely to wait for plugin, Skill, and MCP setup.
   void backend.initializeDeferredServices();
@@ -253,6 +275,7 @@ async function createWindow(): Promise<void> {
     mainWindow?.webContents.send("runtime:event", event);
   });
   backend.onSkillLabEvent((event) => {
+    notifyBackgroundSkillLabEvent(event);
     mainWindow?.webContents.send("skill-lab:event", event);
   });
 

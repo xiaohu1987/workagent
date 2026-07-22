@@ -6,6 +6,7 @@ import type {
   ModelProfile,
   ProviderDefinition,
   RuntimeToolCall,
+  SkillLabEvent,
   SkillMetadata,
   ToolSpecDefinition
 } from "@shared-types";
@@ -25,34 +26,8 @@ export const SKILL_LAB_MIN_ITERATIONS = 1;
 export const SKILL_LAB_MAX_ITERATIONS = 20;
 const SKILL_LAB_MAX_TOOL_TURNS = 24;
 
-export type SkillLabEvent =
-  | {
-      type: "skill-lab.progress";
-      jobId: string;
-      iteration: number;
-      totalIterations: number;
-      phase: string;
-      summary: string;
-      state: "running" | "tested";
-    }
-  | {
-      type: "skill-lab.approval";
-      jobId: string;
-      approvalId: string;
-      title: string;
-      description: string;
-      toolName: string;
-    }
-  | {
-      type: "skill-lab.clarification";
-      jobId: string;
-      clarificationId: string;
-      summary: string;
-      questions: Array<{ id: string; question: string; required: boolean; options: string[]; allowOther: boolean }>;
-    }
-  | { type: "skill-lab.completed"; jobId: string; skill: SkillMetadata }
-  | { type: "skill-lab.failed"; jobId: string; error: string }
-  | { type: "skill-lab.cancelled"; jobId: string };
+type WithoutCreatedAt<T> = T extends unknown ? Omit<T, "createdAt"> : never;
+type SkillLabEventInput = WithoutCreatedAt<SkillLabEvent>;
 
 type SkillLabJob = {
   abort: AbortController;
@@ -114,6 +89,10 @@ export class SkillLabService {
 
   public constructor(services: SkillLabServices) {
     this.#services = services;
+  }
+
+  #emit(event: SkillLabEventInput): void {
+    this.#services.emit({ ...event, createdAt: new Date().toISOString() } as SkillLabEvent);
   }
 
   public start(prompt: string, requestedName?: string, iterations?: number, targetSkillId?: string): string {
@@ -198,7 +177,7 @@ export class SkillLabService {
       if (optimizationTarget) {
         draft = optimizationTarget.draft;
         previousTests = await this.#testSkillDraft(job, provider, model, prompt, draft, availableTools);
-        this.#services.emit({
+        this.#emit({
           type: "skill-lab.progress",
           jobId,
           iteration: 0,
@@ -212,7 +191,7 @@ export class SkillLabService {
           content: buildLabPrompt(prompt, skillCatalog, mcpTools, mcpResources, draft, previousTests)
         });
       } else {
-        this.#services.emit({
+        this.#emit({
           type: "skill-lab.progress",
           jobId,
           iteration: 0,
@@ -231,7 +210,7 @@ export class SkillLabService {
           ? { ...initialDraft.draft, name: normalizeUserSkillName(requestedName) }
           : initialDraft.draft;
         previousTests = await this.#testSkillDraft(job, provider, model, prompt, draft, availableTools);
-        this.#services.emit({
+        this.#emit({
           type: "skill-lab.progress",
           jobId,
           iteration: 0,
@@ -257,7 +236,7 @@ export class SkillLabService {
           buildLabPrompt(prompt, skillCatalog, mcpTools, mcpResources, draft, previousTests)
         );
         transcript.push({ role: "user", content: iterationPrompt });
-        this.#services.emit({
+        this.#emit({
           type: "skill-lab.progress",
           jobId,
           iteration,
@@ -275,7 +254,7 @@ export class SkillLabService {
             : iterationResult.draft;
         const tests = await this.#testSkillDraft(job, provider, model, prompt, draft, availableTools);
         previousTests = tests;
-        this.#services.emit({
+        this.#emit({
           type: "skill-lab.progress",
           jobId,
           iteration,
@@ -313,7 +292,7 @@ export class SkillLabService {
         await this.#services.refreshSkills();
         const skill = this.#services.listSkills().find((entry) => path.resolve(entry.skillPath) === path.resolve(skillPath));
         if (!skill) throw new Error("Skill 已生成，但未能载入 Skill 索引。");
-        this.#services.emit({ type: "skill-lab.completed", jobId, skill });
+        this.#emit({ type: "skill-lab.completed", jobId, skill });
       } catch (error) {
         if (temporaryPath) {
           await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
@@ -328,10 +307,10 @@ export class SkillLabService {
       }
     } catch (error) {
       if (job.abort.signal.aborted) {
-        this.#services.emit({ type: "skill-lab.cancelled", jobId });
+        this.#emit({ type: "skill-lab.cancelled", jobId });
         return;
       }
-      this.#services.emit({
+      this.#emit({
         type: "skill-lab.failed",
         jobId,
         error: error instanceof Error ? error.message : String(error)
@@ -463,7 +442,7 @@ export class SkillLabService {
     const promise = new Promise<Record<string, string> | null>((resolve) => {
       job.clarifications.set(clarificationId, resolve);
     });
-    this.#services.emit({
+    this.#emit({
       type: "skill-lab.clarification",
       jobId,
       clarificationId,
@@ -603,7 +582,7 @@ export class SkillLabService {
   async #requestApproval(jobId: string, job: SkillLabJob, toolName: string, descriptorName: string): Promise<boolean> {
     const approvalId = randomUUID();
     const promise = new Promise<boolean>((resolve) => job.approvals.set(approvalId, resolve));
-    this.#services.emit({
+    this.#emit({
       type: "skill-lab.approval",
       jobId,
       approvalId,

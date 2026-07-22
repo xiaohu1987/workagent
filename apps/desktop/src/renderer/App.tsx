@@ -47,7 +47,10 @@ import type {
   PluginRecord,
   ProviderDefinition,
   ProviderType,
+  RuntimeEvent,
   RuntimeThreadSnapshot,
+  SkillLabEvent,
+  SkillLabProgress,
   SkillMetadata,
   SkillUsageStats,
   ThreadRecord,
@@ -65,18 +68,22 @@ import {
   shouldShowTaskProcessing
 } from "./thread-ui-state";
 import { useMotionPresence } from "./motion-presence";
+import {
+  EMPTY_NOTIFICATION_CENTER_STATE,
+  findActiveNotification,
+  isFinishedNotification,
+  reduceNotificationCenter,
+  resolveRuntimeNotificationThreadId,
+  resolveThreadStatusTransition,
+  sortNotificationItems,
+  type NotificationCenterAction,
+  type NotificationCenterItem,
+  type NotificationCenterState
+} from "./notification-center";
 import { EChartsMessageChart } from "./EChartsMessageChart";
 
 type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
 type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";
-type SkillLabProgress = { iteration: number; totalIterations: number; phase: string; summary: string; state: "running" | "tested" };
-type SkillLabEvent =
-  | ({ type: "skill-lab.progress" } & SkillLabProgress & { jobId: string })
-  | { type: "skill-lab.clarification"; jobId: string; clarificationId: string; summary: string; questions: Array<{ id: string; question: string; required: boolean; options: string[]; allowOther: boolean }> }
-  | { type: "skill-lab.approval"; jobId: string; approvalId: string; title: string; description: string; toolName: string }
-  | { type: "skill-lab.completed"; jobId: string; skill: SkillMetadata }
-  | { type: "skill-lab.failed"; jobId: string; error: string }
-  | { type: "skill-lab.cancelled"; jobId: string };
 type ManagedRemoval =
   | { kind: "plugin"; plugin: PluginRecord }
   | { kind: "skill"; skill: SkillMetadata };
@@ -619,6 +626,8 @@ function clampPanelWidth(value: number, minimum: number, maximum: number): numbe
 
 export function App() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
+  const threadsRef = useRef<ThreadRecord[]>([]);
+  const threadStatusRef = useRef<Map<string, ThreadRecord["status"]>>(new Map());
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
@@ -815,7 +824,15 @@ export function App() {
   const [skillLabElapsedSeconds, setSkillLabElapsedSeconds] = useState(0);
   const skillLabJobIdRef = useRef<string | null>(null);
   const skillLabOptimizationTargetRef = useRef<string | null>(null);
+  const skillLabNotificationTitleRef = useRef("技能实验室");
   const isSkillLabBusy = skillLabStatus === "clarifying" || skillLabStatus === "running";
+  const [notificationCenterState, setNotificationCenterState] = useState<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
+  const notificationCenterStateRef = useRef<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
+  const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
+  const [highlightedNotificationTarget, setHighlightedNotificationTarget] = useState<string | null>(null);
+  const [notificationNow, setNotificationNow] = useState(() => Date.now());
+  const notificationCenterRef = useRef<HTMLDivElement | null>(null);
+  const notificationButtonRef = useRef<HTMLButtonElement | null>(null);
   const [notice, setNotice] = useState<AppNotice | null>(null);
   const [isNoticeHovered, setIsNoticeHovered] = useState(false);
   const [exitingNoticeId, setExitingNoticeId] = useState<number | null>(null);
@@ -834,9 +851,283 @@ export function App() {
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollReleaseTimerRef = useRef<number | null>(null);
 
+  function dispatchNotificationCenter(action: NotificationCenterAction) {
+    setNotificationCenterState((current) => {
+      const next = reduceNotificationCenter(current, action);
+      notificationCenterStateRef.current = next;
+      return next;
+    });
+  }
+
+  function getNotificationThreadTitle(threadId: string, fallback?: string): string {
+    return fallback?.trim() || threadsRef.current.find((thread) => thread.id === threadId)?.title || "后台任务";
+  }
+
+  function updateThreadNotification(threadId: string, detail: string, updatedAt?: string) {
+    const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", threadId);
+    if (!active || active.status === "attention") return;
+    dispatchNotificationCenter({
+      type: "update",
+      source: "thread",
+      targetId: threadId,
+      updatedAt: updatedAt ?? new Date().toISOString(),
+      patch: { detail, status: "running", unread: false }
+    });
+  }
+
+  function setThreadNotificationAttention(
+    threadId: string,
+    detail: string,
+    kind: "approval" | "input" | "gpa",
+    anchorId?: string,
+    updatedAt?: string
+  ) {
+    const timestamp = updatedAt ?? new Date().toISOString();
+    const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", threadId);
+    if (!active) {
+      dispatchNotificationCenter({
+        type: "start",
+        item: {
+          id: `thread:${threadId}:${timestamp}`,
+          source: "thread",
+          targetId: threadId,
+          title: getNotificationThreadTitle(threadId),
+          detail,
+          status: "attention",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          startedAt: timestamp,
+          unread: true,
+          attentionKind: kind,
+          anchorId
+        }
+      });
+      return;
+    }
+    dispatchNotificationCenter({
+      type: "update",
+      source: "thread",
+      targetId: threadId,
+      updatedAt: timestamp,
+      patch: { detail, status: "attention", unread: true, attentionKind: kind, anchorId }
+    });
+  }
+
+  function resumeThreadNotification(threadId: string, detail: string, updatedAt?: string) {
+    if (!findActiveNotification(notificationCenterStateRef.current.items, "thread", threadId)) return;
+    dispatchNotificationCenter({
+      type: "update",
+      source: "thread",
+      targetId: threadId,
+      updatedAt: updatedAt ?? new Date().toISOString(),
+      patch: {
+        detail,
+        status: "running",
+        unread: false,
+        attentionKind: undefined,
+        anchorId: undefined
+      }
+    });
+  }
+
+  function applyThreadStatusNotification(event: RuntimeEvent) {
+    if (event.type !== "thread.updated" || !event.threadId) return;
+    const thread = event.payload.thread as ThreadRecord | undefined;
+    if (!thread) return;
+    const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", event.threadId);
+    const previousStatus = threadStatusRef.current.get(event.threadId);
+    const transition = resolveThreadStatusTransition({
+      previousStatus,
+      nextStatus: thread.status,
+      hasActive: !!active,
+      pluginChanged: !!event.payload.pluginChanged,
+      isSubagent: !!thread.parentThreadId
+    });
+    threadStatusRef.current.set(event.threadId, thread.status);
+    if (!transition) return;
+    const timestamp = thread.updatedAt || event.createdAt;
+    const title = getNotificationThreadTitle(event.threadId, thread.title);
+
+    if (transition === "start") {
+      const waiting = thread.status === "waiting";
+      dispatchNotificationCenter({
+        type: "start",
+        item: {
+          id: `thread:${event.threadId}:${timestamp}`,
+          source: "thread",
+          targetId: event.threadId,
+          title,
+          detail: waiting ? "任务正在等待你的处理。" : "正在理解任务并准备执行。",
+          status: waiting ? "attention" : "running",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          startedAt: timestamp,
+          unread: waiting
+        }
+      });
+      return;
+    }
+
+    if (transition === "running") {
+      resumeThreadNotification(event.threadId, active?.detail || "任务正在运行。", timestamp);
+      return;
+    }
+
+    if (transition === "attention") {
+      if (active?.status !== "attention") {
+        setThreadNotificationAttention(event.threadId, "任务正在等待你的处理。", "input", undefined, timestamp);
+      }
+      return;
+    }
+
+    dispatchNotificationCenter({
+      type: "finish",
+      source: "thread",
+      targetId: event.threadId,
+      updatedAt: timestamp,
+      status: transition,
+      title,
+      detail: transition === "completed"
+        ? "任务已完成，可以查看结果。"
+        : transition === "failed"
+          ? "任务执行失败，请打开任务查看详情。"
+          : "任务已停止。",
+      unread: transition !== "cancelled"
+    });
+  }
+
+  function updateSkillLabNotification(event: SkillLabEvent) {
+    const active = findActiveNotification(notificationCenterStateRef.current.items, "skill-lab", event.jobId);
+    const base = {
+      id: `skill-lab:${event.jobId}`,
+      source: "skill-lab" as const,
+      targetId: event.jobId,
+      title: skillLabNotificationTitleRef.current,
+      createdAt: event.createdAt,
+      updatedAt: event.createdAt,
+      startedAt: event.createdAt
+    };
+
+    if (event.type === "skill-lab.progress") {
+      const completed = event.state === "tested" ? event.iteration : Math.max(0, event.iteration - 1);
+      const progress = {
+        current: Math.min(event.totalIterations, completed),
+        total: event.totalIterations,
+        percent: event.totalIterations > 0
+          ? Math.round((Math.min(event.totalIterations, completed) / event.totalIterations) * 100)
+          : 0
+      };
+      dispatchNotificationCenter({
+        type: "start",
+        item: {
+          ...base,
+          detail: `${event.phase} · ${event.summary}`,
+          status: "running",
+          unread: false,
+          progress,
+          attentionKind: undefined,
+          anchorId: undefined
+        }
+      });
+      return;
+    }
+
+    if (event.type === "skill-lab.approval" || event.type === "skill-lab.clarification") {
+      dispatchNotificationCenter({
+        type: "start",
+        item: {
+          ...base,
+          detail: event.type === "skill-lab.approval" ? event.description : event.summary,
+          status: "attention",
+          unread: true,
+          attentionKind: event.type === "skill-lab.approval" ? "approval" : "input"
+        }
+      });
+      return;
+    }
+
+    const status = event.type === "skill-lab.completed"
+      ? "completed"
+      : event.type === "skill-lab.failed"
+        ? "failed"
+        : "cancelled";
+    const detail = event.type === "skill-lab.completed"
+      ? `${event.skill.displayName ?? event.skill.name} 已生成并通过测试。`
+      : event.type === "skill-lab.failed"
+        ? event.error
+        : "技能实验室任务已取消。";
+    const title = event.type === "skill-lab.completed"
+      ? `技能实验室 · ${event.skill.displayName ?? event.skill.name}`
+      : base.title;
+    if (active) {
+      dispatchNotificationCenter({
+        type: "finish",
+        source: "skill-lab",
+        targetId: event.jobId,
+        updatedAt: event.createdAt,
+        status,
+        detail,
+        title,
+        unread: status !== "cancelled",
+        progress: status === "completed" && active.progress
+          ? { ...active.progress, current: active.progress.total, percent: 100 }
+          : active.progress
+      });
+    } else {
+      dispatchNotificationCenter({
+        type: "start",
+        item: { ...base, title, detail, status, unread: status !== "cancelled" }
+      });
+    }
+  }
+
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    threadsRef.current = threads;
+    for (const thread of threads) {
+      if (!threadStatusRef.current.has(thread.id)) threadStatusRef.current.set(thread.id, thread.status);
+    }
+  }, [threads]);
+
+  useEffect(() => window.codexh.onOpenNotificationCenter((target) => {
+    dispatchNotificationCenter({ type: "mark-all-read" });
+    setHighlightedNotificationTarget(`${target.source}:${target.targetId}`);
+    setIsNotificationCenterOpen(true);
+  }), []);
+
+  useEffect(() => {
+    if (!isNotificationCenterOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (notificationCenterRef.current?.contains(target) || notificationButtonRef.current?.contains(target)) return;
+      setIsNotificationCenterOpen(false);
+      setHighlightedNotificationTarget(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setIsNotificationCenterOpen(false);
+      setHighlightedNotificationTarget(null);
+      notificationButtonRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isNotificationCenterOpen]);
+
+  useEffect(() => {
+    if (!isNotificationCenterOpen || !notificationCenterState.items.some((item) => item.status === "running" || item.status === "attention")) {
+      return;
+    }
+    setNotificationNow(Date.now());
+    const timer = window.setInterval(() => setNotificationNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [isNotificationCenterOpen, notificationCenterState.items]);
 
   useEffect(() => {
     void window.codexh.getUpdateState().then(setUpdateState).catch(() => undefined);
@@ -845,6 +1136,7 @@ export function App() {
 
   useEffect(() => window.codexh.onSkillLabEvent((event) => {
     const typed = event as SkillLabEvent;
+    updateSkillLabNotification(typed);
     if (skillLabJobIdRef.current && "jobId" in typed && typed.jobId !== skillLabJobIdRef.current) return;
     if (typed.type === "skill-lab.clarification") {
       setSkillLabStatus("clarifying");
@@ -1302,6 +1594,7 @@ export function App() {
 
   useEffect(() => {
     const dispose = window.codexh.onRuntimeEvent((event) => {
+      const runtimeEvent = event as RuntimeEvent;
       const typed = event as {
         threadId?: string;
         type: string;
@@ -1322,6 +1615,7 @@ export function App() {
           argumentsJson?: string;
           resultJson?: string;
           prompt?: UserInputPrompt;
+          approval?: ApprovalRequest;
           riskLevel?: ToolCallRecord["riskLevel"];
           approvalMode?: ToolCallRecord["approvalMode"];
           status?: ToolCallRecord["status"];
@@ -1347,6 +1641,7 @@ export function App() {
           tabs?: RuntimeThreadSnapshot["browserTabs"];
         };
       };
+      const notificationThreadId = resolveRuntimeNotificationThreadId(runtimeEvent);
       const currentSelectedThreadId = selectedThreadIdRef.current;
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
       if (typed.type === "terminal.output" && typed.threadId === currentSelectedThreadId) {
@@ -1368,6 +1663,18 @@ export function App() {
         }
         setGpaState(typed.payload.gpa);
         setGpaComposerSelected(typed.payload.gpa.stage !== "off");
+        if (notificationThreadId && typed.payload.gpa.awaitingConfirmation) {
+          setThreadNotificationAttention(
+            notificationThreadId,
+            typed.payload.gpa.awaitingConfirmation === "goal" ? "需要确认任务目标。" : "需要确认 GPA 计划后继续。",
+            "gpa",
+            undefined,
+            typed.createdAt
+          );
+        } else if (notificationThreadId) {
+          const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", notificationThreadId);
+          if (active?.attentionKind === "gpa") resumeThreadNotification(notificationThreadId, "确认完成，任务继续运行。", typed.createdAt);
+        }
         return;
       }
       if (typed.type === "user-input.resolved" && typed.threadId && typed.payload?.prompt) {
@@ -1385,6 +1692,9 @@ export function App() {
             )
           };
         });
+        if (notificationThreadId) {
+          resumeThreadNotification(notificationThreadId, "信息已补充，任务继续运行。", typed.createdAt);
+        }
       }
       if (typed.type === "model.capability.updated" && typed.payload?.modelId) {
         const modelId = typed.payload.modelId;
@@ -1407,7 +1717,28 @@ export function App() {
         const mode = (viewport?.width ?? 1440) <= 500 ? "手机" : "桌面";
         appendRuntimeStatus(typed.threadId, `正在验证页面 · ${mode} ${viewport?.width ?? 1440}×${viewport?.height ?? 900}`, typed.createdAt);
         setRuntimeProgress({ threadId: typed.threadId, phase: "tool", runtimeObserved: true });
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, `正在验证页面 · ${mode}`, typed.createdAt);
+        }
         return;
+      }
+      if (typed.type === "approval.requested" && notificationThreadId && typed.payload?.approval) {
+        setThreadNotificationAttention(
+          notificationThreadId,
+          typed.payload.approval.title || "任务正在等待你的操作确认。",
+          "approval",
+          typed.payload.approval.id,
+          typed.createdAt
+        );
+      }
+      if (typed.type === "user-input.requested" && notificationThreadId && typed.payload?.prompt) {
+        setThreadNotificationAttention(
+          notificationThreadId,
+          typed.payload.prompt.title || "任务正在等待你补充信息。",
+          "input",
+          typed.payload.prompt.id,
+          typed.createdAt
+        );
       }
       if (typed.type === "approval.resolved" && typed.threadId) {
         const approvalPayload = typed.payload as unknown as {
@@ -1433,6 +1764,13 @@ export function App() {
           if (approvalPayload.source === "timeout" && !suppressRuntimeProgressRef.current[typed.threadId]) {
             appendRuntimeStatus(typed.threadId, "审批超时，已自动拒绝", typed.createdAt);
           }
+        }
+        if (notificationThreadId) {
+          resumeThreadNotification(
+            notificationThreadId,
+            approvalPayload.approved ? "操作已确认，任务继续运行。" : "操作已拒绝，任务继续处理。",
+            typed.createdAt
+          );
         }
         return;
       }
@@ -1506,6 +1844,16 @@ export function App() {
           ),
           typed.createdAt
         );
+        if (notificationThreadId) {
+          updateThreadNotification(
+            notificationThreadId,
+            getToolProcessingLabel(
+              typed.payload.toolName,
+              typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}"
+            ),
+            typed.createdAt
+          );
+        }
         setRuntimeProgress({ threadId: typed.threadId, phase: "tool", runtimeObserved: true });
         return;
       }
@@ -1541,6 +1889,9 @@ export function App() {
           });
           if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
             appendRuntimeStatus(runtimeThreadId, "工具已完成，正在整理结果", typed.createdAt);
+            if (notificationThreadId) {
+              updateThreadNotification(notificationThreadId, "工具已完成，正在整理结果。", typed.createdAt);
+            }
             setRuntimeProgress((current) =>
               current?.threadId === runtimeThreadId
                 ? { ...current, phase: "thinking", runtimeObserved: true }
@@ -1567,6 +1918,9 @@ export function App() {
           }
         }));
         appendRuntimeStatus(threadId, "正在生成回复", typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, "正在生成回复。", typed.createdAt);
+        }
         setRuntimeProgress({ threadId, phase: "generating", runtimeObserved: true });
         return;
       }
@@ -1586,6 +1940,9 @@ export function App() {
           });
         }
         appendRuntimeStatus(typed.threadId, "正在校验并整理结果", typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, "正在校验并整理结果。", typed.createdAt);
+        }
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
@@ -1596,12 +1953,18 @@ export function App() {
         const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
         const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 5;
         appendRuntimeStatus(typed.threadId, `模型响应超时，正在重试 (${attempt}/${maxAttempts})`, typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, `模型响应超时，正在重试 (${attempt}/${maxAttempts})。`, typed.createdAt);
+        }
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
       if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "function_call_protocol_compatibility") {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
           appendRuntimeStatus(typed.threadId, "模型服务工具调用不兼容，正在切换兼容模式重试", typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, "正在切换兼容模式重试。", typed.createdAt);
+          }
           setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         }
         return;
@@ -1609,6 +1972,9 @@ export function App() {
       if (typed.type === "agent.context_compacted" && typed.threadId) {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
           appendRuntimeStatus(typed.threadId, "上下文已自动压缩，继续分析中", typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, "上下文已压缩，继续分析。", typed.createdAt);
+          }
         }
       }
       if (typed.type === "agent.repository_exploration" && typed.threadId) {
@@ -1633,12 +1999,18 @@ export function App() {
             appendRuntimeStatus(typed.threadId, "已定位相关路径，继续分析中", typed.createdAt);
           }
           setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, "正在检索并定位相关文件。", typed.createdAt);
+          }
         }
       }
       if (typed.type === "message.created" && typed.threadId && typed.payload?.message?.role === "user") {
         const runtimeThreadId = typed.threadId;
         if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
           appendRuntimeStatus(runtimeThreadId, "正在理解任务", typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, "正在理解任务。", typed.createdAt);
+          }
           setRuntimeProgress((current) =>
             current?.threadId === runtimeThreadId
               ? { ...current, phase: "thinking", runtimeObserved: true }
@@ -1647,6 +2019,7 @@ export function App() {
         }
       }
       if (!isPluginStateUpdate && typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
+        applyThreadStatusNotification(runtimeEvent);
         const runtimeThreadId = typed.threadId;
         if (typed.payload.childThread && runtimeThreadId === currentSelectedThreadId) {
           void refreshSnapshot(runtimeThreadId);
@@ -1881,7 +2254,7 @@ export function App() {
   }, [filePreviewPath, selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !notice && !filePreviewPath) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
       return;
     }
 
@@ -1894,6 +2267,26 @@ export function App() {
 
         if (notice) {
           dismissNotice(notice.id);
+          return;
+        }
+
+        if (quickNoteDeleteConfirm) {
+          setQuickNoteDeleteConfirm(null);
+          return;
+        }
+
+        if (quickNoteListMenu) {
+          setQuickNoteListMenu(null);
+          return;
+        }
+
+        if (isQuickNotesOpen) {
+          setIsQuickNotesOpen(false);
+          return;
+        }
+
+        if (isHelpOpen) {
+          setIsHelpOpen(false);
           return;
         }
 
@@ -1928,7 +2321,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isProjectCreateOpen, isSettingsOpen, notice, updateConfirmDialog]);
+  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isHelpOpen, isProjectCreateOpen, isQuickNotesOpen, isSettingsOpen, notice, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
 
   useEffect(() => {
     if (!notice || isNoticeHovered) {
@@ -2070,10 +2463,7 @@ export function App() {
     [snapshot]
   );
   const pendingPrompts = useMemo(
-    () =>
-      (snapshot?.prompts ?? []).filter(
-        (item) => item.status === "pending" && snapshot?.thread.status === "waiting"
-      ),
+    () => (snapshot?.prompts ?? []).filter((item) => item.status === "pending"),
     [snapshot]
   );
   const userInputPrompts = snapshot?.prompts ?? [];
@@ -3192,7 +3582,8 @@ export function App() {
 
   async function copyUserMessage(content: string) {
     try {
-      await navigator.clipboard.writeText(content);
+      const copied = await copyTextToClipboard(content);
+      if (!copied) throw new Error("剪贴板未接受复制内容。");
       showNotice("已复制消息内容。", { tone: "success" });
     } catch (error) {
       showNotice("复制失败。", {
@@ -3632,12 +4023,14 @@ export function App() {
     }
     setResolvingPromptId(prompt.id);
     setSnapshot((current) => {
-      if (!current || current.thread.id !== prompt.threadId) {
+      if (!current || !current.prompts.some((item) => item.id === prompt.id)) {
         return current;
       }
       return {
         ...current,
-        thread: { ...current.thread, status: "running" },
+        thread: current.thread.id === prompt.threadId
+          ? { ...current.thread, status: "running" }
+          : current.thread,
         prompts: current.prompts.map((item) =>
           item.id === prompt.id
             ? {
@@ -3652,9 +4045,9 @@ export function App() {
     });
     try {
       await window.codexh.answerPrompt(prompt.id, answers);
-      await refreshSnapshot(prompt.threadId);
+      await refreshSnapshot(activeSnapshotThreadId ?? selectedThreadId);
     } catch (error) {
-      await refreshSnapshot(prompt.threadId);
+      await refreshSnapshot(activeSnapshotThreadId ?? selectedThreadId);
       showNotice("提交选择失败。", {
         message: error instanceof Error ? error.message : "请重新开始任务后再试。"
       });
@@ -3856,6 +4249,10 @@ export function App() {
   async function startSkillLab() {
     const prompt = skillLabPrompt.trim();
     if (skillLabJobId || (skillLabMode === "create" && !prompt) || (skillLabMode === "optimize" && !skillLabTargetSkillId)) return;
+    const targetSkill = userSkills.find((skill) => skill.id === skillLabTargetSkillId);
+    skillLabNotificationTitleRef.current = skillLabMode === "optimize"
+      ? `技能实验室 · ${targetSkill?.displayName ?? targetSkill?.name ?? "持续优化"}`
+      : `技能实验室 · ${skillLabName.trim() || prompt.slice(0, 24)}`;
     setSkillLabLastRunMode(skillLabMode);
     setSkillLabStatus("clarifying");
     setSkillLabError(null);
@@ -3877,6 +4274,25 @@ export function App() {
       });
       skillLabJobIdRef.current = jobId;
       setSkillLabJobId(jobId);
+      if (!findActiveNotification(notificationCenterStateRef.current.items, "skill-lab", jobId)) {
+        const timestamp = new Date().toISOString();
+        dispatchNotificationCenter({
+          type: "start",
+          item: {
+            id: `skill-lab:${jobId}`,
+            source: "skill-lab",
+            targetId: jobId,
+            title: skillLabNotificationTitleRef.current,
+            detail: "正在分析需求并准备生成 Skill。",
+            status: "running",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            startedAt: timestamp,
+            unread: false,
+            progress: { current: 0, total: skillLabIterations, percent: 0 }
+          }
+        });
+      }
     } catch (error) {
       skillLabOptimizationTargetRef.current = null;
       setSkillLabStatus("failed");
@@ -4995,7 +5411,23 @@ export function App() {
   const historyContextMenuPresence = useMotionPresence(historyContextMenu, 140);
   const visibleHistoryContextMenu = historyContextMenu ?? historyContextMenuPresence.value;
   const skillsSortPresence = useMotionPresence(skillsSortOpen ? true : null, 140);
+  const notificationCenterPresence = useMotionPresence(isNotificationCenterOpen ? true : null, 160);
   const terminalDrawerPresence = useMotionPresence(isTerminalOpen ? true : null, 220);
+  const helpPresence = useMotionPresence(isHelpOpen ? true : null, 220);
+  const quickNotesPresence = useMotionPresence(isQuickNotesOpen ? true : null, 220);
+  const quickNoteListMenuPresence = useMotionPresence(quickNoteListMenu, 140);
+  const visibleQuickNoteListMenu = quickNoteListMenu ?? quickNoteListMenuPresence.value;
+  const quickNoteDeleteConfirmPresence = useMotionPresence(quickNoteDeleteConfirm, 180);
+  const visibleQuickNoteDeleteConfirm = quickNoteDeleteConfirm ?? quickNoteDeleteConfirmPresence.value;
+  const pendingInteractionsKey = pendingApprovals.length || pendingPrompts.length
+    ? `${pendingApprovals.length}:${pendingPrompts.length}`
+    : null;
+  const pendingInteractionsPresence = useMotionPresence(pendingInteractionsKey, 180);
+  const visiblePendingInteractionCounts = (pendingInteractionsKey ?? pendingInteractionsPresence.value)
+    ?.split(":")
+    .map(Number) ?? [0, 0];
+  const visiblePendingApprovalCount = visiblePendingInteractionCounts[0] ?? 0;
+  const visiblePendingPromptCount = visiblePendingInteractionCounts[1] ?? 0;
   const projectHistoryGroups = useMemo(() => {
     const groups = new Map<string, { cwd: string; threads: ThreadRecord[]; updatedAt: number }>();
 
@@ -5081,6 +5513,98 @@ export function App() {
           </button>
         )}
       </div>
+    );
+  }
+
+  const sortedNotificationItems = sortNotificationItems(notificationCenterState.items);
+  const attentionNotifications = sortedNotificationItems.filter((item) => item.status === "attention");
+  const runningNotifications = sortedNotificationItems.filter((item) => item.status === "running");
+  const finishedNotifications = sortedNotificationItems.filter(isFinishedNotification);
+  const unreadFinishedNotificationCount = finishedNotifications.filter((item) => item.unread).length;
+  const notificationBadgeCount = attentionNotifications.length + unreadFinishedNotificationCount;
+  const hasRunningNotifications = runningNotifications.length > 0;
+
+  function toggleNotificationCenter() {
+    if (isNotificationCenterOpen) {
+      setIsNotificationCenterOpen(false);
+      setHighlightedNotificationTarget(null);
+      return;
+    }
+    dispatchNotificationCenter({ type: "mark-all-read" });
+    setNotificationNow(Date.now());
+    setIsNotificationCenterOpen(true);
+  }
+
+  async function openNotificationItem(item: NotificationCenterItem) {
+    setIsNotificationCenterOpen(false);
+    setHighlightedNotificationTarget(null);
+    if (item.source === "skill-lab") {
+      if (config) resetConfigDraft(config);
+      setSettingsTab("capabilities");
+      setCapabilityTab("lab");
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    setIsSettingsOpen(false);
+    await openThread(item.targetId, { scrollToLatest: true });
+    if (!item.anchorId) return;
+    window.setTimeout(() => {
+      const prefix = item.attentionKind === "approval" ? "approval-card" : "user-input-prompt";
+      document.getElementById(`${prefix}-${item.anchorId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 180);
+  }
+
+  function renderNotificationGroup(label: string, items: NotificationCenterItem[]) {
+    if (!items.length) return null;
+    return (
+      <section className="notification-center-group" aria-label={label}>
+        <div className="notification-center-group-title">{label}<span>{items.length}</span></div>
+        <div className="notification-center-list">
+          {items.map((item) => {
+            const statusLabel = getNotificationStatusLabel(item.status);
+            const elapsed = formatNotificationElapsed(item.startedAt, item.status === "running" || item.status === "attention" ? notificationNow : Date.parse(item.updatedAt));
+            const highlighted = highlightedNotificationTarget === `${item.source}:${item.targetId}`;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={`notification-center-item is-${item.status} ${item.unread ? "is-unread" : ""} ${highlighted ? "is-highlighted" : ""}`}
+                onClick={() => void openNotificationItem(item)}
+              >
+                <span className="notification-item-status" aria-hidden><IconNotificationStatus status={item.status} /></span>
+                <span className="notification-item-copy">
+                  <span className="notification-item-heading">
+                    <strong>{item.title}</strong>
+                    <small>{statusLabel} · {elapsed}</small>
+                  </span>
+                  <span className="notification-item-detail">{item.detail}</span>
+                  {item.status === "running" || item.status === "attention" ? (
+                    item.progress ? (
+                      <span className="notification-item-progress-wrap">
+                        <span
+                          className="notification-item-progress is-determinate"
+                          role="progressbar"
+                          aria-label={`${item.title} 进度`}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={item.progress.percent}
+                        >
+                          <i style={{ width: `${item.progress.percent}%` }} />
+                        </span>
+                        <small>{item.progress.current}/{item.progress.total} · {item.progress.percent}%</small>
+                      </span>
+                    ) : (
+                      <span className="notification-item-progress is-indeterminate" aria-label={`${item.title} 正在运行`}><i /></span>
+                    )
+                  ) : null}
+                </span>
+                {item.unread && isFinishedNotification(item) ? <span className="notification-item-unread" aria-label="未读" /> : null}
+              </button>
+            );
+          })}
+        </div>
+      </section>
     );
   }
 
@@ -5347,6 +5871,58 @@ export function App() {
 
       <main className="workspace">
         <div className="workspace-controls">
+            <div className="notification-center-control">
+              <button
+                ref={notificationButtonRef}
+                type="button"
+                className={`workspace-control-button notification-center-toggle ${isNotificationCenterOpen ? "active" : ""} ${hasRunningNotifications ? "is-running" : ""} ${attentionNotifications.length ? "has-attention" : ""}`}
+                title={`消息与进度${hasRunningNotifications ? ` · ${runningNotifications.length} 个运行中` : ""}${notificationBadgeCount ? ` · ${notificationBadgeCount} 条提醒` : ""}`}
+                aria-label={`消息与进度${notificationBadgeCount ? `，${notificationBadgeCount} 条提醒` : ""}`}
+                aria-haspopup="dialog"
+                aria-expanded={isNotificationCenterOpen}
+                onClick={toggleNotificationCenter}
+              >
+                <span className="notification-bell-glyph" aria-hidden><IconBell /></span>
+                {hasRunningNotifications ? <span className="notification-running-dot" aria-hidden /> : null}
+                {notificationBadgeCount ? <span className="notification-count-badge">{notificationBadgeCount > 9 ? "9+" : notificationBadgeCount}</span> : null}
+              </button>
+              {notificationCenterPresence.value ? (
+                <div
+                  ref={notificationCenterRef}
+                  className={`notification-center-panel motion-${notificationCenterPresence.phase}`}
+                  role="dialog"
+                  aria-modal="false"
+                  aria-label="消息与进度"
+                >
+                  <header className="notification-center-header">
+                    <div><strong>消息与进度</strong><span>{runningNotifications.length} 个运行中</span></div>
+                    <button
+                      type="button"
+                      disabled={!unreadFinishedNotificationCount}
+                      onClick={() => dispatchNotificationCenter({ type: "mark-all-read" })}
+                    >
+                      全部已读
+                    </button>
+                  </header>
+                  <div className="notification-center-body">
+                    {!sortedNotificationItems.length ? (
+                      <div className="notification-center-empty"><IconBell /><span>暂无后台任务或消息</span></div>
+                    ) : (
+                      <>
+                        {renderNotificationGroup("待处理", attentionNotifications)}
+                        {renderNotificationGroup("运行中", runningNotifications)}
+                        {renderNotificationGroup("最近消息", finishedNotifications)}
+                      </>
+                    )}
+                  </div>
+                  {finishedNotifications.length ? (
+                    <footer className="notification-center-footer">
+                      <button type="button" onClick={() => dispatchNotificationCenter({ type: "clear-finished" })}>清除已结束</button>
+                    </footer>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
             <button
               type="button"
               className={`workspace-control-button terminal-toggle ${isTerminalOpen ? "active" : ""}`}
@@ -5372,26 +5948,26 @@ export function App() {
               </button>
             ) : null}
           </div>
-        {(pendingApprovals.length > 0 || pendingPrompts.length > 0) && (
-          <div className="pending-strip">
-            {pendingApprovals.length > 0 ? (
+        {pendingInteractionsPresence.value ? (
+          <div className="pending-strip" data-motion={pendingInteractionsPresence.phase}>
+            {visiblePendingApprovalCount > 0 ? (
               <div className="pending-pill">
-                <span className="pending-count">{pendingApprovals.length}</span>
+                <span className="pending-count">{visiblePendingApprovalCount}</span>
                 <span>待审批</span>
               </div>
             ) : null}
-            {pendingPrompts.length > 0 ? (
+            {visiblePendingPromptCount > 0 ? (
               <button
                 type="button"
                 className="pending-pill"
                 onClick={() => document.getElementById(`user-input-prompt-${pendingPrompts[0]?.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
               >
-                <span className="pending-count">{pendingPrompts.length}</span>
+                <span className="pending-count">{visiblePendingPromptCount}</span>
                 <span>需要选择</span>
               </button>
             ) : null}
           </div>
-        )}
+        ) : null}
 
         <section className="chat-canvas">
           {!showWelcome && !isThreadSwitchPlaceholderVisible && currentSubagents.length > 0 && hasActiveSubagents ? (
@@ -5515,7 +6091,9 @@ export function App() {
                     key={prompt.id}
                     prompt={prompt}
                     resolving={resolvingPromptId === prompt.id}
-                    canAnswer={selectedThreadStatus === "waiting"}
+                    canAnswer={prompt.threadId === activeSnapshotThreadId
+                      ? selectedThreadStatus === "waiting"
+                      : prompt.status === "pending"}
                     onAnswer={(answers) => void answerPendingPrompt(prompt, answers)}
                   />
                 ))}
@@ -7436,8 +8014,8 @@ export function App() {
         </div>
       ) : null}
 
-      {isHelpOpen ? (
-        <div className="project-sheet-overlay help-overlay motion-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setIsHelpOpen(false); }}>
+      {helpPresence.value ? (
+        <div className="project-sheet-overlay help-overlay motion-overlay" data-motion={helpPresence.phase} onMouseDown={(event) => { if (event.target === event.currentTarget) setIsHelpOpen(false); }}>
           <section className="project-sheet help-sheet" role="dialog" aria-modal="true" aria-labelledby="help-title">
             <header className="project-sheet-header">
               <div className="project-sheet-copy"><strong id="help-title">CodeXH 使用指南</strong><span>产品功能与常用工作流</span></div>
@@ -7458,8 +8036,8 @@ export function App() {
         </div>
       ) : null}
 
-      {isQuickNotesOpen ? (
-        <div className="project-sheet-overlay quick-notes-overlay motion-overlay" onClick={(event) => {
+      {quickNotesPresence.value ? (
+        <div className="project-sheet-overlay quick-notes-overlay motion-overlay" data-motion={quickNotesPresence.phase} onClick={(event) => {
           if (event.target === event.currentTarget) setIsQuickNotesOpen(false);
         }}>
           <section className="project-sheet quick-notes-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-notes-title">
@@ -7502,8 +8080,8 @@ export function App() {
                 </footer>
               </div>
             </div>
-            {quickNoteListMenu ? <div className="quick-notes-list-context-menu" style={{ left: quickNoteListMenu.x, top: quickNoteListMenu.y }} onMouseLeave={() => setQuickNoteListMenu(null)}><button type="button" onClick={() => { setRenamingQuickNoteId(quickNoteListMenu.note.id); setQuickNoteRenameDraft(quickNoteListMenu.note.title); setQuickNoteListMenu(null); }}>重命名</button><button type="button" className="danger" onClick={() => { setQuickNoteDeleteConfirm({ id: quickNoteListMenu.note.id, title: quickNoteListMenu.note.title }); setQuickNoteListMenu(null); }}>删除</button></div> : null}
-            {quickNoteDeleteConfirm ? <div className="quick-notes-confirm-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickNoteDeleteConfirm(null); }}><section className="quick-notes-confirm-dialog" role="alertdialog" aria-modal="true"><strong>删除随手记？</strong><p>“{quickNoteDeleteConfirm.title}”及其对应的全局知识库内容将被删除。</p><footer><button type="button" onClick={() => setQuickNoteDeleteConfirm(null)}>取消</button><button type="button" className="danger" onClick={() => void deleteQuickNote(quickNoteDeleteConfirm)}>删除</button></footer></section></div> : null}
+            {visibleQuickNoteListMenu ? <div className="quick-notes-list-context-menu" data-motion={quickNoteListMenuPresence.phase} style={{ left: visibleQuickNoteListMenu.x, top: visibleQuickNoteListMenu.y }} onMouseLeave={() => setQuickNoteListMenu(null)}><button type="button" onClick={() => { setRenamingQuickNoteId(visibleQuickNoteListMenu.note.id); setQuickNoteRenameDraft(visibleQuickNoteListMenu.note.title); setQuickNoteListMenu(null); }}>重命名</button><button type="button" className="danger" onClick={() => { setQuickNoteDeleteConfirm({ id: visibleQuickNoteListMenu.note.id, title: visibleQuickNoteListMenu.note.title }); setQuickNoteListMenu(null); }}>删除</button></div> : null}
+            {visibleQuickNoteDeleteConfirm ? <div className="quick-notes-confirm-overlay motion-overlay" data-motion={quickNoteDeleteConfirmPresence.phase} onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickNoteDeleteConfirm(null); }}><section className="quick-notes-confirm-dialog" role="alertdialog" aria-modal="true"><strong>删除随手记？</strong><p>“{visibleQuickNoteDeleteConfirm.title}”及其对应的全局知识库内容将被删除。</p><footer><button type="button" onClick={() => setQuickNoteDeleteConfirm(null)}>取消</button><button type="button" className="danger" onClick={() => void deleteQuickNote(visibleQuickNoteDeleteConfirm)}>删除</button></footer></section></div> : null}
           </section>
         </div>
       ) : null}
@@ -12010,6 +12588,7 @@ function QueuedMessageList({
 }) {
   const [isSteering, setIsSteering] = useState(false);
   const [steeringDraft, setSteeringDraft] = useState("");
+  const steeringPresence = useMotionPresence(isSteering ? true : null, 160);
   const visible = messages.filter(
     (message) =>
       !message.content.trimStart().startsWith("[internal:") &&
@@ -12054,8 +12633,8 @@ function QueuedMessageList({
           </button>
         </div>
       ))}
-      {isSteering ? (
-        <div className="composer-queue-steer-editor">
+      {steeringPresence.value ? (
+        <div className="composer-queue-steer-editor" data-motion={steeringPresence.phase}>
           <input
             autoFocus
             value={steeringDraft}
@@ -12579,7 +13158,7 @@ function ApprovalCard({
   onResolve: (decision: "approved" | "denied", mode?: "once" | "session" | "remember") => void;
 }) {
   return (
-    <section className="approval-card" aria-label={`审批请求: ${approval.title}`}>
+    <section id={`approval-card-${approval.id}`} className="approval-card" aria-label={`审批请求: ${approval.title}`}>
       <div className="approval-card-copy">
         <span className="approval-card-label">需要审批</span>
         <strong>{approval.title}</strong>
@@ -12920,6 +13499,10 @@ function renderMessageContent(
         <div className="message-user-bubble">
           {editingMessage ? (
             <>
+              <div className="message-user-edit-head">
+                <IconCompose />
+                <span>编辑消息</span>
+              </div>
               <textarea
                 className="message-user-edit-input"
                 value={editingMessage.content}
@@ -14712,6 +15295,25 @@ function formatRelativeTime(isoTime: string) {
   return `${diffDays} 天前`;
 }
 
+function formatNotificationElapsed(startedAt: string, endTime: number): string {
+  const started = Date.parse(startedAt);
+  const seconds = Number.isFinite(started) && Number.isFinite(endTime)
+    ? Math.max(0, Math.floor((endTime - started) / 1_000))
+    : 0;
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+}
+
+function getNotificationStatusLabel(status: NotificationCenterItem["status"]): string {
+  if (status === "attention") return "待处理";
+  if (status === "running") return "运行中";
+  if (status === "completed") return "已完成";
+  if (status === "failed") return "失败";
+  return "已停止";
+}
+
 function cloneConfig(config: AppConfig): AppConfig {
   const multimodal = config.multimodal ?? {
     image: { enabled: true },
@@ -15392,6 +15994,23 @@ function IconTerminal() {
       <path d="M13.5 15h3" />
     </SvgIcon>
   );
+}
+
+function IconBell() {
+  return (
+    <SvgIcon>
+      <path d="M18 9.5a6 6 0 0 0-12 0c0 7-2.5 7-2.5 8.5h17C20.5 16.5 18 16.5 18 9.5z" />
+      <path d="M9.5 20a2.8 2.8 0 0 0 5 0" />
+    </SvgIcon>
+  );
+}
+
+function IconNotificationStatus({ status }: { status: NotificationCenterItem["status"] }) {
+  if (status === "completed") return <IconCheck />;
+  if (status === "failed") return <IconClose />;
+  if (status === "cancelled") return <IconStop />;
+  if (status === "attention") return <IconHelpCircle />;
+  return <IconBell />;
 }
 
 function IconGlobe() {

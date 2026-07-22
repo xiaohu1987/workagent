@@ -34,6 +34,7 @@ import type {
   QuickNoteRecord,
   RuntimeEvent,
   RuntimeThreadSnapshot,
+  SkillLabEvent,
   SkillMetadata,
   SubagentResultEnvelope,
   SubagentWaitResult,
@@ -63,7 +64,7 @@ import { RuntimeLogWriter } from "./runtime-log";
 import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime } from "./terminal-runtime";
 import { GitService } from "./git-service";
-import { SkillLabService, type SkillLabEvent } from "./skill-lab";
+import { SkillLabService } from "./skill-lab";
 import {
   DatabaseService,
   defaultConfig,
@@ -732,6 +733,13 @@ export class DesktopBackend {
 
   public getThreadSnapshot(threadId: string, messageLimit = 160): RuntimeThreadSnapshot {
     const thread = this.#db.getThread(threadId);
+    const subagents = this.getCurrentRequestSubagents(thread);
+    const childApprovals = thread.parentThreadId
+      ? []
+      : subagents.flatMap((child) => this.#db.listApprovals(child.id).filter((approval) => approval.status === "pending"));
+    const childPrompts = thread.parentThreadId
+      ? []
+      : subagents.flatMap((child) => this.#db.listUserPrompts(child.id).filter((prompt) => prompt.status === "pending"));
     const browserTabs = this.removePersistedBrowserErrorTabs(threadId);
     this.#browser.syncPersistedTabs(threadId, browserTabs);
     const cappedMessageLimit = Number.isFinite(messageLimit)
@@ -745,8 +753,8 @@ export class DesktopBackend {
       messageCount,
       hasMoreMessages: messageCount > messages.length,
       queuedMessages: this.#db.listQueuedMessages(threadId).filter((message) => message.status === "queued"),
-      approvals: this.#db.listApprovals(threadId),
-      prompts: this.#db.listUserPrompts(threadId),
+      approvals: [...this.#db.listApprovals(threadId), ...childApprovals],
+      prompts: [...this.#db.listUserPrompts(threadId), ...childPrompts],
       artifacts: this.#db.listArtifacts(threadId),
       knowledgeBases: this.listVisibleKnowledgeBasesForThread(thread),
       browserTabs,
@@ -754,7 +762,7 @@ export class DesktopBackend {
       toolCalls: messages.length > 0 ? this.#db.listToolCalls(threadId, messages[0].createdAt) : [],
       contextCompaction: this.#db.getLatestContextCompaction(threadId),
       gpa: this.getGpaState(threadId),
-      subagents: this.getCurrentRequestSubagents(thread)
+      subagents
     };
   }
 
@@ -3264,18 +3272,25 @@ export class DesktopBackend {
   }
 
   private async emit(event: RuntimeEvent): Promise<void> {
-    this.#db.addRuntimeEvent(event);
-    this.#events.emit("runtime-event", event);
-    if (event.type === "thread.updated") {
-      if (!event.threadId) {
-        return;
-      }
-      let subject: ThreadRecord | null = null;
+    let subject: ThreadRecord | null = null;
+    if (event.threadId) {
       try {
         subject = this.#db.getThread(event.threadId);
       } catch {
         subject = null;
       }
+    }
+    const routedEvent: RuntimeEvent = subject?.parentThreadId
+      ? {
+          ...event,
+          notificationThreadId: subject.rootThreadId,
+          notificationChildThreadId: subject.id
+        }
+      : event;
+
+    this.#db.addRuntimeEvent(routedEvent);
+    this.#events.emit("runtime-event", routedEvent);
+    if (routedEvent.type === "thread.updated") {
       if (subject?.parentThreadId) {
         const root = this.#db.getThread(subject.rootThreadId);
         this.#events.emit("runtime-event", {
@@ -3286,8 +3301,8 @@ export class DesktopBackend {
         } satisfies RuntimeEvent);
       }
     }
-    if (event.type !== "assistant.delta") {
-      await this.#logs.append("runtime.event", { event: sanitizeRuntimeEventForLog(event) }, event.threadId);
+    if (routedEvent.type !== "assistant.delta") {
+      await this.#logs.append("runtime.event", { event: sanitizeRuntimeEventForLog(routedEvent) }, routedEvent.threadId);
     }
   }
 

@@ -778,8 +778,49 @@ export interface RuntimeEvent {
     | "model.capability.updated"
     | "terminal.output";
   threadId?: string;
+  /** Root task used by global notifications while preserving the event's subject thread. */
+  notificationThreadId?: string;
+  /** Child task that produced the event when notifications are routed to its root task. */
+  notificationChildThreadId?: string;
   payload: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface SkillLabProgress {
+  iteration: number;
+  totalIterations: number;
+  phase: string;
+  summary: string;
+  state: "running" | "tested";
+}
+
+export type SkillLabEvent =
+  | ({ type: "skill-lab.progress"; jobId: string; createdAt: string } & SkillLabProgress)
+  | {
+      type: "skill-lab.approval";
+      jobId: string;
+      createdAt: string;
+      approvalId: string;
+      title: string;
+      description: string;
+      toolName: string;
+    }
+  | {
+      type: "skill-lab.clarification";
+      jobId: string;
+      createdAt: string;
+      clarificationId: string;
+      summary: string;
+      questions: Array<{ id: string; question: string; required: boolean; options: string[]; allowOther: boolean }>;
+    }
+  | { type: "skill-lab.completed"; jobId: string; createdAt: string; skill: SkillMetadata }
+  | { type: "skill-lab.failed"; jobId: string; createdAt: string; error: string }
+  | { type: "skill-lab.cancelled"; jobId: string; createdAt: string };
+
+export interface NotificationNavigationTarget {
+  source: "thread" | "skill-lab";
+  targetId: string;
+  anchorId?: string;
 }
 
 export interface ContextCompactionRecord {

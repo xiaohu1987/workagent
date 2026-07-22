@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { NotificationNavigationTarget } from "@shared-types";
 
 const api = {
   listThreads: () => ipcRenderer.invoke("threads:list"),
@@ -97,6 +98,11 @@ const api = {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("skill-lab:event", wrapped);
     return () => ipcRenderer.removeListener("skill-lab:event", wrapped);
+  },
+  onOpenNotificationCenter: (listener: (target: NotificationNavigationTarget) => void) => {
+    const wrapped = (_event: unknown, target: NotificationNavigationTarget) => listener(target);
+    ipcRenderer.on("notifications:open", wrapped);
+    return () => ipcRenderer.removeListener("notifications:open", wrapped);
   },
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),

@@ -14,6 +14,9 @@ type UpdateState = {
   isPackaged: boolean;
 };
 
+type RendererSkillLabEvent = import("@shared-types").SkillLabEvent;
+type RendererNotificationNavigationTarget = import("@shared-types").NotificationNavigationTarget;
+
 declare global {
   interface Window {
     codexh: {
@@ -102,7 +105,8 @@ declare global {
       cancelSkillLab: (jobId: string) => Promise<void>;
       resolveSkillLabApproval: (payload: { jobId: string; approvalId: string; approved: boolean }) => Promise<void>;
       resolveSkillLabClarification: (payload: { jobId: string; clarificationId: string; answers: Record<string, string> }) => Promise<void>;
-      onSkillLabEvent: (listener: (event: any) => void) => () => void;
+      onSkillLabEvent: (listener: (event: RendererSkillLabEvent) => void) => () => void;
+      onOpenNotificationCenter: (listener: (target: RendererNotificationNavigationTarget) => void) => () => void;
       listPlugins: () => Promise<any[]>;
       installPlugin: (source: string) => Promise<any>;
       onPluginInstallProgress: (listener: (progress: { percent: number; stage: string }) => void) => () => void;
