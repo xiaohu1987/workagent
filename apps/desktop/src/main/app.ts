@@ -63,6 +63,7 @@ import { RuntimeLogWriter } from "./runtime-log";
 import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime } from "./terminal-runtime";
 import { GitService } from "./git-service";
+import { SkillLabService, type SkillLabEvent } from "./skill-lab";
 import {
   DatabaseService,
   defaultConfig,
@@ -194,11 +195,14 @@ export class DesktopBackend {
   readonly #browserViewports = new Map<string, BrowserViewport>();
   readonly #browserConsoleErrors = new Map<string, Array<{ message: string; sourceId?: string; line?: number }>>();
   readonly #browserDebuggerOwned = new Set<string>();
+  readonly #skillLabEvents = new EventEmitter();
 
   #layout!: HomeLayout;
   #db!: DatabaseService;
   #config!: AppConfig;
   #runtime!: AgentRuntimeService;
+  #skillLab!: SkillLabService;
+  readonly #gpaStateCache = new Map<string, GpaState>();
   #mcp!: McpManager;
   #mcpOAuth!: McpOAuthService;
   #databaseCredentials!: McpCredentialStore;
@@ -233,6 +237,16 @@ export class DesktopBackend {
       source: "config",
       pluginId: undefined
     })));
+    this.#skillLab = new SkillLabService({
+      config: this.#config,
+      providerFactory: this.#providerFactory,
+      skills: this.#skills,
+      mcp: this.#mcp,
+      skillsDraftsDir: this.#layout.skillsDraftsDir,
+      refreshSkills: () => this.refreshSkills(),
+      listSkills: () => this.#skills.list(),
+      emit: (event) => this.#skillLabEvents.emit("skill-lab-event", event)
+    });
 
     this.#runtime = new AgentRuntimeService({
       config: this.#config,
@@ -599,6 +613,7 @@ export class DesktopBackend {
     }
     this.#browser.clearThread(threadId);
     const updated = this.#db.clearThreadConversation(threadId);
+    this.#gpaStateCache.delete(threadId);
     this.#runtime.ensureThread(threadId);
     await this.emit({
       type: "thread.updated",
@@ -715,13 +730,20 @@ export class DesktopBackend {
     return { path: relativePath };
   }
 
-  public getThreadSnapshot(threadId: string): RuntimeThreadSnapshot {
+  public getThreadSnapshot(threadId: string, messageLimit = 160): RuntimeThreadSnapshot {
     const thread = this.#db.getThread(threadId);
     const browserTabs = this.removePersistedBrowserErrorTabs(threadId);
     this.#browser.syncPersistedTabs(threadId, browserTabs);
+    const cappedMessageLimit = Number.isFinite(messageLimit)
+      ? Math.min(2_000, Math.max(1, Math.floor(messageLimit)))
+      : 160;
+    const messageCount = this.#db.countMessages(threadId);
+    const messages = this.#db.listRecentMessages(threadId, cappedMessageLimit);
     return {
       thread,
-      messages: this.#db.listMessages(threadId),
+      messages,
+      messageCount,
+      hasMoreMessages: messageCount > messages.length,
       queuedMessages: this.#db.listQueuedMessages(threadId).filter((message) => message.status === "queued"),
       approvals: this.#db.listApprovals(threadId),
       prompts: this.#db.listUserPrompts(threadId),
@@ -729,7 +751,7 @@ export class DesktopBackend {
       knowledgeBases: this.listVisibleKnowledgeBasesForThread(thread),
       browserTabs,
       projectPlugins: this.listProjectPluginsForThread(thread),
-      toolCalls: this.#db.listToolCalls(threadId),
+      toolCalls: messages.length > 0 ? this.#db.listToolCalls(threadId, messages[0].createdAt) : [],
       contextCompaction: this.#db.getLatestContextCompaction(threadId),
       gpa: this.getGpaState(threadId),
       subagents: this.getCurrentRequestSubagents(thread)
@@ -738,7 +760,31 @@ export class DesktopBackend {
 
   public getGpaState(threadId: string): GpaState {
     const thread = this.#db.getThread(threadId);
-    return parseGpaState(thread.gpaStateJson);
+    const state = parseGpaState(thread.gpaStateJson, this.#gpaStateCache.get(threadId));
+    this.#gpaStateCache.set(threadId, state);
+    return state;
+  }
+
+  public onSkillLabEvent(listener: (event: SkillLabEvent) => void): () => void {
+    this.#skillLabEvents.on("skill-lab-event", listener);
+    return () => this.#skillLabEvents.off("skill-lab-event", listener);
+  }
+
+  public async startSkillLab(prompt: string, requestedName?: string, iterations?: number, targetSkillId?: string): Promise<string> {
+    await this.initializeDeferredServices();
+    return this.#skillLab.start(prompt, requestedName, iterations, targetSkillId);
+  }
+
+  public cancelSkillLab(jobId: string): void {
+    this.#skillLab.cancel(jobId);
+  }
+
+  public resolveSkillLabApproval(jobId: string, approvalId: string, approved: boolean): void {
+    this.#skillLab.resolveApproval(jobId, approvalId, approved);
+  }
+
+  public resolveSkillLabClarification(jobId: string, clarificationId: string, answers: Record<string, string>): void {
+    this.#skillLab.resolveClarification(jobId, clarificationId, answers);
   }
 
   public async setGpaStage(threadId: string, stage: GpaStage): Promise<void> {
@@ -2690,7 +2736,7 @@ export class DesktopBackend {
     }
   ): Promise<boolean> {
     const thread = this.#db.getThread(threadId);
-    if (parseGpaState(thread.gpaStateJson).fullAccess) {
+    if (this.getGpaState(threadId).fullAccess) {
       return true;
     }
     const approvalKey = hashApprovalPayload({
@@ -3004,9 +3050,7 @@ export class DesktopBackend {
   }
 
   private getCurrentRequestSubagents(parent: ThreadRecord, tree = this.#db.listAgentTree(parent.rootThreadId)): ThreadRecord[] {
-    const latestRootUserMessage = [...this.#db.listMessages(parent.rootThreadId)]
-      .reverse()
-      .find((message) => message.role === "user");
+    const latestRootUserMessage = this.#db.getLatestMessage(parent.rootThreadId, "user");
     const requestStartedAt = latestRootUserMessage ? Date.parse(latestRootUserMessage.createdAt) : Number.NEGATIVE_INFINITY;
 
     return tree.filter((item) =>

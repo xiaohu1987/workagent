@@ -22,9 +22,9 @@ export function gpaStageLabel(stage: GpaStage): string {
   return STAGE_LABELS[stage];
 }
 
-export function parseGpaState(json: string | null | undefined): GpaState {
+export function parseGpaState(json: string | null | undefined, fallback: GpaState = DEFAULT_GPA_STATE): GpaState {
   if (!json) {
-    return { ...DEFAULT_GPA_STATE, updatedAt: new Date().toISOString() };
+    return { ...fallback, planTasks: [...fallback.planTasks], updatedAt: fallback.updatedAt || new Date().toISOString() };
   }
   try {
     const parsed = JSON.parse(json) as Partial<GpaState>;
@@ -43,8 +43,8 @@ export function parseGpaState(json: string | null | undefined): GpaState {
         : parsed.awaitingConfirmation ?? null;
     return {
       stage,
-      fullAccess: parsed.fullAccess === true,
-      knowledgeEnabled: parsed.knowledgeEnabled === true,
+      fullAccess: typeof parsed.fullAccess === "boolean" ? parsed.fullAccess : fallback.fullAccess,
+      knowledgeEnabled: typeof parsed.knowledgeEnabled === "boolean" ? parsed.knowledgeEnabled : fallback.knowledgeEnabled,
       awaitingConfirmation,
       // GPA confirmations wait for an explicit user decision. Ignore deadlines
       // persisted by older versions so a restored plan cannot auto-continue.
@@ -53,7 +53,7 @@ export function parseGpaState(json: string | null | undefined): GpaState {
       updatedAt: parsed.updatedAt ?? new Date().toISOString()
     };
   } catch {
-    return { ...DEFAULT_GPA_STATE, updatedAt: new Date().toISOString() };
+    return { ...fallback, planTasks: [...fallback.planTasks], updatedAt: fallback.updatedAt || new Date().toISOString() };
   }
 }
 

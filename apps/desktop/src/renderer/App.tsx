@@ -67,7 +67,16 @@ import {
 import { useMotionPresence } from "./motion-presence";
 import { EChartsMessageChart } from "./EChartsMessageChart";
 
-type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "skills" | "plugins" | "userSkills" | "mcp" | "database" | "timeouts" | "update";
+type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
+type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";
+type SkillLabProgress = { iteration: number; totalIterations: number; phase: string; summary: string; state: "running" | "tested" };
+type SkillLabEvent =
+  | ({ type: "skill-lab.progress" } & SkillLabProgress & { jobId: string })
+  | { type: "skill-lab.clarification"; jobId: string; clarificationId: string; summary: string; questions: Array<{ id: string; question: string; required: boolean; options: string[]; allowOther: boolean }> }
+  | { type: "skill-lab.approval"; jobId: string; approvalId: string; title: string; description: string; toolName: string }
+  | { type: "skill-lab.completed"; jobId: string; skill: SkillMetadata }
+  | { type: "skill-lab.failed"; jobId: string; error: string }
+  | { type: "skill-lab.cancelled"; jobId: string };
 type ManagedRemoval =
   | { kind: "plugin"; plugin: PluginRecord }
   | { kind: "skill"; skill: SkillMetadata };
@@ -501,13 +510,11 @@ type HistorySearchResult = {
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
   { id: "multimodal", label: "多模态", hint: "配置生图模型与视频模型" },
-  { id: "skills", label: "Skill 管理", hint: "已加载技能与来源范围" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "timeouts", label: "超时设置", hint: "模型请求、重试和视频生成的等待时间" },
-  { id: "plugins", label: "插件管理", hint: "安装插件并管理当前聊天或项目的启用状态" },
-  { id: "userSkills", label: "用户技能", hint: "从历史聊天提炼可复用的工作流技能" },
+  { id: "capabilities", label: "能力中心", hint: "管理独立 Skill、用户技能和插件" },
   { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
 ];
 
@@ -646,10 +653,13 @@ export function App() {
   const selectedThreadIdRef = useRef<string | null>(null);
   const pendingUserMessagesRef = useRef<Record<string, MessageRecord[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
+  const snapshotMessageLimitsRef = useRef<Record<string, number>>({});
   /** After Stop, ignore late runtime events that would revive the "执行中" UI. */
   const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
+  const [isLoadingEarlierMessages, setIsLoadingEarlierMessages] = useState(false);
+  const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
   const pluginToggleQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pluginEnabledStateRef = useRef<Map<string, boolean>>(new Map());
@@ -775,9 +785,6 @@ export function App() {
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<Record<string, KnowledgeDocumentRecord[]>>({});
   const [knowledgeBusyId, setKnowledgeBusyId] = useState<string | null>(null);
   const [isKnowledgeImporting, setIsKnowledgeImporting] = useState(false);
-  const [pluginSource, setPluginSource] = useState("https://github.com/obra/superpowers");
-  const [isInstallingPlugin, setIsInstallingPlugin] = useState(false);
-  const [pluginInstallProgress, setPluginInstallProgress] = useState<{ percent: number; stage: string } | null>(null);
   const [userSkills, setUserSkills] = useState<SkillMetadata[]>([]);
   const [isGeneratingUserSkill, setIsGeneratingUserSkill] = useState(false);
   const [userSkillGenerationDialog, setUserSkillGenerationDialog] = useState<UserSkillGenerationDialog | null>(null);
@@ -788,6 +795,27 @@ export function App() {
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
   const [resolvingPromptId, setResolvingPromptId] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
+  const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>("skills");
+  const [skillLabMode, setSkillLabMode] = useState<"create" | "optimize">("create");
+  const [skillLabTargetSkillId, setSkillLabTargetSkillId] = useState("");
+  const [skillLabLastRunMode, setSkillLabLastRunMode] = useState<"create" | "optimize">("create");
+  const [skillLabPrompt, setSkillLabPrompt] = useState("");
+  const [skillLabName, setSkillLabName] = useState("");
+  const [skillLabIterations, setSkillLabIterations] = useState(5);
+  const [skillLabTotalIterations, setSkillLabTotalIterations] = useState(5);
+  const [skillLabJobId, setSkillLabJobId] = useState<string | null>(null);
+  const [skillLabProgress, setSkillLabProgress] = useState<SkillLabProgress[]>([]);
+  const [skillLabStatus, setSkillLabStatus] = useState<"idle" | "clarifying" | "running" | "completed" | "failed" | "cancelled">("idle");
+  const [skillLabError, setSkillLabError] = useState<string | null>(null);
+  const [skillLabResult, setSkillLabResult] = useState<SkillMetadata | null>(null);
+  const [skillLabApproval, setSkillLabApproval] = useState<Extract<SkillLabEvent, { type: "skill-lab.approval" }> | null>(null);
+  const [skillLabClarification, setSkillLabClarification] = useState<(Extract<SkillLabEvent, { type: "skill-lab.clarification" }> & { answers: Record<string, string>; custom: Record<string, boolean> }) | null>(null);
+  const [skillLabActivityLog, setSkillLabActivityLog] = useState<Array<{ id: string; phase: string; summary: string; state: "running" | "tested" }>>([]);
+  const [skillLabStartedAt, setSkillLabStartedAt] = useState<number | null>(null);
+  const [skillLabElapsedSeconds, setSkillLabElapsedSeconds] = useState(0);
+  const skillLabJobIdRef = useRef<string | null>(null);
+  const skillLabOptimizationTargetRef = useRef<string | null>(null);
+  const isSkillLabBusy = skillLabStatus === "clarifying" || skillLabStatus === "running";
   const [notice, setNotice] = useState<AppNotice | null>(null);
   const [isNoticeHovered, setIsNoticeHovered] = useState(false);
   const [exitingNoticeId, setExitingNoticeId] = useState<number | null>(null);
@@ -815,7 +843,77 @@ export function App() {
     return window.codexh.onUpdateState(setUpdateState);
   }, []);
 
-  useEffect(() => window.codexh.onPluginInstallProgress(setPluginInstallProgress), []);
+  useEffect(() => window.codexh.onSkillLabEvent((event) => {
+    const typed = event as SkillLabEvent;
+    if (skillLabJobIdRef.current && "jobId" in typed && typed.jobId !== skillLabJobIdRef.current) return;
+    if (typed.type === "skill-lab.clarification") {
+      setSkillLabStatus("clarifying");
+      setSkillLabClarification({
+        ...typed,
+        answers: Object.fromEntries(typed.questions.map((question) => [question.id, ""])),
+        custom: Object.fromEntries(typed.questions.map((question) => [question.id, false]))
+      });
+    } else if (typed.type === "skill-lab.progress") {
+      setSkillLabStatus("running");
+      setSkillLabClarification(null);
+      setSkillLabActivityLog((current) => [...current.slice(-7), {
+        id: `${typed.iteration}-${typed.state}-${Date.now()}`,
+        phase: typed.phase,
+        summary: typed.summary,
+        state: typed.state
+      }]);
+      setSkillLabTotalIterations(typed.totalIterations);
+      setSkillLabProgress((current) => {
+        const next = current.filter((item) => item.iteration !== typed.iteration);
+        next.push({
+          iteration: typed.iteration,
+          totalIterations: typed.totalIterations,
+          phase: typed.phase,
+          summary: typed.summary,
+          state: typed.state
+        });
+        return next.sort((left, right) => left.iteration - right.iteration);
+      });
+    } else if (typed.type === "skill-lab.approval") {
+      setSkillLabApproval(typed);
+    } else if (typed.type === "skill-lab.completed") {
+      setSkillLabStatus("completed");
+      setSkillLabResult(typed.skill);
+      if (skillLabOptimizationTargetRef.current) setSkillLabTargetSkillId(typed.skill.id);
+      skillLabOptimizationTargetRef.current = null;
+      setSkillLabJobId(null);
+      skillLabJobIdRef.current = null;
+      setSkillLabApproval(null);
+      setSkillLabClarification(null);
+      setSkillLabStartedAt(null);
+      void Promise.all([refreshSkills(), refreshUserSkills()]);
+    } else if (typed.type === "skill-lab.failed") {
+      setSkillLabStatus("failed");
+      setSkillLabError(typed.error);
+      setSkillLabJobId(null);
+      skillLabJobIdRef.current = null;
+      setSkillLabApproval(null);
+      setSkillLabClarification(null);
+      setSkillLabStartedAt(null);
+      skillLabOptimizationTargetRef.current = null;
+    } else if (typed.type === "skill-lab.cancelled") {
+      setSkillLabStatus("cancelled");
+      setSkillLabJobId(null);
+      skillLabJobIdRef.current = null;
+      setSkillLabApproval(null);
+      setSkillLabClarification(null);
+      setSkillLabStartedAt(null);
+      skillLabOptimizationTargetRef.current = null;
+    }
+  }), []);
+
+  useEffect(() => {
+    if (!skillLabStartedAt || !isSkillLabBusy) return;
+    const updateElapsed = () => setSkillLabElapsedSeconds(Math.max(0, Math.floor((Date.now() - skillLabStartedAt) / 1000)));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [isSkillLabBusy, skillLabStartedAt]);
 
   useEffect(() => {
     if (!isHistorySearchOpen) return;
@@ -1882,16 +1980,10 @@ export function App() {
   }
 
   useEffect(() => {
-    if (isSettingsOpen && settingsTab === "skills") {
-      void refreshSkills();
+    if (isSettingsOpen && settingsTab === "capabilities") {
+      void Promise.all([refreshSkills(), refreshUserSkills(), refreshPlugins()]);
     }
   }, [isSettingsOpen, settingsTab, selectedThread?.cwd]);
-
-  useEffect(() => {
-    if (isSettingsOpen && settingsTab === "userSkills") {
-      void refreshUserSkills();
-    }
-  }, [isSettingsOpen, settingsTab]);
 
   const visibleSkills = useMemo(() => {
     const query = skillsSearchQuery.trim().toLowerCase();
@@ -1912,7 +2004,8 @@ export function App() {
 
     const filtered = skills.filter((skill) => {
       // Plugin-owned Skills are managed with their plugin, not as standalone Skills.
-      if (skill.pluginId) return false;
+      // Skills extracted from chat history are managed in the User Skills tab.
+      if (skill.pluginId || isGeneratedUserSkill(skill)) return false;
       if (!query) return true;
       const haystack = [
         skill.displayName ?? "",
@@ -2016,6 +2109,10 @@ export function App() {
     }
   }, [enabledPluginIds, plugins, selectedThreadId]);
   const selectedThreadStatus = activeSnapshotThreadStatus ?? selectedThread?.status ?? null;
+  // During a history switch the old snapshot stays visible briefly. Keep its
+  // workspace context until the replacement snapshot arrives to avoid an
+  // unnecessary full timeline rebuild using the newly selected thread's path.
+  const snapshotWorkspaceRoot = snapshot?.thread.cwd ?? null;
   const selectedMessages = snapshot?.messages ?? [];
   const queuedMessages = snapshot?.queuedMessages ?? [];
   const visibleMessages = useMemo(
@@ -2032,12 +2129,12 @@ export function App() {
         visibleMessages,
         snapshot?.toolCalls ?? [],
         snapshot?.artifacts ?? [],
-        selectedThread?.cwd,
+        snapshotWorkspaceRoot,
         selectedThreadStatus,
         timelinePrompts
       ),
     [
-      selectedThread?.cwd,
+      snapshotWorkspaceRoot,
       selectedThreadStatus,
       snapshot?.artifacts,
       snapshot?.toolCalls,
@@ -2046,8 +2143,8 @@ export function App() {
     ]
   );
   const conversationTurns = useMemo(
-    () => buildConversationTurnItems(visibleMessages, snapshot?.toolCalls ?? [], selectedThread?.cwd),
-    [selectedThread?.cwd, snapshot?.toolCalls, visibleMessages]
+    () => buildConversationTurnItems(visibleMessages, snapshot?.toolCalls ?? [], snapshotWorkspaceRoot),
+    [snapshotWorkspaceRoot, snapshot?.toolCalls, visibleMessages]
   );
   const currentSubagents = useMemo(
     () => snapshot?.subagents ?? [],
@@ -2107,6 +2204,7 @@ export function App() {
   );
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
   const showWelcome = timelineEntries.length === 0;
+  const isThreadSwitchPlaceholderVisible = isThreadSwitching && selectedThreadId !== activeSnapshotThreadId;
   const isProjectWelcome = selectedThread?.mode === "project";
   const welcomeCards = isProjectWelcome ? WELCOME_CARDS : CHAT_WELCOME_CARDS;
   const latestVisibleMessageId = timelineEntries[timelineEntries.length - 1]?.id ?? null;
@@ -2219,12 +2317,8 @@ export function App() {
         return "模型提供商";
       case "multimodal":
         return "多模态模型";
-      case "skills":
-        return "Skill 管理";
-      case "plugins":
-        return "插件管理";
-      case "userSkills":
-        return "用户技能";
+      case "capabilities":
+        return "能力中心";
       case "mcp":
         return "MCP 管理";
       case "knowledge":
@@ -2493,8 +2587,9 @@ export function App() {
     const requestId = (snapshotRequestIdsRef.current[threadId] ?? 0) + 1;
     snapshotRequestIdsRef.current[threadId] = requestId;
     try {
-      const next = (await window.codexh.getThreadSnapshot(threadId)) as RuntimeThreadSnapshot;
-      if (snapshotRequestIdsRef.current[threadId] !== requestId) {
+      const messageLimit = snapshotMessageLimitsRef.current[threadId] ?? 160;
+      const next = (await window.codexh.getThreadSnapshot(threadId, messageLimit)) as RuntimeThreadSnapshot;
+      if (snapshotRequestIdsRef.current[threadId] !== requestId || selectedThreadIdRef.current !== threadId) {
         return;
       }
       const pending = pendingUserMessagesRef.current[threadId] ?? [];
@@ -2508,6 +2603,9 @@ export function App() {
         ...next,
         messages: remaining.length > 0 ? [...next.messages, ...remaining] : next.messages
       });
+      if (selectedThreadIdRef.current === threadId) {
+        setIsThreadSwitching(false);
+      }
       setThreads((current) => current.map((thread) =>
         thread.id === next.thread.id ? next.thread : thread
       ));
@@ -2540,6 +2638,9 @@ export function App() {
         setGpaComposerSelected(gpa.stage !== "off");
       }
     } catch (error) {
+      if (selectedThreadIdRef.current === threadId) {
+        setIsThreadSwitching(false);
+      }
       const message = error instanceof Error ? error.message : String(error);
       showNotice("加载聊天记录失败。", { message });
     }
@@ -2573,6 +2674,12 @@ export function App() {
   }
 
   async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
+    const isSwitchingThread = selectedThreadIdRef.current !== threadId;
+    if (isSwitchingThread) {
+      // A previously expanded transcript should not make later history switches heavy again.
+      delete snapshotMessageLimitsRef.current[threadId];
+      setIsThreadSwitching(true);
+    }
     if (options?.scrollToLatest) {
       cancelPendingAutoScrollFrame();
       clearAutoScrollReleaseTimer();
@@ -2585,6 +2692,26 @@ export function App() {
     // Switching chats must never auto-start GPA. Same-session incomplete plans only
     // restore the GPA chip/timeline; the user continues explicitly via GPA or send.
     await softRestoreSameSessionGpaPlan(threadId);
+  }
+
+  async function loadEarlierMessages() {
+    if (!selectedThreadId || !snapshot?.hasMoreMessages || isLoadingEarlierMessages) return;
+
+    const previousLimit = snapshotMessageLimitsRef.current[selectedThreadId] ?? 160;
+    snapshotMessageLimitsRef.current[selectedThreadId] = Math.min(previousLimit + 240, snapshot.messageCount);
+    const scrollNode = chatScrollRef.current;
+    const previousHeight = scrollNode?.scrollHeight ?? 0;
+    const previousTop = scrollNode?.scrollTop ?? 0;
+    setIsLoadingEarlierMessages(true);
+    try {
+      await refreshSnapshot(selectedThreadId);
+      window.requestAnimationFrame(() => {
+        if (!scrollNode) return;
+        scrollNode.scrollTop = previousTop + Math.max(0, scrollNode.scrollHeight - previousHeight);
+      });
+    } finally {
+      setIsLoadingEarlierMessages(false);
+    }
   }
 
   async function softRestoreSameSessionGpaPlan(threadId: string): Promise<void> {
@@ -3087,8 +3214,9 @@ export function App() {
   }
 
   async function submitUserMessageEdit() {
-    const content = editingUserMessage?.content.trim();
-    if (!content) {
+    const editingMessage = editingUserMessage;
+    const content = editingMessage?.content.trim();
+    if (!editingMessage || !content) {
       return;
     }
     if (
@@ -3101,7 +3229,7 @@ export function App() {
     }
 
     const threadId = selectedThreadId;
-    const messageId = editingUserMessage.id;
+    const messageId = editingMessage.id;
     if (!threadId) return;
     await window.codexh.replaceMessage({ threadId, messageId, content });
     setEditingUserMessage(null);
@@ -3704,33 +3832,6 @@ export function App() {
     }
   }
 
-  async function installPlugin() {
-    const source = pluginSource.trim();
-    if (!source) {
-      showNotice("请输入插件仓库地址");
-      return;
-    }
-
-    if (isInstallingPlugin) {
-      return;
-    }
-
-    setIsInstallingPlugin(true);
-    setPluginInstallProgress({ percent: 2, stage: "正在开始安装" });
-    try {
-      const plugin = await window.codexh.installPlugin(source);
-      await Promise.all([refreshPlugins(), refreshSkills()]);
-      showNotice(`已安装插件：${plugin.name}`, { tone: "success" });
-    } catch (error) {
-      showNotice("安装插件失败", {
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setIsInstallingPlugin(false);
-      setPluginInstallProgress(null);
-    }
-  }
-
   function openUserSkillGenerationDialog(thread: ThreadRecord) {
     if (thread.parentThreadId || thread.status === "running" || isGeneratingUserSkill) return;
     setUserSkillGenerationDialog({ thread, name: thread.title.slice(0, 64) });
@@ -3750,6 +3851,66 @@ export function App() {
     } finally {
       setIsGeneratingUserSkill(false);
     }
+  }
+
+  async function startSkillLab() {
+    const prompt = skillLabPrompt.trim();
+    if (skillLabJobId || (skillLabMode === "create" && !prompt) || (skillLabMode === "optimize" && !skillLabTargetSkillId)) return;
+    setSkillLabLastRunMode(skillLabMode);
+    setSkillLabStatus("clarifying");
+    setSkillLabError(null);
+    setSkillLabResult(null);
+    setSkillLabProgress([]);
+    setSkillLabTotalIterations(skillLabIterations);
+    setSkillLabApproval(null);
+    setSkillLabClarification(null);
+    setSkillLabActivityLog([]);
+    setSkillLabStartedAt(Date.now());
+    setSkillLabElapsedSeconds(0);
+    try {
+      skillLabOptimizationTargetRef.current = skillLabMode === "optimize" ? skillLabTargetSkillId : null;
+      const jobId = await window.codexh.startSkillLab({
+        prompt,
+        requestedName: skillLabMode === "create" ? skillLabName.trim() || undefined : undefined,
+        iterations: skillLabIterations,
+        targetSkillId: skillLabMode === "optimize" ? skillLabTargetSkillId : undefined
+      });
+      skillLabJobIdRef.current = jobId;
+      setSkillLabJobId(jobId);
+    } catch (error) {
+      skillLabOptimizationTargetRef.current = null;
+      setSkillLabStatus("failed");
+      setSkillLabError(error instanceof Error ? error.message : String(error));
+      setSkillLabStartedAt(null);
+    }
+  }
+
+  async function cancelSkillLab() {
+    if (!skillLabJobId) return;
+    await window.codexh.cancelSkillLab(skillLabJobId);
+  }
+
+  async function resolveSkillLabApproval(approved: boolean) {
+    if (!skillLabApproval) return;
+    const approval = skillLabApproval;
+    setSkillLabApproval(null);
+    await window.codexh.resolveSkillLabApproval({ jobId: approval.jobId, approvalId: approval.approvalId, approved });
+  }
+
+  async function submitSkillLabClarification() {
+    if (!skillLabClarification) return;
+    const clarification = skillLabClarification;
+    const missingRequired = clarification.questions.some((question) =>
+      question.required && !clarification.answers[question.id]?.trim()
+    );
+    if (missingRequired) return;
+    setSkillLabClarification(null);
+    setSkillLabStatus("running");
+    await window.codexh.resolveSkillLabClarification({
+      jobId: clarification.jobId,
+      clarificationId: clarification.clarificationId,
+      answers: clarification.answers
+    });
   }
 
   async function confirmManagedRemoval() {
@@ -4102,7 +4263,7 @@ export function App() {
       if (!response.ok) throw new Error(response.error);
       const result = response.result;
       setDatabaseCatalogs((current) => ({ ...current, [connection.id]: result.databases }));
-      showNotice(`${connection.name || connection.id} 连接成功`, { tone: "success", message: result.version });
+      showNotice(`${connection.name || connection.id} 连接成功`, { tone: "success" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       showNotice(
@@ -4923,6 +5084,40 @@ export function App() {
     );
   }
 
+  const skillLabCurrentProgress = skillLabProgress[skillLabProgress.length - 1] ?? null;
+  const skillLabCurrentIteration = skillLabCurrentProgress?.iteration ?? 0;
+  const skillLabCompletedIterations = skillLabStatus === "completed"
+    ? skillLabTotalIterations
+    : skillLabProgress.filter((item) => item.iteration > 0 && item.state === "tested").length;
+  const skillLabProgressPercent = skillLabTotalIterations > 0
+    ? Math.round((skillLabCompletedIterations / skillLabTotalIterations) * 100)
+    : 0;
+  const skillLabElapsedLabel = `${String(Math.floor(skillLabElapsedSeconds / 60)).padStart(2, "0")}:${String(skillLabElapsedSeconds % 60).padStart(2, "0")}`;
+  const skillLabLastCompletedActivity = [...skillLabActivityLog].reverse().find((activity) => activity.state === "tested") ?? null;
+  const skillLabHeartbeatText = skillLabApproval
+    ? "等待工具调用确认"
+    : skillLabStatus === "clarifying"
+      ? "等待你补充关键信息"
+      : skillLabStatus === "running"
+        ? skillLabElapsedSeconds >= 90
+          ? "模型响应较慢，任务仍在运行"
+          : skillLabElapsedSeconds >= 30
+            ? "模型正在处理，任务未中断"
+            : "模型正在工作"
+        : skillLabStatus === "completed"
+          ? "全部测试已完成"
+          : skillLabStatus === "failed"
+            ? "任务执行失败"
+            : skillLabStatus === "cancelled"
+              ? "任务已取消"
+              : "等待开始";
+  const skillLabCurrentPhase = skillLabStatus === "clarifying"
+    ? "需要用户澄清"
+    : skillLabCurrentProgress?.phase ?? (skillLabMode === "optimize" ? "准备优化 Skill" : "准备生成 Skill");
+  const skillLabCurrentSummary = skillLabStatus === "clarifying"
+    ? skillLabClarification?.summary ?? "正在整理需要确认的信息"
+    : skillLabCurrentProgress?.summary ?? (skillLabMode === "optimize" ? "选择用户技能和迭代次数后开始" : "填写需求和迭代次数后开始");
+
   return (
     <div
       ref={appShellRef}
@@ -5077,6 +5272,7 @@ export function App() {
                 resetConfigDraft(config);
               }
               setSettingsTab("provider");
+              setCapabilityTab("skills");
               setIsSettingsOpen(true);
             }}
           >
@@ -5095,6 +5291,7 @@ export function App() {
                   resetConfigDraft(config);
                 }
                 setSettingsTab("update");
+                setCapabilityTab("skills");
                 setIsSettingsOpen(true);
               }}
             >
@@ -5197,7 +5394,7 @@ export function App() {
         )}
 
         <section className="chat-canvas">
-          {!showWelcome && currentSubagents.length > 0 && hasActiveSubagents ? (
+          {!showWelcome && !isThreadSwitchPlaceholderVisible && currentSubagents.length > 0 && hasActiveSubagents ? (
             <SubagentActivityList
               agents={currentSubagents}
               runtimeActivities={runtimeActivities}
@@ -5210,15 +5407,21 @@ export function App() {
           ) : null}
           <div
             ref={chatScrollRef}
-            className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${currentSubagents.length > 0 && hasActiveSubagents ? "has-subagent-overlay" : ""}`}
+            className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""} ${currentSubagents.length > 0 && hasActiveSubagents ? "has-subagent-overlay" : ""}`}
             onScroll={handleTranscriptScroll}
           >
-            {!showWelcome ? (
+            {!showWelcome && !isThreadSwitchPlaceholderVisible ? (
               <div className="conversation-turn-rail-shell">
                 <ConversationTurnRail turns={conversationTurns} />
               </div>
             ) : null}
-            {showWelcome ? (
+            {isThreadSwitchPlaceholderVisible ? (
+              <div className="thread-switch-placeholder" aria-busy="true" aria-label="加载聊天记录">
+                <span className="thread-switch-placeholder-line short" />
+                <span className="thread-switch-placeholder-line" />
+                <span className="thread-switch-placeholder-line medium" />
+              </div>
+            ) : showWelcome ? (
               <div className="welcome-empty-state">
                 {composerSubmission ? (
                   <ComposerSubmissionStatus submission={composerSubmission} />
@@ -5250,7 +5453,19 @@ export function App() {
                 )}
               </div>
             ) : (
-              <div key={selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
+              <div key={activeSnapshotThreadId ?? selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
+                {snapshot?.hasMoreMessages ? (
+                  <button
+                    type="button"
+                    className="transcript-load-earlier"
+                    onClick={() => void loadEarlierMessages()}
+                    disabled={isLoadingEarlierMessages}
+                  >
+                    {isLoadingEarlierMessages
+                      ? "正在加载更早消息..."
+                      : `加载更早消息（已显示 ${visibleMessages.length} / ${snapshot.messageCount}）`}
+                  </button>
+                ) : null}
                 {timelineEntries.map((entry) =>
                   entry.kind === "message" ? (
                     renderTranscriptMessage(
@@ -6378,8 +6593,52 @@ export function App() {
                 </div>
               ) : null}
 
-              {settingsTab === "skills" ? (
-                <div className="settings-section">
+              {settingsTab === "capabilities" ? (
+                <div className="capability-tab-strip" role="tablist" aria-label="能力中心分类">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={capabilityTab === "skills"}
+                      className={`capability-tab${capabilityTab === "skills" ? " active" : ""}`}
+                      onClick={() => setCapabilityTab("skills")}
+                    >
+                      <span>Skill 库</span>
+                      <small>{skills.length}</small>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={capabilityTab === "userSkills"}
+                      className={`capability-tab${capabilityTab === "userSkills" ? " active" : ""}`}
+                      onClick={() => setCapabilityTab("userSkills")}
+                    >
+                      <span>用户技能</span>
+                      <small>{userSkills.length}</small>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={capabilityTab === "plugins"}
+                      className={`capability-tab${capabilityTab === "plugins" ? " active" : ""}`}
+                      onClick={() => setCapabilityTab("plugins")}
+                    >
+                      <span>插件</span>
+                      <small>{plugins.length}</small>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={capabilityTab === "lab"}
+                      className={`capability-tab${capabilityTab === "lab" ? " active" : ""}`}
+                      onClick={() => setCapabilityTab("lab")}
+                    >
+                      <span>技能实验室</span>
+                    </button>
+                </div>
+              ) : null}
+
+              {settingsTab === "capabilities" && capabilityTab === "skills" ? (
+                <div key="capability-skills" className="settings-section capability-panel">
                   <div className="config-block skills-config-block">
                     <div className="section-copy">
                       <strong>独立 Skills</strong>
@@ -6432,7 +6691,7 @@ export function App() {
                         </div>
                       </div>
                     </div>
-                    <div className="skills-list">
+                    <div className="skills-list capability-list">
                       {visibleSkills.length ? visibleSkills.map(({ skill, stats }) => {
                         const scopeLabel = skill.scope;
                         const scopeClass = skill.scope === "system"
@@ -6445,7 +6704,7 @@ export function App() {
                           : "—";
                         const canRemove = !skill.pluginId && skill.scope === "user";
                         return (
-                          <article key={skill.id} className="skill-row">
+                          <article key={skill.id} className="skill-row capability-list-item">
                             <div className="skill-row-main">
                               <div className="skill-row-title">
                                 <span className="skill-row-icon" aria-hidden><IconSkills /></span>
@@ -6794,61 +7053,33 @@ export function App() {
                 </div>
               ) : null}
 
-              {settingsTab === "plugins" ? (
-                <div className="settings-section plugin-settings-section">
-                  <div className="config-block">
-                    <div className="section-copy">
-                      <strong>安装机器人工作流包</strong>
-                      <span>支持从 GitHub 仓库地址安装，例如 `obra/superpowers`。</span>
-                    </div>
-                    <div className="action-row stretch plugin-install-row">
-                      <input
-                        value={pluginSource}
-                        onChange={(event) => setPluginSource(event.target.value)}
-                        placeholder="GitHub 仓库地址或 owner/repo"
-                        disabled={isInstallingPlugin}
-                      />
-                      <button
-                        className="button primary"
-                        type="button"
-                        onClick={() => void installPlugin()}
-                        disabled={!pluginSource.trim() || isInstallingPlugin}
-                        aria-busy={isInstallingPlugin}
-                      >
-                        {isInstallingPlugin ? "正在安装..." : "安装插件"}
-                      </button>
-                    </div>
-                    {isInstallingPlugin && pluginInstallProgress ? <div className="plugin-install-progress" role="status" aria-live="polite">
-                      <div className="plugin-install-progress-copy"><span>{pluginInstallProgress.stage}</span><span>{pluginInstallProgress.percent}%</span></div>
-                      <div className="plugin-install-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pluginInstallProgress.percent}>
-                        <span style={{ width: `${Math.max(0, Math.min(100, pluginInstallProgress.percent))}%` }} />
-                      </div>
-                    </div> : null}
-                  </div>
-
+              {settingsTab === "capabilities" && capabilityTab === "plugins" ? (
+                <div key="capability-plugins" className="settings-section capability-panel plugin-settings-section">
                   <div className="config-block plugin-library-card">
                     <div className="section-copy">
                       <strong>已安装插件</strong>
                       <span>在聊天输入框的“插件”菜单中选择后，AI 会自动匹配其中的 Skill。这里仅用于安装和查看已安装的能力包。</span>
                     </div>
-                    <div className="stack-list plugin-record-list">
+                    <div className="capability-list">
                       {plugins.map((plugin) => {
                         return (
-                          <article key={plugin.id} className="stack-card plugin-record">
-                            <div className="plugin-record-main">
-                              <span className="plugin-record-icon" aria-hidden><IconSkills /></span>
-                              <div className="plugin-record-copy">
-                                <div className="stack-card-header">
-                                  <strong>{plugin.name}</strong>
-                                  <span className="pill plugin-version-pill">v{plugin.version}</span>
-                                </div>
-                                <p className="plugin-record-source">{plugin.source}</p>
-                                <span className="plugin-record-path" title={plugin.installPath}>{plugin.installPath}</span>
+                          <article key={plugin.id} className="skill-row capability-list-item">
+                            <div className="skill-row-main">
+                              <div className="skill-row-title">
+                                <span className="skill-row-icon" aria-hidden><IconSkills /></span>
+                                <strong title={plugin.name}>{plugin.name}</strong>
+                                <span className="skill-scope-pill plugin">插件</span>
+                                <span className="skill-domain-chip">v{plugin.version}</span>
+                              </div>
+                              <p className="skill-row-desc" title={plugin.source}>{plugin.source}</p>
+                              <div className="skill-row-meta">
+                                <span className="skill-stat">已安装</span>
+                                <span className="skill-row-path" title={plugin.installPath}>{plugin.installPath}</span>
                               </div>
                             </div>
                             <button
                               type="button"
-                              className="button ghost danger-icon-button plugin-remove-button"
+                              className="button ghost danger-icon-button skill-remove-button"
                               title={`移除 ${plugin.name}`}
                               aria-label={`移除 ${plugin.name}`}
                               onClick={() => setManagedRemoval({ kind: "plugin", plugin })}
@@ -6863,27 +7094,32 @@ export function App() {
                 </div>
               ) : null}
 
-              {settingsTab === "userSkills" ? (
-                <div className="settings-section user-skill-settings-section">
+              {settingsTab === "capabilities" && capabilityTab === "userSkills" ? (
+                <div key="capability-user-skills" className="settings-section capability-panel user-skill-settings-section">
                   <div className="config-block user-skill-library-block">
                     <div className="section-copy">
                       <strong>已生成技能</strong>
                       <span>在历史聊天上右键选择“提炼技能”后，生成的工作流会显示在这里，并可在后续聊天中复用。</span>
                     </div>
-                    <div className="stack-list user-skill-list">
+                    <div className="capability-list">
                       {userSkills.length > 0 ? userSkills.map((skill) => (
-                        <article key={skill.id} className="stack-card user-skill-record">
-                          <div className="user-skill-record-main">
-                            <span className="plugin-record-icon" aria-hidden><IconSkills /></span>
-                            <div className="user-skill-record-copy">
-                              <strong>{skill.displayName ?? skill.name}</strong>
-                              <p>{skill.description}</p>
-                              <span title={skill.skillPath}>{skill.skillPath}</span>
+                        <article key={skill.id} className="skill-row capability-list-item">
+                          <div className="skill-row-main">
+                            <div className="skill-row-title">
+                              <span className="skill-row-icon" aria-hidden><IconSkills /></span>
+                              <strong title={skill.displayName ?? skill.name}>{skill.displayName ?? skill.name}</strong>
+                              <span className="skill-scope-pill user">用户</span>
+                              <span className="skill-domain-chip">提炼</span>
+                            </div>
+                            <p className="skill-row-desc" title={skill.description}>{skill.description}</p>
+                            <div className="skill-row-meta">
+                              <span className="skill-stat">用户技能</span>
+                              <span className="skill-row-path" title={skill.skillPath}>{skill.skillPath}</span>
                             </div>
                           </div>
                           <button
                             type="button"
-                            className="button ghost danger-icon-button"
+                            className="button ghost danger-icon-button skill-remove-button"
                             title={`删除 ${skill.displayName ?? skill.name}`}
                             aria-label={`删除 ${skill.displayName ?? skill.name}`}
                             onClick={() => setManagedRemoval({ kind: "skill", skill })}
@@ -6894,6 +7130,275 @@ export function App() {
                       )) : <div className="detail-empty">尚未生成用户技能。</div>}
                     </div>
                   </div>
+                </div>
+              ) : null}
+
+              {settingsTab === "capabilities" && capabilityTab === "lab" ? (
+                <div key="capability-lab" className="settings-section capability-panel skill-lab-settings-section">
+                  <div className="config-block skill-lab-editor">
+                    <div className="section-copy">
+                      <strong>技能实验室</strong>
+                      <span>{skillLabMode === "optimize" ? "选择已生成的用户技能，继续测试并迭代完善。" : "输入需求，自动生成并迭代优化可复用 Skill。"}</span>
+                    </div>
+                    <div className="skill-lab-mode-choice" role="group" aria-label="技能实验室模式">
+                      <button
+                        type="button"
+                        aria-pressed={skillLabMode === "create"}
+                        className={skillLabMode === "create" ? "active" : ""}
+                        disabled={isSkillLabBusy}
+                        onClick={() => setSkillLabMode("create")}
+                      >
+                        新建 Skill
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={skillLabMode === "optimize"}
+                        className={skillLabMode === "optimize" ? "active" : ""}
+                        disabled={isSkillLabBusy}
+                        onClick={() => setSkillLabMode("optimize")}
+                      >
+                        持续优化
+                      </button>
+                    </div>
+                    <label className="settings-field skill-lab-prompt-field">
+                      <span>{skillLabMode === "optimize" ? "优化目标（可选）" : "需求"}</span>
+                      <textarea
+                        value={skillLabPrompt}
+                        onChange={(event) => setSkillLabPrompt(event.target.value)}
+                        placeholder={skillLabMode === "optimize"
+                          ? "例如：加强异常恢复和只读检查；留空则根据现有 Skill 自动测试并优化"
+                          : "例如：整理项目发布流程，生成一个包含检查、验证和回滚步骤的工作流 Skill"}
+                        rows={7}
+                        disabled={isSkillLabBusy}
+                      />
+                    </label>
+                    <div className="skill-lab-options-row">
+                      {skillLabMode === "optimize" ? (
+                        <label className="settings-field skill-lab-name-field">
+                          <span>选择用户技能</span>
+                          <ComposerSelect
+                            className="form-select skill-lab-skill-select"
+                            ariaLabel="选择要持续优化的 Skill"
+                            value={skillLabTargetSkillId}
+                            disabled={isSkillLabBusy}
+                            onChange={setSkillLabTargetSkillId}
+                            options={userSkills.map((skill) => ({
+                              value: skill.id,
+                              label: skill.displayName ?? skill.name
+                            }))}
+                            placeholder="请选择要持续优化的 Skill"
+                            searchable
+                            searchPlaceholder="筛选 Skill"
+                            emptyLabel="没有匹配的用户 Skill"
+                          />
+                        </label>
+                      ) : (
+                        <label className="settings-field skill-lab-name-field">
+                          <span>Skill 名称（可选）</span>
+                          <input
+                            value={skillLabName}
+                            onChange={(event) => setSkillLabName(event.target.value)}
+                            placeholder="例如：release-workflow"
+                            maxLength={64}
+                            disabled={isSkillLabBusy}
+                          />
+                        </label>
+                      )}
+                      <label className="settings-field skill-lab-iterations-field">
+                        <span>迭代次数</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          step={1}
+                          value={skillLabIterations}
+                          onChange={(event) => {
+                            const value = Number(event.target.value);
+                            if (Number.isInteger(value) && value >= 1 && value <= 20) setSkillLabIterations(value);
+                          }}
+                          disabled={isSkillLabBusy}
+                        />
+                      </label>
+                    </div>
+                    <div className="skill-lab-actions">
+                      {isSkillLabBusy ? (
+                        <button className="button ghost" type="button" onClick={() => void cancelSkillLab()}>
+                          <IconStop />
+                          <span>{skillLabStatus === "clarifying" ? "取消澄清" : "取消生成"}</span>
+                        </button>
+                      ) : (
+                        <button
+                          className="button primary"
+                          type="button"
+                          disabled={skillLabMode === "create" ? !skillLabPrompt.trim() : !skillLabTargetSkillId}
+                          onClick={() => void startSkillLab()}
+                        >
+                          <IconSkills />
+                          <span>{skillLabMode === "optimize" ? "开始持续优化" : "分析需求"}</span>
+                        </button>
+                      )}
+                      {skillLabStatus === "failed" && skillLabError ? <span className="skill-lab-error">{skillLabError}</span> : null}
+                      {skillLabStatus === "cancelled" ? <span className="subtle-inline">已取消，可重新开始。</span> : null}
+                    </div>
+                  </div>
+
+                  {skillLabClarification ? (
+                    <div className="config-block skill-lab-clarification-block">
+                      <div className="section-copy">
+                        <strong>需求澄清</strong>
+                        <span>{skillLabClarification.summary}</span>
+                      </div>
+                      <div className="skill-lab-clarification-questions">
+                        {skillLabClarification.questions.map((question, index) => (
+                          <fieldset key={question.id} className="skill-lab-clarification-question">
+                            <legend>{index + 1}. {question.question}{question.required ? " *" : ""}</legend>
+                            {question.options.filter((option) => !/^(?:其他|其它)(?:\s*(?:[（(].*[）)]|请说明|手填|自定义|补充))?$/u.test(option.trim())).map((option) => (
+                              <label key={option} className="skill-lab-choice-option">
+                                <input
+                                  type="radio"
+                                  name={`skill-lab-${skillLabClarification.clarificationId}-${question.id}`}
+                                  checked={!skillLabClarification.custom[question.id] && skillLabClarification.answers[question.id] === option}
+                                  onChange={() => setSkillLabClarification((current) => current ? {
+                                    ...current,
+                                    answers: { ...current.answers, [question.id]: option },
+                                    custom: { ...current.custom, [question.id]: false }
+                                  } : current)}
+                                />
+                                <span>{option}</span>
+                              </label>
+                            ))}
+                            {question.allowOther ? (
+                              <label className="skill-lab-choice-option">
+                                <input
+                                  type="radio"
+                                  name={`skill-lab-${skillLabClarification.clarificationId}-${question.id}`}
+                                  checked={skillLabClarification.custom[question.id] === true}
+                                  onChange={() => setSkillLabClarification((current) => current ? {
+                                    ...current,
+                                    answers: { ...current.answers, [question.id]: "" },
+                                    custom: { ...current.custom, [question.id]: true }
+                                  } : current)}
+                                />
+                                <span>其他（手填）</span>
+                              </label>
+                            ) : null}
+                            {question.allowOther && skillLabClarification.custom[question.id] ? (
+                              <input
+                                className="skill-lab-custom-answer"
+                                value={skillLabClarification.answers[question.id] ?? ""}
+                                placeholder="请填写你的答案"
+                                onChange={(event) => setSkillLabClarification((current) => current ? {
+                                  ...current,
+                                  answers: { ...current.answers, [question.id]: event.target.value }
+                                } : current)}
+                              />
+                            ) : null}
+                            {!question.options.length && !question.allowOther ? (
+                              <textarea
+                                rows={3}
+                                value={skillLabClarification.answers[question.id] ?? ""}
+                                onChange={(event) => setSkillLabClarification((current) => current ? {
+                                  ...current,
+                                  answers: { ...current.answers, [question.id]: event.target.value }
+                                } : current)}
+                              />
+                            ) : null}
+                          </fieldset>
+                        ))}
+                      </div>
+                      <div className="skill-lab-clarification-actions">
+                        <button
+                          className="button primary"
+                          type="button"
+                          disabled={skillLabClarification.questions.some((question) =>
+                            question.required && !skillLabClarification.answers[question.id]?.trim()
+                          )}
+                          onClick={() => void submitSkillLabClarification()}
+                        >
+                          <IconCheck />
+                          <span>{skillLabProgress.some((item) => item.iteration === 0 && item.state === "tested") ? "确认并继续本轮" : "确认并开始生成"}</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {skillLabStatus !== "idle" ? (
+                  <div className={`config-block skill-lab-progress-block is-${skillLabStatus}`}>
+                    <div className="skill-lab-live-status" aria-live="polite">
+                      <span className="skill-lab-live-icon" aria-hidden>
+                        {skillLabStatus === "completed" ? <IconCheck /> : <IconSkills />}
+                      </span>
+                      <div className="skill-lab-live-copy">
+                        <span className="skill-lab-live-kicker">
+                          <i aria-hidden />
+                          {skillLabHeartbeatText}
+                        </span>
+                        <strong>{skillLabCurrentPhase}</strong>
+                        <p>{skillLabCurrentSummary}</p>
+                      </div>
+                      <div className="skill-lab-live-metric">
+                        <strong>{skillLabCompletedIterations}<span>/{skillLabTotalIterations}</span></strong>
+                        <small>{skillLabElapsedLabel}</small>
+                      </div>
+                    </div>
+                    <div
+                      className={`skill-lab-progress-track ${isSkillLabBusy ? "is-running" : ""}`}
+                      role="progressbar"
+                      aria-label="技能迭代完成进度"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={skillLabProgressPercent}
+                    >
+                      <span style={{ width: `${skillLabProgressPercent}%` }} />
+                      {isSkillLabBusy ? <i aria-hidden /> : null}
+                    </div>
+                    <div className="skill-lab-progress-footer">
+                      <div className="skill-lab-iteration-rail" aria-label="迭代轮次">
+                        {Array.from({ length: skillLabTotalIterations }, (_, index) => {
+                          const iteration = index + 1;
+                          const progress = skillLabProgress.find((item) => item.iteration === iteration);
+                          const completed = skillLabStatus === "completed" || progress?.state === "tested";
+                          const active = skillLabStatus === "running" && skillLabCurrentIteration === iteration && !completed;
+                          const failed = skillLabStatus === "failed" && skillLabCurrentIteration === iteration;
+                          return (
+                            <div
+                              key={iteration}
+                              title={`第 ${iteration} 轮${completed ? "已完成" : active ? "进行中" : "待执行"}`}
+                              className={`skill-lab-iteration-node ${completed ? "is-complete" : ""} ${active ? "is-active" : ""} ${failed ? "is-failed" : ""}`}
+                            >
+                              <span className="skill-lab-iteration-dot">{completed ? <IconCheck /> : iteration}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="skill-lab-last-result">
+                        {skillLabLastCompletedActivity ? (
+                          <><IconCheck /><span>最近完成：{skillLabLastCompletedActivity.phase}</span></>
+                        ) : (
+                          <><span className="skill-lab-waiting-dot" aria-hidden /><span>初始版本完成后进入第 1 轮测试</span></>
+                        )}
+                      </div>
+                    </div>
+                    {skillLabResult ? (
+                      <div className="skill-lab-result" role="status">
+                        <IconCheck />
+                        <span>{skillLabLastRunMode === "optimize" ? "已优化并更新" : "已生成并发布"}：{skillLabResult.displayName ?? skillLabResult.name}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                  ) : null}
+                  {skillLabApproval ? (
+                    <div className="skill-lab-approval" role="alertdialog" aria-live="assertive">
+                      <div>
+                        <strong>{skillLabApproval.title}</strong>
+                        <span>{skillLabApproval.description}</span>
+                      </div>
+                      <div className="skill-lab-approval-actions">
+                        <button className="button ghost" type="button" onClick={() => void resolveSkillLabApproval(false)}>拒绝</button>
+                        <button className="button primary" type="button" onClick={() => void resolveSkillLabApproval(true)}>允许本次</button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -12401,6 +12906,7 @@ function renderMessageContent(
         <div className="message-user-content">
           <div className="message-user-bubble">
             {content ? <div className="message-user-text">{content}</div> : null}
+            <MessageSelectedContextChips content={message.content} />
             <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
           </div>
         </div>
@@ -12444,6 +12950,7 @@ function renderMessageContent(
           ) : (
             <>
               {content ? <div className="message-user-text">{content}</div> : null}
+              <MessageSelectedContextChips content={message.content} />
               <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
               <div className="message-user-actions" aria-label="消息操作">
                 <button
@@ -14762,7 +15269,7 @@ function getDisplayMessageContent(message: MessageRecord): string {
   }
 
   if (message.role === "user") {
-    return stripSelectedDatabaseContext(message.content);
+    return stripSelectedComposerContexts(message.content);
   }
 
   if (message.role !== "assistant") {
@@ -14772,12 +15279,89 @@ function getDisplayMessageContent(message: MessageRecord): string {
   return stripAssistantToolMarkup(message.content);
 }
 
-function stripSelectedDatabaseContext(content: string): string {
+type SelectedMessageContext = {
+  kind: "skill" | "mcp" | "database" | "code" | "folder" | "file";
+  label: string;
+};
+
+function getSelectedMessageContexts(content: string): SelectedMessageContext[] {
+  const contexts: SelectedMessageContext[] = [];
+  const add = (kind: SelectedMessageContext["kind"], label: string) => {
+    const normalizedLabel = label.trim();
+    if (!normalizedLabel || contexts.some((context) => context.kind === kind && context.label === normalizedLabel)) return;
+    contexts.push({ kind, label: normalizedLabel });
+  };
+
+  for (const match of content.matchAll(/\[Selected Skill\]\s*\r?\n\s*([^\r\n:]+):[^\r\n]*(?=\r?\n{2,}|$)/gi)) add("skill", match[1] ?? "");
+  for (const match of content.matchAll(/\[Selected MCP server\]\s*\r?\n\s*id:[^\r\n]*\r?\n\s*([^\r\n:]+):[^\r\n]*\r?\n[\s\S]*?(?=\r?\n{2,}|$)/gi)) add("mcp", match[1] ?? "");
+  for (const match of content.matchAll(/\[Selected database\]\s*\r?\n\s*id:[^\r\n]*\r?\n\s*([^\r\n:]+):[^\r\n]*\r?\n[\s\S]*?(?=\r?\n{2,}|$)/gi)) add("database", match[1] ?? "");
+  for (const match of content.matchAll(/(?:Edit|Reference) the following selected code from ([^\r\n:]+):\r?\n```[\s\S]*?```/gi)) add("code", match[1] ?? "");
+  for (const match of content.matchAll(/\[Attached folder - required task context\]\s*\r?\npath:\s*([^\r\n]+)/gi)) add("folder", match[1] ?? "");
+  for (const match of content.matchAll(/\[Attached file\]\s*\r?\n([^\r\n]+)/gi)) add("file", match[1] ?? "");
+  return contexts;
+}
+
+function MessageSelectedContextChips({ content }: { content: string }) {
+  const contexts = getSelectedMessageContexts(content);
+  if (contexts.length === 0) return null;
+  const labels: Record<SelectedMessageContext["kind"], string> = {
+    skill: "Skill",
+    mcp: "MCP",
+    database: "数据库",
+    code: "代码",
+    folder: "文件夹",
+    file: "文件"
+  };
+  const icons: Record<SelectedMessageContext["kind"], () => ReactNode> = {
+    skill: IconSkills,
+    mcp: IconMcp,
+    database: IconMcp,
+    code: IconCode,
+    folder: IconFolder,
+    file: IconFile
+  };
+  return (
+    <div className="message-selected-contexts" aria-label="已选择的聊天上下文">
+      {contexts.map((context) => {
+        const Icon = icons[context.kind];
+        return (
+          <span key={`${context.kind}-${context.label}`} className={`message-selected-context-chip ${context.kind}`} title={`${labels[context.kind]}：${context.label}`}>
+            <Icon />
+            <span>{context.label}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function stripSelectedComposerContexts(content: string): string {
   return content
+    .replace(
+      /\n{0,2}\[Selected Skill\]\s*\r?\n\s*[^\r\n:]+:[^\r\n]*(?=\r?\n{2,}|$)/gi,
+      ""
+    )
+    .replace(
+      /\n{0,2}\[Selected MCP server\]\s*\r?\n\s*id:[^\r\n]*\r?\n\s*[^\r\n:]+:[^\r\n]*\r?\nThis request requires querying this MCP server before answering\./gi,
+      ""
+    )
     .replace(
       /\n{0,2}\[Selected database\]\s*\r?\n\s*id:[^\r\n]*\r?\n[^\r\n]*\r?\nUse only this selected database source for this request when database access is needed\./gi,
       ""
     )
+    .replace(
+      /\n{0,2}(?:Edit|Reference) the following selected code from [^\r\n:]+:\r?\n```[\s\S]*?```/gi,
+      ""
+    )
+    .replace(
+      /\n{0,2}\[Attached folder - required task context\][\s\S]*?Do not claim the folder was inspected until those tool calls succeed\./gi,
+      ""
+    )
+    .replace(
+      /\n{0,2}\[Attached file\]\s*\r?\n[^\r\n]*/gi,
+      ""
+    )
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 

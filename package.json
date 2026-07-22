@@ -69,28 +69,19 @@
     },
     "files": [
       "dist/**/*",
-      "package.json",
-      {
-        "from": "node_modules",
-        "to": "node_modules",
-        "filter": [
-          "mysql2/**/*",
-          "aws-ssl-profiles/**/*",
-          "denque/**/*",
-          "generate-function/**/*",
-          "iconv-lite/**/*",
-          "is-property/**/*",
-          "long/**/*",
-          "lru.min/**/*",
-          "named-placeholders/**/*",
-          "sql-escaper/**/*"
-        ]
-      }
+      "package.json"
     ],
     "extraResources": [
       {
         "from": "build/seed-skills",
         "to": "seed-skills",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/seed-plugins",
+        "to": "seed-plugins",
         "filter": [
           "**/*"
         ]

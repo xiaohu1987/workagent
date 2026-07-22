@@ -92,3 +92,62 @@ describe("DatabaseService.clearThreadConversation", () => {
     expect(() => database.clearThreadConversation(thread.id)).toThrow("暂时不能清空");
   });
 });
+
+describe("DatabaseService recent message queries", () => {
+  it("returns the requested tail in chronological order", async () => {
+    const database = await createDatabase();
+    const thread = database.createThread({
+      title: "paginated history",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock",
+      providerId: "mock"
+    });
+    for (const content of ["first", "second", "third"]) {
+      database.createMessage({ threadId: thread.id, turnRunId: null, role: "user", content, metadataJson: null });
+    }
+
+    expect(database.countMessages(thread.id)).toBe(3);
+    expect(database.listRecentMessages(thread.id, 2).map((message) => message.content)).toEqual(["second", "third"]);
+    expect(database.getLatestMessage(thread.id, "user")?.content).toBe("third");
+  });
+});
+
+describe("DatabaseService.truncateConversationFromMessage", () => {
+  it("preserves composer access modes when editing a message", async () => {
+    const database = await createDatabase();
+    const thread = database.createThread({
+      title: "可编辑会话",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock",
+      providerId: "mock"
+    });
+    const message = database.createMessage({
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: "旧消息",
+      metadataJson: null
+    });
+    database.updateThread(thread.id, {
+      gpaStateJson: JSON.stringify({
+        stage: "off",
+        fullAccess: true,
+        knowledgeEnabled: true
+      })
+    });
+
+    database.truncateConversationFromMessage(thread.id, message.id);
+
+    expect(database.getThread(thread.id).gpaStateJson).toBe(
+      JSON.stringify({
+        stage: "off",
+        fullAccess: true,
+        knowledgeEnabled: true
+      })
+    );
+  });
+});

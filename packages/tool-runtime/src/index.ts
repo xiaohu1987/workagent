@@ -24,7 +24,7 @@ import type {
 import { extractMcpRepositoryToolResult } from "@mcp-runtime";
 import { applyCodexPatch } from "./handlers/applyPatch";
 import { astDiffSources, extractSymbols, isAstSupportedPath, languageFromPath } from "./ast";
-import { prepareShellCommandForWebFrontend } from "./web-shell-policy";
+import { prepareShellCommandForWebFrontend, prepareShellCommandForWindows } from "./web-shell-policy";
 import {
   pageForModel,
   truncatePageText
@@ -34,6 +34,7 @@ export {
   isPythonScaffoldingCommand,
   isWebFrontendTaskText,
   prepareShellCommandForWebFrontend,
+  prepareShellCommandForWindows,
   rewritePythonHttpServer,
   WEB_FRONTEND_PYTHON_BLOCK_MESSAGE
 } from "./web-shell-policy";
@@ -686,9 +687,21 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("shell.exec", "Run a shell command inside the current workspace.", ["command"], "high"),
+    spec(
+      "shell.exec",
+      process.platform === "win32"
+        ? "Run a command inside the current workspace. Windows uses PowerShell; recognized CMD syntax is adapted automatically. Use apply_patch for all file edits, never shell redirection or shell write commands."
+        : "Run a shell command inside the current workspace. Use apply_patch for all file edits, never shell redirection or shell write commands.",
+      ["command"],
+      "high"
+    ),
     async (args, ctx) => {
       let command = String(args.command ?? "");
+      const windowsPrepared = prepareShellCommandForWindows(command);
+      if (!windowsPrepared.ok) {
+        return { ok: false, content: windowsPrepared.error ?? "Command blocked by Windows shell compatibility." };
+      }
+      command = windowsPrepared.command;
       if (ctx.webFrontendGuard) {
         const prepared = prepareShellCommandForWebFrontend(command);
         if (!prepared.ok) {

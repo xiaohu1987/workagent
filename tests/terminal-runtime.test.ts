@@ -66,4 +66,26 @@ describe("web frontend shell policy", () => {
     expect(isPythonScaffoldingCommand("python -c \"print(1+1)\"")).toBe(false);
     expect(isPythonScaffoldingCommand("python write_index.py")).toBe(true);
   });
+
+  it("adapts clear CMD syntax and blocks shell-based file writes on Windows", async () => {
+    const { prepareShellCommandForWindows } = await import("../packages/tool-runtime/src/web-shell-policy");
+
+    expect(prepareShellCommandForWindows('dir /b *.md 2>nul || echo "no md files"', true)).toEqual({
+      ok: true,
+      command: `& cmd.exe /d /s /c 'dir /b *.md 2>nul || echo "no md files"'`,
+      rewritten: true
+    });
+    expect(prepareShellCommandForWindows("Set-Content -Path notes.md -Value 'draft'", true)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("apply_patch")
+    });
+    expect(prepareShellCommandForWindows("python -c \"open('notes.md', 'w').write('draft')\"", true)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("apply_patch")
+    });
+    expect(prepareShellCommandForWindows("Get-ChildItem -Name", true)).toEqual({
+      ok: true,
+      command: "Get-ChildItem -Name"
+    });
+  });
 });

@@ -513,6 +513,8 @@ export class DatabaseService {
         started_at TEXT NOT NULL,
         completed_at TEXT
       );
+      CREATE INDEX IF NOT EXISTS idx_messages_thread_created_at ON messages(thread_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_tool_calls_thread_started_at ON tool_calls(thread_id, started_at);
       CREATE TABLE IF NOT EXISTS approval_records (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
@@ -1072,7 +1074,9 @@ export class DatabaseService {
       }
       this.#db.prepare("DELETE FROM messages WHERE thread_id = ? AND created_at >= ?").run(threadId, target.created_at);
       this.#db.prepare("DELETE FROM queued_messages WHERE thread_id = ?").run(threadId);
-      this.#db.prepare("UPDATE threads SET status = 'idle', gpa_state_json = NULL, updated_at = ? WHERE id = ?").run(nowIso(), threadId);
+      // Editing a message rewinds the conversation, but the composer access
+      // modes belong to the chat session and must survive that rewind.
+      this.#db.prepare("UPDATE threads SET status = 'idle', updated_at = ? WHERE id = ?").run(nowIso(), threadId);
       this.#db.exec("COMMIT");
     } catch (error) {
       this.#db.exec("ROLLBACK");
@@ -1085,6 +1089,39 @@ export class DatabaseService {
       .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC")
       .all(threadId)
       .map(mapMessageRow);
+  }
+
+  public listRecentMessages(threadId: string, limit: number): MessageRecord[] {
+    const cappedLimit = Math.max(1, Math.floor(limit));
+    return this.#db
+      .prepare(
+        `SELECT * FROM (
+           SELECT * FROM messages
+           WHERE thread_id = ?
+           ORDER BY created_at DESC
+           LIMIT ?
+         ) ORDER BY created_at ASC`
+      )
+      .all(threadId, cappedLimit)
+      .map(mapMessageRow);
+  }
+
+  public countMessages(threadId: string): number {
+    const row = this.#db
+      .prepare("SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?")
+      .get(threadId) as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  public getLatestMessage(threadId: string, role?: MessageRecord["role"]): MessageRecord | null {
+    const row = role
+      ? this.#db
+          .prepare("SELECT * FROM messages WHERE thread_id = ? AND role = ? ORDER BY created_at DESC LIMIT 1")
+          .get(threadId, role)
+      : this.#db
+          .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1")
+          .get(threadId);
+    return row ? mapMessageRow(row) : null;
   }
 
   public enqueueQueuedMessage(input: Omit<QueuedMessageRecord, "id" | "status" | "createdAt">): QueuedMessageRecord {
@@ -1302,10 +1339,15 @@ export class DatabaseService {
       .run(next.resultJson, next.status, next.completedAt, id);
   }
 
-  public listToolCalls(threadId: string): ToolCallRecord[] {
-    return this.#db
-      .prepare("SELECT * FROM tool_calls WHERE thread_id = ? ORDER BY started_at ASC")
-      .all(threadId)
+  public listToolCalls(threadId: string, startedAt?: string): ToolCallRecord[] {
+    const rows = startedAt
+      ? this.#db
+          .prepare("SELECT * FROM tool_calls WHERE thread_id = ? AND started_at >= ? ORDER BY started_at ASC")
+          .all(threadId, startedAt)
+      : this.#db
+          .prepare("SELECT * FROM tool_calls WHERE thread_id = ? ORDER BY started_at ASC")
+          .all(threadId);
+    return rows
       .map((row: any) => ({
         id: row.id,
         threadId: row.thread_id,

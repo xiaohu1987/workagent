@@ -573,7 +573,7 @@ class ThreadSessionRuntime {
       return this.#gpa;
     }
     const thread = await this.services.persistence.getThread(this.threadId);
-    this.#gpa = parseGpaState(thread.gpaStateJson);
+    this.#gpa = parseGpaState(thread.gpaStateJson, this.#gpa);
     this.#gpaLoaded = true;
     if (thread.mode === "project" && thread.cwd && this.#gpa.planTasks.length > 0) {
       const planFile = await readGpaPlanFile(thread.cwd);
@@ -5063,6 +5063,9 @@ export function formatAvailableTools(
       ? "The following tools are available in this turn. They are real executable tools, not examples. Never claim that command execution is unavailable while shell.exec appears below."
       : "No executable tools are available in this turn.",
     "For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete.",
+    ...(process.platform === "win32"
+      ? ["This desktop executes shell.exec in Windows PowerShell. Use PowerShell syntax; recognizable CMD commands are adapted automatically. Do not use Bash syntax such as `||`, and never edit files through shell.exec: use apply_patch."]
+      : []),
     ...definitions
   ].join("\n");
 }

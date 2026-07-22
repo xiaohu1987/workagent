@@ -1612,6 +1612,9 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
     "When request_user_input is listed, use that tool for a material user decision instead of placing questions in assistant_message. Do not call tools that were not listed.",
     "Only call tools that were provided in the tool list.",
     "When shell.exec is listed, it is the command execution tool. Do not state that command execution is unavailable; call shell.exec with {\"command\": \"...\"} instead.",
+    ...(process.platform === "win32"
+      ? ["The desktop shell is Windows PowerShell. Use PowerShell syntax, not Bash/CMD syntax; recognizable CMD commands may be adapted automatically. Never write files through shell.exec: use apply_patch."]
+      : []),
     "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",
     "For apply_patch, send arguments.patch with this exact raw grammar: *** Begin Patch\\n*** Add File: relative/path.ext\\n+content\\n*** End Patch. Do not send a Git diff, file_path, or patch_content.",
     "When reviewing or comparing code structure (functions/classes/methods), prefer code.ast_diff with {\"path\": \"relative/file\"} (optional against). Still use apply_patch for writes.",

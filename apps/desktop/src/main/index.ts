@@ -252,6 +252,9 @@ async function createWindow(): Promise<void> {
     notifyBackgroundRuntimeEvent(event);
     mainWindow?.webContents.send("runtime:event", event);
   });
+  backend.onSkillLabEvent((event) => {
+    mainWindow?.webContents.send("skill-lab:event", event);
+  });
 
   mainWindow.removeMenu();
   mainWindow.setMenuBarVisibility(false);
@@ -386,7 +389,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:clear-conversation", (_event, threadId: string) =>
     backend.clearThreadConversation(threadId)
   );
-  ipcMain.handle("threads:snapshot", (_event, threadId: string) => backend.getThreadSnapshot(threadId));
+  ipcMain.handle("threads:snapshot", (_event, threadId: string, messageLimit?: number) =>
+    backend.getThreadSnapshot(threadId, messageLimit)
+  );
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)
   );
@@ -464,6 +469,16 @@ function registerIpc(): void {
     return backend.listUserSkills();
   });
   ipcMain.handle("user-skills:generate", (_event, threadId: string, skillName?: string) => backend.generateUserSkill(threadId, skillName));
+  ipcMain.handle("skill-lab:start", (_event, payload: { prompt: string; requestedName?: string; iterations?: number; targetSkillId?: string }) =>
+    backend.startSkillLab(payload.prompt, payload.requestedName, payload.iterations, payload.targetSkillId)
+  );
+  ipcMain.handle("skill-lab:cancel", (_event, jobId: string) => backend.cancelSkillLab(jobId));
+  ipcMain.handle("skill-lab:approval", (_event, payload: { jobId: string; approvalId: string; approved: boolean }) =>
+    backend.resolveSkillLabApproval(payload.jobId, payload.approvalId, payload.approved)
+  );
+  ipcMain.handle("skill-lab:clarification", (_event, payload: { jobId: string; clarificationId: string; answers: Record<string, string> }) =>
+    backend.resolveSkillLabClarification(payload.jobId, payload.clarificationId, payload.answers)
+  );
   ipcMain.handle("plugins:list", async () => {
     await backend.initializeDeferredServices();
     return backend.listPlugins();

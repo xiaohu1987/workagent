@@ -335,7 +335,14 @@ export class McpManager {
       : [...this.#clients.entries()];
     const resources: any[] = [];
     for (const [id, managed] of pairs) {
-      const response = (await managed.client.listResources?.()) ?? {};
+      let response: { resources?: Array<{ uri: string; name?: string; description?: string }> } = {};
+      try {
+        response = (await managed.client.listResources?.()) ?? {};
+      } catch (error) {
+        // MCP servers are allowed to omit optional resource capabilities.
+        // JSON-RPC -32601 must not abort otherwise usable Skill Lab runs.
+        if (!isMethodUnavailableError(error)) throw error;
+      }
       for (const resource of response.resources ?? []) {
         resources.push({ server: id, uri: resource.uri, name: resource.name ?? resource.uri, description: resource.description ?? "" });
       }
@@ -501,6 +508,11 @@ function connectionFingerprint(config: McpServerConfig): string {
 
 function isMissingToolError(error: unknown): boolean {
   return /tool.*(?:not found|unknown|unavailable)|(?:not found|unknown).*tool/i.test(error instanceof Error ? error.message : String(error));
+}
+
+function isMethodUnavailableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:-32601|method\s+['"]?[^'" ]+['"]?\s+is\s+not\s+available|method\s+not\s+found)/i.test(message);
 }
 
 function normalizeTransport(config: McpServerConfig): "stdio" | "sse" | "streamable_http" {

@@ -47,7 +47,8 @@ const api = {
   createGitPullRequest: (threadId: string) => ipcRenderer.invoke("git:create-pr", threadId),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
   clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),
-  getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
+  getThreadSnapshot: (threadId: string, messageLimit?: number) =>
+    ipcRenderer.invoke("threads:snapshot", threadId, messageLimit),
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[] }) =>
     ipcRenderer.invoke("threads:send", payload),
   replaceMessage: (payload: { threadId: string; messageId: string; content: string }) =>
@@ -86,6 +87,17 @@ const api = {
   removeSkill: (skillId: string) => ipcRenderer.invoke("skills:remove", skillId),
   listUserSkills: () => ipcRenderer.invoke("user-skills:list"),
   generateUserSkill: (threadId: string, skillName?: string) => ipcRenderer.invoke("user-skills:generate", threadId, skillName),
+  startSkillLab: (payload: { prompt: string; requestedName?: string; iterations?: number; targetSkillId?: string }) => ipcRenderer.invoke("skill-lab:start", payload),
+  cancelSkillLab: (jobId: string) => ipcRenderer.invoke("skill-lab:cancel", jobId),
+  resolveSkillLabApproval: (payload: { jobId: string; approvalId: string; approved: boolean }) =>
+    ipcRenderer.invoke("skill-lab:approval", payload),
+  resolveSkillLabClarification: (payload: { jobId: string; clarificationId: string; answers: Record<string, string> }) =>
+    ipcRenderer.invoke("skill-lab:clarification", payload),
+  onSkillLabEvent: (listener: (event: unknown) => void) => {
+    const wrapped = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on("skill-lab:event", wrapped);
+    return () => ipcRenderer.removeListener("skill-lab:event", wrapped);
+  },
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   installPlugin: (source: string) => ipcRenderer.invoke("plugins:install", source),
   onPluginInstallProgress: (listener: (progress: unknown) => void) => {

@@ -58,7 +58,7 @@ declare global {
       createGitPullRequest: (threadId: string) => Promise<any>;
       deleteThread: (threadId: string) => Promise<void>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
-      getThreadSnapshot: (threadId: string) => Promise<any>;
+      getThreadSnapshot: (threadId: string, messageLimit?: number) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[] }) => Promise<void>;
       replaceMessage: (payload: { threadId: string; messageId: string; content: string }) => Promise<void>;
       deleteQueuedMessage: (payload: { threadId: string; id: string }) => Promise<void>;
@@ -98,6 +98,11 @@ declare global {
       removeSkill: (skillId: string) => Promise<void>;
       listUserSkills: () => Promise<SkillMetadata[]>;
       generateUserSkill: (threadId: string, skillName?: string) => Promise<SkillMetadata>;
+      startSkillLab: (payload: { prompt: string; requestedName?: string; iterations?: number; targetSkillId?: string }) => Promise<string>;
+      cancelSkillLab: (jobId: string) => Promise<void>;
+      resolveSkillLabApproval: (payload: { jobId: string; approvalId: string; approved: boolean }) => Promise<void>;
+      resolveSkillLabClarification: (payload: { jobId: string; clarificationId: string; answers: Record<string, string> }) => Promise<void>;
+      onSkillLabEvent: (listener: (event: any) => void) => () => void;
       listPlugins: () => Promise<any[]>;
       installPlugin: (source: string) => Promise<any>;
       onPluginInstallProgress: (listener: (progress: { percent: number; stage: string }) => void) => () => void;

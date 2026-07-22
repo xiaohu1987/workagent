@@ -1666,6 +1666,18 @@ describe("GPA access state", () => {
   it("defaults full access to disabled for existing tasks", () => {
     expect(parseGpaState(null).fullAccess).toBe(false);
   });
+
+  it("preserves the last known access flags when persisted state is missing or invalid", () => {
+    const fallback = parseGpaState(JSON.stringify({
+      stage: "off",
+      fullAccess: true,
+      knowledgeEnabled: true,
+      planTasks: []
+    }));
+
+    expect(parseGpaState(null, fallback)).toMatchObject({ fullAccess: true, knowledgeEnabled: true });
+    expect(parseGpaState("{invalid", fallback)).toMatchObject({ fullAccess: true, knowledgeEnabled: true });
+  });
 });
 
 describe("multimodal intent classification", () => {
