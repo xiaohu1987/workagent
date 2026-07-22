@@ -329,6 +329,12 @@ function reportStartupError(error: unknown): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle("appearance:background:get", () => backend.getApplicationBackground());
+  ipcMain.handle("appearance:background:save", (_event, payload) => backend.saveApplicationBackground(payload));
+  ipcMain.handle("appearance:background:save-settings", (_event, settings) =>
+    backend.saveApplicationBackgroundSettings(settings)
+  );
+  ipcMain.handle("appearance:background:clear", () => backend.clearApplicationBackground());
   ipcMain.handle("threads:list", () => backend.listThreads());
   ipcMain.handle("threads:search", (_event, query: string) => backend.searchThreads(query));
   ipcMain.handle("threads:create", (_event, payload) => backend.createThread(payload));

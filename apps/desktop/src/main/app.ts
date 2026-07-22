@@ -76,6 +76,24 @@ import {
 
 type ResolverMap<T> = Map<string, (value: T) => void>;
 const INTERACTION_TIMEOUT_MS = 30_000;
+const MAX_APPLICATION_BACKGROUND_BYTES = 40 * 1024 * 1024;
+const APPLICATION_BACKGROUND_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif"
+]);
+
+type ApplicationBackgroundPayload = {
+  bytes: ArrayBuffer;
+  mimeType: string;
+  fileName: string;
+  settings: unknown;
+};
+
+type ApplicationBackgroundMetadata = Omit<ApplicationBackgroundPayload, "bytes"> & {
+  version: 1;
+};
 
 function redactDatabaseErrorMessage(message: string, password?: string): string {
   let redacted = message;
@@ -1395,6 +1413,81 @@ export class DesktopBackend {
 
   public getConfig(): AppConfig {
     return this.#config;
+  }
+
+  public async getApplicationBackground(): Promise<ApplicationBackgroundPayload | null> {
+    const appearanceDir = path.join(this.#layout.root, "appearance");
+    try {
+      const [bytes, rawMetadata] = await Promise.all([
+        fs.readFile(path.join(appearanceDir, "background-image")),
+        fs.readFile(path.join(appearanceDir, "background.json"), "utf8")
+      ]);
+      const metadata = JSON.parse(rawMetadata) as Partial<ApplicationBackgroundMetadata>;
+      if (!APPLICATION_BACKGROUND_MIME_TYPES.has(metadata.mimeType ?? "")) return null;
+      return {
+        bytes: Uint8Array.from(bytes).buffer,
+        mimeType: metadata.mimeType!,
+        fileName: typeof metadata.fileName === "string" ? metadata.fileName : "background",
+        settings: metadata.settings
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  public async saveApplicationBackground(payload: ApplicationBackgroundPayload): Promise<void> {
+    const bytes = new Uint8Array(payload.bytes);
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_APPLICATION_BACKGROUND_BYTES) {
+      throw new Error("背景图片必须小于 40 MB。");
+    }
+    if (!APPLICATION_BACKGROUND_MIME_TYPES.has(payload.mimeType)) {
+      throw new Error("仅支持 PNG、JPEG、WebP 或 GIF 图片。");
+    }
+
+    const appearanceDir = path.join(this.#layout.root, "appearance");
+    const metadata: ApplicationBackgroundMetadata = {
+      version: 1,
+      mimeType: payload.mimeType,
+      fileName: path.basename(payload.fileName || "background").slice(0, 255),
+      settings: payload.settings
+    };
+    const serializedMetadata = JSON.stringify(metadata, null, 2);
+    if (Buffer.byteLength(serializedMetadata, "utf8") > 64 * 1024) {
+      throw new Error("背景图片设置无效。");
+    }
+
+    await fs.mkdir(appearanceDir, { recursive: true });
+    await fs.writeFile(
+      path.join(appearanceDir, "background-image"),
+      Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    );
+    await fs.writeFile(path.join(appearanceDir, "background.json"), serializedMetadata, "utf8");
+  }
+
+  public async saveApplicationBackgroundSettings(settings: unknown): Promise<void> {
+    const appearanceDir = path.join(this.#layout.root, "appearance");
+    const metadataPath = path.join(appearanceDir, "background.json");
+    try {
+      const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8")) as ApplicationBackgroundMetadata;
+      metadata.settings = settings;
+      const serializedMetadata = JSON.stringify(metadata, null, 2);
+      if (Buffer.byteLength(serializedMetadata, "utf8") > 64 * 1024) {
+        throw new Error("背景图片设置无效。");
+      }
+      await fs.writeFile(metadataPath, serializedMetadata, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+
+  public async clearApplicationBackground(): Promise<void> {
+    const appearanceDir = path.join(this.#layout.root, "appearance");
+    await Promise.all([
+      fs.rm(path.join(appearanceDir, "background-image"), { force: true }),
+      fs.rm(path.join(appearanceDir, "background.json"), { force: true })
+    ]);
   }
 
   public getUpdatePaths(): Pick<HomeLayout, "cacheDir" | "logsDir"> {

@@ -20,6 +20,20 @@ type RendererNotificationNavigationTarget = import("@shared-types").Notification
 declare global {
   interface Window {
     codexh: {
+      getApplicationBackground: () => Promise<{
+        bytes: ArrayBuffer;
+        mimeType: string;
+        fileName: string;
+        settings: unknown;
+      } | null>;
+      saveApplicationBackground: (payload: {
+        bytes: ArrayBuffer;
+        mimeType: string;
+        fileName: string;
+        settings: unknown;
+      }) => Promise<void>;
+      saveApplicationBackgroundSettings: (settings: unknown) => Promise<void>;
+      clearApplicationBackground: () => Promise<void>;
       listThreads: () => Promise<any[]>;
       searchThreads: (query: string) => Promise<Array<{ thread: ThreadRecord; snippet: string | null; score: number }>>;
       setThreadPinned: (payload: { threadId: string; isPinned: boolean }) => Promise<ThreadRecord>;

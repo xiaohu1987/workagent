@@ -2,6 +2,16 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { NotificationNavigationTarget } from "@shared-types";
 
 const api = {
+  getApplicationBackground: () => ipcRenderer.invoke("appearance:background:get"),
+  saveApplicationBackground: (payload: {
+    bytes: ArrayBuffer;
+    mimeType: string;
+    fileName: string;
+    settings: unknown;
+  }) => ipcRenderer.invoke("appearance:background:save", payload),
+  saveApplicationBackgroundSettings: (settings: unknown) =>
+    ipcRenderer.invoke("appearance:background:save-settings", settings),
+  clearApplicationBackground: () => ipcRenderer.invoke("appearance:background:clear"),
   listThreads: () => ipcRenderer.invoke("threads:list"),
   searchThreads: (query: string) => ipcRenderer.invoke("threads:search", query),
   setThreadPinned: (payload: { threadId: string; isPinned: boolean }) =>

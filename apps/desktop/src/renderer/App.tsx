@@ -1,6 +1,6 @@
 import { createElement, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import c from "highlight.js/lib/languages/c";
@@ -81,8 +81,18 @@ import {
   type NotificationCenterState
 } from "./notification-center";
 import { EChartsMessageChart } from "./EChartsMessageChart";
+import {
+  getChatBackgroundTransform,
+  loadChatBackgroundBlob,
+  normalizeChatBackgroundSettings,
+  readChatBackgroundSettings,
+  removeChatBackgroundBlob,
+  renderChatBackgroundPng,
+  writeChatBackgroundSettings,
+  type ChatBackgroundSettings
+} from "./chat-background";
 
-type SettingsTab = "general" | "knowledge" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
+type SettingsTab = "general" | "appearance" | "knowledge" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
 type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";
 type ManagedRemoval =
   | { kind: "plugin"; plugin: PluginRecord }
@@ -517,6 +527,7 @@ type HistorySearchResult = {
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
   { id: "multimodal", label: "多模态", hint: "配置生图模型与视频模型" },
+  { id: "appearance", label: "应用背景", hint: "导入图片并调整整个应用的背景" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
@@ -745,6 +756,23 @@ export function App() {
   const gpaConfirmationPendingStageRef = useRef<Exclude<GpaStage, "off" | "act"> | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
+  const [chatBackgroundSettings, setChatBackgroundSettings] = useState<ChatBackgroundSettings>(() =>
+    readChatBackgroundSettings()
+  );
+  const [chatBackgroundUrl, setChatBackgroundUrl] = useState<string | null>(null);
+  const [isChatBackgroundExporting, setIsChatBackgroundExporting] = useState(false);
+  const [isChatBackgroundDragging, setIsChatBackgroundDragging] = useState(false);
+  const chatBackgroundInputRef = useRef<HTMLInputElement | null>(null);
+  const chatBackgroundHydratedRef = useRef(false);
+  const chatBackgroundDragRef = useRef<null | {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    positionX: number;
+    positionY: number;
+    width: number;
+    height: number;
+  }>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [updateConfirmDialog, setUpdateConfirmDialog] = useState<null | {
     kind: "download" | "install";
@@ -1084,6 +1112,60 @@ export function App() {
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const persisted = await window.codexh.getApplicationBackground();
+      if (persisted) {
+        if (!active) return;
+        const restoredSettings = normalizeChatBackgroundSettings(persisted.settings);
+        setChatBackgroundSettings(normalizeChatBackgroundSettings({
+          ...restoredSettings,
+          fileName: restoredSettings.fileName ?? persisted.fileName
+        }));
+        setChatBackgroundUrl(URL.createObjectURL(new Blob([persisted.bytes], { type: persisted.mimeType })));
+        return;
+      }
+
+      const legacyBlob = await loadChatBackgroundBlob();
+      if (!legacyBlob) return;
+      const legacySettings = readChatBackgroundSettings();
+      await window.codexh.saveApplicationBackground({
+        bytes: await legacyBlob.arrayBuffer(),
+        mimeType: legacyBlob.type,
+        fileName: legacySettings.fileName ?? "background",
+        settings: legacySettings
+      });
+      await removeChatBackgroundBlob();
+      if (!active) return;
+      setChatBackgroundUrl(URL.createObjectURL(legacyBlob));
+    })()
+      .catch(() => {
+        if (active) {
+          showNotice("应用背景加载失败", { message: "本地背景图存储暂时不可用。", tone: "warning" });
+        }
+      })
+      .finally(() => {
+        chatBackgroundHydratedRef.current = true;
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    writeChatBackgroundSettings(chatBackgroundSettings);
+    if (!chatBackgroundHydratedRef.current) return;
+    const timeout = window.setTimeout(() => {
+      void window.codexh.saveApplicationBackgroundSettings(chatBackgroundSettings).catch(() => undefined);
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [chatBackgroundSettings]);
+
+  useEffect(() => () => {
+    if (chatBackgroundUrl) URL.revokeObjectURL(chatBackgroundUrl);
+  }, [chatBackgroundUrl]);
 
   useEffect(() => {
     threadsRef.current = threads;
@@ -2707,6 +2789,8 @@ export function App() {
         return "模型提供商";
       case "multimodal":
         return "多模态模型";
+      case "appearance":
+        return "应用背景";
       case "capabilities":
         return "能力中心";
       case "mcp":
@@ -4790,6 +4874,130 @@ export function App() {
     setGpaMenuPos(null);
   }
 
+  function updateChatBackgroundSettings(patch: Partial<ChatBackgroundSettings>) {
+    setChatBackgroundSettings((current) => normalizeChatBackgroundSettings({ ...current, ...patch }));
+  }
+
+  function beginChatBackgroundDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!chatBackgroundUrl || event.button !== 0) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    chatBackgroundDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      positionX: chatBackgroundSettings.positionX,
+      positionY: chatBackgroundSettings.positionY,
+      width: Math.max(1, bounds.width),
+      height: Math.max(1, bounds.height)
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsChatBackgroundDragging(true);
+  }
+
+  function moveChatBackground(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = chatBackgroundDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    updateChatBackgroundSettings({
+      positionX: drag.positionX - ((event.clientX - drag.startX) / drag.width) * 100,
+      positionY: drag.positionY - ((event.clientY - drag.startY) / drag.height) * 100
+    });
+  }
+
+  function endChatBackgroundDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = chatBackgroundDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    chatBackgroundDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setIsChatBackgroundDragging(false);
+  }
+
+  async function importChatBackground(file: File) {
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) {
+      showNotice("请选择图片文件", { message: "支持 PNG、JPEG、WebP、GIF 等常见格式。", tone: "warning" });
+      return;
+    }
+    if (file.size > 40 * 1024 * 1024) {
+      showNotice("图片过大", { message: "请选择小于 40 MB 的图片。", tone: "warning" });
+      return;
+    }
+
+    const nextUrl = URL.createObjectURL(file);
+    try {
+      const probe = new Image();
+      probe.src = nextUrl;
+      await probe.decode();
+    } catch {
+      URL.revokeObjectURL(nextUrl);
+      showNotice("图片读取失败", {
+        message: "文件格式无法解码，请换一张 PNG、JPEG 或 WebP 图片。",
+        tone: "warning"
+      });
+      return;
+    }
+
+    try {
+      const nextSettings = normalizeChatBackgroundSettings({
+        ...chatBackgroundSettings,
+        enabled: true,
+        fileName: file.name
+      });
+      await window.codexh.saveApplicationBackground({
+        bytes: await file.arrayBuffer(),
+        mimeType: file.type,
+        fileName: file.name,
+        settings: nextSettings
+      });
+      setChatBackgroundUrl(nextUrl);
+      setChatBackgroundSettings(nextSettings);
+      showNotice("应用背景已更新", { message: "位置、模糊度和透明度可继续实时调整。", tone: "success" });
+    } catch (error) {
+      URL.revokeObjectURL(nextUrl);
+      showNotice("图片保存失败", {
+        message: error instanceof Error ? error.message : String(error),
+        tone: "warning"
+      });
+    }
+  }
+
+  async function clearChatBackground() {
+    try {
+      await window.codexh.clearApplicationBackground();
+      setChatBackgroundUrl(null);
+      updateChatBackgroundSettings({ fileName: null });
+      showNotice("应用背景已清除", { tone: "success" });
+    } catch (error) {
+      showNotice("清除背景失败", {
+        message: error instanceof Error ? error.message : String(error),
+        tone: "warning"
+      });
+    }
+  }
+
+  async function exportChatBackground() {
+    if (!chatBackgroundUrl || isChatBackgroundExporting) return;
+    setIsChatBackgroundExporting(true);
+    try {
+      const blob = await renderChatBackgroundPng(chatBackgroundUrl, chatBackgroundSettings);
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const sourceName = chatBackgroundSettings.fileName?.replace(/\.[^.]+$/, "") || "chat-background";
+      link.href = downloadUrl;
+      link.download = `${sourceName}-blur-${chatBackgroundSettings.blur}-opacity-${chatBackgroundSettings.opacity}.png`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1_000);
+      showNotice("PNG 已生成", { message: "透明度与模糊效果已写入图片。", tone: "success" });
+    } catch (error) {
+      showNotice("PNG 生成失败", {
+        message: error instanceof Error ? error.message : String(error),
+        tone: "warning"
+      });
+    } finally {
+      setIsChatBackgroundExporting(false);
+    }
+  }
+
   function resetConfigDraft(nextConfig: AppConfig, preferredProviderId?: string | null) {
     const draft = cloneConfig(nextConfig);
     const nextProviderId = resolveSettingsProviderId(draft, preferredProviderId);
@@ -5645,7 +5853,7 @@ export function App() {
   return (
     <div
       ref={appShellRef}
-      className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+      className={`app-shell ${chatBackgroundUrl && chatBackgroundSettings.enabled ? "has-app-background" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
         isRightWorkspaceOpen ? "right-workspace-open" : ""
       } ${isTerminalOpen ? "terminal-open" : ""}`}
       style={{
@@ -5653,6 +5861,21 @@ export function App() {
         "--right-workspace-pane-width": `${rightWorkspaceWidth}px`
       } as React.CSSProperties}
     >
+      {chatBackgroundUrl && chatBackgroundSettings.enabled ? (
+        <div className="app-background-layer" aria-hidden="true">
+          <img
+            src={chatBackgroundUrl}
+            alt=""
+            style={{
+              filter: `blur(${chatBackgroundSettings.blur}px)`,
+              opacity: chatBackgroundSettings.opacity / 100,
+              objectFit: chatBackgroundSettings.fit,
+              objectPosition: "center",
+              transform: getChatBackgroundTransform(chatBackgroundSettings)
+            }}
+          />
+        </div>
+      ) : null}
       <header className="windowbar">
         <div className="windowbar-left">
           <button
@@ -6496,6 +6719,213 @@ export function App() {
               </aside>
 
               <div className="settings-body">
+              {settingsTab === "appearance" ? (
+                <div className="settings-section chat-background-settings">
+                  <input
+                    ref={chatBackgroundInputRef}
+                    className="chat-background-file-input"
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.currentTarget.value = "";
+                      if (file) void importChatBackground(file);
+                    }}
+                  />
+
+                  <div className="chat-background-editor">
+                    <div
+                      className={`chat-background-preview ${chatBackgroundUrl ? "is-positionable" : ""} ${isChatBackgroundDragging ? "is-dragging" : ""}`}
+                      data-fit={chatBackgroundSettings.fit}
+                      onPointerDown={beginChatBackgroundDrag}
+                      onPointerMove={moveChatBackground}
+                      onPointerUp={endChatBackgroundDrag}
+                      onPointerCancel={endChatBackgroundDrag}
+                    >
+                      {chatBackgroundUrl ? (
+                        <img
+                          src={chatBackgroundUrl}
+                          alt="背景预览"
+                          style={{
+                            filter: `blur(${chatBackgroundSettings.blur}px)`,
+                            opacity: chatBackgroundSettings.enabled ? chatBackgroundSettings.opacity / 100 : 0,
+                            objectFit: chatBackgroundSettings.fit,
+                            objectPosition: "center",
+                            transform: getChatBackgroundTransform(chatBackgroundSettings)
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="chat-background-empty"
+                          onClick={() => chatBackgroundInputRef.current?.click()}
+                        >
+                          <IconImage />
+                          <span>导入背景图片</span>
+                        </button>
+                      )}
+                      {chatBackgroundUrl ? (
+                        <div className="chat-background-preview-ui" aria-hidden="true">
+                          <div className="chat-background-preview-bar">
+                            <span className="chat-background-preview-avatar" />
+                            <strong>CodeXH</strong>
+                          </div>
+                          <div className="chat-background-preview-messages">
+                            <span className="preview-bubble preview-bubble-assistant">整个应用使用同一张背景。</span>
+                            <span className="preview-bubble preview-bubble-user">界面内容保持清晰可读。</span>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="chat-background-controls">
+                      <div className="chat-background-heading">
+                        <div>
+                          <strong>{chatBackgroundSettings.fileName ?? "尚未导入图片"}</strong>
+                          <span>{chatBackgroundUrl ? "本地背景" : "PNG、JPEG、WebP、GIF · 最大 40 MB"}</span>
+                        </div>
+                        <label className="chat-background-toggle">
+                          <input
+                            type="checkbox"
+                            checked={chatBackgroundSettings.enabled}
+                            disabled={!chatBackgroundUrl}
+                            onChange={(event) => updateChatBackgroundSettings({ enabled: event.target.checked })}
+                          />
+                          <span aria-hidden="true" />
+                          <em>{!chatBackgroundUrl ? "未设置" : chatBackgroundSettings.enabled ? "已启用" : "已停用"}</em>
+                        </label>
+                      </div>
+
+                      <div className="chat-background-control-group">
+                        <div className="chat-background-control-label">
+                          <span>填充方式</span>
+                        </div>
+                        <div className="chat-background-segmented" role="group" aria-label="背景填充方式">
+                          <button
+                            type="button"
+                            className={chatBackgroundSettings.fit === "cover" ? "active" : ""}
+                            onClick={() => updateChatBackgroundSettings({ fit: "cover" })}
+                          >
+                            填满
+                          </button>
+                          <button
+                            type="button"
+                            className={chatBackgroundSettings.fit === "contain" ? "active" : ""}
+                            onClick={() => updateChatBackgroundSettings({ fit: "contain" })}
+                          >
+                            完整显示
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="chat-background-control-group">
+                        <div className="chat-background-control-label">
+                          <span>图片位置</span>
+                          <button
+                            type="button"
+                            className="chat-background-center-button"
+                            onClick={() => updateChatBackgroundSettings({ positionX: 50, positionY: 50 })}
+                            disabled={!chatBackgroundUrl}
+                          >
+                            <IconRefresh />
+                            <span>居中</span>
+                          </button>
+                        </div>
+                        <div className="chat-background-position-controls">
+                          <label>
+                            <span>水平</span>
+                            <input
+                              type="range"
+                              min="0"
+                              max="100"
+                              step="1"
+                              value={chatBackgroundSettings.positionX}
+                              disabled={!chatBackgroundUrl}
+                              onChange={(event) => updateChatBackgroundSettings({ positionX: Number(event.target.value) })}
+                            />
+                            <output>{chatBackgroundSettings.positionX}%</output>
+                          </label>
+                          <label>
+                            <span>垂直</span>
+                            <input
+                              type="range"
+                              min="0"
+                              max="100"
+                              step="1"
+                              value={chatBackgroundSettings.positionY}
+                              disabled={!chatBackgroundUrl}
+                              onChange={(event) => updateChatBackgroundSettings({ positionY: Number(event.target.value) })}
+                            />
+                            <output>{chatBackgroundSettings.positionY}%</output>
+                          </label>
+                        </div>
+                      </div>
+
+                      <label className="chat-background-control-group">
+                        <div className="chat-background-control-label">
+                          <span>图片缩放</span>
+                          <output>{chatBackgroundSettings.zoom}%</output>
+                        </div>
+                        <input
+                          type="range"
+                          min="100"
+                          max="180"
+                          step="1"
+                          value={chatBackgroundSettings.zoom}
+                          disabled={!chatBackgroundUrl}
+                          onChange={(event) => updateChatBackgroundSettings({ zoom: Number(event.target.value) })}
+                        />
+                      </label>
+
+                      <label className="chat-background-control-group">
+                        <div className="chat-background-control-label">
+                          <span>模糊度</span>
+                          <output>{chatBackgroundSettings.blur}px</output>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="30"
+                          step="1"
+                          value={chatBackgroundSettings.blur}
+                          onChange={(event) => updateChatBackgroundSettings({ blur: Number(event.target.value) })}
+                        />
+                      </label>
+
+                      <label className="chat-background-control-group">
+                        <div className="chat-background-control-label">
+                          <span>透明度</span>
+                          <output>{chatBackgroundSettings.opacity}%</output>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="1"
+                          value={chatBackgroundSettings.opacity}
+                          onChange={(event) => updateChatBackgroundSettings({ opacity: Number(event.target.value) })}
+                        />
+                      </label>
+
+                      <div className="chat-background-actions">
+                        <button type="button" className="background-action-primary" onClick={() => chatBackgroundInputRef.current?.click()}>
+                          <IconUpload />
+                          <span>{chatBackgroundUrl ? "替换图片" : "导入图片"}</span>
+                        </button>
+                        <button type="button" onClick={() => void exportChatBackground()} disabled={!chatBackgroundUrl || isChatBackgroundExporting}>
+                          {isChatBackgroundExporting ? <IconSpinner /> : <IconDownload />}
+                          <span>{isChatBackgroundExporting ? "生成中" : "导出 PNG"}</span>
+                        </button>
+                        <button type="button" className="background-action-danger" onClick={() => void clearChatBackground()} disabled={!chatBackgroundUrl} title="清除应用背景">
+                          <IconTrash />
+                          <span>清除</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               {settingsTab === "general" ? (
                 <div className="settings-section">
                   <div className="summary-grid">
@@ -16118,6 +16548,26 @@ function IconImage() {
       <rect x="4" y="5" width="16" height="14" rx="2" />
       <circle cx="9" cy="10" r="1.5" />
       <path d="m5.5 17 4.5-4 3 2.5 2.5-2 3 3.5" />
+    </SvgIcon>
+  );
+}
+
+function IconUpload() {
+  return (
+    <SvgIcon size={16}>
+      <path d="M12 16V4" />
+      <path d="m7.5 8.5 4.5-4.5 4.5 4.5" />
+      <path d="M5 14.5v4h14v-4" />
+    </SvgIcon>
+  );
+}
+
+function IconDownload() {
+  return (
+    <SvgIcon size={16}>
+      <path d="M12 4v12" />
+      <path d="m7.5 11.5 4.5 4.5 4.5-4.5" />
+      <path d="M5 19.5h14" />
     </SvgIcon>
   );
 }
