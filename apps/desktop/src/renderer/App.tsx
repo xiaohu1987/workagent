@@ -1778,8 +1778,9 @@ export function App() {
           resumeThreadNotification(notificationThreadId, "信息已补充，任务继续运行。", typed.createdAt);
         }
       }
-      if (typed.type === "model.capability.updated" && typed.payload?.modelId) {
+      if (typed.type === "model.capability.updated" && typed.payload?.modelId && typed.payload?.providerId) {
         const modelId = typed.payload.modelId;
+        const providerId = typed.payload.providerId;
         const patch = {
           agentCapability: typed.payload.agentCapability,
           agentCapabilityCheckedAt: typed.payload.agentCapabilityCheckedAt,
@@ -1788,7 +1789,9 @@ export function App() {
         const updateCapability = (current: AppConfig | null) => current
           ? {
               ...current,
-              models: current.models.map((model) => model.id === modelId ? { ...model, ...patch } : model)
+              models: current.models.map((model) =>
+                model.id === modelId && model.providerId === providerId ? { ...model, ...patch } : model
+              )
             }
           : current;
         setConfig(updateCapability);
@@ -5173,7 +5176,11 @@ export function App() {
     if (!settingsProvider) {
       return;
     }
-    const existing = new Set(configDraft.models.map((model) => model.id));
+    const existing = new Set(
+      configDraft.models
+        .filter((model) => model.providerId === settingsProvider.id)
+        .map((model) => model.id)
+    );
     const nextDraft = cloneConfig(configDraft);
     let added = 0;
     let skipped = 0;
@@ -5210,9 +5217,9 @@ export function App() {
       return;
     }
 
-    if (configDraft.models.some((model) => model.id === nextId)) {
+    if (configDraft.models.some((model) => model.providerId === providerId && model.id === nextId)) {
       showNotice("模型名称不能重复。", {
-        message: "请换一个唯一的 ID。"
+        message: "同一供应商下的模型 ID 必须唯一。"
       });
       return;
     }
@@ -5224,14 +5231,14 @@ export function App() {
     setNewModelDisplayName("");
   }
 
-  function updateModelDraft(modelId: string, patch: Partial<ModelProfile>) {
+  function updateModelDraft(providerId: string, modelId: string, patch: Partial<ModelProfile>) {
     setConfigDraft((current) => {
       if (!current) {
         return current;
       }
       const next = cloneConfig(current);
       next.models = next.models.map((model) =>
-        model.id === modelId ? { ...model, ...patch } : model
+        model.providerId === providerId && model.id === modelId ? { ...model, ...patch } : model
       );
       return normalizeDraftConfig(next);
     });
@@ -5354,7 +5361,7 @@ export function App() {
     }
   }
 
-  function removeModel(modelId: string) {
+  function removeModel(providerId: string, modelId: string) {
     if (!configDraft) {
       return;
     }
@@ -5365,7 +5372,9 @@ export function App() {
     }
 
     const nextDraft = cloneConfig(configDraft);
-    nextDraft.models = nextDraft.models.filter((model) => model.id !== modelId);
+    nextDraft.models = nextDraft.models.filter((model) =>
+      model.providerId !== providerId || model.id !== modelId
+    );
     setConfigDraft(normalizeDraftConfig(nextDraft));
   }
 
@@ -5399,7 +5408,7 @@ export function App() {
         agentCapabilityReason: result.agentCapabilityReason,
         ...(result.contextWindow ? { contextWindow: result.contextWindow } : {})
       };
-      updateModelDraft(model.id, capabilityPatch);
+      updateModelDraft(provider.id, model.id, capabilityPatch);
       try {
         const savedModel = await window.codexh.saveModelAgentCapability({
           providerId: provider.id,
@@ -6511,21 +6520,6 @@ export function App() {
                       <IconPlus />
                     </button>
                   </div>
-                  {multiAgentMode === "proactive" ? (
-                    <span className={`composer-mode-chip composer-mode-chip-agent composer-mode-chip-agent-${multiAgentMode}`} title="子智能体">
-                      <IconSkills />
-                      <span>子智能体</span>
-                      <button
-                        className="composer-mode-chip-remove"
-                        type="button"
-                        title="移除子智能体委派"
-                        aria-label="移除子智能体委派"
-                        onClick={() => void updateMultiAgentMode("disabled")}
-                      >
-                        <IconClose />
-                      </button>
-                    </span>
-                  ) : null}
                   {gpaState.fullAccess ? (
                     <span className="composer-mode-chip composer-mode-chip-full-access" title="完全访问：执行时不再请求确认">
                       <IconShield />
@@ -6551,6 +6545,21 @@ export function App() {
                         title="关闭知识库"
                         aria-label="关闭知识库"
                         onClick={() => void setKnowledgeEnabled(false)}
+                      >
+                        <IconClose />
+                      </button>
+                    </span>
+                  ) : null}
+                  {multiAgentMode === "proactive" ? (
+                    <span className={`composer-mode-chip composer-mode-chip-agent composer-mode-chip-agent-${multiAgentMode}`} title="子智能体">
+                      <IconSkills />
+                      <span>子智能体</span>
+                      <button
+                        className="composer-mode-chip-remove"
+                        type="button"
+                        title="移除子智能体委派"
+                        aria-label="移除子智能体委派"
+                        onClick={() => void updateMultiAgentMode("disabled")}
                       >
                         <IconClose />
                       </button>
@@ -7135,7 +7144,7 @@ export function App() {
                                             min={1_024}
                                             step={1_024}
                                             value={model.contextWindow}
-                                            onChange={(event) => updateModelDraft(model.id, {
+                                            onChange={(event) => updateModelDraft(settingsProvider.id, model.id, {
                                               contextWindow: Math.max(1_024, Math.floor(Number(event.target.value) || 128_000))
                                             })}
                                           />
@@ -7145,7 +7154,7 @@ export function App() {
                                             type="checkbox"
                                             checked={model.supportsMultimodalInput}
                                             onChange={(event) =>
-                                              updateModelDraft(model.id, { supportsMultimodalInput: event.target.checked })
+                                              updateModelDraft(settingsProvider.id, model.id, { supportsMultimodalInput: event.target.checked })
                                             }
                                           />
                                           <span>支持多模态</span>
@@ -7168,7 +7177,7 @@ export function App() {
                                         })()}
                                         <button
                                           className="settings-icon-button"
-                                          onClick={() => removeModel(model.id)}
+                                          onClick={() => removeModel(settingsProvider.id, model.id)}
                                           title="删除模型"
                                         >
                                           <IconClose />
@@ -9070,7 +9079,9 @@ export function App() {
             <div className="fetch-models-list">
               {fetchedModels.map((entry) => {
                 const checked = selectedFetchedModelIds.includes(entry.id);
-                const already = configDraft?.models.some((model) => model.id === entry.id) ?? false;
+                const already = configDraft?.models.some((model) =>
+                  model.providerId === settingsProvider?.id && model.id === entry.id
+                ) ?? false;
                 return (
                   <label
                     key={entry.id}
@@ -9099,7 +9110,9 @@ export function App() {
                   setSelectedFetchedModelIds(
                     fetchedModels
                       .filter((entry) => {
-                        return !configDraft?.models.some((model) => model.id === entry.id);
+                        return !configDraft?.models.some((model) =>
+                          model.providerId === settingsProvider?.id && model.id === entry.id
+                        );
                       })
                       .map((entry) => entry.id)
                   );

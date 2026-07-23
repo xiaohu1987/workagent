@@ -1534,7 +1534,10 @@ export class DesktopBackend {
     modelId: string,
     reason: string
   ): Promise<void> {
-    const model = this.#config.models.find((entry) => entry.id === modelId);
+    const thread = this.#db.getThread(threadId);
+    const model = this.#config.models.find(
+      (entry) => entry.id === modelId && entry.providerId === thread.providerId
+    );
     if (!model) {
       return;
     }
@@ -1553,6 +1556,7 @@ export class DesktopBackend {
       threadId,
       payload: {
         modelId: model.id,
+        providerId: model.providerId,
         agentCapability: model.agentCapability,
         agentCapabilityCheckedAt: model.agentCapabilityCheckedAt,
         agentCapabilityReason: model.agentCapabilityReason

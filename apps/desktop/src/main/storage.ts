@@ -358,7 +358,9 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     timeouts: normalizeRuntimeTimeouts(config.timeouts),
     projectExecutionPolicies: normalizeProjectExecutionPolicies(config.projectExecutionPolicies),
     providers: Object.fromEntries(config.providers.map((provider) => [provider.id, provider])),
-    models: Object.fromEntries(config.models.map((model) => [model.id, model])),
+    // Model IDs are only unique within a provider. The TOML table key must retain
+    // that scope so models with the same upstream ID are not overwritten on save.
+    models: Object.fromEntries(config.models.map((model) => [modelStorageKey(model), model])),
     mcpServers: config.mcpServers.map((server) => ({
       id: server.id,
       name: server.name,
@@ -378,6 +380,10 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
   };
 
   await fs.writeFile(configFile, TOML.stringify(tomlObject as any), "utf8");
+}
+
+function modelStorageKey(model: Pick<ModelProfile, "providerId" | "id">): string {
+  return Buffer.from(JSON.stringify([model.providerId, model.id]), "utf8").toString("base64url");
 }
 
 function normalizeProjectExecutionPolicies(value: unknown): NonNullable<AppConfig["projectExecutionPolicies"]> {
