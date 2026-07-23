@@ -630,6 +630,12 @@ export interface AppConfig {
   multimodal: {
     image: MultimodalModalityDefaults;
     video: MultimodalModalityDefaults;
+    /**
+     * Default vision/input model. When the chat model cannot accept multimodal
+     * attachments, this model recognizes images/files first and the text result
+     * is passed to the selected chat model.
+     */
+    input: MultimodalModalityDefaults;
   };
   desktop: {
     theme: "light" | "dark" | "system";

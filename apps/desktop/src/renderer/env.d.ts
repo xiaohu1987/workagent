@@ -97,6 +97,7 @@ declare global {
         modelId: string;
       }) => Promise<any>;
       addThreadSkill: (payload: { threadId: string; skillId: string }) => Promise<any>;
+      removeThreadSkill: (payload: { threadId: string; skillId: string }) => Promise<any>;
       openTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<{ cwd: string; shell: string; output: string }>;
       writeTerminal: (payload: { threadId: string; input: string; sessionId?: string }) => Promise<void>;
       closeTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<void>;
@@ -199,6 +200,7 @@ declare global {
       closeBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
       registerBrowserWebContents: (payload: { threadId: string; tabId: string; webContentsId: number }) => Promise<void>;
       syncBrowserWebContents: (payload: { threadId: string; tabId: string }) => Promise<any>;
+      onBrowserReregisterRequest: (handler: (payload: { threadId: string; tabId: string }) => void) => () => void;
       resolveApproval: (
         id: string,
         resolution: { decision: "approved" | "denied"; mode?: "once" | "session" | "remember" }

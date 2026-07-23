@@ -1,4 +1,4 @@
-import { createElement, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, createElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
@@ -83,13 +83,17 @@ import {
 import { EChartsMessageChart } from "./EChartsMessageChart";
 import {
   getChatBackgroundTransform,
+  getChatBackgroundSurfaceStyleVars,
   loadChatBackgroundBlob,
   normalizeChatBackgroundSettings,
   readChatBackgroundSettings,
   removeChatBackgroundBlob,
-  renderChatBackgroundPng,
   writeChatBackgroundSettings,
-  type ChatBackgroundSettings
+  CHAT_BACKGROUND_SURFACE_OPTIONS,
+  DEFAULT_CHAT_BACKGROUND_SURFACES,
+  type ChatBackgroundSettings,
+  type ChatBackgroundSurfaceKey,
+  type ChatBackgroundSurfaces
 } from "./chat-background";
 
 type SettingsTab = "general" | "appearance" | "knowledge" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
@@ -269,12 +273,13 @@ type ComposerBinaryAttachment = {
   previewUrl?: string;
 };
 
-export function isPersistentComposerContextKind(kind: string): boolean {
-  return kind === "skill" || kind === "mcp" || kind === "database";
+export function isPersistentComposerContextKind(_kind: string): boolean {
+  // Composer chips above the input are always one-shot: clear after send.
+  return false;
 }
 
-export function retainPersistentComposerContexts<T extends { kind: string }>(attachments: T[]): T[] {
-  return attachments.filter((attachment) => isPersistentComposerContextKind(attachment.kind));
+export function retainPersistentComposerContexts<T extends { kind: string }>(_attachments: T[]): T[] {
+  return [];
 }
 
 export function isGeneratedUserSkill(skill: Pick<SkillMetadata, "pluginId" | "scope" | "skillPath">): boolean {
@@ -286,6 +291,24 @@ export function isGeneratedUserSkill(skill: Pick<SkillMetadata, "pluginId" | "sc
 type BrowserWebviewElement = HTMLElement & {
   getWebContentsId: () => number;
 };
+
+const browserWebviewRegistrars = new Map<string, () => boolean>();
+
+function browserWebviewRegistrarKey(threadId: string, tabId: string): string {
+  return `${threadId}:${tabId}`;
+}
+
+function reregisterBrowserWebviews(threadId: string, tabId?: string): void {
+  if (tabId) {
+    browserWebviewRegistrars.get(browserWebviewRegistrarKey(threadId, tabId))?.();
+    return;
+  }
+  for (const [key, register] of browserWebviewRegistrars) {
+    if (key.startsWith(`${threadId}:`)) {
+      register();
+    }
+  }
+}
 
 type MessageKnowledgeSource = {
   knowledgeBaseId: string;
@@ -526,8 +549,8 @@ type HistorySearchResult = {
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
-  { id: "multimodal", label: "多模态", hint: "配置生图模型与视频模型" },
-  { id: "appearance", label: "应用背景", hint: "导入图片并调整整个应用的背景" },
+  { id: "multimodal", label: "多模态", hint: "配置默认多模态识别、生图与视频模型" },
+  { id: "appearance", label: "应用背景", hint: "导入图片，并调整背景与各模块透明度" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
@@ -621,6 +644,9 @@ const MAX_SIDEBAR_WIDTH = 520;
 const MIN_RIGHT_WORKSPACE_WIDTH = 300;
 const MAX_RIGHT_WORKSPACE_WIDTH = 720;
 const MIN_CHAT_WIDTH = 380;
+const HISTORY_THREADS_PREVIEW_COUNT = 10;
+const HISTORY_STANDALONE_GROUP_KEY = "__standalone__";
+const HISTORY_COLLAPSED_GROUPS_STORAGE_KEY = "codexh.history-collapsed-groups";
 
 function getStoredPanelWidth(key: string, fallback: number, minimum: number, maximum: number): number {
   try {
@@ -633,6 +659,57 @@ function getStoredPanelWidth(key: string, fallback: number, minimum: number, max
 
 function clampPanelWidth(value: number, minimum: number, maximum: number): number {
   return Math.round(Math.min(Math.max(value, minimum), maximum));
+}
+
+function normalizeHistoryGroupKey(cwd: string): string {
+  return cwd.replace(/\\/g, "/").toLocaleLowerCase();
+}
+
+function readStoredStringSet(key: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((item): item is string => typeof item === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeStoredStringSet(key: string, values: Set<string>): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify([...values]));
+  } catch {
+    // Ignore quota / private-mode write failures.
+  }
+}
+
+function pickVisibleHistoryThreads(
+  threads: ThreadRecord[],
+  options: { expanded: boolean; previewCount: number; selectedThreadId: string | null }
+): { visibleThreads: ThreadRecord[]; hiddenCount: number; canExpand: boolean } {
+  const canExpand = threads.length > options.previewCount;
+  if (options.expanded || !canExpand) {
+    return { visibleThreads: threads, hiddenCount: 0, canExpand };
+  }
+
+  const preview = threads.slice(0, options.previewCount);
+  const hiddenCount = threads.length - preview.length;
+  if (!options.selectedThreadId || preview.some((thread) => thread.id === options.selectedThreadId)) {
+    return { visibleThreads: preview, hiddenCount, canExpand };
+  }
+
+  const selected = threads.find((thread) => thread.id === options.selectedThreadId);
+  if (!selected) {
+    return { visibleThreads: preview, hiddenCount, canExpand };
+  }
+
+  return {
+    visibleThreads: [...preview.slice(0, Math.max(0, options.previewCount - 1)), selected],
+    hiddenCount,
+    canExpand
+  };
 }
 
 export function App() {
@@ -672,6 +749,7 @@ export function App() {
   const [isProjectFilesLoading, setIsProjectFilesLoading] = useState(false);
   const selectedThreadIdRef = useRef<string | null>(null);
   const pendingUserMessagesRef = useRef<Record<string, MessageRecord[]>>({});
+  const pendingOneShotSkillRemovalsRef = useRef<Record<string, string[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
   const snapshotMessageLimitsRef = useRef<Record<string, number>>({});
   /** After Stop, ignore late runtime events that would revive the "执行中" UI. */
@@ -709,6 +787,10 @@ export function App() {
   const [historySearchResults, setHistorySearchResults] = useState<HistorySearchResult[]>([]);
   const [isHistorySearchLoading, setIsHistorySearchLoading] = useState(false);
   const [historyContextMenu, setHistoryContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
+  const [collapsedHistoryGroups, setCollapsedHistoryGroups] = useState<Set<string>>(() =>
+    readStoredStringSet(HISTORY_COLLAPSED_GROUPS_STORAGE_KEY)
+  );
+  const [expandedHistoryThreadGroups, setExpandedHistoryThreadGroups] = useState<Set<string>>(() => new Set());
   const [renamingHistoryThread, setRenamingHistoryThread] = useState<{ id: string; title: string } | null>(null);
   const skipHistoryRenameCommitRef = useRef(false);
   const [editingUserMessage, setEditingUserMessage] = useState<{ id: string; content: string } | null>(null);
@@ -733,7 +815,7 @@ export function App() {
     updatedAt: ""
   });
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
-  const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
+  const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("disabled");
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
   const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "plugins" | "skills" | "mcp" | "database">("root");
   const [composerAddSubmenuPosition, setComposerAddSubmenuPosition] = useState<{ left: number; top: number; anchorTop: number; maxHeight: number } | null>(null);
@@ -760,7 +842,6 @@ export function App() {
     readChatBackgroundSettings()
   );
   const [chatBackgroundUrl, setChatBackgroundUrl] = useState<string | null>(null);
-  const [isChatBackgroundExporting, setIsChatBackgroundExporting] = useState(false);
   const [isChatBackgroundDragging, setIsChatBackgroundDragging] = useState(false);
   const chatBackgroundInputRef = useRef<HTMLInputElement | null>(null);
   const chatBackgroundHydratedRef = useRef(false);
@@ -809,7 +890,7 @@ export function App() {
   const [showFetchedModels, setShowFetchedModels] = useState(false);
   const [selectedFetchedModelIds, setSelectedFetchedModelIds] = useState<string[]>([]);
   const [fetchedModelsTarget, setFetchedModelsTarget] = useState<"provider">("provider");
-  const [multimodalPickerRole, setMultimodalPickerRole] = useState<"reasoning" | "image" | "video" | null>(null);
+  const [multimodalPickerRole, setMultimodalPickerRole] = useState<"reasoning" | "image" | "video" | "input" | null>(null);
   const [multimodalPickerSelected, setMultimodalPickerSelected] = useState<string[]>([]);
   const [composerProviderId, setComposerProviderId] = useState("");
   const [composerModelId, setComposerModelId] = useState("");
@@ -1163,6 +1244,26 @@ export function App() {
     return () => window.clearTimeout(timeout);
   }, [chatBackgroundSettings]);
 
+  useEffect(() => {
+    const root = document.documentElement;
+    const active = Boolean(chatBackgroundUrl && chatBackgroundSettings.enabled);
+    const vars = getChatBackgroundSurfaceStyleVars(chatBackgroundSettings.surfaces);
+    if (active) {
+      for (const [key, value] of Object.entries(vars)) {
+        root.style.setProperty(key, value);
+      }
+      return () => {
+        for (const key of Object.keys(vars)) {
+          root.style.removeProperty(key);
+        }
+      };
+    }
+    for (const key of Object.keys(vars)) {
+      root.style.removeProperty(key);
+    }
+    return undefined;
+  }, [chatBackgroundUrl, chatBackgroundSettings.enabled, chatBackgroundSettings.surfaces]);
+
   useEffect(() => () => {
     if (chatBackgroundUrl) URL.revokeObjectURL(chatBackgroundUrl);
   }, [chatBackgroundUrl]);
@@ -1338,6 +1439,10 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("codexh.right-workspace-width", String(rightWorkspaceWidth));
   }, [rightWorkspaceWidth]);
+
+  useEffect(() => {
+    writeStoredStringSet(HISTORY_COLLAPSED_GROUPS_STORAGE_KEY, collapsedHistoryGroups);
+  }, [collapsedHistoryGroups]);
 
   useEffect(() => {
     if (!resizingPane) {
@@ -1554,7 +1659,6 @@ export function App() {
 
   function startRuntimeActivity(threadId: string) {
     const createdAt = new Date().toISOString();
-    setComposerSubmission(null);
     setCompletedTurnTimers((current) => {
       if (!current[threadId]) return current;
       const next = { ...current };
@@ -1566,7 +1670,9 @@ export function App() {
       [threadId]: {
         threadId,
         startedAt: createdAt,
-        entries: [{ id: `submitted-${createdAt}`, kind: "status", label: "消息已发送，正在准备任务", createdAt }]
+        // Show the same label users expect under the message immediately on send,
+        // instead of waiting for the later message.created runtime event.
+        entries: [{ id: `submitted-${createdAt}`, kind: "status", label: "正在理解任务", createdAt }]
       }
     }));
   }
@@ -1673,6 +1779,13 @@ export function App() {
       }
     }
   }
+
+  useEffect(() => {
+    const dispose = window.codexh.onBrowserReregisterRequest(({ threadId, tabId }) => {
+      reregisterBrowserWebviews(threadId, tabId);
+    });
+    return dispose;
+  }, []);
 
   useEffect(() => {
     const dispose = window.codexh.onRuntimeEvent((event) => {
@@ -1864,6 +1977,11 @@ export function App() {
         void window.codexh.getThreadSnapshot(browserThreadId).then((next: RuntimeThreadSnapshot) => {
           setBrowserTabsByThread((current) => ({ ...current, [browserThreadId]: next.browserTabs }));
         }).catch(() => undefined);
+        if (browserThreadId === selectedThreadIdRef.current) {
+          setIsRightWorkspaceOpen(true);
+          setRightWorkspaceTab("browser");
+          setRightWorkspaceExpandedTab("browser");
+        }
       }
       if (typed.type === "browser.assertion_completed" && typed.threadId) {
         appendRuntimeStatus(typed.threadId, typed.payload?.passed === false ? "页面断言未通过，正在修复" : "页面断言已通过", typed.createdAt);
@@ -2044,6 +2162,30 @@ export function App() {
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "model_rate_limit") {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
+        const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
+        const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 5;
+        appendRuntimeStatus(typed.threadId, `模型请求受限(429)，正在重试 (${attempt}/${maxAttempts})`, typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, `模型请求受限，正在重试 (${attempt}/${maxAttempts})。`, typed.createdAt);
+        }
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "model_rate_limit_continued") {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
+        appendRuntimeStatus(typed.threadId, "已确认继续，正在再次重试模型请求", typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, "已确认继续，正在再次重试。", typed.createdAt);
+        }
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        return;
+      }
       if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "function_call_protocol_compatibility") {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
           appendRuntimeStatus(typed.threadId, "模型服务工具调用不兼容，正在切换兼容模式重试", typed.createdAt);
@@ -2133,6 +2275,13 @@ export function App() {
         });
         if (status !== "running" && status !== "waiting") {
           clearRuntimeActivity(runtimeThreadId);
+          const pendingSkillIds = pendingOneShotSkillRemovalsRef.current[runtimeThreadId] ?? [];
+          if (pendingSkillIds.length > 0) {
+            delete pendingOneShotSkillRemovalsRef.current[runtimeThreadId];
+            for (const skillId of pendingSkillIds) {
+              void window.codexh.removeThreadSkill({ threadId: runtimeThreadId, skillId }).catch(() => undefined);
+            }
+          }
           if (runtimeThreadId === currentSelectedThreadId) {
             setGitRefreshRevision((current) => current + 1);
           }
@@ -2442,7 +2591,9 @@ export function App() {
 
   useEffect(() => {
     if (selectedThread) {
-      setMultiAgentMode(selectedThread.multiAgentMode === "disabled" ? "disabled" : "proactive");
+      setMultiAgentMode(selectedThread.multiAgentMode === "proactive" ? "proactive" : "disabled");
+    } else {
+      setMultiAgentMode(config?.multiAgent?.defaultMode === "proactive" ? "proactive" : "disabled");
     }
   }, [selectedThread?.id, selectedThread?.multiAgentMode, config?.multiAgent?.defaultMode]);
 
@@ -2673,7 +2824,7 @@ export function App() {
         : activeStreamingAssistant
           ? "正在生成回复"
           : isPreparingRuntime
-            ? "消息已发送，正在准备任务"
+            ? "正在理解任务"
             : "正在思考",
     [activeSnapshotThreadId, activeStreamingAssistant, activeToolCall, isPreparingRuntime]
   );
@@ -2708,6 +2859,18 @@ export function App() {
     [composerModelId, composerModels]
   );
   const composerSupportsMultimodalInput = selectedComposerModel?.supportsMultimodalInput ?? false;
+  const multimodalInputFallbackReady = useMemo(() => {
+    const input = config?.multimodal?.input;
+    if (!config || !input || input.enabled === false) return false;
+    if (!input.defaultProviderId || !input.defaultModelId) return false;
+    return config.models.some(
+      (model) =>
+        model.providerId === input.defaultProviderId &&
+        model.id === input.defaultModelId &&
+        model.supportsMultimodalInput
+    );
+  }, [config]);
+  const composerCanAttachMultimodal = composerSupportsMultimodalInput || multimodalInputFallbackReady;
   const composerProviderOptions = useMemo<ComposerSelectOption[]>(
     () =>
       composerProviders.map((provider) => ({
@@ -3088,18 +3251,28 @@ export function App() {
       ));
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: next.browserTabs }));
       if (!isThreadExecutionInProgress(next.thread.status)) {
-        // A refresh can observe completion before its final runtime event reaches
-        // the renderer. Do not let an old activity record keep the thinking UI alive.
-        clearRuntimeActivity(threadId);
+        // Snapshot refresh can win a race where the queue already drained but the
+        // thread has not flipped to running yet. Keep the local preparing
+        // heartbeat so the chat does not go blank after send.
+        let preserveLocalPreparing = false;
         setRuntimeProgress((current) => {
           if (current?.threadId !== threadId) return current;
+          if (!current.runtimeObserved) {
+            preserveLocalPreparing = true;
+            return current;
+          }
           return shouldPreservePreparingRuntime(
             next.thread.status,
             next.queuedMessages.length,
             current.runtimeObserved
           ) ? current : null;
         });
-        setActiveToolCall((current) => current?.threadId === threadId ? null : current);
+        if (!preserveLocalPreparing) {
+          // A refresh can observe completion before its final runtime event reaches
+          // the renderer. Do not let an old activity record keep the thinking UI alive.
+          clearRuntimeActivity(threadId);
+          setActiveToolCall((current) => current?.threadId === threadId ? null : current);
+        }
       }
       if (next.gpa) {
         const gpa =
@@ -3554,7 +3727,7 @@ export function App() {
       const hasMultimodalAttachment = composerAttachments.some(
         (attachment) => attachment.kind === "file" || attachment.kind === "image"
       );
-      if (hasMultimodalAttachment && !selectedComposerModel?.supportsMultimodalInput) {
+      if (hasMultimodalAttachment && !selectedComposerModel?.supportsMultimodalInput && !multimodalInputFallbackReady) {
         unsupportedMultimodalInput = true;
       }
     }
@@ -3575,10 +3748,10 @@ export function App() {
       await window.codexh.rejectUnsupportedMultimodal({ threadId, content: inputContent });
       setComposerSubmission(null);
       setInput("");
-      setComposerAttachments(retainPersistentComposerContexts);
+      setComposerAttachments([]);
       setGpaComposerSelected(false);
       showNotice("此模型不支持多模态", {
-        message: "已在对话中返回原因，请切换到支持多模态输入的模型后再重试。"
+        message: "已在对话中返回原因。请切换到支持多模态输入的模型，或在设置 → 多模态中配置默认多模态识别模型后再重试。"
       });
       await refreshThreads();
       await refreshSnapshot(threadId);
@@ -3603,6 +3776,25 @@ export function App() {
     if (gpaState.fullAccess) {
       await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
     }
+
+    const displayContent = options?.displayContent
+      ?? (options?.internal && (forcedContent ?? inputContent).trim().startsWith("[internal:")
+        ? "继续"
+        : forcedContent ?? inputContent);
+    const queueingBehindActiveTask = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime;
+    let startedLocalRuntime = false;
+    // Start the under-message heartbeat immediately so send never looks like a
+    // silent no-op while attachments/skills/runtime wake are still in flight.
+    if (!options?.internal && !queueingBehindActiveTask) {
+      suppressRuntimeProgressRef.current[threadId] = false;
+      startRuntimeActivity(threadId);
+      setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
+      startedLocalRuntime = true;
+      appendOptimisticUserMessage(threadId, displayContent);
+    } else if (!options?.internal) {
+      setComposerSubmission(null);
+    }
+
     if (!forcedContent) {
       const skillIds = composerAttachments
         .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
@@ -3618,25 +3810,62 @@ export function App() {
         importedAttachments = await importComposerAttachments(threadId, composerAttachments);
       } catch (error) {
         setComposerSubmission(null);
+        if (startedLocalRuntime) {
+          const pendingOptimistic = (pendingUserMessagesRef.current[threadId] ?? []).at(-1);
+          if (pendingOptimistic) {
+            pendingUserMessagesRef.current[threadId] = (pendingUserMessagesRef.current[threadId] ?? [])
+              .filter((message) => message.id !== pendingOptimistic.id);
+            setSnapshot((current) => current?.thread.id === threadId
+              ? { ...current, messages: current.messages.filter((message) => message.id !== pendingOptimistic.id) }
+              : current
+            );
+          }
+          clearRuntimeActivity(threadId);
+          setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+        }
         showNotice("添加附件失败", { message: error instanceof Error ? error.message : String(error) });
         return;
       }
     }
+    const oneShotSkillIds = !forcedContent
+      ? [...new Set(
+          composerAttachments
+            .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
+            .map((attachment) => attachment.skillId)
+        )]
+      : [];
     const raw = (forcedContent ?? [inputContent, formatComposerAttachments(composerAttachments.filter((attachment) => attachment.kind !== "file" && attachment.kind !== "image"))]
       .filter(Boolean).join("\n\n")).trim();
-    const displayContent = options?.displayContent
-      ?? (options?.internal && raw.startsWith("[internal:")
-        ? "继续"
-        : forcedContent ?? inputContent);
-    const queueingBehindActiveTask = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime;
-    const optimisticMessage = !options?.internal
+    const optimisticMessage = !options?.internal && !startedLocalRuntime
       ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments)
-      : null;
-    if (!options?.internal && !queueingBehindActiveTask) {
-      suppressRuntimeProgressRef.current[threadId] = false;
-      startRuntimeActivity(threadId);
-      setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
-    } else {
+      : !options?.internal && startedLocalRuntime
+        ? (pendingUserMessagesRef.current[threadId] ?? []).at(-1) ?? null
+        : null;
+    if (startedLocalRuntime && importedAttachments.length > 0 && optimisticMessage) {
+      pendingUserMessagesRef.current[threadId] = (pendingUserMessagesRef.current[threadId] ?? []).map((message) =>
+        message.id === optimisticMessage.id
+          ? {
+              ...message,
+              metadataJson: JSON.stringify({ attachments: importedAttachments })
+            }
+          : message
+      );
+      setSnapshot((current) => {
+        if (!current || current.thread.id !== threadId) return current;
+        return {
+          ...current,
+          messages: current.messages.map((message) =>
+            message.id === optimisticMessage.id
+              ? {
+                  ...message,
+                  metadataJson: JSON.stringify({ attachments: importedAttachments })
+                }
+              : message
+          )
+        };
+      });
+    }
+    if (!options?.internal) {
       setComposerSubmission(null);
     }
     try {
@@ -3658,7 +3887,15 @@ export function App() {
     }
     if (!forcedContent) {
       setInput("");
-      setComposerAttachments(retainPersistentComposerContexts);
+      setComposerAttachments([]);
+      if (oneShotSkillIds.length > 0) {
+        pendingOneShotSkillRemovalsRef.current[threadId] = [
+          ...new Set([
+            ...(pendingOneShotSkillRemovalsRef.current[threadId] ?? []),
+            ...oneShotSkillIds
+          ])
+        ];
+      }
     }
     clearAutoScrollReleaseTimer();
     shouldAutoScrollRef.current = true;
@@ -4107,6 +4344,7 @@ export function App() {
       setRightWorkspaceTab("browser");
       setRightWorkspaceExpandedTab("browser");
       setIsRightWorkspaceOpen(true);
+      reregisterBrowserWebviews(prompt.threadId);
     }
     setResolvingPromptId(prompt.id);
     setSnapshot((current) => {
@@ -4877,8 +5115,18 @@ export function App() {
     setGpaMenuPos(null);
   }
 
-  function updateChatBackgroundSettings(patch: Partial<ChatBackgroundSettings>) {
-    setChatBackgroundSettings((current) => normalizeChatBackgroundSettings({ ...current, ...patch }));
+  function updateChatBackgroundSettings(
+    patch: Partial<Omit<ChatBackgroundSettings, "surfaces">> & { surfaces?: Partial<ChatBackgroundSurfaces> }
+  ) {
+    setChatBackgroundSettings((current) => normalizeChatBackgroundSettings({
+      ...current,
+      ...patch,
+      surfaces: patch.surfaces ? { ...current.surfaces, ...patch.surfaces } : current.surfaces
+    }));
+  }
+
+  function updateChatBackgroundSurface(key: ChatBackgroundSurfaceKey, value: number) {
+    updateChatBackgroundSettings({ surfaces: { [key]: value } });
   }
 
   function beginChatBackgroundDrag(event: ReactPointerEvent<HTMLDivElement>) {
@@ -4978,27 +5226,9 @@ export function App() {
     }
   }
 
-  async function exportChatBackground() {
-    if (!chatBackgroundUrl || isChatBackgroundExporting) return;
-    setIsChatBackgroundExporting(true);
-    try {
-      const blob = await renderChatBackgroundPng(chatBackgroundUrl, chatBackgroundSettings);
-      const downloadUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      const sourceName = chatBackgroundSettings.fileName?.replace(/\.[^.]+$/, "") || "chat-background";
-      link.href = downloadUrl;
-      link.download = `${sourceName}-blur-${chatBackgroundSettings.blur}-opacity-${chatBackgroundSettings.opacity}.png`;
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1_000);
-      showNotice("PNG 已生成", { message: "透明度与模糊效果已写入图片。", tone: "success" });
-    } catch (error) {
-      showNotice("PNG 生成失败", {
-        message: error instanceof Error ? error.message : String(error),
-        tone: "warning"
-      });
-    } finally {
-      setIsChatBackgroundExporting(false);
-    }
+  function resetChatBackgroundSurfaces() {
+    updateChatBackgroundSettings({ surfaces: { ...DEFAULT_CHAT_BACKGROUND_SURFACES } });
+    showNotice("模块不透明度已重置", { tone: "success" });
   }
 
   function resetConfigDraft(nextConfig: AppConfig, preferredProviderId?: string | null) {
@@ -5273,11 +5503,11 @@ export function App() {
     }, roleLabel ? `已加入${roleLabel}` : "已从多模态列表移除");
   }
 
-  function setMultimodalDefault(kind: "image" | "video", providerId: string, modelId: string) {
+  function setMultimodalDefault(kind: "image" | "video" | "input", providerId: string, modelId: string) {
     void persistMultimodalChange((next) => {
       next.multimodal[kind].defaultProviderId = providerId;
       next.multimodal[kind].defaultModelId = modelId;
-    }, `已设为默认${kind === "image" ? "图片" : "视频"}模型`);
+    }, `已设为默认${kind === "image" ? "图片" : kind === "video" ? "视频" : "多模态识别"}模型`);
   }
 
   function setReasoningDefault(providerId: string, modelId: string) {
@@ -5291,12 +5521,12 @@ export function App() {
     }, "已设为默认推理模型");
   }
 
-  function setMultimodalEnabled(kind: "image" | "video", enabled: boolean) {
+  function setMultimodalEnabled(kind: "image" | "video" | "input", enabled: boolean) {
     void persistMultimodalChange((next) => {
       next.multimodal[kind].enabled = enabled;
     }, enabled
-      ? `已启用${kind === "image" ? "图片" : "视频"}生成`
-      : `已关闭${kind === "image" ? "图片" : "视频"}生成`);
+      ? `已启用${kind === "image" ? "图片生成" : kind === "video" ? "视频生成" : "多模态识别回退"}`
+      : `已关闭${kind === "image" ? "图片生成" : kind === "video" ? "视频生成" : "多模态识别回退"}`);
   }
 
   function removeFromMultimodalRole(providerId: string, modelId: string) {
@@ -5307,6 +5537,17 @@ export function App() {
     if (!multimodalPickerRole || multimodalPickerSelected.length === 0) return;
     const role = multimodalPickerRole;
     const selected = [...multimodalPickerSelected];
+    if (role === "input") {
+      const key = selected[0];
+      if (!key) return;
+      const [providerId, ...modelIdParts] = key.split("::");
+      const modelId = modelIdParts.join("::");
+      setMultimodalPickerRole(null);
+      setMultimodalPickerSelected([]);
+      if (!providerId || !modelId) return;
+      setMultimodalDefault("input", providerId, modelId);
+      return;
+    }
     const roleLabel = role === "reasoning" ? "推理模型" : role === "image" ? "图片模型" : "视频模型";
     setMultimodalPickerRole(null);
     setMultimodalPickerSelected([]);
@@ -5336,6 +5577,13 @@ export function App() {
         }
       }
     }, `已添加 ${selected.length} 个到${roleLabel}`);
+  }
+
+  function clearMultimodalInputDefault() {
+    void persistMultimodalChange((next) => {
+      delete next.multimodal.input.defaultProviderId;
+      delete next.multimodal.input.defaultModelId;
+    }, "已清除默认多模态识别模型");
   }
 
   async function persistMultimodalChange(mutate: (draft: AppConfig) => void, successTitle = "多模态配置已保存") {
@@ -5651,7 +5899,7 @@ export function App() {
     for (const thread of threads) {
       if (thread.mode !== "project" || !thread.cwd) continue;
 
-      const key = thread.cwd.replace(/\\/g, "/").toLocaleLowerCase();
+      const key = normalizeHistoryGroupKey(thread.cwd);
       const updatedAt = Date.parse(thread.updatedAt);
       const existing = groups.get(key);
       if (existing) {
@@ -5676,6 +5924,104 @@ export function App() {
     () => projectHistoryGroups.slice(0, 6).map((group) => group.cwd),
     [projectHistoryGroups]
   );
+
+  useEffect(() => {
+    if (!selectedThreadId) return;
+    const selectedThread = threads.find((thread) => thread.id === selectedThreadId);
+    if (!selectedThread || selectedThread.mode !== "project" || !selectedThread.cwd) return;
+
+    const groupKey = normalizeHistoryGroupKey(selectedThread.cwd);
+    setCollapsedHistoryGroups((current) => {
+      if (!current.has(groupKey)) return current;
+      const next = new Set(current);
+      next.delete(groupKey);
+      return next;
+    });
+  }, [selectedThreadId, threads]);
+
+  function toggleHistoryGroupCollapsed(groupKey: string) {
+    setCollapsedHistoryGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  }
+
+  function toggleHistoryThreadGroupExpanded(groupKey: string) {
+    setExpandedHistoryThreadGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  }
+
+  function renderHistoryThreadGroup(
+    groupKey: string,
+    groupThreads: ThreadRecord[],
+    options?: {
+      heading?: ReactNode;
+      title?: string;
+      ariaLabel: string;
+      className?: string;
+      collapsible?: boolean;
+    }
+  ) {
+    const collapsible = options?.collapsible !== false;
+    const isCollapsed = collapsible && collapsedHistoryGroups.has(groupKey);
+    const threadsExpanded = expandedHistoryThreadGroups.has(groupKey);
+    const { visibleThreads, hiddenCount, canExpand } = pickVisibleHistoryThreads(groupThreads, {
+      expanded: threadsExpanded,
+      previewCount: HISTORY_THREADS_PREVIEW_COUNT,
+      selectedThreadId
+    });
+
+    return (
+      <section
+        key={groupKey}
+        className={`history-project-group ${options?.className ?? ""} ${isCollapsed ? "is-collapsed" : ""}`}
+        aria-label={options?.ariaLabel}
+      >
+        {options?.heading ? (
+          collapsible ? (
+            <button
+              type="button"
+              className="history-project-heading"
+              title={options.title}
+              aria-expanded={!isCollapsed}
+              onClick={() => toggleHistoryGroupCollapsed(groupKey)}
+            >
+              <span className={`history-project-disclosure ${isCollapsed ? "" : "is-expanded"}`} aria-hidden>
+                <IconChevronRight />
+              </span>
+              {options.heading}
+            </button>
+          ) : (
+            <div className="history-standalone-heading" title={options.title}>
+              {options.heading}
+            </div>
+          )
+        ) : null}
+        {!isCollapsed ? (
+          <div className="history-project-threads">
+            {visibleThreads.map(renderHistoryThread)}
+            {canExpand ? (
+              <button
+                type="button"
+                className={`history-project-more ${threadsExpanded ? "is-expanded" : ""}`}
+                aria-expanded={threadsExpanded}
+                onClick={() => toggleHistoryThreadGroupExpanded(groupKey)}
+              >
+                <span>{threadsExpanded ? "收起" : `展开更多 (${hiddenCount})`}</span>
+                <IconChevronDown />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
 
   function renderHistoryThread(thread: ThreadRecord) {
     const historyItemAffordance = getHistoryItemAffordance(thread.status);
@@ -5867,7 +6213,10 @@ export function App() {
       } ${isTerminalOpen ? "terminal-open" : ""}`}
       style={{
         "--sidebar-pane-width": `${sidebarWidth}px`,
-        "--right-workspace-pane-width": `${rightWorkspaceWidth}px`
+        "--right-workspace-pane-width": `${rightWorkspaceWidth}px`,
+        ...(chatBackgroundUrl && chatBackgroundSettings.enabled
+          ? getChatBackgroundSurfaceStyleVars(chatBackgroundSettings.surfaces)
+          : {})
       } as React.CSSProperties}
     >
       {chatBackgroundUrl && chatBackgroundSettings.enabled ? (
@@ -5956,25 +6305,27 @@ export function App() {
               <div className="history-empty">还没有任务</div>
             ) : (
               <>
-                {projectHistoryGroups.map((group) => (
-                  <section className="history-project-group" key={group.cwd} aria-label={`项目 ${getFileLeafName(group.cwd)}`}>
-                    <div className="history-project-heading" title={group.cwd}>
-                      <IconFolder />
-                      <span>{getFileLeafName(group.cwd)}</span>
-                    </div>
-                    <div className="history-project-threads">
-                      {group.threads.map(renderHistoryThread)}
-                    </div>
-                  </section>
-                ))}
-                {standaloneHistoryThreads.length > 0 ? (
-                  <section className="history-project-group history-standalone-group" aria-label="其他任务">
-                    {projectHistoryGroups.length > 0 ? <div className="history-standalone-heading">其他任务</div> : null}
-                    <div className="history-project-threads">
-                      {standaloneHistoryThreads.map(renderHistoryThread)}
-                    </div>
-                  </section>
-                ) : null}
+                {projectHistoryGroups.map((group) => {
+                  const groupKey = normalizeHistoryGroupKey(group.cwd);
+                  return renderHistoryThreadGroup(groupKey, group.threads, {
+                    ariaLabel: `项目 ${getFileLeafName(group.cwd)}`,
+                    title: group.cwd,
+                    heading: (
+                      <>
+                        <IconFolder />
+                        <span>{getFileLeafName(group.cwd)}</span>
+                      </>
+                    )
+                  });
+                })}
+                {standaloneHistoryThreads.length > 0
+                  ? renderHistoryThreadGroup(HISTORY_STANDALONE_GROUP_KEY, standaloneHistoryThreads, {
+                      ariaLabel: "其他任务",
+                      className: "history-standalone-group",
+                      collapsible: false,
+                      heading: projectHistoryGroups.length > 0 ? "其他任务" : undefined
+                    })
+                  : null}
               </>
             )}
           </div>
@@ -6062,7 +6413,7 @@ export function App() {
       </aside>
 
       {historySearchPresence.value ? (
-        <div className="history-search-overlay motion-overlay" data-motion={historySearchPresence.phase} onMouseDown={(event) => { if (event.target === event.currentTarget) setIsHistorySearchOpen(false); }}>
+        <div className="history-search-overlay motion-overlay" data-motion={historySearchPresence.phase}>
           <section className="history-search-dialog" role="dialog" aria-modal="true" aria-label="搜索历史对话">
             <div className="history-search-header">
               <strong>搜索历史对话</strong>
@@ -6697,11 +7048,6 @@ export function App() {
         <div
           className="settings-overlay motion-overlay"
           data-motion={settingsPresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              setIsSettingsOpen(false);
-            }
-          }}
         >
           <div className="settings-dialog">
             <div className="settings-topbar">
@@ -6903,7 +7249,7 @@ export function App() {
 
                       <label className="chat-background-control-group">
                         <div className="chat-background-control-label">
-                          <span>透明度</span>
+                          <span>背景图透明度</span>
                           <output>{chatBackgroundSettings.opacity}%</output>
                         </div>
                         <input
@@ -6916,14 +7262,42 @@ export function App() {
                         />
                       </label>
 
+                      <div className="chat-background-control-group chat-background-surface-group">
+                        <div className="chat-background-control-label">
+                          <span>模块不透明度</span>
+                          <em>数值越高，遮罩越实</em>
+                        </div>
+                        <div className="chat-background-surface-controls">
+                          {CHAT_BACKGROUND_SURFACE_OPTIONS.map((option) => (
+                            <label key={option.key} title={option.hint}>
+                              <span>{option.label}</span>
+                              <input
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="1"
+                                value={chatBackgroundSettings.surfaces[option.key]}
+                                disabled={!chatBackgroundUrl || !chatBackgroundSettings.enabled}
+                                onChange={(event) => updateChatBackgroundSurface(option.key, Number(event.target.value))}
+                              />
+                              <output>{chatBackgroundSettings.surfaces[option.key]}%</output>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+
                       <div className="chat-background-actions">
                         <button type="button" className="background-action-primary" onClick={() => chatBackgroundInputRef.current?.click()}>
                           <IconUpload />
                           <span>{chatBackgroundUrl ? "替换图片" : "导入图片"}</span>
                         </button>
-                        <button type="button" onClick={() => void exportChatBackground()} disabled={!chatBackgroundUrl || isChatBackgroundExporting}>
-                          {isChatBackgroundExporting ? <IconSpinner /> : <IconDownload />}
-                          <span>{isChatBackgroundExporting ? "生成中" : "导出 PNG"}</span>
+                        <button
+                          type="button"
+                          onClick={resetChatBackgroundSurfaces}
+                          title="将模块不透明度恢复为默认值"
+                        >
+                          <IconRefresh />
+                          <span>重置</span>
                         </button>
                         <button type="button" className="background-action-danger" onClick={() => void clearChatBackground()} disabled={!chatBackgroundUrl} title="清除应用背景">
                           <IconTrash />
@@ -7266,7 +7640,7 @@ export function App() {
                         const hint = role === "reasoning"
                           ? "手动添加后会出现在聊天下拉；可设置默认模型或随时移除。"
                           : `从统一模型库中分配${role === "image" ? "图片" : "视频"}生成模型。`;
-                        return (
+                        const panel = (
                           <div key={role} className={`config-block multimodal-model-panel is-${role}`}>
                             <div className="section-copy section-copy-with-action">
                               <div>
@@ -7340,11 +7714,91 @@ export function App() {
                             ) : null}
                           </div>
                         );
+                        if (role !== "reasoning") return panel;
+                        return (
+                          <Fragment key="reasoning-with-input">
+                            {panel}
+                            <div className="config-block multimodal-model-panel is-input">
+                              <div className="section-copy section-copy-with-action">
+                                <div>
+                                  <strong>默认多模态识别模型</strong>
+                                  <span>当聊天所选模型不支持多模态输入时，先用此模型识别图片/文件，再把文字结果交给当前模型处理。</span>
+                                </div>
+                                <button
+                                  className="model-add-button"
+                                  type="button"
+                                  onClick={() => {
+                                    setMultimodalPickerRole("input");
+                                    setMultimodalPickerSelected(
+                                      configDraft.multimodal.input.defaultProviderId && configDraft.multimodal.input.defaultModelId
+                                        ? [modelKey(configDraft.multimodal.input.defaultProviderId, configDraft.multimodal.input.defaultModelId)]
+                                        : []
+                                    );
+                                  }}
+                                  title="选择多模态识别模型"
+                                >
+                                  <IconPlus />
+                                </button>
+                              </div>
+                              <div className="multimodal-toggle-row">
+                                <span>启用识别回退</span>
+                                <label className="model-capability-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={configDraft.multimodal.input.enabled}
+                                    onChange={(event) => setMultimodalEnabled("input", event.target.checked)}
+                                  />
+                                  <span>{configDraft.multimodal.input.enabled ? "已启用" : "已关闭"}</span>
+                                </label>
+                              </div>
+                              {!configDraft.multimodal.input.enabled ? (
+                                <div className="multimodal-empty-tip">
+                                  识别回退已关闭。关闭后，非多模态聊天模型无法处理图片或文件附件。
+                                </div>
+                              ) : null}
+                              <div className={`provider-model-box multimodal-compact-list${configDraft.multimodal.input.enabled ? "" : " is-disabled"}`}>
+                                {(() => {
+                                  const selected = configDraft.models.find(
+                                    (model) =>
+                                      model.supportsMultimodalInput &&
+                                      model.providerId === configDraft.multimodal.input.defaultProviderId &&
+                                      model.id === configDraft.multimodal.input.defaultModelId
+                                  );
+                                  if (!selected) {
+                                    return (
+                                      <div className="provider-empty-state">
+                                        尚未选择识别模型。点击 + 从支持多模态的模型中选一个。
+                                      </div>
+                                    );
+                                  }
+                                  const provider = configDraft.providers.find((entry) => entry.id === selected.providerId);
+                                  return (
+                                    <div className="provider-model-row multimodal-list-row">
+                                      <div className="provider-model-copy multimodal-list-main">
+                                        <strong>{selected.displayName}</strong>
+                                        <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : selected.providerId}</span>
+                                        <em className="mm-tag is-default">默认</em>
+                                        <em className="mm-tag is-mm">多模态</em>
+                                      </div>
+                                      <div className="provider-model-actions">
+                                        <button className="settings-mini-button" type="button" onClick={clearMultimodalInputDefault}>
+                                          清除
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            </div>
+                          </Fragment>
+                        );
                       })}
 
                       <div className="settings-save-row">
                         <span className="subtle-inline">
                           操作即保存 · 默认推理：{configDraft.defaultModel ?? "未设置"}
+                          {" · "}
+                          默认识别：{configDraft.multimodal.input.defaultModelId ?? "未设置"}
                           {" · "}
                           默认图片：{configDraft.multimodal.image.defaultModelId ?? "未设置"}
                           {" · "}
@@ -8454,7 +8908,7 @@ export function App() {
       ) : null}
 
       {helpPresence.value ? (
-        <div className="project-sheet-overlay help-overlay motion-overlay" data-motion={helpPresence.phase} onMouseDown={(event) => { if (event.target === event.currentTarget) setIsHelpOpen(false); }}>
+        <div className="project-sheet-overlay help-overlay motion-overlay" data-motion={helpPresence.phase}>
           <section className="project-sheet help-sheet" role="dialog" aria-modal="true" aria-labelledby="help-title">
             <header className="project-sheet-header">
               <div className="project-sheet-copy"><strong id="help-title">CodeXH 使用指南</strong><span>产品功能与常用工作流</span></div>
@@ -8476,9 +8930,7 @@ export function App() {
       ) : null}
 
       {quickNotesPresence.value ? (
-        <div className="project-sheet-overlay quick-notes-overlay motion-overlay" data-motion={quickNotesPresence.phase} onClick={(event) => {
-          if (event.target === event.currentTarget) setIsQuickNotesOpen(false);
-        }}>
+        <div className="project-sheet-overlay quick-notes-overlay motion-overlay" data-motion={quickNotesPresence.phase}>
           <section className="project-sheet quick-notes-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-notes-title">
             <header className="project-sheet-header">
               <div className="quick-notes-header-title">
@@ -8520,7 +8972,7 @@ export function App() {
               </div>
             </div>
             {visibleQuickNoteListMenu ? <div className="quick-notes-list-context-menu" data-motion={quickNoteListMenuPresence.phase} style={{ left: visibleQuickNoteListMenu.x, top: visibleQuickNoteListMenu.y }} onMouseLeave={() => setQuickNoteListMenu(null)}><button type="button" onClick={() => { setRenamingQuickNoteId(visibleQuickNoteListMenu.note.id); setQuickNoteRenameDraft(visibleQuickNoteListMenu.note.title); setQuickNoteListMenu(null); }}>重命名</button><button type="button" className="danger" onClick={() => { setQuickNoteDeleteConfirm({ id: visibleQuickNoteListMenu.note.id, title: visibleQuickNoteListMenu.note.title }); setQuickNoteListMenu(null); }}>删除</button></div> : null}
-            {visibleQuickNoteDeleteConfirm ? <div className="quick-notes-confirm-overlay motion-overlay" data-motion={quickNoteDeleteConfirmPresence.phase} onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickNoteDeleteConfirm(null); }}><section className="quick-notes-confirm-dialog" role="alertdialog" aria-modal="true"><strong>删除随手记？</strong><p>“{visibleQuickNoteDeleteConfirm.title}”及其对应的全局知识库内容将被删除。</p><footer><button type="button" onClick={() => setQuickNoteDeleteConfirm(null)}>取消</button><button type="button" className="danger" onClick={() => void deleteQuickNote(visibleQuickNoteDeleteConfirm)}>删除</button></footer></section></div> : null}
+            {visibleQuickNoteDeleteConfirm ? <div className="quick-notes-confirm-overlay motion-overlay" data-motion={quickNoteDeleteConfirmPresence.phase}><section className="quick-notes-confirm-dialog" role="alertdialog" aria-modal="true"><strong>删除随手记？</strong><p>“{visibleQuickNoteDeleteConfirm.title}”及其对应的全局知识库内容将被删除。</p><footer><button type="button" onClick={() => setQuickNoteDeleteConfirm(null)}>取消</button><button type="button" className="danger" onClick={() => void deleteQuickNote(visibleQuickNoteDeleteConfirm)}>删除</button></footer></section></div> : null}
           </section>
         </div>
       ) : null}
@@ -8529,9 +8981,6 @@ export function App() {
         <div
           className="project-sheet-overlay mcp-create-overlay motion-overlay"
           data-motion={mcpCreatePresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) closeMcpCreateSheet();
-          }}
         >
           <div className="project-sheet mcp-create-sheet" role="dialog" aria-modal="true" aria-labelledby="mcp-create-title">
             <div className="project-sheet-header">
@@ -8631,11 +9080,6 @@ export function App() {
         <div
           className="project-sheet-overlay motion-overlay"
           data-motion={projectCreatePresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              setIsProjectCreateOpen(false);
-            }
-          }}
         >
           <div className="project-sheet">
             <div className="project-sheet-header">
@@ -8706,11 +9150,6 @@ export function App() {
         <div
           className="project-sheet-overlay motion-overlay"
           data-motion={gpaPlanResumePresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget && !gpaPlanResumeBusy) {
-              void dismissGpaPlanResumeDialog();
-            }
-          }}
         >
           <div className="project-sheet gpa-plan-resume-sheet">
             <div className="project-sheet-header">
@@ -8790,11 +9229,6 @@ export function App() {
         <div
           className="project-sheet-overlay motion-overlay"
           data-motion={clearChatConfirmPresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget && !isClearingChat) {
-              setIsClearChatConfirmOpen(false);
-            }
-          }}
         >
           <div
             className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
@@ -8844,11 +9278,6 @@ export function App() {
         <div
           className="project-sheet-overlay motion-overlay"
           data-motion={userSkillGenerationDialogPresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget && !isGeneratingUserSkill) {
-              setUserSkillGenerationDialog(null);
-            }
-          }}
         >
           <div className="project-sheet confirm-sheet user-skill-generation-sheet" role="dialog" aria-modal="true" aria-labelledby="user-skill-generation-title">
             <div className="project-sheet-header">
@@ -8907,11 +9336,6 @@ export function App() {
         <div
           className="project-sheet-overlay motion-overlay"
           data-motion={managedRemovalPresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget && !removingManagedItem) {
-              setManagedRemoval(null);
-            }
-          }}
         >
           <div className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="managed-removal-title">
             <div className="project-sheet-header delete-confirm-header">
@@ -8941,11 +9365,6 @@ export function App() {
         <div
           className="project-sheet-overlay motion-overlay"
           data-motion={historyThreadDeleteConfirmPresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget && !deletingThreadId) {
-              setHistoryThreadDeleteConfirmation(null);
-            }
-          }}
         >
           <div
             className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
@@ -8995,11 +9414,6 @@ export function App() {
         <div
           className="project-sheet-overlay motion-overlay"
           data-motion={updateConfirmPresence.phase}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              setUpdateConfirmDialog(null);
-            }
-          }}
         >
           <div
             className="project-sheet confirm-sheet delete-confirm-sheet update-confirm-sheet"
@@ -9060,11 +9474,7 @@ export function App() {
       ) : null}
 
       {fetchedModelsPresence.value ? createPortal(
-        <div className="fetch-models-overlay motion-overlay" data-motion={fetchedModelsPresence.phase} onMouseDown={(event) => {
-          if (event.target === event.currentTarget) {
-            setShowFetchedModels(false);
-          }
-        }}>
+        <div className="fetch-models-overlay motion-overlay" data-motion={fetchedModelsPresence.phase}>
           <div className="fetch-models-dialog" role="dialog" aria-label="选择要添加的模型">
             <div className="fetch-models-head">
               <strong>选择要添加的模型</strong>
@@ -9140,60 +9550,101 @@ export function App() {
       ) : null}
 
       {visibleMultimodalPickerRole && configDraft ? createPortal(
-        <div className="fetch-models-overlay motion-overlay" data-motion={multimodalPickerPresence.phase} onMouseDown={(event) => {
-          if (event.target === event.currentTarget) {
-            setMultimodalPickerRole(null);
-            setMultimodalPickerSelected([]);
-          }
-        }}>
+        <div className="fetch-models-overlay motion-overlay" data-motion={multimodalPickerPresence.phase}>
           <div className="fetch-models-dialog multimodal-picker-dialog" role="dialog" aria-label="选择模型角色">
             <div className="fetch-models-head">
-              <strong>添加到{visibleMultimodalPickerRole === "reasoning" ? "推理模型" : visibleMultimodalPickerRole === "image" ? "图片模型" : "视频模型"}</strong>
+              <strong>
+                {visibleMultimodalPickerRole === "input"
+                  ? "选择多模态识别模型"
+                  : `添加到${visibleMultimodalPickerRole === "reasoning" ? "推理模型" : visibleMultimodalPickerRole === "image" ? "图片模型" : "视频模型"}`}
+              </strong>
               <button type="button" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }} title="关闭"><IconClose /></button>
             </div>
             <div className="fetch-models-list multimodal-picker-list">
-              {configDraft.models
-                .filter((model) => visibleMultimodalPickerRole === "reasoning"
-                  ? !isReasoningModel(model)
-                  : model.role !== visibleMultimodalPickerRole)
-                .sort((left, right) => {
-                  const score = (model: typeof left) => {
-                    if (visibleMultimodalPickerRole === "video") return model.supportsVideoGeneration ? 2 : model.supportsMultimodalInput ? 1 : 0;
-                    return model.supportsMultimodalInput ? 1 : 0;
-                  };
-                  return score(right) - score(left) || left.id.localeCompare(right.id);
-                })
-                .map((model) => {
-                  const key = modelKey(model.providerId, model.id);
-                  const checked = multimodalPickerSelected.includes(key);
-                  const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
-                  const currentRoleLabel = model.role === "reasoning"
-                    ? "已在推理"
-                    : model.role === "image"
-                      ? "已在图片"
-                      : model.role === "video"
-                        ? "已在视频"
-                        : null;
-                  return (
-                    <label key={key} className={`fetch-models-item multimodal-picker-item ${checked ? "is-checked" : ""}`}>
-                      <input type="checkbox" checked={checked} onChange={() => setMultimodalPickerSelected((current) =>
-                        current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
-                      )} />
-                      <div className="fetch-models-copy multimodal-picker-main">
-                        <strong>{model.displayName}</strong>
-                        <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : model.providerId}</span>
-                        {model.supportsMultimodalInput ? <em className="mm-tag is-mm">多模态</em> : null}
-                        {model.supportsVideoGeneration ? <em className="mm-tag is-video">视频</em> : null}
-                        {currentRoleLabel ? <em className={`mm-tag is-muted is-role-${model.role}`}>{currentRoleLabel}</em> : null}
-                      </div>
-                    </label>
-                  );
-                })}
+              {visibleMultimodalPickerRole === "input" ? (
+                configDraft.models.filter((model) => model.supportsMultimodalInput).length > 0 ? (
+                  configDraft.models
+                    .filter((model) => model.supportsMultimodalInput)
+                    .sort((left, right) => left.displayName.localeCompare(right.displayName) || left.id.localeCompare(right.id))
+                    .map((model) => {
+                      const key = modelKey(model.providerId, model.id);
+                      const checked = multimodalPickerSelected[0] === key;
+                      const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          className={`fetch-models-item multimodal-picker-item multimodal-picker-single ${checked ? "is-checked" : ""}`}
+                          onClick={() => {
+                            setMultimodalPickerRole(null);
+                            setMultimodalPickerSelected([]);
+                            setMultimodalDefault("input", model.providerId, model.id);
+                          }}
+                        >
+                          <div className="fetch-models-copy multimodal-picker-main">
+                            <strong>{model.displayName}</strong>
+                            <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : model.providerId}</span>
+                            {checked ? <em className="mm-tag is-default">当前</em> : null}
+                            <em className="mm-tag is-mm">多模态</em>
+                          </div>
+                        </button>
+                      );
+                    })
+                ) : (
+                  <div className="provider-empty-state">
+                    暂无支持多模态输入的模型。请先在供应商设置中为模型勾选「支持多模态」。
+                  </div>
+                )
+              ) : (
+                configDraft.models
+                  .filter((model) => visibleMultimodalPickerRole === "reasoning"
+                    ? !isReasoningModel(model)
+                    : model.role !== visibleMultimodalPickerRole)
+                  .sort((left, right) => {
+                    const score = (model: typeof left) => {
+                      if (visibleMultimodalPickerRole === "video") return model.supportsVideoGeneration ? 2 : model.supportsMultimodalInput ? 1 : 0;
+                      return model.supportsMultimodalInput ? 1 : 0;
+                    };
+                    return score(right) - score(left) || left.id.localeCompare(right.id);
+                  })
+                  .map((model) => {
+                    const key = modelKey(model.providerId, model.id);
+                    const checked = multimodalPickerSelected.includes(key);
+                    const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
+                    const currentRoleLabel = model.role === "reasoning"
+                      ? "已在推理"
+                      : model.role === "image"
+                        ? "已在图片"
+                        : model.role === "video"
+                          ? "已在视频"
+                          : null;
+                    return (
+                      <label key={key} className={`fetch-models-item multimodal-picker-item ${checked ? "is-checked" : ""}`}>
+                        <input type="checkbox" checked={checked} onChange={() => setMultimodalPickerSelected((current) =>
+                          current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
+                        )} />
+                        <div className="fetch-models-copy multimodal-picker-main">
+                          <strong>{model.displayName}</strong>
+                          <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : model.providerId}</span>
+                          {model.supportsMultimodalInput ? <em className="mm-tag is-mm">多模态</em> : null}
+                          {model.supportsVideoGeneration ? <em className="mm-tag is-video">视频</em> : null}
+                          {currentRoleLabel ? <em className={`mm-tag is-muted is-role-${model.role}`}>{currentRoleLabel}</em> : null}
+                        </div>
+                      </label>
+                    );
+                  })
+              )}
             </div>
-            <div className="fetch-models-actions">
-              <button className="button ghost" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }}>取消</button>
-              <button className="button warm" onClick={applyMultimodalPicker} disabled={multimodalPickerSelected.length === 0}>确认添加（{multimodalPickerSelected.length}）</button>
-            </div>
+            {visibleMultimodalPickerRole === "input" ? (
+              <div className="fetch-models-actions">
+                <button className="button ghost" type="button" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }}>取消</button>
+              </div>
+            ) : (
+              <div className="fetch-models-actions">
+                <button className="button ghost" type="button" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }}>取消</button>
+                <button className="button warm" type="button" onClick={applyMultimodalPicker} disabled={multimodalPickerSelected.length === 0}>确认添加（{multimodalPickerSelected.length}）</button>
+              </div>
+            )}
           </div>
         </div>,
         document.body
@@ -9224,14 +9675,14 @@ export function App() {
                 }}
               >
                 <>
-                    <button className="gpa-popover-item" role="menuitem" disabled={!composerSupportsMultimodalInput} title={!composerSupportsMultimodalInput ? "当前模型不支持多模态输入" : undefined} onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(false)}>
+                    <button className="gpa-popover-item" role="menuitem" disabled={!composerCanAttachMultimodal} title={!composerCanAttachMultimodal ? "当前模型不支持多模态输入，且未配置默认多模态识别模型" : undefined} onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(false)}>
                       <span className="gpa-popover-item-icon" aria-hidden><IconFile /></span>
                       <span className="gpa-popover-item-copy">
                         <span className="gpa-popover-item-title">添加文件</span>
                         <span className="gpa-popover-item-hint">选择文件作为任务上下文</span>
                       </span>
                     </button>
-                    <button className="gpa-popover-item" role="menuitem" disabled={!composerSupportsMultimodalInput} title={!composerSupportsMultimodalInput ? "当前模型不支持多模态输入" : undefined} onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(true)}>
+                    <button className="gpa-popover-item" role="menuitem" disabled={!composerCanAttachMultimodal} title={!composerCanAttachMultimodal ? "当前模型不支持多模态输入，且未配置默认多模态识别模型" : undefined} onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(true)}>
                       <span className="gpa-popover-item-icon" aria-hidden><IconImage /></span>
                       <span className="gpa-popover-item-copy">
                         <span className="gpa-popover-item-title">添加图片</span>
@@ -9991,6 +10442,7 @@ function FilePreviewDialog({
   useEffect(() => {
     setDraft(preview?.content ?? "");
     setSaveError(null);
+    setContextMenu(null);
   }, [path, preview?.content]);
 
   async function saveFile() {
@@ -10008,6 +10460,20 @@ function FilePreviewDialog({
     }
   }
 
+  function openSelectionContextMenu(event: React.MouseEvent, selection: string) {
+    const trimmed = selection.trim();
+    if (!trimmed) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      selection: trimmed
+    });
+  }
+
   return (
     <div
       className="file-preview-lightbox motion-overlay"
@@ -10015,7 +10481,6 @@ function FilePreviewDialog({
       role="dialog"
       aria-modal="true"
       aria-label={path}
-      onClick={onClose}
     >
       <div className="file-preview-lightbox-content" onClick={(event) => event.stopPropagation()}>
         <header className="file-preview-lightbox-head" title={path}>
@@ -10077,6 +10542,10 @@ function FilePreviewDialog({
                       target.selectionEnd = start + 2;
                     });
                   }}
+                  onContextMenu={(event) => {
+                    const target = event.currentTarget;
+                    openSelectionContextMenu(event, draft.slice(target.selectionStart, target.selectionEnd));
+                  }}
                   aria-label={`${path} 内容`}
                   spellCheck={false}
                 />
@@ -10086,18 +10555,7 @@ function FilePreviewDialog({
                 className="project-preview-code file-preview-lightbox-code"
                 aria-label={`${path} 代码内容`}
                 onContextMenu={(event) => {
-                  const selection = window.getSelection()?.toString() ?? "";
-                  const trimmed = selection.trim();
-                  if (!trimmed) {
-                    return;
-                  }
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setContextMenu({
-                    x: event.clientX,
-                    y: event.clientY,
-                    selection: trimmed
-                  });
+                  openSelectionContextMenu(event, window.getSelection()?.toString() ?? "");
                 }}
               >
                 {preview.content.split(/\r?\n/).map((line, index) => (
@@ -11096,9 +11554,14 @@ function BrowserTabWebview({
 }) {
   const webviewRef = useRef<BrowserWebviewElement | null>(null);
   const syncTimerRef = useRef<number | null>(null);
-  useEffect(() => {
-    const view = webviewRef.current;
+  const cleanupRef = useRef<(() => void) | null>(null);
+
+  const bindWebview = useCallback((view: BrowserWebviewElement | null) => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    webviewRef.current = view;
     if (!view) return;
+
     const sync = () => {
       if (syncTimerRef.current !== null) {
         window.clearTimeout(syncTimerRef.current);
@@ -11109,31 +11572,69 @@ function BrowserTabWebview({
       }, 180);
     };
     const register = () => {
-      const webContentsId = view.getWebContentsId();
+      let webContentsId: number;
+      try {
+        webContentsId = view.getWebContentsId();
+      } catch {
+        return false;
+      }
+      if (!Number.isFinite(webContentsId) || webContentsId <= 0) {
+        return false;
+      }
       void window.codexh.registerBrowserWebContents({ threadId, tabId: tab.id, webContentsId })
         .then(sync)
-        .catch(() => undefined);
+        .catch((error) => {
+          console.warn("[browser] registerBrowserWebContents failed", {
+            threadId,
+            tabId: tab.id,
+            webContentsId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
+      return true;
     };
+
     view.addEventListener("dom-ready", register);
+    view.addEventListener("did-attach", register);
     view.addEventListener("did-navigate", sync);
     view.addEventListener("did-navigate-in-page", sync);
     view.addEventListener("page-title-updated", sync);
-    return () => {
+    register();
+    const registrarKey = browserWebviewRegistrarKey(threadId, tab.id);
+    browserWebviewRegistrars.set(registrarKey, register);
+
+    const poll = window.setInterval(() => {
+      if (register()) {
+        window.clearInterval(poll);
+      }
+    }, 200);
+    const pollTimeout = window.setTimeout(() => window.clearInterval(poll), 20_000);
+
+    cleanupRef.current = () => {
+      browserWebviewRegistrars.delete(registrarKey);
+      window.clearInterval(poll);
+      window.clearTimeout(pollTimeout);
       if (syncTimerRef.current !== null) {
         window.clearTimeout(syncTimerRef.current);
         syncTimerRef.current = null;
       }
       view.removeEventListener("dom-ready", register);
+      view.removeEventListener("did-attach", register);
       view.removeEventListener("did-navigate", sync);
       view.removeEventListener("did-navigate-in-page", sync);
       view.removeEventListener("page-title-updated", sync);
     };
   }, [tab.id, threadId]);
 
+  useEffect(() => () => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+  }, []);
+
   return (
     <div className={`browser-page-host ${visible ? "is-visible" : "is-background"}`}>
       {createElement("webview", {
-        ref: webviewRef,
+        ref: bindWebview,
         className: "browser-frame",
         src: tab.url,
         webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
@@ -14299,7 +14800,7 @@ function MessageAttachmentVideo({
 
 function MessageMediaLightbox({ preview, motionPhase, onClose }: { preview: MessageMediaPreview; motionPhase?: string; onClose: () => void }) {
   return createPortal(
-    <div className="message-image-lightbox motion-overlay" data-motion={motionPhase} role="dialog" aria-modal="true" aria-label={preview.name} onClick={onClose}>
+    <div className="message-image-lightbox motion-overlay" data-motion={motionPhase} role="dialog" aria-modal="true" aria-label={preview.name}>
       <div className="message-image-lightbox-content" onClick={(event) => event.stopPropagation()}>
         <div className="message-image-lightbox-head">
           <span title={preview.name}>{preview.name}</span>
@@ -15760,7 +16261,8 @@ function getNotificationStatusLabel(status: NotificationCenterItem["status"]): s
 function cloneConfig(config: AppConfig): AppConfig {
   const multimodal = config.multimodal ?? {
     image: { enabled: true },
-    video: { enabled: true }
+    video: { enabled: true },
+    input: { enabled: true }
   };
   return {
     defaultModel: config.defaultModel,
@@ -15781,6 +16283,11 @@ function cloneConfig(config: AppConfig): AppConfig {
         enabled: multimodal.video?.enabled !== false,
         defaultProviderId: multimodal.video?.defaultProviderId,
         defaultModelId: multimodal.video?.defaultModelId
+      },
+      input: {
+        enabled: multimodal.input?.enabled !== false,
+        defaultProviderId: multimodal.input?.defaultProviderId,
+        defaultModelId: multimodal.input?.defaultModelId
       }
     },
     multiAgent: { ...config.multiAgent },
@@ -15962,6 +16469,25 @@ function normalizeDraftConfig(config: AppConfig): AppConfig {
       };
     } else {
       next.multimodal[kind] = { ...defaults, enabled: defaults.enabled !== false };
+    }
+  }
+
+  {
+    const defaults = next.multimodal.input ?? { enabled: true };
+    const validDefault = next.models.some((model) =>
+      model.supportsMultimodalInput &&
+      model.providerId === defaults.defaultProviderId &&
+      model.id === defaults.defaultModelId
+    );
+    if (!validDefault) {
+      const first = next.models.find((model) => model.supportsMultimodalInput);
+      next.multimodal.input = {
+        enabled: defaults.enabled !== false,
+        defaultProviderId: first?.providerId,
+        defaultModelId: first?.id
+      };
+    } else {
+      next.multimodal.input = { ...defaults, enabled: defaults.enabled !== false };
     }
   }
 

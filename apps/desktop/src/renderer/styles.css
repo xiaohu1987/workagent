@@ -11435,7 +11435,7 @@ select:focus {
 }
 
 .message-user-text {
-  max-width: min(68vw, 724px);
+  max-width: min(100%, 724px);
   color: inherit;
   font-size: 16px;
   line-height: 1.56;
@@ -11448,7 +11448,7 @@ select:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  max-width: min(68vw, 724px);
+  max-width: min(100%, 724px);
   margin-top: 9px;
 }
 
@@ -15239,6 +15239,10 @@ body.panel-resizing {
   background: #b086ff;
 }
 
+.multimodal-model-panel.is-input .section-copy strong::before {
+  background: #34d399;
+}
+
 .multimodal-toggle-row {
   display: flex;
   align-items: center;
@@ -15432,6 +15436,25 @@ body.panel-resizing {
 .multimodal-picker-item input {
   width: 13px;
   height: 13px;
+}
+
+button.multimodal-picker-single {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  margin: 0;
+  border: 1px solid transparent;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.multimodal-picker-single:hover,
+button.multimodal-picker-single.is-checked {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 /* Match file-change summaries to the compact tool activity disclosure. */
@@ -16697,16 +16720,47 @@ select option:checked {
 .history-project-heading {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
+  width: 100%;
   min-width: 0;
   min-height: 30px;
-  padding: 2px 8px 2px 10px;
+  margin: 0;
+  padding: 2px 8px 2px 4px;
+  border: 0;
+  border-radius: 8px;
   color: rgba(244, 244, 243, 0.86);
+  background: transparent;
+  font: inherit;
   font-size: 14px;
   font-weight: 520;
+  text-align: left;
+  cursor: pointer;
 }
 
-.history-project-heading svg {
+.history-project-heading:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.history-project-disclosure {
+  display: grid;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  color: rgba(244, 244, 243, 0.42);
+}
+
+.history-project-disclosure svg {
+  width: 13px;
+  height: 13px;
+  transition: transform 120ms ease;
+}
+
+.history-project-disclosure.is-expanded svg {
+  transform: rotate(90deg);
+}
+
+.history-project-heading > svg {
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
@@ -16746,8 +16800,44 @@ select option:checked {
   padding: 5px 0;
 }
 
+.history-project-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  min-height: 28px;
+  margin: 0 0 0 4px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 8px;
+  color: rgba(244, 244, 243, 0.48);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.history-project-more:hover {
+  color: rgba(244, 244, 243, 0.82);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.history-project-more svg {
+  width: 13px;
+  height: 13px;
+  transition: transform 140ms ease;
+}
+
+.history-project-more.is-expanded svg {
+  transform: rotate(180deg);
+}
+
 .history-standalone-group {
   gap: 5px;
+}
+
+.history-standalone-group .history-project-threads {
+  padding-left: 10px;
 }
 
 .history-standalone-heading {
@@ -17166,26 +17256,69 @@ select option:checked {
   position: relative;
   isolation: isolate;
   background: #0b0c0e;
+  --app-bg-windowbar: 0.62;
+  --app-bg-sidebar: 0.34;
+  --app-bg-workspace: 0.1;
+  --app-bg-right-panel: 0.22;
+  --app-bg-terminal: 0.4;
+  --app-bg-dialog: 0.62;
 }
 
 .app-shell.has-app-background .windowbar {
-  background: rgba(8, 9, 11, 0.62);
+  background: rgba(8, 9, 11, var(--app-bg-windowbar));
   backdrop-filter: blur(8px);
 }
 
+.app-shell.has-app-background .title-icon-button,
+.app-shell.has-app-background .sidebar-search,
+.app-shell.has-app-background .workspace-control-button,
+.app-shell.has-app-background .composer-icon-button {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(18, 18, 22, min(0.55, calc(var(--app-bg-sidebar) + 0.12)));
+  backdrop-filter: blur(8px);
+}
+
+.app-shell.has-app-background .title-icon-button:hover,
+.app-shell.has-app-background .sidebar-search:hover,
+.app-shell.has-app-background .workspace-control-button:hover,
+.app-shell.has-app-background .composer-icon-button:hover,
+.app-shell.has-app-background .workspace-control-button.active {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(24, 24, 29, min(0.62, calc(var(--app-bg-sidebar) + 0.18)));
+}
+
 .app-shell.has-app-background .sidebar {
-  background: rgba(8, 9, 11, 0.48);
+  background: rgba(8, 9, 11, var(--app-bg-sidebar));
   backdrop-filter: blur(5px);
 }
 
+.app-shell.has-app-background .history-item:hover,
+.app-shell.has-app-background .sidebar-nav-button:hover {
+  background: rgba(20, 20, 24, min(0.72, calc(var(--app-bg-sidebar) + 0.08)));
+  border-color: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+}
+
+.app-shell.has-app-background .history-item.selected,
+.app-shell.has-app-background .history-project-threads .history-item.selected {
+  background: rgba(183, 162, 255, min(0.28, calc(var(--app-bg-sidebar) * 0.45 + 0.08)));
+  border-color: rgba(202, 183, 255, 0.16);
+  backdrop-filter: blur(8px);
+}
+
+.app-shell.has-app-background .history-project-heading:hover,
+.app-shell.has-app-background .history-project-more:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .app-shell.has-app-background .workspace {
-  background: rgba(8, 9, 11, 0.1);
+  background: rgba(8, 9, 11, var(--app-bg-workspace));
 }
 
 .app-shell.has-app-background .right-workspace-panel,
 .app-shell.has-app-background .right-workspace-header,
 .app-shell.has-app-background .right-workspace-content {
-  background: rgba(8, 9, 11, 0.22);
+  background: rgba(8, 9, 11, var(--app-bg-right-panel));
   backdrop-filter: blur(5px);
 }
 
@@ -17199,17 +17332,17 @@ select option:checked {
 }
 
 .app-shell.has-app-background .agent-activity-list {
-  background: rgba(12, 14, 18, 0.28);
+  background: rgba(12, 14, 18, min(0.55, calc(var(--app-bg-workspace) + 0.18)));
   backdrop-filter: blur(10px);
 }
 
 .app-shell.has-app-background .right-workspace-accordion-section {
-  background: rgba(12, 14, 18, 0.28);
+  background: rgba(12, 14, 18, min(0.55, calc(var(--app-bg-right-panel) + 0.06)));
   backdrop-filter: blur(7px);
 }
 
 .app-shell.has-app-background .right-workspace-accordion-section.active {
-  background: rgba(10, 12, 15, 0.2);
+  background: rgba(10, 12, 15, min(0.4, calc(var(--app-bg-right-panel) * 0.9)));
 }
 
 .app-shell.has-app-background .right-workspace-view,
@@ -17225,7 +17358,7 @@ select option:checked {
 .app-shell.has-app-background .workspace-subtab-strip,
 .app-shell.has-app-background .project-preview-header,
 .app-shell.has-app-background .browser-location {
-  background: rgba(13, 16, 20, 0.34);
+  background: rgba(13, 16, 20, min(0.55, calc(var(--app-bg-right-panel) + 0.12)));
   backdrop-filter: blur(6px);
 }
 
@@ -17233,8 +17366,128 @@ select option:checked {
 .app-shell.has-app-background .terminal-workspace .terminal-heading,
 .app-shell.has-app-background .terminal-workspace .terminal-output,
 .app-shell.has-app-background .terminal-workspace .terminal-composer {
-  background: rgba(8, 9, 11, 0.4);
+  background: rgba(8, 9, 11, var(--app-bg-terminal));
   backdrop-filter: blur(5px);
+}
+
+.app-shell.has-app-background .settings-overlay,
+.app-shell.has-app-background .project-sheet-overlay,
+.app-shell.has-app-background .history-search-overlay,
+.app-shell.has-app-background .mcp-create-overlay,
+.app-shell.has-app-background .fetch-models-overlay,
+.app-shell.has-app-background .quick-notes-confirm-overlay {
+  background: rgba(0, 0, 0, min(0.55, calc(var(--app-bg-dialog) * 0.45)));
+  backdrop-filter: blur(10px);
+}
+
+.app-shell.has-app-background .settings-dialog,
+.app-shell.has-app-background .settings-topbar,
+.app-shell.has-app-background .settings-sidebar,
+.app-shell.has-app-background .project-sheet,
+.app-shell.has-app-background .history-search-dialog,
+.app-shell.has-app-background .fetch-models-dialog,
+.app-shell.has-app-background .quick-notes-confirm-dialog {
+  background: rgba(13, 14, 17, var(--app-bg-dialog));
+  backdrop-filter: blur(18px);
+}
+
+.app-shell.has-app-background .settings-layout,
+.app-shell.has-app-background .settings-body,
+.app-shell.has-app-background .settings-tab-strip {
+  background: transparent;
+}
+
+/* Soften solid inner modules inside dialogs / settings. */
+.app-shell.has-app-background .quick-notes-list,
+.app-shell.has-app-background .quick-notes-footer,
+.app-shell.has-app-background .quick-notes-plain-editor,
+.app-shell.has-app-background .quick-notes-content-input.quick-notes-plain-editor,
+.app-shell.has-app-background .summary-card,
+.app-shell.has-app-background .config-block,
+.app-shell.has-app-background .stack-card,
+.app-shell.has-app-background .provider-list-panel,
+.app-shell.has-app-background .provider-detail-panel,
+.app-shell.has-app-background .provider-empty-state,
+.app-shell.has-app-background .update-settings-panel,
+.app-shell.has-app-background .chat-background-preview,
+.app-shell.has-app-background .history-search-input-wrap,
+.app-shell.has-app-background .mcp-create-sheet .form-field input,
+.app-shell.has-app-background .mcp-create-sheet .form-field textarea,
+.app-shell.has-app-background .mcp-create-sheet .form-field select {
+  background: rgba(16, 17, 22, min(0.58, calc(var(--app-bg-dialog) * 0.82)));
+  backdrop-filter: blur(12px);
+}
+
+.app-shell.has-app-background .provider-list-card,
+.app-shell.has-app-background .provider-model-box,
+.app-shell.has-app-background .provider-model-row,
+.app-shell.has-app-background .settings-strip-tab:hover,
+.app-shell.has-app-background .quick-notes-item:hover,
+.app-shell.has-app-background .button.secondary,
+.app-shell.has-app-background .button.ghost,
+.app-shell.has-app-background .settings-mini-button,
+.app-shell.has-app-background .settings-close-button,
+.app-shell.has-app-background .settings-icon-button,
+.app-shell.has-app-background .provider-remove-button {
+  background: rgba(20, 20, 24, min(0.55, calc(var(--app-bg-dialog) * 0.7)));
+}
+
+.app-shell.has-app-background .provider-list-card.selected,
+.app-shell.has-app-background .settings-strip-tab.active,
+.app-shell.has-app-background .quick-notes-item.selected {
+  background: rgba(26, 28, 36, min(0.62, calc(var(--app-bg-dialog) * 0.85)));
+}
+
+.app-shell.has-app-background .quick-notes-item.selected {
+  background: rgba(55, 116, 190, min(0.28, calc(var(--app-bg-dialog) * 0.35 + 0.08)));
+}
+
+.app-shell.has-app-background .quick-notes-add {
+  background: rgba(20, 36, 58, min(0.72, calc(var(--app-bg-dialog) * 0.9)));
+}
+
+.app-shell.has-app-background .quick-notes-add:hover {
+  background: rgba(29, 53, 83, min(0.82, calc(var(--app-bg-dialog) * 0.95)));
+}
+
+.app-shell.has-app-background .quick-notes-list-context-menu {
+  background: rgba(17, 21, 29, var(--app-bg-dialog));
+  backdrop-filter: blur(14px);
+}
+
+.app-shell.has-app-background .chat-background-preview {
+  background: rgba(23, 25, 29, min(0.55, calc(var(--app-bg-dialog) * 0.75)));
+}
+
+.app-shell.has-app-background .chat-background-center-button {
+  background: rgba(25, 27, 32, min(0.55, calc(var(--app-bg-dialog) * 0.7)));
+}
+
+body:has(.app-shell.has-app-background) .fetch-models-overlay,
+body:has(.app-shell.has-app-background) .message-image-lightbox,
+body:has(.app-shell.has-app-background) .file-preview-lightbox {
+  background: rgba(0, 0, 0, min(0.55, calc(var(--app-bg-dialog, 0.62) * 0.45)));
+  backdrop-filter: blur(10px);
+}
+
+body:has(.app-shell.has-app-background) .fetch-models-dialog,
+body:has(.app-shell.has-app-background) .message-image-lightbox-content,
+body:has(.app-shell.has-app-background) .file-preview-lightbox-content,
+body:has(.app-shell.has-app-background) .gpa-popover,
+body:has(.app-shell.has-app-background) .workspace-context-menu {
+  background: rgba(13, 14, 17, var(--app-bg-dialog, 0.62));
+  backdrop-filter: blur(18px);
+}
+
+body:has(.app-shell.has-app-background) .file-preview-lightbox-head {
+  background: rgba(17, 18, 22, min(0.78, calc(var(--app-bg-dialog, 0.62) * 0.95)));
+  backdrop-filter: blur(14px);
+}
+
+body:has(.app-shell.has-app-background) .file-preview-editor-shell,
+body:has(.app-shell.has-app-background) .file-preview-lightbox-code,
+body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
+  background: transparent;
 }
 
 .chat-background-settings {
@@ -17250,7 +17503,7 @@ select option:checked {
   grid-template-columns: minmax(420px, 1.45fr) minmax(310px, 0.75fr);
   min-height: 540px;
   gap: 28px;
-  align-items: center;
+  align-items: start;
 }
 
 .chat-background-preview {
@@ -17377,8 +17630,11 @@ select option:checked {
 
 .chat-background-controls {
   display: grid;
-  gap: 24px;
-  align-content: center;
+  gap: 20px;
+  align-content: start;
+  max-height: min(72vh, 760px);
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .chat-background-heading {
@@ -17491,6 +17747,42 @@ select option:checked {
   color: #f0c47b;
   font-family: var(--font-mono);
   text-align: right;
+}
+
+.chat-background-control-label em {
+  color: #7f8590;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.chat-background-surface-group {
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.chat-background-surface-controls {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-background-surface-controls label {
+  display: grid;
+  grid-template-columns: 72px minmax(100px, 1fr) 40px;
+  align-items: center;
+  gap: 10px;
+  color: #8f959f;
+  font-size: 11px;
+}
+
+.chat-background-surface-controls output {
+  min-width: 40px;
+  color: #f0c47b;
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.chat-background-surface-controls input[type="range"]:disabled {
+  opacity: 0.4;
 }
 
 .chat-background-center-button {

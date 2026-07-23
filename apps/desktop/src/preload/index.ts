@@ -84,6 +84,8 @@ const api = {
     ipcRenderer.invoke("threads:update-model", payload),
   addThreadSkill: (payload: { threadId: string; skillId: string }) =>
     ipcRenderer.invoke("threads:add-skill", payload),
+  removeThreadSkill: (payload: { threadId: string; skillId: string }) =>
+    ipcRenderer.invoke("threads:remove-skill", payload),
   openTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:open", payload),
   writeTerminal: (payload: { threadId: string; input: string; sessionId?: string }) =>
     ipcRenderer.invoke("terminal:write", payload),
@@ -183,6 +185,11 @@ const api = {
     ipcRenderer.invoke("browser:register-webcontents", payload),
   syncBrowserWebContents: (payload: { threadId: string; tabId: string }) =>
     ipcRenderer.invoke("browser:sync-webcontents", payload),
+  onBrowserReregisterRequest: (handler: (payload: { threadId: string; tabId: string }) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: { threadId: string; tabId: string }) => handler(payload);
+    ipcRenderer.on("browser:request-reregister", wrapped);
+    return () => ipcRenderer.removeListener("browser:request-reregister", wrapped);
+  },
   resolveApproval: (
     id: string,
     resolution: { decision: "approved" | "denied"; mode?: "once" | "session" | "remember" }

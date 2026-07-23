@@ -39,6 +39,8 @@ import {
   estimateRuntimeTokens,
   isUpstreamContextOverflowError,
   isFunctionCallProtocolError,
+  isModelRateLimitError,
+  resolveModelRateLimitDelayMs,
   buildFunctionCallCompatibilityTranscript,
   buildBlockedToolCallTranscriptResult,
   clearReusableObservationFingerprints,
@@ -46,9 +48,18 @@ import {
   MAX_AGENT_PROTOCOL_FAILURES,
   MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES,
   AGENT_PROTOCOL_RECOVERY_QUESTION_ID,
+  MAX_MODEL_RATE_LIMIT_RETRIES,
+  MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID,
+  MODEL_RATE_LIMIT_BASE_DELAY_MS,
+  buildModelRateLimitRecoveryQuestion,
   MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
   MAX_MODEL_TOOL_RESULT_CHARACTERS,
   MAX_MCP_TOOL_RESULT_CHARACTERS,
+  MAX_REPOSITORY_COMPLETION_REJECTIONS,
+  LEGACY_MCP_OVERSIZED_FOLLOW_UP,
+  createRepositoryExplorationState,
+  applyLegacyMcpResultToRepositoryExploration,
+  resolveRepositoryCompletionBlock,
   summarizeToolResultForModel,
   shouldFinishGpaAnalysisTurn,
   parseCanonicalGpaPlanTasks,
@@ -75,6 +86,9 @@ import {
   parseMultimodalIntentClassification,
   buildMultimodalIntentClassifySystemPrompt,
   buildMultimodalIntentClassifyTranscript,
+  applyMultimodalInputRecognitionToTranscript,
+  hasRecognizableMultimodalAttachments,
+  buildMultimodalInputRecognizeTranscript,
   canStartGpaStage,
   buildRecommendedSkillSuggestionInstruction,
   injectAutoLoadedSkillCalls,
@@ -332,6 +346,59 @@ describe("Agent decision protocol recovery", () => {
       ]
     });
     expect(question.prompt).toContain(String(MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES));
+  });
+});
+
+describe("model rate limit retries", () => {
+  it("defaults to five automatic 429 retries before asking the user", () => {
+    expect(MAX_MODEL_RATE_LIMIT_RETRIES).toBe(5);
+  });
+
+  it("recognizes common 429 / rate-limit provider errors", () => {
+    expect(isModelRateLimitError(new Error("429 Rate limit reached for gpt-4"))).toBe(true);
+    expect(isModelRateLimitError(new Error("HTTP 429 Too Many Requests"))).toBe(true);
+    expect(isModelRateLimitError(Object.assign(new Error("rate limited"), { status: 429 }))).toBe(true);
+    expect(isModelRateLimitError(new Error("RESOURCE_EXHAUSTED: quota exceeded"))).toBe(true);
+  });
+
+  it("does not treat unrelated provider errors as rate limits", () => {
+    expect(isModelRateLimitError(new Error("HTTP 400 invalid API key"))).toBe(false);
+    expect(isModelRateLimitError(new Error("HTTP 500 upstream unavailable"))).toBe(false);
+    expect(isModelRateLimitError(new Error("Model decision timed out"))).toBe(false);
+  });
+
+  it("uses Retry-After when present and falls back to exponential backoff", () => {
+    const withHeader = Object.assign(new Error("429"), {
+      status: 429,
+      headers: { get: (name: string) => (name === "retry-after" ? "2" : null) }
+    });
+    expect(resolveModelRateLimitDelayMs(withHeader, 1)).toBe(2_000);
+    expect(resolveModelRateLimitDelayMs(new Error("429"), 1)).toBe(MODEL_RATE_LIMIT_BASE_DELAY_MS);
+    expect(resolveModelRateLimitDelayMs(new Error("429"), 3)).toBe(MODEL_RATE_LIMIT_BASE_DELAY_MS * 4);
+  });
+
+  it("offers another five retries after the automatic budget is exhausted", () => {
+    const question = buildModelRateLimitRecoveryQuestion("429 Rate limit reached");
+
+    expect(question).toMatchObject({
+      id: MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID,
+      allowFreeText: false,
+      options: [
+        { id: "continue", recommended: true },
+        { id: "stop" }
+      ]
+    });
+    expect(question.prompt).toContain("429");
+    expect(question.prompt).toContain(String(MAX_MODEL_RATE_LIMIT_RETRIES));
+  });
+
+  it("explains when the user stops after persistent 429 errors", () => {
+    const message = buildRuntimeFailureRecoveryMessage(
+      new Error(`Model rate limit persisted after ${MAX_MODEL_RATE_LIMIT_RETRIES} retries: 429 Rate limit reached`)
+    );
+
+    expect(message).toContain("429");
+    expect(message).toContain("稍后");
   });
 });
 
@@ -1090,6 +1157,40 @@ describe("context overflow recovery", () => {
     expect(summarized).toContain("precise file search");
   });
 
+  it("stops blocking completion after a focused search even when MCP output is truncated", () => {
+    const state = createRepositoryExplorationState();
+    applyLegacyMcpResultToRepositoryExploration(
+      state,
+      { name: "mcp.call", arguments: { tool: "get_repository_structure", arguments: { path: "/" } } },
+      { content: "tree\n".repeat(10_000) }
+    );
+    expect(state.pendingFollowUp).toBe(LEGACY_MCP_OVERSIZED_FOLLOW_UP);
+
+    applyLegacyMcpResultToRepositoryExploration(
+      state,
+      { name: "mcp.call", arguments: { tool: "search_files", arguments: { query: "EndPrjAutoApproval" } } },
+      { content: "matches\n".repeat(10_000) }
+    );
+    expect(state.pendingFollowUp).toBeNull();
+    expect(state.focusedActionAfterTruncation).toBe(true);
+    expect(resolveRepositoryCompletionBlock(state, "Final code review findings...")).toEqual({
+      action: "allow"
+    });
+  });
+
+  it("force-accepts a substantive answer after repeated legacy truncation blocks", () => {
+    const state = createRepositoryExplorationState();
+    state.pendingFollowUp = LEGACY_MCP_OVERSIZED_FOLLOW_UP;
+
+    expect(resolveRepositoryCompletionBlock(state, "Draft review").action).toBe("reject");
+    expect(resolveRepositoryCompletionBlock(state, "Draft review").action).toBe("reject");
+    expect(state.completionRejectCount).toBe(MAX_REPOSITORY_COMPLETION_REJECTIONS);
+    expect(resolveRepositoryCompletionBlock(state, "Final code review with findings")).toMatchObject({
+      action: "force_accept"
+    });
+    expect(state.pendingFollowUp).toBeNull();
+  });
+
   it("uses compact structured repository pages instead of raw MCP content", () => {
     const summarized = summarizeToolResultForModel("mcp.call", {
       ok: true,
@@ -1549,10 +1650,11 @@ describe("GPA plan validation", () => {
 });
 
 describe("browser workspace recovery", () => {
-  it("offers a skip-by-default choice when the Browser workspace is unavailable", () => {
+  it("recommends opening the Browser workspace when it is unavailable", () => {
     const question = buildBrowserWorkspaceRecoveryQuestion();
 
-    expect(question.options.find((option) => option.id === "skip")?.recommended).toBe(true);
+    expect(question.options.find((option) => option.id === "retry")?.recommended).toBe(true);
+    expect(question.options.find((option) => option.id === "skip")?.recommended).toBe(false);
     expect(resolveBrowserWorkspaceRecoveryChoice({ [question.id]: "retry" })).toBe("retry");
     expect(resolveBrowserWorkspaceRecoveryChoice({ [question.id]: "skip" })).toBe("skip");
   });
@@ -1562,7 +1664,11 @@ describe("browser workspace recovery", () => {
       "browser.inspect_page",
       "Tool execution failed: Browser tab is not ready. Open the Browser workspace and retry."
     )).toBe(true);
-    expect(isBrowserWorkspaceUnavailableError("browser.open_tab", "Tool execution failed: fetch failed")).toBe(true);
+    expect(isBrowserWorkspaceUnavailableError("browser.open_tab", "Tool execution failed: fetch failed")).toBe(false);
+    expect(isBrowserWorkspaceUnavailableError(
+      "browser.inspect_page",
+      "Tool execution failed: Browser tab webview is not attached yet for tab abc. Wait for the page to finish loading and retry."
+    )).toBe(false);
     expect(isBrowserWorkspaceUnavailableError("browser.inspect_page", "Page selector was not found")).toBe(false);
   });
 });
@@ -1762,6 +1868,61 @@ describe("multimodal intent classification", () => {
     expect(parseMultimodalIntentClassification(
       '{"intent":"video","prompt":"短片","count":3}'
     )).toMatchObject({ intent: "video", count: 1 });
+  });
+});
+
+describe("multimodal input recognition fallback", () => {
+  it("detects recognizable image and file attachments", () => {
+    expect(hasRecognizableMultimodalAttachments([
+      { id: "1", kind: "image", name: "a.png", mimeType: "image/png", absolutePath: "/tmp/a.png", sizeBytes: 10, source: "user" }
+    ])).toBe(true);
+    expect(hasRecognizableMultimodalAttachments([
+      { id: "2", kind: "file", name: "a.pdf", mimeType: "application/pdf", absolutePath: "/tmp/a.pdf", sizeBytes: 10, source: "user" }
+    ])).toBe(true);
+    expect(hasRecognizableMultimodalAttachments([
+      { id: "3", kind: "video", name: "a.mp4", mimeType: "video/mp4", absolutePath: "/tmp/a.mp4", sizeBytes: 10, source: "user" }
+    ])).toBe(false);
+  });
+
+  it("builds a recognition transcript that keeps image attachments", () => {
+    const attachments = [
+      { id: "1", kind: "image" as const, name: "a.png", mimeType: "image/png", absolutePath: "/tmp/a.png", sizeBytes: 10, source: "user" as const }
+    ];
+    const transcript = buildMultimodalInputRecognizeTranscript({
+      currentInput: "看看这张图",
+      attachments
+    });
+    expect(transcript).toEqual([
+      {
+        role: "user",
+        content: "看看这张图",
+        attachments
+      }
+    ]);
+  });
+
+  it("injects recognition notes into the latest user message and strips attachments", () => {
+    const next = applyMultimodalInputRecognitionToTranscript(
+      [
+        { role: "user", content: "旧消息", attachments: undefined },
+        {
+          role: "user",
+          content: "解释这张截图",
+          attachments: [
+            { id: "1", kind: "image", name: "a.png", mimeType: "image/png", absolutePath: "/tmp/a.png", sizeBytes: 10, source: "user" }
+          ]
+        }
+      ],
+      "截图里有一个登录按钮",
+      "vision-model"
+    );
+    expect(next).toHaveLength(2);
+    expect(next[0]).toEqual({ role: "user", content: "旧消息", attachments: undefined });
+    expect(next[1]?.attachments).toBeUndefined();
+    expect(next[1]?.content).toContain("[Multimodal recognition via vision-model]");
+    expect(next[1]?.content).toContain("截图里有一个登录按钮");
+    expect(next[1]?.content).toContain("[User message]");
+    expect(next[1]?.content).toContain("解释这张截图");
   });
 });
 

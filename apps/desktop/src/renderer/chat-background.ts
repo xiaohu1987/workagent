@@ -1,5 +1,15 @@
 export type ChatBackgroundFit = "cover" | "contain";
 
+export type ChatBackgroundSurfaceKey =
+  | "windowbar"
+  | "sidebar"
+  | "workspace"
+  | "rightPanel"
+  | "terminal"
+  | "dialog";
+
+export type ChatBackgroundSurfaces = Record<ChatBackgroundSurfaceKey, number>;
+
 export type ChatBackgroundSettings = {
   enabled: boolean;
   opacity: number;
@@ -9,7 +19,30 @@ export type ChatBackgroundSettings = {
   positionX: number;
   positionY: number;
   fileName: string | null;
+  surfaces: ChatBackgroundSurfaces;
 };
+
+export const DEFAULT_CHAT_BACKGROUND_SURFACES: ChatBackgroundSurfaces = {
+  windowbar: 62,
+  sidebar: 34,
+  workspace: 10,
+  rightPanel: 22,
+  terminal: 40,
+  dialog: 62
+};
+
+export const CHAT_BACKGROUND_SURFACE_OPTIONS: Array<{
+  key: ChatBackgroundSurfaceKey;
+  label: string;
+  hint: string;
+}> = [
+  { key: "windowbar", label: "标题栏", hint: "顶部窗口栏遮罩" },
+  { key: "sidebar", label: "侧边栏", hint: "历史记录与导航" },
+  { key: "workspace", label: "对话区", hint: "主聊天区域" },
+  { key: "rightPanel", label: "右侧工作区", hint: "文件、浏览器与 Git" },
+  { key: "terminal", label: "终端", hint: "底部终端抽屉" },
+  { key: "dialog", label: "弹窗", hint: "设置、确认框等浮层" }
+];
 
 export const DEFAULT_CHAT_BACKGROUND_SETTINGS: ChatBackgroundSettings = {
   enabled: true,
@@ -19,7 +52,8 @@ export const DEFAULT_CHAT_BACKGROUND_SETTINGS: ChatBackgroundSettings = {
   zoom: 115,
   positionX: 50,
   positionY: 50,
-  fileName: null
+  fileName: null,
+  surfaces: { ...DEFAULT_CHAT_BACKGROUND_SURFACES }
 };
 
 const SETTINGS_KEY = "codexh.chat-background.settings";
@@ -30,13 +64,32 @@ const BACKGROUND_KEY = "chat-background";
 const MAX_EXPORT_EDGE = 4096;
 
 function clamp(value: unknown, minimum: number, maximum: number, fallback: number): number {
+  if (value === null || value === undefined || value === "") return fallback;
   const numeric = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numeric) ? Math.min(maximum, Math.max(minimum, numeric)) : fallback;
 }
 
+export function normalizeChatBackgroundSurfaces(value: unknown): ChatBackgroundSurfaces {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Partial<Record<ChatBackgroundSurfaceKey, unknown>>
+    : {};
+
+  return {
+    windowbar: Math.round(clamp(source.windowbar, 0, 100, DEFAULT_CHAT_BACKGROUND_SURFACES.windowbar)),
+    sidebar: Math.round(clamp(source.sidebar, 0, 100, DEFAULT_CHAT_BACKGROUND_SURFACES.sidebar)),
+    workspace: Math.round(clamp(source.workspace, 0, 100, DEFAULT_CHAT_BACKGROUND_SURFACES.workspace)),
+    rightPanel: Math.round(clamp(source.rightPanel, 0, 100, DEFAULT_CHAT_BACKGROUND_SURFACES.rightPanel)),
+    terminal: Math.round(clamp(source.terminal, 0, 100, DEFAULT_CHAT_BACKGROUND_SURFACES.terminal)),
+    dialog: Math.round(clamp(source.dialog, 0, 100, DEFAULT_CHAT_BACKGROUND_SURFACES.dialog))
+  };
+}
+
 export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { ...DEFAULT_CHAT_BACKGROUND_SETTINGS };
+    return {
+      ...DEFAULT_CHAT_BACKGROUND_SETTINGS,
+      surfaces: { ...DEFAULT_CHAT_BACKGROUND_SURFACES }
+    };
   }
 
   const source = value as Partial<ChatBackgroundSettings>;
@@ -48,16 +101,36 @@ export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundS
     zoom: Math.round(clamp(source.zoom, 100, 180, DEFAULT_CHAT_BACKGROUND_SETTINGS.zoom)),
     positionX: Math.round(clamp(source.positionX, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.positionX)),
     positionY: Math.round(clamp(source.positionY, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.positionY)),
-    fileName: typeof source.fileName === "string" && source.fileName.trim() ? source.fileName.trim() : null
+    fileName: typeof source.fileName === "string" && source.fileName.trim() ? source.fileName.trim() : null,
+    surfaces: normalizeChatBackgroundSurfaces(source.surfaces)
+  };
+}
+
+export function getChatBackgroundSurfaceStyleVars(
+  surfaces: ChatBackgroundSurfaces
+): Record<string, string> {
+  return {
+    "--app-bg-windowbar": String(surfaces.windowbar / 100),
+    "--app-bg-sidebar": String(surfaces.sidebar / 100),
+    "--app-bg-workspace": String(surfaces.workspace / 100),
+    "--app-bg-right-panel": String(surfaces.rightPanel / 100),
+    "--app-bg-terminal": String(surfaces.terminal / 100),
+    "--app-bg-dialog": String(surfaces.dialog / 100)
   };
 }
 
 export function readChatBackgroundSettings(storage: Pick<Storage, "getItem"> = window.localStorage): ChatBackgroundSettings {
   try {
     const value = storage.getItem(SETTINGS_KEY);
-    return value ? normalizeChatBackgroundSettings(JSON.parse(value)) : { ...DEFAULT_CHAT_BACKGROUND_SETTINGS };
+    return value ? normalizeChatBackgroundSettings(JSON.parse(value)) : {
+      ...DEFAULT_CHAT_BACKGROUND_SETTINGS,
+      surfaces: { ...DEFAULT_CHAT_BACKGROUND_SURFACES }
+    };
   } catch {
-    return { ...DEFAULT_CHAT_BACKGROUND_SETTINGS };
+    return {
+      ...DEFAULT_CHAT_BACKGROUND_SETTINGS,
+      surfaces: { ...DEFAULT_CHAT_BACKGROUND_SURFACES }
+    };
   }
 }
 

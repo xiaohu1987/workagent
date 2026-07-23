@@ -951,10 +951,10 @@
   padding-left: 0;
 }
 
-/* User bubbles use intrinsic width; avoid percentage max-width shrinkage in the timeline. */
+/* User bubbles use intrinsic width; cap to the parent content box so right-panel resize reflows. */
 .task-timeline .message-user-content:not(.is-editing) .message-user-bubble {
   width: max-content;
-  max-width: min(68vw, 760px);
+  max-width: 100%;
   padding: 9px 15px;
   border-radius: 9px;
 }

@@ -44,9 +44,8 @@ function normalizeMultiAgentSettings(value?: Partial<MultiAgentSettings> | null)
     return Math.min(maximum, Math.max(minimum, numeric));
   };
   return {
-    // Older settings may contain the retired explicit mode. Keep delegation
-    // enabled by treating it as proactive instead of silently turning it off.
-    defaultMode: source.defaultMode === "disabled" ? "disabled" : "proactive",
+    // Sub-agents are opt-in per thread; product default stays disabled.
+    defaultMode: "disabled",
     maxConcurrentSubagents: clamp(source.maxConcurrentSubagents, 3, 1, 3),
     maxSubagentsPerRoot: clamp(source.maxSubagentsPerRoot, 8, 1, 8),
     maxDepth: clamp(source.maxDepth, 3, 1, 3),
@@ -191,7 +190,8 @@ export function defaultConfig(): AppConfig {
     routing: {},
     multimodal: {
       image: { enabled: true },
-      video: { enabled: true }
+      video: { enabled: true },
+      input: { enabled: true }
     },
     desktop: {
       theme: "system",
@@ -199,7 +199,7 @@ export function defaultConfig(): AppConfig {
       inAppBrowser: true
     },
     multiAgent: {
-      defaultMode: "proactive",
+      defaultMode: "disabled",
       maxConcurrentSubagents: 3,
       maxSubagentsPerRoot: 8,
       maxDepth: 3,
@@ -230,7 +230,7 @@ function readMultimodalModels(value: unknown): Array<{ id: string; displayName?:
 
 function readModalityDefaults(
   value: unknown,
-  role: 'image' | 'video',
+  role: 'image' | 'video' | 'input',
   models: ModelProfile[]
 ): { enabled: boolean; defaultProviderId?: string; defaultModelId?: string } {
   const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -238,6 +238,27 @@ function readModalityDefaults(
 
   let defaultProviderId = typeof source.defaultProviderId === 'string' ? source.defaultProviderId.trim() : '';
   let defaultModelId = typeof source.defaultModelId === 'string' ? source.defaultModelId.trim() : '';
+
+  if (role === 'input') {
+    const candidates = models.filter((model) => model.supportsMultimodalInput);
+    if (defaultModelId && !defaultProviderId) {
+      const owner = candidates.find((model) => model.id === defaultModelId);
+      defaultProviderId = owner?.providerId ?? '';
+    }
+    const defaultOk = candidates.some(
+      (model) => model.id === defaultModelId && model.providerId === defaultProviderId
+    );
+    if (!defaultOk) {
+      const first = candidates[0];
+      defaultProviderId = first?.providerId;
+      defaultModelId = first?.id;
+    }
+    return {
+      enabled,
+      defaultProviderId: defaultProviderId || undefined,
+      defaultModelId: defaultModelId || undefined
+    };
+  }
 
   if (Array.isArray(source.providers)) {
     for (const entry of source.providers) {
@@ -311,6 +332,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
 
   const image = readModalityDefaults(parsed.multimodal?.image, 'image', models);
   const video = readModalityDefaults(parsed.multimodal?.video, 'video', models);
+  const input = readModalityDefaults(parsed.multimodal?.input, 'input', models);
 
   return {
     defaultModel: parsed.defaultModel ?? 'mock-codexh',
@@ -318,7 +340,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     providers,
     models,
     routing: parsed.routing ?? {},
-    multimodal: { image, video },
+    multimodal: { image, video, input },
     desktop: {
       theme: parsed.desktop?.theme ?? 'system',
       approvals: parsed.desktop?.approvals ?? 'prompt',
@@ -472,7 +494,7 @@ export class DatabaseService {
         agent_path TEXT NOT NULL DEFAULT '/root',
         agent_role TEXT,
         last_task_message TEXT,
-        multi_agent_mode TEXT NOT NULL DEFAULT 'proactive'
+        multi_agent_mode TEXT NOT NULL DEFAULT 'disabled'
       );
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -707,7 +729,7 @@ export class DatabaseService {
     this.ensureColumn("threads", "agent_path", "TEXT NOT NULL DEFAULT '/root'");
     this.ensureColumn("threads", "agent_role", "TEXT");
     this.ensureColumn("threads", "last_task_message", "TEXT");
-    this.ensureColumn("threads", "multi_agent_mode", "TEXT NOT NULL DEFAULT 'proactive'");
+    this.ensureColumn("threads", "multi_agent_mode", "TEXT NOT NULL DEFAULT 'disabled'");
     this.#db.prepare("UPDATE threads SET root_thread_id = id WHERE root_thread_id IS NULL OR root_thread_id = ''").run();
     this.ensureColumn("user_input_prompts", "kind", "TEXT NOT NULL DEFAULT 'generic'");
     this.ensureColumn("user_input_prompts", "allow_skip", "INTEGER NOT NULL DEFAULT 0");
@@ -718,6 +740,18 @@ export class DatabaseService {
     this.ensureColumn("user_input_prompts", "expires_at", "TEXT");
     this.ensureColumn("user_input_prompts", "default_answers_json", "TEXT");
     this.ensureColumn("user_input_prompts", "resolution_source", "TEXT");
+    this.migrateSubagentDefaultOff();
+  }
+
+  /** One-shot: legacy installs defaulted multi_agent_mode to proactive. */
+  private migrateSubagentDefaultOff(): void {
+    const row = this.#db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
+    const version = Number(row?.user_version ?? 0);
+    if (version >= 1) {
+      return;
+    }
+    this.#db.prepare("UPDATE threads SET multi_agent_mode = 'disabled' WHERE multi_agent_mode != 'disabled'").run();
+    this.#db.exec("PRAGMA user_version = 1");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -827,7 +861,7 @@ export class DatabaseService {
       agentPath: input.agentPath ?? "/root",
       agentRole: input.agentRole ?? null,
       lastTaskMessage: input.lastTaskMessage ?? null,
-      multiAgentMode: input.multiAgentMode ?? "proactive"
+      multiAgentMode: input.multiAgentMode ?? "disabled"
     };
 
     this.#db

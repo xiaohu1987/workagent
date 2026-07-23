@@ -141,6 +141,63 @@ function describeAttachments(attachments: MessageAttachment[]): string {
   return `[attachments: ${kinds}]`;
 }
 
+/**
+ * System prompt for the default multimodal-input recognition model.
+ * Used when the chat model cannot accept image/file attachments directly.
+ */
+export function buildMultimodalInputRecognizeSystemPrompt(): string {
+  return [
+    "You convert multimodal attachments into a precise text description for a text-only model.",
+    "Describe every attached image and file in detail: visible text (OCR), layout, UI elements, code, tables, charts, errors, and any details needed to answer the user.",
+    "Respond in the same language as the user message when possible.",
+    "Do not answer the user's request yourself. Do not call tools. Output only the recognition notes."
+  ].join("\n");
+}
+
+export function buildMultimodalInputRecognizeTranscript(input: {
+  currentInput: string;
+  attachments: MessageAttachment[];
+}): Array<{ role: MessageRole; content: string; attachments?: MessageAttachment[] }> {
+  const current = input.currentInput.trim();
+  const recognizable = input.attachments.filter(
+    (attachment) => attachment.kind === "image" || attachment.kind === "file"
+  );
+  return [
+    {
+      role: "user",
+      content: current || "请识别这些附件的内容，输出详细文字描述。",
+      attachments: recognizable.length > 0 ? recognizable : undefined
+    }
+  ];
+}
+
+export function applyMultimodalInputRecognitionToTranscript(
+  transcript: Array<{ role: MessageRole; content: string; attachments?: MessageAttachment[] }>,
+  description: string,
+  recognizerModelId: string
+): Array<{ role: MessageRole; content: string; attachments?: MessageAttachment[] }> {
+  const note = description.trim();
+  if (!note) {
+    return transcript.map((message) => ({ ...message, attachments: undefined }));
+  }
+
+  return transcript.map((message, index) => {
+    const withoutAttachments = { ...message, attachments: undefined };
+    if (index !== transcript.length - 1 || message.role !== "user") {
+      return withoutAttachments;
+    }
+    const header = `[Multimodal recognition via ${recognizerModelId}]\n${note}`;
+    const content = message.content.trim()
+      ? `${header}\n\n[User message]\n${message.content}`
+      : header;
+    return { ...withoutAttachments, content };
+  });
+}
+
+export function hasRecognizableMultimodalAttachments(attachments: MessageAttachment[]): boolean {
+  return attachments.some((attachment) => attachment.kind === "image" || attachment.kind === "file");
+}
+
 /** @deprecated Prefer model-based classification. Kept for debug/tests only. */
 export function detectMultimodalIntent(
   input: string,

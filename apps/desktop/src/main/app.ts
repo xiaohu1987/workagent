@@ -572,7 +572,8 @@ export class DesktopBackend {
       workspaceKind: input.cwd ? "project" : "projectless",
       cwd: input.cwd,
       modelId: selection.modelId,
-      providerId: selection.providerId
+      providerId: selection.providerId,
+      multiAgentMode: this.#config.multiAgent?.defaultMode === "proactive" ? "proactive" : "disabled"
     });
     this.refreshSkillsInBackground(thread.cwd);
     this.#runtime.ensureThread(thread.id);
@@ -1086,7 +1087,7 @@ export class DesktopBackend {
       threadId,
       turnRunId: null,
       role: "assistant",
-      content: "此模型不支持多模态输入，无法处理本次文件、文件夹或图片附件。请切换到支持多模态的模型后重试。",
+      content: "此模型不支持多模态输入，无法处理本次文件、文件夹或图片附件。请切换到支持多模态的模型，或在设置 → 多模态中配置默认多模态识别模型后重试。",
       metadataJson: JSON.stringify({ reason: "multimodal_not_supported" })
     });
     for (const message of [userMessage, assistantMessage]) {
@@ -1650,6 +1651,24 @@ export class DesktopBackend {
     return updated;
   }
 
+  public async removeThreadSkill(threadId: string, skillId: string): Promise<ThreadRecord> {
+    const thread = this.#db.getThread(threadId);
+    if (!thread.selectedSkillIds.includes(skillId)) {
+      return thread;
+    }
+    const updated = this.#db.updateThread(threadId, {
+      selectedSkillIds: thread.selectedSkillIds.filter((id) => id !== skillId),
+      updatedAt: new Date().toISOString()
+    });
+    await this.emit({
+      type: "thread.updated",
+      threadId,
+      payload: { thread: updated },
+      createdAt: new Date().toISOString()
+    });
+    return updated;
+  }
+
   public listPlugins(): PluginRecord[] {
     return this.#db.listPlugins();
   }
@@ -1747,6 +1766,15 @@ export class DesktopBackend {
       threadId,
       payload: { action: "open", tab: opened.tab },
       createdAt: new Date().toISOString()
+    });
+    // Wait for the renderer webview to attach so follow-up automation tools can run.
+    await this.requireBrowserContents(threadId, opened.tab.id, 20_000).catch(async (error) => {
+      await this.#logs.append("browser.webview_attach_timeout", {
+        threadId,
+        tabId: opened.tab.id,
+        url: opened.tab.url,
+        error: error instanceof Error ? error.message : String(error)
+      });
     });
     return opened;
   }
@@ -1900,8 +1928,9 @@ export class DesktopBackend {
       throw new Error("Browser tab does not belong to this thread.");
     }
     const contents = webContents.fromId(webContentsId);
-    if (!contents || contents.isDestroyed() || contents.getType() !== "webview") {
-      throw new Error("Browser page is not available for automation.");
+    if (!contents || contents.isDestroyed() || !isBrowserAutomationGuest(contents)) {
+      const type = contents && !contents.isDestroyed() ? contents.getType() : "missing";
+      throw new Error(`Browser page is not available for automation (type=${type}, id=${webContentsId}).`);
     }
     const key = this.browserContentsKey(threadId, tabId);
     const previous = this.#browserContents.get(key);
@@ -1932,6 +1961,12 @@ export class DesktopBackend {
         this.#browserConsoleErrors.delete(key);
         this.#browserDebuggerOwned.delete(key);
       }
+    });
+    void this.#logs.append("browser.webview_registered", {
+      threadId,
+      tabId,
+      webContentsId,
+      type: contents.getType()
     });
   }
 
@@ -2257,14 +2292,39 @@ export class DesktopBackend {
     return { width: Math.max(1, size?.width ?? 1440), height: Math.max(1, size?.height ?? 900), deviceScaleFactor: 1, mobile: false };
   }
 
-  private async requireBrowserContents(threadId: string, tabId: string): Promise<WebContents> {
+  private async requireBrowserContents(threadId: string, tabId: string, timeoutMs = 20_000): Promise<WebContents> {
     const key = this.browserContentsKey(threadId, tabId);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    const attempts = Math.max(1, Math.ceil(timeoutMs / 100));
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       const contents = this.#browserContents.get(key);
       if (contents && !contents.isDestroyed()) return contents;
+      // Ask the renderer to re-bind once mid-wait; UI may already show the page.
+      if (attempt === Math.min(20, Math.floor(attempts / 3))) {
+        this.emitBrowserReregisterRequest(threadId, tabId);
+      }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    const tabExists = this.#db.listBrowserTabs(threadId).some((tab) => tab.id === tabId);
+    const registeredForThread = [...this.#browserContents.keys()].filter((item) => item.startsWith(`${threadId}:`));
+    await this.#logs.append("browser.webview_missing", {
+      threadId,
+      tabId,
+      tabExists,
+      registeredKeys: registeredForThread,
+      timeoutMs
+    });
+    // Tab metadata already exists: the workspace is open, only automation binding failed.
+    if (tabExists) {
+      throw new Error(
+        `Browser tab webview is not attached yet for tab ${tabId}. Wait for the page to finish loading and retry.`
+      );
+    }
     throw new Error("Browser tab is not ready. Open the Browser workspace and retry.");
+  }
+
+  private emitBrowserReregisterRequest(threadId: string, tabId: string): void {
+    const window = BrowserWindow.getAllWindows().find((entry) => !entry.isDestroyed());
+    window?.webContents.send("browser:request-reregister", { threadId, tabId });
   }
 
   private waitForBrowserLoad(contents: WebContents, timeoutMs = 15_000): Promise<void> {
@@ -3701,12 +3761,13 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     models: nextModels,
     multimodal: {
       image: normalizeMultimodalDefaults(config.multimodal?.image, nextModels, "image"),
-      video: normalizeMultimodalDefaults(config.multimodal?.video, nextModels, "video")
+      video: normalizeMultimodalDefaults(config.multimodal?.video, nextModels, "video"),
+      input: normalizeMultimodalInputDefaults(config.multimodal?.input, nextModels)
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     timeouts: normalizeRuntimeTimeouts(config.timeouts),
     multiAgent: {
-      defaultMode: config.multiAgent?.defaultMode === "disabled" ? "disabled" : "proactive",
+      defaultMode: "disabled",
       maxConcurrentSubagents: Math.min(3, Math.max(1, Math.round(config.multiAgent?.maxConcurrentSubagents ?? fallback.multiAgent.maxConcurrentSubagents))),
       maxSubagentsPerRoot: Math.min(8, Math.max(1, Math.round(config.multiAgent?.maxSubagentsPerRoot ?? fallback.multiAgent.maxSubagentsPerRoot))),
       maxDepth: Math.min(3, Math.max(1, Math.round(config.multiAgent?.maxDepth ?? fallback.multiAgent.maxDepth))),
@@ -3783,6 +3844,28 @@ function normalizeMultimodalDefaults(
   );
   if (!ok) {
     const first = roleModels[0];
+    defaultProviderId = first?.providerId;
+    defaultModelId = first?.id;
+  }
+  return {
+    enabled: value?.enabled !== false,
+    defaultProviderId,
+    defaultModelId
+  };
+}
+
+function normalizeMultimodalInputDefaults(
+  value: AppConfig["multimodal"]["input"] | undefined,
+  models: AppConfig["models"]
+): AppConfig["multimodal"]["input"] {
+  const candidates = models.filter((model) => model.supportsMultimodalInput);
+  let defaultProviderId = value?.defaultProviderId?.trim();
+  let defaultModelId = value?.defaultModelId?.trim();
+  const ok = candidates.some(
+    (model) => model.id === defaultModelId && model.providerId === defaultProviderId
+  );
+  if (!ok) {
+    const first = candidates[0];
     defaultProviderId = first?.providerId;
     defaultModelId = first?.id;
   }
@@ -4268,6 +4351,16 @@ function sortJsonValue(value: unknown): unknown {
 
 function buildApprovalScopeKey(projectId: string | null, approvalKey: string): string {
   return `${projectId ?? "__global__"}:${approvalKey}`;
+}
+
+function isBrowserAutomationGuest(contents: WebContents): boolean {
+  const type = contents.getType();
+  if (type === "webview") {
+    return true;
+  }
+  // Electron 43+ GuestView MPArch may report embedded guests as "page".
+  const host = (contents as WebContents & { hostWebContents?: WebContents | null }).hostWebContents;
+  return Boolean(host && !host.isDestroyed());
 }
 
 function slugify(value: string): string {

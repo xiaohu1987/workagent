@@ -618,7 +618,28 @@ class GeminiProvider implements ProviderAdapter {
       signal: input.abortSignal
     });
 
-    const json = (await response.json()) as {
+    const rawText = await response.text();
+    let payload: unknown = null;
+    if (rawText.trim()) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        payload = null;
+      }
+    }
+    if (!response.ok) {
+      const detail =
+        (payload && typeof payload === "object" && !Array.isArray(payload)
+          ? extractVideoErrorMessage(payload as Record<string, unknown>)
+          : null) ||
+        rawText.trim() ||
+        response.statusText;
+      throw new Error(`Gemini generateContent failed: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`);
+    }
+
+    const json = (payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload
+      : {}) as {
       candidates?: Array<{
         content?: {
           parts?: Array<{ text?: string; functionCall?: { name?: string; args?: unknown } }>;

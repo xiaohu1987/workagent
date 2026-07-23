@@ -257,7 +257,9 @@ async function createWindow(): Promise<void> {
     title: "codexh",
     titleBarStyle: "hidden",
     titleBarOverlay: {
-      color: "#09090a",
+      // Keep native caption buttons, but let the custom windowbar show through.
+      // Solid colors here create an opaque black block that ignores CSS module opacity.
+      color: "rgba(0, 0, 0, 0)",
       symbolColor: "#f3f4f6",
       height: 32
     },
@@ -455,6 +457,9 @@ function registerIpc(): void {
   );
   ipcMain.handle("threads:add-skill", (_event, payload: { threadId: string; skillId: string }) =>
     backend.addThreadSkill(payload.threadId, payload.skillId)
+  );
+  ipcMain.handle("threads:remove-skill", (_event, payload: { threadId: string; skillId: string }) =>
+    backend.removeThreadSkill(payload.threadId, payload.skillId)
   );
   ipcMain.handle("terminal:open", (_event, payload: { threadId: string; sessionId?: string }) =>
     backend.openTerminal(payload.threadId, payload.sessionId)

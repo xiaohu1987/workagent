@@ -64,8 +64,12 @@ import {
   type GpaPlanFileStatus
 } from "./gpa-plan-file";
 import {
+  applyMultimodalInputRecognitionToTranscript,
+  buildMultimodalInputRecognizeSystemPrompt,
+  buildMultimodalInputRecognizeTranscript,
   buildMultimodalIntentClassifySystemPrompt,
   buildMultimodalIntentClassifyTranscript,
+  hasRecognizableMultimodalAttachments,
   parseMultimodalIntentClassification,
   type MultimodalIntentClassification
 } from "./multimodal-intent";
@@ -100,7 +104,11 @@ export {
   detectMultimodalIntent,
   parseMultimodalIntentClassification,
   buildMultimodalIntentClassifySystemPrompt,
-  buildMultimodalIntentClassifyTranscript
+  buildMultimodalIntentClassifyTranscript,
+  buildMultimodalInputRecognizeSystemPrompt,
+  buildMultimodalInputRecognizeTranscript,
+  applyMultimodalInputRecognitionToTranscript,
+  hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
 
 export const MAX_REPEATED_TASK_FAILURES = 5;
@@ -118,6 +126,14 @@ export const MAX_CONTEXT_MESSAGE_TOKENS = 24_000;
 export const MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES = 5;
 export const AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS = 30_000;
 export const AGENT_PROTOCOL_RECOVERY_QUESTION_ID = "agent_protocol_recovery";
+export const MAX_REPOSITORY_COMPLETION_REJECTIONS = 2;
+export const LEGACY_MCP_OVERSIZED_FOLLOW_UP =
+  "The MCP server returned an oversized legacy response that was shortened.";
+export const MAX_MODEL_RATE_LIMIT_RETRIES = 5;
+export const MODEL_RATE_LIMIT_RECOVERY_TIMEOUT_MS = 30_000;
+export const MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID = "model_rate_limit_recovery";
+export const MODEL_RATE_LIMIT_BASE_DELAY_MS = 1_000;
+export const MODEL_RATE_LIMIT_MAX_DELAY_MS = 30_000;
 
 export function isUpstreamContextOverflowError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -133,6 +149,91 @@ export function isUpstreamContextOverflowError(error: unknown): boolean {
 export function isFunctionCallProtocolError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /\b400\b.*\bno tool (?:call|output) found for function call\b/i.test(message);
+}
+
+export function isModelRateLimitError(error: unknown): boolean {
+  if (error && typeof error === "object" && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    if (status === 429) {
+      return true;
+    }
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b(?:HTTP\s*)?429\b/i.test(message)) {
+    return true;
+  }
+  if (/\brate[\s_-]?limit(?:ed|ing)?\b/i.test(message)) {
+    return true;
+  }
+  if (/\btoo many requests\b/i.test(message)) {
+    return true;
+  }
+  if (/\bRESOURCE_EXHAUSTED\b/i.test(message)) {
+    return true;
+  }
+  return false;
+}
+
+export function resolveModelRateLimitDelayMs(error: unknown, attempt: number): number {
+  const retryAfterMs = readRetryAfterDelayMs(error);
+  if (retryAfterMs !== null) {
+    return Math.min(MODEL_RATE_LIMIT_MAX_DELAY_MS, Math.max(MODEL_RATE_LIMIT_BASE_DELAY_MS, retryAfterMs));
+  }
+  const exponential = MODEL_RATE_LIMIT_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1));
+  return Math.min(MODEL_RATE_LIMIT_MAX_DELAY_MS, exponential);
+}
+
+function readRetryAfterDelayMs(error: unknown): number | null {
+  if (!error || typeof error !== "object" || !("headers" in error)) {
+    return null;
+  }
+  const headers = (error as { headers?: unknown }).headers;
+  const raw = readHeaderValue(headers, "retry-after");
+  if (!raw) {
+    return null;
+  }
+  const asSeconds = Number(raw);
+  if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+    return Math.round(asSeconds * 1_000);
+  }
+  const asDate = Date.parse(raw);
+  if (!Number.isNaN(asDate)) {
+    return Math.max(0, asDate - Date.now());
+  }
+  return null;
+}
+
+function readHeaderValue(headers: unknown, name: string): string | null {
+  if (!headers || typeof headers !== "object") {
+    return null;
+  }
+  if (typeof (headers as { get?: unknown }).get === "function") {
+    const value = (headers as { get: (key: string) => string | null | undefined }).get(name);
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+  const record = headers as Record<string, unknown>;
+  const direct = record[name] ?? record[name.toLowerCase()] ?? record["Retry-After"];
+  return typeof direct === "string" && direct.trim() ? direct.trim() : null;
+}
+
+async function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+  if (signal.aborted) {
+    throw new Error("Turn interrupted.");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("Turn interrupted."));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -1021,6 +1122,85 @@ class ThreadSessionRuntime {
         userMessageMetadata
       );
 
+      let multimodalInputRecognition:
+        | { modelId: string; description: string }
+        | null = null;
+      const needsMultimodalInputFallback =
+        hasRecognizableMultimodalAttachments(attachments) && !model.supportsMultimodalInput;
+      if (needsMultimodalInputFallback) {
+        const fallback = resolveDefaultMultimodalInputModel(this.services.config);
+        if (!fallback) {
+          await this.recordMessage(
+            "assistant",
+            "当前聊天模型不支持多模态输入，且未配置可用的默认多模态识别模型。请在设置 → 多模态中指定默认多模态模型，或切换到支持多模态输入的聊天模型后再试。",
+            turn.id,
+            { reason: "multimodal_input_fallback_missing" }
+          );
+          const completedAt = new Date().toISOString();
+          await this.services.persistence.finishTurn(turn.id, {
+            status: "failed",
+            completedAt,
+            errorMessage: "multimodal_input_fallback_missing"
+          });
+          const updatedThread = await this.services.persistence.updateThread(this.threadId, {
+            status: "idle",
+            updatedAt: completedAt
+          });
+          await this.services.emit({
+            type: "thread.updated",
+            threadId: this.threadId,
+            payload: { thread: updatedThread },
+            createdAt: completedAt
+          });
+          return;
+        }
+
+        await this.services.log("multimodal.input_recognize", this.threadId, {
+          turnRunId: turn.id,
+          chatModelId: model.id,
+          recognizerModelId: fallback.model.id,
+          attachmentCount: attachments.length
+        });
+
+        const description = await this.recognizeMultimodalAttachments({
+          currentInput: initialInput,
+          attachments,
+          model: fallback.model,
+          provider: fallback.provider,
+          abortController,
+          turnId: turn.id
+        });
+        if (!description) {
+          await this.recordMessage(
+            "assistant",
+            `默认多模态模型（${fallback.model.displayName || fallback.model.id}）未能识别附件内容。请稍后重试，或切换到支持多模态输入的聊天模型。`,
+            turn.id,
+            { reason: "multimodal_input_recognize_failed" }
+          );
+          const completedAt = new Date().toISOString();
+          await this.services.persistence.finishTurn(turn.id, {
+            status: "failed",
+            completedAt,
+            errorMessage: "multimodal_input_recognize_failed"
+          });
+          const updatedThread = await this.services.persistence.updateThread(this.threadId, {
+            status: "idle",
+            updatedAt: completedAt
+          });
+          await this.services.emit({
+            type: "thread.updated",
+            threadId: this.threadId,
+            payload: { thread: updatedThread },
+            createdAt: completedAt
+          });
+          return;
+        }
+        multimodalInputRecognition = {
+          modelId: fallback.model.id,
+          description
+        };
+      }
+
       const multimodalClassification = await this.classifyMultimodalIntent({
         currentInput: initialInput,
         attachments,
@@ -1082,6 +1262,15 @@ class ThreadSessionRuntime {
 
       try {
         let transcript = compactTranscript(history);
+      if (multimodalInputRecognition) {
+        transcript = applyMultimodalInputRecognitionToTranscript(
+          transcript,
+          multimodalInputRecognition.description,
+          multimodalInputRecognition.modelId
+        );
+      } else if (!model.supportsMultimodalInput) {
+        transcript = transcript.map((message) => ({ ...message, attachments: undefined }));
+      }
       const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
       const policyKey = normalizeWorkspacePolicyKey(workspaceCwd);
       const executionPolicy = this.services.config.projectExecutionPolicies?.[policyKey] ?? DEFAULT_PROJECT_EXECUTION_POLICY;
@@ -1144,6 +1333,7 @@ class ThreadSessionRuntime {
       let managedWriteCompletionAttempts = 0;
       let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
+      let modelRateLimitAttempts = 0;
       let upstreamContextRecoveryAttempts = 0;
       let functionCallProtocolRecoveryAttempts = 0;
       let agentProtocolFailureAttempts = 0;
@@ -1270,7 +1460,7 @@ class ThreadSessionRuntime {
           allowSkip: false,
           questions: [buildBrowserWorkspaceRecoveryQuestion()],
           timeoutMs: 30_000,
-          defaultAnswers: { [BROWSER_WORKSPACE_RECOVERY_QUESTION_ID]: "skip" }
+          defaultAnswers: { [BROWSER_WORKSPACE_RECOVERY_QUESTION_ID]: "retry" }
         });
         return resolveBrowserWorkspaceRecoveryChoice(answers) ?? "skip";
       };
@@ -1458,6 +1648,71 @@ class ThreadSessionRuntime {
             });
             continue;
           }
+          if (!abortController.signal.aborted && isModelRateLimitError(error)) {
+            modelRateLimitAttempts += 1;
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            const delayMs = resolveModelRateLimitDelayMs(error, modelRateLimitAttempts);
+            const retrying = modelRateLimitAttempts <= MAX_MODEL_RATE_LIMIT_RETRIES;
+            await this.services.log("provider.rate_limit", this.threadId, {
+              turnRunId: turn.id,
+              attempt: modelRateLimitAttempts,
+              maxRetries: MAX_MODEL_RATE_LIMIT_RETRIES,
+              delayMs,
+              retrying,
+              error: errorMessage
+            });
+
+            if (retrying) {
+              await this.services.emit({
+                type: "agent.retrying",
+                threadId: this.threadId,
+                payload: {
+                  attempt: modelRateLimitAttempts,
+                  maxAttempts: MAX_MODEL_RATE_LIMIT_RETRIES,
+                  reason: "model_rate_limit",
+                  delayMs
+                },
+                createdAt: new Date().toISOString()
+              });
+              await sleepWithAbort(delayMs, abortController.signal);
+              continue;
+            }
+
+            const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+              title: "模型请求过于频繁",
+              kind: "generic",
+              allowSkip: false,
+              questions: [buildModelRateLimitRecoveryQuestion(errorMessage)],
+              timeoutMs: MODEL_RATE_LIMIT_RECOVERY_TIMEOUT_MS,
+              defaultAnswers: { [MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID]: "continue" }
+            });
+            if (answers[MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID] === "continue") {
+              modelRateLimitAttempts = 0;
+              await this.services.log("provider.rate_limit_retry_continued", this.threadId, {
+                turnRunId: turn.id,
+                nextBatchLimit: MAX_MODEL_RATE_LIMIT_RETRIES
+              });
+              await this.services.emit({
+                type: "agent.retrying",
+                threadId: this.threadId,
+                payload: {
+                  attempt: 0,
+                  maxAttempts: MAX_MODEL_RATE_LIMIT_RETRIES,
+                  reason: "model_rate_limit_continued"
+                },
+                createdAt: new Date().toISOString()
+              });
+              await sleepWithAbort(
+                resolveModelRateLimitDelayMs(error, MAX_MODEL_RATE_LIMIT_RETRIES),
+                abortController.signal
+              );
+              continue;
+            }
+
+            throw new Error(
+              `Model rate limit persisted after ${MAX_MODEL_RATE_LIMIT_RETRIES} retries: ${errorMessage}`
+            );
+          }
           if (!(error instanceof ModelDecisionTimeoutError) || abortController.signal.aborted) {
             throw error;
           }
@@ -1500,6 +1755,7 @@ class ThreadSessionRuntime {
           continue;
         }
         modelTimeoutAttempts = 0;
+        modelRateLimitAttempts = 0;
 
         if (abortController.signal.aborted) {
           throw new Error("Turn interrupted.");
@@ -1932,19 +2188,29 @@ class ThreadSessionRuntime {
           decision.endTurn &&
           repositoryExploration.pendingFollowUp
         ) {
-          const reason = repositoryExploration.pendingFollowUp;
-          await this.services.log("agent.repository_completion_rejected", this.threadId, {
-            turnRunId: turn.id,
-            reason
-          });
-          transcript.push({
-            role: "user",
-            content: buildRepositoryExplorationRecoveryInstruction(reason)
-          });
-          decision.assistantMessage = undefined;
-          decision.endTurn = false;
-          decision.goalCompleted = false;
-          continue;
+          const block = resolveRepositoryCompletionBlock(repositoryExploration, assistantMessage);
+          if (block.action === "reject") {
+            await this.services.log("agent.repository_completion_rejected", this.threadId, {
+              turnRunId: turn.id,
+              reason: block.reason,
+              attempt: repositoryExploration.completionRejectCount
+            });
+            transcript.push({
+              role: "user",
+              content: buildRepositoryExplorationRecoveryInstruction(block.reason)
+            });
+            decision.assistantMessage = undefined;
+            decision.endTurn = false;
+            decision.goalCompleted = false;
+            continue;
+          }
+          if (block.action === "force_accept") {
+            await this.services.log("agent.repository_completion_force_accepted", this.threadId, {
+              turnRunId: turn.id,
+              reason: block.reason,
+              attempt: repositoryExploration.completionRejectCount
+            });
+          }
         }
         if (
           this.#gpa.stage !== "act" &&
@@ -2851,10 +3117,7 @@ class ThreadSessionRuntime {
           const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result);
           const repositoryResult = getMcpRepositoryToolResult(sanitizedResult);
           if (repositoryResult) {
-            repositoryExploration.lastResult = repositoryResult;
-            repositoryExploration.pendingFollowUp = repositoryResult.hasMore
-              ? `The ${repositoryResult.kind} result has another page available.`
-              : null;
+            applyStructuredRepositoryResult(repositoryExploration, repositoryResult);
             await this.services.log("agent.repository_exploration", this.threadId, {
               turnRunId: turn.id,
               toolName: toolCall.name,
@@ -2879,14 +3142,20 @@ class ThreadSessionRuntime {
               },
               createdAt: new Date().toISOString()
             });
-          } else if (toolCall.name === "mcp.call" && result.content.length > MAX_MCP_TOOL_RESULT_CHARACTERS) {
-            repositoryExploration.pendingFollowUp = "The MCP server returned an oversized legacy response that was shortened.";
-            await this.services.emit({
-              type: "agent.repository_exploration",
-              threadId: this.threadId,
-              payload: { status: "narrowing", turnRunId: turn.id, legacyTruncated: true },
-              createdAt: new Date().toISOString()
-            });
+          } else if (toolCall.name === "mcp.call") {
+            const legacyFollowUp = applyLegacyMcpResultToRepositoryExploration(
+              repositoryExploration,
+              toolCall,
+              sanitizedResult
+            );
+            if (legacyFollowUp) {
+              await this.services.emit({
+                type: "agent.repository_exploration",
+                threadId: this.threadId,
+                payload: { status: "narrowing", turnRunId: turn.id, legacyTruncated: true },
+                createdAt: new Date().toISOString()
+              });
+            }
           }
           const persistedResult = toolCall.name.startsWith("database.")
             ? summarizeDatabaseToolResultForPersistence(sanitizedResult)
@@ -3558,6 +3827,59 @@ class ThreadSessionRuntime {
     };
   }
 
+  private async recognizeMultimodalAttachments(input: {
+    currentInput: string;
+    attachments: MessageAttachment[];
+    model: ModelProfile;
+    provider: ProviderDefinition;
+    abortController: AbortController;
+    turnId: string;
+  }): Promise<string | null> {
+    try {
+      const adapter = this.services.providerFactory.create(input.provider);
+      const recognizeAbort = createChildAbortController(input.abortController.signal);
+      const decision = await waitForAbortOrTimeout(
+        adapter.runTurn({
+          systemPrompt: buildMultimodalInputRecognizeSystemPrompt(),
+          transcript: buildMultimodalInputRecognizeTranscript({
+            currentInput: input.currentInput,
+            attachments: input.attachments
+          }),
+          availableTools: [],
+          model: input.model,
+          provider: input.provider,
+          stream: false,
+          abortSignal: recognizeAbort.signal
+        }),
+        input.abortController.signal,
+        this.services.config.timeouts.modelDecisionMs,
+        () => recognizeAbort.abort()
+      );
+
+      const raw =
+        typeof decision.assistantMessage === "string" ? decision.assistantMessage.trim() : "";
+      await this.services.log("multimodal.input_recognize", this.threadId, {
+        turnRunId: input.turnId,
+        recognizerModelId: input.model.id,
+        ok: Boolean(raw),
+        preview: raw.slice(0, 240)
+      });
+      return raw || null;
+    } catch (error) {
+      if (input.abortController.signal.aborted) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      await this.services.log("multimodal.input_recognize", this.threadId, {
+        turnRunId: input.turnId,
+        recognizerModelId: input.model.id,
+        ok: false,
+        failed: true,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    }
+  }
+
   private async classifyMultimodalIntent(input: {
     currentInput: string;
     attachments: MessageAttachment[];
@@ -4216,6 +4538,28 @@ export function buildAgentProtocolRecoveryQuestion(reason: string) {
   };
 }
 
+export function buildModelRateLimitRecoveryQuestion(reason: string) {
+  return {
+    id: MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID,
+    label: "是否继续重试",
+    prompt: `模型服务返回 429（请求过于频繁），已自动重试 ${MAX_MODEL_RATE_LIMIT_RETRIES} 次仍未成功。${reason}`,
+    options: [
+      {
+        id: "continue",
+        label: "继续重试",
+        description: `继续后会再自动重试 ${MAX_MODEL_RATE_LIMIT_RETRIES} 次。30 秒内未选择将默认继续。`,
+        recommended: true
+      },
+      {
+        id: "stop",
+        label: "停止任务",
+        description: "停止当前任务并保留已经完成的工具结果和项目文件。"
+      }
+    ],
+    allowFreeText: false
+  };
+}
+
 export function resolveBrowserTestChoice(
   answers: Record<string, string>
 ): BrowserTestChoice | undefined {
@@ -4428,13 +4772,13 @@ export function buildBrowserWorkspaceRecoveryQuestion() {
         id: "retry",
         label: "打开后重试",
         description: "打开浏览器工作区后，继续当前页面验证。",
-        recommended: false
+        recommended: true
       },
       {
         id: "skip",
         label: "跳过验证",
         description: "不再等待浏览器，使用文件或测试结果继续任务。",
-        recommended: true
+        recommended: false
       }
     ],
     allowFreeText: false
@@ -4452,8 +4796,9 @@ export function resolveBrowserWorkspaceRecoveryChoice(
 
 export function isBrowserWorkspaceUnavailableError(toolName: string, content: string): boolean {
   if (!isBrowserTestToolCall(toolName)) return false;
-  return /Browser tab is not ready\. Open the Browser workspace and retry\./i.test(content) ||
-    (toolName === "browser.open_tab" && /\bfetch failed\b/i.test(content));
+  // Only the explicit "workspace not open" readiness error should prompt the user.
+  // Attached-but-slow webviews and open_tab network failures should retry/fail normally.
+  return /Browser tab is not ready\. Open the Browser workspace and retry\./i.test(content);
 }
 
 export function buildGpaPlanProgressCheckpointInstruction(task: GpaState["planTasks"][number]): string {
@@ -4828,6 +5173,14 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
       "任务暂时停止：模型连续多次未能返回可执行的 Agent 决策。",
       `原因：${error.message.replace(/^Agent decision protocol failed repeatedly:\s*/, "")}`,
       "建议：稍后重试，或检查当前模型服务是否可用。已完成的工具结果和项目文件会被保留。"
+    ].join("\n");
+  }
+
+  if (error instanceof Error && error.message.startsWith("Model rate limit persisted after")) {
+    return [
+      "任务暂时停止：模型服务持续返回 429（请求过于频繁）。",
+      `原因：${error.message.replace(/^Model rate limit persisted after\s+\d+\s+retries:\s*/, "")}`,
+      "建议：稍后再试，或切换到配额更充足的模型/供应商。已完成的工具结果和项目文件会被保留。"
     ].join("\n");
   }
 
@@ -5811,10 +6164,18 @@ type RepositoryExplorationState = {
   broadTreeRequested: boolean;
   pendingFollowUp: string | null;
   lastResult: McpRepositoryToolResult | null;
+  completionRejectCount: number;
+  focusedActionAfterTruncation: boolean;
 };
 
-function createRepositoryExplorationState(): RepositoryExplorationState {
-  return { broadTreeRequested: false, pendingFollowUp: null, lastResult: null };
+export function createRepositoryExplorationState(): RepositoryExplorationState {
+  return {
+    broadTreeRequested: false,
+    pendingFollowUp: null,
+    lastResult: null,
+    completionRejectCount: 0,
+    focusedActionAfterTruncation: false
+  };
 }
 
 function prepareRepositoryExplorationCall(
@@ -5841,7 +6202,12 @@ function prepareRepositoryExplorationCall(
   }
 
   if (broadTreeRequest) state.broadTreeRequested = true;
-  if (cursor || !broadTreeRequest) state.pendingFollowUp = null;
+  if (cursor || !broadTreeRequest) {
+    state.pendingFollowUp = null;
+    if (isFocusedRepositoryMcpKind(kind, pathValue)) {
+      state.focusedActionAfterTruncation = true;
+    }
+  }
 
   if (kind === "repository_tree") {
     innerArguments.path = pathValue || "/";
@@ -5857,6 +6223,100 @@ function prepareRepositoryExplorationCall(
     ok: true,
     call: { ...call, arguments: { ...call.arguments, arguments: innerArguments } }
   };
+}
+
+export function applyStructuredRepositoryResult(
+  state: RepositoryExplorationState,
+  repositoryResult: McpRepositoryToolResult
+): void {
+  state.lastResult = repositoryResult;
+  state.pendingFollowUp = repositoryResult.hasMore
+    ? `The ${repositoryResult.kind} result has another page available.`
+    : null;
+  if (!repositoryResult.hasMore) {
+    state.focusedActionAfterTruncation = true;
+  }
+}
+
+export function applyLegacyMcpResultToRepositoryExploration(
+  state: RepositoryExplorationState,
+  toolCall: Pick<RuntimeToolCall, "name" | "arguments">,
+  result: Pick<ToolResult, "content">
+): boolean {
+  if (toolCall.name !== "mcp.call") return false;
+  const tool = typeof toolCall.arguments.tool === "string" ? toolCall.arguments.tool : "";
+  const kind = getRepositoryMcpToolKind(tool);
+  const pathValue = readMcpArgumentPath(toolCall.arguments);
+  const focused = Boolean(kind && isFocusedRepositoryMcpKind(kind, pathValue));
+
+  if (result.content.length <= MAX_MCP_TOOL_RESULT_CHARACTERS) {
+    if (focused) {
+      state.pendingFollowUp = null;
+      state.focusedActionAfterTruncation = true;
+    }
+    return false;
+  }
+
+  // Focused search/read already satisfied the "narrow further" requirement even when truncated.
+  if (focused) {
+    state.pendingFollowUp = null;
+    state.focusedActionAfterTruncation = true;
+    return true;
+  }
+
+  // Avoid re-arming the same truncation block forever after the model already narrowed once.
+  if (state.focusedActionAfterTruncation) {
+    state.pendingFollowUp = null;
+    return true;
+  }
+
+  state.pendingFollowUp = LEGACY_MCP_OVERSIZED_FOLLOW_UP;
+  return true;
+}
+
+export function resolveRepositoryCompletionBlock(
+  state: RepositoryExplorationState,
+  assistantMessage: string | undefined
+): { action: "reject"; reason: string } | { action: "allow" } | { action: "force_accept"; reason: string } {
+  if (!state.pendingFollowUp) {
+    return { action: "allow" };
+  }
+
+  const reason = state.pendingFollowUp;
+  const isLegacyTruncation = reason === LEGACY_MCP_OVERSIZED_FOLLOW_UP;
+  if (isLegacyTruncation && state.focusedActionAfterTruncation) {
+    state.pendingFollowUp = null;
+    return { action: "allow" };
+  }
+
+  state.completionRejectCount += 1;
+  const hasSubstantiveAnswer = Boolean(assistantMessage?.trim()) &&
+    !isProgressOnlyAssistantMessage(assistantMessage ?? "");
+
+  if (state.completionRejectCount > MAX_REPOSITORY_COMPLETION_REJECTIONS) {
+    state.pendingFollowUp = null;
+    if (hasSubstantiveAnswer || isLegacyTruncation) {
+      return { action: "force_accept", reason };
+    }
+    return { action: "allow" };
+  }
+
+  return { action: "reject", reason };
+}
+
+function isFocusedRepositoryMcpKind(
+  kind: McpRepositoryToolResult["kind"],
+  pathValue: string
+): boolean {
+  if (kind === "file_search" || kind === "file_read") return true;
+  if (kind === "repository_tree") return !isRepositoryRootPath(pathValue);
+  return false;
+}
+
+function readMcpArgumentPath(argumentsJson: Record<string, unknown>): string {
+  if (!isRecordValue(argumentsJson.arguments)) return "";
+  const pathValue = argumentsJson.arguments.path;
+  return typeof pathValue === "string" ? pathValue.trim() : "";
 }
 
 function getRepositoryMcpToolKind(tool: string): McpRepositoryToolResult["kind"] | null {
@@ -5891,7 +6351,7 @@ function buildRepositoryExplorationRecoveryInstruction(reason: string): string {
     "[Internal repository exploration recovery. Do not quote this instruction.]",
     reason,
     "Before answering, make one focused repository action: continue with nextCursor, search inside a discovered path, or read a specific file.",
-    "Do not repeat a root repository-tree call. After that action, synthesize the evidence into a direct user-facing answer."
+    "Do not repeat a root repository-tree call. After that focused action, synthesize the evidence into a direct user-facing answer even if some MCP results were shortened."
   ].join("\n");
 }
 
@@ -6051,6 +6511,31 @@ function resolveDefaultModalityModel(
       supportsVideoGeneration: role === "video"
     }
   };
+}
+
+function resolveDefaultMultimodalInputModel(
+  config: AppConfig
+): { provider: ProviderDefinition; model: ModelProfile } | null {
+  const modality = config.multimodal?.input;
+  if (!modality || modality.enabled === false) {
+    return null;
+  }
+  const providerId = modality.defaultProviderId?.trim();
+  const modelId = modality.defaultModelId?.trim();
+  if (!providerId || !modelId) {
+    return null;
+  }
+  const model = config.models.find(
+    (entry) =>
+      entry.id === modelId &&
+      entry.providerId === providerId &&
+      entry.supportsMultimodalInput
+  );
+  const provider = config.providers.find((entry) => entry.id === providerId);
+  if (!model || !provider) {
+    return null;
+  }
+  return { provider, model };
 }
 
 function assertAccessibleMcpServer(serverId: string, accessibleServerIds: string[]): void {

@@ -39,7 +39,7 @@ describe("parseMarkdownBlocks", () => {
     })).toBe(false);
   });
 
-  it("keeps selected skill, MCP, and database contexts after a send", () => {
+  it("clears every composer chip after a send, including skill, MCP, and database", () => {
     expect(retainPersistentComposerContexts([
       { kind: "file", label: "report.xlsx" },
       { kind: "image", label: "chart.png" },
@@ -47,11 +47,7 @@ describe("parseMarkdownBlocks", () => {
       { kind: "skill", label: "数据分析" },
       { kind: "mcp", label: "项目服务" },
       { kind: "database", label: "分析库" }
-    ])).toEqual([
-      { kind: "skill", label: "数据分析" },
-      { kind: "mcp", label: "项目服务" },
-      { kind: "database", label: "分析库" }
-    ]);
+    ])).toEqual([]);
   });
 
   it("parses only a closed echarts fence as a chart block", () => {
