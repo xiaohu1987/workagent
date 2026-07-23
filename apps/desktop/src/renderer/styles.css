@@ -1738,7 +1738,7 @@ pre {
   display: grid;
   width: min(390px, calc(100vw - 44px));
   max-height: min(640px, calc(100vh - 116px));
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 8px;
@@ -1769,7 +1769,7 @@ pre {
   border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 
-.notification-center-header > div {
+.notification-center-header > div:first-child {
   display: grid;
   min-width: 0;
   gap: 2px;
@@ -1786,8 +1786,14 @@ pre {
   font-size: 11px;
 }
 
-.notification-center-header button,
-.notification-center-footer button {
+.notification-center-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.notification-center-header button {
   flex: 0 0 auto;
   padding: 5px 7px;
   border-radius: 5px;
@@ -1795,8 +1801,7 @@ pre {
   font-size: 11px;
 }
 
-.notification-center-header button:hover:not(:disabled),
-.notification-center-footer button:hover {
+.notification-center-header button:hover:not(:disabled) {
   color: #f0f2f5;
   background: rgba(255, 255, 255, 0.06);
 }
@@ -2178,15 +2183,6 @@ pre {
 .notification-token-usage-thread {
   color: rgba(244, 244, 243, 0.42);
   font-size: 11px;
-}
-
-.notification-center-footer {
-  display: flex;
-  min-height: 38px;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 5px 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 @keyframes notification-bell-ring {

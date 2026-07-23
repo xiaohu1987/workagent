@@ -1112,6 +1112,88 @@ export function App() {
     });
   }
 
+  function syncThreadNotificationsFromThreads(nextThreads: ThreadRecord[]) {
+    const timestamp = new Date().toISOString();
+    const rootThreads = nextThreads.filter((thread) => !thread.parentThreadId);
+    const byId = new Map(rootThreads.map((thread) => [thread.id, thread]));
+
+    for (const thread of rootThreads) {
+      threadStatusRef.current.set(thread.id, thread.status);
+      const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", thread.id);
+      if (thread.status === "running" || thread.status === "waiting") {
+        if (active) {
+          if (thread.status === "waiting" && active.status !== "attention") {
+            setThreadNotificationAttention(
+              thread.id,
+              active.detail || "任务正在等待你的处理。",
+              active.attentionKind ?? "input",
+              active.anchorId,
+              timestamp
+            );
+          } else if (thread.status === "running" && active.status === "attention") {
+            // Keep approval / input / GPA attention until the corresponding event resumes it.
+            if (!active.attentionKind) {
+              resumeThreadNotification(thread.id, active.detail || "任务正在运行。", timestamp);
+            }
+          }
+          continue;
+        }
+        const waiting = thread.status === "waiting";
+        dispatchNotificationCenter({
+          type: "start",
+          item: {
+            id: `thread:${thread.id}:${timestamp}`,
+            source: "thread",
+            targetId: thread.id,
+            title: getNotificationThreadTitle(thread.id, thread.title),
+            detail: waiting ? "任务正在等待你的处理。" : "任务正在运行。",
+            status: waiting ? "attention" : "running",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            startedAt: timestamp,
+            unread: waiting
+          }
+        });
+        continue;
+      }
+
+      if (!active) continue;
+      const finishStatus = thread.status === "completed"
+        ? "completed"
+        : thread.status === "failed"
+          ? "failed"
+          : "cancelled";
+      dispatchNotificationCenter({
+        type: "finish",
+        source: "thread",
+        targetId: thread.id,
+        updatedAt: timestamp,
+        status: finishStatus,
+        title: getNotificationThreadTitle(thread.id, thread.title),
+        detail: finishStatus === "completed"
+          ? "任务已完成，可以查看结果。"
+          : finishStatus === "failed"
+            ? "任务执行失败，请打开任务查看详情。"
+            : "任务已停止。",
+        unread: finishStatus !== "cancelled"
+      });
+    }
+
+    for (const item of notificationCenterStateRef.current.items) {
+      if (item.source !== "thread" || (item.status !== "running" && item.status !== "attention")) continue;
+      if (byId.has(item.targetId)) continue;
+      dispatchNotificationCenter({
+        type: "finish",
+        source: "thread",
+        targetId: item.targetId,
+        updatedAt: timestamp,
+        status: "cancelled",
+        detail: "任务已停止。",
+        unread: false
+      });
+    }
+  }
+
   function updateSkillLabNotification(event: SkillLabEvent) {
     const active = findActiveNotification(notificationCenterStateRef.current.items, "skill-lab", event.jobId);
     const base = {
@@ -1283,6 +1365,7 @@ export function App() {
   }, [threads]);
 
   useEffect(() => window.codexh.onOpenNotificationCenter((target) => {
+    syncThreadNotificationsFromThreads(threadsRef.current);
     dispatchNotificationCenter({ type: "mark-all-read" });
     setHighlightedNotificationTarget(`${target.source}:${target.targetId}`);
     setIsNotificationCenterOpen(true);
@@ -3253,6 +3336,7 @@ export function App() {
   async function refreshThreads() {
     const nextThreads = (await window.codexh.listThreads()) as ThreadRecord[];
     setThreads(nextThreads);
+    syncThreadNotificationsFromThreads(nextThreads);
 
     // Runtime listeners are registered once, so read the current selection from the ref
     // instead of the render that created the listener.
@@ -6147,6 +6231,7 @@ export function App() {
       setHighlightedNotificationTarget(null);
       return;
     }
+    syncThreadNotificationsFromThreads(threadsRef.current);
     dispatchNotificationCenter({ type: "mark-all-read" });
     setNotificationNow(Date.now());
     setIsNotificationCenterOpen(true);
@@ -6533,13 +6618,22 @@ export function App() {
                 >
                   <header className="notification-center-header">
                     <div><strong>消息与进度</strong><span>{runningNotifications.length} 个运行中</span></div>
-                    <button
-                      type="button"
-                      disabled={!unreadFinishedNotificationCount}
-                      onClick={() => dispatchNotificationCenter({ type: "mark-all-read" })}
-                    >
-                      全部已读
-                    </button>
+                    <div className="notification-center-header-actions">
+                      <button
+                        type="button"
+                        disabled={!finishedNotifications.length}
+                        onClick={() => dispatchNotificationCenter({ type: "clear-finished" })}
+                      >
+                        清除已结束
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!unreadFinishedNotificationCount}
+                        onClick={() => dispatchNotificationCenter({ type: "mark-all-read" })}
+                      >
+                        全部已读
+                      </button>
+                    </div>
                   </header>
                   <div className="notification-center-body">
                     <section className={`notification-token-usage ${isTokenUsageExpanded ? "is-expanded" : ""}`} aria-label="本对话 Token 消耗">
@@ -6590,11 +6684,6 @@ export function App() {
                       </>
                     )}
                   </div>
-                  {finishedNotifications.length ? (
-                    <footer className="notification-center-footer">
-                      <button type="button" onClick={() => dispatchNotificationCenter({ type: "clear-finished" })}>清除已结束</button>
-                    </footer>
-                  ) : null}
                 </div>
               ) : null}
             </div>
