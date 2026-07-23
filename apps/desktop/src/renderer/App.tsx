@@ -54,10 +54,11 @@ import type {
   SkillMetadata,
   SkillUsageStats,
   ThreadRecord,
+  TokenUsage,
   ToolCallRecord,
   UserInputPrompt
 } from "@shared-types";
-import { DEFAULT_RUNTIME_TIMEOUTS } from "@shared-types";
+import { DEFAULT_RUNTIME_TIMEOUTS, createEmptyTokenUsage, addTokenUsage, finalizeTokenUsage } from "@shared-types";
 import {
   canDeleteThread,
   getComposerPrimaryActionState,
@@ -938,6 +939,12 @@ export function App() {
   const [notificationCenterState, setNotificationCenterState] = useState<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
   const notificationCenterStateRef = useRef<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
   const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
+  const [isTokenUsageExpanded, setIsTokenUsageExpanded] = useState(false);
+  const [threadTokenUsage, setThreadTokenUsage] = useState<{
+    turn: TokenUsage;
+    thread: TokenUsage;
+    turnRunId: string | null;
+  }>({ turn: createEmptyTokenUsage(), thread: createEmptyTokenUsage(), turnRunId: null });
   const [highlightedNotificationTarget, setHighlightedNotificationTarget] = useState<string | null>(null);
   const [notificationNow, setNotificationNow] = useState(() => Date.now());
   const notificationCenterRef = useRef<HTMLDivElement | null>(null);
@@ -1311,6 +1318,24 @@ export function App() {
     const timer = window.setInterval(() => setNotificationNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [isNotificationCenterOpen, notificationCenterState.items]);
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      setThreadTokenUsage({ turn: createEmptyTokenUsage(), thread: createEmptyTokenUsage(), turnRunId: null });
+      return;
+    }
+    let cancelled = false;
+    void window.codexh.getThreadTokenUsage(selectedThreadId).then((usage) => {
+      if (!cancelled) setThreadTokenUsage(usage);
+    }).catch(() => {
+      if (!cancelled) {
+        setThreadTokenUsage({ turn: createEmptyTokenUsage(), thread: createEmptyTokenUsage(), turnRunId: null });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedThreadId]);
 
   useEffect(() => {
     void window.codexh.getUpdateState().then(setUpdateState).catch(() => undefined);
@@ -2284,6 +2309,7 @@ export function App() {
           }
           if (runtimeThreadId === currentSelectedThreadId) {
             setGitRefreshRevision((current) => current + 1);
+            void window.codexh.getThreadTokenUsage(runtimeThreadId).then(setThreadTokenUsage).catch(() => undefined);
           }
         }
       }
@@ -2310,6 +2336,33 @@ export function App() {
             }
           };
         });
+      }
+      if (typed.type === "turn.usage" && typed.threadId && typed.payload?.usage) {
+        const usage = finalizeTokenUsage(typed.payload.usage as Partial<TokenUsage>);
+        const turnRunId = typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : null;
+        if (typed.threadId === currentSelectedThreadId) {
+          setThreadTokenUsage((current) => {
+            const sameTurn = turnRunId && current.turnRunId === turnRunId;
+            const previousTurn = sameTurn ? current.turn : createEmptyTokenUsage();
+            const threadWithoutPrevious = sameTurn
+              ? finalizeTokenUsage({
+                  totalTokens: Math.max(0, current.thread.totalTokens - previousTurn.totalTokens),
+                  inputTokens: Math.max(0, current.thread.inputTokens - previousTurn.inputTokens),
+                  inputCacheHitTokens: Math.max(0, current.thread.inputCacheHitTokens - previousTurn.inputCacheHitTokens),
+                  inputCacheMissTokens: Math.max(0, current.thread.inputCacheMissTokens - previousTurn.inputCacheMissTokens),
+                  inputCacheWriteTokens: Math.max(0, current.thread.inputCacheWriteTokens - previousTurn.inputCacheWriteTokens),
+                  outputTokens: Math.max(0, current.thread.outputTokens - previousTurn.outputTokens),
+                  outputReasoningTokens: Math.max(0, current.thread.outputReasoningTokens - previousTurn.outputReasoningTokens),
+                  outputContentTokens: Math.max(0, current.thread.outputContentTokens - previousTurn.outputContentTokens)
+                })
+              : current.thread;
+            return {
+              turn: usage,
+              thread: addTokenUsage(threadWithoutPrevious, usage),
+              turnRunId
+            };
+          });
+        }
       }
       if (!isPluginStateUpdate) {
         void refreshThreads();
@@ -3691,6 +3744,7 @@ export function App() {
       setGpaPlanResumeRetryPrompt(null);
       setIsTerminalOpen(false);
       setIsClearChatConfirmOpen(false);
+      setThreadTokenUsage({ turn: createEmptyTokenUsage(), thread: createEmptyTokenUsage(), turnRunId: null });
       await refreshThreads();
       showNotice("聊天记录已清空。", { tone: "success" });
       window.setTimeout(() => composerRef.current?.focus(), 0);
@@ -6488,6 +6542,44 @@ export function App() {
                     </button>
                   </header>
                   <div className="notification-center-body">
+                    <section className={`notification-token-usage ${isTokenUsageExpanded ? "is-expanded" : ""}`} aria-label="本对话 Token 消耗">
+                      <button
+                        type="button"
+                        className="notification-token-usage-toggle"
+                        aria-expanded={isTokenUsageExpanded}
+                        onClick={() => setIsTokenUsageExpanded((current) => !current)}
+                      >
+                        <span className="notification-token-usage-toggle-main">
+                          <span className="notification-token-usage-label">累计消耗</span>
+                          <strong>{formatTokenCount(threadTokenUsage.thread.totalTokens)}</strong>
+                          {selectedThreadId ? <em>实时</em> : null}
+                        </span>
+                        <span className="notification-token-usage-chevron" aria-hidden>
+                          <IconChevronDown />
+                        </span>
+                      </button>
+                      <div className="notification-token-usage-panel" aria-hidden={!isTokenUsageExpanded}>
+                        <div className="notification-token-usage-panel-inner">
+                          <div className="notification-token-usage-grid">
+                            <div className="notification-token-usage-block">
+                              <strong>输入</strong>
+                              <div><span>缓存命中</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheHitTokens)}</b></div>
+                              <div><span>未命中</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheMissTokens)}</b></div>
+                              <div><span>缓存写入</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheWriteTokens)}</b></div>
+                            </div>
+                            <div className="notification-token-usage-block">
+                              <strong>输出</strong>
+                              <div><span>思考过程</span><b>{formatTokenCount(threadTokenUsage.thread.outputReasoningTokens)}</b></div>
+                              <div><span>回复内容</span><b>{formatTokenCount(threadTokenUsage.thread.outputContentTokens)}</b></div>
+                            </div>
+                            <div className="notification-token-usage-rate">
+                              <span>缓存命中率</span>
+                              <strong>{formatCacheHitRate(threadTokenUsage.thread.cacheHitRate)}</strong>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
                     {!sortedNotificationItems.length ? (
                       <div className="notification-center-empty"><IconBell /><span>暂无后台任务或消息</span></div>
                     ) : (
@@ -11210,6 +11302,11 @@ function estimateContextTokens(value: string): number {
 
 function formatTokenCount(tokens: number): string {
   return tokens >= 1_000 ? `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}K` : String(tokens);
+}
+
+function formatCacheHitRate(rate: number): string {
+  if (!Number.isFinite(rate) || rate <= 0) return "0%";
+  return `${Math.round(rate * 1000) / 10}%`;
 }
 
 function LegacyBrowserWorkspace({

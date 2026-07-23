@@ -13,6 +13,7 @@ const api = {
     ipcRenderer.invoke("appearance:background:save-settings", settings),
   clearApplicationBackground: () => ipcRenderer.invoke("appearance:background:clear"),
   listThreads: () => ipcRenderer.invoke("threads:list"),
+  getThreadTokenUsage: (threadId: string) => ipcRenderer.invoke("threads:token-usage", threadId),
   searchThreads: (query: string) => ipcRenderer.invoke("threads:search", query),
   setThreadPinned: (payload: { threadId: string; isPinned: boolean }) =>
     ipcRenderer.invoke("threads:set-pinned", payload),

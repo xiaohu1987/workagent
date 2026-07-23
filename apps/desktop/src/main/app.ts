@@ -402,6 +402,14 @@ export class DesktopBackend {
     return this.#db.listThreads();
   }
 
+  public getThreadTokenUsage(threadId: string): {
+    turn: import("@shared-types").TokenUsage;
+    thread: import("@shared-types").TokenUsage;
+    turnRunId: string | null;
+  } {
+    return this.#db.getThreadTokenUsage(threadId);
+  }
+
   public searchThreads(query: string) {
     return this.#db.searchThreads(query);
   }

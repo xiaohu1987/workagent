@@ -132,9 +132,95 @@ export interface TurnRunRecord {
   resolvedModelSnapshotJson: string;
   promptTokens: number;
   completionTokens: number;
+  /** Detailed provider usage for the turn when available. */
+  usageJson?: string | null;
   startedAt: string;
   completedAt: string | null;
   errorMessage: string | null;
+}
+
+/** Aggregated token usage for one provider call, one turn, or one thread. */
+export interface TokenUsage {
+  totalTokens: number;
+  inputTokens: number;
+  inputCacheHitTokens: number;
+  inputCacheMissTokens: number;
+  inputCacheWriteTokens: number;
+  outputTokens: number;
+  outputReasoningTokens: number;
+  outputContentTokens: number;
+  /** Cache hit rate over input tokens, 0–1. */
+  cacheHitRate: number;
+}
+
+export function createEmptyTokenUsage(): TokenUsage {
+  return {
+    totalTokens: 0,
+    inputTokens: 0,
+    inputCacheHitTokens: 0,
+    inputCacheMissTokens: 0,
+    inputCacheWriteTokens: 0,
+    outputTokens: 0,
+    outputReasoningTokens: 0,
+    outputContentTokens: 0,
+    cacheHitRate: 0
+  };
+}
+
+export function finalizeTokenUsage(partial: Partial<TokenUsage>): TokenUsage {
+  const inputTokens = Math.max(0, Math.round(partial.inputTokens ?? 0));
+  const inputCacheHitTokens = Math.max(0, Math.round(partial.inputCacheHitTokens ?? 0));
+  const inputCacheWriteTokens = Math.max(0, Math.round(partial.inputCacheWriteTokens ?? 0));
+  const inputCacheMissTokens = Math.max(
+    0,
+    Math.round(partial.inputCacheMissTokens ?? Math.max(0, inputTokens - inputCacheHitTokens))
+  );
+  const outputTokens = Math.max(0, Math.round(partial.outputTokens ?? 0));
+  const outputReasoningTokens = Math.max(0, Math.round(partial.outputReasoningTokens ?? 0));
+  const outputContentTokens = Math.max(
+    0,
+    Math.round(partial.outputContentTokens ?? Math.max(0, outputTokens - outputReasoningTokens))
+  );
+  const totalTokens = Math.max(
+    0,
+    Math.round(partial.totalTokens ?? inputTokens + outputTokens)
+  );
+  const cacheHitRate = inputTokens > 0 ? Math.min(1, inputCacheHitTokens / inputTokens) : 0;
+  return {
+    totalTokens,
+    inputTokens,
+    inputCacheHitTokens,
+    inputCacheMissTokens,
+    inputCacheWriteTokens,
+    outputTokens,
+    outputReasoningTokens,
+    outputContentTokens,
+    cacheHitRate
+  };
+}
+
+export function addTokenUsage(left: TokenUsage, right: Partial<TokenUsage> | TokenUsage): TokenUsage {
+  return finalizeTokenUsage({
+    totalTokens: left.totalTokens + (right.totalTokens ?? 0),
+    inputTokens: left.inputTokens + (right.inputTokens ?? 0),
+    inputCacheHitTokens: left.inputCacheHitTokens + (right.inputCacheHitTokens ?? 0),
+    inputCacheMissTokens: left.inputCacheMissTokens + (right.inputCacheMissTokens ?? 0),
+    inputCacheWriteTokens: left.inputCacheWriteTokens + (right.inputCacheWriteTokens ?? 0),
+    outputTokens: left.outputTokens + (right.outputTokens ?? 0),
+    outputReasoningTokens: left.outputReasoningTokens + (right.outputReasoningTokens ?? 0),
+    outputContentTokens: left.outputContentTokens + (right.outputContentTokens ?? 0)
+  });
+}
+
+export function parseTokenUsageJson(value: string | null | undefined): TokenUsage | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<TokenUsage>;
+    if (!parsed || typeof parsed !== "object") return null;
+    return finalizeTokenUsage(parsed);
+  } catch {
+    return null;
+  }
 }
 
 export interface ToolSpecDefinition {
@@ -660,6 +746,8 @@ export interface ProviderTurnDecision {
   };
   /** Provider-reported completion token count when its API exposes usage data. */
   outputTokens?: number;
+  /** Detailed provider usage when available. Prefer this over outputTokens alone. */
+  usage?: TokenUsage;
   toolCalls: RuntimeToolCall[];
   endTurn: boolean;
   /** Explicit provider declaration that every deliverable in the user goal is complete. */
@@ -768,6 +856,7 @@ export interface RuntimeEvent {
     | "agent.repository_exploration"
     | "queue.updated"
     | "turn.updated"
+    | "turn.usage"
     | "tool.started"
     | "tool.completed"
     | "approval.requested"

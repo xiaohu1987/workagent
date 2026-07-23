@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_PROJECT_EXECUTION_POLICY, DEFAULT_RUNTIME_TIMEOUTS, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage } from "@shared-types";
 import type {
   AppConfig,
   ArtifactRecord,
@@ -25,13 +26,13 @@ import type {
   ThreadRecord,
   SubagentResultEnvelope,
   SubagentWaitResult,
+  TokenUsage,
   ToolCallRecord,
   ToolResult,
   ToolSpecDefinition,
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { DEFAULT_PROJECT_EXECUTION_POLICY, DEFAULT_RUNTIME_TIMEOUTS } from "@shared-types";
 import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
@@ -1259,6 +1260,7 @@ class ThreadSessionRuntime {
           isWebFrontendTaskText(this.#gpa.planTasks.map((task) => task.title).join("\n")));
 
       let interruptedVisibleContent = "";
+      let turnTokenUsage = createEmptyTokenUsage();
 
       try {
         let transcript = compactTranscript(history);
@@ -1759,6 +1761,27 @@ class ThreadSessionRuntime {
 
         if (abortController.signal.aborted) {
           throw new Error("Turn interrupted.");
+        }
+
+        const stepUsage = decision.usage ?? (typeof decision.outputTokens === "number"
+          ? finalizeTokenUsage({ outputTokens: decision.outputTokens, outputContentTokens: decision.outputTokens })
+          : null);
+        if (stepUsage) {
+          turnTokenUsage = addTokenUsage(turnTokenUsage, stepUsage);
+          await this.services.persistence.finishTurn(turn.id, {
+            promptTokens: turnTokenUsage.inputTokens,
+            completionTokens: turnTokenUsage.outputTokens,
+            usageJson: JSON.stringify(turnTokenUsage)
+          });
+          await this.services.emit({
+            type: "turn.usage",
+            threadId: this.threadId,
+            payload: {
+              turnRunId: turn.id,
+              usage: turnTokenUsage
+            },
+            createdAt: new Date().toISOString()
+          });
         }
 
         const planProgress = this.#gpa.stage === "act"

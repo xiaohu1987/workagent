@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
-import { normalizeRuntimeTimeouts } from "@shared-types";
+import { normalizeRuntimeTimeouts, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson } from "@shared-types";
 import type {
   AppConfig,
   ApprovalResolutionMode,
@@ -28,6 +28,7 @@ import type {
   ProjectPluginBinding,
   QuickNoteRecord,
   RememberedApprovalRecord,
+  TokenUsage,
   QueuedMessageRecord,
   ProviderDefinition,
   RuntimeEvent,
@@ -524,6 +525,7 @@ export class DatabaseService {
         resolved_model_snapshot_json TEXT NOT NULL,
         prompt_tokens INTEGER NOT NULL,
         completion_tokens INTEGER NOT NULL,
+        usage_json TEXT,
         started_at TEXT NOT NULL,
         completed_at TEXT,
         error_message TEXT
@@ -740,6 +742,7 @@ export class DatabaseService {
     this.ensureColumn("user_input_prompts", "expires_at", "TEXT");
     this.ensureColumn("user_input_prompts", "default_answers_json", "TEXT");
     this.ensureColumn("user_input_prompts", "resolution_source", "TEXT");
+    this.ensureColumn("turn_runs", "usage_json", "TEXT");
     this.migrateSubagentDefaultOff();
   }
 
@@ -1265,8 +1268,8 @@ export class DatabaseService {
       .prepare(
         `INSERT INTO turn_runs (
           id, thread_id, kind, status, provider_id, model_id, resolved_model_snapshot_json,
-          prompt_tokens, completion_tokens, started_at, completed_at, error_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          prompt_tokens, completion_tokens, usage_json, started_at, completed_at, error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         turn.id,
@@ -1278,6 +1281,7 @@ export class DatabaseService {
         turn.resolvedModelSnapshotJson,
         turn.promptTokens,
         turn.completionTokens,
+        turn.usageJson ?? null,
         turn.startedAt,
         turn.completedAt,
         turn.errorMessage
@@ -1294,19 +1298,21 @@ export class DatabaseService {
       status: patch.status ?? current.status,
       promptTokens: patch.promptTokens ?? current.prompt_tokens,
       completionTokens: patch.completionTokens ?? current.completion_tokens,
+      usageJson: patch.usageJson !== undefined ? patch.usageJson : current.usage_json,
       completedAt: patch.completedAt ?? current.completed_at,
       errorMessage: patch.errorMessage ?? current.error_message
     };
     this.#db
       .prepare(
         `UPDATE turn_runs
-         SET status = ?, prompt_tokens = ?, completion_tokens = ?, completed_at = ?, error_message = ?
+         SET status = ?, prompt_tokens = ?, completion_tokens = ?, usage_json = ?, completed_at = ?, error_message = ?
          WHERE id = ?`
       )
       .run(
         next.status,
         next.promptTokens,
         next.completionTokens,
+        next.usageJson ?? null,
         next.completedAt,
         next.errorMessage,
         turnRunId
@@ -1318,19 +1324,39 @@ export class DatabaseService {
       .prepare("SELECT * FROM turn_runs WHERE thread_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
       .get(threadId) as any;
     if (!row) return null;
+    return mapTurnRunRow(row);
+  }
+
+  public listTurnRuns(threadId: string): TurnRunRecord[] {
+    return (this.#db
+      .prepare("SELECT * FROM turn_runs WHERE thread_id = ? ORDER BY started_at ASC, rowid ASC")
+      .all(threadId) as any[]).map(mapTurnRunRow);
+  }
+
+  public getThreadTokenUsage(threadId: string): {
+    turn: TokenUsage;
+    thread: TokenUsage;
+    turnRunId: string | null;
+  } {
+    const turns = this.listTurnRuns(threadId);
+    const latest = turns.length > 0 ? turns[turns.length - 1] : null;
+    const turnUsage = latest
+      ? parseTokenUsageJson(latest.usageJson) ?? finalizeTokenUsage({
+          inputTokens: latest.promptTokens,
+          outputTokens: latest.completionTokens
+        })
+      : createEmptyTokenUsage();
+    const threadUsage = turns.reduce((sum, entry) => {
+      const usage = parseTokenUsageJson(entry.usageJson) ?? finalizeTokenUsage({
+        inputTokens: entry.promptTokens,
+        outputTokens: entry.completionTokens
+      });
+      return addTokenUsage(sum, usage);
+    }, createEmptyTokenUsage());
     return {
-      id: row.id,
-      threadId: row.thread_id,
-      kind: row.kind,
-      status: row.status,
-      providerId: row.provider_id,
-      modelId: row.model_id,
-      resolvedModelSnapshotJson: row.resolved_model_snapshot_json,
-      promptTokens: row.prompt_tokens,
-      completionTokens: row.completion_tokens,
-      startedAt: row.started_at,
-      completedAt: row.completed_at,
-      errorMessage: row.error_message
+      turn: turnUsage,
+      thread: threadUsage,
+      turnRunId: latest?.id ?? null
     };
   }
 
@@ -2403,6 +2429,24 @@ function mapMessageRow(row: any): MessageRecord {
     content: row.content,
     metadataJson: row.metadata_json,
     createdAt: row.created_at
+  };
+}
+
+function mapTurnRunRow(row: any): TurnRunRecord {
+  return {
+    id: row.id,
+    threadId: row.thread_id,
+    kind: row.kind,
+    status: row.status,
+    providerId: row.provider_id,
+    modelId: row.model_id,
+    resolvedModelSnapshotJson: row.resolved_model_snapshot_json,
+    promptTokens: row.prompt_tokens,
+    completionTokens: row.completion_tokens,
+    usageJson: row.usage_json ?? null,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    errorMessage: row.error_message
   };
 }
 

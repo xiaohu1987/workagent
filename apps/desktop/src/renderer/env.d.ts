@@ -35,6 +35,11 @@ declare global {
       saveApplicationBackgroundSettings: (settings: unknown) => Promise<void>;
       clearApplicationBackground: () => Promise<void>;
       listThreads: () => Promise<any[]>;
+      getThreadTokenUsage: (threadId: string) => Promise<{
+        turn: import("@shared-types").TokenUsage;
+        thread: import("@shared-types").TokenUsage;
+        turnRunId: string | null;
+      }>;
       searchThreads: (query: string) => Promise<Array<{ thread: ThreadRecord; snippet: string | null; score: number }>>;
       setThreadPinned: (payload: { threadId: string; isPinned: boolean }) => Promise<ThreadRecord>;
       renameThread: (payload: { threadId: string; title: string }) => Promise<ThreadRecord>;

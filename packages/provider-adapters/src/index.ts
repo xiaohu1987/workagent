@@ -3,7 +3,7 @@ import OpenAI from "openai";
 import * as cheerio from "cheerio";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { modelJsonCandidates, tryParseModelJson } from "@shared-types";
+import { finalizeTokenUsage, modelJsonCandidates, tryParseModelJson } from "@shared-types";
 import type {
   MessageAttachment,
   ModelProfile,
@@ -11,7 +11,8 @@ import type {
   ProviderTurnDecision,
   ProviderTurnInput,
   ProviderType,
-  RuntimeToolCall
+  RuntimeToolCall,
+  TokenUsage
 } from "@shared-types";
 
 export interface ProviderAdapter {
@@ -171,7 +172,13 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
 
     if (input.stream && input.model.supportsStreaming) {
       const streamResponse = await this.#client.chat.completions.create(
-        { ...request, stream: true },
+        {
+          ...request,
+          stream: true,
+          // OpenAI and most compatible gateways only attach usage on the final
+          // chunk when this flag is set.
+          stream_options: { include_usage: true }
+        },
         { signal: input.abortSignal }
       ) as any;
       if (!isAsyncIterable(streamResponse)) {
@@ -180,9 +187,13 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       const stream = streamResponse;
       let text = "";
       let visibleText = "";
+      let streamUsage: unknown;
       const streamedNativeCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
       for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta;
+        if (chunk?.usage) {
+          streamUsage = chunk.usage;
+        }
+        const delta = chunk?.choices?.[0]?.delta;
         const content = delta?.content ?? "";
         if (content) {
           text += content;
@@ -221,15 +232,18 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           }];
         });
       if (nativeCalls.length > 0) {
-        return {
+        return withTokenUsage({
           assistantMessage: text.trim() || undefined,
           toolCalls: nativeCalls,
           endTurn: false,
           goalCompleted: false,
           isStructured: true
-        };
+        }, streamUsage);
       }
-      return nativeTools ? nativeTextDecision(text.trim()) : parseDecisionFromText(text.trim());
+      return withTokenUsage(
+        nativeTools ? nativeTextDecision(text.trim()) : parseDecisionFromText(text.trim()),
+        streamUsage
+      );
     }
 
     const response = await this.#client.chat.completions.create(request, {
@@ -474,18 +488,18 @@ function parseOpenAiCompatibleResponse(
     }];
   }) ?? [];
   if (nativeCalls.length > 0) {
-    return withOutputTokens({
+    return withTokenUsage({
       assistantMessage: message?.content?.trim() || undefined,
       toolCalls: nativeCalls,
       endTurn: false,
       goalCompleted: false,
       isStructured: true
-    }, response.usage?.completion_tokens);
+    }, response.usage);
   }
   const text = message?.content?.trim() || "";
-  return withOutputTokens(
+  return withTokenUsage(
     hasNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
-    response.usage?.completion_tokens
+    response.usage
   );
 }
 
@@ -559,7 +573,7 @@ class AnthropicProvider implements ProviderAdapter {
       }];
     });
     if (nativeCalls.length > 0) {
-      return withOutputTokens({
+      return withTokenUsage({
         assistantMessage: response.content
           .filter((part) => part.type === "text")
           .map((part) => part.text)
@@ -569,16 +583,16 @@ class AnthropicProvider implements ProviderAdapter {
         endTurn: false,
         goalCompleted: false,
         isStructured: true
-      }, response.usage.output_tokens);
+      }, response.usage);
     }
     const text = response.content
       .map((part) => ("text" in part ? part.text : ""))
       .join("\n")
       .trim();
 
-    return withOutputTokens(
+    return withTokenUsage(
       nativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
-      response.usage.output_tokens
+      response.usage
     );
   }
 }
@@ -646,7 +660,11 @@ class GeminiProvider implements ProviderAdapter {
         };
       }>;
       usageMetadata?: {
+        promptTokenCount?: number;
         candidatesTokenCount?: number;
+        totalTokenCount?: number;
+        cachedContentTokenCount?: number;
+        thoughtsTokenCount?: number;
       };
     };
 
@@ -663,19 +681,19 @@ class GeminiProvider implements ProviderAdapter {
       }];
     });
     if (nativeCalls.length > 0) {
-      return withOutputTokens({
+      return withTokenUsage({
         assistantMessage: parts.map((part) => part.text ?? "").join("\n").trim() || undefined,
         toolCalls: nativeCalls,
         endTurn: false,
         goalCompleted: false,
         isStructured: true
-      }, json.usageMetadata?.candidatesTokenCount);
+      }, json.usageMetadata);
     }
     const text = parts.map((part) => part.text ?? "").join("\n").trim();
     const usesNativeTools = input.model.supportsToolCalling && input.availableTools.length > 0;
-    return withOutputTokens(
+    return withTokenUsage(
       usesNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
-      json.usageMetadata?.candidatesTokenCount
+      json.usageMetadata
     );
   }
 }
@@ -1345,10 +1363,89 @@ function contentWithFileAttachments(content: string, attachments?: MessageAttach
   return [content, ...files.map((file) => `[Attached file]\n${file.absolutePath}`)].filter(Boolean).join("\n\n");
 }
 
-function withOutputTokens(decision: ProviderTurnDecision, outputTokens?: number): ProviderTurnDecision {
-  return typeof outputTokens === "number" && Number.isFinite(outputTokens)
-    ? { ...decision, outputTokens }
-    : decision;
+function withTokenUsage(decision: ProviderTurnDecision, rawUsage: unknown): ProviderTurnDecision {
+  const usage = parseProviderTokenUsage(rawUsage);
+  if (!usage) return decision;
+  return {
+    ...decision,
+    usage,
+    outputTokens: usage.outputTokens || decision.outputTokens
+  };
+}
+
+export function parseProviderTokenUsage(rawUsage: unknown): TokenUsage | null {
+  if (!rawUsage || typeof rawUsage !== "object") return null;
+  const usage = rawUsage as Record<string, unknown>;
+
+  // OpenAI-compatible
+  if (typeof usage.prompt_tokens === "number" || typeof usage.completion_tokens === "number") {
+    const inputTokens = numberOrZero(usage.prompt_tokens);
+    const outputTokens = numberOrZero(usage.completion_tokens);
+    const details = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : {};
+    const completionDetails = isRecord(usage.completion_tokens_details) ? usage.completion_tokens_details : {};
+    const inputCacheHitTokens = numberOrZero(details.cached_tokens ?? usage.cached_tokens);
+    const outputReasoningTokens = numberOrZero(completionDetails.reasoning_tokens ?? usage.reasoning_tokens);
+    return finalizeTokenUsage({
+      totalTokens: numberOrZero(usage.total_tokens) || inputTokens + outputTokens,
+      inputTokens,
+      inputCacheHitTokens,
+      inputCacheMissTokens: Math.max(0, inputTokens - inputCacheHitTokens),
+      inputCacheWriteTokens: numberOrZero(details.cache_write_tokens ?? usage.cache_write_tokens),
+      outputTokens,
+      outputReasoningTokens,
+      outputContentTokens: Math.max(0, outputTokens - outputReasoningTokens)
+    });
+  }
+
+  // Anthropic
+  if (typeof usage.input_tokens === "number" || typeof usage.output_tokens === "number") {
+    const inputCacheHitTokens = numberOrZero(usage.cache_read_input_tokens);
+    const inputCacheWriteTokens = numberOrZero(usage.cache_creation_input_tokens);
+    const inputTokens = numberOrZero(usage.input_tokens) + inputCacheHitTokens + inputCacheWriteTokens;
+    const outputTokens = numberOrZero(usage.output_tokens);
+    return finalizeTokenUsage({
+      totalTokens: inputTokens + outputTokens,
+      inputTokens,
+      inputCacheHitTokens,
+      inputCacheMissTokens: Math.max(0, numberOrZero(usage.input_tokens)),
+      inputCacheWriteTokens,
+      outputTokens,
+      outputReasoningTokens: 0,
+      outputContentTokens: outputTokens
+    });
+  }
+
+  // Gemini
+  if (
+    typeof usage.promptTokenCount === "number" ||
+    typeof usage.candidatesTokenCount === "number" ||
+    typeof usage.totalTokenCount === "number"
+  ) {
+    const inputTokens = numberOrZero(usage.promptTokenCount);
+    const outputTokens = numberOrZero(usage.candidatesTokenCount);
+    const inputCacheHitTokens = numberOrZero(usage.cachedContentTokenCount);
+    const outputReasoningTokens = numberOrZero(usage.thoughtsTokenCount);
+    return finalizeTokenUsage({
+      totalTokens: numberOrZero(usage.totalTokenCount) || inputTokens + outputTokens,
+      inputTokens,
+      inputCacheHitTokens,
+      inputCacheMissTokens: Math.max(0, inputTokens - inputCacheHitTokens),
+      inputCacheWriteTokens: 0,
+      outputTokens,
+      outputReasoningTokens,
+      outputContentTokens: Math.max(0, outputTokens - outputReasoningTokens)
+    });
+  }
+
+  return null;
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function tryParseTaggedToolCalls(text: string): ProviderTurnDecision["toolCalls"] | null {

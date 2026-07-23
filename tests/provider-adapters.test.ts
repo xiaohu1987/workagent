@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, nativeToolName, parseDecisionFromText, ProviderFactory } from "@provider-adapters";
+import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, nativeToolName, parseDecisionFromText, parseProviderTokenUsage, ProviderFactory } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -545,6 +545,73 @@ describe("OpenAiCompatibleProvider", () => {
     });
   });
 
+  it("captures token usage from the final streaming chunk", async () => {
+    async function* streamWithUsage() {
+      yield {
+        choices: [{
+          delta: {
+            content: '{"assistant_message":"Done.","tool_calls":[],"end_turn":true,"goal_completed":true}'
+          }
+        }]
+      };
+      yield {
+        choices: [],
+        usage: {
+          prompt_tokens: 120,
+          completion_tokens: 40,
+          total_tokens: 160,
+          prompt_tokens_details: { cached_tokens: 80 },
+          completion_tokens_details: { reasoning_tokens: 10 }
+        }
+      };
+    }
+
+    mocks.chatCreate.mockResolvedValue(streamWithUsage());
+    const provider: ProviderDefinition = {
+      id: "company-gateway",
+      type: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "secret"
+    };
+    const model: ModelProfile = {
+      id: "test-model",
+      providerId: "company-gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: true,
+      supportsToolCalling: false,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON only.",
+      transcript: [{ role: "user", content: "Finish" }],
+      availableTools: [],
+      model,
+      provider,
+      stream: true
+    });
+
+    expect(mocks.chatCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stream: true,
+        stream_options: { include_usage: true }
+      }),
+      expect.anything()
+    );
+    expect(decision.usage).toMatchObject({
+      totalTokens: 160,
+      inputTokens: 120,
+      inputCacheHitTokens: 80,
+      outputTokens: 40,
+      outputReasoningTokens: 10,
+      outputContentTokens: 30
+    });
+  });
+
   it("streams a final assistant_message when native tools are available but unused", async () => {
     async function* streamFinalAnswer() {
       yield { choices: [{ delta: { content: '{"assistant_message":"Streaming ' } }] };
@@ -1006,6 +1073,45 @@ describe("decision system prompt", () => {
     expect(prompt).toContain("goal_completed");
     expect(prompt).toContain("shell.exec");
     expect(prompt).toContain("For every GPA ACT decision, include completed_task_ids");
+  });
+});
+
+describe("parseProviderTokenUsage", () => {
+  it("parses OpenAI-compatible cache and reasoning details", () => {
+    expect(parseProviderTokenUsage({
+      prompt_tokens: 1200,
+      completion_tokens: 300,
+      total_tokens: 1500,
+      prompt_tokens_details: { cached_tokens: 800 },
+      completion_tokens_details: { reasoning_tokens: 100 }
+    })).toEqual({
+      totalTokens: 1500,
+      inputTokens: 1200,
+      inputCacheHitTokens: 800,
+      inputCacheMissTokens: 400,
+      inputCacheWriteTokens: 0,
+      outputTokens: 300,
+      outputReasoningTokens: 100,
+      outputContentTokens: 200,
+      cacheHitRate: 800 / 1200
+    });
+  });
+
+  it("parses Anthropic cache read/write tokens", () => {
+    expect(parseProviderTokenUsage({
+      input_tokens: 200,
+      output_tokens: 50,
+      cache_read_input_tokens: 700,
+      cache_creation_input_tokens: 100
+    })).toMatchObject({
+      inputTokens: 1000,
+      inputCacheHitTokens: 700,
+      inputCacheMissTokens: 200,
+      inputCacheWriteTokens: 100,
+      outputTokens: 50,
+      outputContentTokens: 50,
+      cacheHitRate: 0.7
+    });
   });
 });
 
