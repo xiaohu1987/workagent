@@ -18,6 +18,10 @@ import {
   recordManagedWriteResult,
   validateManagedWriteCompletion,
   buildManagedWriteCompletionRecoveryInstruction,
+  validateStandardCompletion,
+  buildStandardCompletionRecoveryInstruction,
+  isDeferredExecutionPayload,
+  isProjectFileMutationRequest,
   createManagedWriteRecoveryState,
   createManagedWriteRecoveryReadToolCall,
   validateManagedWriteRecoveryToolCall,
@@ -308,6 +312,80 @@ describe("premature completion recovery", () => {
     expect(instruction).toContain("not a result");
     expect(instruction).toContain("exactly one new, targeted tool");
     expect(instruction).toContain("Do not repeat a completed tool call");
+  });
+});
+
+describe("standard completion validation", () => {
+  it("recognizes direct project mutation requests without classifying diagnostic questions", () => {
+    expect(isProjectFileMutationRequest("修改一下程序 ，换一个语音源 你这个太生硬了")).toBe(true);
+    expect(isProjectFileMutationRequest("Please fix the login bug")).toBe(true);
+    expect(isProjectFileMutationRequest("为什么会标记 completed？")).toBe(false);
+    expect(isProjectFileMutationRequest("How should I modify this function?")).toBe(false);
+  });
+
+  it("recognizes a bare tool name as deferred execution instead of a final answer", () => {
+    expect(isDeferredExecutionPayload("fs.read_directory")).toBe(true);
+    expect(isDeferredExecutionPayload('fs.read_directory({"path":"."})')).toBe(true);
+    expect(isDeferredExecutionPayload("project")).toBe(false);
+    expect(isDeferredExecutionPayload("The files were updated and verified.")).toBe(false);
+  });
+
+  it("rejects a file-change completion with no delivery or verification", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "fs.read_directory",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.missingDelivery).toBe(true);
+    expect(result.missingVerification).toBe(true);
+    expect(result.reasons).toContain("The assistant message is an unexecuted tool call or raw execution payload.");
+    expect(buildStandardCompletionRecoveryInstruction(result)).toContain("apply_patch");
+  });
+
+  it("accepts a file-change completion only after delivery and post-delivery verification", () => {
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "test-1",
+      toolName: "shell.exec",
+      hasPriorDelivery: true
+    });
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "Updated the voice source and verified the targeted test.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      deliveredPaths: ["D:\\project\\js\\speech.js"],
+      successfulEvidence: [verification]
+    });
+
+    expect(result.valid).toBe(true);
+  });
+
+  it("requires goal_completed even for a substantive standard response", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "The analysis is ready.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: false
+      },
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.reasons).toContain("The model did not declare the original goal complete.");
   });
 });
 

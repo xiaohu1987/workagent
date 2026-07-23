@@ -1113,11 +1113,30 @@ export class DesktopBackend {
     const descendants = this.#db.listAgentTree(thread.rootThreadId)
       .filter((item) => item.id !== thread.id && item.agentPath.startsWith(`${thread.agentPath}/`))
       .sort((left, right) => right.agentPath.length - left.agentPath.length);
-    for (const child of descendants) {
-      await this.interruptThread(child.id);
+    const threadIds = [...descendants.map((child) => child.id), thread.id];
+    const cancelledQueueItemIds = new Map<string, string[]>();
+
+    await this.#logs.append("thread.interrupt_requested", {
+      targetThreadId: threadId,
+      interruptedThreadIds: threadIds
+    }, threadId);
+
+    for (const id of threadIds) {
+      this.#runtime.interrupt(id);
+      this.#terminal.cancelCommands(id, "Task interrupted.");
+      cancelledQueueItemIds.set(id, this.#db.cancelQueuedMessages(id));
     }
-    this.#runtime.interrupt(threadId);
-    this.#terminal.cancelCommands(threadId, "Task interrupted.");
+
+    await Promise.all(threadIds.map((id) => this.finishInterruptThread(id, cancelledQueueItemIds.get(id) ?? [])));
+
+    await this.#logs.append("thread.interrupted", {
+      targetThreadId: threadId,
+      interruptedThreadIds: threadIds,
+      cancelledQueueItemCount: [...cancelledQueueItemIds.values()].reduce((count, ids) => count + ids.length, 0)
+    }, threadId);
+  }
+
+  private async finishInterruptThread(threadId: string, cancelledQueueItemIds: string[]): Promise<void> {
     // Let the aborted turn finish its persistence/finally cleanup before a
     // caller deletes or clears this thread and its descendants.
     await this.#runtime.waitForIdle(threadId, 5000);
@@ -1145,6 +1164,14 @@ export class DesktopBackend {
       payload: { thread: updated },
       createdAt: new Date().toISOString()
     });
+    for (const queueItemId of cancelledQueueItemIds) {
+      await this.emit({
+        type: "queue.updated",
+        threadId,
+        payload: { queueItemId, action: "deleted" },
+        createdAt: new Date().toISOString()
+      });
+    }
   }
 
   public listSkills(): ReturnType<SkillsManager["list"]> {

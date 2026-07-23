@@ -67,4 +67,14 @@ describe("queued messages", () => {
     expect(db.getThread(thread.id).status).toBe("idle");
     expect(db.claimNextQueuedMessage(thread.id)?.id).toBe(next.id);
   });
+
+  it("cancels queued messages without touching a dispatch already in progress", async () => {
+    const db = await createDatabase();
+    const active = db.enqueueQueuedMessage({ threadId: "thread-1", content: "active", displayContent: "active", attachments: [] });
+    const queued = db.enqueueQueuedMessage({ threadId: "thread-1", content: "queued", displayContent: "queued", attachments: [] });
+
+    expect(db.claimNextQueuedMessage("thread-1")?.id).toBe(active.id);
+    expect(db.cancelQueuedMessages("thread-1")).toEqual([queued.id]);
+    expect(db.listQueuedMessages("thread-1").map((item) => item.id)).toEqual([active.id]);
+  });
 });

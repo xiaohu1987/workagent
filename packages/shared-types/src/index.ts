@@ -758,6 +758,8 @@ export interface ProviderTurnDecision {
   completionEvidence?: CompletionEvidenceReference[];
   /** True only when the provider response matched the runtime JSON envelope. */
   isStructured: boolean;
+  /** The provider returned a native tool name as plain text and needs a JSON tool-protocol retry. */
+  requestTextToolProtocol?: boolean;
   reasoningSummary?: string;
 }
 
@@ -839,6 +841,8 @@ export interface ProviderTurnInput {
   availableTools: ToolSpecDefinition[];
   model: ModelProfile;
   provider: ProviderDefinition;
+  /** Use the JSON decision envelope instead of provider-native function calls. */
+  forceTextToolProtocol?: boolean;
   stream?: boolean;
   onTextDelta?: (delta: string) => void | Promise<void>;
   abortSignal?: AbortSignal;

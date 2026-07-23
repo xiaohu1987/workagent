@@ -151,7 +151,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
-    const nativeTools = input.model.supportsToolCalling && input.availableTools.length > 0
+    const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
       ? input.availableTools.map((tool) => ({
           type: "function" as const,
           function: {
@@ -519,6 +519,16 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
       isStructured: false
     };
   }
+  if (isBareToolInvocationText(text)) {
+    return {
+      assistantMessage: text,
+      toolCalls: [],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: false,
+      requestTextToolProtocol: true
+    };
+  }
   const structuredDecision = parseDecisionFromText(text);
   if (structuredDecision.isStructured) {
     return structuredDecision;
@@ -530,6 +540,13 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
     goalCompleted: true,
     isStructured: true
   };
+}
+
+export function isBareToolInvocationText(text: string): boolean {
+  const normalized = text.trim();
+  return /^(?:(?:web_search|browser|shell|fs|knowledge|mcp|database|git|code|project|skills|multi_agents|image|video)(?:[._][a-z0-9-]+)+|apply_patch|request_user_input)$/i.test(
+    normalized
+  );
 }
 
 class AnthropicProvider implements ProviderAdapter {
@@ -544,7 +561,7 @@ class AnthropicProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
-    const nativeTools = input.model.supportsToolCalling && input.availableTools.length > 0
+    const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
       ? input.availableTools.map((tool) => ({
           name: nativeToolName(tool.name),
           description: tool.description,
@@ -690,7 +707,7 @@ class GeminiProvider implements ProviderAdapter {
       }, json.usageMetadata);
     }
     const text = parts.map((part) => part.text ?? "").join("\n").trim();
-    const usesNativeTools = input.model.supportsToolCalling && input.availableTools.length > 0;
+    const usesNativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0;
     return withTokenUsage(
       usesNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
       json.usageMetadata

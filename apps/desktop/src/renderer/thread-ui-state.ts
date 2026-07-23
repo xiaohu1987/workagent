@@ -67,20 +67,20 @@ export function getComposerPrimaryActionState(
   status: ThreadRecord["status"] | null | undefined,
   input: string
 ): ComposerPrimaryActionState {
-  if (input.trim()) {
-    return {
-      kind: "send",
-      title: "发送",
-      ariaLabel: "发送",
-      disabled: false
-    };
-  }
-
   if (isThreadExecutionInProgress(status)) {
     return {
       kind: "interrupt",
       title: "停止执行",
       ariaLabel: "停止执行",
+      disabled: false
+    };
+  }
+
+  if (input.trim()) {
+    return {
+      kind: "send",
+      title: "发送",
+      ariaLabel: "发送",
       disabled: false
     };
   }

@@ -43,13 +43,54 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, nativeToolName, parseDecisionFromText, parseProviderTokenUsage, ProviderFactory } from "@provider-adapters";
+import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseProviderTokenUsage, ProviderFactory } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
     expect(nativeToolName("fs.read_directory")).toBe(nativeToolName("fs.read_directory"));
     expect(nativeToolName("mcp.server.tool")).not.toBe(nativeToolName("mcp_server_tool"));
     expect(nativeToolName("mcp.server.tool")).toMatch(/^tool_[a-f0-9]{24}$/);
+  });
+
+  it("recognizes a bare tool name as an unexecuted invocation", () => {
+    expect(isBareToolInvocationText("fs.read_directory")).toBe(true);
+    expect(isBareToolInvocationText("apply_patch")).toBe(true);
+    expect(isBareToolInvocationText("The project is complete.")).toBe(false);
+  });
+
+  it("can force the JSON tool protocol for native-tool-compatible gateways", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({
+        assistant_message: "Inspecting the workspace.",
+        tool_calls: [{ name: "fs.read_directory", arguments: { path: "." } }],
+        end_turn: false,
+        goal_completed: false
+      }) } }]
+    });
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "tool-model", providerId: "gateway", displayName: "Tool model", contextWindow: 8_192,
+      supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: true,
+      supportsJsonOutput: true, supportsMultimodalInput: false, supportsReasoningSummary: false
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the function tool.",
+      transcript: [{ role: "user", content: "Inspect the workspace." }],
+      availableTools: [{
+        name: "fs.read_directory",
+        description: "List a directory.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        riskLevel: "low"
+      }],
+      model,
+      provider,
+      forceTextToolProtocol: true
+    });
+
+    expect(mocks.chatCreate.mock.calls[0]?.[0]).not.toHaveProperty("tools");
+    expect(mocks.chatCreate.mock.calls[0]?.[0]).toMatchObject({ response_format: { type: "json_object" } });
+    expect(decision.toolCalls).toMatchObject([{ name: "fs.read_directory", arguments: { path: "." } }]);
   });
 });
 
@@ -285,6 +326,39 @@ describe("OpenAiCompatibleProvider", () => {
       endTurn: false,
       isStructured: true,
       outputTokens: 8
+    });
+  });
+
+  it("does not mark a bare native tool name as a completed turn", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "fs.read_directory" } }]
+    });
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "tool-model", providerId: "gateway", displayName: "Tool model", contextWindow: 8_192,
+      supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: true,
+      supportsJsonOutput: true, supportsMultimodalInput: false, supportsReasoningSummary: false
+    };
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the function tool.",
+      transcript: [{ role: "user", content: "Inspect the workspace." }],
+      availableTools: [{
+        name: "fs.read_directory",
+        description: "List a directory.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        riskLevel: "low"
+      }],
+      model,
+      provider
+    });
+
+    expect(decision).toMatchObject({
+      assistantMessage: "fs.read_directory",
+      toolCalls: [],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: false,
+      requestTextToolProtocol: true
     });
   });
 

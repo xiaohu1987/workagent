@@ -1228,6 +1228,19 @@ export class DatabaseService {
     this.#db.prepare("DELETE FROM queued_messages WHERE id = ?").run(id);
   }
 
+  public cancelQueuedMessages(threadId: string): string[] {
+    const queuedIds = (this.#db
+      .prepare("SELECT id FROM queued_messages WHERE thread_id = ? AND status = 'queued'")
+      .all(threadId) as Array<{ id: string }>)
+      .map((row) => row.id);
+    if (queuedIds.length > 0) {
+      this.#db
+        .prepare("DELETE FROM queued_messages WHERE thread_id = ? AND status = 'queued'")
+        .run(threadId);
+    }
+    return queuedIds;
+  }
+
   public deleteQueuedMessage(threadId: string, id: string): boolean {
     const result = this.#db
       .prepare("DELETE FROM queued_messages WHERE id = ? AND thread_id = ? AND status = 'queued'")

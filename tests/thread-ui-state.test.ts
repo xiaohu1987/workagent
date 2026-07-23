@@ -93,9 +93,9 @@ describe("thread UI state helpers", () => {
     });
 
     expect(getComposerPrimaryActionState("waiting", "继续")).toEqual({
-      kind: "send",
-      title: "发送",
-      ariaLabel: "发送",
+      kind: "interrupt",
+      title: "停止执行",
+      ariaLabel: "停止执行",
       disabled: false
     });
   });

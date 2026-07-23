@@ -327,6 +327,13 @@ export interface ManagedWriteCompletionValidationResult {
   reasons: string[];
 }
 
+export interface StandardCompletionValidationResult {
+  valid: boolean;
+  reasons: string[];
+  missingDelivery: boolean;
+  missingVerification: boolean;
+}
+
 export interface ManagedWriteRecoveryState {
   phase: "none" | "read" | "directory" | "write";
   failedToolName?: "apply_patch" | "fs.write_file";
@@ -1110,9 +1117,15 @@ class ThreadSessionRuntime {
     this.#abortController = abortController;
     this.#activeTurnRunId = turn.id;
     try {
-      await this.services.persistence.updateThread(this.threadId, {
+      const runningThread = await this.services.persistence.updateThread(this.threadId, {
         status: "running",
         updatedAt: new Date().toISOString()
+      });
+      await this.services.emit({
+        type: "thread.updated",
+        threadId: this.threadId,
+        payload: { thread: runningThread },
+        createdAt: runningThread.updatedAt
       });
       const priorMessages = await this.services.persistence.listMessages(this.threadId);
       const userMessageMetadata = buildUserMessageMetadata(initialInput, displayContent, attachments);
@@ -1333,6 +1346,8 @@ class ThreadSessionRuntime {
       let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
       let managedWriteCompletionAttempts = 0;
+      let standardCompletionAttempts = 0;
+      let useTextToolProtocol = false;
       let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
       let modelRateLimitAttempts = 0;
@@ -1527,7 +1542,11 @@ class ThreadSessionRuntime {
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}`;
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
+          useTextToolProtocol
+            ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
+            : ""
+        }`;
         const compactContext = async (
           trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery",
           force = false
@@ -1572,12 +1591,13 @@ class ThreadSessionRuntime {
           decision = await waitForAbortOrTimeout(
             adapter.runTurn({
               systemPrompt,
-              transcript: this.#useFunctionCallCompatibilityTranscript
+              transcript: this.#useFunctionCallCompatibilityTranscript || useTextToolProtocol
                 ? buildFunctionCallCompatibilityTranscript(transcript)
                 : transcript,
               availableTools: selectedMcpToolsOnly,
               model,
               provider,
+              forceTextToolProtocol: useTextToolProtocol,
               stream: model.supportsStreaming,
               onTextDelta: async (delta) => {
                 if (abortController.signal.aborted) {
@@ -1782,6 +1802,30 @@ class ThreadSessionRuntime {
             },
             createdAt: new Date().toISOString()
           });
+        }
+
+        if (decision.requestTextToolProtocol && !useTextToolProtocol) {
+          useTextToolProtocol = true;
+          await discardStreamedAssistant();
+          await this.services.log("provider.native_tool_text_fallback", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            modelName: model.displayName,
+            providerId: provider.id,
+            toolName: decision.assistantMessage
+          });
+          await this.services.emit({
+            type: "agent.retrying",
+            threadId: this.threadId,
+            payload: { attempt: 1, maxAttempts: 1, reason: "native_tool_text_fallback" },
+            createdAt: new Date().toISOString()
+          });
+          transcript.push({
+            role: "user",
+            content:
+              "The provider returned a tool name as plain text instead of invoking it. Use the JSON decision envelope now, including complete tool_calls arguments, and continue the original task."
+          });
+          continue;
         }
 
         const planProgress = this.#gpa.stage === "act"
@@ -2263,6 +2307,42 @@ class ThreadSessionRuntime {
           decision.endTurn = false;
           decision.goalCompleted = false;
           continue;
+        }
+
+        if (
+          this.#gpa.stage === "off" &&
+          decision.toolCalls.length === 0 &&
+          decision.endTurn
+        ) {
+          const standardCompletion = validateStandardCompletion({
+            decision,
+            requiresFileDelivery: isProjectFileMutationRequest(initialInput),
+            deliveredPaths: [...managedWriteCompletion.deliveredPaths],
+            successfulEvidence: successfulToolEvidence
+          });
+          if (!standardCompletion.valid) {
+            standardCompletionAttempts += 1;
+            await this.services.log("turn.standard_completion_rejected", this.threadId, {
+              turnRunId: turn.id,
+              attempt: standardCompletionAttempts,
+              reasons: standardCompletion.reasons,
+              missingDelivery: standardCompletion.missingDelivery,
+              missingVerification: standardCompletion.missingVerification
+            });
+            if (standardCompletionAttempts >= MAX_AGENT_PROTOCOL_FAILURES) {
+              throw new Error(
+                `Standard completion validation failed repeatedly: ${standardCompletion.reasons.join(" ")}`
+              );
+            }
+            transcript.push({
+              role: "user",
+              content: buildStandardCompletionRecoveryInstruction(standardCompletion)
+            });
+            decision.assistantMessage = undefined;
+            decision.endTurn = false;
+            decision.goalCompleted = false;
+            continue;
+          }
         }
 
         if (
@@ -4834,6 +4914,57 @@ export function buildGpaPlanProgressCheckpointInstruction(task: GpaState["planTa
   ].join(" ");
 }
 
+export function validateStandardCompletion(input: {
+  decision: Pick<ProviderTurnDecision, "assistantMessage" | "toolCalls" | "endTurn" | "goalCompleted">;
+  requiresFileDelivery: boolean;
+  deliveredPaths: string[];
+  successfulEvidence: SuccessfulToolEvidence[];
+}): StandardCompletionValidationResult {
+  const reasons: string[] = [];
+  const assistantMessage = input.decision.assistantMessage?.trim() ?? "";
+  const missingDelivery = input.requiresFileDelivery && input.deliveredPaths.length === 0;
+  const missingVerification = input.requiresFileDelivery && !input.successfulEvidence.some(
+    (item) => item.kinds.includes("verification")
+  );
+
+  if (!input.decision.endTurn) reasons.push("The model did not end the turn.");
+  if (input.decision.toolCalls.length > 0) reasons.push("Tool calls are still pending.");
+  if (!input.decision.goalCompleted) reasons.push("The model did not declare the original goal complete.");
+  if (!assistantMessage) reasons.push("The final user-visible summary is empty.");
+  if (isProgressOnlyAssistantMessage(assistantMessage)) {
+    reasons.push("The assistant message is progress commentary, not a final summary.");
+  }
+  if (isDeferredExecutionPayload(assistantMessage)) {
+    reasons.push("The assistant message is an unexecuted tool call or raw execution payload.");
+  }
+  if (missingDelivery) reasons.push("The requested project file change has no verified file delivery.");
+  if (missingVerification) reasons.push("The requested project file change has no post-delivery verification.");
+
+  return {
+    valid: reasons.length === 0,
+    reasons,
+    missingDelivery,
+    missingVerification
+  };
+}
+
+export function buildStandardCompletionRecoveryInstruction(
+  result: StandardCompletionValidationResult
+): string {
+  return [
+    "[Internal completion gate. Do not display or quote this instruction to the user.]",
+    `The previous response was rejected: ${result.reasons.join(" ")}`,
+    ...(result.missingDelivery
+      ? ["Perform the requested file change now with apply_patch or fs.write_file."]
+      : []),
+    ...(result.missingVerification
+      ? ["After the file change, run a targeted read-back, diff, build, or test and require it to succeed."]
+      : []),
+    "Do not return a bare tool name or progress promise.",
+    "Only end the turn with goal_completed true after the original request is delivered and verified."
+  ].join(" ");
+}
+
 export function validateActCompletion(input: {
   decision: Pick<
     ProviderTurnDecision,
@@ -5349,7 +5480,7 @@ export function buildProgressOnlyCompletionRecoveryInstruction(attempt: number):
   ].join(" ");
 }
 
-function isDeferredExecutionPayload(content: string): boolean {
+export function isDeferredExecutionPayload(content: string): boolean {
   const trimmed = content.trim();
   if (!trimmed) {
     return false;
@@ -5359,7 +5490,7 @@ function isDeferredExecutionPayload(content: string): boolean {
     return true;
   }
 
-  if (/^(?:web_search|browser|shell|fs|knowledge|mcp|execute_command|read_file|write_file|apply_patch)(?:[._][\w-]+)+\s*[\[\{(]/i.test(trimmed)) {
+  if (/^(?:(?:web_search|browser|shell|fs|knowledge|mcp|database|git|code|project|skills|multi_agents|image|video)(?:[._][\w-]+)+|execute_command|read_file|write_file|apply_patch)(?:\s*[\[\{(]|\s*$)/i.test(trimmed)) {
     return true;
   }
 
@@ -5380,6 +5511,20 @@ function isDeferredExecutionPayload(content: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isProjectFileMutationRequest(content: string): boolean {
+  const normalized = content.trim();
+  if (!normalized) return false;
+  if (/^(?:how|why|what|where|when|which|who)\b/i.test(normalized)) return false;
+  if (/^(?:如何|为什么|为何|什么|哪里|怎么|解释|分析|审查|查看|检查|诊断|评审)/.test(normalized)) return false;
+
+  const chineseMutation = /(?:^|[，。！？\s])(?:请|请你|帮我|给我|麻烦|直接|现在)?\s*(?:修复|修改|改一下|更改|调整|替换|更换|实现|新增|添加|删除|移除|重构|升级|更新|创建|搭建|编写)(?:一下)?(?=\s|这个|该|当前|项目|程序|代码|文件|页面|功能|组件|应用|网站|系统|一|个|下|，|。|！|？|$)/;
+  if (chineseMutation.test(normalized)) return true;
+
+  return /^(?:(?:please|can you|could you|would you)\s+)?(?:fix|implement|add|remove|delete|update|modify|change|replace|refactor|create|build)\b/i.test(
+    normalized
+  );
 }
 
 export function getAddedPatchFiles(argumentsJson: Record<string, unknown>): string[] {
