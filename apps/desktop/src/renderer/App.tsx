@@ -939,7 +939,7 @@ export function App() {
   const [notificationCenterState, setNotificationCenterState] = useState<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
   const notificationCenterStateRef = useRef<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
   const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
-  const [isTokenUsageExpanded, setIsTokenUsageExpanded] = useState(false);
+  const [isTokenUsagePanelOpen, setIsTokenUsagePanelOpen] = useState(false);
   const [threadTokenUsage, setThreadTokenUsage] = useState<{
     turn: TokenUsage;
     thread: TokenUsage;
@@ -949,6 +949,8 @@ export function App() {
   const [notificationNow, setNotificationNow] = useState(() => Date.now());
   const notificationCenterRef = useRef<HTMLDivElement | null>(null);
   const notificationButtonRef = useRef<HTMLButtonElement | null>(null);
+  const tokenUsagePanelRef = useRef<HTMLDivElement | null>(null);
+  const tokenUsageButtonRef = useRef<HTMLButtonElement | null>(null);
   const [notice, setNotice] = useState<AppNotice | null>(null);
   const [isNoticeHovered, setIsNoticeHovered] = useState(false);
   const [exitingNoticeId, setExitingNoticeId] = useState<number | null>(null);
@@ -1392,6 +1394,26 @@ export function App() {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [isNotificationCenterOpen]);
+
+  useEffect(() => {
+    if (!isTokenUsagePanelOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (tokenUsagePanelRef.current?.contains(target) || tokenUsageButtonRef.current?.contains(target)) return;
+      setIsTokenUsagePanelOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setIsTokenUsagePanelOpen(false);
+      tokenUsageButtonRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isTokenUsagePanelOpen]);
 
   useEffect(() => {
     if (!isNotificationCenterOpen || !notificationCenterState.items.some((item) => item.status === "running" || item.status === "attention")) {
@@ -6015,6 +6037,7 @@ export function App() {
   const visibleHistoryContextMenu = historyContextMenu ?? historyContextMenuPresence.value;
   const skillsSortPresence = useMotionPresence(skillsSortOpen ? true : null, 140);
   const notificationCenterPresence = useMotionPresence(isNotificationCenterOpen ? true : null, 160);
+  const tokenUsagePanelPresence = useMotionPresence(isTokenUsagePanelOpen ? true : null, 160);
   const terminalDrawerPresence = useMotionPresence(isTerminalOpen ? true : null, 220);
   const helpPresence = useMotionPresence(isHelpOpen ? true : null, 220);
   const quickNotesPresence = useMotionPresence(isQuickNotesOpen ? true : null, 220);
@@ -6593,6 +6616,55 @@ export function App() {
 
       <main className="workspace">
         <div className="workspace-controls">
+            <div className="token-usage-control">
+              <button
+                ref={tokenUsageButtonRef}
+                type="button"
+                className={`token-usage-toggle ${isTokenUsagePanelOpen ? "active" : ""}`}
+                title={`累计消耗 ${formatTokenCount(threadTokenUsage.thread.totalTokens)} Tokens${selectedThreadId ? " · 实时" : ""}`}
+                aria-label={`累计消耗 ${formatTokenCount(threadTokenUsage.thread.totalTokens)} Tokens`}
+                aria-haspopup="dialog"
+                aria-expanded={isTokenUsagePanelOpen}
+                onClick={() => setIsTokenUsagePanelOpen((current) => !current)}
+              >
+                <span className="token-usage-toggle-label" aria-hidden>累计消耗</span>
+                <strong className="token-usage-toggle-value">{formatTokenCount(threadTokenUsage.thread.totalTokens)}</strong>
+                {selectedThreadId ? <em className="token-usage-toggle-live" aria-hidden>实时</em> : null}
+              </button>
+              {tokenUsagePanelPresence.value ? (
+                <div
+                  ref={tokenUsagePanelRef}
+                  className={`token-usage-panel motion-${tokenUsagePanelPresence.phase}`}
+                  role="dialog"
+                  aria-modal="false"
+                  aria-label="本对话 Token 消耗"
+                >
+                  <header className="token-usage-panel-header">
+                    <strong>累计消耗</strong>
+                    <span>{formatTokenCount(threadTokenUsage.thread.totalTokens)} Tokens</span>
+                  </header>
+                  <div className="token-usage-panel-body">
+                    <div className="token-usage-grid">
+                      <div className="token-usage-block">
+                        <strong>输入</strong>
+                        <div><span>缓存命中</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheHitTokens)}</b></div>
+                        <div><span>未命中</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheMissTokens)}</b></div>
+                        <div><span>缓存写入</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheWriteTokens)}</b></div>
+                      </div>
+                      <div className="token-usage-block">
+                        <strong>输出</strong>
+                        <div><span>思考过程</span><b>{formatTokenCount(threadTokenUsage.thread.outputReasoningTokens)}</b></div>
+                        <div><span>回复内容</span><b>{formatTokenCount(threadTokenUsage.thread.outputContentTokens)}</b></div>
+                      </div>
+                      <div className="token-usage-rate">
+                        <span>缓存命中率</span>
+                        <strong>{formatCacheHitRate(threadTokenUsage.thread.cacheHitRate)}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
             <div className="notification-center-control">
               <button
                 ref={notificationButtonRef}
@@ -6636,44 +6708,6 @@ export function App() {
                     </div>
                   </header>
                   <div className="notification-center-body">
-                    <section className={`notification-token-usage ${isTokenUsageExpanded ? "is-expanded" : ""}`} aria-label="本对话 Token 消耗">
-                      <button
-                        type="button"
-                        className="notification-token-usage-toggle"
-                        aria-expanded={isTokenUsageExpanded}
-                        onClick={() => setIsTokenUsageExpanded((current) => !current)}
-                      >
-                        <span className="notification-token-usage-toggle-main">
-                          <span className="notification-token-usage-label">累计消耗</span>
-                          <strong>{formatTokenCount(threadTokenUsage.thread.totalTokens)}</strong>
-                          {selectedThreadId ? <em>实时</em> : null}
-                        </span>
-                        <span className="notification-token-usage-chevron" aria-hidden>
-                          <IconChevronDown />
-                        </span>
-                      </button>
-                      <div className="notification-token-usage-panel" aria-hidden={!isTokenUsageExpanded}>
-                        <div className="notification-token-usage-panel-inner">
-                          <div className="notification-token-usage-grid">
-                            <div className="notification-token-usage-block">
-                              <strong>输入</strong>
-                              <div><span>缓存命中</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheHitTokens)}</b></div>
-                              <div><span>未命中</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheMissTokens)}</b></div>
-                              <div><span>缓存写入</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheWriteTokens)}</b></div>
-                            </div>
-                            <div className="notification-token-usage-block">
-                              <strong>输出</strong>
-                              <div><span>思考过程</span><b>{formatTokenCount(threadTokenUsage.thread.outputReasoningTokens)}</b></div>
-                              <div><span>回复内容</span><b>{formatTokenCount(threadTokenUsage.thread.outputContentTokens)}</b></div>
-                            </div>
-                            <div className="notification-token-usage-rate">
-                              <span>缓存命中率</span>
-                              <strong>{formatCacheHitRate(threadTokenUsage.thread.cacheHitRate)}</strong>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </section>
                     {!sortedNotificationItems.length ? (
                       <div className="notification-center-empty"><IconBell /><span>暂无后台任务或消息</span></div>
                     ) : (
@@ -8011,12 +8045,13 @@ export function App() {
                           <label className="settings-field"><span>模型决策超时</span><input type="number" step="1" value={configDraft.timeouts.modelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("modelDecisionMs", event.target.value)} /></label>
                           <label className="settings-field"><span>恢复请求超时</span><input type="number" step="1" value={configDraft.timeouts.recoveryModelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("recoveryModelDecisionMs", event.target.value)} /></label>
                           <label className="settings-field"><span>模型超时重试次数</span><input type="number" step="1" value={configDraft.timeouts.modelTimeoutRetries} onChange={(event) => updateTimeoutDraft("modelTimeoutRetries", event.target.value)} /></label>
+                          <label className="settings-field"><span>工具执行超时</span><input type="number" step="1" value={configDraft.timeouts.toolExecutionMs / 1_000} onChange={(event) => updateTimeoutDraft("toolExecutionMs", event.target.value)} /></label>
                           <label className="settings-field"><span>多模态意图分类超时</span><input type="number" step="1" value={configDraft.timeouts.multimodalIntentClassifyMs / 1_000} onChange={(event) => updateTimeoutDraft("multimodalIntentClassifyMs", event.target.value)} /></label>
                           <label className="settings-field"><span>模型连接测试超时</span><input type="number" step="1" value={configDraft.timeouts.modelTestMs / 1_000} onChange={(event) => updateTimeoutDraft("modelTestMs", event.target.value)} /></label>
                           <label className="settings-field"><span>视频生成总超时</span><input type="number" step="1" value={configDraft.timeouts.videoGenerationMs / 1_000} onChange={(event) => updateTimeoutDraft("videoGenerationMs", event.target.value)} /></label>
                           <label className="settings-field"><span>视频状态轮询间隔</span><input type="number" step="1" value={configDraft.timeouts.videoPollIntervalMs / 1_000} onChange={(event) => updateTimeoutDraft("videoPollIntervalMs", event.target.value)} /></label>
                         </div>
-                        <span className="timeout-settings-note">“模型超时重试次数”只控制模型响应超时，不控制工具执行失败；同一工具连续失败会单独询问是否继续。</span>
+                        <span className="timeout-settings-note">“模型超时重试次数”控制模型响应超时；“工具执行超时”控制单个工具调用（如文件写入、终端命令）的最大执行时间，超时后自动中止并提示模型换一种方式重试。</span>
                       </div>
                       <div className="settings-save-row">
                         <span className="subtle-inline">图片生成与视频下载没有固定超时，只会在任务被取消时中断。</span>

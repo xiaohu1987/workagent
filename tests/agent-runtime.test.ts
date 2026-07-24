@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SkillMetadata } from "@shared-types";
+import { DEFAULT_RUNTIME_TIMEOUTS, normalizeRuntimeTimeouts } from "@shared-types";
 import {
   createToolCallFingerprint,
   createCommentaryMessageKey,
@@ -45,6 +46,12 @@ import {
   isFunctionCallProtocolError,
   isModelRateLimitError,
   resolveModelRateLimitDelayMs,
+  isNetworkError,
+  resolveNetworkErrorDelayMs,
+  MAX_NETWORK_ERROR_RETRIES,
+  NETWORK_ERROR_BASE_DELAY_MS,
+  NETWORK_ERROR_MAX_DELAY_MS,
+  isToolArgsTruncated,
   buildFunctionCallCompatibilityTranscript,
   buildBlockedToolCallTranscriptResult,
   clearReusableObservationFingerprints,
@@ -483,6 +490,60 @@ describe("model rate limit retries", () => {
 describe("model decision timeout retries", () => {
   it("defaults to five automatic timeout retries before stopping", () => {
     expect(MAX_MODEL_TIMEOUT_RETRIES).toBe(5);
+  });
+});
+
+describe("network error retries", () => {
+  it("defaults to three automatic retries before stopping", () => {
+    expect(MAX_NETWORK_ERROR_RETRIES).toBe(3);
+  });
+
+  it("recognizes common network / stream faults", () => {
+    expect(isNetworkError(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }))).toBe(true);
+    expect(isNetworkError(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }))).toBe(true);
+    expect(isNetworkError(new Error("fetch failed"))).toBe(true);
+    expect(isNetworkError(new Error("Connection error: stream terminated"))).toBe(true);
+    expect(isNetworkError(new Error("network error: request failed"))).toBe(true);
+  });
+
+  it("does not treat abort / timeout / http errors as network faults", () => {
+    const abortError = new Error("The user aborted a request");
+    abortError.name = "AbortError";
+    expect(isNetworkError(abortError)).toBe(false);
+    expect(isNetworkError(new Error("The model decision timed out after 90000ms."))).toBe(false);
+    expect(isNetworkError(new Error("HTTP 429 Too Many Requests"))).toBe(false);
+    expect(isNetworkError(new Error("HTTP 400 invalid API key"))).toBe(false);
+  });
+
+  it("uses exponential back-off capped at the max delay", () => {
+    expect(resolveNetworkErrorDelayMs(1)).toBe(NETWORK_ERROR_BASE_DELAY_MS);
+    expect(resolveNetworkErrorDelayMs(2)).toBe(NETWORK_ERROR_BASE_DELAY_MS * 2);
+    expect(resolveNetworkErrorDelayMs(3)).toBe(NETWORK_ERROR_BASE_DELAY_MS * 4);
+    expect(resolveNetworkErrorDelayMs(10)).toBe(NETWORK_ERROR_MAX_DELAY_MS);
+  });
+});
+
+describe("tool argument truncation detection", () => {
+  it("detects the truncation marker set by parseNativeToolArguments", () => {
+    expect(isToolArgsTruncated({ __tool_args_truncated__: true, __raw_length__: 42 })).toBe(true);
+  });
+
+  it("does not treat normal tool arguments as truncated", () => {
+    expect(isToolArgsTruncated({ path: "/tmp/test.txt", content: "hello" })).toBe(false);
+    expect(isToolArgsTruncated({})).toBe(false);
+    expect(isToolArgsTruncated(null)).toBe(false);
+    expect(isToolArgsTruncated("string-args")).toBe(false);
+    expect(isToolArgsTruncated(undefined)).toBe(false);
+  });
+});
+
+describe("tool execution timeout", () => {
+  it("exposes a configurable tool execution timeout in RuntimeTimeoutSettings", () => {
+    expect(DEFAULT_RUNTIME_TIMEOUTS.toolExecutionMs).toBeGreaterThan(0);
+    const normalized = normalizeRuntimeTimeouts({ toolExecutionMs: 0 });
+    expect(normalized.toolExecutionMs).toBe(0);
+    const fallback = normalizeRuntimeTimeouts(null);
+    expect(fallback.toolExecutionMs).toBe(DEFAULT_RUNTIME_TIMEOUTS.toolExecutionMs);
   });
 });
 
@@ -1174,6 +1235,37 @@ describe("managed-write recovery", () => {
   });
 });
 
+describe("managed-write recovery with truncated arguments", () => {
+  const workspaceCwd = "C:\\project";
+
+  it("does not activate recovery when tool arguments are truncated", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: { __tool_args_truncated__: true, __raw_length__: 42 },
+      ok: false,
+      workspaceCwd
+    });
+    expect(state.phase).toBe("none");
+    expect(state.targetPaths).toEqual([]);
+  });
+
+  it("allows managed writes when recovery has no target paths to inspect", () => {
+    const state = createManagedWriteRecoveryState();
+    // Manually set a read phase with no target paths — simulates an edge case
+    // where target paths could not be extracted from the failed write.
+    state.phase = "read";
+    state.targetPaths = [];
+    expect(validateManagedWriteRecoveryToolCall(
+      state,
+      { name: "apply_patch", arguments: { patch: "*** Begin Patch ***\n*** Update File: a.ts ***\n@@\n-x\n+y\n*** End Patch" } },
+      workspaceCwd
+    )).toMatchObject({ allowed: true });
+    // Auto-advanced to write phase
+    expect(state.phase).toBe("write");
+  });
+});
+
 describe("browser test choice", () => {
   it("offers explicit run and skip options", () => {
     const question = buildBrowserTestChoiceQuestion();
@@ -1466,6 +1558,42 @@ describe("GPA plan validation", () => {
       "CSS像素风格小图标",
       "ASCII艺术字符"
     ]);
+  });
+
+  it("parses JSON content inside request_user_input XML tags (DeepSeek format)", () => {
+    const content = [
+      "让我确认几个设计选项：",
+      '<request_user_input> { "title": "语音变更方案确认", "questions": [',
+      '  { "id": "voice_strategy", "label": "语音变更策略", "prompt": "你希望如何更换语音源？", "options": [',
+      '    { "id": "reweight", "label": "调整评分权重", "description": "降低当前音色分数", "recommended": true },',
+      '    { "id": "force_voice", "label": "强制指定特定语音", "description": "写死一个 voiceURI" }',
+      '  ] }',
+      '] } </request_user_input>',
+      "请确认后我继续。"
+    ].join("\n");
+
+    const parsed = parseEmbeddedRequestUserInput(content);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.title).toBe("语音变更方案确认");
+    expect(parsed?.questions).toHaveLength(1);
+    expect(parsed?.questions[0]).toMatchObject({
+      id: "voice_strategy",
+      label: "语音变更策略",
+      prompt: "你希望如何更换语音源？"
+    });
+    expect(parsed?.questions[0]?.options).toHaveLength(2);
+    expect(parsed?.questions[0]?.options?.[0]).toMatchObject({
+      id: "reweight",
+      label: "调整评分权重",
+      recommended: true
+    });
+    expect(parsed?.questions[0]?.options?.[1]).toMatchObject({
+      id: "force_voice",
+      label: "强制指定特定语音",
+      recommended: false
+    });
+    expect(parsed?.cleanedContent).toContain("让我确认几个设计选项");
+    expect(parsed?.cleanedContent).not.toContain("<request_user_input");
   });
 
   it("promotes PLAN risk mitigations and silent defaults into clarification questions", () => {

@@ -2249,20 +2249,23 @@ function runCommand(command: string, args: string[], cwd: string): Promise<strin
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
     });
-
+    const decoder = new TextDecoder("utf-8");
     let stdout = "";
     let stderr = "";
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      stdout += Buffer.isBuffer(chunk) ? decoder.decode(chunk, { stream: true }) : String(chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderr += Buffer.isBuffer(chunk) ? decoder.decode(chunk, { stream: true }) : String(chunk);
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      stdout += decoder.decode();
+      stderr += decoder.decode();
       if (code === 0) {
         resolve(stdout.trim());
         return;

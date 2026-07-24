@@ -51,13 +51,14 @@ export class TerminalRuntime {
             "-NoExit",
             "-Command",
             "$utf8 = [System.Text.UTF8Encoding]::new($false); " +
-              "$OutputEncoding = $utf8; [Console]::InputEncoding = $utf8"
+              "$OutputEncoding = $utf8; [Console]::InputEncoding = $utf8; [Console]::OutputEncoding = $utf8"
           ]
         : ["-i"];
     const child = spawn(command, args, {
       cwd,
       windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
     });
     const session: TerminalSession = {
       threadId,
@@ -66,9 +67,10 @@ export class TerminalRuntime {
       cwd,
       output: "",
       onOutput,
-      // Windows PowerShell writes redirected host output using the active ANSI code page.
-      stdoutDecoder: process.platform === "win32" ? new TextDecoder("gb18030") : null,
-      stderrDecoder: process.platform === "win32" ? new TextDecoder("gb18030") : null
+      // PowerShell is configured to output UTF-8 via [Console]::OutputEncoding above.
+      // Python gets PYTHONIOENCODING=utf-8 / PYTHONUTF8=1. Both produce UTF-8.
+      stdoutDecoder: process.platform === "win32" ? new TextDecoder("utf-8") : null,
+      stderrDecoder: process.platform === "win32" ? new TextDecoder("utf-8") : null
     };
     this.#sessions.set(key, session);
 
@@ -129,18 +131,31 @@ export class TerminalRuntime {
     }
     const executable = process.platform === "win32" ? "powershell.exe" : "sh";
     const backgrounded = process.platform === "win32" && isLocalServerCommand(effectiveCommand);
+    // Prepend UTF-8 setup so PowerShell writes UTF-8 to the redirected stdout
+    // pipe. Without this, -NoProfile uses the system ANSI code page (GBK on
+    // Chinese Windows), which mismatches the UTF-8 decoder and garbles output
+    // from both PowerShell and Python.
+    const utf8Prefix = process.platform === "win32" && !backgrounded
+      ? "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+      : "";
+    const shellCommand = backgrounded ? buildBackgroundLaunchCommand(effectiveCommand, cwd) : (utf8Prefix + effectiveCommand);
     const args = process.platform === "win32"
-      ? ["-NoLogo", "-NoProfile", "-Command", backgrounded ? buildBackgroundLaunchCommand(effectiveCommand, cwd) : effectiveCommand]
+      ? ["-NoLogo", "-NoProfile", "-Command", shellCommand]
       : ["-lc", effectiveCommand];
 
     return new Promise((resolve, reject) => {
-      const child = spawn(executable, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(executable, args, {
+        cwd,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
+      });
       const activeCommand: ActiveCommand = { threadId, child, session };
       const activeForThread = this.#activeCommands.get(threadId) ?? new Set<ActiveCommand>();
       activeForThread.add(activeCommand);
       this.#activeCommands.set(threadId, activeForThread);
-      const stdoutDecoder = process.platform === "win32" ? new TextDecoder("gb18030") : null;
-      const stderrDecoder = process.platform === "win32" ? new TextDecoder("gb18030") : null;
+      const stdoutDecoder = process.platform === "win32" ? new TextDecoder("utf-8") : null;
+      const stderrDecoder = process.platform === "win32" ? new TextDecoder("utf-8") : null;
       let stdout = "";
       let stderr = "";
       let localUrl: string | undefined;

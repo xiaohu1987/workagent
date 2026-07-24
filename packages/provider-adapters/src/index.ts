@@ -14,6 +14,32 @@ import type {
   RuntimeToolCall,
   TokenUsage
 } from "@shared-types";
+import type {
+  ImageGenerationProtocol,
+  ModelCompat,
+  ModelCompatContext
+} from "./models";
+import { resolveModelCompat } from "./models";
+
+export {
+  resolveModelCompat,
+  gptCompat,
+  deepseekCompat,
+  grokCompat,
+  glmCompat,
+  qwenCompat,
+  senseNovaCompat
+} from "./models";
+export type {
+  ModelCompat,
+  ModelCompatContext,
+  ModelCompatToolCallMode,
+  ModelGenerationContext,
+  ImageGenerationProtocol,
+  ImageGenerationPlan,
+  VideoGenerationPlan,
+  defineCompat
+} from "./models";
 
 export interface ProviderAdapter {
   runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision>;
@@ -31,8 +57,6 @@ export type ProviderFetch = (
   input: RequestInfo | URL,
   init?: RequestInit
 ) => Promise<Response>;
-
-export type ImageGenerationProtocol = "gpt-image-api" | "gpt-responses" | "grok-images" | "openai-compatible";
 
 export interface GeneratedImageResult {
   data: Uint8Array;
@@ -151,7 +175,10 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
-    const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
+    const compat = resolveModelCompat(input.model);
+    const ctx: ModelCompatContext = { model: input.model, input };
+    const toolCallMode = compat.resolveToolCallMode(ctx);
+    const nativeTools = toolCallMode.useNativeTools
       ? input.availableTools.map((tool) => ({
           type: "function" as const,
           function: {
@@ -161,14 +188,15 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           }
         }))
       : undefined;
-    const request: any = {
+    const baseRequest: Record<string, unknown> = {
       model: input.model.id,
       messages: await buildOpenAiCompatibleMessages(input),
       temperature: input.model.defaultTemperature,
       max_tokens: input.model.defaultMaxOutputTokens,
       ...(nativeTools ? { tools: nativeTools, parallel_tool_calls: input.model.supportsParallelToolCalls } : {}),
-      ...(!nativeTools && input.model.supportsJsonOutput ? { response_format: { type: "json_object" as const } } : {})
+      ...(!nativeTools && toolCallMode.useJsonOutput ? { response_format: { type: "json_object" as const } } : {})
     };
+    const request = compat.normalizeRequestParams(ctx, baseRequest);
 
     if (input.stream && input.model.supportsStreaming) {
       const streamResponse = await this.#client.chat.completions.create(
@@ -182,11 +210,16 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
         { signal: input.abortSignal }
       ) as any;
       if (!isAsyncIterable(streamResponse)) {
-        return parseOpenAiCompatibleResponse(streamResponse, Boolean(nativeTools), input);
+        const fallbackDecision = compat.parseResponse(streamResponse, ctx, Boolean(nativeTools));
+        const fallbackReasoning = compat.extractReasoningFromMessage(streamResponse?.choices?.[0]?.message);
+        return fallbackReasoning
+          ? { ...fallbackDecision, reasoningSummary: fallbackReasoning }
+          : fallbackDecision;
       }
       const stream = streamResponse;
       let text = "";
       let visibleText = "";
+      let reasoning = "";
       let streamUsage: unknown;
       const streamedNativeCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
       for await (const chunk of stream) {
@@ -197,7 +230,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
         const content = delta?.content ?? "";
         if (content) {
           text += content;
-          const nextVisibleText = extractVisibleStreamText(text);
+          const nextVisibleText = compat.extractVisibleStreamText(text);
           if (nextVisibleText.startsWith(visibleText)) {
             const visibleDelta = nextVisibleText.slice(visibleText.length);
             if (visibleDelta) {
@@ -206,6 +239,8 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           }
           visibleText = nextVisibleText;
         }
+        const reasoningDelta = compat.extractReasoningFromDelta(delta);
+        if (reasoningDelta) reasoning += reasoningDelta;
 
         for (const toolCall of delta?.tool_calls ?? []) {
           const index = typeof toolCall.index === "number" ? toolCall.index : 0;
@@ -220,6 +255,11 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           streamedNativeCalls.set(index, current);
         }
       }
+      const trimmedReasoning = reasoning.trim();
+      const applyReasoning = (decision: ProviderTurnDecision): ProviderTurnDecision =>
+        trimmedReasoning && !decision.reasoningSummary
+          ? { ...decision, reasoningSummary: trimmedReasoning }
+          : decision;
       const nativeCalls = [...streamedNativeCalls.entries()]
         .sort(([left], [right]) => left - right)
         .flatMap(([, call]) => {
@@ -232,103 +272,62 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           }];
         });
       if (nativeCalls.length > 0) {
-        return withTokenUsage({
+        return applyReasoning(withTokenUsage({
           assistantMessage: text.trim() || undefined,
           toolCalls: nativeCalls,
           endTurn: false,
           goalCompleted: false,
           isStructured: true
-        }, streamUsage);
+        }, streamUsage));
       }
-      return withTokenUsage(
+      return applyReasoning(withTokenUsage(
         nativeTools ? nativeTextDecision(text.trim()) : parseDecisionFromText(text.trim()),
         streamUsage
-      );
+      ));
     }
 
-    const response = await this.#client.chat.completions.create(request, {
+    const response = await this.#client.chat.completions.create(request as any, {
       signal: input.abortSignal
     });
-    return parseOpenAiCompatibleResponse(response, Boolean(nativeTools), input);
+    const nonStreamDecision = compat.parseResponse(response, ctx, Boolean(nativeTools));
+    const nonStreamReasoning = compat.extractReasoningFromMessage(response?.choices?.[0]?.message);
+    return nonStreamReasoning
+      ? { ...nonStreamDecision, reasoningSummary: nonStreamReasoning }
+      : nonStreamDecision;
   }
 
   public async generateImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
-    const protocol = imageGenerationProtocolForModel(input.model);
-    if (protocol === "gpt-image-api") {
-      return this.generateGptImage(input);
-    }
-    if (protocol === "gpt-responses") {
-      return this.generateGptResponsesImage(input);
-    }
-    if (protocol === "grok-images") {
-      return this.generateGrokImage(input);
-    }
-
-    const response = await this.#client.images.generate({
-      model: input.model.id,
-      prompt: input.prompt,
-      n: 1,
-      size: "1024x1024",
-      response_format: "b64_json"
-    }, { signal: input.abortSignal });
-    const image = response.data?.[0];
-    if (image?.b64_json) {
-      return { data: Buffer.from(image.b64_json, "base64"), mimeType: "image/png", protocol };
-    }
-    if (image?.url) {
-      const downloaded = await this.#fetch(image.url, { signal: input.abortSignal });
-      if (!downloaded.ok) throw new Error(`Image download failed: HTTP ${downloaded.status}`);
-      return {
-        data: new Uint8Array(await downloaded.arrayBuffer()),
-        mimeType: downloaded.headers.get("content-type")?.split(";")[0] || "image/png",
-        protocol
-      };
-    }
-    throw new Error("The image generation service returned no image data.");
-  }
-
-  private async generateGptImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
-    return this.requestImage(
-      "/images/generations",
-      {
+    const compat = resolveModelCompat(input.model);
+    const plan = compat.resolveImageGeneration({ model: input.model, prompt: input.prompt });
+    if (plan.protocol === "openai-compatible") {
+      const response = await this.#client.images.generate({
         model: input.model.id,
         prompt: input.prompt,
         n: 1,
         size: "1024x1024",
-        quality: "medium",
-        output_format: "png"
-      },
-      input.abortSignal,
-      "GPT Image generation request",
-      "gpt-image-api"
-    );
-  }
-
-  private async generateGptResponsesImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
+        response_format: "b64_json"
+      }, { signal: input.abortSignal });
+      const image = response.data?.[0];
+      if (image?.b64_json) {
+        return { data: Buffer.from(image.b64_json, "base64"), mimeType: "image/png", protocol: plan.protocol };
+      }
+      if (image?.url) {
+        const downloaded = await this.#fetch(image.url, { signal: input.abortSignal });
+        if (!downloaded.ok) throw new Error(`Image download failed: HTTP ${downloaded.status}`);
+        return {
+          data: new Uint8Array(await downloaded.arrayBuffer()),
+          mimeType: downloaded.headers.get("content-type")?.split(";")[0] || "image/png",
+          protocol: plan.protocol
+        };
+      }
+      throw new Error("The image generation service returned no image data.");
+    }
     return this.requestImage(
-      "/responses",
-      {
-        model: input.model.id,
-        input: input.prompt,
-        tools: [{ type: "image_generation", action: "generate" }]
-      },
+      plan.endpoint!,
+      plan.payload,
       input.abortSignal,
-      "GPT Responses image generation request",
-      "gpt-responses"
-    );
-  }
-
-  private async generateGrokImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
-    return this.requestImage(
-      "/images/generations",
-      {
-        model: input.model.id,
-        prompt: input.prompt,
-        n: 1
-      },
-      input.abortSignal,
-      "Grok image generation request",
-      "grok-images"
+      plan.label ?? "Image generation request",
+      plan.protocol
     );
   }
 
@@ -373,6 +372,8 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
     timeoutMs?: number;
     pollIntervalMs?: number;
   }) {
+    const compat = resolveModelCompat(input.model);
+    const plan = compat.resolveVideoGeneration({ model: input.model, prompt: input.prompt });
     const baseUrl = normalizeProviderBaseUrl(this.provider.baseUrl);
     if (!baseUrl) {
       throw new Error(`Provider ${this.provider.id} is missing baseUrl for video generation.`);
@@ -384,16 +385,10 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       ...(this.provider.headers ?? {})
     };
 
-    const createResponse = await this.#fetch(`${baseUrl}/videos/generations`, {
+    const createResponse = await this.#fetch(`${baseUrl}${plan.endpoint}`, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        model: input.model.id,
-        prompt: input.prompt,
-        duration: 10,
-        aspect_ratio: "16:9",
-        resolution: "480p"
-      }),
+      body: JSON.stringify(plan.payload),
       signal: input.abortSignal
     });
     const createPayload = await readJsonResponse(createResponse, "Video generation request");
@@ -456,22 +451,96 @@ function originalToolName(nativeName: string, availableTools: ProviderTurnInput[
   return availableTools.find((tool) => nativeToolName(tool.name) === nativeName)?.name ?? null;
 }
 
-function parseNativeToolArguments(value: string): Record<string, unknown> {
+export const TOOL_ARGS_TRUNCATED_KEY = "__tool_args_truncated__";
+
+export function parseNativeToolArguments(value: string): Record<string, unknown> {
+  if (!value || !value.trim()) {
+    return {};
+  }
   try {
     const parsed = JSON.parse(value);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed as Record<string, unknown>
       : {};
   } catch {
-    return {};
+    // JSON parse failed. Try repairing common issues (literal newlines /
+    // tabs / carriage returns inside string values) before giving up.
+    try {
+      const repaired = repairJsonStringValues(value);
+      if (repaired !== value) {
+        const parsed = JSON.parse(repaired);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed as Record<string, unknown>
+          : {};
+      }
+    } catch {
+      // repair didn't help — fall through to truncation marker
+    }
+    // JSON parse failed on non-empty input — the model's output was likely
+    // truncated by max_tokens or a mid-stream disconnect. Return a marker so
+    // the agent runtime can detect it and ask the model to retry with shorter
+    // output instead of silently passing empty arguments to the tool.
+    return { [TOOL_ARGS_TRUNCATED_KEY]: true, __raw_length__: value.length };
   }
+}
+
+/**
+ * Escapes literal control characters (newline, carriage return, tab) inside
+ * JSON string values. Some models (notably DeepSeek) emit raw newlines inside
+ * string values instead of the \n escape sequence, which makes JSON.parse
+ * fail. This function walks the string and only escapes control characters
+ * that appear *inside* quoted string values, leaving the JSON structure intact.
+ */
+function repairJsonStringValues(raw: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) {
+        result += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        result += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        result += ch;
+        inString = false;
+        continue;
+      }
+      if (ch === "\n") {
+        result += "\\n";
+        continue;
+      }
+      if (ch === "\r") {
+        result += "\\r";
+        continue;
+      }
+      if (ch === "\t") {
+        result += "\\t";
+        continue;
+      }
+      result += ch;
+    } else {
+      if (ch === '"') {
+        inString = true;
+      }
+      result += ch;
+    }
+  }
+  return result;
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   return Boolean(value && typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function");
 }
 
-function parseOpenAiCompatibleResponse(
+export function parseOpenAiCompatibleResponse(
   response: any,
   hasNativeTools: boolean,
   input: ProviderTurnInput
@@ -1284,7 +1353,7 @@ function parseCompletionEvidence(
   return evidence.length > 0 ? evidence : undefined;
 }
 
-function extractVisibleStreamText(text: string): string {
+export function extractVisibleStreamText(text: string): string {
   const match = text.match(/"assistant_message"\s*:\s*"((?:\\.|[^"\\])*)/s);
   if (match?.[1]) {
     try {
@@ -1519,6 +1588,11 @@ function tryParseStandaloneRequestUserInput(text: string): StandaloneRequestUser
     return null;
   }
 
+  const cleanedContent = text
+    .replace(fragment, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
   const readAttribute = (element: cheerio.Cheerio<cheerio.Element>, name: string): string =>
     element.attr(name)?.trim() ?? "";
   const splitOptions = (value: string): string[] => value
@@ -1563,6 +1637,23 @@ function tryParseStandaloneRequestUserInput(text: string): StandaloneRequestUser
     });
   });
 
+  // Fallback: some models (e.g. DeepSeek) emit the request_user_input payload
+  // as a JSON object inside the XML tags instead of using XML attributes and
+  // child elements. Try parsing the tag's text content as JSON.
+  if (questions.length === 0) {
+    const jsonContent = root.text().trim();
+    if (jsonContent) {
+      const jsonParsed = tryParseRequestUserInputJson(jsonContent);
+      if (jsonParsed) {
+        return {
+          title: jsonParsed.title,
+          questions: jsonParsed.questions,
+          cleanedContent
+        };
+      }
+    }
+  }
+
   if (questions.length === 0) {
     return null;
   }
@@ -1570,11 +1661,62 @@ function tryParseStandaloneRequestUserInput(text: string): StandaloneRequestUser
   return {
     title: readAttribute(root, "title") || "需要确认几个选项",
     questions,
-    cleanedContent: text
-      .replace(fragment, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim()
+    cleanedContent
   };
+}
+
+function tryParseRequestUserInputJson(jsonContent: string): { title: string; questions: StandaloneRequestUserInput["questions"] } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonContent);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  const title = typeof obj.title === "string" && obj.title.trim() ? obj.title.trim() : "需要确认几个选项";
+  const rawQuestions = Array.isArray(obj.questions) ? obj.questions : [];
+  const questions: StandaloneRequestUserInput["questions"] = [];
+  for (const rawQuestion of rawQuestions) {
+    if (questions.length >= 4) break;
+    if (!rawQuestion || typeof rawQuestion !== "object" || Array.isArray(rawQuestion)) continue;
+    const q = rawQuestion as Record<string, unknown>;
+    const id = typeof q.id === "string" && q.id.trim() ? q.id.trim() : `q${questions.length + 1}`;
+    const label = typeof q.label === "string" && q.label.trim() ? q.label.trim() : `Q${questions.length + 1}`;
+    const prompt = typeof q.prompt === "string" && q.prompt.trim() ? q.prompt.trim() : label;
+    const rawOptions = Array.isArray(q.options) ? q.options : [];
+    const options: StandaloneRequestUserInput["questions"][number]["options"] = [];
+    for (const rawOption of rawOptions) {
+      if (options.length >= 4) break;
+      if (typeof rawOption === "string") {
+        if (!rawOption.trim()) continue;
+        options.push({ id: `option_${options.length + 1}`, label: rawOption.trim(), recommended: options.length === 0 });
+      } else if (rawOption && typeof rawOption === "object" && !Array.isArray(rawOption)) {
+        const opt = rawOption as Record<string, unknown>;
+        const optLabel = typeof opt.label === "string" ? opt.label.trim() : typeof opt.id === "string" ? opt.id.trim() : "";
+        if (!optLabel) continue;
+        options.push({
+          id: typeof opt.id === "string" && opt.id.trim() ? opt.id.trim() : `option_${options.length + 1}`,
+          label: optLabel,
+          recommended: typeof opt.recommended === "boolean" ? opt.recommended : false
+        });
+      }
+    }
+    if (options.length === 0) continue;
+    questions.push({
+      id,
+      label: label.slice(0, 48),
+      prompt,
+      options,
+      allowFreeText: true
+    });
+  }
+  if (questions.length === 0) {
+    return null;
+  }
+  return { title, questions };
 }
 
 function tryParseTaggedJsonToolCalls(payload: string): ProviderTurnDecision["toolCalls"] | null {

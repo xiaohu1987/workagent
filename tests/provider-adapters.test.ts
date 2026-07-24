@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseProviderTokenUsage, ProviderFactory } from "@provider-adapters";
+import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, ProviderFactory, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -263,7 +263,10 @@ describe("OpenAiCompatibleProvider", () => {
           { role: "assistant", content: "Tool output" }
         ],
         temperature: 0.2,
-        max_tokens: 4096,
+        // deepseek compat raises max_tokens floor to 8192 to prevent
+        // mid-stream truncation (finish_reason: length) that breaks long
+        // replies and apply_patch arguments.
+        max_tokens: 8192,
         response_format: { type: "json_object" }
       },
       {
@@ -1303,9 +1306,133 @@ describe("parseDecisionFromText", () => {
     expect(decision).toMatchObject({ isStructured: false, toolCalls: [] });
   });
 
+  it("parses request_user_input with JSON content inside XML tags (DeepSeek format)", () => {
+    const decision = parseDecisionFromText([
+      '<request_user_input> { "title": "语音变更 + 攻治减半方案确认", "questions": [',
+      '  { "id": "voice_strategy", "label": "语音变更策略", "prompt": "你希望如何更换语音源？", "options": [',
+      '    { "id": "reweight", "label": "调整评分权重", "description": "降低当前音色分数", "recommended": true },',
+      '    { "id": "force_voice", "label": "强制指定特定语音", "description": "写死一个 voiceURI" }',
+      '  ] },',
+      '  { "id": "half_scope", "label": "减半效果的技能范围", "prompt": "「提醒后攻治减半」应覆盖哪些技能类型？", "options": [',
+      '    { "id": "all", "label": "所有技能" },',
+      '    { "id": "attack_heal", "label": "仅攻击和治疗", "recommended": true },',
+      '    { "id": "attack_only", "label": "仅攻击类技能" }',
+      '  ] }',
+      '] } </request_user_input>'
+    ].join("\n"));
+
+    expect(decision).toMatchObject({
+      isStructured: true,
+      endTurn: false,
+      toolCalls: [{
+        name: "request_user_input",
+        arguments: {
+          title: "语音变更 + 攻治减半方案确认",
+          questions: [
+            {
+              id: "voice_strategy",
+              label: "语音变更策略",
+              prompt: "你希望如何更换语音源？",
+              options: [
+                { id: "reweight", label: "调整评分权重", recommended: true },
+                { id: "force_voice", label: "强制指定特定语音", recommended: false }
+              ]
+            },
+            {
+              id: "half_scope",
+              label: "减半效果的技能范围",
+              prompt: "「提醒后攻治减半」应覆盖哪些技能类型？",
+              options: [
+                { id: "all", label: "所有技能", recommended: false },
+                { id: "attack_heal", label: "仅攻击和治疗", recommended: true },
+                { id: "attack_only", label: "仅攻击类技能", recommended: false }
+              ]
+            }
+          ]
+        }
+      }]
+    });
+    expect(decision.assistantMessage ?? "").not.toContain("<request_user_input");
+  });
+
+  it("parses request_user_input with JSON content using string options", () => {
+    const decision = parseDecisionFromText(
+      '<request_user_input>{"title":"测试","questions":[{"id":"q1","label":"问题","prompt":"选哪个？","options":["选项A","选项B"]}]}</request_user_input>'
+    );
+
+    expect(decision).toMatchObject({
+      isStructured: true,
+      toolCalls: [{
+        name: "request_user_input",
+        arguments: {
+          title: "测试",
+          questions: [{
+            id: "q1",
+            label: "问题",
+            prompt: "选哪个？",
+            options: [
+              { id: "option_1", label: "选项A", recommended: true },
+              { id: "option_2", label: "选项B", recommended: false }
+            ]
+          }]
+        }
+      }]
+    });
+  });
+
   it("keeps unrepairable text protocols unstructured and prevents tool execution", () => {
     const decision = parseDecisionFromText("<tool_calls>{not valid</tool_calls>");
 
     expect(decision).toMatchObject({ isStructured: false, toolCalls: [] });
+  });
+});
+
+describe("parseNativeToolArguments JSON repair", () => {
+  it("parses well-formed JSON normally", () => {
+    expect(parseNativeToolArguments('{"patch":"hello"}')).toEqual({ patch: "hello" });
+  });
+
+  it("returns empty object for empty input", () => {
+    expect(parseNativeToolArguments("")).toEqual({});
+    expect(parseNativeToolArguments("   ")).toEqual({});
+  });
+
+  it("repairs literal newlines inside string values (DeepSeek apply_patch)", () => {
+    // DeepSeek sometimes emits raw newlines inside JSON string values
+    // instead of \n escape sequences, e.g. for apply_patch arguments.
+    const raw = '{"patch": "*** Begin Patch\n*** Update File: app.ts\n@@\n-old\n+new\n*** End Patch"}';
+    const parsed = parseNativeToolArguments(raw);
+    expect(parsed).toEqual({
+      patch: "*** Begin Patch\n*** Update File: app.ts\n@@\n-old\n+new\n*** End Patch"
+    });
+    expect(TOOL_ARGS_TRUNCATED_KEY in parsed).toBe(false);
+  });
+
+  it("repairs literal tabs inside string values", () => {
+    const raw = '{"code": "if\t(true)\t{return}"}';
+    expect(parseNativeToolArguments(raw)).toEqual({ code: "if\t(true)\t{return}" });
+  });
+
+  it("repairs literal carriage returns inside string values", () => {
+    const raw = '{"text": "line1\r\nline2"}';
+    expect(parseNativeToolArguments(raw)).toEqual({ text: "line1\r\nline2" });
+  });
+
+  it("preserves already-escaped sequences in repaired JSON", () => {
+    const raw = '{"patch": "*** Begin Patch\\n*** End Patch"}';
+    expect(parseNativeToolArguments(raw)).toEqual({ patch: "*** Begin Patch\n*** End Patch" });
+  });
+
+  it("returns truncation marker for genuinely truncated JSON", () => {
+    const raw = '{"patch": "*** Begin Patch\n*** Update File: app.ts\n@@\n-old\n+new';  // no closing
+    const parsed = parseNativeToolArguments(raw);
+    expect(TOOL_ARGS_TRUNCATED_KEY in parsed).toBe(true);
+  });
+
+  it("handles mixed escaped and literal newlines", () => {
+    // First line uses \n escape, second has literal newline
+    const raw = '{"patch": "line1\\nline2\nline3"}';
+    const parsed = parseNativeToolArguments(raw);
+    expect(parsed).toEqual({ patch: "line1\nline2\nline3" });
   });
 });

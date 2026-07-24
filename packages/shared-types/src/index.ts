@@ -656,6 +656,7 @@ export interface RuntimeTimeoutSettings {
   modelDecisionMs: number;
   recoveryModelDecisionMs: number;
   modelTimeoutRetries: number;
+  toolExecutionMs: number;
   multimodalIntentClassifyMs: number;
   modelTestMs: number;
   videoGenerationMs: number;
@@ -679,6 +680,7 @@ export const DEFAULT_RUNTIME_TIMEOUTS: RuntimeTimeoutSettings = {
   modelDecisionMs: 90_000,
   recoveryModelDecisionMs: 20_000,
   modelTimeoutRetries: 5,
+  toolExecutionMs: 120_000,
   multimodalIntentClassifyMs: 20_000,
   modelTestMs: 30_000,
   videoGenerationMs: 10 * 60_000,
@@ -696,6 +698,7 @@ export function normalizeRuntimeTimeouts(value?: Partial<RuntimeTimeoutSettings>
     modelDecisionMs: nonNegativeNumber(source.modelDecisionMs, DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs),
     recoveryModelDecisionMs: nonNegativeNumber(source.recoveryModelDecisionMs, DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs),
     modelTimeoutRetries: nonNegativeNumber(source.modelTimeoutRetries, DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries),
+    toolExecutionMs: nonNegativeNumber(source.toolExecutionMs, DEFAULT_RUNTIME_TIMEOUTS.toolExecutionMs),
     multimodalIntentClassifyMs: nonNegativeNumber(source.multimodalIntentClassifyMs, DEFAULT_RUNTIME_TIMEOUTS.multimodalIntentClassifyMs),
     modelTestMs: nonNegativeNumber(source.modelTestMs, DEFAULT_RUNTIME_TIMEOUTS.modelTestMs),
     videoGenerationMs: nonNegativeNumber(source.videoGenerationMs, DEFAULT_RUNTIME_TIMEOUTS.videoGenerationMs),

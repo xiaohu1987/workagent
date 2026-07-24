@@ -2185,6 +2185,168 @@ pre {
   font-size: 11px;
 }
 
+/* Standalone token usage control (placed before the notification bell) */
+.token-usage-control {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.token-usage-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: rgba(244, 244, 243, 0.7);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.token-usage-toggle:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.token-usage-toggle.active {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #f4f4f5;
+  background: #1d1d22;
+}
+
+.token-usage-toggle-label {
+  color: rgba(244, 244, 243, 0.5);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.token-usage-toggle-value {
+  color: #f4f4f3;
+  font-size: 13px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.token-usage-toggle-live {
+  color: rgba(88, 191, 139, 0.82);
+  font-size: 10px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.token-usage-panel {
+  position: absolute;
+  top: 38px;
+  right: 0;
+  z-index: 40;
+  display: grid;
+  width: min(340px, calc(100vw - 44px));
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  color: #e9ebef;
+  background: rgba(17, 18, 21, 0.98);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+  transform-origin: top right;
+  backdrop-filter: blur(18px);
+}
+
+.token-usage-panel.motion-entering {
+  animation: notification-panel-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.token-usage-panel.motion-exiting {
+  animation: notification-panel-out 140ms ease both;
+  pointer-events: none;
+}
+
+.token-usage-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.token-usage-panel-header strong {
+  color: #f4f5f7;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.token-usage-panel-header span {
+  color: #808894;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-usage-panel-body {
+  padding: 10px 12px 12px;
+}
+
+.token-usage-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.token-usage-block {
+  display: grid;
+  gap: 4px;
+  padding-top: 6px;
+}
+
+.token-usage-block > strong {
+  color: rgba(244, 244, 243, 0.78);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.token-usage-block div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 20px;
+}
+
+.token-usage-block div span {
+  color: rgba(244, 244, 243, 0.52);
+  font-size: 12px;
+}
+
+.token-usage-block b {
+  color: rgba(244, 244, 243, 0.92);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-usage-rate {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.token-usage-rate span {
+  color: rgba(244, 244, 243, 0.52);
+  font-size: 12px;
+}
+
+.token-usage-rate strong {
+  color: #f4f4f3;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
 @keyframes notification-bell-ring {
   0%, 74%, 100% { transform: rotate(0); }
   80% { transform: rotate(10deg); }
@@ -17460,6 +17622,23 @@ select option:checked {
 
 .app-shell.has-app-background .notification-token-usage {
   background: rgba(255, 255, 255, 0.04);
+}
+
+.app-shell.has-app-background .token-usage-toggle {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(18, 18, 22, min(0.55, calc(var(--app-bg-sidebar) + 0.12)));
+  backdrop-filter: blur(8px);
+}
+
+.app-shell.has-app-background .token-usage-toggle:hover,
+.app-shell.has-app-background .token-usage-toggle.active {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(24, 24, 29, min(0.62, calc(var(--app-bg-sidebar) + 0.18)));
+}
+
+.app-shell.has-app-background .token-usage-panel {
+  background: rgba(13, 14, 17, 0.58);
+  backdrop-filter: blur(18px);
 }
 
 .app-shell.has-app-background .history-item:hover,

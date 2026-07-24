@@ -482,6 +482,23 @@ export function parseEmbeddedRequestUserInput(
     });
   });
 
+  // Fallback: some models (e.g. DeepSeek) emit the request_user_input payload
+  // as a JSON object inside the XML tags instead of using XML attributes and
+  // child elements. Try parsing the tag's text content as JSON.
+  if (questions.length === 0) {
+    const jsonContent = root.text().trim();
+    if (jsonContent) {
+      const jsonParsed = tryParseRequestUserInputJson(jsonContent);
+      if (jsonParsed) {
+        const cleanedJsonContent = assistantMessage
+          .replace(blockMatch[0], "")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+        return { title: jsonParsed.title, questions: jsonParsed.questions, cleanedContent: cleanedJsonContent };
+      }
+    }
+  }
+
   if (questions.length === 0) {
     return null;
   }
@@ -492,6 +509,60 @@ export function parseEmbeddedRequestUserInput(
     .trim();
 
   return { title, questions, cleanedContent };
+}
+
+function tryParseRequestUserInputJson(jsonContent: string): { title: string; questions: UserInputQuestion[] } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonContent);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  const title = typeof obj.title === "string" && obj.title.trim() ? obj.title.trim() : "需要确认几个设计选项";
+  const rawQuestions = Array.isArray(obj.questions) ? obj.questions : [];
+  const questions: UserInputQuestion[] = [];
+  for (const rawQuestion of rawQuestions) {
+    if (questions.length >= 4) break;
+    if (!rawQuestion || typeof rawQuestion !== "object" || Array.isArray(rawQuestion)) continue;
+    const q = rawQuestion as Record<string, unknown>;
+    const id = typeof q.id === "string" && q.id.trim() ? q.id.trim() : `q${questions.length + 1}`;
+    const label = typeof q.label === "string" && q.label.trim() ? q.label.trim() : `选项 ${questions.length + 1}`;
+    const prompt = typeof q.prompt === "string" && q.prompt.trim() ? q.prompt.trim() : label;
+    const rawOptions = Array.isArray(q.options) ? q.options : [];
+    const options: UserInputQuestion["options"] = [];
+    for (const rawOption of rawOptions) {
+      if (options.length >= 4) break;
+      if (typeof rawOption === "string") {
+        if (!rawOption.trim()) continue;
+        options.push({ id: `option_${options.length + 1}`, label: rawOption.trim(), recommended: options.length === 0 });
+      } else if (rawOption && typeof rawOption === "object" && !Array.isArray(rawOption)) {
+        const opt = rawOption as Record<string, unknown>;
+        const optLabel = typeof opt.label === "string" ? opt.label.trim() : typeof opt.id === "string" ? opt.id.trim() : "";
+        if (!optLabel) continue;
+        options.push({
+          id: typeof opt.id === "string" && opt.id.trim() ? opt.id.trim() : `option_${options.length + 1}`,
+          label: optLabel,
+          recommended: typeof opt.recommended === "boolean" ? opt.recommended : false
+        });
+      }
+    }
+    if (options.length === 0) continue;
+    questions.push({
+      id,
+      label: label.slice(0, 48),
+      prompt,
+      options,
+      allowFreeText: true
+    });
+  }
+  if (questions.length === 0) {
+    return null;
+  }
+  return { title, questions };
 }
 
 /** Promotes numbered questions embedded in GOAL/PLAN prose into input cards. */

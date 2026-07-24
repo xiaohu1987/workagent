@@ -33,7 +33,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory } from "@provider-adapters";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
@@ -135,6 +135,9 @@ export const MODEL_RATE_LIMIT_RECOVERY_TIMEOUT_MS = 30_000;
 export const MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID = "model_rate_limit_recovery";
 export const MODEL_RATE_LIMIT_BASE_DELAY_MS = 1_000;
 export const MODEL_RATE_LIMIT_MAX_DELAY_MS = 30_000;
+export const MAX_NETWORK_ERROR_RETRIES = 3;
+export const NETWORK_ERROR_BASE_DELAY_MS = 1_000;
+export const NETWORK_ERROR_MAX_DELAY_MS = 10_000;
 
 export function isUpstreamContextOverflowError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -175,6 +178,32 @@ export function isModelRateLimitError(error: unknown): boolean {
   return false;
 }
 
+export function isNetworkError(error: unknown): boolean {
+  // AbortError is an intentional interruption (user stop or model timeout),
+  // not a network fault — never retry on it here.
+  if (error instanceof Error && /^abort/i.test(error.name)) {
+    return false;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message) return false;
+  if (/\babort(?:ed)?\b/i.test(message)) {
+    return false;
+  }
+  // Node.js / system errno codes on the error object.
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|ECONNABORTED)$/.test(code)) {
+      return true;
+    }
+  }
+  return /\b(?:socket\s+hang\s+up|fetch\s+failed|connection\s+(?:error|refused|reset|timed?\s*out)|network\s+error|stream\s+(?:disconnected?|terminated)|APIConnectionError|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|terminated)\b/i.test(message);
+}
+
+export function resolveNetworkErrorDelayMs(attempt: number): number {
+  const exponential = NETWORK_ERROR_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1));
+  return Math.min(NETWORK_ERROR_MAX_DELAY_MS, exponential);
+}
+
 export function resolveModelRateLimitDelayMs(error: unknown, attempt: number): number {
   const retryAfterMs = readRetryAfterDelayMs(error);
   if (retryAfterMs !== null) {
@@ -182,6 +211,15 @@ export function resolveModelRateLimitDelayMs(error: unknown, attempt: number): n
   }
   const exponential = MODEL_RATE_LIMIT_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1));
   return Math.min(MODEL_RATE_LIMIT_MAX_DELAY_MS, exponential);
+}
+
+export function isToolArgsTruncated(argumentsValue: unknown): boolean {
+  return Boolean(
+    argumentsValue &&
+    typeof argumentsValue === "object" &&
+    !Array.isArray(argumentsValue) &&
+    TOOL_ARGS_TRUNCATED_KEY in (argumentsValue as Record<string, unknown>)
+  );
 }
 
 function readRetryAfterDelayMs(error: unknown): number | null {
@@ -1351,6 +1389,7 @@ class ThreadSessionRuntime {
       let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
       let modelRateLimitAttempts = 0;
+      let networkErrorAttempts = 0;
       let upstreamContextRecoveryAttempts = 0;
       let functionCallProtocolRecoveryAttempts = 0;
       let agentProtocolFailureAttempts = 0;
@@ -1735,6 +1774,41 @@ class ThreadSessionRuntime {
               `Model rate limit persisted after ${MAX_MODEL_RATE_LIMIT_RETRIES} retries: ${errorMessage}`
             );
           }
+          if (!abortController.signal.aborted && isNetworkError(error)) {
+            // Network faults (ECONNRESET, socket hang up, fetch failed, stream
+            // terminated, …) abort the SSE stream mid-flight without producing
+            // a model decision. Unlike ModelDecisionTimeoutError these never
+            // carry a partial result, so discard whatever was streamed so far
+            // and retry with exponential back-off.
+            await discardStreamedAssistant();
+            networkErrorAttempts += 1;
+            const retrying = networkErrorAttempts <= MAX_NETWORK_ERROR_RETRIES;
+            const delayMs = resolveNetworkErrorDelayMs(networkErrorAttempts);
+            await this.services.log("provider.network_error", this.threadId, {
+              turnRunId: turn.id,
+              attempt: networkErrorAttempts,
+              maxRetries: MAX_NETWORK_ERROR_RETRIES,
+              delayMs,
+              retrying,
+              error: errorMessage
+            });
+            if (!retrying) {
+              throw error;
+            }
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: networkErrorAttempts,
+                maxAttempts: MAX_NETWORK_ERROR_RETRIES,
+                reason: "network_error",
+                delayMs
+              },
+              createdAt: new Date().toISOString()
+            });
+            await sleepWithAbort(delayMs, abortController.signal);
+            continue;
+          }
           if (!(error instanceof ModelDecisionTimeoutError) || abortController.signal.aborted) {
             throw error;
           }
@@ -1778,6 +1852,7 @@ class ThreadSessionRuntime {
         }
         modelTimeoutAttempts = 0;
         modelRateLimitAttempts = 0;
+        networkErrorAttempts = 0;
 
         if (abortController.signal.aborted) {
           throw new Error("Turn interrupted.");
@@ -2953,7 +3028,10 @@ class ThreadSessionRuntime {
 
           hasExecutedToolCall = true;
           let result: ToolResult;
+          let toolTimedOut = false;
+          let toolArgsTruncated = false;
           let toolContext: Parameters<ToolRuntime["execute"]>[1] | null = null;
+          const toolTimeoutMs = this.services.config.timeouts.toolExecutionMs;
           try {
             // Projectless chats must never inherit the desktop application's launch folder.
             const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
@@ -3167,23 +3245,58 @@ class ThreadSessionRuntime {
               loadSkill: (skillId) =>
                 this.services.skills.loadInstructions(skillId, availableSkillIds)
             };
-            result = await waitForAbort(
-              this.services.toolRuntime.execute(toolCall, toolContext!),
-              abortController.signal
-            );
+            if (isToolArgsTruncated(toolCall.arguments)) {
+              // DeepSeek / max_tokens truncation: the streamed tool arguments
+              // were incomplete JSON. Skip execution and ask the model to retry
+              // with shorter output instead of silently failing with empty args.
+              toolArgsTruncated = true;
+              result = {
+                ok: false,
+                content: "Tool arguments were truncated (incomplete JSON received from the model). " +
+                  "This usually happens when the output exceeds the token limit. " +
+                  "Please retry with shorter, more focused output."
+              };
+              await this.services.log("tool.arguments_truncated", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                rawLength: (toolCall.arguments as Record<string, unknown>).__raw_length__ ?? null
+              });
+            } else {
+              result = await waitForAbortOrTimeout(
+                this.services.toolRuntime.execute(toolCall, toolContext!),
+                abortController.signal,
+                toolTimeoutMs
+              );
+            }
           } catch (error) {
             if (abortController.signal.aborted) {
               throw error;
             }
-            result = {
-              ok: false,
-              content: `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`
-            };
-            await this.services.log("tool.execution_error", this.threadId, {
-              turnRunId: turn.id,
-              toolName: toolCall.name,
-              error: error instanceof Error ? error.message : String(error)
-            });
+            const isToolTimeout = error instanceof ModelDecisionTimeoutError;
+            if (isToolTimeout) {
+              toolTimedOut = true;
+              result = {
+                ok: false,
+                content: `Tool execution timed out after ${toolTimeoutMs / 1000}s. ` +
+                  "The operation was aborted to prevent the agent from hanging. " +
+                  "Try a different approach or break the task into smaller steps."
+              };
+              await this.services.log("tool.execution_timeout", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                timeoutMs: toolTimeoutMs
+              });
+            } else {
+              result = {
+                ok: false,
+                content: `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`
+              };
+              await this.services.log("tool.execution_error", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                error: error instanceof Error ? error.message : String(error)
+              });
+            }
           }
 
           if (abortController.signal.aborted) {
@@ -3315,6 +3428,23 @@ class ThreadSessionRuntime {
               content: buildTimedOutDeploymentRecoveryInstruction()
             });
           }
+          if (toolTimedOut) {
+            transcript.push({
+              role: "user",
+              content:
+                "The previous tool call timed out and was aborted. Try a simpler approach, " +
+                "break the task into smaller steps, or verify the target environment is responsive."
+            });
+          }
+          if (toolArgsTruncated) {
+            transcript.push({
+              role: "user",
+              content:
+                "The previous tool call arguments were truncated because the model output exceeded the token limit. " +
+                "Retry the same operation with shorter, more focused output — for file writes, write in smaller " +
+                "patches or split large files into multiple calls."
+            });
+          }
           if (result.ok && result.attachments?.length && model.supportsMultimodalInput) {
             transcript.push({
               role: "user",
@@ -3438,14 +3568,20 @@ class ThreadSessionRuntime {
               });
               let verificationResult: ToolResult;
               try {
-                verificationResult = await waitForAbort(
+                verificationResult = await waitForAbortOrTimeout(
                   this.services.toolRuntime.execute(verificationCall, toolContext),
-                  abortController.signal
+                  abortController.signal,
+                  toolTimeoutMs
                 );
               } catch (error) {
+                if (abortController.signal.aborted) {
+                  throw error;
+                }
                 verificationResult = {
                   ok: false,
-                  content: `Automatic project verification failed: ${error instanceof Error ? error.message : String(error)}`
+                  content: error instanceof ModelDecisionTimeoutError
+                    ? `Automatic project verification timed out after ${toolTimeoutMs / 1000}s.`
+                    : `Automatic project verification failed: ${error instanceof Error ? error.message : String(error)}`
                 };
               }
               const verificationCompletedAt = new Date().toISOString();
@@ -6206,6 +6342,13 @@ export function validateManagedWriteRecoveryToolCall(
 
   if (state.phase === "read") {
     if (MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
+      // If there are no target paths to inspect, there is nothing to read
+      // first — auto-advance to the write phase so the model can retry
+      // instead of dead-locking in a read phase with nothing to read.
+      if (state.targetPaths.length === 0) {
+        state.phase = "write";
+        return { allowed: true };
+      }
       return {
         allowed: false,
         message: buildManagedWriteRecoveryInstruction(state)
@@ -6227,6 +6370,14 @@ export function advanceManagedWriteRecovery(
     readPath?: string;
   }
 ): void {
+  // Skip recovery for truncated tool arguments — the model already received
+  // a truncation error and should retry with shorter output. Activating
+  // recovery here would create a dead-end because no target paths can be
+  // extracted from the truncated arguments, leaving the agent stuck in a
+  // "read" phase with nothing to read.
+  if (isToolArgsTruncated(input.argumentsJson)) {
+    return;
+  }
   if ((input.toolName === "apply_patch" || input.toolName === "fs.write_file") && !input.ok) {
     const addOnlyTargetPaths = input.toolName === "apply_patch"
       ? getManagedWriteAddOnlyTargetPaths(input.argumentsJson)
