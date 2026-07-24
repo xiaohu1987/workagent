@@ -196,6 +196,9 @@ declare global {
       listKnowledgeDocuments: (knowledgeBaseId: string) => Promise<any[]>;
       refreshKnowledgeBase: (knowledgeBaseId: string) => Promise<any>;
       deleteKnowledgeBase: (knowledgeBaseId: string) => Promise<void>;
+      listErrorSolutions: (input?: { limit?: number; modelId?: string | null }) => Promise<any[]>;
+      deleteErrorSolution: (id: string) => Promise<void>;
+      clearErrorSolutions: (modelId?: string | null) => Promise<number>;
       openBrowserTab: (payload: { threadId: string; url: string }) => Promise<any>;
       navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) => Promise<any>;
       focusBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;

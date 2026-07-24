@@ -28,6 +28,7 @@ import type {
   ProjectPluginBinding,
   QuickNoteRecord,
   RememberedApprovalRecord,
+  ErrorSolutionRecord,
   TokenUsage,
   QueuedMessageRecord,
   ProviderDefinition,
@@ -713,6 +714,30 @@ export class DatabaseService {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS error_solutions (
+        scope_key TEXT PRIMARY KEY,
+        id TEXT NOT NULL,
+        model_id TEXT NOT NULL DEFAULT '',
+        project_id TEXT,
+        tool_name TEXT NOT NULL,
+        task_key_pattern TEXT NOT NULL,
+        error_signature TEXT NOT NULL,
+        error_summary TEXT NOT NULL,
+        solution_summary TEXT NOT NULL,
+        strategy_json TEXT NOT NULL,
+        success_count INTEGER NOT NULL DEFAULT 1,
+        source_thread_id TEXT,
+        last_used_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE VIRTUAL TABLE IF NOT EXISTS error_solution_fts USING fts5 (
+        solution_id UNINDEXED,
+        tool_name,
+        task_key_pattern,
+        error_summary,
+        solution_summary
+      );
     `);
     this.ensureColumns();
   }
@@ -743,6 +768,7 @@ export class DatabaseService {
     this.ensureColumn("user_input_prompts", "default_answers_json", "TEXT");
     this.ensureColumn("user_input_prompts", "resolution_source", "TEXT");
     this.ensureColumn("turn_runs", "usage_json", "TEXT");
+    this.ensureColumn("error_solutions", "model_id", "TEXT NOT NULL DEFAULT ''");
     this.migrateSubagentDefaultOff();
   }
 
@@ -1622,6 +1648,229 @@ export class DatabaseService {
       );
 
     return record;
+  }
+
+  public findErrorSolutionByScope(scopeKey: string): ErrorSolutionRecord | null {
+    const row = this.#db.prepare("SELECT * FROM error_solutions WHERE scope_key = ?").get(scopeKey) as any;
+    return row ? mapErrorSolutionRow(row) : null;
+  }
+
+  public upsertErrorSolution(
+    input: Omit<ErrorSolutionRecord, "id" | "createdAt" | "updatedAt" | "lastUsedAt" | "successCount" | "score"> & {
+      successCount?: number;
+    }
+  ): ErrorSolutionRecord {
+    const modelId = input.modelId.trim();
+    if (!modelId) {
+      throw new Error("Error solution memory requires a modelId.");
+    }
+    const scopeKey = buildErrorSolutionScopeKey(modelId, input.projectId, input.toolName, input.errorSignature);
+    const existing = this.findErrorSolutionByScope(scopeKey);
+    const now = nowIso();
+    const record: ErrorSolutionRecord = {
+      id: existing?.id ?? randomUUID(),
+      modelId,
+      projectId: input.projectId,
+      toolName: input.toolName,
+      taskKeyPattern: input.taskKeyPattern,
+      errorSignature: input.errorSignature,
+      errorSummary: input.errorSummary.slice(0, 1_000),
+      solutionSummary: input.solutionSummary.slice(0, 2_000),
+      strategyJson: input.strategyJson,
+      successCount: existing
+        ? existing.successCount + Math.max(1, input.successCount ?? 1)
+        : Math.max(1, input.successCount ?? 1),
+      sourceThreadId: input.sourceThreadId,
+      lastUsedAt: now,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    };
+
+    this.#db
+      .prepare(
+        `INSERT INTO error_solutions (
+          scope_key, id, model_id, project_id, tool_name, task_key_pattern, error_signature,
+          error_summary, solution_summary, strategy_json, success_count,
+          source_thread_id, last_used_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(scope_key) DO UPDATE SET
+          id = excluded.id,
+          model_id = excluded.model_id,
+          project_id = excluded.project_id,
+          tool_name = excluded.tool_name,
+          task_key_pattern = excluded.task_key_pattern,
+          error_signature = excluded.error_signature,
+          error_summary = excluded.error_summary,
+          solution_summary = excluded.solution_summary,
+          strategy_json = excluded.strategy_json,
+          success_count = excluded.success_count,
+          source_thread_id = excluded.source_thread_id,
+          last_used_at = excluded.last_used_at,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        scopeKey,
+        record.id,
+        record.modelId,
+        record.projectId,
+        record.toolName,
+        record.taskKeyPattern,
+        record.errorSignature,
+        record.errorSummary,
+        record.solutionSummary,
+        record.strategyJson,
+        record.successCount,
+        record.sourceThreadId,
+        record.lastUsedAt,
+        record.createdAt,
+        record.updatedAt
+      );
+
+    this.#db.prepare("DELETE FROM error_solution_fts WHERE solution_id = ?").run(record.id);
+    this.#db
+      .prepare(
+        "INSERT INTO error_solution_fts (solution_id, tool_name, task_key_pattern, error_summary, solution_summary) VALUES (?, ?, ?, ?, ?)"
+      )
+      .run(record.id, record.toolName, record.taskKeyPattern, record.errorSummary, record.solutionSummary);
+
+    return record;
+  }
+
+  public markErrorSolutionUsed(id: string): void {
+    const now = nowIso();
+    this.#db
+      .prepare(
+        "UPDATE error_solutions SET success_count = success_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?"
+      )
+      .run(now, now, id);
+  }
+
+  public searchErrorSolutions(input: {
+    query: string;
+    modelId: string;
+    projectId?: string | null;
+    toolName?: string;
+    limit?: number;
+  }): ErrorSolutionRecord[] {
+    const limit = Math.min(Math.max(input.limit ?? 3, 1), 8);
+    const modelId = input.modelId.trim();
+    if (!modelId) {
+      return [];
+    }
+    const query = input.query.trim();
+    const params: unknown[] = [modelId];
+    const filters: string[] = ["es.model_id = ?"];
+    if (input.projectId) {
+      filters.push("(es.project_id = ? OR es.project_id IS NULL)");
+      params.push(input.projectId);
+    }
+    if (input.toolName) {
+      filters.push("es.tool_name = ?");
+      params.push(input.toolName);
+    }
+    const filterSql = ` AND ${filters.join(" AND ")}`;
+
+    let rows: any[] = [];
+    if (query) {
+      try {
+        const ftsQuery = buildErrorSolutionFtsQuery(query);
+        if (ftsQuery) {
+          rows = this.#db
+            .prepare(
+              `SELECT es.*, bm25(error_solution_fts) AS score
+               FROM error_solution_fts f
+               JOIN error_solutions es ON es.id = f.solution_id
+               WHERE error_solution_fts MATCH ?${filterSql}
+               ORDER BY score ASC, es.success_count DESC, es.last_used_at DESC
+               LIMIT ?`
+            )
+            .all(ftsQuery, ...params, limit) as any[];
+        }
+      } catch {
+        rows = [];
+      }
+    }
+
+    if (rows.length === 0) {
+      const terms = extractKnowledgeSearchTerms(query || input.toolName || "");
+      if (terms.length > 0) {
+        const termClauses = terms
+          .map(() => "(es.tool_name LIKE ? OR es.task_key_pattern LIKE ? OR es.error_summary LIKE ? OR es.solution_summary LIKE ?)")
+          .join(" OR ");
+        const termParams = terms.flatMap((term) => {
+          const pattern = `%${term}%`;
+          return [pattern, pattern, pattern, pattern];
+        });
+        rows = this.#db
+          .prepare(
+            `SELECT es.*, 0 AS score
+             FROM error_solutions es
+             WHERE (${termClauses})${filterSql}
+             ORDER BY es.success_count DESC, es.last_used_at DESC
+             LIMIT ?`
+          )
+          .all(...termParams, ...params, limit) as any[];
+      } else if (input.toolName) {
+        rows = this.#db
+          .prepare(
+            `SELECT es.*, 0 AS score
+             FROM error_solutions es
+             WHERE 1=1${filterSql}
+             ORDER BY es.success_count DESC, es.last_used_at DESC
+             LIMIT ?`
+          )
+          .all(...params, limit) as any[];
+      }
+    }
+
+    return rows.map((row) => ({
+      ...mapErrorSolutionRow(row),
+      score: Number(row.score ?? 0)
+    }));
+  }
+
+  public listErrorSolutions(input: { limit?: number; modelId?: string | null } = {}): ErrorSolutionRecord[] {
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const modelId = input.modelId?.trim();
+    if (modelId) {
+      return this.#db
+        .prepare(
+          "SELECT * FROM error_solutions WHERE model_id = ? ORDER BY success_count DESC, last_used_at DESC LIMIT ?"
+        )
+        .all(modelId, limit)
+        .map(mapErrorSolutionRow);
+    }
+    return this.#db
+      .prepare(
+        "SELECT * FROM error_solutions ORDER BY success_count DESC, last_used_at DESC LIMIT ?"
+      )
+      .all(limit)
+      .map(mapErrorSolutionRow);
+  }
+
+  public deleteErrorSolution(id: string): void {
+    this.#db.prepare("DELETE FROM error_solution_fts WHERE solution_id = ?").run(id);
+    this.#db.prepare("DELETE FROM error_solutions WHERE id = ?").run(id);
+  }
+
+  public clearErrorSolutions(modelId?: string | null): number {
+    const scopedModelId = modelId?.trim();
+    if (scopedModelId) {
+      const rows = this.#db
+        .prepare("SELECT id FROM error_solutions WHERE model_id = ?")
+        .all(scopedModelId) as Array<{ id: string }>;
+      const deleteFts = this.#db.prepare("DELETE FROM error_solution_fts WHERE solution_id = ?");
+      for (const row of rows) {
+        deleteFts.run(row.id);
+      }
+      const result = this.#db.prepare("DELETE FROM error_solutions WHERE model_id = ?").run(scopedModelId);
+      return Number(result.changes ?? rows.length);
+    }
+    const row = this.#db.prepare("SELECT COUNT(*) AS count FROM error_solutions").get() as { count?: number } | undefined;
+    const count = Number(row?.count ?? 0);
+    this.#db.exec("DELETE FROM error_solution_fts;");
+    this.#db.exec("DELETE FROM error_solutions;");
+    return count;
   }
 
   public createUserPrompt(
@@ -2515,6 +2764,25 @@ function mapRememberedApprovalRow(row: any): RememberedApprovalRecord {
   };
 }
 
+function mapErrorSolutionRow(row: any): ErrorSolutionRecord {
+  return {
+    id: row.id,
+    modelId: row.model_id ?? "",
+    projectId: row.project_id ?? null,
+    toolName: row.tool_name,
+    taskKeyPattern: row.task_key_pattern,
+    errorSignature: row.error_signature,
+    errorSummary: row.error_summary,
+    solutionSummary: row.solution_summary,
+    strategyJson: row.strategy_json,
+    successCount: Number(row.success_count ?? 1),
+    sourceThreadId: row.source_thread_id ?? null,
+    lastUsedAt: row.last_used_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 function mapQueuedMessageRow(row: any): QueuedMessageRecord {
   let attachments: MessageAttachment[] = [];
   try {
@@ -2629,4 +2897,25 @@ function hashPath(input: string): string {
 
 function buildApprovalScopeKey(projectId: string | null, approvalKey: string): string {
   return `${projectId ?? "__global__"}:${approvalKey}`;
+}
+
+function buildErrorSolutionScopeKey(
+  modelId: string,
+  projectId: string | null,
+  toolName: string,
+  errorSignature: string
+): string {
+  const signatureHash = createHash("sha256").update(errorSignature).digest("hex").slice(0, 24);
+  return `${modelId}:${projectId ?? "__global__"}:${toolName}:${signatureHash}`;
+}
+
+function buildErrorSolutionFtsQuery(query: string): string | null {
+  const terms = extractKnowledgeSearchTerms(query)
+    .map((term) => term.replace(/["']/g, ""))
+    .filter((term) => term.length >= 2)
+    .slice(0, 8);
+  if (terms.length === 0) {
+    return null;
+  }
+  return terms.map((term) => `"${term}"`).join(" OR ");
 }

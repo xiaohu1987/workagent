@@ -569,6 +569,11 @@ function registerIpc(): void {
   );
   ipcMain.handle("knowledge:refresh", (_event, knowledgeBaseId: string) => backend.refreshKnowledgeBase(knowledgeBaseId));
   ipcMain.handle("knowledge:delete", (_event, knowledgeBaseId: string) => backend.deleteKnowledgeBase(knowledgeBaseId));
+  ipcMain.handle("error-solutions:list", (_event, input?: { limit?: number; modelId?: string | null }) =>
+    backend.listErrorSolutions(input ?? {})
+  );
+  ipcMain.handle("error-solutions:delete", (_event, id: string) => backend.deleteErrorSolution(id));
+  ipcMain.handle("error-solutions:clear", (_event, modelId?: string | null) => backend.clearErrorSolutions(modelId));
   ipcMain.handle("quick-notes:list", () => backend.listQuickNotes());
   ipcMain.handle("quick-notes:save", (_event, payload: { id?: string; title?: string; content: string }) => backend.saveQuickNote(payload));
   ipcMain.handle("quick-notes:delete", (_event, id: string) => backend.deleteQuickNote(id));

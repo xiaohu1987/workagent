@@ -48,6 +48,7 @@ import type {
   ProviderDefinition,
   ProviderType,
   RuntimeEvent,
+  ErrorSolutionRecord,
   RuntimeThreadSnapshot,
   SkillLabEvent,
   SkillLabProgress,
@@ -97,7 +98,7 @@ import {
   type ChatBackgroundSurfaces
 } from "./chat-background";
 
-type SettingsTab = "general" | "appearance" | "knowledge" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
+type SettingsTab = "general" | "appearance" | "knowledge" | "memory" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
 type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";
 type ManagedRemoval =
   | { kind: "plugin"; plugin: PluginRecord }
@@ -555,6 +556,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
+  { id: "memory", label: "记忆", hint: "查看和清理错误解决方案记忆" },
   { id: "timeouts", label: "超时设置", hint: "模型请求、重试和视频生成的等待时间" },
   { id: "capabilities", label: "能力中心", hint: "管理独立 Skill、用户技能和插件" },
   { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
@@ -901,6 +903,12 @@ export function App() {
   const [knowledgeName, setKnowledgeName] = useState("Imported Knowledge");
   const [knowledgeScope, setKnowledgeScope] = useState<KnowledgeScope>("global");
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([]);
+  const [errorSolutions, setErrorSolutions] = useState<ErrorSolutionRecord[]>([]);
+  const [errorSolutionBusyId, setErrorSolutionBusyId] = useState<string | null>(null);
+  const [errorSolutionModelFilter, setErrorSolutionModelFilter] = useState<string>("all");
+  const [isClearErrorSolutionsConfirmOpen, setIsClearErrorSolutionsConfirmOpen] = useState(false);
+  const [isClearingErrorSolutions, setIsClearingErrorSolutions] = useState(false);
+  const [expandedErrorSolutionIds, setExpandedErrorSolutionIds] = useState<Set<string>>(() => new Set());
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<Record<string, KnowledgeDocumentRecord[]>>({});
   const [knowledgeBusyId, setKnowledgeBusyId] = useState<string | null>(null);
   const [isKnowledgeImporting, setIsKnowledgeImporting] = useState(false);
@@ -2221,9 +2229,9 @@ export function App() {
             };
           });
           if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
-            appendRuntimeStatus(runtimeThreadId, "工具已完成，正在整理结果", typed.createdAt);
+            appendRuntimeStatus(runtimeThreadId, "工具已完成，正在根据结果决策", typed.createdAt);
             if (notificationThreadId) {
-              updateThreadNotification(notificationThreadId, "工具已完成，正在整理结果。", typed.createdAt);
+              updateThreadNotification(notificationThreadId, "工具已完成，正在根据结果决策。", typed.createdAt);
             }
             setRuntimeProgress((current) =>
               current?.threadId === runtimeThreadId
@@ -2232,6 +2240,23 @@ export function App() {
             );
           }
         }
+        return;
+      }
+      if (typed.type === "agent.awaiting_model" && typed.threadId) {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
+        const reason = typeof typed.payload?.reason === "string" ? typed.payload.reason : "recovery";
+        const statusLabel = reason === "after_tools"
+          ? "正在根据工具结果决策"
+          : reason === "turn_start"
+            ? "正在请求模型决策"
+            : "正在重新请求模型决策";
+        appendRuntimeStatus(typed.threadId, statusLabel, typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
+        }
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
       if (typed.type === "assistant.delta" && typed.threadId && typed.payload?.turnRunId) {
@@ -2272,9 +2297,9 @@ export function App() {
             return next;
           });
         }
-        appendRuntimeStatus(typed.threadId, "正在校验并整理结果", typed.createdAt);
+        appendRuntimeStatus(typed.threadId, "正在校验模型输出", typed.createdAt);
         if (notificationThreadId) {
-          updateThreadNotification(notificationThreadId, "正在校验并整理结果。", typed.createdAt);
+          updateThreadNotification(notificationThreadId, "正在校验模型输出。", typed.createdAt);
         }
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
@@ -2646,7 +2671,7 @@ export function App() {
   }, [filePreviewPath, selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
       return;
     }
 
@@ -2687,6 +2712,11 @@ export function App() {
           return;
         }
 
+        if (isClearErrorSolutionsConfirmOpen && !isClearingErrorSolutions) {
+          setIsClearErrorSolutionsConfirmOpen(false);
+          return;
+        }
+
         if (historyThreadDeleteConfirmation && !deletingThreadId) {
           setHistoryThreadDeleteConfirmation(null);
           return;
@@ -2713,7 +2743,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isHelpOpen, isProjectCreateOpen, isQuickNotesOpen, isSettingsOpen, notice, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
+  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isHelpOpen, isProjectCreateOpen, isQuickNotesOpen, isSettingsOpen, notice, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
 
   useEffect(() => {
     if (!notice || isNoticeHovered) {
@@ -2848,6 +2878,7 @@ export function App() {
 
   useEffect(() => {
     if (isSettingsOpen && settingsTab === "knowledge") void refreshKnowledgeBases();
+    if (isSettingsOpen && settingsTab === "memory") void refreshErrorSolutions();
   }, [isSettingsOpen, settingsTab]);
 
   const activeSnapshotThreadId = snapshot?.thread.id ?? null;
@@ -2969,7 +3000,7 @@ export function App() {
   const displayedQueuedMessages = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime
     ? []
     : queuedMessages;
-  // A model may be thinking between tool calls. Keep the same live heartbeat
+  // A model may be deciding between tool calls. Keep the same live heartbeat
   // until the runtime explicitly completes the turn, rather than freezing the
   // elapsed timer at the last completed tool call.
   const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
@@ -2983,8 +3014,16 @@ export function App() {
           ? "正在生成回复"
           : isPreparingRuntime
             ? "正在理解任务"
-            : "正在思考",
-    [activeSnapshotThreadId, activeStreamingAssistant, activeToolCall, isPreparingRuntime]
+            : localRuntimeProgress?.phase === "thinking"
+              ? "正在根据工具结果决策"
+              : "正在请求模型决策",
+    [
+      activeSnapshotThreadId,
+      activeStreamingAssistant,
+      activeToolCall,
+      isPreparingRuntime,
+      localRuntimeProgress?.phase
+    ]
   );
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
   const showWelcome = timelineEntries.length === 0;
@@ -3045,6 +3084,32 @@ export function App() {
       })),
     [composerModels]
   );
+  const errorSolutionModelOptions = useMemo<ComposerSelectOption[]>(() => {
+    const modelMap = new Map<string, string>();
+    for (const model of config?.models ?? []) {
+      modelMap.set(
+        model.id,
+        model.displayName === model.id ? model.id : `${model.displayName} (${model.id})`
+      );
+    }
+    for (const solution of errorSolutions) {
+      if (solution.modelId && !modelMap.has(solution.modelId)) {
+        modelMap.set(solution.modelId, solution.modelId);
+      }
+    }
+    return [
+      { value: "all", label: "全部模型" },
+      ...[...modelMap.entries()]
+        .sort((left, right) => left[1].localeCompare(right[1], "zh-CN"))
+        .map(([value, label]) => ({ value, label }))
+    ];
+  }, [config?.models, errorSolutions]);
+  const resolveErrorSolutionModelLabel = useCallback((modelId: string) => {
+    if (!modelId) return "未知模型";
+    const model = config?.models.find((entry) => entry.id === modelId);
+    if (!model) return modelId;
+    return model.displayName === model.id ? model.id : model.displayName;
+  }, [config?.models]);
   const composerModelGroups = useMemo(
     () =>
       config
@@ -3121,6 +3186,8 @@ export function App() {
         return "MCP 管理";
       case "knowledge":
         return "知识库";
+      case "memory":
+        return "记忆";
       case "timeouts":
         return "Timeout Settings";
       case "update":
@@ -4657,6 +4724,70 @@ export function App() {
     }
   }
 
+  async function refreshErrorSolutions(modelFilter = errorSolutionModelFilter) {
+    try {
+      const modelId = modelFilter === "all" ? null : modelFilter;
+      setErrorSolutions((await window.codexh.listErrorSolutions({ limit: 100, modelId })) as ErrorSolutionRecord[]);
+    } catch (error) {
+      showNotice("加载记忆失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function deleteErrorSolution(id: string) {
+    setErrorSolutionBusyId(id);
+    try {
+      await window.codexh.deleteErrorSolution(id);
+      setErrorSolutions((current) => current.filter((entry) => entry.id !== id));
+      setExpandedErrorSolutionIds((current) => {
+        if (!current.has(id)) return current;
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+      showNotice("记忆已删除", { tone: "success" });
+    } catch (error) {
+      showNotice("删除记忆失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setErrorSolutionBusyId(null);
+    }
+  }
+
+  async function confirmClearErrorSolutions() {
+    if (isClearingErrorSolutions) return;
+    setIsClearingErrorSolutions(true);
+    try {
+      const modelId = errorSolutionModelFilter === "all" ? null : errorSolutionModelFilter;
+      const cleared = await window.codexh.clearErrorSolutions(modelId);
+      setErrorSolutions([]);
+      setExpandedErrorSolutionIds(new Set());
+      setIsClearErrorSolutionsConfirmOpen(false);
+      const modelLabel = modelId
+        ? (config?.models.find((entry) => entry.id === modelId)?.displayName ?? modelId)
+        : null;
+      showNotice(
+        cleared > 0
+          ? modelLabel
+            ? `已清空 ${modelLabel} 的 ${cleared} 条记忆`
+            : `已清空 ${cleared} 条记忆`
+          : "记忆已清空",
+        { tone: "success" }
+      );
+    } catch (error) {
+      showNotice("清空记忆失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsClearingErrorSolutions(false);
+    }
+  }
+
+  function toggleErrorSolutionExpanded(id: string) {
+    setExpandedErrorSolutionIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   async function toggleKnowledgeDocuments(knowledgeBaseId: string) {
     if (knowledgeDocuments[knowledgeBaseId]) {
       setKnowledgeDocuments((current) => {
@@ -6028,6 +6159,7 @@ export function App() {
   const managedRemovalPresence = useMotionPresence(managedRemoval);
   const visibleManagedRemoval = managedRemoval ?? managedRemovalPresence.value;
   const clearChatConfirmPresence = useMotionPresence(isClearChatConfirmOpen ? true : null);
+  const clearErrorSolutionsConfirmPresence = useMotionPresence(isClearErrorSolutionsConfirmOpen ? true : null);
   const fetchedModelsPresence = useMotionPresence(showFetchedModels ? true : null);
   const multimodalPickerPresence = useMotionPresence(multimodalPickerRole);
   const visibleMultimodalPickerRole = multimodalPickerRole ?? multimodalPickerPresence.value;
@@ -8280,6 +8412,137 @@ export function App() {
                 </div>
               ) : null}
 
+              {settingsTab === "memory" ? (
+                <div className="settings-section memory-settings-section">
+                  <div className="config-block memory-management-panel">
+                    <div className="section-copy">
+                      <strong>错误解决方案记忆</strong>
+                      <span>按模型隔离存储；不同模型的失败模式不会互相干扰。</span>
+                    </div>
+
+                    <div className="memory-toolbar">
+                      <div className="memory-toolbar-main">
+                        <label className="memory-filter-field">
+                          <span>模型</span>
+                          <ComposerSelect
+                            className="form-select memory-model-filter"
+                            ariaLabel="按模型筛选记忆"
+                            value={errorSolutionModelFilter}
+                            onChange={(value) => {
+                              setErrorSolutionModelFilter(value);
+                              void refreshErrorSolutions(value);
+                            }}
+                            options={errorSolutionModelOptions}
+                            placeholder="选择模型"
+                          />
+                        </label>
+                        <span className="memory-count-pill">{errorSolutions.length} 条记录</span>
+                      </div>
+                      <div className="memory-toolbar-actions">
+                        <button
+                          className="button ghost"
+                          type="button"
+                          onClick={() => void refreshErrorSolutions()}
+                          title="刷新列表"
+                        >
+                          <IconRefresh />
+                          <span>刷新</span>
+                        </button>
+                        <button
+                          className="button ghost"
+                          type="button"
+                          disabled={errorSolutions.length === 0 || isClearingErrorSolutions}
+                          onClick={() => setIsClearErrorSolutionsConfirmOpen(true)}
+                        >
+                          <IconTrash />
+                          <span>{errorSolutionModelFilter === "all" ? "清空全部" : "清空当前模型"}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="memory-solution-list" aria-label="错误解决方案记忆列表">
+                      {errorSolutions.length ? errorSolutions.map((solution) => {
+                        const isBusy = errorSolutionBusyId === solution.id;
+                        const isExpanded = expandedErrorSolutionIds.has(solution.id);
+                        const modelLabel = resolveErrorSolutionModelLabel(solution.modelId);
+                        return (
+                          <article key={solution.id} className={`memory-solution-card${isExpanded ? " is-expanded" : ""}`}>
+                            <div className="memory-solution-card-head">
+                              <div className="memory-solution-card-copy">
+                                <div className="memory-solution-card-title">
+                                  <strong title={solution.toolName}>{solution.toolName}</strong>
+                                  <span className="memory-meta-chip">{modelLabel}</span>
+                                  <span className="memory-meta-chip soft">成功 {solution.successCount} 次</span>
+                                </div>
+                                <p className="memory-solution-summary" title={solution.solutionSummary}>
+                                  {solution.solutionSummary}
+                                </p>
+                                <div className="memory-solution-card-meta">
+                                  <span title={solution.taskKeyPattern}>{solution.taskKeyPattern}</span>
+                                  <span>{solution.projectId ? "项目范围" : "全局范围"}</span>
+                                  <span>最近使用 {formatRelativeTime(solution.lastUsedAt)}</span>
+                                </div>
+                              </div>
+                              <div className="memory-solution-card-actions">
+                                <button
+                                  className="button ghost"
+                                  type="button"
+                                  onClick={() => toggleErrorSolutionExpanded(solution.id)}
+                                >
+                                  {isExpanded ? "收起" : "详情"}
+                                </button>
+                                <button
+                                  className="button ghost danger-icon-button"
+                                  type="button"
+                                  onClick={() => void deleteErrorSolution(solution.id)}
+                                  disabled={isBusy || isClearingErrorSolutions}
+                                  title="删除记忆"
+                                  aria-label="删除记忆"
+                                >
+                                  <IconTrash />
+                                </button>
+                              </div>
+                            </div>
+                            {isExpanded ? (
+                              <div className="memory-solution-details">
+                                <div className="memory-solution-detail-block">
+                                  <span>所属模型</span>
+                                  <p>{modelLabel}（{solution.modelId || "未知"}）</p>
+                                </div>
+                                <div className="memory-solution-detail-block">
+                                  <span>失败摘要</span>
+                                  <p>{solution.errorSummary || "无"}</p>
+                                </div>
+                                <div className="memory-solution-detail-block">
+                                  <span>最优解</span>
+                                  <p>{solution.solutionSummary || "无"}</p>
+                                </div>
+                                <div className="memory-solution-detail-meta">
+                                  <span>签名：{solution.errorSignature}</span>
+                                  <span>创建于 {formatRelativeTime(solution.createdAt)}</span>
+                                </div>
+                              </div>
+                            ) : null}
+                          </article>
+                        );
+                      }) : (
+                        <div className="memory-empty-state">
+                          <div className="memory-empty-icon" aria-hidden>
+                            <IconKnowledge />
+                          </div>
+                          <strong>暂无记忆记录</strong>
+                          <p>
+                            {errorSolutionModelFilter === "all"
+                              ? "Agent 在失败并成功恢复后，会按模型自动写入最优解。"
+                              : "当前模型还没有记忆。可切换到「全部模型」查看其他记录。"}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               {settingsTab === "capabilities" ? (
                 <div className="capability-tab-strip" role="tablist" aria-label="能力中心分类">
                     <button
@@ -9484,6 +9747,61 @@ export function App() {
                 onClick={() => void confirmClearCurrentChat()}
               >
                 {isClearingChat ? "正在清空..." : "确认清空"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {clearErrorSolutionsConfirmPresence.value ? (
+        <div
+          className="project-sheet-overlay motion-overlay"
+          data-motion={clearErrorSolutionsConfirmPresence.phase}
+        >
+          <div
+            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="clear-error-solutions-confirm-title"
+          >
+            <div className="project-sheet-header delete-confirm-header">
+              <button
+                className="project-sheet-close"
+                type="button"
+                onClick={() => setIsClearErrorSolutionsConfirmOpen(false)}
+                title="关闭"
+                aria-label="关闭"
+                disabled={isClearingErrorSolutions}
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
+              <strong id="clear-error-solutions-confirm-title">
+                {errorSolutionModelFilter === "all" ? "清空全部记忆？" : "清空当前模型记忆？"}
+              </strong>
+              <p>
+                {errorSolutionModelFilter === "all"
+                  ? `将删除全部 ${errorSolutions.length} 条错误解决方案记忆，且无法恢复。之后 Agent 遇到同类失败时需要重新学习。`
+                  : `将删除模型“${resolveErrorSolutionModelLabel(errorSolutionModelFilter)}”的 ${errorSolutions.length} 条记忆，其他模型的记忆会保留。`}
+              </p>
+            </div>
+            <div className="project-sheet-actions">
+              <button
+                className="button ghost"
+                type="button"
+                disabled={isClearingErrorSolutions}
+                onClick={() => setIsClearErrorSolutionsConfirmOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                className="button clear-chat-danger"
+                type="button"
+                disabled={isClearingErrorSolutions}
+                onClick={() => void confirmClearErrorSolutions()}
+              >
+                {isClearingErrorSolutions ? "正在清空..." : "确认清空"}
               </button>
             </div>
           </div>
@@ -11425,6 +11743,12 @@ function estimateContextTokens(value: string): number {
 }
 
 function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000_000) {
+    return `${(tokens / 1_000_000_000).toFixed(tokens >= 10_000_000_000 ? 0 : 1)}B`;
+  }
+  if (tokens >= 1_000_000) {
+    return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1)}M`;
+  }
   return tokens >= 1_000 ? `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}K` : String(tokens);
 }
 

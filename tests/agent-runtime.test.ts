@@ -35,6 +35,11 @@ import {
   buildProgressOnlyCompletionRecoveryInstruction,
   buildExecutionRecoveryInstruction,
   buildStrategySwitchInstruction,
+  buildErrorSolutionMemoryInstruction,
+  createErrorSignature,
+  summarizeToolCallApproach,
+  buildErrorSolutionSummary,
+  formatRememberedErrorSolutions,
   createFailedFileReadRecoveryToolCall,
   buildRepeatedTaskRecoveryMessage,
   buildRuntimeFailureRecoveryMessage,
@@ -1936,6 +1941,83 @@ describe("strategy switching", () => {
 
     expect(instruction).toContain("fs.read_directory");
     expect(instruction).toContain("corrected path");
+  });
+
+  it("prefers remembered optimal recoveries over hardcoded alternatives", () => {
+    const instruction = buildStrategySwitchInstruction({
+      toolName: "apply_patch",
+      taskKey: "apply_patch:src/app.ts",
+      attempts: 2,
+      lastError: "Patch context did not match",
+      rememberedSolutions: [{
+        id: "mem-1",
+        modelId: "gpt-test",
+        projectId: "project-1",
+        toolName: "apply_patch",
+        taskKeyPattern: "apply_patch:src/app.ts",
+        errorSignature: "apply_patch:patch context did not match",
+        errorSummary: "Patch context did not match",
+        solutionSummary: "Read the file first, then rewrite with exact current content.",
+        strategyJson: "{}",
+        successCount: 4,
+        sourceThreadId: "thread-1",
+        lastUsedAt: "2026-07-24T00:00:00.000Z",
+        createdAt: "2026-07-24T00:00:00.000Z",
+        updatedAt: "2026-07-24T00:00:00.000Z"
+      }]
+    });
+
+    expect(instruction).toContain("previously successful recovery");
+    expect(instruction).toContain("Read the file first");
+    expect(instruction).not.toContain("Inspect the target file or directory state first");
+  });
+
+  it("builds a first-failure memory instruction from ranked solutions", () => {
+    const instruction = buildErrorSolutionMemoryInstruction({
+      toolName: "shell.exec",
+      taskKey: "shell.exec:pnpm test",
+      lastError: "command failed with exit code 1",
+      rememberedSolutions: [{
+        id: "mem-2",
+        modelId: "gpt-test",
+        projectId: null,
+        toolName: "shell.exec",
+        taskKeyPattern: "shell.exec:pnpm test",
+        errorSignature: "shell.exec:command failed with exit code N",
+        errorSummary: "command failed with exit code 1",
+        solutionSummary: "Run a narrower test command after inspecting package.json scripts.",
+        strategyJson: "{}",
+        successCount: 2,
+        sourceThreadId: null,
+        lastUsedAt: "2026-07-24T00:00:00.000Z",
+        createdAt: "2026-07-24T00:00:00.000Z",
+        updatedAt: "2026-07-24T00:00:00.000Z"
+      }]
+    });
+
+    expect(instruction).toContain("error-solution memory");
+    expect(instruction).toContain("narrower test command");
+    expect(formatRememberedErrorSolutions([])).toBeNull();
+  });
+
+  it("normalizes volatile error details into stable signatures", () => {
+    const left = createErrorSignature(
+      "fs.read_file",
+      "ENOENT: no such file C:\\Users\\demo\\project\\src\\a.ts at line 12"
+    );
+    const right = createErrorSignature(
+      "fs.read_file",
+      "ENOENT: no such file C:\\Users\\other\\project\\src\\b.ts at line 99"
+    );
+    expect(left).toBe(right);
+    expect(summarizeToolCallApproach("fs.read_file", { path: "src/app.ts" })).toContain("path=src/app.ts");
+    expect(buildErrorSolutionSummary({
+      failedToolName: "fs.read_file",
+      successToolName: "fs.read_directory",
+      failedApproach: "fs.read_file(path=missing.ts)",
+      successApproach: "fs.read_directory(path=src)",
+      errorSummary: "ENOENT"
+    })).toContain("Proven recovery");
   });
 });
 

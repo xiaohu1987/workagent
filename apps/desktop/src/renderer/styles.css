@@ -15414,6 +15414,296 @@ body.panel-resizing {
 .knowledge-document-row small { margin-left: auto; color: rgba(255, 255, 255, 0.42); }
 .knowledge-document-row.missing { color: #e7b17f; }
 
+.memory-settings-section {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-management-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.memory-management-panel > .section-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.memory-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.memory-toolbar-main,
+.memory-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.memory-filter-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.memory-filter-field > span {
+  flex: 0 0 auto;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+}
+
+.memory-model-filter {
+  width: 200px;
+  min-width: 160px;
+  max-width: 240px;
+}
+
+.memory-count-pill {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.68);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.memory-toolbar-actions .button {
+  min-height: 32px;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.memory-toolbar-actions .button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.memory-solution-list {
+  display: grid;
+  gap: 8px;
+  min-height: 220px;
+}
+
+.memory-solution-card {
+  display: grid;
+  gap: 0;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.memory-solution-card.is-expanded {
+  border-color: rgba(127, 199, 255, 0.22);
+  background: rgba(69, 156, 216, 0.05);
+}
+
+.memory-solution-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 12px;
+  align-items: start;
+}
+
+.memory-solution-card-copy {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.memory-solution-card-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memory-solution-card-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.memory-meta-chip {
+  flex: 0 0 auto;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: #7fc7ff;
+  background: rgba(69, 156, 216, 0.16);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.memory-meta-chip.soft {
+  color: #e9c778;
+  background: rgba(192, 143, 52, 0.14);
+}
+
+.memory-solution-summary {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.memory-solution-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 11px;
+}
+
+.memory-solution-card-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.memory-solution-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memory-solution-card-actions .button {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.memory-solution-details {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.memory-solution-detail-block {
+  display: grid;
+  gap: 4px;
+}
+
+.memory-solution-detail-block > span {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 11px;
+}
+
+.memory-solution-detail-block > p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-solution-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.memory-solution-detail-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.memory-empty-state {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 220px;
+  padding: 28px 20px;
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.14);
+  text-align: center;
+}
+
+.memory-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 2px;
+  border-radius: 10px;
+  color: #85c7a2;
+  background: rgba(78, 169, 118, 0.12);
+}
+
+.memory-empty-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.memory-empty-state strong {
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 14px;
+}
+
+.memory-empty-state p {
+  margin: 0;
+  max-width: 360px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 900px) {
+  .memory-toolbar {
+    align-items: stretch;
+  }
+
+  .memory-toolbar-main,
+  .memory-toolbar-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .memory-model-filter {
+    width: min(220px, 100%);
+  }
+
+  .memory-solution-card-head {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-solution-card-actions {
+    justify-content: flex-end;
+  }
+}
+
 .knowledge-format-hint {
   color: rgba(255, 255, 255, 0.52);
   font-size: 12px;

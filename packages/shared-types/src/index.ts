@@ -362,6 +362,26 @@ export interface RememberedApprovalRecord {
   updatedAt: string;
 }
 
+/** Cross-session memory of how a prior tool failure was recovered/optimized. */
+export interface ErrorSolutionRecord {
+  id: string;
+  /** Memories are isolated per model because failure modes differ by model. */
+  modelId: string;
+  projectId: string | null;
+  toolName: string;
+  taskKeyPattern: string;
+  errorSignature: string;
+  errorSummary: string;
+  solutionSummary: string;
+  strategyJson: string;
+  successCount: number;
+  sourceThreadId: string | null;
+  lastUsedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  score?: number;
+}
+
 export interface UserInputOption {
   id: string;
   label: string;
@@ -859,6 +879,7 @@ export interface RuntimeEvent {
     | "assistant.completed"
     | "assistant.execution_output"
     | "agent.retrying"
+    | "agent.awaiting_model"
     | "agent.context_compacted"
     | "agent.repository_exploration"
     | "queue.updated"

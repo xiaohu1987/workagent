@@ -168,6 +168,10 @@ const api = {
   listKnowledgeDocuments: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:documents", knowledgeBaseId),
   refreshKnowledgeBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:refresh", knowledgeBaseId),
   deleteKnowledgeBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:delete", knowledgeBaseId),
+  listErrorSolutions: (input?: { limit?: number; modelId?: string | null }) =>
+    ipcRenderer.invoke("error-solutions:list", input),
+  deleteErrorSolution: (id: string) => ipcRenderer.invoke("error-solutions:delete", id),
+  clearErrorSolutions: (modelId?: string | null) => ipcRenderer.invoke("error-solutions:clear", modelId),
   openBrowserTab: (payload: { threadId: string; url: string }) =>
     ipcRenderer.invoke("browser:open", payload),
   navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) =>

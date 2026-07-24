@@ -32,6 +32,7 @@ import type {
   ProviderDefinition,
   ProjectPluginBinding,
   QuickNoteRecord,
+  ErrorSolutionRecord,
   RuntimeEvent,
   RuntimeThreadSnapshot,
   SkillLabEvent,
@@ -300,6 +301,11 @@ export class DesktopBackend {
       listKnowledgeBases: async (threadId) => this.listVisibleKnowledgeBases(threadId),
       searchKnowledge: async (query, ids) => this.#db.searchKnowledgeChunks(query, ids),
       readKnowledgeConcept: async (conceptId) => this.#db.getKnowledgeChunk(conceptId) ?? this.#db.getKnowledgeConcept(conceptId),
+      searchErrorSolutions: async (input) => this.#db.searchErrorSolutions(input),
+      recordErrorSolution: async (input) => this.#db.upsertErrorSolution(input),
+      markErrorSolutionUsed: async (id) => {
+        this.#db.markErrorSolutionUsed(id);
+      },
       listFiles: async (dir) =>
         (await fs.readdir(dir, { withFileTypes: true })).map((entry) => entry.name),
       readFile: async (filePath) => fs.readFile(filePath, "utf8"),
@@ -2736,6 +2742,18 @@ export class DesktopBackend {
     if (!knowledgeBase) return;
     await fs.rm(knowledgeBase.bundleRoot, { recursive: true, force: true });
     this.#db.deleteKnowledgeBase(knowledgeBaseId);
+  }
+
+  public listErrorSolutions(input: { limit?: number; modelId?: string | null } = {}): ErrorSolutionRecord[] {
+    return this.#db.listErrorSolutions(input);
+  }
+
+  public deleteErrorSolution(id: string): void {
+    this.#db.deleteErrorSolution(id);
+  }
+
+  public clearErrorSolutions(modelId?: string | null): number {
+    return this.#db.clearErrorSolutions(modelId);
   }
 
   private async extractKnowledgeSourceDocuments(

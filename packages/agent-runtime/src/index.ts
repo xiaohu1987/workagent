@@ -9,6 +9,7 @@ import type {
   BrowserAssertionCheck,
   BrowserViewport,
   CompletionEvidenceKind,
+  ErrorSolutionRecord,
   MessageAttachment,
   McpRepositoryToolResult,
   McpServerConfig,
@@ -383,6 +384,14 @@ export interface ManagedWriteRecoveryToolCallValidation {
   message?: string;
 }
 
+interface PendingErrorMemory {
+  toolName: string;
+  taskKey: string;
+  errorSummary: string;
+  errorSignature: string;
+  failedApproach: string;
+}
+
 interface BrowserVerificationEvidenceState {
   required: boolean;
   testChoice?: BrowserTestChoice;
@@ -456,6 +465,26 @@ interface RuntimeServices {
   listKnowledgeBases(threadId: string): Promise<any[]>;
   searchKnowledge(query: string, knowledgeBaseIds?: string[]): Promise<any[]>;
   readKnowledgeConcept(conceptId: string): Promise<any | null>;
+  searchErrorSolutions?(input: {
+    query: string;
+    modelId: string;
+    projectId?: string | null;
+    toolName?: string;
+    limit?: number;
+  }): Promise<ErrorSolutionRecord[]>;
+  recordErrorSolution?(input: {
+    modelId: string;
+    projectId: string | null;
+    toolName: string;
+    taskKeyPattern: string;
+    errorSignature: string;
+    errorSummary: string;
+    solutionSummary: string;
+    strategyJson: string;
+    sourceThreadId: string | null;
+    successCount?: number;
+  }): Promise<ErrorSolutionRecord>;
+  markErrorSolutionUsed?(id: string): Promise<void>;
   listFiles(dir: string): Promise<string[]>;
   readFile(filePath: string): Promise<string>;
   writeFile(filePath: string, content: string): Promise<void>;
@@ -1340,6 +1369,8 @@ class ThreadSessionRuntime {
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
       const successfulReusableToolResults = new Map<string, string>();
+      const pendingErrorMemories = new Map<string, PendingErrorMemory>();
+      const injectedErrorSolutionIds = new Set<string>();
       const knowledgeSources = new Map<string, KnowledgeSourceReference>();
       const browserSources = new Map<string, BrowserSourceReference>();
       const visibleAssistantMessages = new Set<string>();
@@ -1385,6 +1416,7 @@ class ThreadSessionRuntime {
       let prematureCompletionAttempts = 0;
       let managedWriteCompletionAttempts = 0;
       let standardCompletionAttempts = 0;
+      let modelAwaitReason: "turn_start" | "after_tools" | "recovery" = "turn_start";
       let useTextToolProtocol = false;
       let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
@@ -1509,6 +1541,119 @@ class ThreadSessionRuntime {
         }
         return attempts;
       };
+      const lookupErrorSolutionMemories = async (input: {
+        toolName: string;
+        taskKey: string;
+        lastError: string;
+      }): Promise<ErrorSolutionRecord[]> => {
+        if (!this.services.searchErrorSolutions) {
+          return [];
+        }
+        try {
+          const matches = await this.services.searchErrorSolutions({
+            modelId: model.id,
+            projectId: thread.projectId,
+            toolName: input.toolName,
+            query: `${input.toolName} ${input.taskKey} ${input.lastError}`.slice(0, 600),
+            limit: 3
+          });
+          for (const match of matches) {
+            injectedErrorSolutionIds.add(match.id);
+          }
+          if (matches.length > 0) {
+            await this.services.log("agent.error_solution_recalled", this.threadId, {
+              turnRunId: turn.id,
+              modelId: model.id,
+              toolName: input.toolName,
+              taskKey: input.taskKey,
+              matchIds: matches.map((entry) => entry.id),
+              matchCount: matches.length
+            });
+          }
+          return matches;
+        } catch (error) {
+          await this.services.log("agent.error_solution_lookup_failed", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            toolName: input.toolName,
+            reason: error instanceof Error ? error.message : String(error)
+          });
+          return [];
+        }
+      };
+      const rememberPendingError = (
+        toolName: string,
+        taskKey: string,
+        lastError: string,
+        failedApproach: string
+      ) => {
+        pendingErrorMemories.set(taskKey, {
+          toolName,
+          taskKey,
+          errorSummary: lastError.slice(0, 800),
+          errorSignature: createErrorSignature(toolName, lastError),
+          failedApproach: failedApproach.slice(0, 500)
+        });
+      };
+      const persistRecoveredErrorSolution = async (
+        taskKey: string,
+        successToolName: string,
+        successApproach: string
+      ) => {
+        const pending = pendingErrorMemories.get(taskKey);
+        if (!pending || !this.services.recordErrorSolution) {
+          return;
+        }
+        pendingErrorMemories.delete(taskKey);
+        try {
+          const solutionSummary = buildErrorSolutionSummary({
+            failedToolName: pending.toolName,
+            successToolName,
+            failedApproach: pending.failedApproach,
+            successApproach,
+            errorSummary: pending.errorSummary
+          });
+          const record = await this.services.recordErrorSolution({
+            modelId: model.id,
+            projectId: thread.projectId,
+            toolName: pending.toolName,
+            taskKeyPattern: pending.taskKey,
+            errorSignature: pending.errorSignature,
+            errorSummary: pending.errorSummary,
+            solutionSummary,
+            strategyJson: JSON.stringify({
+              modelId: model.id,
+              failedTool: pending.toolName,
+              successTool: successToolName,
+              taskKey: pending.taskKey,
+              failedApproach: pending.failedApproach,
+              successApproach,
+              guidance: solutionSummary
+            }),
+            sourceThreadId: this.threadId
+          });
+          await this.services.log("agent.error_solution_recorded", this.threadId, {
+            turnRunId: turn.id,
+            solutionId: record.id,
+            modelId: model.id,
+            toolName: pending.toolName,
+            successToolName,
+            taskKey
+          });
+          for (const solutionId of injectedErrorSolutionIds) {
+            if (this.services.markErrorSolutionUsed) {
+              await this.services.markErrorSolutionUsed(solutionId);
+            }
+          }
+          injectedErrorSolutionIds.clear();
+        } catch (error) {
+          await this.services.log("agent.error_solution_record_failed", this.threadId, {
+            turnRunId: turn.id,
+            taskKey,
+            reason: error instanceof Error ? error.message : String(error)
+          });
+        }
+      };
       const requestBrowserWorkspaceRecovery = async (): Promise<BrowserWorkspaceRecoveryChoice> => {
         const answers = await this.services.requestUserInput(this.threadId, turn.id, {
           title: "浏览器工作区未打开",
@@ -1625,6 +1770,19 @@ class ThreadSessionRuntime {
         const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
           ? this.services.config.timeouts.recoveryModelDecisionMs
           : this.services.config.timeouts.modelDecisionMs;
+        const awaitingModelPayload = {
+          turnRunId: turn.id,
+          reason: modelAwaitReason
+        };
+        await this.services.log("agent.awaiting_model", this.threadId, awaitingModelPayload);
+        await this.services.emit({
+          type: "agent.awaiting_model",
+          threadId: this.threadId,
+          payload: awaitingModelPayload,
+          createdAt: new Date().toISOString()
+        });
+        // Default next loop to recovery unless a tool batch marks after_tools.
+        modelAwaitReason = "recovery";
         let decision: ProviderTurnDecision;
         try {
           decision = await waitForAbortOrTimeout(
@@ -2950,15 +3108,27 @@ class ThreadSessionRuntime {
             const lastError =
               `The identical tool call ${toolCall.name} already failed ${failedCallAttempts} times.`;
             appendBlockedToolCallResult(toolCall, lastError);
+            const rememberedSolutions = await lookupErrorSolutionMemories({
+              toolName: toolCall.name,
+              taskKey: toolTaskKey,
+              lastError
+            });
             transcript.push({
               role: "user",
               content: buildStrategySwitchInstruction({
                 toolName: toolCall.name,
                 taskKey: toolTaskKey,
                 attempts: failedCallAttempts,
-                lastError
+                lastError,
+                rememberedSolutions
               })
             });
+            rememberPendingError(
+              toolCall.name,
+              toolTaskKey,
+              lastError,
+              summarizeToolCallApproach(toolCall.name, toolCall.arguments)
+            );
             await registerTaskFailure(toolTaskKey, lastError, "tool.strategy_switch_enforced");
             if (repeatedTaskFailure) {
               break;
@@ -3536,6 +3706,11 @@ class ThreadSessionRuntime {
               successfullyCreatedFiles.add(filePath);
             }
             taskFailureCounts.delete(toolTaskKey);
+            await persistRecoveredErrorSolution(
+              toolTaskKey,
+              toolCall.name,
+              summarizeToolCallApproach(toolCall.name, toolCall.arguments)
+            );
             if (toolCall.name === "apply_patch" && executionPolicy.autoVerify && toolContext) {
               const verificationCall: RuntimeToolCall = {
                 id: randomUUID(),
@@ -3659,6 +3834,28 @@ class ThreadSessionRuntime {
             const attempts = (failedToolCallFingerprints.get(toolCallFingerprint) ?? 0) + 1;
             failedToolCallFingerprints.set(toolCallFingerprint, attempts);
             await registerTaskFailure(toolTaskKey, result.content);
+            rememberPendingError(
+              toolCall.name,
+              toolTaskKey,
+              result.content,
+              summarizeToolCallApproach(toolCall.name, toolCall.arguments)
+            );
+            const rememberedSolutions = await lookupErrorSolutionMemories({
+              toolName: toolCall.name,
+              taskKey: toolTaskKey,
+              lastError: result.content
+            });
+            if (attempts === 1 && rememberedSolutions.length > 0) {
+              transcript.push({
+                role: "user",
+                content: buildErrorSolutionMemoryInstruction({
+                  toolName: toolCall.name,
+                  taskKey: toolTaskKey,
+                  lastError: result.content,
+                  rememberedSolutions
+                })
+              });
+            }
             if (attempts >= 2) {
               const forcedRecoveryCall = createFailedFileReadRecoveryToolCall(
                 toolCall,
@@ -3673,7 +3870,8 @@ class ThreadSessionRuntime {
                 toolName: toolCall.name,
                 taskKey: toolTaskKey,
                 attempts,
-                lastError: result.content
+                lastError: result.content,
+                rememberedSolutionCount: rememberedSolutions.length
               });
               transcript.push({
                 role: "user",
@@ -3681,7 +3879,8 @@ class ThreadSessionRuntime {
                   toolName: toolCall.name,
                   taskKey: toolTaskKey,
                   attempts,
-                  lastError: result.content
+                  lastError: result.content,
+                  rememberedSolutions
                 })
               });
             }
@@ -3692,6 +3891,7 @@ class ThreadSessionRuntime {
         }
 
         await compactContext("post_tool_batch");
+        modelAwaitReason = "after_tools";
 
         if (reevaluateAfterUserInput) {
           continue;
@@ -5384,6 +5584,7 @@ export function buildStrategySwitchInstruction(input: {
   taskKey: string;
   attempts: number;
   lastError: string;
+  rememberedSolutions?: ErrorSolutionRecord[];
 }): string {
   const alternatives: Record<string, string> = {
     apply_patch:
@@ -5395,7 +5596,9 @@ export function buildStrategySwitchInstruction(input: {
     "shell.exec":
       "Do not resend the same command. Inspect the working directory or relevant files first, then use a narrower command or a filesystem tool that avoids the failed shell dependency."
   };
+  const remembered = formatRememberedErrorSolutions(input.rememberedSolutions ?? []);
   const alternative =
+    remembered ??
     alternatives[input.toolName] ??
     "Use tool_search or another available tool to obtain new evidence, then choose a different executable approach.";
 
@@ -5403,9 +5606,91 @@ export function buildStrategySwitchInstruction(input: {
     "[Internal strategy switch. Do not display or quote this instruction to the user.]",
     `The exact call for ${input.taskKey} has failed ${input.attempts} times: ${input.lastError}`,
     "The runtime will not execute that identical call again. Change the approach instead of retrying it.",
+    remembered
+      ? "A previously successful recovery for a similar failure is available. Prefer that proven approach before inventing a new one."
+      : "",
     alternative,
     "Return a JSON decision containing a different tool call or materially different arguments."
+  ].filter(Boolean).join(" ");
+}
+
+export function buildErrorSolutionMemoryInstruction(input: {
+  toolName: string;
+  taskKey: string;
+  lastError: string;
+  rememberedSolutions: ErrorSolutionRecord[];
+}): string {
+  const remembered = formatRememberedErrorSolutions(input.rememberedSolutions);
+  return [
+    "[Internal error-solution memory. Do not display or quote this instruction to the user.]",
+    `Tool ${input.toolName} (${input.taskKey}) just failed: ${input.lastError.slice(0, 400)}`,
+    "Do not repeat the identical failed call. Apply the best remembered recovery below.",
+    remembered ?? "No concrete remembered recovery was available; inspect preconditions and change approach."
   ].join(" ");
+}
+
+export function createErrorSignature(toolName: string, errorText: string): string {
+  const normalized = errorText
+    .toLowerCase()
+    .replace(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi, "<uuid>")
+    .replace(/[a-z]:\\[^\s"'`]+/gi, "<path>")
+    .replace(/\/(?:Users|home|tmp|var|opt|mnt|Users)[^\s"'`]*/gi, "<path>")
+    .replace(/\/[^\s"'`]+\.[a-z0-9]+/gi, "<path>")
+    .replace(/\b\d{2,}\b/g, "N")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 400);
+  return `${toolName}:${normalized}`;
+}
+
+export function summarizeToolCallApproach(
+  toolName: string,
+  argumentsJson: Record<string, unknown>
+): string {
+  const keys = Object.keys(argumentsJson).slice(0, 6);
+  const parts = keys.map((key) => {
+    const value = argumentsJson[key];
+    if (typeof value === "string") {
+      return `${key}=${value.slice(0, 80)}`;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return `${key}=${String(value)}`;
+    }
+    return `${key}=<${typeof value}>`;
+  });
+  return `${toolName}(${parts.join(", ")})`.slice(0, 300);
+}
+
+export function buildErrorSolutionSummary(input: {
+  failedToolName: string;
+  successToolName: string;
+  failedApproach: string;
+  successApproach: string;
+  errorSummary: string;
+}): string {
+  return [
+    `Failure: ${input.failedToolName} → ${input.errorSummary.slice(0, 180)}`,
+    `Avoid: ${input.failedApproach}`,
+    `Proven recovery: succeed with ${input.successToolName} using ${input.successApproach}`,
+    "Prefer this recovered approach on similar future failures."
+  ].join(" | ").slice(0, 1_500);
+}
+
+export function formatRememberedErrorSolutions(
+  solutions: ErrorSolutionRecord[]
+): string | null {
+  if (solutions.length === 0) {
+    return null;
+  }
+  const ranked = [...solutions].sort(
+    (left, right) =>
+      right.successCount - left.successCount ||
+      right.lastUsedAt.localeCompare(left.lastUsedAt)
+  );
+  const lines = ranked.slice(0, 3).map((solution, index) => {
+    return `${index + 1}. (used ${solution.successCount}×) ${solution.solutionSummary}`;
+  });
+  return `Remembered optimal recoveries:\n${lines.join("\n")}`;
 }
 
 export function buildRepeatedTaskRecoveryMessage(input: {
