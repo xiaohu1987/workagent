@@ -14,6 +14,8 @@ const api = {
   clearApplicationBackground: () => ipcRenderer.invoke("appearance:background:clear"),
   listThreads: () => ipcRenderer.invoke("threads:list"),
   getThreadTokenUsage: (threadId: string) => ipcRenderer.invoke("threads:token-usage", threadId),
+  getUsageAnalytics: (input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) =>
+    ipcRenderer.invoke("usage-analytics:get", input),
   searchThreads: (query: string) => ipcRenderer.invoke("threads:search", query),
   setThreadPinned: (payload: { threadId: string; isPinned: boolean }) =>
     ipcRenderer.invoke("threads:set-pinned", payload),
@@ -172,6 +174,10 @@ const api = {
     ipcRenderer.invoke("error-solutions:list", input),
   deleteErrorSolution: (id: string) => ipcRenderer.invoke("error-solutions:delete", id),
   clearErrorSolutions: (modelId?: string | null) => ipcRenderer.invoke("error-solutions:clear", modelId),
+  listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean }) =>
+    ipcRenderer.invoke("self-improvement:list", input),
+  deleteSelfImprovementMemory: (id: string) => ipcRenderer.invoke("self-improvement:delete", id),
+  refreshSelfImprovementMemories: () => ipcRenderer.invoke("self-improvement:refresh"),
   openBrowserTab: (payload: { threadId: string; url: string }) =>
     ipcRenderer.invoke("browser:open", payload),
   navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) =>

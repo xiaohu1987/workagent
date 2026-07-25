@@ -40,6 +40,8 @@ declare global {
         thread: import("@shared-types").TokenUsage;
         turnRunId: string | null;
       }>;
+      getUsageAnalytics: (input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) =>
+        Promise<import("@shared-types").UsageAnalyticsSummary>;
       searchThreads: (query: string) => Promise<Array<{ thread: ThreadRecord; snippet: string | null; score: number }>>;
       setThreadPinned: (payload: { threadId: string; isPinned: boolean }) => Promise<ThreadRecord>;
       renameThread: (payload: { threadId: string; title: string }) => Promise<ThreadRecord>;
@@ -199,6 +201,9 @@ declare global {
       listErrorSolutions: (input?: { limit?: number; modelId?: string | null }) => Promise<any[]>;
       deleteErrorSolution: (id: string) => Promise<void>;
       clearErrorSolutions: (modelId?: string | null) => Promise<number>;
+      listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean }) => Promise<any[]>;
+      deleteSelfImprovementMemory: (id: string) => Promise<void>;
+      refreshSelfImprovementMemories: () => Promise<{ processed: number; pruned: number }>;
       openBrowserTab: (payload: { threadId: string; url: string }) => Promise<any>;
       navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) => Promise<any>;
       focusBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;

@@ -79,16 +79,20 @@ export interface ToolRuntimeContext {
   requestUserInputEnabled?: boolean;
   /** When true, block Python scaffolding for HTML/CSS/JS delivery tasks. */
   webFrontendGuard?: boolean;
-  spawnChildAgent: (input: { prompt: string; role: string; modelId?: string }) => Promise<{
+  spawnChildAgent: (input: { prompt: string; role: string; modelId?: string; providerId?: string; contextFork?: "none" | "all" | "recent"; reasoningEffort?: "low" | "medium" | "high"; serviceTier?: string }) => Promise<{
     threadId: string;
     agentPath: string;
     status: ThreadRecord["status"];
+    reused?: boolean;
+    queued?: boolean;
   }>;
   sendAgentMessage: (input: { agent: string; message: string }) => Promise<SubagentResultEnvelope>;
   followupAgentTask: (input: { agent: string; prompt: string }) => Promise<SubagentResultEnvelope>;
   waitForSubagents: (input: { agents?: string[]; timeoutMs?: number }) => Promise<SubagentWaitResult>;
   interruptAgent: (agent: string) => Promise<SubagentResultEnvelope>;
   listSubagents: () => Promise<ThreadRecord[]>;
+  listSelfImprovementMemories?: (query?: string) => Promise<Array<{ id: string; title: string; content: string; scope: string }>>;
+  addSelfImprovementMemory?: (input: { title: string; content: string; scope?: "global" | "project" }) => Promise<{ id: string }>;
   webSearch: (query: string) => Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage: (url: string) => Promise<{ title: string; url: string; text: string }>;
   findInPage: (url: string, pattern: string) => Promise<string[]>;
@@ -226,7 +230,13 @@ const TOOL_ALIASES: Record<string, string> = {
   video_gen: "video.generate",
   videogen: "video.generate",
   "video-gen": "video.generate",
-  generate_video: "video.generate"
+  generate_video: "video.generate",
+  "multi_agents.spawn": "spawn_agent",
+  "multi_agents.send_message": "send_message",
+  "multi_agents.followup_task": "followup_task",
+  "multi_agents.wait": "wait_agent",
+  "multi_agents.interrupt": "interrupt_agent",
+  "multi_agents.list": "list_agents"
 };
 
 const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
@@ -1225,16 +1235,47 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("multi_agents.spawn", "Spawn a bounded child agent session for independent research, review, or diagnosis.", ["prompt", "role"], "medium"),
+    {
+      name: "spawn_agent",
+      description: "Spawn a bounded child agent session. Accepts prompt, task, or message; supports task_name, role, model, provider, reasoning_effort, service_tier, and context_fork.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          prompt: { type: "string" }, task: { type: "string" }, message: { type: "string" },
+          task_name: { type: "string" }, role: { type: "string" },
+          model: { type: "string" }, modelId: { type: "string" },
+          provider: { type: "string" }, provider_id: { type: "string" },
+          reasoning_effort: { type: "string", enum: ["low", "medium", "high"] },
+          service_tier: { type: "string" },
+          context_fork: { type: "string", enum: ["none", "all", "recent"] }
+        },
+        required: []
+      },
+      riskLevel: "medium"
+    },
     async (args, ctx) => {
+      const prompt = String(args.prompt ?? args.task ?? args.message ?? "").trim();
+      if (!prompt) {
+        return { ok: false, content: "spawn_agent requires a task assignment in prompt, task, or message." };
+      }
+      const requestedModel = typeof args.modelId === "string" ? args.modelId.trim() : typeof args.model === "string" ? args.model.trim() : "";
+      const providerId = typeof args.provider_id === "string" ? args.provider_id.trim() || undefined : typeof args.provider === "string" ? args.provider.trim() || undefined : undefined;
       const child = await ctx.spawnChildAgent({
-        prompt: String(args.prompt ?? ""),
-        role: String(args.role ?? "implementer"),
-        modelId: typeof args.modelId === "string" ? args.modelId : undefined
+        prompt,
+        role: String(args.role ?? args.task_name ?? "implementer"),
+        modelId: requestedModel && !["current", "default", "inherit"].includes(requestedModel.toLowerCase()) ? requestedModel : undefined,
+        providerId,
+        contextFork: args.context_fork === "none" || args.context_fork === "recent" || args.context_fork === "all" ? args.context_fork : undefined,
+        reasoningEffort: args.reasoning_effort === "low" || args.reasoning_effort === "medium" || args.reasoning_effort === "high" ? args.reasoning_effort : undefined,
+        serviceTier: typeof args.service_tier === "string" ? args.service_tier : undefined
       });
       return {
         ok: true,
-        content: `Spawned ${child.agentPath} (${child.status})`,
+        content: child.reused
+          ? `Reused ${child.agentPath} (${child.status}) because the same assignment is already in progress.`
+          : child.queued
+            ? `Queued ${child.agentPath}. It will start automatically when a child-agent slot is available.`
+            : `Spawned ${child.agentPath} (${child.status})`,
         json: child
       };
     }
@@ -1262,7 +1303,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("multi_agents.send_message", "Queue additional context for an existing child agent without starting a turn.", ["agent", "message"], "low"),
+    spec("send_message", "Queue additional context for an existing child agent without starting a turn.", ["agent", "message"], "low"),
     async (args, ctx) => {
       const result = await ctx.sendAgentMessage({
         agent: String(args.agent ?? ""),
@@ -1273,7 +1314,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("multi_agents.followup_task", "Resume an existing child agent with a bounded follow-up task.", ["agent", "prompt"], "low"),
+    spec("followup_task", "Resume an existing child agent with a bounded follow-up task.", ["agent", "prompt"], "low"),
     async (args, ctx) => {
       const result = await ctx.followupAgentTask({ agent: String(args.agent ?? ""), prompt: String(args.prompt ?? "") });
       return { ok: result.status !== "failed", content: JSON.stringify(result), json: { ...result } };
@@ -1282,7 +1323,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
 
   runtime.register(
     {
-      name: "multi_agents.wait",
+      name: "wait_agent",
       description: "Wait for one or more child agents to reach a terminal state.",
       inputSchema: {
         type: "object",
@@ -1309,7 +1350,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("multi_agents.interrupt", "Interrupt an existing child agent while preserving its context.", ["agent"], "medium"),
+    spec("interrupt_agent", "Interrupt an existing child agent while preserving its context.", ["agent"], "medium"),
     async (args, ctx) => {
       const result = await ctx.interruptAgent(String(args.agent ?? ""));
       return { ok: true, content: JSON.stringify(result), json: { ...result } };
@@ -1317,10 +1358,36 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("multi_agents.list", "List the current child-agent tree and statuses.", [], "low"),
+    spec("list_agents", "List the current child-agent tree and statuses.", [], "low"),
     async (_args, ctx) => {
       const agents = await ctx.listSubagents();
       return { ok: true, content: JSON.stringify(agents), json: { agents } };
+    }
+  );
+
+  runtime.register(
+    spec("memories.list", "List available self-improvement memories for this task.", [], "low"),
+    async (_args, ctx) => {
+      const memories = await ctx.listSelfImprovementMemories?.() ?? [];
+      return { ok: true, content: JSON.stringify({ memories }), json: { memories } };
+    }
+  );
+  runtime.register(
+    spec("memories.search", "Search self-improvement memories relevant to a question.", ["query"], "low"),
+    async (args, ctx) => {
+      const memories = await ctx.listSelfImprovementMemories?.(String(args.query ?? "")) ?? [];
+      return { ok: true, content: JSON.stringify({ memories }), json: { memories } };
+    }
+  );
+  runtime.register(
+    spec("memories.add_ad_hoc_note", "Store an explicit, redacted long-term self-improvement note.", ["content"], "low"),
+    async (args, ctx) => {
+      if (!ctx.addSelfImprovementMemory) return { ok: false, content: "Self-improvement memory is unavailable." };
+      const memory = await ctx.addSelfImprovementMemory({
+        title: String(args.title ?? "User note"), content: String(args.content ?? ""),
+        scope: args.scope === "project" ? "project" : "global"
+      });
+      return { ok: true, content: JSON.stringify(memory), json: memory };
     }
   );
 

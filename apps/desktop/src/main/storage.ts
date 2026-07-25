@@ -29,6 +29,7 @@ import type {
   QuickNoteRecord,
   RememberedApprovalRecord,
   ErrorSolutionRecord,
+  SelfImprovementMemoryRecord,
   TokenUsage,
   QueuedMessageRecord,
   ProviderDefinition,
@@ -46,12 +47,33 @@ function normalizeMultiAgentSettings(value?: Partial<MultiAgentSettings> | null)
     return Math.min(maximum, Math.max(minimum, numeric));
   };
   return {
-    // Sub-agents are opt-in per thread; product default stays disabled.
-    defaultMode: "disabled",
-    maxConcurrentSubagents: clamp(source.maxConcurrentSubagents, 3, 1, 3),
-    maxSubagentsPerRoot: clamp(source.maxSubagentsPerRoot, 8, 1, 8),
-    maxDepth: clamp(source.maxDepth, 3, 1, 3),
-    childWritePolicy: "read-only"
+    defaultMode: "proactive",
+    // This is the total Codex-style worker budget, including the root agent.
+    maxConcurrentSubagents: clamp(source.maxConcurrentSubagents, 4, 2, 8),
+    maxSubagentsPerRoot: clamp(source.maxSubagentsPerRoot, 8, 1, 16),
+    maxDepth: clamp(source.maxDepth, 3, 1, 6),
+    childWritePolicy: source.childWritePolicy === "read-only" ? "read-only" : "inherit",
+    defaultContextFork: source.defaultContextFork === "none" || source.defaultContextFork === "recent" ? source.defaultContextFork : "all",
+    defaultModelId: typeof source.defaultModelId === "string" ? source.defaultModelId : undefined,
+    defaultProviderId: typeof source.defaultProviderId === "string" ? source.defaultProviderId : undefined,
+    defaultReasoningEffort: source.defaultReasoningEffort === "low" || source.defaultReasoningEffort === "high" ? source.defaultReasoningEffort : "medium"
+  };
+}
+
+function normalizeSelfImprovementSettings(value?: Partial<AppConfig["selfImprovement"]> | null): AppConfig["selfImprovement"] {
+  const source = value ?? {};
+  const clamp = (input: unknown, fallback: number, min: number, max: number) => {
+    const value = typeof input === "number" && Number.isFinite(input) ? Math.round(input) : fallback;
+    return Math.min(max, Math.max(min, value));
+  };
+  return {
+    generateMemories: source.generateMemories !== false,
+    useMemories: source.useMemories !== false,
+    dedicatedTools: source.dedicatedTools === true,
+    processingModelId: typeof source.processingModelId === "string" ? source.processingModelId : undefined,
+    idleMinutes: clamp(source.idleMinutes, 5, 1, 1440),
+    retentionDays: clamp(source.retentionDays, 180, 7, 3650),
+    maxMemories: clamp(source.maxMemories, 500, 20, 5000)
   };
 }
 
@@ -201,12 +223,15 @@ export function defaultConfig(): AppConfig {
       inAppBrowser: true
     },
     multiAgent: {
-      defaultMode: "disabled",
-      maxConcurrentSubagents: 3,
+      defaultMode: "proactive",
+      maxConcurrentSubagents: 4,
       maxSubagentsPerRoot: 8,
       maxDepth: 3,
-      childWritePolicy: "read-only"
+      childWritePolicy: "inherit",
+      defaultContextFork: "all",
+      defaultReasoningEffort: "medium"
     },
+    selfImprovement: normalizeSelfImprovementSettings(),
     timeouts: normalizeRuntimeTimeouts(),
     projectExecutionPolicies: {},
     mcpServers: [],
@@ -349,6 +374,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       inAppBrowser: parsed.desktop?.inAppBrowser ?? true
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
+    selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),
     timeouts: normalizeRuntimeTimeouts(parsed.timeouts),
     projectExecutionPolicies: normalizeProjectExecutionPolicies(parsed.projectExecutionPolicies),
     mcpServers: ((parsed.mcpServers ?? []) as Array<Record<string, unknown>>).map((item) => ({
@@ -379,6 +405,7 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     multimodal: config.multimodal,
     desktop: config.desktop,
     multiAgent: normalizeMultiAgentSettings(config.multiAgent),
+    selfImprovement: normalizeSelfImprovementSettings(config.selfImprovement),
     timeouts: normalizeRuntimeTimeouts(config.timeouts),
     projectExecutionPolicies: normalizeProjectExecutionPolicies(config.projectExecutionPolicies),
     providers: Object.fromEntries(config.providers.map((provider) => [provider.id, provider])),
@@ -720,14 +747,22 @@ export class DatabaseService {
         model_id TEXT NOT NULL DEFAULT '',
         project_id TEXT,
         tool_name TEXT NOT NULL,
+        memory_kind TEXT NOT NULL DEFAULT 'recovered',
+        scope_mode TEXT NOT NULL DEFAULT 'model',
         task_key_pattern TEXT NOT NULL,
+        target_key_pattern TEXT NOT NULL DEFAULT '',
+        strategy_fingerprint TEXT NOT NULL DEFAULT '',
         error_signature TEXT NOT NULL,
         error_summary TEXT NOT NULL,
         solution_summary TEXT NOT NULL,
         strategy_json TEXT NOT NULL,
         success_count INTEGER NOT NULL DEFAULT 1,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        confidence REAL NOT NULL DEFAULT 1,
         source_thread_id TEXT,
         last_used_at TEXT NOT NULL,
+        last_observed_at TEXT NOT NULL DEFAULT '',
+        expires_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -738,6 +773,38 @@ export class DatabaseService {
         error_summary,
         solution_summary
       );
+      CREATE TABLE IF NOT EXISTS self_improvement_memories (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        project_id TEXT,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source_thread_id TEXT,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        last_used_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE VIRTUAL TABLE IF NOT EXISTS self_improvement_memory_fts USING fts5 (
+        memory_id UNINDEXED, title, content
+      );
+      CREATE TABLE IF NOT EXISTS self_improvement_jobs (
+        thread_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_until TEXT,
+        last_error TEXT,
+        processed_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS subagent_pending_dispatch (
+        thread_id TEXT PRIMARY KEY,
+        root_thread_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_subagent_pending_dispatch_root_created
+        ON subagent_pending_dispatch(root_thread_id, created_at);
     `);
     this.ensureColumns();
   }
@@ -769,6 +836,17 @@ export class DatabaseService {
     this.ensureColumn("user_input_prompts", "resolution_source", "TEXT");
     this.ensureColumn("turn_runs", "usage_json", "TEXT");
     this.ensureColumn("error_solutions", "model_id", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("error_solutions", "memory_kind", "TEXT NOT NULL DEFAULT 'recovered'");
+    this.ensureColumn("error_solutions", "scope_mode", "TEXT NOT NULL DEFAULT 'model'");
+    this.ensureColumn("error_solutions", "target_key_pattern", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("error_solutions", "strategy_fingerprint", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("error_solutions", "failure_count", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("error_solutions", "confidence", "REAL NOT NULL DEFAULT 1");
+    this.ensureColumn("error_solutions", "last_observed_at", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("error_solutions", "expires_at", "TEXT");
+    this.#db.prepare("UPDATE error_solutions SET last_observed_at = updated_at WHERE last_observed_at = ''").run();
+    this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_error_solutions_preflight
+      ON error_solutions(project_id, tool_name, target_key_pattern, strategy_fingerprint, scope_mode, model_id)`);
     this.migrateSubagentDefaultOff();
   }
 
@@ -861,6 +939,7 @@ export class DatabaseService {
     agentPath?: string;
     agentRole?: string | null;
     lastTaskMessage?: string | null;
+    gpaStateJson?: string | null;
     multiAgentMode?: ThreadRecord["multiAgentMode"];
     status?: ThreadRecord["status"];
   }): ThreadRecord {
@@ -884,7 +963,7 @@ export class DatabaseService {
       updatedAt: now,
       isPinned: false,
       pinnedAt: null,
-      gpaStateJson: null,
+      gpaStateJson: input.gpaStateJson ?? null,
       parentThreadId: input.parentThreadId ?? null,
       rootThreadId: input.rootThreadId ?? id,
       agentPath: input.agentPath ?? "/root",
@@ -1064,6 +1143,7 @@ export class DatabaseService {
 
     this.#db.exec("BEGIN");
     try {
+      this.#db.prepare("DELETE FROM subagent_pending_dispatch WHERE thread_id = ?").run(threadId);
       for (const table of threadScopedTables) {
         this.#db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(threadId);
       }
@@ -1098,6 +1178,7 @@ export class DatabaseService {
 
     this.#db.exec("BEGIN");
     try {
+      this.#db.prepare("DELETE FROM subagent_pending_dispatch WHERE thread_id = ?").run(threadId);
       for (const table of conversationTables) {
         this.#db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(threadId);
       }
@@ -1165,11 +1246,11 @@ export class DatabaseService {
     return this.#db
       .prepare(
         `SELECT * FROM (
-           SELECT * FROM messages
+           SELECT *, rowid AS _rowid FROM messages
            WHERE thread_id = ?
-           ORDER BY created_at DESC
+           ORDER BY created_at DESC, rowid DESC
            LIMIT ?
-         ) ORDER BY created_at ASC`
+         ) ORDER BY created_at ASC, _rowid ASC`
       )
       .all(threadId, cappedLimit)
       .map(mapMessageRow);
@@ -1229,6 +1310,59 @@ export class DatabaseService {
       .prepare("SELECT DISTINCT thread_id FROM queued_messages WHERE status = 'queued'")
       .all() as Array<{ thread_id: string }>)
       .map((row) => row.thread_id);
+  }
+
+  public listQueuedSubagentMessageThreadIds(): Array<{ threadId: string; rootThreadId: string }> {
+    return (this.#db
+      .prepare(
+        `SELECT queue.thread_id, thread.root_thread_id, MIN(queue.created_at) AS first_queued_at, MIN(queue.rowid) AS first_rowid
+         FROM queued_messages AS queue
+         JOIN threads AS thread ON thread.id = queue.thread_id
+         WHERE queue.status = 'queued' AND thread.parent_thread_id IS NOT NULL
+         GROUP BY queue.thread_id, thread.root_thread_id
+         ORDER BY first_queued_at ASC, first_rowid ASC`
+      )
+      .all() as Array<{ thread_id: string; root_thread_id: string }>)
+      .map((row) => ({ threadId: row.thread_id, rootThreadId: row.root_thread_id }));
+  }
+
+  public markSubagentPendingDispatch(threadId: string, rootThreadId: string): void {
+    this.#db
+      .prepare(
+        `INSERT INTO subagent_pending_dispatch (thread_id, root_thread_id, created_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(thread_id) DO NOTHING`
+      )
+      .run(threadId, rootThreadId, nowIso());
+  }
+
+  public clearSubagentPendingDispatch(threadId: string): void {
+    this.#db.prepare("DELETE FROM subagent_pending_dispatch WHERE thread_id = ?").run(threadId);
+  }
+
+  public isSubagentPendingDispatch(threadId: string): boolean {
+    return !!this.#db
+      .prepare("SELECT 1 FROM subagent_pending_dispatch WHERE thread_id = ?")
+      .get(threadId);
+  }
+
+  public listSubagentPendingDispatchRoots(): string[] {
+    return (this.#db
+      .prepare("SELECT DISTINCT root_thread_id FROM subagent_pending_dispatch ORDER BY root_thread_id")
+      .all() as Array<{ root_thread_id: string }>)
+      .map((row) => row.root_thread_id);
+  }
+
+  public listSubagentPendingDispatches(rootThreadId: string): Array<{ threadId: string; rootThreadId: string; createdAt: string }> {
+    return (this.#db
+      .prepare(
+        `SELECT thread_id, root_thread_id, created_at
+         FROM subagent_pending_dispatch
+         WHERE root_thread_id = ?
+         ORDER BY created_at ASC, rowid ASC`
+      )
+      .all(rootThreadId) as Array<{ thread_id: string; root_thread_id: string; created_at: string }>)
+      .map((row) => ({ threadId: row.thread_id, rootThreadId: row.root_thread_id, createdAt: row.created_at }));
   }
 
   public claimNextQueuedMessage(threadId: string): QueuedMessageRecord | null {
@@ -1396,6 +1530,52 @@ export class DatabaseService {
       turn: turnUsage,
       thread: threadUsage,
       turnRunId: latest?.id ?? null
+    };
+  }
+
+  public getUsageAnalytics(input: { rangeDays?: number | null; granularity?: "day" | "week" | "month" } = {}) {
+    const rangeDays = typeof input.rangeDays === "number" && Number.isFinite(input.rangeDays) && input.rangeDays > 0
+      ? Math.min(3650, Math.round(input.rangeDays))
+      : null;
+    const granularity = input.granularity === "week" || input.granularity === "month" ? input.granularity : "day";
+    const since = rangeDays ? new Date(Date.now() - rangeDays * 86_400_000).toISOString() : null;
+    const rows = (since
+      ? this.#db.prepare("SELECT provider_id, model_id, prompt_tokens, completion_tokens, usage_json, started_at FROM turn_runs WHERE started_at >= ? ORDER BY started_at ASC").all(since)
+      : this.#db.prepare("SELECT provider_id, model_id, prompt_tokens, completion_tokens, usage_json, started_at FROM turn_runs ORDER BY started_at ASC").all()
+    ) as Array<Record<string, unknown>>;
+    const models = new Map<string, { providerId: string; modelId: string; requestCount: number; usage: TokenUsage }>();
+    const trend = new Map<string, { key: string; label: string; requestCount: number; usage: TokenUsage }>();
+    let totalUsage = createEmptyTokenUsage();
+
+    for (const row of rows) {
+      const providerId = String(row.provider_id ?? "unknown");
+      const modelId = String(row.model_id ?? "unknown");
+      const usage = parseTokenUsageJson(typeof row.usage_json === "string" ? row.usage_json : null) ?? finalizeTokenUsage({
+        inputTokens: Number(row.prompt_tokens ?? 0),
+        outputTokens: Number(row.completion_tokens ?? 0)
+      });
+      totalUsage = addTokenUsage(totalUsage, usage);
+      const modelKey = `${providerId}\u0000${modelId}`;
+      const model = models.get(modelKey) ?? { providerId, modelId, requestCount: 0, usage: createEmptyTokenUsage() };
+      model.requestCount += 1;
+      model.usage = addTokenUsage(model.usage, usage);
+      models.set(modelKey, model);
+
+      const point = usageAnalyticsBucket(String(row.started_at ?? ""), granularity);
+      const bucket = trend.get(point.key) ?? { ...point, requestCount: 0, usage: createEmptyTokenUsage() };
+      bucket.requestCount += 1;
+      bucket.usage = addTokenUsage(bucket.usage, usage);
+      trend.set(point.key, bucket);
+    }
+
+    return {
+      generatedAt: nowIso(),
+      rangeDays,
+      granularity,
+      totalRequests: rows.length,
+      totalUsage,
+      models: [...models.values()].sort((left, right) => right.usage.totalTokens - left.usage.totalTokens || right.requestCount - left.requestCount),
+      trend: [...trend.values()].sort((left, right) => left.key.localeCompare(right.key))
     };
   }
 
@@ -1656,32 +1836,71 @@ export class DatabaseService {
   }
 
   public upsertErrorSolution(
-    input: Omit<ErrorSolutionRecord, "id" | "createdAt" | "updatedAt" | "lastUsedAt" | "successCount" | "score"> & {
+    input: Omit<ErrorSolutionRecord,
+      "id" | "createdAt" | "updatedAt" | "lastUsedAt" | "lastObservedAt" | "expiresAt" |
+      "successCount" | "failureCount" | "confidence" | "memoryKind" | "scopeMode" |
+      "targetKeyPattern" | "strategyFingerprint" | "matchKind" | "effectiveConfidence" | "score"
+    > & {
       successCount?: number;
+      failureCount?: number;
+      confidence?: number;
+      memoryKind?: ErrorSolutionRecord["memoryKind"];
+      scopeMode?: ErrorSolutionRecord["scopeMode"];
+      targetKeyPattern?: string;
+      strategyFingerprint?: string;
+      lastObservedAt?: string;
+      expiresAt?: string | null;
     }
   ): ErrorSolutionRecord {
     const modelId = input.modelId.trim();
     if (!modelId) {
       throw new Error("Error solution memory requires a modelId.");
     }
-    const scopeKey = buildErrorSolutionScopeKey(modelId, input.projectId, input.toolName, input.errorSignature);
+    const memoryKind = input.memoryKind ?? "recovered";
+    const scopeMode = input.scopeMode ?? "model";
+    const targetKeyPattern = input.targetKeyPattern?.trim() || input.taskKeyPattern;
+    const strategyFingerprint = input.strategyFingerprint?.trim() ?? "";
+    const scopeKey = buildErrorSolutionScopeKey({
+      modelId,
+      projectId: input.projectId,
+      toolName: input.toolName,
+      errorSignature: input.errorSignature,
+      memoryKind,
+      scopeMode,
+      targetKeyPattern,
+      strategyFingerprint
+    });
     const existing = this.findErrorSolutionByScope(scopeKey);
     const now = nowIso();
+    const observedAt = input.lastObservedAt ?? now;
+    const expiresAt = memoryKind === "blocked_strategy"
+      ? input.expiresAt ?? new Date(Date.parse(observedAt) + 90 * 86_400_000).toISOString()
+      : null;
     const record: ErrorSolutionRecord = {
       id: existing?.id ?? randomUUID(),
       modelId,
       projectId: input.projectId,
       toolName: input.toolName,
+      memoryKind,
+      scopeMode,
       taskKeyPattern: input.taskKeyPattern,
+      targetKeyPattern,
+      strategyFingerprint,
       errorSignature: input.errorSignature,
-      errorSummary: input.errorSummary.slice(0, 1_000),
-      solutionSummary: input.solutionSummary.slice(0, 2_000),
-      strategyJson: input.strategyJson,
-      successCount: existing
-        ? existing.successCount + Math.max(1, input.successCount ?? 1)
-        : Math.max(1, input.successCount ?? 1),
+      errorSummary: redactStoredMemory(input.errorSummary).slice(0, 1_000),
+      solutionSummary: redactStoredMemory(input.solutionSummary).slice(0, 2_000),
+      strategyJson: redactStoredMemory(input.strategyJson),
+      successCount: memoryKind === "recovered"
+        ? (existing?.successCount ?? 0) + Math.max(1, input.successCount ?? 1)
+        : existing?.successCount ?? 0,
+      failureCount: memoryKind === "blocked_strategy"
+        ? (existing?.failureCount ?? 0) + Math.max(1, input.failureCount ?? 1)
+        : existing?.failureCount ?? Math.max(0, input.failureCount ?? 0),
+      confidence: Math.max(0, Math.min(1, input.confidence ?? existing?.confidence ?? 1)),
       sourceThreadId: input.sourceThreadId,
       lastUsedAt: now,
+      lastObservedAt: observedAt,
+      expiresAt,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     };
@@ -1689,23 +1908,32 @@ export class DatabaseService {
     this.#db
       .prepare(
         `INSERT INTO error_solutions (
-          scope_key, id, model_id, project_id, tool_name, task_key_pattern, error_signature,
-          error_summary, solution_summary, strategy_json, success_count,
-          source_thread_id, last_used_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          scope_key, id, model_id, project_id, tool_name, memory_kind, scope_mode,
+          task_key_pattern, target_key_pattern, strategy_fingerprint, error_signature,
+          error_summary, solution_summary, strategy_json, success_count, failure_count, confidence,
+          source_thread_id, last_used_at, last_observed_at, expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(scope_key) DO UPDATE SET
           id = excluded.id,
           model_id = excluded.model_id,
           project_id = excluded.project_id,
           tool_name = excluded.tool_name,
+          memory_kind = excluded.memory_kind,
+          scope_mode = excluded.scope_mode,
           task_key_pattern = excluded.task_key_pattern,
+          target_key_pattern = excluded.target_key_pattern,
+          strategy_fingerprint = excluded.strategy_fingerprint,
           error_signature = excluded.error_signature,
           error_summary = excluded.error_summary,
           solution_summary = excluded.solution_summary,
           strategy_json = excluded.strategy_json,
           success_count = excluded.success_count,
+          failure_count = excluded.failure_count,
+          confidence = excluded.confidence,
           source_thread_id = excluded.source_thread_id,
           last_used_at = excluded.last_used_at,
+          last_observed_at = excluded.last_observed_at,
+          expires_at = excluded.expires_at,
           updated_at = excluded.updated_at`
       )
       .run(
@@ -1714,14 +1942,22 @@ export class DatabaseService {
         record.modelId,
         record.projectId,
         record.toolName,
+        record.memoryKind,
+        record.scopeMode,
         record.taskKeyPattern,
+        record.targetKeyPattern,
+        record.strategyFingerprint,
         record.errorSignature,
         record.errorSummary,
         record.solutionSummary,
         record.strategyJson,
         record.successCount,
+        record.failureCount,
+        record.confidence,
         record.sourceThreadId,
         record.lastUsedAt,
+        record.lastObservedAt,
+        record.expiresAt,
         record.createdAt,
         record.updatedAt
       );
@@ -1740,7 +1976,7 @@ export class DatabaseService {
     const now = nowIso();
     this.#db
       .prepare(
-        "UPDATE error_solutions SET success_count = success_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?"
+        "UPDATE error_solutions SET last_used_at = ?, updated_at = ? WHERE id = ?"
       )
       .run(now, now, id);
   }
@@ -1750,6 +1986,9 @@ export class DatabaseService {
     modelId: string;
     projectId?: string | null;
     toolName?: string;
+    phase?: "preflight" | "post_failure";
+    targetKey?: string;
+    strategyFingerprint?: string;
     limit?: number;
   }): ErrorSolutionRecord[] {
     const limit = Math.min(Math.max(input.limit ?? 3, 1), 8);
@@ -1758,11 +1997,13 @@ export class DatabaseService {
       return [];
     }
     const query = input.query.trim();
-    const params: unknown[] = [modelId];
-    const filters: string[] = ["es.model_id = ?"];
+    const params: string[] = [modelId];
+    const filters: string[] = ["(es.scope_mode = 'shared' OR (es.scope_mode = 'model' AND es.model_id = ?))"];
     if (input.projectId) {
       filters.push("(es.project_id = ? OR es.project_id IS NULL)");
       params.push(input.projectId);
+    } else {
+      filters.push("es.project_id IS NULL");
     }
     if (input.toolName) {
       filters.push("es.tool_name = ?");
@@ -1771,10 +2012,31 @@ export class DatabaseService {
     const filterSql = ` AND ${filters.join(" AND ")}`;
 
     let rows: any[] = [];
+    if (input.phase === "preflight" && input.targetKey) {
+      rows = this.#db
+        .prepare(
+          `SELECT es.*, 0 AS score
+           FROM error_solutions es
+           WHERE (es.target_key_pattern = ? OR es.task_key_pattern = ?)${filterSql}
+           ORDER BY
+             CASE WHEN es.strategy_fingerprint = ? AND ? != '' THEN 0 ELSE 1 END,
+             CASE WHEN es.scope_mode = 'model' THEN 0 ELSE 1 END,
+             es.success_count DESC, es.failure_count DESC, es.last_observed_at DESC
+           LIMIT ?`
+        )
+        .all(
+          input.targetKey,
+          input.targetKey,
+          input.strategyFingerprint ?? "",
+          input.strategyFingerprint ?? "",
+          ...params,
+          limit
+        ) as any[];
+    }
     if (query) {
       try {
         const ftsQuery = buildErrorSolutionFtsQuery(query);
-        if (ftsQuery) {
+        if (ftsQuery && rows.length === 0) {
           rows = this.#db
             .prepare(
               `SELECT es.*, bm25(error_solution_fts) AS score
@@ -1823,10 +2085,20 @@ export class DatabaseService {
       }
     }
 
-    return rows.map((row) => ({
-      ...mapErrorSolutionRow(row),
-      score: Number(row.score ?? 0)
-    }));
+    return rows.map((row) => {
+      const record = mapErrorSolutionRow(row);
+      const matchKind = input.targetKey && record.targetKeyPattern === input.targetKey
+        ? input.strategyFingerprint && record.strategyFingerprint === input.strategyFingerprint
+          ? "exact_strategy"
+          : "exact_target"
+        : "similar";
+      return {
+        ...record,
+        matchKind,
+        effectiveConfidence: calculateStoredErrorSolutionConfidence(record),
+        score: Number(row.score ?? 0)
+      };
+    });
   }
 
   public listErrorSolutions(input: { limit?: number; modelId?: string | null } = {}): ErrorSolutionRecord[] {
@@ -1835,7 +2107,7 @@ export class DatabaseService {
     if (modelId) {
       return this.#db
         .prepare(
-          "SELECT * FROM error_solutions WHERE model_id = ? ORDER BY success_count DESC, last_used_at DESC LIMIT ?"
+          "SELECT * FROM error_solutions WHERE model_id = ? OR scope_mode = 'shared' ORDER BY success_count DESC, failure_count DESC, last_used_at DESC LIMIT ?"
         )
         .all(modelId, limit)
         .map(mapErrorSolutionRow);
@@ -1871,6 +2143,98 @@ export class DatabaseService {
     this.#db.exec("DELETE FROM error_solution_fts;");
     this.#db.exec("DELETE FROM error_solutions;");
     return count;
+  }
+
+  public upsertSelfImprovementMemory(
+    input: Omit<SelfImprovementMemoryRecord, "id" | "createdAt" | "updatedAt" | "usageCount" | "lastUsedAt" | "score"> & { id?: string }
+  ): SelfImprovementMemoryRecord {
+    const now = nowIso();
+    const record: SelfImprovementMemoryRecord = {
+      id: input.id ?? randomUUID(),
+      scope: input.scope,
+      projectId: input.scope === "project" ? input.projectId : null,
+      kind: input.kind,
+      title: redactStoredMemory(input.title).slice(0, 240),
+      content: redactStoredMemory(input.content).slice(0, 4_000),
+      sourceThreadId: input.sourceThreadId,
+      usageCount: 0,
+      lastUsedAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.#db.prepare(`INSERT INTO self_improvement_memories (
+      id, scope, project_id, kind, title, content, source_thread_id, usage_count, last_used_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(record.id, record.scope, record.projectId, record.kind, record.title, record.content, record.sourceThreadId, 0, null, now, now);
+    this.#db.prepare("INSERT INTO self_improvement_memory_fts (memory_id, title, content) VALUES (?, ?, ?)")
+      .run(record.id, record.title, record.content);
+    return record;
+  }
+
+  public listSelfImprovementMemories(input: { projectId?: string | null; limit?: number; all?: boolean } = {}): SelfImprovementMemoryRecord[] {
+    const limit = Math.min(Math.max(input.limit ?? 100, 1), 1000);
+    const rows = input.all
+      ? this.#db.prepare("SELECT * FROM self_improvement_memories ORDER BY usage_count DESC, updated_at DESC LIMIT ?").all(limit)
+      : input.projectId
+      ? this.#db.prepare("SELECT * FROM self_improvement_memories WHERE project_id = ? OR scope = 'global' ORDER BY usage_count DESC, updated_at DESC LIMIT ?").all(input.projectId, limit)
+      : this.#db.prepare("SELECT * FROM self_improvement_memories WHERE scope = 'global' ORDER BY usage_count DESC, updated_at DESC LIMIT ?").all(limit);
+    return (rows as any[]).map(mapSelfImprovementMemoryRow);
+  }
+
+  public searchSelfImprovementMemories(input: { query: string; projectId?: string | null; limit?: number }): SelfImprovementMemoryRecord[] {
+    const limit = Math.min(Math.max(input.limit ?? 6, 1), 20);
+    const filter = input.projectId ? "(m.project_id = ? OR m.scope = 'global')" : "m.scope = 'global'";
+    const scopeParams: unknown[] = input.projectId ? [input.projectId] : [];
+    const query = buildErrorSolutionFtsQuery(input.query);
+    let rows: any[] = [];
+    if (query) {
+      try {
+        rows = this.#db.prepare(`SELECT m.*, bm25(self_improvement_memory_fts) AS score FROM self_improvement_memory_fts f
+          JOIN self_improvement_memories m ON m.id = f.memory_id WHERE self_improvement_memory_fts MATCH ? AND ${filter}
+          ORDER BY score ASC, m.usage_count DESC, m.updated_at DESC LIMIT ?`).all(query, ...scopeParams, limit) as any[];
+      } catch { /* Search falls back to useful recent memories. */ }
+    }
+    if (!rows.length) {
+      rows = this.#db.prepare(`SELECT *, 0 AS score FROM self_improvement_memories m WHERE ${filter}
+        ORDER BY usage_count DESC, updated_at DESC LIMIT ?`).all(...scopeParams, limit) as any[];
+    }
+    return rows.map((row) => ({ ...mapSelfImprovementMemoryRow(row), score: Number(row.score ?? 0) }));
+  }
+
+  public markSelfImprovementMemoryUsed(id: string): void {
+    const now = nowIso();
+    this.#db.prepare("UPDATE self_improvement_memories SET usage_count = usage_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?")
+      .run(now, now, id);
+  }
+
+  public deleteSelfImprovementMemory(id: string): void {
+    this.#db.prepare("DELETE FROM self_improvement_memory_fts WHERE memory_id = ?").run(id);
+    this.#db.prepare("DELETE FROM self_improvement_memories WHERE id = ?").run(id);
+  }
+
+  public pruneSelfImprovementMemories(retentionDays: number, maxMemories: number): number {
+    const before = new Date(Date.now() - retentionDays * 86_400_000).toISOString();
+    const stale = this.#db.prepare("SELECT id FROM self_improvement_memories WHERE updated_at < ?").all(before) as Array<{ id: string }>;
+    const excess = this.#db.prepare("SELECT id FROM self_improvement_memories ORDER BY usage_count DESC, updated_at DESC LIMIT -1 OFFSET ?").all(maxMemories) as Array<{ id: string }>;
+    const ids = [...new Set([...stale, ...excess].map((row) => row.id))];
+    for (const id of ids) this.deleteSelfImprovementMemory(id);
+    return ids.length;
+  }
+
+  public claimSelfImprovementJob(threadId: string, leaseMinutes = 10): boolean {
+    const now = nowIso();
+    const leaseUntil = new Date(Date.now() + leaseMinutes * 60_000).toISOString();
+    const existing = this.#db.prepare("SELECT status, lease_until FROM self_improvement_jobs WHERE thread_id = ?").get(threadId) as { status?: string; lease_until?: string | null } | undefined;
+    if (existing?.status === "completed" || (existing?.lease_until && Date.parse(existing.lease_until) > Date.now())) return false;
+    this.#db.prepare(`INSERT INTO self_improvement_jobs (thread_id, status, attempts, lease_until, updated_at) VALUES (?, 'running', 1, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET status = 'running', attempts = attempts + 1, lease_until = excluded.lease_until, updated_at = excluded.updated_at`).run(threadId, leaseUntil, now);
+    return true;
+  }
+
+  public finishSelfImprovementJob(threadId: string, error?: string): void {
+    const now = nowIso();
+    this.#db.prepare("UPDATE self_improvement_jobs SET status = ?, lease_until = NULL, last_error = ?, processed_at = ?, updated_at = ? WHERE thread_id = ?")
+      .run(error ? "failed" : "completed", error ?? null, error ? null : now, now, threadId);
   }
 
   public createUserPrompt(
@@ -2694,6 +3058,23 @@ function mapMessageRow(row: any): MessageRecord {
   };
 }
 
+function usageAnalyticsBucket(value: string, granularity: "day" | "week" | "month"): { key: string; label: string } {
+  const date = new Date(value);
+  const safeDate = Number.isFinite(date.getTime()) ? date : new Date(0);
+  if (granularity === "month") {
+    const key = `${safeDate.getUTCFullYear()}-${String(safeDate.getUTCMonth() + 1).padStart(2, "0")}`;
+    return { key, label: key };
+  }
+  if (granularity === "week") {
+    const weekStart = new Date(Date.UTC(safeDate.getUTCFullYear(), safeDate.getUTCMonth(), safeDate.getUTCDate()));
+    weekStart.setUTCDate(weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7));
+    const key = weekStart.toISOString().slice(0, 10);
+    return { key, label: key };
+  }
+  const key = safeDate.toISOString().slice(0, 10);
+  return { key, label: key };
+}
+
 function mapTurnRunRow(row: any): TurnRunRecord {
   return {
     id: row.id,
@@ -2770,14 +3151,38 @@ function mapErrorSolutionRow(row: any): ErrorSolutionRecord {
     modelId: row.model_id ?? "",
     projectId: row.project_id ?? null,
     toolName: row.tool_name,
+    memoryKind: row.memory_kind === "blocked_strategy" ? "blocked_strategy" : "recovered",
+    scopeMode: row.scope_mode === "shared" ? "shared" : "model",
     taskKeyPattern: row.task_key_pattern,
+    targetKeyPattern: row.target_key_pattern || row.task_key_pattern,
+    strategyFingerprint: row.strategy_fingerprint ?? "",
     errorSignature: row.error_signature,
     errorSummary: row.error_summary,
     solutionSummary: row.solution_summary,
     strategyJson: row.strategy_json,
     successCount: Number(row.success_count ?? 1),
+    failureCount: Number(row.failure_count ?? 0),
+    confidence: Number(row.confidence ?? 1),
     sourceThreadId: row.source_thread_id ?? null,
     lastUsedAt: row.last_used_at,
+    lastObservedAt: row.last_observed_at || row.updated_at,
+    expiresAt: row.expires_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapSelfImprovementMemoryRow(row: any): SelfImprovementMemoryRecord {
+  return {
+    id: row.id,
+    scope: row.scope === "project" ? "project" : "global",
+    projectId: row.project_id ?? null,
+    kind: ["experience", "preference", "error_solution", "note"].includes(row.kind) ? row.kind : "experience",
+    title: row.title,
+    content: row.content,
+    sourceThreadId: row.source_thread_id ?? null,
+    usageCount: Number(row.usage_count ?? 0),
+    lastUsedAt: row.last_used_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -2891,6 +3296,15 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/** Keep durable recovery experience useful without retaining credentials. */
+function redactStoredMemory(value: string): string {
+  return value
+    .replace(/\b(sk-[A-Za-z0-9_-]{16,}|(?:ghp|github_pat)_[A-Za-z0-9_]{16,})\b/g, "[REDACTED_SECRET]")
+    .replace(/(authorization\s*[:=]\s*(?:bearer\s+)?)\S+/gi, "$1[REDACTED]")
+    .replace(/([A-Za-z_][A-Za-z0-9_]*(?:token|secret|password|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/(https?:\/\/[^:\s/@]+:)[^@\s/]+@/gi, "$1[REDACTED]@");
+}
+
 function hashPath(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }
@@ -2899,14 +3313,34 @@ function buildApprovalScopeKey(projectId: string | null, approvalKey: string): s
   return `${projectId ?? "__global__"}:${approvalKey}`;
 }
 
-function buildErrorSolutionScopeKey(
-  modelId: string,
-  projectId: string | null,
-  toolName: string,
-  errorSignature: string
-): string {
-  const signatureHash = createHash("sha256").update(errorSignature).digest("hex").slice(0, 24);
-  return `${modelId}:${projectId ?? "__global__"}:${toolName}:${signatureHash}`;
+function buildErrorSolutionScopeKey(input: {
+  modelId: string;
+  projectId: string | null;
+  toolName: string;
+  errorSignature: string;
+  memoryKind: ErrorSolutionRecord["memoryKind"];
+  scopeMode: ErrorSolutionRecord["scopeMode"];
+  targetKeyPattern: string;
+  strategyFingerprint: string;
+}): string {
+  const signature = [
+    input.errorSignature,
+    input.targetKeyPattern,
+    input.strategyFingerprint,
+    input.memoryKind
+  ].join("\u0000");
+  const signatureHash = createHash("sha256").update(signature).digest("hex").slice(0, 24);
+  const modelScope = input.scopeMode === "shared" ? "*" : input.modelId;
+  return `${input.scopeMode}:${modelScope}:${input.projectId ?? "__global__"}:${input.toolName}:${signatureHash}`;
+}
+
+function calculateStoredErrorSolutionConfidence(record: ErrorSolutionRecord, now = Date.now()): number {
+  const base = Number.isFinite(record.confidence) ? Math.max(0, Math.min(1, record.confidence)) : 1;
+  if (record.memoryKind !== "blocked_strategy") return base;
+  const observedAt = Date.parse(record.lastObservedAt);
+  if (!Number.isFinite(observedAt)) return base;
+  const ageDays = Math.max(0, now - observedAt) / 86_400_000;
+  return base * Math.pow(0.5, ageDays / 30);
 }
 
 function buildErrorSolutionFtsQuery(query: string): string | null {

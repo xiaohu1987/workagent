@@ -34,6 +34,29 @@ describe("apply-patch failures", () => {
     expect(message).not.toContain("Unsupported headings");
   });
 
+  it("preserves the provider ID when a custom child model is selected", async () => {
+    const runtime = new ToolRuntime();
+    const spawnChildAgent = vi.fn().mockResolvedValue({
+      threadId: "child-1",
+      agentPath: "/root/reviewer",
+      status: "running"
+    });
+
+    await runtime.execute(
+      {
+        id: "agent-spawn-custom-model",
+        name: "spawn_agent",
+        arguments: { prompt: "Review the failing tests.", model: "grok-4.5", provider: "provider-5" }
+      },
+      { cwd: process.cwd(), spawnChildAgent } as unknown as ToolRuntimeContext
+    );
+
+    expect(spawnChildAgent).toHaveBeenCalledWith(expect.objectContaining({
+      modelId: "grok-4.5",
+      providerId: "provider-5"
+    }));
+  });
+
   it("treats a missing removal block as stale file context instead of invalid syntax", () => {
     const message = buildApplyPatchFailureMessage(
       "Patch hunk context/removal block was not found in the target file."
@@ -98,8 +121,26 @@ describe("ToolRuntime", () => {
     );
 
     expect(waitForSubagents).toHaveBeenCalledWith({ agents: undefined, timeoutMs: 250 });
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
     expect(result.json).toMatchObject({ agents: [], timedOut: true });
+  });
+
+  it("reports a capacity-limited child as queued instead of failing the tool call", async () => {
+    const runtime = new ToolRuntime();
+    const spawnChildAgent = vi.fn().mockResolvedValue({
+      threadId: "child-4",
+      agentPath: "/root/reviewer-4",
+      status: "idle",
+      queued: true
+    });
+
+    const result = await runtime.execute(
+      { id: "agent-spawn-queued", name: "spawn_agent", arguments: { prompt: "Review the patch." } },
+      { cwd: process.cwd(), spawnChildAgent } as unknown as ToolRuntimeContext
+    );
+
+    expect(result).toMatchObject({ ok: true, json: { queued: true } });
+    expect(result.content).toContain("Queued /root/reviewer-4");
   });
 
   it("defaults image generation to one image and honors a requested count", async () => {

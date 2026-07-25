@@ -45,6 +45,7 @@ import type {
   UserInputQuestion,
   UserInputPrompt
 } from "@shared-types";
+import { isOverlappingSubagentAssignment } from "./subagent-assignment";
 import { normalizeRuntimeTimeouts } from "@shared-types";
 import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@agent-runtime";
 import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
@@ -230,6 +231,7 @@ export class DesktopBackend {
   #logs!: RuntimeLogWriter;
   #deferredServices: Promise<void> | null = null;
   #backgroundSkillRefresh: Promise<void> | null = null;
+  readonly #subagentDispatches = new Map<string, Promise<void>>();
 
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
@@ -306,6 +308,9 @@ export class DesktopBackend {
       markErrorSolutionUsed: async (id) => {
         this.#db.markErrorSolutionUsed(id);
       },
+      searchSelfImprovementMemories: async (input) => this.#db.searchSelfImprovementMemories(input),
+      addSelfImprovementMemory: async (input) => this.#db.upsertSelfImprovementMemory(input),
+      markSelfImprovementMemoryUsed: async (id) => this.#db.markSelfImprovementMemoryUsed(id),
       listFiles: async (dir) =>
         (await fs.readdir(dir, { withFileTypes: true })).map((entry) => entry.name),
       readFile: async (filePath) => fs.readFile(filePath, "utf8"),
@@ -378,8 +383,27 @@ export class DesktopBackend {
     for (const approval of this.#db.listPendingApprovals()) {
       this.#scheduleApprovalTimeout(approval.id);
     }
+    void this.processSelfImprovementMemories();
+    // Recovery turns interrupted work back into queued messages. Reapply the
+    // child-agent limit before waking them so a restart cannot burst past it.
+    const childCapacity = Math.max(1, this.#config.multiAgent.maxConcurrentSubagents - 1);
+    const recoveredChildrenByRoot = new Map<string, number>();
+    for (const child of this.#db.listQueuedSubagentMessageThreadIds()) {
+      if (this.#db.isSubagentPendingDispatch(child.threadId)) continue;
+      const restoredCount = recoveredChildrenByRoot.get(child.rootThreadId) ?? 0;
+      if (restoredCount >= childCapacity) {
+        this.#db.markSubagentPendingDispatch(child.threadId, child.rootThreadId);
+      } else {
+        recoveredChildrenByRoot.set(child.rootThreadId, restoredCount + 1);
+      }
+    }
     for (const threadId of this.#db.listQueuedMessageThreadIds()) {
-      this.#runtime.wakeQueuedMessages(threadId);
+      if (!this.#db.isSubagentPendingDispatch(threadId)) {
+        this.#runtime.wakeQueuedMessages(threadId);
+      }
+    }
+    for (const rootThreadId of this.#db.listSubagentPendingDispatchRoots()) {
+      this.schedulePendingSubagentDispatch(rootThreadId);
     }
     await this.#logs.append("backend.initialized", {
       logsDir: this.#layout.logsDir,
@@ -414,6 +438,10 @@ export class DesktopBackend {
     turnRunId: string | null;
   } {
     return this.#db.getThreadTokenUsage(threadId);
+  }
+
+  public getUsageAnalytics(input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) {
+    return this.#db.getUsageAnalytics(input);
   }
 
   public searchThreads(query: string) {
@@ -587,7 +615,10 @@ export class DesktopBackend {
       cwd: input.cwd,
       modelId: selection.modelId,
       providerId: selection.providerId,
-      multiAgentMode: this.#config.multiAgent?.defaultMode === "proactive" ? "proactive" : "disabled"
+      // Persist the default instead of relying on a renderer-only highlight.
+      // A later manual removal writes false and remains respected.
+      gpaStateJson: JSON.stringify({ fullAccess: true }),
+      multiAgentMode: "proactive"
     });
     this.refreshSkillsInBackground(thread.cwd);
     this.#runtime.ensureThread(thread.id);
@@ -795,7 +826,10 @@ export class DesktopBackend {
       toolCalls: messages.length > 0 ? this.#db.listToolCalls(threadId, messages[0].createdAt) : [],
       contextCompaction: this.#db.getLatestContextCompaction(threadId),
       gpa: this.getGpaState(threadId),
-      subagents
+      subagents,
+      queuedSubagentIds: subagents
+        .filter((child) => this.#db.isSubagentPendingDispatch(child.id))
+        .map((child) => child.id)
     };
   }
 
@@ -1130,6 +1164,7 @@ export class DesktopBackend {
     for (const id of threadIds) {
       this.#runtime.interrupt(id);
       this.#terminal.cancelCommands(id, "Task interrupted.");
+      this.#db.clearSubagentPendingDispatch(id);
       cancelledQueueItemIds.set(id, this.#db.cancelQueuedMessages(id));
     }
 
@@ -2756,6 +2791,52 @@ export class DesktopBackend {
     return this.#db.clearErrorSolutions(modelId);
   }
 
+  public listSelfImprovementMemories(input: { projectId?: string | null; limit?: number; all?: boolean } = {}) {
+    return this.#db.listSelfImprovementMemories(input);
+  }
+
+  public deleteSelfImprovementMemory(id: string): void {
+    this.#db.deleteSelfImprovementMemory(id);
+  }
+
+  public async refreshSelfImprovementMemories(): Promise<{ processed: number; pruned: number }> {
+    return this.processSelfImprovementMemories();
+  }
+
+  private async processSelfImprovementMemories(): Promise<{ processed: number; pruned: number }> {
+    const settings = this.#config.selfImprovement;
+    const pruned = this.#db.pruneSelfImprovementMemories(settings.retentionDays, settings.maxMemories);
+    if (!settings.generateMemories) return { processed: 0, pruned };
+    const idleBefore = Date.now() - settings.idleMinutes * 60_000;
+    let processed = 0;
+    for (const thread of this.#db.listThreads()) {
+      if (thread.parentThreadId || thread.status === "running" || Date.parse(thread.updatedAt) > idleBefore) continue;
+      if (!this.#db.claimSelfImprovementJob(thread.id)) continue;
+      try {
+        const messages = this.#db.listMessages(thread.id);
+        const request = [...messages].reverse().find((message) => message.role === "user")?.content.trim();
+        const result = [...messages].reverse().find((message) => message.role === "assistant")?.content.trim();
+        if (!request || !result) {
+          this.#db.finishSelfImprovementJob(thread.id, "No completed user/assistant exchange.");
+          continue;
+        }
+        this.#db.upsertSelfImprovementMemory({
+          scope: thread.projectId ? "project" : "global",
+          projectId: thread.projectId,
+          kind: "experience",
+          title: `任务经验：${thread.title.slice(0, 160)}`,
+          content: `任务：${request.slice(0, 900)}\n结果：${result.slice(0, 2_400)}`,
+          sourceThreadId: thread.id
+        });
+        this.#db.finishSelfImprovementJob(thread.id);
+        processed += 1;
+      } catch (error) {
+        this.#db.finishSelfImprovementJob(thread.id, error instanceof Error ? error.message : String(error));
+      }
+    }
+    return { processed, pruned };
+  }
+
   private async extractKnowledgeSourceDocuments(
     sources: KnowledgeImportSource[],
     options: { allowEmptyLocal?: boolean } = {}
@@ -3092,8 +3173,8 @@ export class DesktopBackend {
 
   private async spawnChildAgent(
     parentThreadId: string,
-    input: { prompt: string; role: string; modelId?: string; systemOverride?: boolean }
-  ): Promise<{ threadId: string; agentPath: string; status: ThreadRecord["status"] }> {
+    input: { prompt: string; role: string; modelId?: string; providerId?: string; contextFork?: "none" | "all" | "recent"; reasoningEffort?: "low" | "medium" | "high"; serviceTier?: string; systemOverride?: boolean }
+  ): Promise<{ threadId: string; agentPath: string; status: ThreadRecord["status"]; reused?: boolean; queued?: boolean }> {
     const parent = this.#db.getThread(parentThreadId);
     if (parent.multiAgentMode === "disabled" && !input.systemOverride) {
       throw new Error("Multi-agent delegation is disabled for this task.");
@@ -3110,21 +3191,32 @@ export class DesktopBackend {
     }
     const duplicate = delegatedForCurrentRequest.find((item) => isOverlappingSubagentAssignment(input, item));
     if (duplicate) {
-      throw new Error(
-        `An overlapping child-agent task already exists for this user request (${duplicate.agentPath}). ` +
-        "Use multi_agents.wait or multi_agents.followup_task instead of spawning a duplicate."
-      );
+      return { threadId: duplicate.id, agentPath: duplicate.agentPath, status: duplicate.status, reused: true };
     }
 
     const activeCount = tree.filter((item) =>
-      item.id !== parent.rootThreadId && this.isSubagentActive(item)
+      item.id !== parent.rootThreadId && this.isSubagentActive(item) && !this.#db.isSubagentPendingDispatch(item.id)
     ).length;
-    if (activeCount >= this.#config.multiAgent.maxConcurrentSubagents) {
-      throw new Error(`All ${this.#config.multiAgent.maxConcurrentSubagents} child-agent slots are busy. Wait for a child to finish first.`);
-    }
+    const childCapacity = Math.max(1, this.#config.multiAgent.maxConcurrentSubagents - 1);
+    const queued = activeCount >= childCapacity;
 
     await this.refreshSkills(parent.cwd);
     const role = normalizeAgentSegment(input.role);
+    const requestedModelId = input.modelId?.trim();
+    const requestedProviderId = input.providerId?.trim();
+    const configuredModelId = this.#config.multiAgent.defaultModelId?.trim();
+    const configuredProviderId = this.#config.multiAgent.defaultProviderId?.trim();
+    const reasoningModels = this.#config.models.filter((model) => model.role === "reasoning");
+    const selectModel = (modelId: string | undefined, providerId?: string) => {
+      if (!modelId) return undefined;
+      const candidates = reasoningModels.filter((model) => model.id === modelId);
+      if (providerId) return candidates.find((model) => model.providerId === providerId);
+      return candidates.find((model) => model.providerId === parent.providerId) ?? candidates[0];
+    };
+    // Explicit choice wins. A configured default follows it; without either,
+    // child agents inherit the exact model and provider from their parent.
+    const selectedModel = selectModel(requestedModelId, requestedProviderId)
+      ?? selectModel(configuredModelId, configuredProviderId);
     const siblingPaths = new Set(this.#db.listChildThreads(parent.id).map((item) => item.agentPath));
     let suffix = 1;
     let agentPath = `${parent.agentPath}/${role}`;
@@ -3137,24 +3229,36 @@ export class DesktopBackend {
       mode: parent.mode,
       workspaceKind: parent.workspaceKind,
       cwd: parent.cwd,
-      modelId: input.modelId ?? parent.modelId,
-      providerId: parent.providerId,
+      modelId: selectedModel?.id ?? parent.modelId,
+      providerId: selectedModel?.providerId ?? parent.providerId,
       parentThreadId: parent.id,
       rootThreadId: parent.rootThreadId,
       agentPath,
       agentRole: input.role,
       lastTaskMessage: input.prompt,
+      gpaStateJson: parent.gpaStateJson ?? JSON.stringify({ fullAccess: true }),
       multiAgentMode: parent.multiAgentMode,
-      status: "running"
+      status: queued ? "idle" : "running"
     });
     this.#db.updateThread(thread.id, {
       selectedSkillIds: parent.selectedSkillIds,
       selectedPluginIds: parent.selectedPluginIds,
       knowledgeBaseIds: parent.knowledgeBaseIds
     });
-    await this.sendMessage(thread.id, buildChildAgentPrompt(parent, thread, input.prompt));
+    const contextFork = input.contextFork ?? this.#config.multiAgent.defaultContextFork ?? "all";
+    const parentMessages = contextFork === "none" ? [] : this.#db.listMessages(parent.id).slice(contextFork === "recent" ? -6 : -24);
+    if (queued) {
+      this.#db.markSubagentPendingDispatch(thread.id, parent.rootThreadId);
+    }
+    await this.sendMessage(
+      thread.id,
+      buildChildAgentPrompt(parent, thread, input.prompt, parentMessages.map((message) => `${message.role}: ${message.content}`).join("\n").slice(-12_000)),
+      [],
+      undefined,
+      !queued
+    );
     await this.emitAgentTreeUpdated(parent.rootThreadId);
-    return { threadId: thread.id, agentPath: thread.agentPath, status: "running" };
+    return { threadId: thread.id, agentPath: thread.agentPath, status: thread.status, queued };
   }
 
   private resolveAgent(parentThreadId: string, agent: string): ThreadRecord {
@@ -3265,6 +3369,34 @@ export class DesktopBackend {
     return thread.status === "running"
       || thread.status === "waiting"
       || this.#db.listQueuedMessages(thread.id).some((message) => message.status === "queued" || message.status === "dispatching");
+  }
+
+  private schedulePendingSubagentDispatch(rootThreadId: string): void {
+    if (this.#subagentDispatches.has(rootThreadId)) return;
+    const dispatch = this.dispatchPendingSubagents(rootThreadId)
+      .catch(async (error) => {
+        await this.#logs.append("subagent.pending_dispatch_failed", {
+          rootThreadId,
+          error: error instanceof Error ? error.message : String(error)
+        }, rootThreadId);
+      })
+      .finally(() => this.#subagentDispatches.delete(rootThreadId));
+    this.#subagentDispatches.set(rootThreadId, dispatch);
+  }
+
+  private async dispatchPendingSubagents(rootThreadId: string): Promise<void> {
+    const childCapacity = Math.max(1, this.#config.multiAgent.maxConcurrentSubagents - 1);
+    const tree = this.#db.listAgentTree(rootThreadId);
+    let activeCount = tree.filter((item) =>
+      item.id !== rootThreadId && this.isSubagentActive(item) && !this.#db.isSubagentPendingDispatch(item.id)
+    ).length;
+    for (const pending of this.#db.listSubagentPendingDispatches(rootThreadId)) {
+      if (activeCount >= childCapacity) break;
+      this.#db.clearSubagentPendingDispatch(pending.threadId);
+      this.#runtime.wakeQueuedMessages(pending.threadId);
+      activeCount += 1;
+      await this.emitAgentTreeUpdated(rootThreadId);
+    }
   }
 
   private getCurrentRequestSubagents(parent: ThreadRecord, tree = this.#db.listAgentTree(parent.rootThreadId)): ThreadRecord[] {
@@ -3513,6 +3645,9 @@ export class DesktopBackend {
     }
     if (routedEvent.type !== "assistant.delta") {
       await this.#logs.append("runtime.event", { event: sanitizeRuntimeEventForLog(routedEvent) }, routedEvent.threadId);
+    }
+    if (subject?.parentThreadId && (routedEvent.type === "thread.updated" || routedEvent.type === "queue.updated")) {
+      this.schedulePendingSubagentDispatch(subject.rootThreadId);
     }
   }
 
@@ -3820,12 +3955,17 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     timeouts: normalizeRuntimeTimeouts(config.timeouts),
     multiAgent: {
-      defaultMode: "disabled",
-      maxConcurrentSubagents: Math.min(3, Math.max(1, Math.round(config.multiAgent?.maxConcurrentSubagents ?? fallback.multiAgent.maxConcurrentSubagents))),
-      maxSubagentsPerRoot: Math.min(8, Math.max(1, Math.round(config.multiAgent?.maxSubagentsPerRoot ?? fallback.multiAgent.maxSubagentsPerRoot))),
-      maxDepth: Math.min(3, Math.max(1, Math.round(config.multiAgent?.maxDepth ?? fallback.multiAgent.maxDepth))),
-      childWritePolicy: "read-only"
+      defaultMode: "proactive",
+      maxConcurrentSubagents: Math.min(8, Math.max(2, Math.round(config.multiAgent?.maxConcurrentSubagents ?? fallback.multiAgent.maxConcurrentSubagents))),
+      maxSubagentsPerRoot: Math.min(16, Math.max(1, Math.round(config.multiAgent?.maxSubagentsPerRoot ?? fallback.multiAgent.maxSubagentsPerRoot))),
+      maxDepth: Math.min(6, Math.max(1, Math.round(config.multiAgent?.maxDepth ?? fallback.multiAgent.maxDepth))),
+      childWritePolicy: config.multiAgent?.childWritePolicy === "read-only" ? "read-only" : "inherit",
+      defaultContextFork: config.multiAgent?.defaultContextFork ?? "all",
+      defaultModelId: config.multiAgent?.defaultModelId,
+      defaultProviderId: config.multiAgent?.defaultProviderId,
+      defaultReasoningEffort: config.multiAgent?.defaultReasoningEffort ?? "medium"
     },
+    selfImprovement: config.selfImprovement ?? fallback.selfImprovement,
     databaseConnections: Array.isArray(config.databaseConnections) ? config.databaseConnections : []
   };
 }
@@ -3840,47 +3980,16 @@ function normalizeAgentSegment(value: string): string {
   return normalized || "agent";
 }
 
-function isOverlappingSubagentAssignment(
-  input: { prompt: string; role: string },
-  existing: Pick<ThreadRecord, "agentRole" | "lastTaskMessage">
-): boolean {
-  const requestedRole = normalizeDelegationRole(input.role);
-  const existingRole = normalizeDelegationRole(existing.agentRole ?? "");
-  if (requestedRole && requestedRole === existingRole) {
-    return true;
-  }
-
-  const requestedFiles = extractDelegatedFileScopes(input.prompt);
-  const existingFiles = extractDelegatedFileScopes(existing.lastTaskMessage ?? "");
-  let sharedFiles = 0;
-  for (const file of requestedFiles) {
-    if (existingFiles.has(file)) sharedFiles += 1;
-  }
-  return sharedFiles >= 2;
-}
-
-function normalizeDelegationRole(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s\W_]+/g, "");
-}
-
-function extractDelegatedFileScopes(prompt: string): Set<string> {
-  const scopes = new Set<string>();
-  const normalized = prompt.toLowerCase().replace(/\\/g, "/");
-  for (const match of normalized.matchAll(/(?:[a-z0-9_-]+\/)*[a-z0-9_-]+\.(?:[a-z0-9]{1,8})/g)) {
-    scopes.add(match[0]);
-  }
-  return scopes;
-}
-
-function buildChildAgentPrompt(parent: ThreadRecord, child: ThreadRecord, prompt: string): string {
+function buildChildAgentPrompt(parent: ThreadRecord, child: ThreadRecord, prompt: string, inheritedContext = ""): string {
   return [
     `[Internal child-agent task ${child.agentPath}]`,
     `Parent agent: ${parent.agentPath}`,
     "You are a bounded child agent. Work independently on the assigned task and return a concise structured result.",
-    "This task is read-only: do not edit files, run mutating shell commands, commit, push, or change external state.",
+    "You share the parent workspace and inherit its permission policy. Use the normal approval flow for any action that requires approval.",
     "Include summary, concrete evidence (paths, symbols, or commands inspected), and errors or uncertainty.",
     "Assigned task:",
-    prompt
+    prompt,
+    ...(inheritedContext ? ["Inherited parent context:", inheritedContext] : [])
   ].join("\n\n");
 }
 

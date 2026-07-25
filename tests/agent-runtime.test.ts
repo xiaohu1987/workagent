@@ -170,8 +170,8 @@ describe("function-call protocol compatibility", () => {
 });
 
 describe("createToolCallFingerprint", () => {
-  it("stops only after five consecutive failures of the same tool task", () => {
-    expect(MAX_REPEATED_TASK_FAILURES).toBe(5);
+  it("stops after two actual failures of the same recovery target", () => {
+    expect(MAX_REPEATED_TASK_FAILURES).toBe(2);
   });
 
   it("treats equivalent tool arguments as the same call", () => {
@@ -1954,14 +1954,22 @@ describe("strategy switching", () => {
         modelId: "gpt-test",
         projectId: "project-1",
         toolName: "apply_patch",
+        memoryKind: "recovered",
+        scopeMode: "model",
         taskKeyPattern: "apply_patch:src/app.ts",
+        targetKeyPattern: "file:src/app.ts",
+        strategyFingerprint: "strategy-1",
         errorSignature: "apply_patch:patch context did not match",
         errorSummary: "Patch context did not match",
         solutionSummary: "Read the file first, then rewrite with exact current content.",
         strategyJson: "{}",
         successCount: 4,
+        failureCount: 0,
+        confidence: 1,
         sourceThreadId: "thread-1",
         lastUsedAt: "2026-07-24T00:00:00.000Z",
+        lastObservedAt: "2026-07-24T00:00:00.000Z",
+        expiresAt: null,
         createdAt: "2026-07-24T00:00:00.000Z",
         updatedAt: "2026-07-24T00:00:00.000Z"
       }]
@@ -1982,14 +1990,22 @@ describe("strategy switching", () => {
         modelId: "gpt-test",
         projectId: null,
         toolName: "shell.exec",
+        memoryKind: "recovered",
+        scopeMode: "model",
         taskKeyPattern: "shell.exec:pnpm test",
+        targetKeyPattern: "task:shell.exec:test",
+        strategyFingerprint: "strategy-2",
         errorSignature: "shell.exec:command failed with exit code N",
         errorSummary: "command failed with exit code 1",
         solutionSummary: "Run a narrower test command after inspecting package.json scripts.",
         strategyJson: "{}",
         successCount: 2,
+        failureCount: 0,
+        confidence: 1,
         sourceThreadId: null,
         lastUsedAt: "2026-07-24T00:00:00.000Z",
+        lastObservedAt: "2026-07-24T00:00:00.000Z",
+        expiresAt: null,
         createdAt: "2026-07-24T00:00:00.000Z",
         updatedAt: "2026-07-24T00:00:00.000Z"
       }]

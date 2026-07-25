@@ -3,7 +3,7 @@ export { modelJsonCandidates, tryParseModelJson } from "./model-json";
 export type ThreadMode = "project" | "chat";
 export type WorkspaceKind = "project" | "projectless";
 export type MultiAgentMode = "disabled" | "proactive";
-export type ChildAgentWritePolicy = "read-only";
+export type ChildAgentWritePolicy = "inherit" | "read-only";
 export type GpaStage = "off" | "goal" | "plan" | "act";
 export interface GpaPlanTask {
   id: string;
@@ -96,6 +96,36 @@ export interface MultiAgentSettings {
   maxSubagentsPerRoot: number;
   maxDepth: number;
   childWritePolicy: ChildAgentWritePolicy;
+  defaultContextFork?: "none" | "all" | "recent";
+  defaultModelId?: string;
+  defaultProviderId?: string;
+  defaultReasoningEffort?: "low" | "medium" | "high";
+}
+
+/** Long-lived, redacted experience distilled from completed root tasks. */
+export interface SelfImprovementMemoryRecord {
+  id: string;
+  scope: "global" | "project";
+  projectId: string | null;
+  kind: "experience" | "preference" | "error_solution" | "note";
+  title: string;
+  content: string;
+  sourceThreadId: string | null;
+  usageCount: number;
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  score?: number;
+}
+
+export interface SelfImprovementSettings {
+  generateMemories: boolean;
+  useMemories: boolean;
+  dedicatedTools: boolean;
+  processingModelId?: string;
+  idleMinutes: number;
+  retentionDays: number;
+  maxMemories: number;
 }
 
 export interface SubagentResultEnvelope {
@@ -223,6 +253,32 @@ export function parseTokenUsageJson(value: string | null | undefined): TokenUsag
   }
 }
 
+export type UsageAnalyticsGranularity = "day" | "week" | "month";
+
+export interface UsageAnalyticsModelRow {
+  providerId: string;
+  modelId: string;
+  requestCount: number;
+  usage: TokenUsage;
+}
+
+export interface UsageAnalyticsTrendPoint {
+  key: string;
+  label: string;
+  requestCount: number;
+  usage: TokenUsage;
+}
+
+export interface UsageAnalyticsSummary {
+  generatedAt: string;
+  rangeDays: number | null;
+  granularity: UsageAnalyticsGranularity;
+  totalRequests: number;
+  totalUsage: TokenUsage;
+  models: UsageAnalyticsModelRow[];
+  trend: UsageAnalyticsTrendPoint[];
+}
+
 export interface ToolSpecDefinition {
   name: string;
   namespace?: string;
@@ -241,7 +297,7 @@ export interface ToolCallRecord {
   toolName: string;
   argumentsJson: string;
   resultJson: string | null;
-  status: "pending" | "running" | "completed" | "failed" | "denied";
+  status: "pending" | "running" | "completed" | "failed" | "denied" | "blocked";
   riskLevel: ToolRiskLevel;
   approvalMode: ApprovalMode;
   startedAt: string;
@@ -362,23 +418,37 @@ export interface RememberedApprovalRecord {
   updatedAt: string;
 }
 
-/** Cross-session memory of how a prior tool failure was recovered/optimized. */
+export type ErrorSolutionMemoryKind = "recovered" | "blocked_strategy";
+export type ErrorSolutionScopeMode = "shared" | "model";
+export type ErrorSolutionMatchKind = "exact_strategy" | "exact_target" | "similar";
+
+/** Cross-session memory of how a prior tool failure was recovered or should be avoided. */
 export interface ErrorSolutionRecord {
   id: string;
-  /** Memories are isolated per model because failure modes differ by model. */
+  /** Shared records use "*"; model records keep the originating model id. */
   modelId: string;
   projectId: string | null;
   toolName: string;
+  memoryKind: ErrorSolutionMemoryKind;
+  scopeMode: ErrorSolutionScopeMode;
   taskKeyPattern: string;
+  targetKeyPattern: string;
+  strategyFingerprint: string;
   errorSignature: string;
   errorSummary: string;
   solutionSummary: string;
   strategyJson: string;
   successCount: number;
+  failureCount: number;
+  confidence: number;
   sourceThreadId: string | null;
   lastUsedAt: string;
+  lastObservedAt: string;
+  expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
+  matchKind?: ErrorSolutionMatchKind;
+  effectiveConfidence?: number;
   score?: number;
 }
 
@@ -752,6 +822,7 @@ export interface AppConfig {
     inAppBrowser: boolean;
   };
   multiAgent: MultiAgentSettings;
+  selfImprovement: SelfImprovementSettings;
   timeouts: RuntimeTimeoutSettings;
   /** Optional per-workspace overrides keyed by normalized absolute workspace path. */
   projectExecutionPolicies?: Record<string, ProjectExecutionPolicy>;
@@ -985,6 +1056,7 @@ export interface RuntimeThreadSnapshot {
   contextCompaction: ContextCompactionRecord | null;
   gpa: GpaState | null;
   subagents: ThreadRecord[];
+  queuedSubagentIds: string[];
 }
 
 export type GitDiffLineKind = "context" | "added" | "removed" | "meta";

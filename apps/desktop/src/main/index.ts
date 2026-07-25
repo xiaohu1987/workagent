@@ -339,6 +339,9 @@ function registerIpc(): void {
   ipcMain.handle("appearance:background:clear", () => backend.clearApplicationBackground());
   ipcMain.handle("threads:list", () => backend.listThreads());
   ipcMain.handle("threads:token-usage", (_event, threadId: string) => backend.getThreadTokenUsage(threadId));
+  ipcMain.handle("usage-analytics:get", (_event, input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) =>
+    backend.getUsageAnalytics(input)
+  );
   ipcMain.handle("threads:search", (_event, query: string) => backend.searchThreads(query));
   ipcMain.handle("threads:create", (_event, payload) => backend.createThread(payload));
   ipcMain.handle("threads:set-pinned", (_event, payload: { threadId: string; isPinned: boolean }) =>
@@ -574,6 +577,11 @@ function registerIpc(): void {
   );
   ipcMain.handle("error-solutions:delete", (_event, id: string) => backend.deleteErrorSolution(id));
   ipcMain.handle("error-solutions:clear", (_event, modelId?: string | null) => backend.clearErrorSolutions(modelId));
+  ipcMain.handle("self-improvement:list", (_event, input?: { projectId?: string | null; limit?: number; all?: boolean }) =>
+    backend.listSelfImprovementMemories(input ?? {})
+  );
+  ipcMain.handle("self-improvement:delete", (_event, id: string) => backend.deleteSelfImprovementMemory(id));
+  ipcMain.handle("self-improvement:refresh", () => backend.refreshSelfImprovementMemories());
   ipcMain.handle("quick-notes:list", () => backend.listQuickNotes());
   ipcMain.handle("quick-notes:save", (_event, payload: { id?: string; title?: string; content: string }) => backend.saveQuickNote(payload));
   ipcMain.handle("quick-notes:delete", (_event, id: string) => backend.deleteQuickNote(id));

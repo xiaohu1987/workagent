@@ -613,7 +613,7 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
 
 export function isBareToolInvocationText(text: string): boolean {
   const normalized = text.trim();
-  return /^(?:(?:web_search|browser|shell|fs|knowledge|mcp|database|git|code|project|skills|multi_agents|image|video)(?:[._][a-z0-9-]+)+|apply_patch|request_user_input)$/i.test(
+  return /^(?:(?:web_search|browser|shell|fs|knowledge|mcp|database|git|code|project|skills|multi_agents|image|video|memories)(?:[._][a-z0-9-]+)+|apply_patch|request_user_input|spawn_agent|send_message|followup_task|wait_agent|interrupt_agent|list_agents)$/i.test(
     normalized
   );
 }

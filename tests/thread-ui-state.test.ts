@@ -216,6 +216,18 @@ describe("tool activity summaries", () => {
     expect(presentation.runningCall).toBeUndefined();
   });
 
+  it("keeps preflight blocks distinct from executed failures", () => {
+    const presentation = getToolActivityPresentation([
+      makeToolCall({
+        status: "blocked",
+        resultJson: JSON.stringify({ blocked: true, content: "Known ineffective strategy" })
+      })
+    ]);
+
+    expect(presentation.status).toBe("blocked");
+    expect(presentation.runningCall).toBeUndefined();
+  });
+
   it("summarizes completed operations in user-facing categories", () => {
     const summary = getToolActivitySummary([
       makeToolCall({ id: "search", toolName: "code.search", argumentsJson: JSON.stringify({ query: "timeline" }) }),

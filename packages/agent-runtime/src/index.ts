@@ -66,6 +66,21 @@ import {
   type GpaPlanFileStatus
 } from "./gpa-plan-file";
 import {
+  MAX_PREMATURE_COMPLETION_ATTEMPTS,
+  MAX_TARGET_FAILURE_ATTEMPTS,
+  appendRecoveryEpisodeStep,
+  buildBlockedStrategySummary,
+  buildRecoverySolutionSummary,
+  createRecoveryEpisode,
+  createRecoveryPrerequisiteToolCall,
+  createRecoveryStrategyFingerprint,
+  getToolCallRecoveryTargetKey,
+  shouldBlockPreviouslyFailedRecoveredStrategy,
+  shouldHardBlockRememberedStrategy,
+  updateRecoveryEpisodeFailure
+} from "./error-recovery";
+import type { RecoveryEpisode } from "./error-recovery";
+import {
   applyMultimodalInputRecognitionToTranscript,
   buildMultimodalInputRecognizeSystemPrompt,
   buildMultimodalInputRecognizeTranscript,
@@ -113,7 +128,9 @@ export {
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
 
-export const MAX_REPEATED_TASK_FAILURES = 5;
+/** @deprecated Use MAX_TARGET_FAILURE_ATTEMPTS for tool failures. */
+export const MAX_REPEATED_TASK_FAILURES = MAX_TARGET_FAILURE_ATTEMPTS;
+export { MAX_PREMATURE_COMPLETION_ATTEMPTS, MAX_TARGET_FAILURE_ATTEMPTS } from "./error-recovery";
 export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
 export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs;
 export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
@@ -384,14 +401,6 @@ export interface ManagedWriteRecoveryToolCallValidation {
   message?: string;
 }
 
-interface PendingErrorMemory {
-  toolName: string;
-  taskKey: string;
-  errorSummary: string;
-  errorSignature: string;
-  failedApproach: string;
-}
-
 interface BrowserVerificationEvidenceState {
   required: boolean;
   testChoice?: BrowserTestChoice;
@@ -470,6 +479,9 @@ interface RuntimeServices {
     modelId: string;
     projectId?: string | null;
     toolName?: string;
+    phase?: "preflight" | "post_failure";
+    targetKey?: string;
+    strategyFingerprint?: string;
     limit?: number;
   }): Promise<ErrorSolutionRecord[]>;
   recordErrorSolution?(input: {
@@ -477,14 +489,25 @@ interface RuntimeServices {
     projectId: string | null;
     toolName: string;
     taskKeyPattern: string;
+    targetKeyPattern?: string;
+    strategyFingerprint?: string;
+    memoryKind?: ErrorSolutionRecord["memoryKind"];
+    scopeMode?: ErrorSolutionRecord["scopeMode"];
     errorSignature: string;
     errorSummary: string;
     solutionSummary: string;
     strategyJson: string;
     sourceThreadId: string | null;
     successCount?: number;
+    failureCount?: number;
+    confidence?: number;
+    lastObservedAt?: string;
+    expiresAt?: string | null;
   }): Promise<ErrorSolutionRecord>;
   markErrorSolutionUsed?(id: string): Promise<void>;
+  searchSelfImprovementMemories?(input: { query: string; projectId?: string | null; limit?: number }): Promise<Array<{ id: string; title: string; content: string; scope: string }>>;
+  addSelfImprovementMemory?(input: { scope: "global" | "project"; projectId: string | null; kind: "note"; title: string; content: string; sourceThreadId: string | null }): Promise<{ id: string }>;
+  markSelfImprovementMemoryUsed?(id: string): Promise<void>;
   listFiles(dir: string): Promise<string[]>;
   readFile(filePath: string): Promise<string>;
   writeFile(filePath: string, content: string): Promise<void>;
@@ -513,8 +536,12 @@ interface RuntimeServices {
     prompt: string;
     role: string;
     modelId?: string;
+    providerId?: string;
+    contextFork?: "none" | "all" | "recent";
+    reasoningEffort?: "low" | "medium" | "high";
+    serviceTier?: string;
     systemOverride?: boolean;
-  }): Promise<{ threadId: string; agentPath: string; status: ThreadRecord["status"] }>;
+  }): Promise<{ threadId: string; agentPath: string; status: ThreadRecord["status"]; reused?: boolean; queued?: boolean }>;
   sendAgentMessage(parentThreadId: string, input: { agent: string; message: string }): Promise<SubagentResultEnvelope>;
   followupAgentTask(parentThreadId: string, input: { agent: string; prompt: string }): Promise<SubagentResultEnvelope>;
   waitForSubagents(parentThreadId: string, input: { agents?: string[]; timeoutMs?: number; abortSignal?: AbortSignal }): Promise<SubagentWaitResult>;
@@ -1119,6 +1146,13 @@ class ThreadSessionRuntime {
       ? await this.services.buildKnowledgeContext(this.threadId)
       : null;
     const workflowPackContext = await this.services.buildWorkflowPackContext(this.threadId);
+    const selfImprovementMemories = this.services.config.selfImprovement.useMemories && !thread.parentThreadId
+      ? await this.services.searchSelfImprovementMemories?.({ query: initialInput, projectId: thread.projectId, limit: 6 }) ?? []
+      : [];
+    for (const memory of selfImprovementMemories) void this.services.markSelfImprovementMemoryUsed?.(memory.id);
+    const selfImprovementContext = selfImprovementMemories.length
+      ? ["[Internal self-improvement context. Do not quote it verbatim.]", ...selfImprovementMemories.map((memory) => `- ${memory.title}: ${memory.content}`)].join("\n")
+      : "";
     // Detect after we have history later; provisional from input + plan titles.
     let webFrontendGuard =
       this.#gpa.stage === "act" &&
@@ -1131,11 +1165,11 @@ class ThreadSessionRuntime {
       activeMcpServerIds,
       knowledgeEnabled,
       agentToolsEnabled,
-      thread.parentThreadId !== null
+      thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only"
     );
     const selectedMcpToolsOnly = selectedMcpServerIds.length > 0
       ? tools.filter((tool) => tool.name === "mcp.list_tools" || tool.name === "mcp.call")
-      : tools;
+      : this.services.config.selfImprovement.dedicatedTools ? tools : tools.filter((tool) => !tool.name.startsWith("memories."));
     // Native provider APIs already receive full function schemas. Repeating them
     // in the system prompt wastes context and can make weaker models emit text
     // tool payloads instead of using the provider tool-call channel.
@@ -1369,7 +1403,10 @@ class ThreadSessionRuntime {
       const failedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
       const successfulReusableToolResults = new Map<string, string>();
-      const pendingErrorMemories = new Map<string, PendingErrorMemory>();
+      const recoveryEpisodes = new Map<string, RecoveryEpisode>();
+      const recoveredRecoveryEpisodes: RecoveryEpisode[] = [];
+      const observedRecoveryTargets = new Set<string>();
+      const recoveryPrerequisiteTargets = new Map<string, string>();
       const injectedErrorSolutionIds = new Set<string>();
       const knowledgeSources = new Map<string, KnowledgeSourceReference>();
       const browserSources = new Map<string, BrowserSourceReference>();
@@ -1378,7 +1415,7 @@ class ThreadSessionRuntime {
       const loadedSkillIds = new Set<string>();
       let skillAutoLoadIssued = false;
       let terminalThread: ThreadRecord | null = null;
-      const taskFailureCounts = new Map<string, number>();
+      const targetFailureCounts = new Map<string, number>();
       let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
       const requestBrowserTestChoice = async (reason: "browser_tool" | "frontend_delivery") => {
         if (browserVerificationEvidence.testChoice) {
@@ -1525,26 +1562,29 @@ class ThreadSessionRuntime {
         throw new Error(`Agent decision protocol failed repeatedly: ${reason}`);
       };
 
-      const registerTaskFailure = async (taskKey: string, lastError: string, logKind?: string) => {
-        const attempts = (taskFailureCounts.get(taskKey) ?? 0) + 1;
-        taskFailureCounts.set(taskKey, attempts);
+      const registerTargetFailure = async (targetKey: string, lastError: string, logKind?: string) => {
+        const attempts = (targetFailureCounts.get(targetKey) ?? 0) + 1;
+        targetFailureCounts.set(targetKey, attempts);
         if (logKind) {
           await this.services.log(logKind, this.threadId, {
             turnRunId: turn.id,
-            taskKey,
+            targetKey,
             attempts,
             lastError
           });
         }
-        if (attempts >= MAX_REPEATED_TASK_FAILURES) {
-          repeatedTaskFailure = { taskKey, attempts, lastError };
+        if (attempts >= MAX_TARGET_FAILURE_ATTEMPTS) {
+          repeatedTaskFailure = { taskKey: targetKey, attempts, lastError };
         }
         return attempts;
       };
       const lookupErrorSolutionMemories = async (input: {
         toolName: string;
         taskKey: string;
-        lastError: string;
+        targetKey: string;
+        strategyFingerprint: string;
+        lastError?: string;
+        phase: "preflight" | "post_failure";
       }): Promise<ErrorSolutionRecord[]> => {
         if (!this.services.searchErrorSolutions) {
           return [];
@@ -1554,7 +1594,10 @@ class ThreadSessionRuntime {
             modelId: model.id,
             projectId: thread.projectId,
             toolName: input.toolName,
-            query: `${input.toolName} ${input.taskKey} ${input.lastError}`.slice(0, 600),
+            phase: input.phase,
+            targetKey: input.targetKey,
+            strategyFingerprint: input.strategyFingerprint,
+            query: `${input.toolName} ${input.taskKey} ${input.targetKey} ${input.lastError ?? ""}`.slice(0, 600),
             limit: 3
           });
           for (const match of matches) {
@@ -1566,6 +1609,8 @@ class ThreadSessionRuntime {
               modelId: model.id,
               toolName: input.toolName,
               taskKey: input.taskKey,
+              targetKey: input.targetKey,
+              phase: input.phase,
               matchIds: matches.map((entry) => entry.id),
               matchCount: matches.length
             });
@@ -1581,77 +1626,124 @@ class ThreadSessionRuntime {
           return [];
         }
       };
-      const rememberPendingError = (
+      const rememberRecoveryFailure = async (
         toolName: string,
         taskKey: string,
+        targetKey: string,
         lastError: string,
-        failedApproach: string
+        failedApproach: string,
+        strategyFingerprint: string
       ) => {
-        pendingErrorMemories.set(taskKey, {
+        const existing = recoveryEpisodes.get(targetKey);
+        const episode = existing
+          ? updateRecoveryEpisodeFailure(existing, {
+              toolName,
+              taskKey,
+              errorSummary: lastError,
+              errorSignature: createErrorSignature(toolName, lastError),
+              failedApproach,
+              strategyFingerprint
+            })
+          : createRecoveryEpisode({
+              targetKey,
+              toolName,
+              taskKey,
+              errorSummary: lastError,
+              errorSignature: createErrorSignature(toolName, lastError),
+              failedApproach,
+              strategyFingerprint
+            });
+        recoveryEpisodes.set(targetKey, episode);
+        await this.services.log(existing ? "agent.recovery_episode_failure" : "agent.recovery_episode_started", this.threadId, {
+          turnRunId: turn.id,
+          episodeId: episode.id,
+          targetKey,
           toolName,
-          taskKey,
-          errorSummary: lastError.slice(0, 800),
-          errorSignature: createErrorSignature(toolName, lastError),
-          failedApproach: failedApproach.slice(0, 500)
+          failureCount: episode.failureCount,
+          strategyFingerprint
         });
+        return episode;
       };
-      const persistRecoveredErrorSolution = async (
-        taskKey: string,
-        successToolName: string,
-        successApproach: string
+      const persistRecoveryEpisode = async (
+        episode: RecoveryEpisode,
+        memoryKind: ErrorSolutionRecord["memoryKind"]
       ) => {
-        const pending = pendingErrorMemories.get(taskKey);
-        if (!pending || !this.services.recordErrorSolution) {
+        if (!this.services.recordErrorSolution) {
           return;
         }
-        pendingErrorMemories.delete(taskKey);
         try {
-          const solutionSummary = buildErrorSolutionSummary({
-            failedToolName: pending.toolName,
-            successToolName,
-            failedApproach: pending.failedApproach,
-            successApproach,
-            errorSummary: pending.errorSummary
-          });
-          const record = await this.services.recordErrorSolution({
-            modelId: model.id,
-            projectId: thread.projectId,
-            toolName: pending.toolName,
-            taskKeyPattern: pending.taskKey,
-            errorSignature: pending.errorSignature,
-            errorSummary: pending.errorSummary,
-            solutionSummary,
-            strategyJson: JSON.stringify({
-              modelId: model.id,
-              failedTool: pending.toolName,
-              successTool: successToolName,
-              taskKey: pending.taskKey,
-              failedApproach: pending.failedApproach,
-              successApproach,
-              guidance: solutionSummary
-            }),
-            sourceThreadId: this.threadId
-          });
-          await this.services.log("agent.error_solution_recorded", this.threadId, {
-            turnRunId: turn.id,
-            solutionId: record.id,
-            modelId: model.id,
-            toolName: pending.toolName,
-            successToolName,
-            taskKey
-          });
-          for (const solutionId of injectedErrorSolutionIds) {
-            if (this.services.markErrorSolutionUsed) {
-              await this.services.markErrorSolutionUsed(solutionId);
+          const records: ErrorSolutionRecord[] = [];
+          for (const failure of episode.failures) {
+            const solutionSummary = memoryKind === "recovered"
+              ? buildRecoverySolutionSummary(episode, failure)
+              : buildBlockedStrategySummary(episode, failure);
+            for (const scope of [
+              { scopeMode: "shared" as const, modelId: "*" },
+              { scopeMode: "model" as const, modelId: model.id }
+            ]) {
+              records.push(await this.services.recordErrorSolution({
+                modelId: scope.modelId,
+                projectId: thread.projectId,
+                toolName: failure.toolName,
+                memoryKind,
+                scopeMode: scope.scopeMode,
+                taskKeyPattern: failure.taskKey,
+                targetKeyPattern: episode.targetKey,
+                strategyFingerprint: failure.strategyFingerprint,
+                errorSignature: failure.errorSignature,
+                errorSummary: failure.errorSummary,
+                solutionSummary,
+                strategyJson: JSON.stringify({
+                  failedTool: failure.toolName,
+                  targetKey: episode.targetKey,
+                  failedApproach: failure.failedApproach,
+                  recoverySteps: episode.steps,
+                  guidance: solutionSummary
+                }),
+                sourceThreadId: this.threadId,
+                successCount: memoryKind === "recovered" ? 1 : 0,
+                failureCount: memoryKind === "blocked_strategy" ? 1 : 0,
+                confidence: 1,
+                lastObservedAt: failure.observedAt,
+                expiresAt: memoryKind === "blocked_strategy"
+                  ? new Date(Date.parse(failure.observedAt) + 90 * 86_400_000).toISOString()
+                  : null
+              }));
             }
           }
-          injectedErrorSolutionIds.clear();
+          await this.services.log(
+            memoryKind === "recovered" ? "agent.recovery_episode_recorded" : "agent.blocked_strategy_recorded",
+            this.threadId,
+            {
+            turnRunId: turn.id,
+            episodeId: episode.id,
+            solutionIds: records.map((record) => record.id),
+            modelId: model.id,
+            toolName: episode.failedToolName,
+            targetKey: episode.targetKey,
+            memoryKind
+          });
+          if (memoryKind === "recovered") {
+            for (const solutionId of injectedErrorSolutionIds) {
+              if (this.services.markErrorSolutionUsed) {
+                await this.services.markErrorSolutionUsed(solutionId);
+              }
+            }
+            injectedErrorSolutionIds.clear();
+          }
         } catch (error) {
           await this.services.log("agent.error_solution_record_failed", this.threadId, {
             turnRunId: turn.id,
-            taskKey,
+            episodeId: episode.id,
+            targetKey: episode.targetKey,
+            memoryKind,
             reason: error instanceof Error ? error.message : String(error)
           });
+        }
+      };
+      const persistRecoveredEpisodes = async () => {
+        for (const episode of recoveredRecoveryEpisodes.splice(0)) {
+          await persistRecoveryEpisode(episode, "recovered");
         }
       };
       const requestBrowserWorkspaceRecovery = async (): Promise<BrowserWorkspaceRecoveryChoice> => {
@@ -1668,6 +1760,62 @@ class ThreadSessionRuntime {
 
       const appendBlockedToolCallResult = (toolCall: RuntimeToolCall, reason: string) => {
         transcript.push(buildBlockedToolCallTranscriptResult(toolCall, reason));
+      };
+      const persistBlockedToolCall = async (
+        toolCall: RuntimeToolCall,
+        reason: string,
+        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite"
+      ) => {
+        const toolRecord = await this.services.persistence.recordToolCall({
+          threadId: this.threadId,
+          turnRunId: turn.id,
+          toolName: toolCall.name,
+          argumentsJson: redactSensitiveText(JSON.stringify(toolCall.arguments)),
+          resultJson: null,
+          status: "blocked",
+          riskLevel: "low",
+          approvalMode: this.services.config.desktop.approvals
+        });
+        const completedAt = new Date().toISOString();
+        const resultJson = redactSensitiveText(JSON.stringify({ ok: false, blocked: true, blockKind, content: reason }));
+        await this.services.persistence.finishToolCall(toolRecord.id, { status: "blocked", resultJson, completedAt });
+        await this.services.emit({
+          type: "tool.started",
+          threadId: this.threadId,
+          payload: {
+            toolCallId: toolRecord.id,
+            turnRunId: toolRecord.turnRunId,
+            toolName: toolRecord.toolName,
+            argumentsJson: toolRecord.argumentsJson,
+            riskLevel: toolRecord.riskLevel,
+            approvalMode: toolRecord.approvalMode,
+            startedAt: toolRecord.startedAt
+          },
+          createdAt: toolRecord.startedAt
+        });
+        await this.services.emit({
+          type: "tool.completed",
+          threadId: this.threadId,
+          payload: {
+            toolCallId: toolRecord.id,
+            toolName: toolRecord.toolName,
+            turnRunId: toolRecord.turnRunId,
+            resultJson,
+            status: "blocked",
+            completedAt,
+            ok: false,
+            blocked: true,
+            blockKind
+          },
+          createdAt: completedAt
+        });
+        await this.services.log("tool.preflight_blocked", this.threadId, {
+          turnRunId: turn.id,
+          toolCallId: toolRecord.id,
+          toolName: toolCall.name,
+          blockKind,
+          reason
+        });
       };
 
       const recoverActExecution = async (reason: string) => {
@@ -1726,7 +1874,7 @@ class ThreadSessionRuntime {
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
           useTextToolProtocol
             ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
             : ""
@@ -2714,7 +2862,7 @@ class ThreadSessionRuntime {
               successfulToolEvidence,
               prematureCompletionAttempts
             );
-            if (prematureCompletionAttempts >= MAX_REPEATED_TASK_FAILURES) {
+            if (prematureCompletionAttempts >= MAX_PREMATURE_COMPLETION_ATTEMPTS) {
               const answers = await this.services.requestUserInput(this.threadId, turn.id, {
                 title: "任务完成条件尚未满足",
                 kind: "generic",
@@ -2875,28 +3023,6 @@ class ThreadSessionRuntime {
         const currentChildAgents = thread.parentThreadId
           ? []
           : await this.services.listSubagents(this.threadId);
-        const hasActiveChildAgents = currentChildAgents.length > 0
-          && await this.services.hasActiveSubagents(this.threadId);
-        if (hasActiveChildAgents) {
-          const coordinationCalls = decision.toolCalls.filter((toolCall) =>
-            canonicalizeToolName(toolCall.name).startsWith("multi_agents.")
-          );
-          if (decision.assistantMessage) {
-            await discardStreamedAssistant();
-            decision.assistantMessage = undefined;
-          }
-          // Keep the root agent in coordination mode while child work is in
-          // flight. It may manage the child tree, but cannot publish a partial
-          // report or start duplicating the children's analysis locally.
-          decision = {
-            ...decision,
-            toolCalls: coordinationCalls.length > 0
-              ? coordinationCalls
-              : [{ id: randomUUID(), name: "multi_agents.wait", arguments: { timeoutMs: 30_000 } }],
-            endTurn: false,
-            goalCompleted: false
-          };
-        }
 
         const isPrematureRootReport = currentChildAgents.length > 0
           && Boolean(decision.assistantMessage)
@@ -2979,18 +3105,8 @@ class ThreadSessionRuntime {
           }
         }
 
-        if (decision.toolCalls.length === 0 && decision.endTurn && await this.services.hasActiveSubagents(this.threadId)) {
-          transcript.push({
-            role: "user",
-            content: "[Internal multi-agent completion gate] Active child agents still exist. Call multi_agents.wait or multi_agents.interrupt before returning a final answer."
-          });
-          decision.assistantMessage = undefined;
-          decision.endTurn = false;
-          decision.goalCompleted = false;
-          continue;
-        }
-
         if (decision.toolCalls.length === 0 && decision.endTurn) {
+          await persistRecoveredEpisodes();
           await this.services.persistence.finishTurn(turn.id, {
             status: "completed",
             completedAt: new Date().toISOString()
@@ -3033,13 +3149,14 @@ class ThreadSessionRuntime {
           rawToolCall.name = toolCall.name;
           let toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
           let toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+          let recoveryTargetKey = getToolCallRecoveryTargetKey(toolCall.name, toolCall.arguments, workspaceCwd);
+          let recoveryStrategyFingerprint = createRecoveryStrategyFingerprint(toolCall.name, toolCall.arguments);
           const isRepeatableCoordinationTool = toolCall.name === "multi_agents.wait" || toolCall.name === "multi_agents.list";
           const browserTabs = await this.services.listBrowserTabs(this.threadId);
           const duplicateCreatedFile = getAddedPatchFiles(toolCall.arguments).find((filePath) =>
             successfullyCreatedFiles.has(filePath)
           );
           if (duplicateCreatedFile) {
-            const taskKey = `${toolCall.name}:${duplicateCreatedFile}`;
             const lastError =
               `The file ${duplicateCreatedFile} was already created successfully in this task.`;
             appendBlockedToolCallResult(toolCall, lastError);
@@ -3049,10 +3166,6 @@ class ThreadSessionRuntime {
                 `${lastError} ` +
                 "Do not use Add File for it again. Read it first and use an Update File patch only when a change is required."
             });
-            await registerTaskFailure(taskKey, lastError, "tool.duplicate_file_create_blocked");
-            if (repeatedTaskFailure) {
-              break;
-            }
             continue;
           }
           if (!isRepeatableCoordinationTool && successfulToolCallFingerprints.has(toolCallFingerprint)) {
@@ -3061,6 +3174,8 @@ class ThreadSessionRuntime {
               toolCall = retargetedToolCall;
               toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
               toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+              recoveryTargetKey = getToolCallRecoveryTargetKey(toolCall.name, toolCall.arguments, workspaceCwd);
+              recoveryStrategyFingerprint = createRecoveryStrategyFingerprint(toolCall.name, toolCall.arguments);
               await this.services.log("tool.browser_tab_retargeted", this.threadId, {
                 turnRunId: turn.id,
                 toolName: toolCall.name,
@@ -3096,22 +3211,22 @@ class ThreadSessionRuntime {
                 "Do not repeat it. Use its result to continue the task, choose a different tool, or return a completed decision.";
               appendBlockedToolCallResult(toolCall, lastError);
               transcript.push({ role: "user", content: correction });
-              await registerTaskFailure(toolTaskKey, lastError, "tool.duplicate_call_blocked");
-              if (repeatedTaskFailure) {
-                break;
-              }
               continue;
             }
           }
           const failedCallAttempts = failedToolCallFingerprints.get(toolCallFingerprint) ?? 0;
-          if (!isRepeatableCoordinationTool && failedCallAttempts >= 2) {
+          if (!isRepeatableCoordinationTool && failedCallAttempts >= 1) {
             const lastError =
               `The identical tool call ${toolCall.name} already failed ${failedCallAttempts} times.`;
             appendBlockedToolCallResult(toolCall, lastError);
+            await persistBlockedToolCall(toolCall, lastError, "identical_retry");
             const rememberedSolutions = await lookupErrorSolutionMemories({
               toolName: toolCall.name,
               taskKey: toolTaskKey,
-              lastError
+              targetKey: recoveryTargetKey,
+              strategyFingerprint: recoveryStrategyFingerprint,
+              lastError,
+              phase: "post_failure"
             });
             transcript.push({
               role: "user",
@@ -3123,16 +3238,104 @@ class ThreadSessionRuntime {
                 rememberedSolutions
               })
             });
-            rememberPendingError(
-              toolCall.name,
-              toolTaskKey,
-              lastError,
-              summarizeToolCallApproach(toolCall.name, toolCall.arguments)
-            );
-            await registerTaskFailure(toolTaskKey, lastError, "tool.strategy_switch_enforced");
-            if (repeatedTaskFailure) {
-              break;
+            continue;
+          }
+          const preflightMemories = isRepeatableCoordinationTool
+            ? []
+            : await lookupErrorSolutionMemories({
+                toolName: toolCall.name,
+                taskKey: toolTaskKey,
+                targetKey: recoveryTargetKey,
+                strategyFingerprint: recoveryStrategyFingerprint,
+                phase: "preflight"
+              });
+          const rememberedBlockedStrategy = preflightMemories.find((memory) =>
+            shouldHardBlockRememberedStrategy(memory)
+          );
+          if (rememberedBlockedStrategy) {
+            const lastError = [
+              `A prior recovery episode proved this exact ${toolCall.name} strategy ineffective for ${recoveryTargetKey}.`,
+              rememberedBlockedStrategy.solutionSummary,
+              "The call was blocked before execution; inspect prerequisites or use materially different arguments."
+            ].join(" ");
+            appendBlockedToolCallResult(toolCall, lastError);
+            await persistBlockedToolCall(toolCall, lastError, "remembered_strategy");
+            transcript.push({
+              role: "user",
+              content: buildStrategySwitchInstruction({
+                toolName: toolCall.name,
+                taskKey: toolTaskKey,
+                attempts: rememberedBlockedStrategy.failureCount,
+                lastError,
+                rememberedSolutions: preflightMemories
+              })
+            });
+            await this.services.log("agent.recovery_preflight_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              targetKey: recoveryTargetKey,
+              strategyFingerprint: recoveryStrategyFingerprint,
+              solutionId: rememberedBlockedStrategy.id,
+              effectiveConfidence: rememberedBlockedStrategy.effectiveConfidence
+            });
+            continue;
+          }
+          const rememberedRecovery = preflightMemories.find((memory) =>
+            memory.memoryKind === "recovered" &&
+            (memory.matchKind === "exact_strategy" || memory.matchKind === "exact_target")
+          );
+          if (
+            rememberedRecovery &&
+            MANAGED_WRITE_TOOL_NAMES.has(toolCall.name) &&
+            !observedRecoveryTargets.has(recoveryTargetKey)
+          ) {
+            const prerequisiteCall = createRecoveryPrerequisiteToolCall(toolCall, workspaceCwd, randomUUID());
+            if (prerequisiteCall) {
+              pendingFileReadRecovery = prerequisiteCall;
+              recoveryPrerequisiteTargets.set(prerequisiteCall.id, recoveryTargetKey);
+              const reason =
+                `A proven recovery for ${recoveryTargetKey} requires a fresh inspection before this write. ` +
+                `The runtime will execute ${prerequisiteCall.name} first; resubmit a patch based on that result.`;
+              appendBlockedToolCallResult(toolCall, reason);
+              await persistBlockedToolCall(toolCall, reason, "recovery_prerequisite");
+              transcript.push({ role: "user", content: reason });
+              await this.services.log("agent.recovery_preflight_prerequisite_forced", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                targetKey: recoveryTargetKey,
+                solutionId: rememberedRecovery.id,
+                prerequisiteToolName: prerequisiteCall.name
+              });
+              continue;
             }
+          }
+          if (rememberedRecovery && shouldBlockPreviouslyFailedRecoveredStrategy(rememberedRecovery)) {
+            const reason = [
+              `This exact ${toolCall.name} strategy previously failed for ${recoveryTargetKey}.`,
+              rememberedRecovery.solutionSummary,
+              "The call was blocked before execution. Use the fresh inspection result and submit materially different arguments."
+            ].join(" ");
+            appendBlockedToolCallResult(toolCall, reason);
+            await persistBlockedToolCall(toolCall, reason, "remembered_strategy");
+            transcript.push({
+              role: "user",
+              content: buildStrategySwitchInstruction({
+                toolName: toolCall.name,
+                taskKey: toolTaskKey,
+                attempts: Math.max(1, rememberedRecovery.successCount),
+                lastError: reason,
+                rememberedSolutions: preflightMemories
+              })
+            });
+            await this.services.log("agent.recovery_preflight_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              targetKey: recoveryTargetKey,
+              strategyFingerprint: recoveryStrategyFingerprint,
+              solutionId: rememberedRecovery.id,
+              memoryKind: rememberedRecovery.memoryKind,
+              matchKind: rememberedRecovery.matchKind
+            });
             continue;
           }
           const recoveryWorkspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
@@ -3204,7 +3407,6 @@ class ThreadSessionRuntime {
           const toolTimeoutMs = this.services.config.timeouts.toolExecutionMs;
           try {
             // Projectless chats must never inherit the desktop application's launch folder.
-            const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
             toolContext = {
               cwd: workspaceCwd,
               appHome: "",
@@ -3263,6 +3465,16 @@ class ThreadSessionRuntime {
               waitForSubagents: (input) => this.services.waitForSubagents(this.threadId, input),
               interruptAgent: (agent) => this.services.interruptAgent(this.threadId, agent),
               listSubagents: () => this.services.listSubagents(this.threadId),
+              listSelfImprovementMemories: async (query) => {
+                if (!this.services.config.selfImprovement.useMemories) return [];
+                const memories = await this.services.searchSelfImprovementMemories?.({ query: query ?? initialInput, projectId: thread.projectId, limit: 12 }) ?? [];
+                for (const memory of memories) void this.services.markSelfImprovementMemoryUsed?.(memory.id);
+                return memories;
+              },
+              addSelfImprovementMemory: async (input) => {
+                if (!this.services.config.selfImprovement.generateMemories || !this.services.addSelfImprovementMemory) throw new Error("Self-improvement memory generation is disabled.");
+                return this.services.addSelfImprovementMemory({ ...input, projectId: input.scope === "project" ? thread.projectId : null, kind: "note", sourceThreadId: this.threadId });
+              },
               webSearch: (query) => trackOpenedBrowserTabs(
                 () => this.services.webSearch(this.threadId, query)
               ),
@@ -3405,7 +3617,7 @@ class ThreadSessionRuntime {
                 return this.services.executeDatabase(sourceId, sql, parameters, operation);
               },
               deferredToolSpecs: mcpTools,
-              readOnlyAgent: thread.parentThreadId !== null,
+              readOnlyAgent: thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
               hiddenToolNames: [
                 ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read"]),
                 ...(this.#gpa.stage === "off" ? ["request_user_input"] : []),
@@ -3473,7 +3685,6 @@ class ThreadSessionRuntime {
             throw new Error("Turn interrupted.");
           }
 
-          const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
           const pathVerification = result.ok
             ? await verifySuccessfulToolDeliveryPaths(toolCall.name, toolCall.arguments, result, workspaceCwd)
             : undefined;
@@ -3661,6 +3872,41 @@ class ThreadSessionRuntime {
               requiresVerifiedPath: pathVerification?.requiresVerifiedPath
             });
             successfulToolEvidence.push(evidence);
+            const prerequisiteTarget = recoveryPrerequisiteTargets.get(toolCall.id);
+            if (prerequisiteTarget) {
+              observedRecoveryTargets.add(prerequisiteTarget);
+              recoveryPrerequisiteTargets.delete(toolCall.id);
+            }
+            if (evidence.kinds.includes("observation")) {
+              observedRecoveryTargets.add(recoveryTargetKey);
+            }
+            const activeRecoveryEpisode = recoveryEpisodes.get(recoveryTargetKey);
+            if (activeRecoveryEpisode) {
+              const resolved = appendRecoveryEpisodeStep(activeRecoveryEpisode, {
+                toolName: toolCall.name,
+                targetKey: recoveryTargetKey,
+                approach: summarizeToolCallApproach(toolCall.name, toolCall.arguments),
+                evidenceKinds: evidence.kinds
+              });
+              await this.services.log("agent.recovery_episode_step", this.threadId, {
+                turnRunId: turn.id,
+                episodeId: activeRecoveryEpisode.id,
+                targetKey: recoveryTargetKey,
+                toolName: toolCall.name,
+                evidenceKinds: evidence.kinds,
+                resolved
+              });
+              if (resolved) {
+                recoveryEpisodes.delete(recoveryTargetKey);
+                recoveredRecoveryEpisodes.push(activeRecoveryEpisode);
+                await this.services.log("agent.recovery_episode_resolved", this.threadId, {
+                  turnRunId: turn.id,
+                  episodeId: activeRecoveryEpisode.id,
+                  targetKey: recoveryTargetKey,
+                  recoveryStepCount: activeRecoveryEpisode.steps.length
+                });
+              }
+            }
             updateBrowserVerificationEvidence(browserVerificationEvidence, toolCall, result);
             successfulToolCallFingerprints.add(toolCallFingerprint);
             if (isReusableSuccessfulToolCall(toolCall.name)) {
@@ -3705,12 +3951,6 @@ class ThreadSessionRuntime {
             for (const filePath of getAddedPatchFiles(toolCall.arguments)) {
               successfullyCreatedFiles.add(filePath);
             }
-            taskFailureCounts.delete(toolTaskKey);
-            await persistRecoveredErrorSolution(
-              toolTaskKey,
-              toolCall.name,
-              summarizeToolCallApproach(toolCall.name, toolCall.arguments)
-            );
             if (toolCall.name === "apply_patch" && executionPolicy.autoVerify && toolContext) {
               const verificationCall: RuntimeToolCall = {
                 id: randomUUID(),
@@ -3801,7 +4041,10 @@ class ThreadSessionRuntime {
                   hasPriorDelivery: true
                 }));
               } else if (!verificationResult.ok) {
-                await registerTaskFailure("project.verify", verificationResult.content);
+                await registerTargetFailure(
+                  getToolCallRecoveryTargetKey(verificationCall.name, verificationCall.arguments, workspaceCwd),
+                  verificationResult.content
+                );
                 transcript.push({
                   role: "user",
                   content: "Automatic project verification failed. Inspect the reported command output, fix the issue, and do not claim completion until fresh verification succeeds."
@@ -3833,17 +4076,22 @@ class ThreadSessionRuntime {
             }
             const attempts = (failedToolCallFingerprints.get(toolCallFingerprint) ?? 0) + 1;
             failedToolCallFingerprints.set(toolCallFingerprint, attempts);
-            await registerTaskFailure(toolTaskKey, result.content);
-            rememberPendingError(
+            const recoveryEpisode = await rememberRecoveryFailure(
               toolCall.name,
               toolTaskKey,
+              recoveryTargetKey,
               result.content,
-              summarizeToolCallApproach(toolCall.name, toolCall.arguments)
+              summarizeToolCallApproach(toolCall.name, toolCall.arguments),
+              recoveryStrategyFingerprint
             );
+            const targetAttempts = await registerTargetFailure(recoveryTargetKey, result.content);
             const rememberedSolutions = await lookupErrorSolutionMemories({
               toolName: toolCall.name,
               taskKey: toolTaskKey,
-              lastError: result.content
+              targetKey: recoveryTargetKey,
+              strategyFingerprint: recoveryStrategyFingerprint,
+              lastError: result.content,
+              phase: "post_failure"
             });
             if (attempts === 1 && rememberedSolutions.length > 0) {
               transcript.push({
@@ -3856,7 +4104,7 @@ class ThreadSessionRuntime {
                 })
               });
             }
-            if (attempts >= 2) {
+            if (targetAttempts >= 1) {
               const forcedRecoveryCall = createFailedFileReadRecoveryToolCall(
                 toolCall,
                 workspaceCwd,
@@ -3869,7 +4117,7 @@ class ThreadSessionRuntime {
                 turnRunId: turn.id,
                 toolName: toolCall.name,
                 taskKey: toolTaskKey,
-                attempts,
+                attempts: targetAttempts,
                 lastError: result.content,
                 rememberedSolutionCount: rememberedSolutions.length
               });
@@ -3878,11 +4126,14 @@ class ThreadSessionRuntime {
                 content: buildStrategySwitchInstruction({
                   toolName: toolCall.name,
                   taskKey: toolTaskKey,
-                  attempts,
+                  attempts: targetAttempts,
                   lastError: result.content,
                   rememberedSolutions
                 })
               });
+            }
+            if (targetAttempts >= MAX_TARGET_FAILURE_ATTEMPTS) {
+              await persistRecoveryEpisode(recoveryEpisode, "blocked_strategy");
             }
             if (repeatedTaskFailure) {
               break;
@@ -3899,57 +4150,14 @@ class ThreadSessionRuntime {
 
         const failure = readRepeatedTaskFailure();
         if (failure) {
-          await this.services.log("turn.repeated_task_failure_confirmation_requested", this.threadId, {
+          await this.services.log("turn.target_failure_hard_limit_reached", this.threadId, {
             turnRunId: turn.id,
-            taskKey: failure.taskKey,
+            targetKey: failure.taskKey,
             attempts: failure.attempts,
+            maxAttempts: MAX_TARGET_FAILURE_ATTEMPTS,
             lastError: failure.lastError
           });
-          const answers = await this.services.requestUserInput(this.threadId, turn.id, {
-            title: "同一操作连续失败",
-            kind: "generic",
-            allowSkip: false,
-            questions: [{
-              id: "recovery",
-              label: "是否继续处理？",
-              prompt:
-                `操作 ${failure.taskKey} 已连续失败 ${failure.attempts} 次。最后结果：${failure.lastError.slice(0, 500)}`,
-              options: [
-                {
-                  id: "continue",
-                  label: "继续尝试",
-                  description: "保留当前任务；Agent 会先检查前置条件并改用不同方案。",
-                  recommended: true
-                },
-                {
-                  id: "stop",
-                  label: "结束任务",
-                  description: "停止当前任务，并保留已完成的工作和失败记录。"
-                }
-              ]
-            }]
-          });
-
-          if (answers.recovery === "continue") {
-            taskFailureCounts.clear();
-            managedWriteRecoveryBlocks.clear();
-            failedToolCallFingerprints.clear();
-            repeatedTaskFailure = null;
-            executionRecoveryAttempts = 0;
-            await this.services.log("turn.repeated_task_failure_continued", this.threadId, {
-              turnRunId: turn.id,
-              taskKey: failure.taskKey,
-              previousAttempts: failure.attempts
-            });
-            transcript.push({
-              role: "user",
-              content:
-                "The user explicitly chose to continue after repeated failures. Do not repeat the same failed tool call unchanged. First inspect the target, path, permissions, or command preconditions, then use a materially different patch, command, or approach. Continue the original task after obtaining new evidence."
-            });
-            continue;
-          }
         }
-
       }
 
       const terminalRepeatedTaskFailure = readRepeatedTaskFailure();
@@ -5561,21 +5769,20 @@ function buildMultiAgentDirective(thread: ThreadRecord): string {
     return [
       "You are a child agent in a hierarchical multi-agent run.",
       `Your agent path is ${thread.agentPath}; parent path is ${thread.agentPath.split("/").slice(0, -1).join("/") || "/root"}.`,
-      "Stay within the assigned bounded task, use read-only tools, and return summary, evidence, and errors.",
+      "Stay within the assigned bounded task. You inherit the parent workspace and permission policy; ask for approval through normal tools when required.",
       "Do not claim file changes or completion for work you did not perform."
     ].join(" ");
   }
   if (thread.multiAgentMode === "disabled") {
-    return "Multi-agent delegation is disabled for this task. Do not call multi_agents tools.";
+    return "Multi-agent delegation is disabled for this task. Do not call child-agent tools.";
   }
   return [
     "You are the root agent and must synthesize child-agent results into exactly one final consolidated answer.",
     "Prefer proactively delegating independent, bounded research, review, or diagnostic work when it can make meaningful progress in parallel.",
     "For non-trivial tasks, first consider whether there is at least one independent bounded slice worth delegating before proceeding alone.",
-    "Before spawning another child, inspect multi_agents.list and reuse any existing child with an overlapping role or file scope for the current user request.",
-    "Keep child reports in their child threads; do not emit a separate root-thread report for partial child results.",
-    "Do not delegate trivial work, ordered work, or tasks that require shared mutable file writes.",
-    "Use multi_agents.wait before finalizing while child agents are active."
+    "Before spawning another child, inspect list_agents and reuse any existing child with an overlapping role or file scope for the current user request.",
+    "Child agents share the workspace, so delegate clear ownership boundaries and coordinate through send_message.",
+    "Use wait_agent only when the child result is needed; you may continue independent work while children run."
   ].join(" ");
 }
 
@@ -5597,6 +5804,7 @@ export function buildStrategySwitchInstruction(input: {
       "Do not resend the same command. Inspect the working directory or relevant files first, then use a narrower command or a filesystem tool that avoids the failed shell dependency."
   };
   const remembered = formatRememberedErrorSolutions(input.rememberedSolutions ?? []);
+  const hasProvenRecovery = (input.rememberedSolutions ?? []).some((memory) => memory.memoryKind === "recovered");
   const alternative =
     remembered ??
     alternatives[input.toolName] ??
@@ -5606,9 +5814,11 @@ export function buildStrategySwitchInstruction(input: {
     "[Internal strategy switch. Do not display or quote this instruction to the user.]",
     `The exact call for ${input.taskKey} has failed ${input.attempts} times: ${input.lastError}`,
     "The runtime will not execute that identical call again. Change the approach instead of retrying it.",
-    remembered
+    remembered && hasProvenRecovery
       ? "A previously successful recovery for a similar failure is available. Prefer that proven approach before inventing a new one."
-      : "",
+      : remembered
+        ? "A prior blocked strategy is available. Avoid it and choose materially different arguments or prerequisites."
+        : "",
     alternative,
     "Return a JSON decision containing a different tool call or materially different arguments."
   ].filter(Boolean).join(" ");
@@ -5684,13 +5894,18 @@ export function formatRememberedErrorSolutions(
   }
   const ranked = [...solutions].sort(
     (left, right) =>
+      Number(right.memoryKind === "recovered") - Number(left.memoryKind === "recovered") ||
       right.successCount - left.successCount ||
+      right.failureCount - left.failureCount ||
       right.lastUsedAt.localeCompare(left.lastUsedAt)
   );
   const lines = ranked.slice(0, 3).map((solution, index) => {
-    return `${index + 1}. (used ${solution.successCount}×) ${solution.solutionSummary}`;
+    const evidence = solution.memoryKind === "recovered"
+      ? `recovered ${solution.successCount}×`
+      : `blocked after ${solution.failureCount} failures`;
+    return `${index + 1}. (${evidence}) ${solution.solutionSummary}`;
   });
-  return `Remembered optimal recoveries:\n${lines.join("\n")}`;
+  return `Remembered recovery experience:\n${lines.join("\n")}`;
 }
 
 export function buildRepeatedTaskRecoveryMessage(input: {

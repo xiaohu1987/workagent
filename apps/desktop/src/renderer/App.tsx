@@ -49,6 +49,7 @@ import type {
   ProviderType,
   RuntimeEvent,
   ErrorSolutionRecord,
+  SelfImprovementMemoryRecord,
   RuntimeThreadSnapshot,
   SkillLabEvent,
   SkillLabProgress,
@@ -56,6 +57,8 @@ import type {
   SkillUsageStats,
   ThreadRecord,
   TokenUsage,
+  UsageAnalyticsGranularity,
+  UsageAnalyticsSummary,
   ToolCallRecord,
   UserInputPrompt
 } from "@shared-types";
@@ -98,7 +101,7 @@ import {
   type ChatBackgroundSurfaces
 } from "./chat-background";
 
-type SettingsTab = "general" | "appearance" | "knowledge" | "memory" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
+type SettingsTab = "general" | "appearance" | "usage" | "knowledge" | "memory" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
 type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";
 type ManagedRemoval =
   | { kind: "plugin"; plugin: PluginRecord }
@@ -550,16 +553,26 @@ type HistorySearchResult = {
 };
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
+  { id: "timeouts", label: "通用设置", hint: "模型请求、重试、视频生成和子智能体的运行设置" },
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
   { id: "multimodal", label: "多模态", hint: "配置默认多模态识别、生图与视频模型" },
-  { id: "appearance", label: "应用背景", hint: "导入图片，并调整背景与各模块透明度" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "memory", label: "记忆", hint: "查看和清理错误解决方案记忆" },
-  { id: "timeouts", label: "超时设置", hint: "模型请求、重试和视频生成的等待时间" },
   { id: "capabilities", label: "能力中心", hint: "管理独立 Skill、用户技能和插件" },
+  { id: "appearance", label: "应用背景", hint: "导入图片，并调整背景与各模块透明度" },
+  { id: "usage", label: "统计", hint: "查看模型调用、Token 和缓存趋势" },
   { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
+];
+
+const SETTINGS_MENU_GROUPS: Array<{ id: string; label: string; hint: string; tabs: SettingsTab[] }> = [
+  { id: "general", label: "通用设置", hint: "超时、重试和子智能体", tabs: ["timeouts"] },
+  { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"] },
+  { id: "connections", label: "连接", hint: "MCP 与数据库", tabs: ["mcp", "database"] },
+  { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory"] },
+  { id: "capabilities", label: "能力中心", hint: "技能与插件", tabs: ["capabilities"] },
+  { id: "application", label: "应用", hint: "外观、统计与更新", tabs: ["appearance", "usage", "update"] }
 ];
 
 const DATABASE_PERMISSION_OPTIONS: Array<{ value: DatabasePermission; label: string }> = [
@@ -811,14 +824,14 @@ export function App() {
   const [removingManagedItem, setRemovingManagedItem] = useState(false);
   const [gpaState, setGpaState] = useState<GpaState>({
     stage: "off",
-    fullAccess: false,
+    fullAccess: true,
     knowledgeEnabled: false,
     awaitingConfirmation: null,
     planTasks: [],
     updatedAt: ""
   });
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
-  const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("disabled");
+  const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
   const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "plugins" | "skills" | "mcp" | "database">("root");
   const [composerAddSubmenuPosition, setComposerAddSubmenuPosition] = useState<{ left: number; top: number; anchorTop: number; maxHeight: number } | null>(null);
@@ -903,6 +916,9 @@ export function App() {
   const [knowledgeName, setKnowledgeName] = useState("Imported Knowledge");
   const [knowledgeScope, setKnowledgeScope] = useState<KnowledgeScope>("global");
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([]);
+  const [selfImprovementMemories, setSelfImprovementMemories] = useState<SelfImprovementMemoryRecord[]>([]);
+  const [isRefreshingSelfImprovementMemories, setIsRefreshingSelfImprovementMemories] = useState(false);
+  const [selfImprovementMemoryPage, setSelfImprovementMemoryPage] = useState(0);
   const [errorSolutions, setErrorSolutions] = useState<ErrorSolutionRecord[]>([]);
   const [errorSolutionBusyId, setErrorSolutionBusyId] = useState<string | null>(null);
   const [errorSolutionModelFilter, setErrorSolutionModelFilter] = useState<string>("all");
@@ -916,6 +932,10 @@ export function App() {
   const [isGeneratingUserSkill, setIsGeneratingUserSkill] = useState(false);
   const [userSkillGenerationDialog, setUserSkillGenerationDialog] = useState<UserSkillGenerationDialog | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [usageStatisticsRangeDays, setUsageStatisticsRangeDays] = useState<number | null>(7);
+  const [usageStatisticsGranularity, setUsageStatisticsGranularity] = useState<UsageAnalyticsGranularity>("day");
+  const [usageStatistics, setUsageStatistics] = useState<UsageAnalyticsSummary | null>(null);
+  const [isUsageStatisticsLoading, setIsUsageStatisticsLoading] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
@@ -1878,7 +1898,7 @@ export function App() {
   function completeRuntimeTool(
     threadId: string,
     toolCallId: string,
-    status: Extract<ToolCallRecord["status"], "completed" | "failed">,
+    status: Extract<ToolCallRecord["status"], "completed" | "failed" | "blocked">,
     resultJson: string | null,
     completedAt: string
   ) {
@@ -2207,7 +2227,7 @@ export function App() {
           completeRuntimeTool(
             runtimeThreadId,
             typed.payload.toolCallId,
-            typed.payload.status === "failed" ? "failed" : "completed",
+            typed.payload.status === "failed" ? "failed" : typed.payload.status === "blocked" ? "blocked" : "completed",
             typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null,
             typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString()
           );
@@ -2218,7 +2238,7 @@ export function App() {
               toolCalls: current.toolCalls.map((tool) => tool.id === typed.payload?.toolCallId
                 ? {
                     ...tool,
-                    status: typed.payload?.status === "failed" ? "failed" : "completed",
+                    status: typed.payload?.status === "failed" ? "failed" : typed.payload?.status === "blocked" ? "blocked" : "completed",
                     resultJson: typeof typed.payload?.resultJson === "string" ? typed.payload.resultJson : null,
                     completedAt: typeof typed.payload?.completedAt === "string"
                       ? typed.payload.completedAt
@@ -2781,9 +2801,9 @@ export function App() {
     if (selectedThread) {
       setMultiAgentMode(selectedThread.multiAgentMode === "proactive" ? "proactive" : "disabled");
     } else {
-      setMultiAgentMode(config?.multiAgent?.defaultMode === "proactive" ? "proactive" : "disabled");
+      setMultiAgentMode("proactive");
     }
-  }, [selectedThread?.id, selectedThread?.multiAgentMode, config?.multiAgent?.defaultMode]);
+  }, [selectedThread?.id, selectedThread?.multiAgentMode]);
 
   async function updateMultiAgentMode(mode: MultiAgentMode) {
     setMultiAgentMode(mode);
@@ -2878,7 +2898,10 @@ export function App() {
 
   useEffect(() => {
     if (isSettingsOpen && settingsTab === "knowledge") void refreshKnowledgeBases();
-    if (isSettingsOpen && settingsTab === "memory") void refreshErrorSolutions();
+    if (isSettingsOpen && settingsTab === "memory") {
+      void refreshSelfImprovementMemories();
+      void refreshErrorSolutions();
+    }
   }, [isSettingsOpen, settingsTab]);
 
   const activeSnapshotThreadId = snapshot?.thread.id ?? null;
@@ -2965,7 +2988,10 @@ export function App() {
     () => snapshot?.subagents ?? [],
     [snapshot?.subagents]
   );
-  const hasActiveSubagents = currentSubagents.some((agent) => agent.status === "running" || agent.status === "waiting");
+  const queuedSubagentIds = useMemo(
+    () => new Set(snapshot?.queuedSubagentIds ?? []),
+    [snapshot?.queuedSubagentIds]
+  );
   const activeStreamingAssistant = useMemo(
     () =>
       Object.values(streamingAssistants)
@@ -3104,6 +3130,24 @@ export function App() {
         .map(([value, label]) => ({ value, label }))
     ];
   }, [config?.models, errorSolutions]);
+  const subagentDefaultModelOptions = useMemo<ComposerSelectOption[]>(() => [
+    { value: "__inherit__", label: "跟随当前模型（默认）" },
+    ...(configDraft?.models ?? [])
+      .filter(isReasoningModel)
+      .map((model) => ({
+        value: modelKey(model.providerId, model.id),
+        label: `${getProviderDisplayName(configDraft!.providers.find((provider) => provider.id === model.providerId) ?? { id: model.providerId, type: "openai-compatible" })} / ${model.displayName || model.id}`
+      }))
+  ], [configDraft]);
+  const subagentDefaultModelValue = useMemo(() => {
+    const settings = configDraft?.multiAgent;
+    if (!settings?.defaultModelId) return "__inherit__";
+    const model = (configDraft?.models ?? []).find((item) =>
+      item.id === settings.defaultModelId &&
+      (!settings.defaultProviderId || item.providerId === settings.defaultProviderId)
+    );
+    return model ? modelKey(model.providerId, model.id) : "__inherit__";
+  }, [configDraft]);
   const resolveErrorSolutionModelLabel = useCallback((modelId: string) => {
     if (!modelId) return "未知模型";
     const model = config?.models.find((entry) => entry.id === modelId);
@@ -3180,6 +3224,8 @@ export function App() {
         return "多模态模型";
       case "appearance":
         return "应用背景";
+      case "usage":
+        return "统计";
       case "capabilities":
         return "能力中心";
       case "mcp":
@@ -3189,13 +3235,17 @@ export function App() {
       case "memory":
         return "记忆";
       case "timeouts":
-        return "Timeout Settings";
+        return "通用设置";
       case "update":
         return "应用更新";
       default:
         return "设置";
     }
   }, [settingsTab]);
+  const activeSettingsGroup = useMemo(
+    () => SETTINGS_MENU_GROUPS.find((group) => group.tabs.includes(settingsTab)) ?? SETTINGS_MENU_GROUPS[0],
+    [settingsTab]
+  );
 
   function cancelPendingAutoScrollFrame() {
     if (autoScrollFrameRef.current === null) {
@@ -4729,7 +4779,46 @@ export function App() {
       const modelId = modelFilter === "all" ? null : modelFilter;
       setErrorSolutions((await window.codexh.listErrorSolutions({ limit: 100, modelId })) as ErrorSolutionRecord[]);
     } catch (error) {
+      showNotice("加载错误恢复经验失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function refreshSelfImprovementMemories() {
+    try {
+      const memories = await window.codexh.listSelfImprovementMemories({ all: true, limit: 1_000 });
+      setSelfImprovementMemories(memories as SelfImprovementMemoryRecord[]);
+      setSelfImprovementMemoryPage((current) => Math.min(current, Math.max(0, Math.ceil(memories.length / 20) - 1)));
+    } catch (error) {
       showNotice("加载记忆失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function refreshSelfImprovementNow() {
+    if (isRefreshingSelfImprovementMemories) return;
+    setIsRefreshingSelfImprovementMemories(true);
+    try {
+      const result = await window.codexh.refreshSelfImprovementMemories();
+      await refreshSelfImprovementMemories();
+      showNotice(
+        result.processed > 0 || result.pruned > 0
+          ? `记忆已更新：提炼 ${result.processed} 条，清理 ${result.pruned} 条`
+          : "没有可处理的记忆任务",
+        { tone: "success" }
+      );
+    } catch (error) {
+      showNotice("提炼记忆失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsRefreshingSelfImprovementMemories(false);
+    }
+  }
+
+  async function deleteSelfImprovementMemory(id: string) {
+    try {
+      await window.codexh.deleteSelfImprovementMemory(id);
+      setSelfImprovementMemories((current) => current.filter((memory) => memory.id !== id));
+      showNotice("记忆已删除", { tone: "success" });
+    } catch (error) {
+      showNotice("删除记忆失败", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -4746,7 +4835,7 @@ export function App() {
       });
       showNotice("记忆已删除", { tone: "success" });
     } catch (error) {
-      showNotice("删除记忆失败", { message: error instanceof Error ? error.message : String(error) });
+      showNotice("删除错误恢复经验失败", { message: error instanceof Error ? error.message : String(error) });
     } finally {
       setErrorSolutionBusyId(null);
     }
@@ -4773,7 +4862,7 @@ export function App() {
         { tone: "success" }
       );
     } catch (error) {
-      showNotice("清空记忆失败", { message: error instanceof Error ? error.message : String(error) });
+      showNotice("清空错误恢复经验失败", { message: error instanceof Error ? error.message : String(error) });
     } finally {
       setIsClearingErrorSolutions(false);
     }
@@ -6143,6 +6232,24 @@ export function App() {
     }
   }
 
+  const refreshUsageStatistics = async () => {
+    setIsUsageStatisticsLoading(true);
+    try {
+      setUsageStatistics(await window.codexh.getUsageAnalytics({
+        rangeDays: usageStatisticsRangeDays,
+        granularity: usageStatisticsGranularity
+      }));
+    } catch (error) {
+      setNotice({ id: Date.now(), tone: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsUsageStatisticsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isSettingsOpen && settingsTab === "usage") void refreshUsageStatistics();
+  }, [isSettingsOpen, settingsTab, usageStatisticsRangeDays, usageStatisticsGranularity]);
+
   const historySearchPresence = useMotionPresence(isHistorySearchOpen ? true : null);
   const settingsPresence = useMotionPresence(isSettingsOpen ? true : null, 220);
   const projectCreatePresence = useMotionPresence(isProjectCreateOpen ? true : null);
@@ -6840,6 +6947,22 @@ export function App() {
                     </div>
                   </header>
                   <div className="notification-center-body">
+                    {currentSubagents.length ? (
+                      <section className="notification-center-group" aria-label="子智能体">
+                        <div className="notification-center-group-title">子智能体<span>{currentSubagents.length}</span></div>
+                        <SubagentActivityList
+                          compact
+                          agents={currentSubagents}
+                          queuedAgentIds={queuedSubagentIds}
+                          runtimeActivities={runtimeActivities}
+                          onInterrupt={(agent) => {
+                            if (!selectedThreadId) return;
+                            void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
+                              .then(() => refreshSnapshot(selectedThreadId));
+                          }}
+                        />
+                      </section>
+                    ) : null}
                     {!sortedNotificationItems.length ? (
                       <div className="notification-center-empty"><IconBell /><span>暂无后台任务或消息</span></div>
                     ) : (
@@ -6900,20 +7023,9 @@ export function App() {
         ) : null}
 
         <section className="chat-canvas">
-          {!showWelcome && !isThreadSwitchPlaceholderVisible && currentSubagents.length > 0 && hasActiveSubagents ? (
-            <SubagentActivityList
-              agents={currentSubagents}
-              runtimeActivities={runtimeActivities}
-              onInterrupt={(agent) => {
-                if (!selectedThreadId) return;
-                void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
-                  .then(() => refreshSnapshot(selectedThreadId));
-              }}
-            />
-          ) : null}
           <div
             ref={chatScrollRef}
-            className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""} ${currentSubagents.length > 0 && hasActiveSubagents ? "has-subagent-overlay" : ""}`}
+            className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""}`}
             onScroll={handleTranscriptScroll}
           >
             {!showWelcome && !isThreadSwitchPlaceholderVisible ? (
@@ -7407,20 +7519,53 @@ export function App() {
             <div className="settings-layout">
               <aside className="settings-sidebar">
                 <div className="settings-tab-strip settings-tab-strip-vertical">
-                  {SETTINGS_TABS.map((tab) => (
+                  {SETTINGS_MENU_GROUPS.map((group) => (
                     <button
-                      key={tab.id}
-                      className={`settings-strip-tab ${settingsTab === tab.id ? "active" : ""}`}
-                      onClick={() => setSettingsTab(tab.id)}
-                      title={tab.hint}
+                      key={group.id}
+                      className={`settings-strip-tab ${activeSettingsGroup.id === group.id ? "active" : ""}`}
+                      onClick={() => setSettingsTab(group.tabs[0])}
+                      title={group.hint}
                     >
-                      {tab.label}
+                      {group.label}
                     </button>
                   ))}
                 </div>
               </aside>
 
               <div className="settings-body">
+              {activeSettingsGroup.tabs.length > 1 ? (
+                <div className="settings-subtab-bar" role="tablist" aria-label={`${activeSettingsGroup.label}分类`}>
+                  {activeSettingsGroup.tabs.map((tabId) => {
+                    const tab = SETTINGS_TABS.find((item) => item.id === tabId);
+                    if (!tab) return null;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={settingsTab === tab.id}
+                        className={settingsTab === tab.id ? "active" : ""}
+                        onClick={() => setSettingsTab(tab.id)}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {settingsTab === "usage" ? (
+                <div className="settings-section usage-statistics-settings">
+                  <UsageStatisticsPanel
+                    summary={usageStatistics}
+                    loading={isUsageStatisticsLoading}
+                    rangeDays={usageStatisticsRangeDays}
+                    granularity={usageStatisticsGranularity}
+                    onRangeChange={setUsageStatisticsRangeDays}
+                    onGranularityChange={setUsageStatisticsGranularity}
+                    onRefresh={() => void refreshUsageStatistics()}
+                  />
+                </div>
+              ) : null}
               {settingsTab === "appearance" ? (
                 <div className="settings-section chat-background-settings">
                   <input
@@ -7656,51 +7801,116 @@ export function App() {
                 </div>
               ) : null}
 
-              {settingsTab === "general" ? (
+              {settingsTab === "timeouts" ? (
                 <div className="settings-section">
-                  <div className="summary-grid">
-                    <article className="summary-card">
-                      <span>Threads</span>
-                      <strong>{threads.length}</strong>
-                    </article>
-                    <article className="summary-card">
-                      <span>Skills</span>
-                      <strong>{skills.length}</strong>
-                    </article>
-                    <article className="summary-card">
-                      <span>Providers</span>
-                      <strong>{config?.providers.length ?? 0}</strong>
-                    </article>
-                    <article className="summary-card">
-                      <span>Models</span>
-                      <strong>{config?.models.length ?? 0}</strong>
-                    </article>
+                  <div className="general-overview">
+                    <div className="general-overview-heading">
+                      <strong>运行概览</strong>
+                      <span className="general-overview-status"><i aria-hidden />本地服务正常</span>
+                    </div>
+                    <div className="general-overview-stats">
+                      <article className="general-overview-stat">
+                        <span className="general-overview-icon blue"><IconChecklist /></span>
+                        <div><span>会话</span><strong>{threads.length}</strong></div>
+                      </article>
+                      <article className="general-overview-stat">
+                        <span className="general-overview-icon green"><IconSkills /></span>
+                        <div><span>技能</span><strong>{skills.length}</strong></div>
+                      </article>
+                      <article className="general-overview-stat">
+                        <span className="general-overview-icon amber"><IconGlobe /></span>
+                        <div><span>供应商</span><strong>{config?.providers.length ?? 0}</strong></div>
+                      </article>
+                      <article className="general-overview-stat">
+                        <span className="general-overview-icon cyan"><IconChart /></span>
+                        <div><span>模型</span><strong>{config?.models.length ?? 0}</strong></div>
+                      </article>
+                    </div>
                   </div>
 
-                  <div className="config-block">
+                  <div className="config-block general-defaults-panel">
                     <div className="section-copy">
                       <strong>当前默认配置</strong>
-                      <span>这里展示当前应用正在使用的全局默认供应商、模型和桌面运行策略。</span>
+                      <span>全局执行与桌面服务状态</span>
                     </div>
-                    <div className="stack-list">
-                      <article className="stack-card compact">
-                        <strong>默认供应商</strong>
-                        <span>{config?.defaultProvider ?? "未配置"}</span>
-                      </article>
-                      <article className="stack-card compact">
-                        <strong>默认模型</strong>
-                        <span>{config?.defaultModel ?? "未配置"}</span>
-                      </article>
-                      <article className="stack-card compact">
-                        <strong>审批模式</strong>
-                        <span>{config?.desktop.approvals ?? "prompt"}</span>
-                      </article>
-                      <article className="stack-card compact">
-                        <strong>内置浏览器</strong>
-                        <span>{config?.desktop.inAppBrowser ? "已启用" : "已关闭"}</span>
-                      </article>
+                    <div className="general-defaults-grid">
+                      <div className="general-default-item">
+                        <span><IconGlobe />默认供应商</span>
+                        <strong title={config?.defaultProvider ?? "未配置"}>
+                          {(() => {
+                            const provider = config?.providers.find((entry) => entry.id === config.defaultProvider);
+                            return provider ? getProviderDisplayName(provider) : config?.defaultProvider ?? "未配置";
+                          })()}
+                        </strong>
+                      </div>
+                      <div className="general-default-item">
+                        <span><IconChart />默认模型</span>
+                        <strong title={config?.defaultModel ?? "未配置"}>{config?.defaultModel ?? "未配置"}</strong>
+                      </div>
+                      <div className="general-default-item">
+                        <span><IconChecklist />审批模式</span>
+                        <strong>{config?.desktop.approvals ?? "prompt"}</strong>
+                      </div>
+                      <div className="general-default-item">
+                        <span><IconGlobe />内置浏览器</span>
+                        <strong className={config?.desktop.inAppBrowser ? "is-online" : "is-offline"}><i aria-hidden />{config?.desktop.inAppBrowser ? "已启用" : "已关闭"}</strong>
+                      </div>
                     </div>
                   </div>
+
+                  {configDraft ? (
+                    <div className="config-block general-subagent-settings">
+                      <div className="section-copy">
+                        <strong>子智能体</strong>
+                        <span>子任务共享当前工作区并沿用审批策略；模型未指定时跟随创建它的主任务。</span>
+                      </div>
+                      <div className="general-subagent-settings-grid">
+                        <label className="settings-field">
+                          <span>默认模型</span>
+                          <ComposerSelect
+                            className="form-select"
+                            ariaLabel="子智能体默认模型"
+                            value={subagentDefaultModelValue}
+                            onChange={(value) => setConfigDraft((current) => {
+                              if (!current) return current;
+                              if (value === "__inherit__") {
+                                return { ...current, multiAgent: { ...current.multiAgent, defaultModelId: undefined, defaultProviderId: undefined } };
+                              }
+                              const model = current.models.find((item) => modelKey(item.providerId, item.id) === value);
+                              return model ? { ...current, multiAgent: { ...current.multiAgent, defaultModelId: model.id, defaultProviderId: model.providerId } } : current;
+                            })}
+                            options={subagentDefaultModelOptions}
+                            placeholder="选择默认模型"
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>总并发（含主智能体）</span>
+                          <input type="number" min="2" max="8" value={configDraft.multiAgent.maxConcurrentSubagents} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxConcurrentSubagents: Number(event.target.value) || 4 } } : current)} />
+                        </label>
+                        <label className="settings-field">
+                          <span>每次任务上限</span>
+                          <input type="number" min="1" max="16" value={configDraft.multiAgent.maxSubagentsPerRoot} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxSubagentsPerRoot: Number(event.target.value) || 8 } } : current)} />
+                        </label>
+                        <label className="settings-field">
+                          <span>最大层级</span>
+                          <input type="number" min="1" max="6" value={configDraft.multiAgent.maxDepth} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxDepth: Number(event.target.value) || 3 } } : current)} />
+                        </label>
+                        <label className="settings-field">
+                          <span>默认上下文</span>
+                          <ComposerSelect className="form-select" ariaLabel="子智能体默认上下文" value={configDraft.multiAgent.defaultContextFork ?? "all"} onChange={(value) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, defaultContextFork: value === "none" || value === "recent" ? value : "all" } } : current)} options={[{ value: "all", label: "全部上下文" }, { value: "recent", label: "最近 6 条" }, { value: "none", label: "不继承" }]} placeholder="选择上下文" />
+                        </label>
+                        <label className="settings-field">
+                          <span>默认推理强度</span>
+                          <ComposerSelect className="form-select" ariaLabel="子智能体默认推理强度" value={configDraft.multiAgent.defaultReasoningEffort ?? "medium"} onChange={(value) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, defaultReasoningEffort: value === "low" || value === "high" ? value : "medium" } } : current)} options={[{ value: "low", label: "低" }, { value: "medium", label: "中" }, { value: "high", label: "高" }]} placeholder="选择推理强度" />
+                        </label>
+                        <div className="settings-field general-permission-field">
+                          <span>执行权限</span>
+                          <label className="memory-switch"><input type="checkbox" checked={configDraft.multiAgent.childWritePolicy !== "read-only"} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, childWritePolicy: event.target.checked ? "inherit" : "read-only" } } : current)} /> <span>继承父任务权限</span></label>
+                        </div>
+                      </div>
+                      <div className="settings-save-row"><span className="subtle-inline">更改仅影响后续创建的子智能体。</span><button className="button warm" type="button" onClick={() => void saveConfigDraft()}>保存</button></div>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -8416,7 +8626,44 @@ export function App() {
                 <div className="settings-section memory-settings-section">
                   <div className="config-block memory-management-panel">
                     <div className="section-copy">
-                      <strong>错误解决方案记忆</strong>
+                      <strong>记忆</strong>
+                      <span>从已完成主任务中提炼脱敏经验；通用经验全局可用，项目经验只在对应项目中使用。</span>
+                    </div>
+                    {configDraft ? (
+                      <div className="memory-toolbar">
+                        <div className="memory-toolbar-main">
+                          <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.generateMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, generateMemories: event.target.checked } } : current)} /> <span>生成经验</span></label>
+                          <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.useMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, useMemories: event.target.checked } } : current)} /> <span>任务中使用</span></label>
+                          <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.dedicatedTools} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, dedicatedTools: event.target.checked } } : current)} /> <span>开放专用工具</span></label>
+                          <label className="memory-filter-field"><span>保留天数</span><input className="form-input" type="number" min="7" max="3650" value={configDraft.selfImprovement.retentionDays} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, retentionDays: Number(event.target.value) || 180 } } : current)} /></label>
+                          <label className="memory-filter-field"><span>最大记录</span><input className="form-input" type="number" min="20" max="5000" value={configDraft.selfImprovement.maxMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, maxMemories: Number(event.target.value) || 500 } } : current)} /></label>
+                        </div>
+                        <div className="memory-toolbar-actions">
+                          <span className="memory-count-pill">{selfImprovementMemories.length} 条记录</span>
+                          <button className="button ghost" type="button" onClick={() => void refreshSelfImprovementNow()} disabled={isRefreshingSelfImprovementMemories}><IconRefresh /><span>{isRefreshingSelfImprovementMemories ? "处理中" : "立即提炼"}</span></button>
+                          <button className="button ghost" type="button" onClick={() => void saveConfigDraft()}><span>保存设置</span></button>
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="memory-solution-list" aria-label="自我完善经验列表">
+                      {selfImprovementMemories.slice(selfImprovementMemoryPage * 20, (selfImprovementMemoryPage + 1) * 20).map((memory) => (
+                        <article key={memory.id} className="memory-solution-card">
+                          <div className="memory-solution-card-head"><div className="memory-solution-card-copy"><div className="memory-solution-card-title"><strong>{memory.title}</strong><span className="memory-meta-chip soft">{memory.scope === "project" ? "项目" : "全局"}</span></div><p className="memory-solution-summary">{memory.content}</p></div><button className="button ghost danger-icon-button" type="button" title="删除经验" onClick={() => void deleteSelfImprovementMemory(memory.id)}><IconTrash /></button></div>
+                        </article>
+                      ))}
+                      {!selfImprovementMemories.length ? <div className="memory-empty-state"><div className="memory-empty-icon" aria-hidden><IconKnowledge /></div><strong>暂无记忆记录</strong><p>完成的主任务会在空闲后自动提炼为记忆。</p></div> : null}
+                    </div>
+                    {selfImprovementMemories.length > 20 ? (
+                      <div className="memory-toolbar-actions">
+                        <button className="button ghost" type="button" disabled={selfImprovementMemoryPage === 0} onClick={() => setSelfImprovementMemoryPage((current) => current - 1)}>上一页</button>
+                        <span className="memory-count-pill">{selfImprovementMemoryPage + 1} / {Math.ceil(selfImprovementMemories.length / 20)}</span>
+                        <button className="button ghost" type="button" disabled={selfImprovementMemoryPage >= Math.ceil(selfImprovementMemories.length / 20) - 1} onClick={() => setSelfImprovementMemoryPage((current) => current + 1)}>下一页</button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="config-block memory-management-panel">
+                    <div className="section-copy">
+                      <strong>错误恢复经验</strong>
                       <span>按模型隔离存储；不同模型的失败模式不会互相干扰。</span>
                     </div>
 
@@ -8460,7 +8707,7 @@ export function App() {
                       </div>
                     </div>
 
-                    <div className="memory-solution-list" aria-label="错误解决方案记忆列表">
+                    <div className="memory-solution-list" aria-label="错误恢复经验列表">
                       {errorSolutions.length ? errorSolutions.map((solution) => {
                         const isBusy = errorSolutionBusyId === solution.id;
                         const isExpanded = expandedErrorSolutionIds.has(solution.id);
@@ -8496,8 +8743,8 @@ export function App() {
                                   type="button"
                                   onClick={() => void deleteErrorSolution(solution.id)}
                                   disabled={isBusy || isClearingErrorSolutions}
-                                  title="删除记忆"
-                                  aria-label="删除记忆"
+                                  title="删除错误恢复经验"
+                                  aria-label="删除错误恢复经验"
                                 >
                                   <IconTrash />
                                 </button>
@@ -8544,42 +8791,42 @@ export function App() {
               ) : null}
 
               {settingsTab === "capabilities" ? (
-                <div className="capability-tab-strip" role="tablist" aria-label="能力中心分类">
+                <div className="settings-subtab-bar capability-tab-strip" role="tablist" aria-label="能力中心分类">
                     <button
                       type="button"
                       role="tab"
                       aria-selected={capabilityTab === "skills"}
-                      className={`capability-tab${capabilityTab === "skills" ? " active" : ""}`}
+                      className={`capability-subtab${capabilityTab === "skills" ? " active" : ""}`}
                       onClick={() => setCapabilityTab("skills")}
                     >
                       <span>Skill 库</span>
-                      <small>{skills.length}</small>
+                      <small className="capability-tab-count">{skills.length}</small>
                     </button>
                     <button
                       type="button"
                       role="tab"
                       aria-selected={capabilityTab === "userSkills"}
-                      className={`capability-tab${capabilityTab === "userSkills" ? " active" : ""}`}
+                      className={`capability-subtab${capabilityTab === "userSkills" ? " active" : ""}`}
                       onClick={() => setCapabilityTab("userSkills")}
                     >
                       <span>用户技能</span>
-                      <small>{userSkills.length}</small>
+                      <small className="capability-tab-count">{userSkills.length}</small>
                     </button>
                     <button
                       type="button"
                       role="tab"
                       aria-selected={capabilityTab === "plugins"}
-                      className={`capability-tab${capabilityTab === "plugins" ? " active" : ""}`}
+                      className={`capability-subtab${capabilityTab === "plugins" ? " active" : ""}`}
                       onClick={() => setCapabilityTab("plugins")}
                     >
                       <span>插件</span>
-                      <small>{plugins.length}</small>
+                      <small className="capability-tab-count">{plugins.length}</small>
                     </button>
                     <button
                       type="button"
                       role="tab"
                       aria-selected={capabilityTab === "lab"}
-                      className={`capability-tab${capabilityTab === "lab" ? " active" : ""}`}
+                      className={`capability-subtab${capabilityTab === "lab" ? " active" : ""}`}
                       onClick={() => setCapabilityTab("lab")}
                     >
                       <span>技能实验室</span>
@@ -9782,7 +10029,7 @@ export function App() {
               </strong>
               <p>
                 {errorSolutionModelFilter === "all"
-                  ? `将删除全部 ${errorSolutions.length} 条错误解决方案记忆，且无法恢复。之后 Agent 遇到同类失败时需要重新学习。`
+                  ? `将删除全部 ${errorSolutions.length} 条错误恢复经验，且无法恢复。之后 Agent 遇到同类失败时需要重新学习。`
                   : `将删除模型“${resolveErrorSolutionModelLabel(errorSolutionModelFilter)}”的 ${errorSolutions.length} 条记忆，其他模型的记忆会保留。`}
               </p>
             </div>
@@ -10322,17 +10569,17 @@ export function App() {
                 </button>
                 <button
                   className={`gpa-popover-item gpa-popover-item-agent ${multiAgentMode === "proactive" ? "is-active" : ""}`}
-                  role="menuitem"
+                  role="menuitemcheckbox"
+                  aria-checked={multiAgentMode === "proactive"}
                   onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  disabled={multiAgentMode === "proactive"}
-                  onClick={() => void updateMultiAgentMode("proactive")}
+                  onClick={() => void updateMultiAgentMode(multiAgentMode === "proactive" ? "disabled" : "proactive")}
                 >
                   <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
                   <span className="gpa-popover-item-copy">
                     <span className="gpa-popover-item-title">子智能体</span>
-                    <span className="gpa-popover-item-hint">自动拆分可并行的探索、审查与诊断工作</span>
+                    <span className="gpa-popover-item-hint">{multiAgentMode === "proactive" ? "当前任务已开启，点击关闭" : "为当前任务开启并行探索、审查与诊断"}</span>
                   </span>
-                  {multiAgentMode === "proactive" ? <span className="gpa-popover-item-check">已开启</span> : null}
+                  <span className={`gpa-popover-item-check ${multiAgentMode === "proactive" ? "is-active" : ""}`}>{multiAgentMode === "proactive" ? "已开启" : "已关闭"}</span>
                 </button>
                 <button
                   className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
@@ -11740,6 +11987,112 @@ function estimateContextTokens(value: string): number {
     return 0;
   }
   return Math.ceil(Array.from(normalized).length / 2.8);
+}
+
+function UsageStatisticsPanel({
+  summary,
+  loading,
+  rangeDays,
+  granularity,
+  onRangeChange,
+  onGranularityChange,
+  onRefresh
+}: {
+  summary: UsageAnalyticsSummary | null;
+  loading: boolean;
+  rangeDays: number | null;
+  granularity: UsageAnalyticsGranularity;
+  onRangeChange: (value: number | null) => void;
+  onGranularityChange: (value: UsageAnalyticsGranularity) => void;
+  onRefresh: () => void;
+}) {
+  const palette = ["#4d8df7", "#19bd86", "#dca331", "#a875e9", "#1badc7", "#e36b78", "#7b8ba4"];
+  const models = (summary?.models ?? []).slice(0, 7);
+  const totalModelTokens = models.reduce((total, row) => total + row.usage.totalTokens, 0);
+  let cursor = 0;
+  const donutGradient = totalModelTokens > 0
+    ? `conic-gradient(${models.map((row, index) => {
+      const start = cursor;
+      cursor += (row.usage.totalTokens / totalModelTokens) * 100;
+      return `${palette[index % palette.length]} ${start}% ${cursor}%`;
+    }).join(", ")})`
+    : "conic-gradient(#293443 0 100%)";
+  const trend = summary?.trend ?? [];
+  const series = [
+    { id: "input", label: "输入", color: "#4d8df7", values: trend.map((point) => point.usage.inputTokens) },
+    { id: "output", label: "输出", color: "#19bd86", values: trend.map((point) => point.usage.outputTokens) },
+    { id: "cache-write", label: "缓存写入", color: "#dca331", values: trend.map((point) => point.usage.inputCacheWriteTokens) },
+    { id: "cache-hit", label: "缓存命中", color: "#1badc7", values: trend.map((point) => point.usage.inputCacheHitTokens) }
+  ];
+  const tokenMax = Math.max(1, ...series.flatMap((item) => item.values));
+  const chart = { left: 46, right: 12, top: 16, bottom: 30, width: 542, height: 130 };
+  const labelEvery = Math.max(1, Math.ceil(trend.length / 7));
+
+  return (
+    <section className="usage-statistics-content" aria-label="使用统计">
+      <div className="usage-statistics-toolbar">
+        <label>时间范围<ComposerSelect className="usage-statistics-select" ariaLabel="统计时间范围" placeholder="选择时间范围" value={rangeDays === null ? "all" : String(rangeDays)} onChange={(value) => onRangeChange(value === "all" ? null : Number(value))} options={[{ value: "7", label: "近 7 天" }, { value: "30", label: "近 30 天" }, { value: "90", label: "近 90 天" }, { value: "all", label: "全部记录" }]} /></label>
+        <label>粒度<ComposerSelect className="usage-statistics-select" ariaLabel="统计粒度" placeholder="选择统计粒度" value={granularity} onChange={(value) => onGranularityChange(value === "week" || value === "month" ? value : "day")} options={[{ value: "day", label: "按天" }, { value: "week", label: "按周" }, { value: "month", label: "按月" }]} /></label>
+        <button className="usage-statistics-refresh" type="button" onClick={onRefresh} disabled={loading} title="刷新统计"><IconRefresh /><span>{loading ? "加载中" : "刷新"}</span></button>
+      </div>
+      <div className="usage-statistics-summary" aria-label="统计摘要">
+        <span><b>{formatTokenCount(summary?.totalUsage.totalTokens ?? 0)}</b> Tokens</span>
+        <span><b>{summary?.totalRequests ?? 0}</b> 请求</span>
+        <span><b>{formatCacheHitRate(summary?.totalUsage.cacheHitRate ?? 0)}</b> 缓存命中</span>
+      </div>
+      <div className="usage-statistics-grid">
+        <section className="usage-statistics-panel distribution-panel" aria-label="模型分布">
+          <header><h3>模型分布</h3><span>{summary?.models.length ?? 0} 个模型</span></header>
+          <div className="usage-model-distribution">
+            <div className="usage-donut" style={{ background: donutGradient }} />
+            <div className="usage-model-table-wrap"><table className="usage-model-table"><thead><tr><th>模型</th><th>请求</th><th>Token</th></tr></thead><tbody>{models.length ? models.map((row, index) => <tr key={`${row.providerId}:${row.modelId}`}><td><i style={{ background: palette[index % palette.length] }} /><span title={`${row.providerId} / ${row.modelId}`}>{row.modelId}</span></td><td>{row.requestCount.toLocaleString()}</td><td>{formatTokenCount(row.usage.totalTokens)}</td></tr>) : <tr><td colSpan={3} className="usage-empty-cell">该时间范围暂无调用记录</td></tr>}</tbody></table></div>
+          </div>
+        </section>
+        <section className="usage-statistics-panel trend-panel" aria-label="Token 使用趋势">
+          <header><h3>Token 使用趋势</h3><span>{trend.length ? `${trend[0].label} 至 ${trend.at(-1)?.label}` : "暂无趋势"}</span></header>
+          <div className="usage-chart-legend">{series.map((item) => <span key={item.id}><i style={{ background: item.color }} />{item.label}</span>)}</div>
+          <div className="usage-chart-wrap">{trend.length ? <svg className="usage-chart" viewBox="0 0 600 176" role="img" aria-label="Token 使用趋势折线图">
+            {[0, 0.25, 0.5, 0.75, 1].map((ratio) => { const y = chart.top + chart.height - ratio * chart.height; return <g key={ratio}><line x1={chart.left} y1={y} x2={chart.left + chart.width} y2={y} /><text x={chart.left - 6} y={y + 3} textAnchor="end">{formatTokenCount(Math.round(tokenMax * ratio))}</text></g>; })}
+            {series.map((item) => {
+              const points = item.values.map((value, index) => ({
+                x: chart.left + (index * chart.width) / Math.max(1, trend.length - 1),
+                y: chart.top + chart.height - (value / tokenMax) * chart.height,
+                value,
+                label: trend[index]?.label ?? ""
+              }));
+              return <g key={item.id} className="usage-chart-series" style={{ color: item.color }}>
+                <path d={buildSmoothUsageLinePath(points)} />
+                {points.map((point) => <circle key={`${item.id}-${point.label}`} cx={point.x} cy={point.y} r="3"><title>{`${point.label} ${item.label}: ${point.value.toLocaleString()} Tokens`}</title></circle>)}
+              </g>;
+            })}
+            {trend.map((point, index) => {
+              const x = chart.left + (index * chart.width) / Math.max(1, trend.length - 1);
+              return (index % labelEvery === 0 || index === trend.length - 1) ? <text key={point.key} x={x} y="170" textAnchor="middle">{point.label.slice(5)}</text> : null;
+            })}
+          </svg> : <div className="usage-chart-empty">暂无可绘制的 Token 数据</div>}</div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function buildSmoothUsageLinePath(points: Array<{ x: number; y: number }>): string {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+
+  let path = `M ${points[0].x} ${points[0].y}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = points[index - 1] ?? points[index];
+    const current = points[index];
+    const next = points[index + 1];
+    const following = points[index + 2] ?? next;
+    const control1X = current.x + (next.x - previous.x) / 6;
+    const control1Y = current.y + (next.y - previous.y) / 6;
+    const control2X = next.x - (following.x - current.x) / 6;
+    const control2Y = next.y - (following.y - current.y) / 6;
+    path += ` C ${control1X} ${control1Y}, ${control2X} ${control2Y}, ${next.x} ${next.y}`;
+  }
+  return path;
 }
 
 function formatTokenCount(tokens: number): string {
@@ -13824,7 +14177,7 @@ function getRuntimeBrowserScreenshotPaths(entries: RuntimeActivityEntry[], artif
       .map((entry) => entry.toolCall.turnRunId)
   );
   const paths = artifacts
-    .filter((artifact) => artifact.artifactKind === "browser-screenshot" && turnRunIds.has(artifact.turnRunId))
+    .filter((artifact) => artifact.artifactKind === "browser-screenshot" && !!artifact.turnRunId && turnRunIds.has(artifact.turnRunId))
     .map((artifact) => artifact.absolutePath);
   for (const entry of entries) {
     if (entry.kind !== "tool" || entry.toolCall.toolName !== "browser.capture_screenshot") continue;
@@ -13861,20 +14214,27 @@ function formatElapsedClock(durationMs: number): string {
 
 function SubagentActivityList({
   agents,
+  queuedAgentIds,
   runtimeActivities,
-  onInterrupt
+  onInterrupt,
+  compact = false
 }: {
   agents: ThreadRecord[];
+  queuedAgentIds?: Set<string>;
   runtimeActivities: Record<string, RuntimeActivity>;
   onInterrupt: (agent: ThreadRecord) => void;
+  compact?: boolean;
 }) {
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
-  const activeCount = agents.filter((agent) => agent.status === "running" || agent.status === "waiting").length;
+  const queuedCount = agents.filter((agent) => queuedAgentIds?.has(agent.id)).length;
+  const activeCount = agents.filter((agent) => !queuedAgentIds?.has(agent.id) && (agent.status === "running" || agent.status === "waiting")).length;
   const failedCount = agents.filter((agent) => agent.status === "failed").length;
   const completedCount = agents.filter((agent) => agent.status === "completed").length;
   const stoppedCount = agents.filter((agent) => agent.status === "idle").length;
   const summaryLabel = activeCount > 0
     ? `${activeCount} 个运行中`
+    : queuedCount > 0
+      ? `${queuedCount} 个排队中`
     : failedCount > 0
       ? `${failedCount} 个需处理`
       : completedCount === agents.length
@@ -13884,22 +14244,24 @@ function SubagentActivityList({
           : `${agents.length} 个已结束`;
 
   return (
-    <section className="agent-activity-list" aria-label="子智能体活动" tabIndex={0}>
+    <section className={`agent-activity-list ${compact ? "is-notification" : ""}`} aria-label="子智能体活动" tabIndex={0}>
       <div className="agent-activity-summary" aria-live="polite">
         <span className={`agent-activity-indicator ${activeCount > 0 ? "running" : failedCount > 0 ? "failed" : "completed"}`} aria-hidden="true" />
         <IconSkills />
         <span className="agent-activity-heading">子智能体</span>
         <span className="agent-activity-count">{summaryLabel}</span>
-        <IconChevronDown />
       </div>
       <div className="agent-activity-details">
         {agents.map((agent) => {
-        const active = agent.status === "running" || agent.status === "waiting";
+        const queued = queuedAgentIds?.has(agent.id) ?? false;
+        const active = !queued && (agent.status === "running" || agent.status === "waiting");
         const runtimeActivity = runtimeActivities[agent.id];
         const runtimeLabel = getSubagentRuntimeLabel(runtimeActivity);
         const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity);
         const title = getSubagentTitle(agent);
-        const statusLabel = agent.status === "completed"
+        const statusLabel = queued
+          ? "排队中"
+          : agent.status === "completed"
           ? "已完成"
           : agent.status === "failed"
             ? "失败"
@@ -13909,7 +14271,7 @@ function SubagentActivityList({
                 ? "运行中"
                 : "已停止";
         return (
-          <div key={agent.id} className={`agent-activity-row ${agent.status} ${expandedAgentId === agent.id ? "is-open" : ""}`}>
+          <div key={agent.id} className={`agent-activity-row ${queued ? "queued" : agent.status} ${expandedAgentId === agent.id ? "is-open" : ""}`}>
             <button
               type="button"
               className="agent-activity-main"
@@ -13918,15 +14280,16 @@ function SubagentActivityList({
               title={expandedAgentId === agent.id ? "收起子任务详情" : "展开子任务详情"}
             >
               <span className="agent-activity-title-row">
+                <span className="agent-activity-disclosure" aria-hidden="true"><IconChevronRight /></span>
                 <span className="agent-activity-title">{title}</span>
                 <span className="agent-activity-path">{agent.agentPath}</span>
               </span>
               <span key={`${agent.id}-${runtimeLabel ?? "preparing"}`} className="agent-activity-task agent-runtime-update">
-                {runtimeLabel ?? "正在准备任务"}
+                {queued ? "等待可用的子智能体名额" : runtimeLabel ?? "正在准备任务"}
               </span>
             </button>
             <span className="agent-activity-status">{statusLabel}</span>
-            {active ? (
+            {active || queued ? (
               <button type="button" className="agent-activity-stop" title="停止子任务" onClick={() => onInterrupt(agent)}>
                 停止
               </button>
@@ -14272,7 +14635,7 @@ function PlanItem({ label, status }: { label: string; status: "pending" | "in_pr
   );
 }
 
-function StatusIcon({ status }: { status: "pending" | "in_progress" | "completed" | "failed" }) {
+function StatusIcon({ status }: { status: "pending" | "in_progress" | "completed" | "failed" | "blocked" }) {
   const glyph = status === "completed" ? "✔" : status === "in_progress" ? "◐" : status === "failed" ? "✕" : "□";
   return <span className={`timeline-status-icon ${status}`}>{glyph}</span>;
 }
@@ -14292,8 +14655,9 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
   const result = parseTimelineJson(toolCall.resultJson);
   const command = getTimelineCommand(toolCall.toolName, input);
   const isRunning = toolCall.status === "running" || toolCall.status === "pending";
+  const blocked = toolCall.status === "blocked";
   const failed = toolCall.status === "failed" || toolCall.status === "denied";
-  const status = isRunning ? "in_progress" : failed ? "failed" : "completed";
+  const status = isRunning ? "in_progress" : blocked ? "blocked" : failed ? "failed" : "completed";
   const duration = toolCall.completedAt
     ? Math.max(0, Date.parse(toolCall.completedAt) - Date.parse(toolCall.startedAt))
     : null;
@@ -14304,7 +14668,7 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
     <details className={`execution-step ${status}`}>
       <summary className="execution-step-head">
         <StatusIcon status={status} />
-        <strong>{isRunning ? "Running" : failed ? "Command failed" : "Ran command"}</strong>
+        <strong>{isRunning ? "Running" : blocked ? "Blocked before execution" : failed ? "Command failed" : "Ran command"}</strong>
         <span className="execution-tool-name">{formatToolName(toolCall.toolName)}</span>
         {duration !== null ? <span className="execution-duration">{formatDuration(duration)}</span> : null}
       </summary>
@@ -14312,8 +14676,8 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
         <code className="execution-command">$ {command}</code>
         {localUrl ? <LocalServerPreview url={localUrl} /> : null}
         {output ? (
-          <details className="execution-output" open={failed}>
-            <summary>{failed ? "View error output" : "View output"}</summary>
+          <details className="execution-output" open={failed || blocked}>
+            <summary>{blocked ? "View block reason" : failed ? "View error output" : "View output"}</summary>
             <pre>{output}</pre>
             <MessageDetectedMediaGallery content={output} />
           </details>
@@ -14336,11 +14700,11 @@ const ToolActivityGroup = memo(function ToolActivityGroup({ toolCalls }: { toolC
         className="tool-activity-summary"
         aria-expanded={expanded}
         onClick={() => setExpanded((current) => !current)}
-        aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : "已完成"}，${toolCalls.length} 项`}
+        aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}，${toolCalls.length} 项`}
       >
         <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={toolCalls[0]?.toolName ?? ""} /></span>
         <span className="tool-activity-summary-copy"><strong>{conciseLabel}</strong></span>
-        <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : "已完成"}</span>
+        <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}</span>
         <span className="tool-activity-summary-count">{toolCalls.length} 项</span>
         <span className="tool-activity-chevron" aria-hidden />
       </button>
@@ -14372,8 +14736,9 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
   const result = parseTimelineJson(toolCall.resultJson);
   const command = getTimelineCommand(toolCall.toolName, input);
   const isRunning = toolCall.status === "running" || toolCall.status === "pending";
+  const blocked = toolCall.status === "blocked";
   const failed = toolCall.status === "failed" || toolCall.status === "denied";
-  const status = isRunning ? "in_progress" : failed ? "failed" : "completed";
+  const status = isRunning ? "in_progress" : blocked ? "blocked" : failed ? "failed" : "completed";
   const duration = toolCall.completedAt
     ? Math.max(0, Date.parse(toolCall.completedAt) - Date.parse(toolCall.startedAt))
     : null;
@@ -14388,7 +14753,7 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
           <span className="tool-activity-row-icon" aria-hidden><ToolActivityIcon toolName={toolCall.toolName} /></span>
           <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
           <code title={target}>{target}</code>
-          <span className="tool-activity-compact-status">{isRunning ? "执行中" : failed ? "失败" : "完成"}</span>
+          <span className="tool-activity-compact-status">{isRunning ? "执行中" : blocked ? "已拦截" : failed ? "失败" : "完成"}</span>
           {duration !== null ? <time>{formatDuration(duration)}</time> : null}
         </summary>
         <div className="tool-activity-compact-details">
@@ -14396,7 +14761,7 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
           {localUrl ? <LocalServerPreview url={localUrl} /> : null}
           {output ? (
             <details className="tool-activity-output" open>
-              <summary>{failed ? "查看错误输出" : "查看输出"}</summary>
+              <summary>{blocked ? "查看拦截原因" : failed ? "查看错误输出" : "查看输出"}</summary>
               <pre>{output}</pre>
               <MessageDetectedMediaGallery content={output} />
             </details>
@@ -14412,14 +14777,14 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
       <div className="tool-activity-row-copy">
         <div className="tool-activity-row-head">
           <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
-          <span>{isRunning ? "正在执行" : failed ? "执行失败" : "已完成"}</span>
+          <span>{isRunning ? "正在执行" : blocked ? "执行前已拦截" : failed ? "执行失败" : "已完成"}</span>
           {duration !== null ? <time>{formatDuration(duration)}</time> : null}
         </div>
         <code>{isFileWriteTool(toolCall.toolName) ? getFileWriteTarget(input) : `$ ${command}`}</code>
         {localUrl ? <LocalServerPreview url={localUrl} /> : null}
         {output ? (
-          <details className="tool-activity-output" open={failed}>
-            <summary>{failed ? "查看错误输出" : "查看输出"}</summary>
+          <details className="tool-activity-output" open={failed || blocked}>
+            <summary>{blocked ? "查看拦截原因" : failed ? "查看错误输出" : "查看输出"}</summary>
             <pre>{output}</pre>
             <MessageDetectedMediaGallery content={output} />
           </details>
@@ -14526,10 +14891,11 @@ function getToolWriteTargets(toolCall: ToolCallRecord): string[] {
 export function getToolActivityPresentation(toolCalls: ToolCallRecord[]) {
   const runningCall = toolCalls.find((toolCall) => toolCall.status === "running" || toolCall.status === "pending");
   const failed = toolCalls.some((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
+  const blocked = toolCalls.some((toolCall) => toolCall.status === "blocked");
 
   return {
     runningCall,
-    status: runningCall ? "in_progress" : failed ? "failed" : "completed",
+    status: runningCall ? "in_progress" : failed ? "failed" : blocked ? "blocked" : "completed",
     summary: getToolActivitySummary(toolCalls, runningCall)
   };
 }
@@ -16836,6 +17202,15 @@ function cloneConfig(config: AppConfig): AppConfig {
       }
     },
     multiAgent: { ...config.multiAgent },
+    selfImprovement: {
+      generateMemories: config.selfImprovement?.generateMemories !== false,
+      useMemories: config.selfImprovement?.useMemories !== false,
+      dedicatedTools: config.selfImprovement?.dedicatedTools === true,
+      processingModelId: config.selfImprovement?.processingModelId,
+      idleMinutes: config.selfImprovement?.idleMinutes ?? 5,
+      retentionDays: config.selfImprovement?.retentionDays ?? 180,
+      maxMemories: config.selfImprovement?.maxMemories ?? 500
+    },
     desktop: { ...config.desktop },
     timeouts: { ...config.timeouts },
     mcpServers: config.mcpServers.map((server) => ({
@@ -17806,6 +18181,10 @@ function IconGear() {
       <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a2 2 0 0 1-4 0v-.1a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a2 2 0 1 1 0-4h.1a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2h.1a1 1 0 0 0 .6-.9V4a2 2 0 0 1 4 0v.1a1 1 0 0 0 .6.9h.1a1 1 0 0 0 1.1-.2l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1v.1a1 1 0 0 0 .9.6H20a2 2 0 0 1 0 4h-.1a1 1 0 0 0-.9.6z" />
     </SvgIcon>
   );
+}
+
+function IconChart() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19H20M8 16V11M12 16V7M16 16V9" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>;
 }
 
 function IconHelpCircle() {

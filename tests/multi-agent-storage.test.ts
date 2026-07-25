@@ -119,4 +119,109 @@ describe("multi-agent thread storage", () => {
       status: "running"
     });
   });
+
+  it("aggregates usage by provider-scoped model and time bucket", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-usage-analytics-test-"));
+    directories.push(directory);
+    const database = new DatabaseService(path.join(directory, "codexh.sqlite"));
+    databases.push(database);
+    const thread = database.createThread({
+      title: "Usage source",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "grok-4.5",
+      providerId: "provider-5"
+    });
+
+    for (const [providerId, inputTokens, outputTokens] of [["provider-5", 100, 25], ["provider-3", 40, 10]] as const) {
+      database.startTurn({
+        threadId: thread.id,
+        kind: "chat",
+        status: "completed",
+        providerId,
+        modelId: "grok-4.5",
+        resolvedModelSnapshotJson: "{}",
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        usageJson: JSON.stringify({ inputTokens, outputTokens }),
+        errorMessage: null
+      });
+    }
+
+    const summary = database.getUsageAnalytics({ rangeDays: 7, granularity: "day" });
+
+    expect(summary.totalRequests).toBe(2);
+    expect(summary.totalUsage.totalTokens).toBe(175);
+    expect(summary.models).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerId: "provider-5", modelId: "grok-4.5", requestCount: 1 }),
+      expect.objectContaining({ providerId: "provider-3", modelId: "grok-4.5", requestCount: 1 })
+    ]));
+    expect(summary.trend).toHaveLength(1);
+  });
+
+  it("persists queued child-agent dispatches independently from normal message queues", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-agent-dispatch-test-"));
+    directories.push(directory);
+    const database = new DatabaseService(path.join(directory, "codexh.sqlite"));
+    databases.push(database);
+    const root = database.createThread({
+      title: "Root",
+      mode: "project",
+      workspaceKind: "project",
+      cwd: directory,
+      modelId: "mock-codexh",
+      providerId: "mock"
+    });
+    const child = database.createThread({
+      title: "Queued reviewer",
+      mode: "project",
+      workspaceKind: "project",
+      cwd: directory,
+      modelId: "mock-codexh",
+      providerId: "mock",
+      parentThreadId: root.id,
+      rootThreadId: root.id,
+      agentPath: "/root/reviewer"
+    });
+
+    database.enqueueQueuedMessage({ threadId: child.id, content: "Review the patch", displayContent: "Review the patch", attachments: [] });
+    database.markSubagentPendingDispatch(child.id, root.id);
+
+    expect(database.isSubagentPendingDispatch(child.id)).toBe(true);
+    expect(database.listQueuedSubagentMessageThreadIds()).toEqual([
+      { threadId: child.id, rootThreadId: root.id }
+    ]);
+    expect(database.listSubagentPendingDispatchRoots()).toEqual([root.id]);
+    expect(database.listSubagentPendingDispatches(root.id)).toEqual([
+      expect.objectContaining({ threadId: child.id, rootThreadId: root.id })
+    ]);
+
+    database.clearSubagentPendingDispatch(child.id);
+    expect(database.isSubagentPendingDispatch(child.id)).toBe(false);
+    expect(database.listQueuedMessages(child.id)).toHaveLength(1);
+  });
+
+  it("persists an explicit full-access default for a newly created task", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-default-access-test-"));
+    directories.push(directory);
+    const database = new DatabaseService(path.join(directory, "codexh.sqlite"));
+    databases.push(database);
+
+    const thread = database.createThread({
+      title: "Default access",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock-codexh",
+      providerId: "mock",
+      gpaStateJson: JSON.stringify({ fullAccess: true }),
+      multiAgentMode: "proactive"
+    });
+
+    expect(database.getThread(thread.id)).toMatchObject({
+      gpaStateJson: JSON.stringify({ fullAccess: true }),
+      multiAgentMode: "proactive"
+    });
+  });
 });
