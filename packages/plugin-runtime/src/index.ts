@@ -42,7 +42,50 @@ export interface PluginInstallProgress {
   stage: string;
 }
 
+export interface SkillInstallResult {
+  installPath: string;
+  skillPath: string;
+  source: string;
+}
+
 export class PluginRuntime {
+  public async installSkillFromSource(
+    source: string,
+    installedDir: string,
+    subdirectory?: string,
+    onProgress?: (progress: PluginInstallProgress) => void
+  ): Promise<SkillInstallResult> {
+    const trimmedSource = source.trim();
+    if (!trimmedSource) {
+      throw new Error("A local directory or Git repository is required to install a skill.");
+    }
+    const normalized = normalizePluginSource(trimmedSource);
+    const targetName = slugify(repoNameFromSource(normalized)) || "skill";
+    const targetDir = path.join(installedDir, targetName);
+    const relativeDirectory = normalizeSkillSubdirectory(subdirectory);
+    onProgress?.({ percent: 5, stage: "Preparing skill installation" });
+
+    if (await exists(targetDir)) {
+      if (await exists(path.join(targetDir, ".git"))) {
+        onProgress?.({ percent: 45, stage: "Updating skill repository" });
+        await runCommand("git", ["-C", targetDir, "pull", "--ff-only"], installedDir);
+      }
+    } else if (await exists(trimmedSource)) {
+      onProgress?.({ percent: 45, stage: "Copying local skill files" });
+      await fs.cp(trimmedSource, targetDir, { recursive: true });
+    } else {
+      onProgress?.({ percent: 45, stage: "Downloading skill repository" });
+      await runCommand("git", ["clone", "--depth", "1", normalized, targetDir], installedDir);
+    }
+
+    const skillPath = path.join(targetDir, relativeDirectory, "SKILL.md");
+    if (!(await exists(skillPath))) {
+      throw new Error(`Installed source ${source} is missing ${relativeDirectory ? `${relativeDirectory}/` : ""}SKILL.md.`);
+    }
+    onProgress?.({ percent: 100, stage: "Skill files are ready" });
+    return { installPath: targetDir, skillPath, source: normalized };
+  }
+
   public async installFromSource(
     source: string,
     installedDir: string,
@@ -312,6 +355,19 @@ function slugify(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function normalizeSkillSubdirectory(value?: string): string {
+  const trimmed = value?.trim().replace(/[\\/]+$/, "") ?? "";
+  if (!trimmed) return "";
+  if (path.isAbsolute(trimmed)) {
+    throw new Error("Skill subdirectory must be relative to the installed source.");
+  }
+  const normalized = path.normalize(trimmed);
+  if (normalized === ".." || normalized.startsWith(`..${path.sep}`)) {
+    throw new Error("Skill subdirectory must stay inside the installed source.");
+  }
+  return normalized;
 }
 
 function runCommand(command: string, args: string[], cwd: string): Promise<void> {

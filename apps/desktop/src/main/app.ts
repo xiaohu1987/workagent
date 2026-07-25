@@ -308,6 +308,12 @@ export class DesktopBackend {
       markErrorSolutionUsed: async (id) => {
         this.#db.markErrorSolutionUsed(id);
       },
+      recordErrorSolutionRecall: async (id) => {
+        this.#db.recordErrorSolutionRecall(id);
+      },
+      setErrorSolutionRecallOutcome: async (id, outcome) => {
+        this.#db.setErrorSolutionRecallOutcome(id, outcome);
+      },
       searchSelfImprovementMemories: async (input) => this.#db.searchSelfImprovementMemories(input),
       addSelfImprovementMemory: async (input) => this.#db.upsertSelfImprovementMemory(input),
       markSelfImprovementMemoryUsed: async (id) => this.#db.markSelfImprovementMemoryUsed(id),
@@ -323,7 +329,7 @@ export class DesktopBackend {
           void this.emitTerminalOutput(threadId, data);
         }, (url) => {
           void this.openLocalServerUrl(threadId, url);
-        }, "default", undefined, input?.onStalled),
+        }, "default", input?.onStalled),
       cancelTerminalCommands: async (threadId, reason) => this.#terminal.cancelCommands(threadId, reason),
       requestApproval: async (threadId, turnRunId, input) =>
         this.requestApproval(threadId, turnRunId, input),
@@ -336,6 +342,9 @@ export class DesktopBackend {
       interruptAgent: async (parentThreadId, agent) => this.interruptAgent(parentThreadId, agent),
       listSubagents: async (parentThreadId) => this.listSubagents(parentThreadId),
       hasActiveSubagents: async (parentThreadId) => this.hasActiveSubagents(parentThreadId),
+      installSkillForThread: async (threadId, input) => this.installSkillForThread(threadId, input),
+      installPluginForThread: async (threadId, source) => this.installPluginForThread(threadId, source),
+      installMcpServerFromChat: async (input) => this.installMcpServerFromChat(input),
       webSearch: async (threadId, query) => this.webSearch(threadId, query),
       openPage: async (threadId, url) => this.openPage(threadId, url),
       findInPage: async (url, pattern) => this.findInPage(url, pattern),
@@ -845,9 +854,16 @@ export class DesktopBackend {
     return () => this.#skillLabEvents.off("skill-lab-event", listener);
   }
 
-  public async startSkillLab(prompt: string, requestedName?: string, iterations?: number, targetSkillId?: string): Promise<string> {
+  public async startSkillLab(
+    prompt: string,
+    requestedName?: string,
+    iterations?: number,
+    targetSkillId?: string,
+    providerId?: string,
+    modelId?: string
+  ): Promise<string> {
     await this.initializeDeferredServices();
-    return this.#skillLab.start(prompt, requestedName, iterations, targetSkillId);
+    return this.#skillLab.start(prompt, requestedName, iterations, targetSkillId, providerId, modelId);
   }
 
   public cancelSkillLab(jobId: string): void {
@@ -954,19 +970,21 @@ export class DesktopBackend {
     displayContent?: string,
     dispatch = true
   ): Promise<void> {
-    await this.initializeDeferredServices();
+    // Queue first so cold-start maintenance (plugin discovery, skill indexing,
+    // MCP refresh) never delays visible message submission.
+    void this.initializeDeferredServices();
     const thread = this.#db.getThread(threadId);
     const isFirstThreadMessage = this.#db.listMessages(threadId).length === 0 && this.#db.listQueuedMessages(threadId).length === 0;
     if (isFirstThreadMessage) {
       const updated = this.#db.updateThread(threadId, {
         title: buildThreadTitleFromFirstMessage(displayContent || content)
       });
-      await this.emit({
+      void this.emit({
         type: "thread.updated",
         threadId,
         payload: { thread: updated },
         createdAt: new Date().toISOString()
-      });
+      }).catch(() => undefined);
     }
 
     const queued = this.#db.enqueueQueuedMessage({
@@ -975,12 +993,14 @@ export class DesktopBackend {
       displayContent: displayContent || content,
       attachments
     });
-    await this.emit({
+    // Emit synchronously before the first await inside emit, but do not make
+    // queue dispatch wait for the event-log append that follows it.
+    void this.emit({
       type: "queue.updated",
       threadId,
       payload: { queueItemId: queued.id, action: "queued" },
       createdAt: new Date().toISOString()
-    });
+    }).catch(() => undefined);
     if (dispatch) {
       this.#runtime.wakeQueuedMessages(threadId);
     }
@@ -1760,6 +1780,109 @@ export class DesktopBackend {
     await this.refreshSkills();
     onProgress?.({ percent: 100, stage: "插件安装完成" });
     return plugin;
+  }
+
+  public async installSkillForThread(
+    threadId: string,
+    input: { source: string; subdirectory?: string }
+  ): Promise<{ id: string; name: string; qualifiedName: string; skillPath: string }> {
+    const installed = await this.#plugins.installSkillFromSource(
+      input.source,
+      this.#layout.skillsInstalledDir,
+      input.subdirectory
+    );
+    await this.refreshSkills();
+    const skill = this.#skills.list().find((entry) => path.resolve(entry.skillPath) === path.resolve(installed.skillPath));
+    if (!skill) {
+      throw new Error("The installed SKILL.md is missing valid name and description metadata.");
+    }
+    await this.addThreadSkill(threadId, skill.id);
+    await this.#logs.append("skill.installed_from_chat", {
+      threadId,
+      source: installed.source,
+      qualifiedName: skill.qualifiedName
+    }, threadId);
+    return {
+      id: skill.id,
+      name: skill.name,
+      qualifiedName: skill.qualifiedName,
+      skillPath: skill.skillPath
+    };
+  }
+
+  public async installPluginForThread(threadId: string, source: string): Promise<PluginRecord> {
+    const plugin = await this.installPlugin(source);
+    await this.setThreadPluginEnabled(threadId, plugin.id, true);
+    await this.#logs.append("plugin.installed_from_chat", {
+      threadId,
+      pluginId: plugin.id,
+      source: plugin.source
+    }, threadId);
+    return plugin;
+  }
+
+  public async installMcpServerFromChat(input: {
+    id?: string;
+    name: string;
+    description?: string;
+    command?: string;
+    args?: string[];
+    cwd?: string;
+    url?: string;
+    transport?: string;
+  }): Promise<{ server: McpServerConfig; connectionError?: string }> {
+    const name = input.name.trim();
+    const command = input.command?.trim();
+    const url = input.url?.trim();
+    if (!name) throw new Error("MCP server name is required.");
+    if (!command && !url) throw new Error("Provide either an MCP command or a service URL.");
+    if (command && /[\r\n\0]/.test(command)) throw new Error("MCP command must be a single command name.");
+    if (url) {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new Error("MCP service URL must be a valid http or https URL.");
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error("MCP service URL must use http or https.");
+      }
+    }
+    const baseId = slugify(input.id?.trim() || name) || "mcp-server";
+    const id = baseId;
+    const server: McpServerConfig = {
+      id,
+      name,
+      description: input.description?.trim() || undefined,
+      command: command || undefined,
+      args: input.args?.map((value) => String(value)).filter(Boolean),
+      cwd: input.cwd?.trim() || undefined,
+      url: url || undefined,
+      transport: input.transport?.trim() || (url ? "streamable-http" : "stdio"),
+      enabled: true,
+      source: "config"
+    };
+    const existingIndex = this.#config.mcpServers.findIndex((entry) => entry.id === id);
+    if (existingIndex >= 0) {
+      this.#config.mcpServers.splice(existingIndex, 1, server);
+    } else {
+      this.#config.mcpServers.push(server);
+    }
+    await saveConfig(this.#layout.configFile, this.#config);
+    let connectionError: string | undefined;
+    try {
+      await this.refreshMcpConfiguration();
+    } catch (error) {
+      connectionError = error instanceof Error ? error.message : String(error);
+      await this.#logs.append("mcp.installed_from_chat_connection_failed", { id, connectionError });
+    }
+    await this.#logs.append("mcp.installed_from_chat", {
+      id,
+      transport: server.transport,
+      sourceKind: command ? "command" : "url",
+      connected: !connectionError
+    });
+    return { server, connectionError };
   }
 
   public async removePlugin(pluginId: string): Promise<void> {

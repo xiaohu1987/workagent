@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DatabaseService } from "../apps/desktop/src/main/storage";
 
 const tempDirs: string[] = [];
@@ -15,6 +15,7 @@ async function makeTempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   while (databases.length > 0) {
     databases.pop()?.close();
   }
@@ -49,7 +50,10 @@ describe("error solution memory persistence", () => {
       scopeMode: "model",
       targetKeyPattern: "apply_patch:src/app.ts",
       successCount: 2,
-      failureCount: 0
+      failureCount: 0,
+      recallCount: 0,
+      lastRecalledAt: null,
+      lastRecallOutcome: null
     });
     expect(memory?.lastObservedAt).toBe(observedAt);
   });
@@ -89,9 +93,19 @@ describe("error solution memory persistence", () => {
     expect(second.id).toBe(first.id);
     expect(second.successCount).toBe(2);
 
+    db.recordErrorSolutionRecall(first.id);
+    db.setErrorSolutionRecallOutcome(first.id, "prerequisite");
+    let listed = db.listErrorSolutions({ modelId: "gpt-test" });
+    expect(listed[0]).toMatchObject({
+      successCount: 2,
+      recallCount: 1,
+      lastRecallOutcome: "prerequisite"
+    });
+    expect(listed[0]?.lastRecalledAt).toBeTruthy();
+
     db.markErrorSolutionUsed(first.id);
-    const listed = db.listErrorSolutions({ modelId: "gpt-test" });
-    expect(listed[0]?.successCount).toBe(2);
+    listed = db.listErrorSolutions({ modelId: "gpt-test" });
+    expect(listed[0]?.lastRecallOutcome).toBe("recovered");
 
     const matches = db.searchErrorSolutions({
       modelId: "gpt-test",
@@ -172,6 +186,56 @@ describe("error solution memory persistence", () => {
     const projectB = db.searchSelfImprovementMemories({ query: "deployment concise", projectId: "project-b" });
     expect(projectA.map((entry) => entry.title)).toEqual(expect.arrayContaining(["Project A", "Global"]));
     expect(projectB.map((entry) => entry.title)).toEqual(["Global"]);
+  });
+
+  it("lists error solutions from newest update to oldest", async () => {
+    vi.useFakeTimers();
+    const tempDir = await makeTempDir();
+    const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));
+    databases.push(db);
+
+    vi.setSystemTime("2026-07-25T01:00:00.000Z");
+    const first = db.upsertErrorSolution({
+      modelId: "model-a", projectId: null, toolName: "shell.exec",
+      taskKeyPattern: "shell.exec:first", errorSignature: "first failure",
+      errorSummary: "first failure", solutionSummary: "first solution",
+      strategyJson: "{}", sourceThreadId: null
+    });
+    vi.setSystemTime("2026-07-25T02:00:00.000Z");
+    const second = db.upsertErrorSolution({
+      modelId: "model-a", projectId: null, toolName: "shell.exec",
+      taskKeyPattern: "shell.exec:second", errorSignature: "second failure",
+      errorSummary: "second failure", solutionSummary: "second solution",
+      strategyJson: "{}", sourceThreadId: null
+    });
+    vi.setSystemTime("2026-07-25T03:00:00.000Z");
+    db.recordErrorSolutionRecall(first.id);
+
+    expect(db.listErrorSolutions({ modelId: "model-a" }).map((entry) => entry.id))
+      .toEqual([first.id, second.id]);
+  });
+
+  it("lists self-improvement memories from newest update to oldest", async () => {
+    vi.useFakeTimers();
+    const tempDir = await makeTempDir();
+    const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));
+    databases.push(db);
+
+    vi.setSystemTime("2026-07-25T01:00:00.000Z");
+    const first = db.upsertSelfImprovementMemory({
+      scope: "global", projectId: null, kind: "experience", title: "First",
+      content: "First memory", sourceThreadId: "thread-first"
+    });
+    vi.setSystemTime("2026-07-25T02:00:00.000Z");
+    const second = db.upsertSelfImprovementMemory({
+      scope: "global", projectId: null, kind: "experience", title: "Second",
+      content: "Second memory", sourceThreadId: "thread-second"
+    });
+    vi.setSystemTime("2026-07-25T03:00:00.000Z");
+    db.markSelfImprovementMemoryUsed(first.id);
+
+    expect(db.listSelfImprovementMemories({ all: true }).map((entry) => entry.id))
+      .toEqual([first.id, second.id]);
   });
 
   it("shares project recovery facts across models while keeping model strategies separate", async () => {

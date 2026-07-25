@@ -761,6 +761,9 @@ export class DatabaseService {
         confidence REAL NOT NULL DEFAULT 1,
         source_thread_id TEXT,
         last_used_at TEXT NOT NULL,
+        recall_count INTEGER NOT NULL DEFAULT 0,
+        last_recalled_at TEXT,
+        last_recall_outcome TEXT,
         last_observed_at TEXT NOT NULL DEFAULT '',
         expires_at TEXT,
         created_at TEXT NOT NULL,
@@ -842,6 +845,9 @@ export class DatabaseService {
     this.ensureColumn("error_solutions", "strategy_fingerprint", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("error_solutions", "failure_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("error_solutions", "confidence", "REAL NOT NULL DEFAULT 1");
+    this.ensureColumn("error_solutions", "recall_count", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("error_solutions", "last_recalled_at", "TEXT");
+    this.ensureColumn("error_solutions", "last_recall_outcome", "TEXT");
     this.ensureColumn("error_solutions", "last_observed_at", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("error_solutions", "expires_at", "TEXT");
     this.#db.prepare("UPDATE error_solutions SET last_observed_at = updated_at WHERE last_observed_at = ''").run();
@@ -1175,6 +1181,7 @@ export class DatabaseService {
       "runtime_events"
     ];
     const updatedAt = nowIso();
+    const preservedGpaState = resetConversationGpaState(thread.gpaStateJson, updatedAt);
 
     this.#db.exec("BEGIN");
     try {
@@ -1183,8 +1190,8 @@ export class DatabaseService {
         this.#db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(threadId);
       }
       this.#db
-        .prepare("UPDATE threads SET status = 'idle', gpa_state_json = NULL, updated_at = ? WHERE id = ?")
-        .run(updatedAt, threadId);
+        .prepare("UPDATE threads SET status = 'idle', gpa_state_json = ?, updated_at = ? WHERE id = ?")
+        .run(preservedGpaState, updatedAt, threadId);
       this.#db.exec("COMMIT");
     } catch (error) {
       this.#db.exec("ROLLBACK");
@@ -1899,6 +1906,9 @@ export class DatabaseService {
       confidence: Math.max(0, Math.min(1, input.confidence ?? existing?.confidence ?? 1)),
       sourceThreadId: input.sourceThreadId,
       lastUsedAt: now,
+      recallCount: existing?.recallCount ?? 0,
+      lastRecalledAt: existing?.lastRecalledAt ?? null,
+      lastRecallOutcome: existing?.lastRecallOutcome ?? null,
       lastObservedAt: observedAt,
       expiresAt,
       createdAt: existing?.createdAt ?? now,
@@ -1911,8 +1921,9 @@ export class DatabaseService {
           scope_key, id, model_id, project_id, tool_name, memory_kind, scope_mode,
           task_key_pattern, target_key_pattern, strategy_fingerprint, error_signature,
           error_summary, solution_summary, strategy_json, success_count, failure_count, confidence,
-          source_thread_id, last_used_at, last_observed_at, expires_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          source_thread_id, last_used_at, recall_count, last_recalled_at, last_recall_outcome,
+          last_observed_at, expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(scope_key) DO UPDATE SET
           id = excluded.id,
           model_id = excluded.model_id,
@@ -1932,6 +1943,9 @@ export class DatabaseService {
           confidence = excluded.confidence,
           source_thread_id = excluded.source_thread_id,
           last_used_at = excluded.last_used_at,
+          recall_count = excluded.recall_count,
+          last_recalled_at = excluded.last_recalled_at,
+          last_recall_outcome = excluded.last_recall_outcome,
           last_observed_at = excluded.last_observed_at,
           expires_at = excluded.expires_at,
           updated_at = excluded.updated_at`
@@ -1956,6 +1970,9 @@ export class DatabaseService {
         record.confidence,
         record.sourceThreadId,
         record.lastUsedAt,
+        record.recallCount,
+        record.lastRecalledAt,
+        record.lastRecallOutcome,
         record.lastObservedAt,
         record.expiresAt,
         record.createdAt,
@@ -1976,9 +1993,24 @@ export class DatabaseService {
     const now = nowIso();
     this.#db
       .prepare(
-        "UPDATE error_solutions SET last_used_at = ?, updated_at = ? WHERE id = ?"
+        "UPDATE error_solutions SET last_used_at = ?, last_recall_outcome = 'recovered', updated_at = ? WHERE id = ?"
       )
       .run(now, now, id);
+  }
+
+  public recordErrorSolutionRecall(id: string): void {
+    const now = nowIso();
+    this.#db
+      .prepare(
+        "UPDATE error_solutions SET recall_count = recall_count + 1, last_recalled_at = ?, last_recall_outcome = 'matched', updated_at = ? WHERE id = ?"
+      )
+      .run(now, now, id);
+  }
+
+  public setErrorSolutionRecallOutcome(id: string, outcome: "blocked" | "prerequisite"): void {
+    this.#db
+      .prepare("UPDATE error_solutions SET last_recall_outcome = ?, updated_at = ? WHERE id = ?")
+      .run(outcome, nowIso(), id);
   }
 
   public searchErrorSolutions(input: {
@@ -2102,19 +2134,19 @@ export class DatabaseService {
   }
 
   public listErrorSolutions(input: { limit?: number; modelId?: string | null } = {}): ErrorSolutionRecord[] {
-    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 1000);
     const modelId = input.modelId?.trim();
     if (modelId) {
       return this.#db
         .prepare(
-          "SELECT * FROM error_solutions WHERE model_id = ? OR scope_mode = 'shared' ORDER BY success_count DESC, failure_count DESC, last_used_at DESC LIMIT ?"
+          "SELECT * FROM error_solutions WHERE model_id = ? OR scope_mode = 'shared' ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?"
         )
         .all(modelId, limit)
         .map(mapErrorSolutionRow);
     }
     return this.#db
       .prepare(
-        "SELECT * FROM error_solutions ORDER BY success_count DESC, last_used_at DESC LIMIT ?"
+        "SELECT * FROM error_solutions ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?"
       )
       .all(limit)
       .map(mapErrorSolutionRow);
@@ -2174,10 +2206,10 @@ export class DatabaseService {
   public listSelfImprovementMemories(input: { projectId?: string | null; limit?: number; all?: boolean } = {}): SelfImprovementMemoryRecord[] {
     const limit = Math.min(Math.max(input.limit ?? 100, 1), 1000);
     const rows = input.all
-      ? this.#db.prepare("SELECT * FROM self_improvement_memories ORDER BY usage_count DESC, updated_at DESC LIMIT ?").all(limit)
+      ? this.#db.prepare("SELECT * FROM self_improvement_memories ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?").all(limit)
       : input.projectId
-      ? this.#db.prepare("SELECT * FROM self_improvement_memories WHERE project_id = ? OR scope = 'global' ORDER BY usage_count DESC, updated_at DESC LIMIT ?").all(input.projectId, limit)
-      : this.#db.prepare("SELECT * FROM self_improvement_memories WHERE scope = 'global' ORDER BY usage_count DESC, updated_at DESC LIMIT ?").all(limit);
+      ? this.#db.prepare("SELECT * FROM self_improvement_memories WHERE project_id = ? OR scope = 'global' ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?").all(input.projectId, limit)
+      : this.#db.prepare("SELECT * FROM self_improvement_memories WHERE scope = 'global' ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?").all(limit);
     return (rows as any[]).map(mapSelfImprovementMemoryRow);
   }
 
@@ -3165,6 +3197,11 @@ function mapErrorSolutionRow(row: any): ErrorSolutionRecord {
     confidence: Number(row.confidence ?? 1),
     sourceThreadId: row.source_thread_id ?? null,
     lastUsedAt: row.last_used_at,
+    recallCount: Number(row.recall_count ?? 0),
+    lastRecalledAt: row.last_recalled_at ?? null,
+    lastRecallOutcome: ["matched", "blocked", "prerequisite", "recovered"].includes(row.last_recall_outcome)
+      ? row.last_recall_outcome
+      : null,
     lastObservedAt: row.last_observed_at || row.updated_at,
     expiresAt: row.expires_at ?? null,
     createdAt: row.created_at,
@@ -3294,6 +3331,25 @@ function createSearchSnippet(content: string, query: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function resetConversationGpaState(stateJson: string | null, updatedAt: string): string | null {
+  if (!stateJson) return null;
+  try {
+    const state = JSON.parse(stateJson) as Record<string, unknown>;
+    if (!state || typeof state !== "object") return null;
+    return JSON.stringify({
+      stage: "off",
+      fullAccess: state.fullAccess === true,
+      knowledgeEnabled: state.knowledgeEnabled === true,
+      awaitingConfirmation: null,
+      confirmationExpiresAt: null,
+      planTasks: [],
+      updatedAt
+    });
+  } catch {
+    return null;
+  }
 }
 
 /** Keep durable recovery experience useful without retaining credentials. */

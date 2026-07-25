@@ -421,6 +421,7 @@ export interface RememberedApprovalRecord {
 export type ErrorSolutionMemoryKind = "recovered" | "blocked_strategy";
 export type ErrorSolutionScopeMode = "shared" | "model";
 export type ErrorSolutionMatchKind = "exact_strategy" | "exact_target" | "similar";
+export type ErrorSolutionRecallOutcome = "matched" | "blocked" | "prerequisite" | "recovered";
 
 /** Cross-session memory of how a prior tool failure was recovered or should be avoided. */
 export interface ErrorSolutionRecord {
@@ -443,6 +444,12 @@ export interface ErrorSolutionRecord {
   confidence: number;
   sourceThreadId: string | null;
   lastUsedAt: string;
+  /** Number of later tool decisions that recalled this experience. */
+  recallCount?: number;
+  /** Most recent time a later tool decision recalled this experience. */
+  lastRecalledAt?: string | null;
+  /** Result of the most recent recall, when known. */
+  lastRecallOutcome?: ErrorSolutionRecallOutcome | null;
   lastObservedAt: string;
   expiresAt: string | null;
   createdAt: string;

@@ -440,15 +440,14 @@ async function applyHunks(
   let symbols = language ? await extractSymbols(normalizedOriginal, language) : null;
 
   for (const hunk of hunks) {
-    const counts = countHunkEdits(hunk);
-    additions += counts.additions;
-    deletions += counts.deletions;
+    const prepared = prepareHunk(current, hunk, symbols);
+    additions += prepared.additions;
+    deletions += prepared.deletions;
 
-    const location = locateHunk(current, hunk, symbols);
-    if (location.mode === "ast") {
+    if (prepared.location.mode === "ast") {
       applyMode = "ast";
     }
-    current = applyLocatedHunk(current, location);
+    current = applyLocatedHunk(current, prepared.location);
 
     // Re-extract symbols after each hunk so later hunks see updated spans
     if (language) {
@@ -462,4 +461,145 @@ async function applyHunks(
     deletions,
     applyMode: language ? applyMode : "text"
   };
+}
+
+function prepareHunk(
+  current: string[],
+  hunk: { lines: string[] },
+  symbols: Awaited<ReturnType<typeof extractSymbols>> | null
+): {
+  location: ReturnType<typeof locateHunk>;
+  additions: number;
+  deletions: number;
+} {
+  const counts = countHunkEdits(hunk);
+  const hasExplicitEdits = counts.additions > 0 || counts.deletions > 0;
+  const hasRawSourceLine = hunk.lines.some((line) =>
+    line.length > 0 && line[0] !== " " && line[0] !== "+" && line[0] !== "-"
+  );
+
+  if (!hasExplicitEdits) {
+    if (!hasRawSourceLine) {
+      throw new Error("Patch hunk contains no additions or removals.");
+    }
+    return inferRawDesiredFragment(current, hunk.lines);
+  }
+
+  if (hasRawSourceLine) {
+    // Some OpenAI-compatible models emit source lines without the required
+    // one-character diff prefix. Treat the whole surrounding block as raw
+    // source and add the context marker before locating it.
+    const repaired = {
+      lines: hunk.lines.map((line) => line.startsWith("+") || line.startsWith("-") ? line : ` ${line}`)
+    };
+    try {
+      return { location: locateHunk(current, repaired, symbols), ...counts };
+    } catch {
+      // Mixed canonical/raw output is less common, but retaining already
+      // prefixed context makes it recoverable without weakening matching.
+      const minimallyRepaired = {
+        lines: hunk.lines.map((line) =>
+          line.startsWith("+") || line.startsWith("-") || line.startsWith(" ") ? line : ` ${line}`
+        )
+      };
+      return { location: locateHunk(current, minimallyRepaired, symbols), ...counts };
+    }
+  }
+
+  return { location: locateHunk(current, hunk, symbols), ...counts };
+}
+
+function inferRawDesiredFragment(
+  current: string[],
+  fragment: string[]
+): {
+  location: ReturnType<typeof locateHunk>;
+  additions: number;
+  deletions: number;
+} {
+  if (fragment.length < 3) {
+    throw new Error("Patch hunk contains no edits and is too short to infer a safe change.");
+  }
+  if (findSequenceStarts(current, fragment).length > 0) {
+    throw new Error("Patch hunk contains no edits and already matches the target file.");
+  }
+
+  const maximumAnchorLength = Math.min(12, fragment.length - 2);
+  const candidates = new Map<string, {
+    start: number;
+    end: number;
+    prefixLength: number;
+    suffixLength: number;
+    score: number;
+  }>();
+
+  for (let prefixLength = 1; prefixLength <= maximumAnchorLength; prefixLength += 1) {
+    const prefix = fragment.slice(0, prefixLength);
+    if (!prefix.some((line) => line.trim())) continue;
+    const prefixStarts = findSequenceStarts(current, prefix);
+
+    const maximumSuffixLength = Math.min(12, fragment.length - prefixLength - 1);
+    for (let suffixLength = 1; suffixLength <= maximumSuffixLength; suffixLength += 1) {
+      const suffix = fragment.slice(fragment.length - suffixLength);
+      if (!suffix.some((line) => line.trim())) continue;
+      const suffixStarts = findSequenceStarts(current, suffix);
+
+      for (const start of prefixStarts) {
+        for (const suffixStart of suffixStarts) {
+          if (suffixStart < start + prefixLength) continue;
+          const desiredMiddle = fragment.slice(prefixLength, fragment.length - suffixLength);
+          const currentMiddle = current.slice(start + prefixLength, suffixStart);
+          if (sameLines(desiredMiddle, currentMiddle)) continue;
+
+          const end = suffixStart + suffixLength;
+          const key = `${start}:${end}`;
+          const score = prefixLength + suffixLength;
+          const previous = candidates.get(key);
+          if (!previous || score > previous.score) {
+            candidates.set(key, { start, end, prefixLength, suffixLength, score });
+          }
+        }
+      }
+    }
+  }
+
+  const ranked = [...candidates.values()].sort((left, right) => right.score - left.score);
+  const bestScore = ranked[0]?.score;
+  const best = ranked.filter((candidate) => candidate.score === bestScore);
+  if (best.length !== 1) {
+    throw new Error(
+      best.length === 0
+        ? "Patch hunk contains no edits and its surrounding anchors were not found."
+        : "Patch hunk contains no edits and its surrounding anchors are ambiguous."
+    );
+  }
+
+  const match = best[0];
+  const desiredMiddleLength = fragment.length - match.prefixLength - match.suffixLength;
+  const currentMiddleLength = match.end - match.start - match.prefixLength - match.suffixLength;
+  return {
+    location: {
+      start: match.start,
+      deleteCount: match.end - match.start,
+      replacement: fragment,
+      mode: "text"
+    },
+    additions: desiredMiddleLength,
+    deletions: currentMiddleLength
+  };
+}
+
+function findSequenceStarts(haystack: string[], needle: string[]): number[] {
+  if (needle.length === 0 || needle.length > haystack.length) return [];
+  const matches: number[] = [];
+  for (let start = 0; start <= haystack.length - needle.length; start += 1) {
+    if (needle.every((line, offset) => haystack[start + offset] === line)) {
+      matches.push(start);
+    }
+  }
+  return matches;
+}
+
+function sameLines(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((line, index) => line === right[index]);
 }

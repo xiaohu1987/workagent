@@ -645,17 +645,14 @@ const CHAT_WELCOME_CARDS: WelcomeCard[] = [
 ];
 
 const PROVIDER_TYPE_OPTIONS: ProviderTypeOption[] = [
-  { value: "openai-compatible", label: "OpenAI Chat Completions" },
+  { value: "openai-compatible", label: "OpenAI 兼容接口" },
   { value: "anthropic", label: "Anthropic Messages" },
   { value: "gemini", label: "Google Gemini" },
-  { value: "openrouter", label: "OpenRouter" },
-  { value: "ollama", label: "Ollama" },
-  { value: "vllm", label: "vLLM" },
-  { value: "gateway", label: "Gateway" },
-  { value: "mock", label: "Mock Provider" }
+  { value: "mock", label: "Mock（仅测试）" }
 ];
 
 const MIN_SIDEBAR_WIDTH = 220;
+const MEMORY_LIST_PAGE_SIZE = 20;
 const MAX_SIDEBAR_WIDTH = 520;
 const MIN_RIGHT_WORKSPACE_WIDTH = 300;
 const MAX_RIGHT_WORKSPACE_WIDTH = 720;
@@ -920,6 +917,7 @@ export function App() {
   const [isRefreshingSelfImprovementMemories, setIsRefreshingSelfImprovementMemories] = useState(false);
   const [selfImprovementMemoryPage, setSelfImprovementMemoryPage] = useState(0);
   const [errorSolutions, setErrorSolutions] = useState<ErrorSolutionRecord[]>([]);
+  const [errorSolutionPage, setErrorSolutionPage] = useState(0);
   const [errorSolutionBusyId, setErrorSolutionBusyId] = useState<string | null>(null);
   const [errorSolutionModelFilter, setErrorSolutionModelFilter] = useState<string>("all");
   const [isClearErrorSolutionsConfirmOpen, setIsClearErrorSolutionsConfirmOpen] = useState(false);
@@ -945,6 +943,7 @@ export function App() {
   const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>("skills");
   const [skillLabMode, setSkillLabMode] = useState<"create" | "optimize">("create");
   const [skillLabTargetSkillId, setSkillLabTargetSkillId] = useState("");
+  const [skillLabModelSelection, setSkillLabModelSelection] = useState("");
   const [skillLabLastRunMode, setSkillLabLastRunMode] = useState<"create" | "optimize">("create");
   const [skillLabPrompt, setSkillLabPrompt] = useState("");
   const [skillLabName, setSkillLabName] = useState("");
@@ -964,6 +963,16 @@ export function App() {
   const skillLabOptimizationTargetRef = useRef<string | null>(null);
   const skillLabNotificationTitleRef = useRef("技能实验室");
   const isSkillLabBusy = skillLabStatus === "clarifying" || skillLabStatus === "running";
+  const skillLabModelOptions = (config?.models ?? [])
+    .filter((model) => model.role === "reasoning" && model.supportsToolCalling && model.agentCapability !== "unsupported")
+    .map((model) => {
+      const provider = config?.providers.find((entry) => entry.id === model.providerId);
+      return provider ? {
+        value: modelKey(provider.id, model.id),
+        label: `${getProviderDisplayName(provider)} / ${model.displayName?.trim() || model.id}`
+      } : null;
+    })
+    .filter((option): option is ComposerSelectOption => option !== null);
   const [notificationCenterState, setNotificationCenterState] = useState<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
   const notificationCenterStateRef = useRef<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
   const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
@@ -992,6 +1001,8 @@ export function App() {
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatTranscriptRef = useRef<HTMLDivElement | null>(null);
   const terminalScrollRef = useRef<HTMLPreElement | null>(null);
+  const selfImprovementMemoryListRef = useRef<HTMLDivElement | null>(null);
+  const errorSolutionListRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
   const pendingLatestScrollThreadIdRef = useRef<string | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
@@ -1660,13 +1671,20 @@ export function App() {
   const projectToolCalls = snapshot?.thread.id === selectedThreadId ? snapshot.toolCalls : [];
 
   function ensureThreadTerminalTabs(threadId: string) {
+    ensureThreadTerminalTab(threadId, "default");
+  }
+
+  function ensureThreadTerminalTab(threadId: string, sessionId: string) {
     setTerminalTabsByThread((current) => {
-      if (current[threadId]?.length) {
+      if (current[threadId]?.some((tab) => tab.id === sessionId)) {
         return current;
       }
       return {
         ...current,
-        [threadId]: [{ id: "default", title: "终端" }]
+        [threadId]: [
+          ...(current[threadId] ?? []),
+          { id: sessionId, title: sessionId === "default" ? "终端" : `终端 ${(current[threadId]?.length ?? 0) + 1}` }
+        ]
       };
     });
     setActiveTerminalTabByThread((current) => (
@@ -1674,7 +1692,7 @@ export function App() {
         ? current
         : {
             ...current,
-            [threadId]: "default"
+            [threadId]: sessionId
           }
     ));
   }
@@ -1797,6 +1815,17 @@ export function App() {
     ensureThreadTerminalTabs(selectedThreadId);
     setGpaComposerSelected(false);
   }, [selectedThreadId]);
+
+  useEffect(() => {
+    if (!config) return;
+    const defaultSelection = modelKey(config.defaultProvider, config.defaultModel);
+    const fallbackSelection = skillLabModelOptions.some((option) => option.value === defaultSelection)
+      ? defaultSelection
+      : skillLabModelOptions[0]?.value ?? "";
+    setSkillLabModelSelection((current) =>
+      skillLabModelOptions.some((option) => option.value === current) ? current : fallbackSelection
+    );
+  }, [config]);
 
   useEffect(() => {
     if (!gpaMenuOpen) {
@@ -1997,9 +2026,10 @@ export function App() {
       const notificationThreadId = resolveRuntimeNotificationThreadId(runtimeEvent);
       const currentSelectedThreadId = selectedThreadIdRef.current;
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
-      if (typed.type === "terminal.output" && typed.threadId === currentSelectedThreadId) {
+      if (typed.type === "terminal.output" && typed.threadId) {
         const sessionId = typeof typed.payload?.sessionId === "string" ? typed.payload.sessionId : "default";
-        updateTerminalSessionState(currentSelectedThreadId, sessionId, (current) => ({
+        ensureThreadTerminalTab(typed.threadId, sessionId);
+        updateTerminalSessionState(typed.threadId, sessionId, (current) => ({
           output: `${current?.output ?? ""}${typed.payload?.data ?? ""}`.slice(-80_000),
           cwd: current?.cwd ?? "",
           shell: current?.shell ?? "PowerShell"
@@ -2135,11 +2165,6 @@ export function App() {
         void window.codexh.getThreadSnapshot(browserThreadId).then((next: RuntimeThreadSnapshot) => {
           setBrowserTabsByThread((current) => ({ ...current, [browserThreadId]: next.browserTabs }));
         }).catch(() => undefined);
-        if (browserThreadId === selectedThreadIdRef.current) {
-          setIsRightWorkspaceOpen(true);
-          setRightWorkspaceTab("browser");
-          setRightWorkspaceExpandedTab("browser");
-        }
       }
       if (typed.type === "browser.assertion_completed" && typed.threadId) {
         appendRuntimeStatus(typed.threadId, typed.payload?.passed === false ? "页面断言未通过，正在修复" : "页面断言已通过", typed.createdAt);
@@ -2822,22 +2847,34 @@ export function App() {
     }
   }, [isSettingsOpen, settingsTab, selectedThread?.cwd]);
 
-  const visibleSkills = useMemo(() => {
-    const query = skillsSearchQuery.trim().toLowerCase();
+  const skillUsageStatsByKey = useMemo(() => {
     const statsByKey = new Map<string, SkillUsageStats>();
     for (const stats of skillUsageStats) {
       statsByKey.set(stats.skillId, stats);
     }
-    const resolveStats = (skill: SkillMetadata): SkillUsageStats =>
-      statsByKey.get(skill.id) ??
-      statsByKey.get(skill.qualifiedName) ??
-      statsByKey.get(skill.name) ?? {
-        skillId: skill.id,
-        callCount: 0,
-        successCount: 0,
-        successRate: 0,
-        lastUsedAt: null
-      };
+    return statsByKey;
+  }, [skillUsageStats]);
+  const resolveSkillUsageStats = (skill: SkillMetadata): SkillUsageStats =>
+    skillUsageStatsByKey.get(skill.id) ??
+    skillUsageStatsByKey.get(skill.qualifiedName) ??
+    skillUsageStatsByKey.get(skill.name) ?? {
+      skillId: skill.id,
+      callCount: 0,
+      successCount: 0,
+      successRate: 0,
+      lastUsedAt: null
+    };
+  const pluginCallCounts = useMemo(() => {
+    const callCounts = new Map<string, number>();
+    for (const skill of skills) {
+      if (!skill.pluginId) continue;
+      callCounts.set(skill.pluginId, (callCounts.get(skill.pluginId) ?? 0) + resolveSkillUsageStats(skill).callCount);
+    }
+    return callCounts;
+  }, [skillUsageStatsByKey, skills]);
+
+  const visibleSkills = useMemo(() => {
+    const query = skillsSearchQuery.trim().toLowerCase();
 
     const filtered = skills.filter((skill) => {
       // Plugin-owned Skills are managed with their plugin, not as standalone Skills.
@@ -2857,7 +2894,7 @@ export function App() {
     });
 
     return filtered
-      .map((skill) => ({ skill, stats: resolveStats(skill) }))
+      .map((skill) => ({ skill, stats: resolveSkillUsageStats(skill) }))
       .sort((left, right) => {
         if (skillsSortMode === "calls") {
           if (right.stats.callCount !== left.stats.callCount) {
@@ -2883,7 +2920,7 @@ export function App() {
           right.skill.displayName ?? right.skill.qualifiedName
         );
       });
-  }, [skillUsageStats, skills, skillsSearchQuery, skillsSortMode]);
+  }, [skillUsageStatsByKey, skills, skillsSearchQuery, skillsSortMode]);
 
   useEffect(() => {
     if (!skillsSortOpen) return;
@@ -3130,6 +3167,36 @@ export function App() {
         .map(([value, label]) => ({ value, label }))
     ];
   }, [config?.models, errorSolutions]);
+  const selfImprovementMemoryPageCount = Math.max(
+    1,
+    Math.ceil(selfImprovementMemories.length / MEMORY_LIST_PAGE_SIZE)
+  );
+  const errorSolutionPageCount = Math.max(
+    1,
+    Math.ceil(errorSolutions.length / MEMORY_LIST_PAGE_SIZE)
+  );
+  const safeSelfImprovementMemoryPage = Math.min(
+    selfImprovementMemoryPage,
+    selfImprovementMemoryPageCount - 1
+  );
+  const safeErrorSolutionPage = Math.min(
+    errorSolutionPage,
+    errorSolutionPageCount - 1
+  );
+  const visibleSelfImprovementMemories = useMemo(
+    () => selfImprovementMemories.slice(
+      safeSelfImprovementMemoryPage * MEMORY_LIST_PAGE_SIZE,
+      (safeSelfImprovementMemoryPage + 1) * MEMORY_LIST_PAGE_SIZE
+    ),
+    [selfImprovementMemories, safeSelfImprovementMemoryPage]
+  );
+  const visibleErrorSolutions = useMemo(
+    () => errorSolutions.slice(
+      safeErrorSolutionPage * MEMORY_LIST_PAGE_SIZE,
+      (safeErrorSolutionPage + 1) * MEMORY_LIST_PAGE_SIZE
+    ),
+    [errorSolutions, safeErrorSolutionPage]
+  );
   const subagentDefaultModelOptions = useMemo<ComposerSelectOption[]>(() => [
     { value: "__inherit__", label: "跟随当前模型（默认）" },
     ...(configDraft?.models ?? [])
@@ -3986,7 +4053,8 @@ export function App() {
     options?: { internal?: boolean; displayContent?: string }
   ) {
     const inputContent = (forcedContent ?? input.trim()).trim();
-    const hasOneShotAttachment = composerAttachments.some((attachment) => !isPersistentComposerContextKind(attachment.kind));
+    const submittedAttachments = forcedContent ? [] : [...composerAttachments];
+    const hasOneShotAttachment = submittedAttachments.some((attachment) => !isPersistentComposerContextKind(attachment.kind));
     if (!inputContent && (forcedContent || !hasOneShotAttachment)) {
       return;
     }
@@ -4001,7 +4069,7 @@ export function App() {
         showNotice("请先在聊天框下方选择可用的供应商和模型。");
         return;
       }
-      const hasMultimodalAttachment = composerAttachments.some(
+      const hasMultimodalAttachment = submittedAttachments.some(
         (attachment) => attachment.kind === "file" || attachment.kind === "image"
       );
       if (hasMultimodalAttachment && !selectedComposerModel?.supportsMultimodalInput && !multimodalInputFallbackReady) {
@@ -4018,7 +4086,8 @@ export function App() {
       const thread = await createThreadRecord("chat");
       threadId = thread.id;
       selectThreadId(thread.id);
-      await refreshThreads();
+      void refreshThreads();
+      void refreshSnapshot(thread.id);
     }
 
     if (unsupportedMultimodalInput) {
@@ -4072,8 +4141,15 @@ export function App() {
       setComposerSubmission(null);
     }
 
+    // Release the composer as soon as the submission is accepted locally. All
+    // remaining work uses the captured attachment list so it cannot delay UI feedback.
     if (!forcedContent) {
-      const skillIds = composerAttachments
+      setInput("");
+      setComposerAttachments([]);
+    }
+
+    if (!forcedContent) {
+      const skillIds = submittedAttachments
         .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
         .map((attachment) => attachment.skillId);
       for (const skillId of new Set(skillIds)) {
@@ -4084,9 +4160,11 @@ export function App() {
     let importedAttachments: MessageAttachment[] = [];
     if (!forcedContent) {
       try {
-        importedAttachments = await importComposerAttachments(threadId, composerAttachments);
+        importedAttachments = await importComposerAttachments(threadId, submittedAttachments);
       } catch (error) {
         setComposerSubmission(null);
+        setInput((current) => current.trim() ? current : inputContent);
+        setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
         if (startedLocalRuntime) {
           const pendingOptimistic = (pendingUserMessagesRef.current[threadId] ?? []).at(-1);
           if (pendingOptimistic) {
@@ -4106,12 +4184,12 @@ export function App() {
     }
     const oneShotSkillIds = !forcedContent
       ? [...new Set(
-          composerAttachments
+          submittedAttachments
             .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
             .map((attachment) => attachment.skillId)
         )]
       : [];
-    const raw = (forcedContent ?? [inputContent, formatComposerAttachments(composerAttachments.filter((attachment) => attachment.kind !== "file" && attachment.kind !== "image"))]
+    const raw = (forcedContent ?? [inputContent, formatComposerAttachments(submittedAttachments.filter((attachment) => attachment.kind !== "file" && attachment.kind !== "image"))]
       .filter(Boolean).join("\n\n")).trim();
     const optimisticMessage = !options?.internal && !startedLocalRuntime
       ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments)
@@ -4157,14 +4235,16 @@ export function App() {
         );
       }
       setComposerSubmission(null);
+      if (!forcedContent) {
+        setInput((current) => current.trim() ? current : inputContent);
+        setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
+      }
       setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
       clearRuntimeActivity(threadId);
       showNotice("发送消息失败", { message: error instanceof Error ? error.message : String(error) });
       return;
     }
     if (!forcedContent) {
-      setInput("");
-      setComposerAttachments([]);
       if (oneShotSkillIds.length > 0) {
         pendingOneShotSkillRemovalsRef.current[threadId] = [
           ...new Set([
@@ -4777,7 +4857,11 @@ export function App() {
   async function refreshErrorSolutions(modelFilter = errorSolutionModelFilter) {
     try {
       const modelId = modelFilter === "all" ? null : modelFilter;
-      setErrorSolutions((await window.codexh.listErrorSolutions({ limit: 100, modelId })) as ErrorSolutionRecord[]);
+      const solutions = sortMemoryRecordsNewestFirst(
+        (await window.codexh.listErrorSolutions({ limit: 1_000, modelId })) as ErrorSolutionRecord[]
+      );
+      setErrorSolutions(solutions);
+      setErrorSolutionPage((current) => Math.min(current, getMemoryLastPageIndex(solutions.length)));
     } catch (error) {
       showNotice("加载错误恢复经验失败", { message: error instanceof Error ? error.message : String(error) });
     }
@@ -4785,9 +4869,11 @@ export function App() {
 
   async function refreshSelfImprovementMemories() {
     try {
-      const memories = await window.codexh.listSelfImprovementMemories({ all: true, limit: 1_000 });
+      const memories = sortMemoryRecordsNewestFirst(
+        await window.codexh.listSelfImprovementMemories({ all: true, limit: 1_000 }) as SelfImprovementMemoryRecord[]
+      );
       setSelfImprovementMemories(memories as SelfImprovementMemoryRecord[]);
-      setSelfImprovementMemoryPage((current) => Math.min(current, Math.max(0, Math.ceil(memories.length / 20) - 1)));
+      setSelfImprovementMemoryPage((current) => Math.min(current, getMemoryLastPageIndex(memories.length)));
     } catch (error) {
       showNotice("加载记忆失败", { message: error instanceof Error ? error.message : String(error) });
     }
@@ -4813,28 +4899,52 @@ export function App() {
   }
 
   async function deleteSelfImprovementMemory(id: string) {
+    const removed = selfImprovementMemories.find((memory) => memory.id === id);
+    if (!removed) return;
+    setSelfImprovementMemories((current) => current.filter((memory) => memory.id !== id));
+    setSelfImprovementMemoryPage((current) => Math.min(
+      current,
+      getMemoryLastPageIndex(selfImprovementMemories.length - 1)
+    ));
     try {
       await window.codexh.deleteSelfImprovementMemory(id);
-      setSelfImprovementMemories((current) => current.filter((memory) => memory.id !== id));
       showNotice("记忆已删除", { tone: "success" });
     } catch (error) {
+      setSelfImprovementMemories((current) => current.some((memory) => memory.id === id)
+        ? current
+        : sortMemoryRecordsNewestFirst([...current, removed])
+      );
       showNotice("删除记忆失败", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
   async function deleteErrorSolution(id: string) {
+    const removed = errorSolutions.find((entry) => entry.id === id);
+    if (!removed) return;
+    const wasExpanded = expandedErrorSolutionIds.has(id);
     setErrorSolutionBusyId(id);
+    setErrorSolutions((current) => current.filter((entry) => entry.id !== id));
+    setErrorSolutionPage((current) => Math.min(
+      current,
+      getMemoryLastPageIndex(errorSolutions.length - 1)
+    ));
+    setExpandedErrorSolutionIds((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
     try {
       await window.codexh.deleteErrorSolution(id);
-      setErrorSolutions((current) => current.filter((entry) => entry.id !== id));
-      setExpandedErrorSolutionIds((current) => {
-        if (!current.has(id)) return current;
-        const next = new Set(current);
-        next.delete(id);
-        return next;
-      });
       showNotice("记忆已删除", { tone: "success" });
     } catch (error) {
+      setErrorSolutions((current) => current.some((entry) => entry.id === id)
+        ? current
+        : sortMemoryRecordsNewestFirst([...current, removed])
+      );
+      if (wasExpanded) {
+        setExpandedErrorSolutionIds((current) => new Set(current).add(id));
+      }
       showNotice("删除错误恢复经验失败", { message: error instanceof Error ? error.message : String(error) });
     } finally {
       setErrorSolutionBusyId(null);
@@ -4847,7 +4957,11 @@ export function App() {
     try {
       const modelId = errorSolutionModelFilter === "all" ? null : errorSolutionModelFilter;
       const cleared = await window.codexh.clearErrorSolutions(modelId);
-      setErrorSolutions([]);
+      setErrorSolutions((current) => modelId
+        ? current.filter((entry) => entry.modelId !== modelId)
+        : []
+      );
+      setErrorSolutionPage(0);
       setExpandedErrorSolutionIds(new Set());
       setIsClearErrorSolutionsConfirmOpen(false);
       const modelLabel = modelId
@@ -4953,7 +5067,14 @@ export function App() {
 
   async function startSkillLab() {
     const prompt = skillLabPrompt.trim();
-    if (skillLabJobId || (skillLabMode === "create" && !prompt) || (skillLabMode === "optimize" && !skillLabTargetSkillId)) return;
+    const selectedSkillLabModel = skillLabModelOptions.find((option) => option.value === skillLabModelSelection);
+    if (
+      skillLabJobId ||
+      !selectedSkillLabModel ||
+      (skillLabMode === "create" && !prompt) ||
+      (skillLabMode === "optimize" && !skillLabTargetSkillId)
+    ) return;
+    const [providerId, modelId] = skillLabModelSelection.split("::", 2);
     const targetSkill = userSkills.find((skill) => skill.id === skillLabTargetSkillId);
     skillLabNotificationTitleRef.current = skillLabMode === "optimize"
       ? `技能实验室 · ${targetSkill?.displayName ?? targetSkill?.name ?? "持续优化"}`
@@ -4975,7 +5096,9 @@ export function App() {
         prompt,
         requestedName: skillLabMode === "create" ? skillLabName.trim() || undefined : undefined,
         iterations: skillLabIterations,
-        targetSkillId: skillLabMode === "optimize" ? skillLabTargetSkillId : undefined
+        targetSkillId: skillLabMode === "optimize" ? skillLabTargetSkillId : undefined,
+        providerId,
+        modelId
       });
       skillLabJobIdRef.current = jobId;
       setSkillLabJobId(jobId);
@@ -7557,6 +7680,7 @@ export function App() {
                 <div className="settings-section usage-statistics-settings">
                   <UsageStatisticsPanel
                     summary={usageStatistics}
+                    providers={config?.providers ?? []}
                     loading={isUsageStatisticsLoading}
                     rangeDays={usageStatisticsRangeDays}
                     granularity={usageStatisticsGranularity}
@@ -7966,18 +8090,18 @@ export function App() {
                               </label>
 
                               <label className="settings-field full">
-                                <span>模式设置</span>
+                                <span>接口协议</span>
                                 <ComposerSelect
                                   className="form-select provider-type-select"
-                                  ariaLabel="模式设置"
-                                  value={settingsProvider.type}
+                                  ariaLabel="接口协议"
+                                  value={normalizeProviderProtocol(settingsProvider.type)}
                                   onChange={(type) =>
                                     updateProviderDraft(settingsProvider.id, {
                                       type: type as ProviderType
                                     })
                                   }
                                   options={PROVIDER_TYPE_OPTIONS}
-                                  placeholder="选择模式"
+                                  placeholder="选择接口协议"
                                 />
                               </label>
 
@@ -8146,7 +8270,10 @@ export function App() {
 
                             <div className="settings-save-row">
                               <span className="subtle-inline">
-                                当前默认：{configDraft.defaultProvider} / {configDraft.defaultModel}
+                                当前默认：{(() => {
+                                  const provider = configDraft.providers.find((entry) => entry.id === configDraft.defaultProvider);
+                                  return provider ? getProviderDisplayName(provider) : configDraft.defaultProvider;
+                                })()} / {configDraft.defaultModel}
                               </span>
                               <button className="button warm" onClick={() => void saveConfigDraft()}>
                                 保存
@@ -8387,13 +8514,13 @@ export function App() {
                           <label className="settings-field"><span>模型决策超时</span><input type="number" step="1" value={configDraft.timeouts.modelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("modelDecisionMs", event.target.value)} /></label>
                           <label className="settings-field"><span>恢复请求超时</span><input type="number" step="1" value={configDraft.timeouts.recoveryModelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("recoveryModelDecisionMs", event.target.value)} /></label>
                           <label className="settings-field"><span>模型超时重试次数</span><input type="number" step="1" value={configDraft.timeouts.modelTimeoutRetries} onChange={(event) => updateTimeoutDraft("modelTimeoutRetries", event.target.value)} /></label>
-                          <label className="settings-field"><span>工具执行超时</span><input type="number" step="1" value={configDraft.timeouts.toolExecutionMs / 1_000} onChange={(event) => updateTimeoutDraft("toolExecutionMs", event.target.value)} /></label>
+                          <label className="settings-field"><span>非终端工具超时</span><input type="number" step="1" value={configDraft.timeouts.toolExecutionMs / 1_000} onChange={(event) => updateTimeoutDraft("toolExecutionMs", event.target.value)} /></label>
                           <label className="settings-field"><span>多模态意图分类超时</span><input type="number" step="1" value={configDraft.timeouts.multimodalIntentClassifyMs / 1_000} onChange={(event) => updateTimeoutDraft("multimodalIntentClassifyMs", event.target.value)} /></label>
                           <label className="settings-field"><span>模型连接测试超时</span><input type="number" step="1" value={configDraft.timeouts.modelTestMs / 1_000} onChange={(event) => updateTimeoutDraft("modelTestMs", event.target.value)} /></label>
                           <label className="settings-field"><span>视频生成总超时</span><input type="number" step="1" value={configDraft.timeouts.videoGenerationMs / 1_000} onChange={(event) => updateTimeoutDraft("videoGenerationMs", event.target.value)} /></label>
                           <label className="settings-field"><span>视频状态轮询间隔</span><input type="number" step="1" value={configDraft.timeouts.videoPollIntervalMs / 1_000} onChange={(event) => updateTimeoutDraft("videoPollIntervalMs", event.target.value)} /></label>
                         </div>
-                        <span className="timeout-settings-note">“模型超时重试次数”控制模型响应超时；“工具执行超时”控制单个工具调用（如文件写入、终端命令）的最大执行时间，超时后自动中止并提示模型换一种方式重试。</span>
+                        <span className="timeout-settings-note">“模型超时重试次数”控制模型响应超时；终端命令会在持续无输出 5 分钟后进入诊断，下载等持续输出的任务会继续运行。</span>
                       </div>
                       <div className="settings-save-row">
                         <span className="subtle-inline">图片生成与视频下载没有固定超时，只会在任务被取消时中断。</span>
@@ -8645,21 +8772,24 @@ export function App() {
                         </div>
                       </div>
                     ) : null}
-                    <div className="memory-solution-list" aria-label="自我完善经验列表">
-                      {selfImprovementMemories.slice(selfImprovementMemoryPage * 20, (selfImprovementMemoryPage + 1) * 20).map((memory) => (
+                    <div ref={selfImprovementMemoryListRef} className="memory-solution-list memory-paged-list" aria-label="自我完善经验列表">
+                      {visibleSelfImprovementMemories.map((memory) => (
                         <article key={memory.id} className="memory-solution-card">
                           <div className="memory-solution-card-head"><div className="memory-solution-card-copy"><div className="memory-solution-card-title"><strong>{memory.title}</strong><span className="memory-meta-chip soft">{memory.scope === "project" ? "项目" : "全局"}</span></div><p className="memory-solution-summary">{memory.content}</p></div><button className="button ghost danger-icon-button" type="button" title="删除经验" onClick={() => void deleteSelfImprovementMemory(memory.id)}><IconTrash /></button></div>
                         </article>
                       ))}
                       {!selfImprovementMemories.length ? <div className="memory-empty-state"><div className="memory-empty-icon" aria-hidden><IconKnowledge /></div><strong>暂无记忆记录</strong><p>完成的主任务会在空闲后自动提炼为记忆。</p></div> : null}
                     </div>
-                    {selfImprovementMemories.length > 20 ? (
-                      <div className="memory-toolbar-actions">
-                        <button className="button ghost" type="button" disabled={selfImprovementMemoryPage === 0} onClick={() => setSelfImprovementMemoryPage((current) => current - 1)}>上一页</button>
-                        <span className="memory-count-pill">{selfImprovementMemoryPage + 1} / {Math.ceil(selfImprovementMemories.length / 20)}</span>
-                        <button className="button ghost" type="button" disabled={selfImprovementMemoryPage >= Math.ceil(selfImprovementMemories.length / 20) - 1} onClick={() => setSelfImprovementMemoryPage((current) => current + 1)}>下一页</button>
-                      </div>
-                    ) : null}
+                    <MemoryPagination
+                      label="记忆列表"
+                      page={safeSelfImprovementMemoryPage}
+                      pageCount={selfImprovementMemoryPageCount}
+                      totalCount={selfImprovementMemories.length}
+                      onPageChange={(page) => {
+                        setSelfImprovementMemoryPage(page);
+                        window.requestAnimationFrame(() => selfImprovementMemoryListRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
+                      }}
+                    />
                   </div>
                   <div className="config-block memory-management-panel">
                     <div className="section-copy">
@@ -8677,6 +8807,7 @@ export function App() {
                             value={errorSolutionModelFilter}
                             onChange={(value) => {
                               setErrorSolutionModelFilter(value);
+                              setErrorSolutionPage(0);
                               void refreshErrorSolutions(value);
                             }}
                             options={errorSolutionModelOptions}
@@ -8707,11 +8838,13 @@ export function App() {
                       </div>
                     </div>
 
-                    <div className="memory-solution-list" aria-label="错误恢复经验列表">
-                      {errorSolutions.length ? errorSolutions.map((solution) => {
+                    <div ref={errorSolutionListRef} className="memory-solution-list memory-paged-list" aria-label="错误恢复经验列表">
+                      {visibleErrorSolutions.length ? visibleErrorSolutions.map((solution) => {
                         const isBusy = errorSolutionBusyId === solution.id;
                         const isExpanded = expandedErrorSolutionIds.has(solution.id);
                         const modelLabel = resolveErrorSolutionModelLabel(solution.modelId);
+                        const recallCount = solution.recallCount ?? 0;
+                        const recallStatus = getErrorSolutionRecallStatus(solution.lastRecallOutcome);
                         return (
                           <article key={solution.id} className={`memory-solution-card${isExpanded ? " is-expanded" : ""}`}>
                             <div className="memory-solution-card-head">
@@ -8727,16 +8860,22 @@ export function App() {
                                 <div className="memory-solution-card-meta">
                                   <span title={solution.taskKeyPattern}>{solution.taskKeyPattern}</span>
                                   <span>{solution.projectId ? "项目范围" : "全局范围"}</span>
+                                  <span>引用 {recallCount} 次</span>
+                                  <span>{solution.lastRecalledAt ? `最近命中 ${formatRelativeTime(solution.lastRecalledAt)}` : "尚未命中"}</span>
+                                  {recallStatus ? <span className={`memory-recall-status is-${solution.lastRecallOutcome}`}>{recallStatus}</span> : null}
                                   <span>最近使用 {formatRelativeTime(solution.lastUsedAt)}</span>
                                 </div>
                               </div>
                               <div className="memory-solution-card-actions">
                                 <button
-                                  className="button ghost"
+                                  className={`button ghost memory-solution-toggle${isExpanded ? " is-expanded" : ""}`}
                                   type="button"
                                   onClick={() => toggleErrorSolutionExpanded(solution.id)}
+                                  aria-expanded={isExpanded}
+                                  aria-controls={`error-solution-details-${solution.id}`}
                                 >
-                                  {isExpanded ? "收起" : "详情"}
+                                  <IconChevronDown />
+                                  <span>{isExpanded ? "收起" : "详情"}</span>
                                 </button>
                                 <button
                                   className="button ghost danger-icon-button"
@@ -8751,10 +8890,16 @@ export function App() {
                               </div>
                             </div>
                             {isExpanded ? (
-                              <div className="memory-solution-details">
+                              <div id={`error-solution-details-${solution.id}`} className="memory-solution-details">
                                 <div className="memory-solution-detail-block">
                                   <span>所属模型</span>
                                   <p>{modelLabel}（{solution.modelId || "未知"}）</p>
+                                </div>
+                                <div className="memory-solution-detail-block">
+                                  <span>引用情况</span>
+                                  <p>累计引用 {recallCount} 次；{solution.lastRecalledAt
+                                    ? `最近命中于 ${formatRelativeTime(solution.lastRecalledAt)}${recallStatus ? `，结果：${recallStatus}` : ""}`
+                                    : "尚未在后续任务中命中"}</p>
                                 </div>
                                 <div className="memory-solution-detail-block">
                                   <span>失败摘要</span>
@@ -8768,6 +8913,14 @@ export function App() {
                                   <span>签名：{solution.errorSignature}</span>
                                   <span>创建于 {formatRelativeTime(solution.createdAt)}</span>
                                 </div>
+                                <button
+                                  className="memory-solution-collapse"
+                                  type="button"
+                                  onClick={() => toggleErrorSolutionExpanded(solution.id)}
+                                >
+                                  <IconChevronDown />
+                                  <span>收起详情</span>
+                                </button>
                               </div>
                             ) : null}
                           </article>
@@ -8786,6 +8939,16 @@ export function App() {
                         </div>
                       )}
                     </div>
+                    <MemoryPagination
+                      label="错误恢复经验列表"
+                      page={safeErrorSolutionPage}
+                      pageCount={errorSolutionPageCount}
+                      totalCount={errorSolutions.length}
+                      onPageChange={(page) => {
+                        setErrorSolutionPage(page);
+                        window.requestAnimationFrame(() => errorSolutionListRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
+                      }}
+                    />
                   </div>
                 </div>
               ) : null}
@@ -9259,6 +9422,7 @@ export function App() {
                     </div>
                     <div className="capability-list">
                       {plugins.map((plugin) => {
+                        const callCount = pluginCallCounts.get(plugin.id) ?? 0;
                         return (
                           <article key={plugin.id} className="skill-row capability-list-item">
                             <div className="skill-row-main">
@@ -9271,6 +9435,9 @@ export function App() {
                               <p className="skill-row-desc" title={plugin.source}>{plugin.source}</p>
                               <div className="skill-row-meta">
                                 <span className="skill-stat">已安装</span>
+                                <span className={`skill-stat ${callCount > 0 ? "is-hot" : ""}`}>
+                                  调用 {callCount.toLocaleString()} 次
+                                </span>
                                 <span className="skill-row-path" title={plugin.installPath}>{plugin.installPath}</span>
                               </div>
                             </div>
@@ -9299,8 +9466,9 @@ export function App() {
                       <span>在历史聊天上右键选择“提炼技能”后，生成的工作流会显示在这里，并可在后续聊天中复用。</span>
                     </div>
                     <div className="capability-list">
-                      {userSkills.length > 0 ? userSkills.map((skill) => (
-                        <article key={skill.id} className="skill-row capability-list-item">
+                      {userSkills.length > 0 ? userSkills.map((skill) => {
+                        const callCount = resolveSkillUsageStats(skill).callCount;
+                        return <article key={skill.id} className="skill-row capability-list-item">
                           <div className="skill-row-main">
                             <div className="skill-row-title">
                               <span className="skill-row-icon" aria-hidden><IconSkills /></span>
@@ -9311,6 +9479,9 @@ export function App() {
                             <p className="skill-row-desc" title={skill.description}>{skill.description}</p>
                             <div className="skill-row-meta">
                               <span className="skill-stat">用户技能</span>
+                              <span className={`skill-stat ${callCount > 0 ? "is-hot" : ""}`}>
+                                调用 {callCount.toLocaleString()} 次
+                              </span>
                               <span className="skill-row-path" title={skill.skillPath}>{skill.skillPath}</span>
                             </div>
                           </div>
@@ -9323,8 +9494,8 @@ export function App() {
                           >
                             <IconTrash />
                           </button>
-                        </article>
-                      )) : <div className="detail-empty">尚未生成用户技能。</div>}
+                        </article>;
+                      }) : <div className="detail-empty">尚未生成用户技能。</div>}
                     </div>
                   </div>
                 </div>
@@ -9401,6 +9572,21 @@ export function App() {
                           />
                         </label>
                       )}
+                      <label className="settings-field skill-lab-model-field">
+                        <span>实验模型</span>
+                        <ComposerSelect
+                          className="form-select skill-lab-skill-select"
+                          ariaLabel="选择技能实验室模型"
+                          value={skillLabModelSelection}
+                          disabled={isSkillLabBusy || skillLabModelOptions.length === 0}
+                          onChange={setSkillLabModelSelection}
+                          options={skillLabModelOptions}
+                          placeholder="请选择实验模型"
+                          searchable
+                          searchPlaceholder="搜索供应商或模型"
+                          emptyLabel="没有可用的实验模型"
+                        />
+                      </label>
                       <label className="settings-field skill-lab-iterations-field">
                         <span>迭代次数</span>
                         <input
@@ -9427,7 +9613,10 @@ export function App() {
                         <button
                           className="button primary"
                           type="button"
-                          disabled={skillLabMode === "create" ? !skillLabPrompt.trim() : !skillLabTargetSkillId}
+                          disabled={
+                            !skillLabModelSelection ||
+                            (skillLabMode === "create" ? !skillLabPrompt.trim() : !skillLabTargetSkillId)
+                          }
                           onClick={() => void startSkillLab()}
                         >
                           <IconSkills />
@@ -11989,8 +12178,70 @@ function estimateContextTokens(value: string): number {
   return Math.ceil(Array.from(normalized).length / 2.8);
 }
 
+function MemoryPagination({
+  label,
+  page,
+  pageCount,
+  totalCount,
+  onPageChange
+}: {
+  label: string;
+  page: number;
+  pageCount: number;
+  totalCount: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (totalCount === 0) return null;
+  const safePage = Math.min(Math.max(0, page), pageCount - 1);
+  const rangeStart = safePage * MEMORY_LIST_PAGE_SIZE + 1;
+  const rangeEnd = Math.min(totalCount, (safePage + 1) * MEMORY_LIST_PAGE_SIZE);
+  return (
+    <nav className="memory-pagination" aria-label={`${label}分页`}>
+      <span className="memory-pagination-range">{rangeStart}-{rangeEnd} / {totalCount}</span>
+      <div className="memory-pagination-controls">
+        <button
+          className="memory-pagination-button"
+          type="button"
+          disabled={safePage === 0}
+          onClick={() => onPageChange(safePage - 1)}
+          title="上一页"
+          aria-label={`${label}上一页`}
+        >
+          <IconChevronLeft />
+        </button>
+        <span className="memory-pagination-page" aria-live="polite">
+          {safePage + 1} / {pageCount}
+        </span>
+        <button
+          className="memory-pagination-button"
+          type="button"
+          disabled={safePage >= pageCount - 1}
+          onClick={() => onPageChange(safePage + 1)}
+          title="下一页"
+          aria-label={`${label}下一页`}
+        >
+          <IconChevronRight />
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+function sortMemoryRecordsNewestFirst<T extends { id: string; createdAt: string; updatedAt: string }>(records: readonly T[]): T[] {
+  return [...records].sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt)
+      || right.createdAt.localeCompare(left.createdAt)
+      || right.id.localeCompare(left.id)
+  );
+}
+
+function getMemoryLastPageIndex(totalCount: number): number {
+  return Math.max(0, Math.ceil(Math.max(0, totalCount) / MEMORY_LIST_PAGE_SIZE) - 1);
+}
+
 function UsageStatisticsPanel({
   summary,
+  providers,
   loading,
   rangeDays,
   granularity,
@@ -11999,6 +12250,7 @@ function UsageStatisticsPanel({
   onRefresh
 }: {
   summary: UsageAnalyticsSummary | null;
+  providers: ProviderDefinition[];
   loading: boolean;
   rangeDays: number | null;
   granularity: UsageAnalyticsGranularity;
@@ -12006,6 +12258,7 @@ function UsageStatisticsPanel({
   onGranularityChange: (value: UsageAnalyticsGranularity) => void;
   onRefresh: () => void;
 }) {
+  const [hiddenSeriesIds, setHiddenSeriesIds] = useState<string[]>([]);
   const palette = ["#4d8df7", "#19bd86", "#dca331", "#a875e9", "#1badc7", "#e36b78", "#7b8ba4"];
   const models = (summary?.models ?? []).slice(0, 7);
   const totalModelTokens = models.reduce((total, row) => total + row.usage.totalTokens, 0);
@@ -12045,15 +12298,33 @@ function UsageStatisticsPanel({
           <header><h3>模型分布</h3><span>{summary?.models.length ?? 0} 个模型</span></header>
           <div className="usage-model-distribution">
             <div className="usage-donut" style={{ background: donutGradient }} />
-            <div className="usage-model-table-wrap"><table className="usage-model-table"><thead><tr><th>模型</th><th>请求</th><th>Token</th></tr></thead><tbody>{models.length ? models.map((row, index) => <tr key={`${row.providerId}:${row.modelId}`}><td><i style={{ background: palette[index % palette.length] }} /><span title={`${row.providerId} / ${row.modelId}`}>{row.modelId}</span></td><td>{row.requestCount.toLocaleString()}</td><td>{formatTokenCount(row.usage.totalTokens)}</td></tr>) : <tr><td colSpan={3} className="usage-empty-cell">该时间范围暂无调用记录</td></tr>}</tbody></table></div>
+            <div className="usage-model-table-wrap"><table className="usage-model-table"><thead><tr><th>模型</th><th>请求</th><th>Token</th></tr></thead><tbody>{models.length ? models.map((row, index) => {
+              const provider = providers.find((entry) => entry.id === row.providerId);
+              const providerLabel = provider ? getProviderDisplayName(provider) : row.providerId;
+              const label = `${providerLabel} / ${row.modelId}`;
+              return <tr key={`${row.providerId}:${row.modelId}`}><td><i style={{ background: palette[index % palette.length] }} /><span title={label}>{label}</span></td><td>{row.requestCount.toLocaleString()}</td><td>{formatTokenCount(row.usage.totalTokens)}</td></tr>;
+            }) : <tr><td colSpan={3} className="usage-empty-cell">该时间范围暂无调用记录</td></tr>}</tbody></table></div>
           </div>
         </section>
         <section className="usage-statistics-panel trend-panel" aria-label="Token 使用趋势">
           <header><h3>Token 使用趋势</h3><span>{trend.length ? `${trend[0].label} 至 ${trend.at(-1)?.label}` : "暂无趋势"}</span></header>
-          <div className="usage-chart-legend">{series.map((item) => <span key={item.id}><i style={{ background: item.color }} />{item.label}</span>)}</div>
+          <div className="usage-chart-legend">{series.map((item) => {
+            const isHidden = hiddenSeriesIds.includes(item.id);
+            return <button
+              key={item.id}
+              className={isHidden ? "is-hidden" : undefined}
+              type="button"
+              aria-pressed={!isHidden}
+              title={`${isHidden ? "显示" : "隐藏"}${item.label}折线`}
+              onClick={() => setHiddenSeriesIds((current) => current.includes(item.id)
+                ? current.filter((id) => id !== item.id)
+                : [...current, item.id]
+              )}
+            ><i style={{ background: item.color }} />{item.label}</button>;
+          })}</div>
           <div className="usage-chart-wrap">{trend.length ? <svg className="usage-chart" viewBox="0 0 600 176" role="img" aria-label="Token 使用趋势折线图">
             {[0, 0.25, 0.5, 0.75, 1].map((ratio) => { const y = chart.top + chart.height - ratio * chart.height; return <g key={ratio}><line x1={chart.left} y1={y} x2={chart.left + chart.width} y2={y} /><text x={chart.left - 6} y={y + 3} textAnchor="end">{formatTokenCount(Math.round(tokenMax * ratio))}</text></g>; })}
-            {series.map((item) => {
+            {series.filter((item) => !hiddenSeriesIds.includes(item.id)).map((item) => {
               const points = item.values.map((value, index) => ({
                 x: chart.left + (index * chart.width) / Math.max(1, trend.length - 1),
                 y: chart.top + chart.height - (value / tokenMax) * chart.height,
@@ -17522,6 +17793,21 @@ function getModelProfileKey(providerId: string, modelId: string): string {
   return `${providerId}:${modelId}`;
 }
 
+function getErrorSolutionRecallStatus(outcome: ErrorSolutionRecord["lastRecallOutcome"]): string | null {
+  switch (outcome) {
+    case "matched":
+      return "已提供建议";
+    case "blocked":
+      return "最近已拦截";
+    case "prerequisite":
+      return "已要求重新读取";
+    case "recovered":
+      return "已成功恢复";
+    default:
+      return null;
+  }
+}
+
 function formatLatency(latencyMs: number): string {
   return latencyMs >= 1_000 ? `${(latencyMs / 1_000).toFixed(2)} s` : `${latencyMs} ms`;
 }
@@ -17534,8 +17820,15 @@ function getProviderDisplayName(provider: ProviderDefinition): string {
   return provider.name?.trim() || provider.id;
 }
 
+function normalizeProviderProtocol(type: ProviderType): ProviderType {
+  return type === "openrouter" || type === "ollama" || type === "vllm" || type === "gateway"
+    ? "openai-compatible"
+    : type;
+}
+
 function getProviderTransportLabel(type: ProviderType): string {
-  return PROVIDER_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type;
+  const protocol = normalizeProviderProtocol(type);
+  return PROVIDER_TYPE_OPTIONS.find((option) => option.value === protocol)?.label ?? protocol;
 }
 
 function getProviderSubtitle(provider: ProviderDefinition): string {

@@ -54,6 +54,106 @@ describe("applyCodexPatch", () => {
     ]));
   });
 
+  it("repairs update context lines emitted without diff prefixes", async () => {
+    const root = await makeTempDir();
+    const filePath = path.join(root, "duplicate.ts");
+    await fs.writeFile(
+      filePath,
+      [
+        "function alpha() {",
+        "  return 1;",
+        "}",
+        "",
+        "function beta() {",
+        "  return 1;",
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    await applyCodexPatch(
+      `*** Begin Patch
+*** Update File: duplicate.ts
+@@
+function beta() {
+-  return 1;
++  return 2;
+}
+*** End Patch`,
+      root
+    );
+
+    await expect(fs.readFile(filePath, "utf8")).resolves.toContain(
+      "function beta() {\n  return 2;\n}"
+    );
+  });
+
+  it("infers a raw desired fragment insertion from unique surrounding anchors", async () => {
+    const root = await makeTempDir();
+    const filePath = path.join(root, "legacy.js");
+    await fs.writeFile(
+      filePath,
+      [
+        "function before() {",
+        "  return true;",
+        "}",
+        "",
+        "function after() {",
+        "  return false;",
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const result = await applyCodexPatch(
+      `*** Begin Patch
+*** Update File: legacy.js
+  return true;
+}
+
+function inserted() {
+  return "compatible";
+}
+
+function after() {
+*** End Patch`,
+      root
+    );
+
+    await expect(fs.readFile(filePath, "utf8")).resolves.toContain(
+      "function inserted() {\n  return \"compatible\";\n}"
+    );
+    expect(result.changes[0]).toMatchObject({ additions: 4, deletions: 0, applyMode: "text" });
+  });
+
+  it("rejects a raw no-edit fragment when its anchors are ambiguous", async () => {
+    const root = await makeTempDir();
+    const filePath = path.join(root, "ambiguous.js");
+    await fs.writeFile(
+      filePath,
+      [
+        "function before() {}",
+        "function after() {}",
+        "function before() {}",
+        "function after() {}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    await expect(applyCodexPatch(
+      `*** Begin Patch
+*** Update File: ambiguous.js
+function before() {}
+function inserted() {}
+function after() {}
+*** End Patch`,
+      root
+    )).rejects.toThrow(/anchors are ambiguous/i);
+  });
+
   it("rejects patch paths outside the selected project folder", async () => {
     const root = await makeTempDir();
 

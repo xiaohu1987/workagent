@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, ProviderFactory, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, ProviderFactory, ProviderStreamIncompleteError, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -528,6 +528,7 @@ describe("OpenAiCompatibleProvider", () => {
       yield {
         choices: [
           {
+            finish_reason: "stop",
             delta: {
               content: '_calls> [{"name":"fs.read_directory","arguments":{"path":"."}}] </tool_calls>'
             }
@@ -580,7 +581,7 @@ describe("OpenAiCompatibleProvider", () => {
   it("streams only the decoded assistant_message before a JSON tool batch", async () => {
     async function* streamDecision() {
       yield { choices: [{ delta: { content: '{"assistant_message":"I will inspect ' } }] };
-      yield { choices: [{ delta: { content: 'the renderer.","tool_calls":[{"name":"fs.read_file","arguments":{"path":"src/App.tsx"}}],"end_turn":false}' } }] };
+      yield { choices: [{ finish_reason: "stop", delta: { content: 'the renderer.","tool_calls":[{"name":"fs.read_file","arguments":{"path":"src/App.tsx"}}],"end_turn":false}' } }] };
     }
 
     mocks.chatCreate.mockResolvedValue(streamDecision());
@@ -626,6 +627,7 @@ describe("OpenAiCompatibleProvider", () => {
     async function* streamWithUsage() {
       yield {
         choices: [{
+          finish_reason: "stop",
           delta: {
             content: '{"assistant_message":"Done.","tool_calls":[],"end_turn":true,"goal_completed":true}'
           }
@@ -689,10 +691,46 @@ describe("OpenAiCompatibleProvider", () => {
     });
   });
 
+  it("rejects a stream that ends without a provider completion signal", async () => {
+    async function* incompleteStream() {
+      yield {
+        choices: [{
+          delta: {
+            content: '{"assistant_message":"This must not be treated as complete.","tool_calls":[],"end_turn":true,"goal_completed":true}'
+          }
+        }]
+      };
+    }
+
+    mocks.chatCreate.mockResolvedValue(incompleteStream());
+    const provider: ProviderDefinition = { id: "company-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "test-model",
+      providerId: "company-gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: true,
+      supportsToolCalling: false,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+
+    await expect(new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON only.",
+      transcript: [{ role: "user", content: "Finish" }],
+      availableTools: [],
+      model,
+      provider,
+      stream: true
+    })).rejects.toBeInstanceOf(ProviderStreamIncompleteError);
+  });
+
   it("streams a final assistant_message when native tools are available but unused", async () => {
     async function* streamFinalAnswer() {
       yield { choices: [{ delta: { content: '{"assistant_message":"Streaming ' } }] };
-      yield { choices: [{ delta: { content: 'works","tool_calls":[],"end_turn":true,"goal_completed":true}' } }] };
+      yield { choices: [{ finish_reason: "stop", delta: { content: 'works","tool_calls":[],"end_turn":true,"goal_completed":true}' } }] };
     }
 
     mocks.chatCreate.mockResolvedValue(streamFinalAnswer());
@@ -739,7 +777,7 @@ describe("OpenAiCompatibleProvider", () => {
     const nativeName = nativeToolName("fs.read_file");
     async function* streamToolCall() {
       yield { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", function: { name: nativeName, arguments: '{"path":"src/' } }] } }] };
-      yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'App.tsx"}' } }] } }] };
+      yield { choices: [{ finish_reason: "tool_calls", delta: { tool_calls: [{ index: 0, function: { arguments: 'App.tsx"}' } }] } }] };
     }
 
     mocks.chatCreate.mockResolvedValue(streamToolCall());
@@ -1145,6 +1183,8 @@ describe("decision system prompt", () => {
     expect(prompt).toContain("use apply_patch");
     expect(prompt).toContain("There is no create_file tool");
     expect(prompt).toContain("arguments.patch");
+    expect(prompt).toContain("*** Update File: relative/path.ext");
+    expect(prompt).toContain("Every update hunk line must start with a space, -, or +");
     expect(prompt).toContain("fs.read_directory");
     expect(prompt).toContain("Do not repeat it");
     expect(prompt).toContain("goal_completed");

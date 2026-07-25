@@ -104,4 +104,22 @@ describe("PluginRuntime", () => {
     expect(bootstrap).toContain("Use superpowers first");
     expect(progress.map((event) => event.percent)).toEqual([5, 35, 72, 80]);
   });
+
+  it("installs a standalone Skill from a local source directory", async () => {
+    const sourceRoot = await makeTempDir();
+    const installedRoot = await makeTempDir();
+    const skillSource = path.join(sourceRoot, "release-checker");
+    await fs.mkdir(skillSource, { recursive: true });
+    await fs.writeFile(
+      path.join(skillSource, "SKILL.md"),
+      "---\nname: release-checker\ndescription: Verify a release before publishing.\n---\nRun the release checks.\n",
+      "utf8"
+    );
+
+    const installed = await new PluginRuntime().installSkillFromSource(skillSource, installedRoot);
+
+    expect(installed.installPath).toBe(path.join(installedRoot, "release-checker"));
+    expect(installed.skillPath).toBe(path.join(installedRoot, "release-checker", "SKILL.md"));
+    await expect(fs.readFile(installed.skillPath, "utf8")).resolves.toContain("release-checker");
+  });
 });

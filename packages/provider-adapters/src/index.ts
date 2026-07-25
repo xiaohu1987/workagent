@@ -65,6 +65,19 @@ export interface GeneratedImageResult {
   responseModel?: string;
 }
 
+export class ProviderStreamIncompleteError extends Error {
+  public constructor(reason: "missing_finish_reason" | "length" | "content_filter") {
+    super(
+      reason === "length"
+        ? "Provider stream terminated because the response reached its output limit."
+        : reason === "content_filter"
+          ? "Provider stream terminated because its response was filtered."
+          : "Provider stream terminated before emitting a completion signal."
+    );
+    this.name = "ProviderStreamIncompleteError";
+  }
+}
+
 export class ProviderFactory {
   readonly #fetch: ProviderFetch;
 
@@ -221,12 +234,17 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       let visibleText = "";
       let reasoning = "";
       let streamUsage: unknown;
+      let finishReason: string | null = null;
       const streamedNativeCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
       for await (const chunk of stream) {
         if (chunk?.usage) {
           streamUsage = chunk.usage;
         }
-        const delta = chunk?.choices?.[0]?.delta;
+        const choice = chunk?.choices?.[0];
+        if (typeof choice?.finish_reason === "string") {
+          finishReason = choice.finish_reason;
+        }
+        const delta = choice?.delta;
         const content = delta?.content ?? "";
         if (content) {
           text += content;
@@ -254,6 +272,15 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           }
           streamedNativeCalls.set(index, current);
         }
+      }
+      if (!finishReason) {
+        throw new ProviderStreamIncompleteError("missing_finish_reason");
+      }
+      if (finishReason === "length") {
+        throw new ProviderStreamIncompleteError("length");
+      }
+      if (finishReason === "content_filter") {
+        throw new ProviderStreamIncompleteError("content_filter");
       }
       const trimmedReasoning = reasoning.trim();
       const applyReasoning = (decision: ProviderTurnDecision): ProviderTurnDecision =>
@@ -1893,7 +1920,7 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
       ? ["The desktop shell is Windows PowerShell. Use PowerShell syntax, not Bash/CMD syntax; recognizable CMD commands may be adapted automatically. Never write files through shell.exec: use apply_patch."]
       : []),
     "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",
-    "For apply_patch, send arguments.patch with this exact raw grammar: *** Begin Patch\\n*** Add File: relative/path.ext\\n+content\\n*** End Patch. Do not send a Git diff, file_path, or patch_content.",
+    "For apply_patch, send arguments.patch as raw Codex patch text. Add example: *** Begin Patch\\n*** Add File: relative/path.ext\\n+content\\n*** End Patch. Update example: *** Begin Patch\\n*** Update File: relative/path.ext\\n@@\\n unchanged context\\n-old text\\n+new text\\n*** End Patch. Every update hunk line must start with a space, -, or +. Do not send file_path or patch_content.",
     "When reviewing or comparing code structure (functions/classes/methods), prefer code.ast_diff with {\"path\": \"relative/file\"} (optional against). Still use apply_patch for writes.",
     "For large source files, call code.outline first, then fs.read_file with optional {\"offset\": startLine, \"limit\": lineCount} instead of reading the entire file.",
     "To inspect the selected project folder, call fs.read_directory with { path: \".\" }. Never call read or use Unix paths such as /home.",

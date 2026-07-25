@@ -91,6 +91,23 @@ export interface ToolRuntimeContext {
   waitForSubagents: (input: { agents?: string[]; timeoutMs?: number }) => Promise<SubagentWaitResult>;
   interruptAgent: (agent: string) => Promise<SubagentResultEnvelope>;
   listSubagents: () => Promise<ThreadRecord[]>;
+  installSkill?: (input: { source: string; subdirectory?: string }) => Promise<{
+    id: string;
+    name: string;
+    qualifiedName: string;
+    skillPath: string;
+  }>;
+  installPlugin?: (source: string) => Promise<{ id: string; name: string; version: string; installPath: string; source: string }>;
+  installMcpServer?: (input: {
+    id?: string;
+    name: string;
+    description?: string;
+    command?: string;
+    args?: string[];
+    cwd?: string;
+    url?: string;
+    transport?: string;
+  }) => Promise<{ server: { id: string; name: string; transport?: string; command?: string; url?: string }; connectionError?: string }>;
   listSelfImprovementMemories?: (query?: string) => Promise<Array<{ id: string; title: string; content: string; scope: string }>>;
   addSelfImprovementMemory?: (input: { title: string; content: string; scope?: "global" | "project" }) => Promise<{ id: string }>;
   webSearch: (query: string) => Promise<Array<{ title: string; url: string; snippet: string }>>;
@@ -241,6 +258,7 @@ const TOOL_ALIASES: Record<string, string> = {
 
 const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
   "apply_patch", "fs.write_file", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
+  "skills.install", "plugins.install", "mcp.install",
   "image.generate", "video.generate",
   "git.stage_file", "git.stage_all", "git.unstage_file", "git.revert_file", "git.apply_hunk",
   "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
@@ -752,7 +770,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec(
       "apply_patch",
-      "Apply a Codex patch. Pass arguments.patch as raw text beginning with *** Begin Patch and ending with *** End Patch. Use *** Add File: relative/path for new files.",
+      "Apply a Codex patch in arguments.patch. Add files with *** Add File and +content. Update files with *** Update File, @@, and lines prefixed by space (context), - (remove), or + (add). The patch must begin with *** Begin Patch and end with *** End Patch.",
       ["patch"],
       "high"
     ),
@@ -1362,6 +1380,131 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     async (_args, ctx) => {
       const agents = await ctx.listSubagents();
       return { ok: true, content: JSON.stringify(agents), json: { agents } };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "skills.install",
+      description: "Install a reusable Skill from a local directory or Git repository. The source must contain a valid SKILL.md with name and description metadata. This changes the user's global Skills library and requires approval.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Local directory, full Git URL, or owner/repository shorthand." },
+          subdirectory: { type: "string", description: "Optional relative directory inside the source that contains SKILL.md." }
+        },
+        required: ["source"]
+      },
+      riskLevel: "high"
+    },
+    async (args, ctx) => {
+      if (!ctx.installSkill) return { ok: false, content: "Skill installation is unavailable in this task." };
+      const source = String(args.source ?? "").trim();
+      const subdirectory = typeof args.subdirectory === "string" ? args.subdirectory.trim() || undefined : undefined;
+      if (!source) return { ok: false, content: "A Skill source is required." };
+      const approved = await ctx.requestApproval({
+        title: "安装 Skill",
+        description: subdirectory ? `${source} (${subdirectory})` : source,
+        riskLevel: "high",
+        payload: { kind: "skill", source, subdirectory }
+      });
+      if (!approved) return { ok: false, content: "Skill installation was not approved." };
+      const skill = await ctx.installSkill({ source, subdirectory });
+      return {
+        ok: true,
+        content: `Installed Skill ${skill.qualifiedName} and added it to this task. Load it with skills.load before using its instructions.`,
+        json: { skill }
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "plugins.install",
+      description: "Install a CodeXH plugin from a local directory or Git repository. The source must contain .codex-plugin/plugin.json. This changes the user's global plugin library, may add MCP servers, and requires approval.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Local directory, full Git URL, or owner/repository shorthand." }
+        },
+        required: ["source"]
+      },
+      riskLevel: "high"
+    },
+    async (args, ctx) => {
+      if (!ctx.installPlugin) return { ok: false, content: "Plugin installation is unavailable in this task." };
+      const source = String(args.source ?? "").trim();
+      if (!source) return { ok: false, content: "A plugin source is required." };
+      const approved = await ctx.requestApproval({
+        title: "安装插件",
+        description: source,
+        riskLevel: "high",
+        payload: { kind: "plugin", source }
+      });
+      if (!approved) return { ok: false, content: "Plugin installation was not approved." };
+      const plugin = await ctx.installPlugin(source);
+      return {
+        ok: true,
+        content: `Installed plugin ${plugin.name} and enabled it for this task. Its Skills and MCP configuration are now available to subsequent turns.`,
+        json: { plugin }
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "mcp.install",
+      description: "Add and enable an MCP server. Supply either a stdio command with arguments or an http(s) endpoint. Do not invent API keys or credentials; ask the user to configure secrets in Settings when required. This changes global MCP configuration and requires approval.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Optional stable server identifier." },
+          name: { type: "string", description: "Visible MCP server name." },
+          description: { type: "string", description: "Optional concise purpose." },
+          command: { type: "string", description: "Stdio executable name, for example npx." },
+          args: { type: "array", items: { type: "string" }, description: "Arguments for the stdio command." },
+          cwd: { type: "string", description: "Optional working directory for a stdio server." },
+          url: { type: "string", description: "HTTP or HTTPS MCP endpoint." },
+          transport: { type: "string", description: "Optional transport override, such as stdio, sse, or streamable-http." }
+        },
+        required: ["name"]
+      },
+      riskLevel: "high"
+    },
+    async (args, ctx) => {
+      if (!ctx.installMcpServer) return { ok: false, content: "MCP installation is unavailable in this task." };
+      const name = String(args.name ?? "").trim();
+      const command = typeof args.command === "string" ? args.command.trim() || undefined : undefined;
+      const url = typeof args.url === "string" ? args.url.trim() || undefined : undefined;
+      const toolInput = {
+        id: typeof args.id === "string" ? args.id.trim() || undefined : undefined,
+        name,
+        description: typeof args.description === "string" ? args.description.trim() || undefined : undefined,
+        command,
+        args: Array.isArray(args.args) ? args.args.map((value) => String(value)) : undefined,
+        cwd: typeof args.cwd === "string" ? args.cwd.trim() || undefined : undefined,
+        url,
+        transport: typeof args.transport === "string" ? args.transport.trim() || undefined : undefined
+      };
+      if (!name || (!command && !url)) {
+        return { ok: false, content: "MCP installation requires a name and either command or url." };
+      }
+      const approved = await ctx.requestApproval({
+        title: "安装 MCP 服务",
+        description: command ? `${name}: ${command} ${(toolInput.args ?? []).join(" ")}`.trim() : `${name}: ${url}`,
+        riskLevel: "high",
+        payload: { kind: "mcp", ...toolInput }
+      });
+      if (!approved) return { ok: false, content: "MCP installation was not approved." };
+      const installed = await ctx.installMcpServer(toolInput);
+      const connectionNote = installed.connectionError
+        ? ` Configuration was saved, but the first connection failed: ${installed.connectionError}`
+        : " Connection refresh succeeded.";
+      return {
+        ok: true,
+        content: `Installed and enabled MCP server ${installed.server.name}.${connectionNote} It will be available to subsequent turns.`,
+        json: installed
+      };
     }
   );
 
@@ -2038,6 +2181,15 @@ function createTextSnapshot(path: string, before: string, after: string) {
 }
 
 export function buildApplyPatchFailureMessage(reason: string): string {
+  if (/Patch hunk contains no edits/i.test(reason)) {
+    return [
+      "Patch was not applied because the update did not contain explicit additions or removals and could not be inferred safely.",
+      `Details: ${reason}`,
+      "Use one minimal *** Update File hunk. Prefix unchanged context with one space, removed lines with -, and added lines with +.",
+      "Do not resend the same raw source block unchanged."
+    ].join("\n");
+  }
+
   if (/^Ambiguous patch hunk matched \d+ locations;/i.test(reason)) {
     return [
       "Patch was not applied because its target text appears in multiple locations.",

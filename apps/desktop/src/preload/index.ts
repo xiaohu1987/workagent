@@ -103,7 +103,14 @@ const api = {
   removeSkill: (skillId: string) => ipcRenderer.invoke("skills:remove", skillId),
   listUserSkills: () => ipcRenderer.invoke("user-skills:list"),
   generateUserSkill: (threadId: string, skillName?: string) => ipcRenderer.invoke("user-skills:generate", threadId, skillName),
-  startSkillLab: (payload: { prompt: string; requestedName?: string; iterations?: number; targetSkillId?: string }) => ipcRenderer.invoke("skill-lab:start", payload),
+  startSkillLab: (payload: {
+    prompt: string;
+    requestedName?: string;
+    iterations?: number;
+    targetSkillId?: string;
+    providerId?: string;
+    modelId?: string;
+  }) => ipcRenderer.invoke("skill-lab:start", payload),
   cancelSkillLab: (jobId: string) => ipcRenderer.invoke("skill-lab:cancel", jobId),
   resolveSkillLabApproval: (payload: { jobId: string; approvalId: string; approved: boolean }) =>
     ipcRenderer.invoke("skill-lab:approval", payload),

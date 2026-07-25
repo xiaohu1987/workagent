@@ -507,8 +507,22 @@ function registerIpc(): void {
     return backend.listUserSkills();
   });
   ipcMain.handle("user-skills:generate", (_event, threadId: string, skillName?: string) => backend.generateUserSkill(threadId, skillName));
-  ipcMain.handle("skill-lab:start", (_event, payload: { prompt: string; requestedName?: string; iterations?: number; targetSkillId?: string }) =>
-    backend.startSkillLab(payload.prompt, payload.requestedName, payload.iterations, payload.targetSkillId)
+  ipcMain.handle("skill-lab:start", (_event, payload: {
+    prompt: string;
+    requestedName?: string;
+    iterations?: number;
+    targetSkillId?: string;
+    providerId?: string;
+    modelId?: string;
+  }) =>
+    backend.startSkillLab(
+      payload.prompt,
+      payload.requestedName,
+      payload.iterations,
+      payload.targetSkillId,
+      payload.providerId,
+      payload.modelId
+    )
   );
   ipcMain.handle("skill-lab:cancel", (_event, jobId: string) => backend.cancelSkillLab(jobId));
   ipcMain.handle("skill-lab:approval", (_event, payload: { jobId: string; approvalId: string; approved: boolean }) =>

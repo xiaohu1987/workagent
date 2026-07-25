@@ -123,7 +123,14 @@ declare global {
       removeSkill: (skillId: string) => Promise<void>;
       listUserSkills: () => Promise<SkillMetadata[]>;
       generateUserSkill: (threadId: string, skillName?: string) => Promise<SkillMetadata>;
-      startSkillLab: (payload: { prompt: string; requestedName?: string; iterations?: number; targetSkillId?: string }) => Promise<string>;
+      startSkillLab: (payload: {
+        prompt: string;
+        requestedName?: string;
+        iterations?: number;
+        targetSkillId?: string;
+        providerId?: string;
+        modelId?: string;
+      }) => Promise<string>;
       cancelSkillLab: (jobId: string) => Promise<void>;
       resolveSkillLabApproval: (payload: { jobId: string; approvalId: string; approved: boolean }) => Promise<void>;
       resolveSkillLabClarification: (payload: { jobId: string; clarificationId: string; answers: Record<string, string> }) => Promise<void>;

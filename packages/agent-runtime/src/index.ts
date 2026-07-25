@@ -15,6 +15,7 @@ import type {
   McpServerConfig,
   MessageRecord,
   ModelProfile,
+  PluginRecord,
   ProviderDefinition,
   ProviderTurnDecision,
   ProviderTurnInput,
@@ -505,6 +506,8 @@ interface RuntimeServices {
     expiresAt?: string | null;
   }): Promise<ErrorSolutionRecord>;
   markErrorSolutionUsed?(id: string): Promise<void>;
+  recordErrorSolutionRecall?(id: string): Promise<void>;
+  setErrorSolutionRecallOutcome?(id: string, outcome: "blocked" | "prerequisite"): Promise<void>;
   searchSelfImprovementMemories?(input: { query: string; projectId?: string | null; limit?: number }): Promise<Array<{ id: string; title: string; content: string; scope: string }>>;
   addSelfImprovementMemory?(input: { scope: "global" | "project"; projectId: string | null; kind: "note"; title: string; content: string; sourceThreadId: string | null }): Promise<{ id: string }>;
   markSelfImprovementMemoryUsed?(id: string): Promise<void>;
@@ -548,6 +551,23 @@ interface RuntimeServices {
   interruptAgent(parentThreadId: string, agent: string): Promise<SubagentResultEnvelope>;
   listSubagents(parentThreadId: string): Promise<ThreadRecord[]>;
   hasActiveSubagents(parentThreadId: string): Promise<boolean>;
+  installSkillForThread(threadId: string, input: { source: string; subdirectory?: string }): Promise<{
+    id: string;
+    name: string;
+    qualifiedName: string;
+    skillPath: string;
+  }>;
+  installPluginForThread(threadId: string, source: string): Promise<PluginRecord>;
+  installMcpServerFromChat(input: {
+    id?: string;
+    name: string;
+    description?: string;
+    command?: string;
+    args?: string[];
+    cwd?: string;
+    url?: string;
+    transport?: string;
+  }): Promise<{ server: McpServerConfig; connectionError?: string }>;
   webSearch(threadId: string, query: string): Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage(threadId: string, url: string): Promise<{ title: string; url: string; text: string }>;
   findInPage(url: string, pattern: string): Promise<string[]>;
@@ -612,7 +632,11 @@ class AsyncQueue<T> {
   }
 }
 
-function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+function waitForAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  onAbortAction?: () => void
+): Promise<T> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (callback: () => void) => {
@@ -623,7 +647,10 @@ function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T>
       signal.removeEventListener("abort", onAbort);
       callback();
     };
-    const onAbort = () => finish(() => reject(new Error("Turn interrupted.")));
+    const onAbort = () => finish(() => {
+      onAbortAction?.();
+      reject(new Error("Turn interrupted."));
+    });
 
     operation.then(
       (value) => finish(() => resolve(value)),
@@ -636,6 +663,12 @@ function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T>
     }
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+export function shouldApplyToolExecutionTimeout(toolName: string): boolean {
+  // TerminalRuntime tracks command activity from stdout/stderr. Applying the
+  // generic wall-clock timeout here would discard that progress information.
+  return toolName !== "shell.exec";
 }
 
 class ModelDecisionTimeoutError extends Error {
@@ -1137,6 +1170,7 @@ class ThreadSessionRuntime {
       recommendedSkillIds
     });
     const availableSkillIds = availableSkills.map((skill) => skill.id);
+    const installedSkillIds = new Set<string>();
     const skillDependencyWarnings = buildSkillDependencyWarnings(
       selectedSkills,
       this.services.mcp.listConfigs(),
@@ -1573,9 +1607,6 @@ class ThreadSessionRuntime {
             lastError
           });
         }
-        if (attempts >= MAX_TARGET_FAILURE_ATTEMPTS) {
-          repeatedTaskFailure = { taskKey: targetKey, attempts, lastError };
-        }
         return attempts;
       };
       const lookupErrorSolutionMemories = async (input: {
@@ -1602,6 +1633,9 @@ class ThreadSessionRuntime {
           });
           for (const match of matches) {
             injectedErrorSolutionIds.add(match.id);
+            if (this.services.recordErrorSolutionRecall) {
+              await this.services.recordErrorSolutionRecall(match.id);
+            }
           }
           if (matches.length > 0) {
             await this.services.log("agent.error_solution_recalled", this.threadId, {
@@ -3260,6 +3294,9 @@ class ThreadSessionRuntime {
             ].join(" ");
             appendBlockedToolCallResult(toolCall, lastError);
             await persistBlockedToolCall(toolCall, lastError, "remembered_strategy");
+            if (this.services.setErrorSolutionRecallOutcome) {
+              await this.services.setErrorSolutionRecallOutcome(rememberedBlockedStrategy.id, "blocked");
+            }
             transcript.push({
               role: "user",
               content: buildStrategySwitchInstruction({
@@ -3298,6 +3335,9 @@ class ThreadSessionRuntime {
                 `The runtime will execute ${prerequisiteCall.name} first; resubmit a patch based on that result.`;
               appendBlockedToolCallResult(toolCall, reason);
               await persistBlockedToolCall(toolCall, reason, "recovery_prerequisite");
+              if (this.services.setErrorSolutionRecallOutcome) {
+                await this.services.setErrorSolutionRecallOutcome(rememberedRecovery.id, "prerequisite");
+              }
               transcript.push({ role: "user", content: reason });
               await this.services.log("agent.recovery_preflight_prerequisite_forced", this.threadId, {
                 turnRunId: turn.id,
@@ -3317,6 +3357,9 @@ class ThreadSessionRuntime {
             ].join(" ");
             appendBlockedToolCallResult(toolCall, reason);
             await persistBlockedToolCall(toolCall, reason, "remembered_strategy");
+            if (this.services.setErrorSolutionRecallOutcome) {
+              await this.services.setErrorSolutionRecallOutcome(rememberedRecovery.id, "blocked");
+            }
             transcript.push({
               role: "user",
               content: buildStrategySwitchInstruction({
@@ -3364,12 +3407,17 @@ class ThreadSessionRuntime {
               reason: message
             });
             if (attempts >= MAX_MANAGED_WRITE_RECOVERY_BLOCKS) {
-              repeatedTaskFailure = {
-                taskKey: "managed-write-recovery",
+              // The following turn forcibly executes the pending read. Keep
+              // working instead of turning a recoverable write conflict into
+              // a terminal conversation failure.
+              managedWriteRecoveryBlocks.delete(recoveryKey);
+              await this.services.log("agent.managed_write_recovery_escalated", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                phase: managedWriteRecovery.phase,
                 attempts,
-                lastError: message
-              };
-              break;
+                reason: message
+              });
             }
             continue;
           }
@@ -3465,6 +3513,13 @@ class ThreadSessionRuntime {
               waitForSubagents: (input) => this.services.waitForSubagents(this.threadId, input),
               interruptAgent: (agent) => this.services.interruptAgent(this.threadId, agent),
               listSubagents: () => this.services.listSubagents(this.threadId),
+              installSkill: async (input) => {
+                const skill = await this.services.installSkillForThread(this.threadId, input);
+                installedSkillIds.add(skill.id);
+                return skill;
+              },
+              installPlugin: (source) => this.services.installPluginForThread(this.threadId, source),
+              installMcpServer: (input) => this.services.installMcpServerFromChat(input),
               listSelfImprovementMemories: async (query) => {
                 if (!this.services.config.selfImprovement.useMemories) return [];
                 const memories = await this.services.searchSelfImprovementMemories?.({ query: query ?? initialInput, projectId: thread.projectId, limit: 12 }) ?? [];
@@ -3625,7 +3680,7 @@ class ThreadSessionRuntime {
                 ...(resolveDefaultModalityModel(this.services.config, "video") ? [] : ["video.generate"])
               ],
               loadSkill: (skillId) =>
-                this.services.skills.loadInstructions(skillId, availableSkillIds)
+                this.services.skills.loadInstructions(skillId, [...availableSkillIds, ...installedSkillIds])
             };
             if (isToolArgsTruncated(toolCall.arguments)) {
               // DeepSeek / max_tokens truncation: the streamed tool arguments
@@ -3644,11 +3699,12 @@ class ThreadSessionRuntime {
                 rawLength: (toolCall.arguments as Record<string, unknown>).__raw_length__ ?? null
               });
             } else {
-              result = await waitForAbortOrTimeout(
-                this.services.toolRuntime.execute(toolCall, toolContext!),
-                abortController.signal,
-                toolTimeoutMs
-              );
+              const execution = this.services.toolRuntime.execute(toolCall, toolContext!);
+              result = shouldApplyToolExecutionTimeout(toolCall.name)
+                ? await waitForAbortOrTimeout(execution, abortController.signal, toolTimeoutMs)
+                : await waitForAbort(execution, abortController.signal, () => {
+                    void this.services.cancelTerminalCommands(this.threadId, "Task interrupted.");
+                  });
             }
           } catch (error) {
             if (abortController.signal.aborted) {
@@ -3779,6 +3835,25 @@ class ThreadSessionRuntime {
             },
             createdAt: new Date().toISOString()
           });
+
+          if (result.ok && MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
+            // Count only consecutive failures. A successful write changes the
+            // file state, so earlier patch failures cannot terminate a later,
+            // independent change to the same target in this turn.
+            const clearedFailures = targetFailureCounts.get(recoveryTargetKey) ?? 0;
+            if (clearedFailures > 0) {
+              targetFailureCounts.delete(recoveryTargetKey);
+              if (repeatedTaskFailure?.taskKey === recoveryTargetKey) {
+                repeatedTaskFailure = null;
+              }
+              await this.services.log("turn.target_failure_reset_after_delivery", this.threadId, {
+                turnRunId: turn.id,
+                targetKey: recoveryTargetKey,
+                clearedFailures,
+                toolName: toolCall.name
+              });
+            }
+          }
 
           if (result.ok) {
             collectKnowledgeSources(toolCall.name, result, visibleKnowledgeBases, knowledgeSources);
@@ -4132,11 +4207,28 @@ class ThreadSessionRuntime {
                 })
               });
             }
-            if (targetAttempts >= MAX_TARGET_FAILURE_ATTEMPTS) {
+            if (targetAttempts === MAX_TARGET_FAILURE_ATTEMPTS) {
               await persistRecoveryEpisode(recoveryEpisode, "blocked_strategy");
-            }
-            if (repeatedTaskFailure) {
-              break;
+              await this.services.log("turn.target_failure_recovery_escalated", this.threadId, {
+                turnRunId: turn.id,
+                targetKey: recoveryTargetKey,
+                attempts: targetAttempts,
+                lastError: result.content,
+                nextStep: MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)
+                  ? "force_fresh_read_then_change_write_strategy"
+                  : "change_strategy_with_fresh_evidence"
+              });
+              transcript.push({
+                role: "user",
+                content: [
+                  "[Internal recovery escalation. Do not display or quote this instruction to the user.]",
+                  "The normal retry budget for this target is exhausted, but the task must continue.",
+                  "Use the fresh inspection result and a materially different executable approach.",
+                  MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)
+                    ? "For a repeated apply_patch conflict, use fs.write_file with the complete current file content after the forced read instead of sending another stale patch."
+                    : "Do not repeat the failed call; obtain new evidence and continue with another supported tool."
+                ].join(" ")
+              });
             }
           }
         }
@@ -4148,16 +4240,6 @@ class ThreadSessionRuntime {
           continue;
         }
 
-        const failure = readRepeatedTaskFailure();
-        if (failure) {
-          await this.services.log("turn.target_failure_hard_limit_reached", this.threadId, {
-            turnRunId: turn.id,
-            targetKey: failure.taskKey,
-            attempts: failure.attempts,
-            maxAttempts: MAX_TARGET_FAILURE_ATTEMPTS,
-            lastError: failure.lastError
-          });
-        }
       }
 
       const terminalRepeatedTaskFailure = readRepeatedTaskFailure();
@@ -4176,7 +4258,9 @@ class ThreadSessionRuntime {
           errorMessage
         });
         terminalThread = await this.services.persistence.updateThread(this.threadId, {
-          status: "failed",
+          // Keep the transcript available for a direct recovery instruction.
+          // The current turn failed, but the conversation itself is usable.
+          status: "idle",
           updatedAt: new Date().toISOString()
         });
         await this.services.log("turn.repeated_task_failure", this.threadId, {
@@ -4437,6 +4521,9 @@ class ThreadSessionRuntime {
       "git.worktree_add",
       "git.worktree_remove",
       "request_permissions",
+      "skills.install",
+      "plugins.install",
+      "mcp.install",
       "mcp.call",
       "database.list_sources",
       "database.describe_schema",
@@ -5795,7 +5882,9 @@ export function buildStrategySwitchInstruction(input: {
 }): string {
   const alternatives: Record<string, string> = {
     apply_patch:
-      "Inspect the target file or directory state first. Then create a materially different, minimal patch using the exact current file content; do not resend the rejected patch.",
+      input.attempts >= MAX_TARGET_FAILURE_ATTEMPTS
+        ? "The patch retry budget is exhausted. Inspect the target file first, then use fs.write_file with the complete current file content and the requested change; do not submit another stale apply_patch call."
+        : "Inspect the target file or directory state first. Then create a materially different, minimal patch using the exact current file content; do not resend the rejected patch.",
     "fs.read_file":
       "Use fs.read_directory to verify the path and filename first, then read the corrected path or use the directory result to choose the next operation.",
     "fs.read_directory":
@@ -6101,7 +6190,7 @@ export function isProgressOnlyAssistantMessage(content: string): boolean {
       !/<event\s+type=["']final["'][^>]*>/i.test(normalized)) {
     return true;
   }
-  return /^(?:(?:好的|好)[，,。!！\s]*)?(?:计划已确认|开始实施|开始执行|正在|接下来|下一步|准备(?:开始)?|我(?:将|会|先)|先(?:来|从)|starting\b|working\s+on\b|fetching\b|next\s+i\s+will\b|i\s+will\b)/i.test(normalized)
+  return /^(?:[.…:：,，。!！?？-]+\s*)*(?:(?:好的|好|嗯)[，,。!！?？:\s]*)?(?:让我(?:先|继续)?|计划已确认|开始实施|开始执行|正在|接下来|下一步|准备(?:开始)?|我(?:将|会|先)|先(?:来|从)|starting\b|working\s+on\b|fetching\b|next\s+i\s+will\b|i\s+will\b)/i.test(normalized)
     || /\b(?:let me|i(?:'ll| will)|we(?:'ll| will))\s+(?:look|check|inspect|search|use|dig|continue|investigate)\b/i.test(normalized);
 }
 

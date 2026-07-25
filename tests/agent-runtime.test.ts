@@ -98,6 +98,7 @@ import {
   parseGpaCompletedTaskDeclarations,
   applyCompletedPlanTasks,
   resolveGpaPlanProgress,
+  shouldApplyToolExecutionTimeout,
   buildGpaPlanSequenceRecoveryInstruction,
   parseMultimodalIntentClassification,
   buildMultimodalIntentClassifySystemPrompt,
@@ -170,7 +171,7 @@ describe("function-call protocol compatibility", () => {
 });
 
 describe("createToolCallFingerprint", () => {
-  it("stops after two actual failures of the same recovery target", () => {
+  it("limits only consecutive failures of the same recovery target", () => {
     expect(MAX_REPEATED_TASK_FAILURES).toBe(2);
   });
 
@@ -399,6 +400,35 @@ describe("standard completion validation", () => {
     expect(result.valid).toBe(false);
     expect(result.reasons).toContain("The model did not declare the original goal complete.");
   });
+
+  it("rejects Chinese progress prose even when the provider declares completion", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "让我继续查看完整的语音相关代码：",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.reasons).toContain("The assistant message is progress commentary, not a final summary.");
+  });
+
+  it("switches repeated patch conflicts to a fresh full-file write instead of ending the task", () => {
+    const instruction = buildStrategySwitchInstruction({
+      toolName: "apply_patch",
+      taskKey: "apply_patch:src/app.ts",
+      attempts: MAX_REPEATED_TASK_FAILURES,
+      lastError: "File version conflict"
+    });
+
+    expect(instruction).toContain("fs.write_file");
+    expect(instruction).toContain("do not submit another stale apply_patch");
+  });
 });
 
 describe("Agent model compatibility failures", () => {
@@ -549,6 +579,11 @@ describe("tool execution timeout", () => {
     expect(normalized.toolExecutionMs).toBe(0);
     const fallback = normalizeRuntimeTimeouts(null);
     expect(fallback.toolExecutionMs).toBe(DEFAULT_RUNTIME_TIMEOUTS.toolExecutionMs);
+  });
+
+  it("lets terminal commands use output-based stall detection", () => {
+    expect(shouldApplyToolExecutionTimeout("shell.exec")).toBe(false);
+    expect(shouldApplyToolExecutionTimeout("fs.read_file")).toBe(true);
   });
 });
 
@@ -995,6 +1030,14 @@ describe("GPA ACT completion evidence", () => {
     expect(result.valid).toBe(false);
     expect(result.invalidEvidenceToolCallIds).toEqual(["missing"]);
     expect(result.missingEvidenceTaskIds).toEqual(["T1"]);
+  });
+
+  it("rejects real Chinese progress messages as final answers", () => {
+    expect(isProgressOnlyAssistantMessage("接下来我会创建文件。")).toBe(true);
+    expect(isProgressOnlyAssistantMessage("让我继续查看完整的语音相关代码：")).toBe(true);
+    expect(isProgressOnlyAssistantMessage("... 让我检查音色选择逻辑：")).toBe(true);
+    expect(isProgressOnlyAssistantMessage("让我验证一下修改是否完整应用：")).toBe(true);
+    expect(isProgressOnlyAssistantMessage("任务已经完成并通过全部测试。")).toBe(false);
   });
 
   it("builds a concrete next step instead of accepting progress prose", () => {

@@ -95,7 +95,14 @@ export class SkillLabService {
     this.#services.emit({ ...event, createdAt: new Date().toISOString() } as SkillLabEvent);
   }
 
-  public start(prompt: string, requestedName?: string, iterations?: number, targetSkillId?: string): string {
+  public start(
+    prompt: string,
+    requestedName?: string,
+    iterations?: number,
+    targetSkillId?: string,
+    providerId?: string,
+    modelId?: string
+  ): string {
     const normalizedPrompt = prompt.trim() || (targetSkillId ? "继续测试并优化现有 Skill。" : "");
     if (!normalizedPrompt) throw new Error("技能实验室需求不能为空。");
     if (normalizedPrompt.length > 20_000) throw new Error("技能实验室需求不能超过 20000 个字符。");
@@ -103,7 +110,7 @@ export class SkillLabService {
     const jobId = randomUUID();
     const job: SkillLabJob = { abort: new AbortController(), approvals: new Map(), clarifications: new Map() };
     this.#jobs.set(jobId, job);
-    void this.#run(jobId, job, normalizedPrompt, requestedName, iterationCount, targetSkillId).finally(() => {
+    void this.#run(jobId, job, normalizedPrompt, requestedName, iterationCount, targetSkillId, providerId, modelId).finally(() => {
       this.#jobs.delete(jobId);
     });
     return jobId;
@@ -141,10 +148,12 @@ export class SkillLabService {
     prompt: string,
     requestedName: string | undefined,
     iterationCount: number,
-    targetSkillId?: string
+    targetSkillId?: string,
+    providerId?: string,
+    modelId?: string
   ): Promise<void> {
     try {
-      const { provider, model } = resolveDefaultReasoningModel(this.#services.config);
+      const { provider, model } = resolveSkillLabModel(this.#services.config, providerId, modelId);
       const optimizationTarget = targetSkillId ? await this.#loadOptimizationTarget(targetSkillId) : null;
       const clarificationPrompt = optimizationTarget
         ? [
@@ -623,10 +632,24 @@ export class SkillLabService {
   }
 }
 
-function resolveDefaultReasoningModel(config: AppConfig): { provider: ProviderDefinition; model: ModelProfile } {
-  const provider = config.providers.find((entry) => entry.id === config.defaultProvider);
-  const model = config.models.find((entry) => entry.id === config.defaultModel && entry.providerId === config.defaultProvider && entry.role === "reasoning");
-  if (!provider || !model) throw new Error("未找到默认推理模型，请先配置可用的模型。");
+export function resolveSkillLabModel(
+  config: AppConfig,
+  selectedProviderId?: string,
+  selectedModelId?: string
+): { provider: ProviderDefinition; model: ModelProfile } {
+  const providerId = selectedProviderId?.trim() || config.defaultProvider;
+  const modelId = selectedModelId?.trim() || config.defaultModel;
+  if ((selectedProviderId?.trim() && !selectedModelId?.trim()) || (!selectedProviderId?.trim() && selectedModelId?.trim())) {
+    throw new Error("技能实验室需要同时选择供应商和模型。");
+  }
+  const provider = config.providers.find((entry) => entry.id === providerId);
+  const model = config.models.find((entry) => entry.id === modelId && entry.providerId === providerId);
+  if (!provider || !model) throw new Error("所选实验模型不存在，请刷新配置后重试。");
+  if (model.role !== "reasoning") throw new Error("技能实验室只能使用推理模型。");
+  if (!model.supportsToolCalling) throw new Error("所选实验模型未启用工具调用，无法运行技能实验室。");
+  if (model.agentCapability === "unsupported") {
+    throw new Error(model.agentCapabilityReason || "所选实验模型未通过 Agent 工具调用测试，无法运行技能实验室。");
+  }
   return { provider, model };
 }
 

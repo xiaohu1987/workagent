@@ -19,7 +19,6 @@ type ActiveCommand = {
 };
 
 const MAX_BUFFER_LENGTH = 80_000;
-const DEFAULT_COMMAND_TIMEOUT_MS = 300_000;
 const DEFAULT_COMMAND_IDLE_TIMEOUT_MS = 300_000;
 
 export type TerminalCommandResult = {
@@ -103,7 +102,6 @@ export class TerminalRuntime {
     onOutput: (data: string) => void,
     onLocalUrl?: (url: string) => void,
     sessionId = "default",
-    timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
     onStalled?: () => Promise<string | null>
   ): Promise<TerminalCommandResult> {
     const key = this.#sessionKey(threadId, sessionId);
@@ -169,22 +167,19 @@ export class TerminalRuntime {
       const finish = (callback: () => void) => {
         if (settled) return;
         settled = true;
-        if (timeout) clearTimeout(timeout);
         if (idleTimeout) clearTimeout(idleTimeout);
         removeActiveCommand();
         callback();
       };
-      const reportStall = async (reason: "total" | "idle", limitMs: number) => {
+      const reportStall = async (limitMs: number) => {
         if (settled || timedOut) return;
         timedOut = true;
-        const description = reason === "idle" ? "produced no output" : "exceeded its total runtime";
-        this.#publish(session, `Command ${description} for ${limitMs}ms. Starting a diagnostic subagent while the command continues.\n`);
+        this.#publish(session, `Command produced no output for ${limitMs}ms. Starting a diagnostic subagent while the command continues.\n`);
         const diagnosis = await onStalled?.().catch((error) =>
           `Diagnostic subagent could not start: ${error instanceof Error ? error.message : String(error)}`
         ) ?? null;
         if (settled) return;
         settled = true;
-        if (timeout) clearTimeout(timeout);
         if (idleTimeout) clearTimeout(idleTimeout);
         const output = `${stdout}${stderr}`.trim();
         resolve({
@@ -198,14 +193,11 @@ export class TerminalRuntime {
           diagnosis: diagnosis ?? undefined
         });
       };
-      const timeout = onStalled
-        ? setTimeout(() => void reportStall("total", timeoutMs), Math.max(1, timeoutMs))
-        : undefined;
       const resetIdleTimeout = () => {
         if (!onStalled) return;
         if (idleTimeout) clearTimeout(idleTimeout);
         idleTimeout = setTimeout(
-          () => void reportStall("idle", DEFAULT_COMMAND_IDLE_TIMEOUT_MS),
+          () => void reportStall(DEFAULT_COMMAND_IDLE_TIMEOUT_MS),
           DEFAULT_COMMAND_IDLE_TIMEOUT_MS
         );
       };

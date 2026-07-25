@@ -60,7 +60,13 @@ describe("DatabaseService.clearThreadConversation", () => {
     });
     database.updateThread(thread.id, {
       status: "completed",
-      gpaStateJson: JSON.stringify({ stage: "act" })
+      gpaStateJson: JSON.stringify({
+        stage: "act",
+        fullAccess: true,
+        knowledgeEnabled: true,
+        awaitingConfirmation: "act",
+        planTasks: [{ id: "T1", title: "旧计划", done: false }]
+      })
     });
 
     const cleared = database.clearThreadConversation(thread.id);
@@ -68,9 +74,16 @@ describe("DatabaseService.clearThreadConversation", () => {
     expect(cleared).toMatchObject({
       id: thread.id,
       title: "保留的任务",
-      status: "idle",
-      gpaStateJson: null
+      status: "idle"
     });
+    expect(JSON.parse(cleared.gpaStateJson ?? "{}"))
+      .toMatchObject({
+        stage: "off",
+        fullAccess: true,
+        knowledgeEnabled: true,
+        awaitingConfirmation: null,
+        planTasks: []
+      });
     expect(database.listMessages(thread.id)).toEqual([]);
     expect(database.listQueuedMessages(thread.id)).toEqual([]);
     expect(database.listToolCalls(thread.id)).toEqual([]);

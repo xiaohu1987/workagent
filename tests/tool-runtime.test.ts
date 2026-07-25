@@ -67,6 +67,16 @@ describe("apply-patch failures", () => {
     expect(message).toContain("Do not resend this patch unchanged");
     expect(message).not.toContain("Unsupported headings");
   });
+
+  it("explains how to repair a no-edit update hunk", () => {
+    const message = buildApplyPatchFailureMessage(
+      "Patch hunk contains no edits and its surrounding anchors were not found."
+    );
+
+    expect(message).toContain("did not contain explicit additions or removals");
+    expect(message).toContain("Prefix unchanged context with one space");
+    expect(message).toContain("Do not resend the same raw source block unchanged");
+  });
 });
 
 describe("ToolRuntime", () => {
@@ -99,6 +109,11 @@ describe("ToolRuntime", () => {
       name: "image.generate",
       arguments: { prompt: "should-not-generate" }
     }, context);
+    const install = await runtime.execute({
+      id: "child-skill-install",
+      name: "skills.install",
+      arguments: { source: "owner/repository" }
+    }, context);
 
     expect(patch.ok).toBe(false);
     expect(patch.content).toContain("read-only");
@@ -110,6 +125,8 @@ describe("ToolRuntime", () => {
     expect(browser.content).toContain("read-only");
     expect(image.ok).toBe(false);
     expect(image.content).toContain("read-only");
+    expect(install.ok).toBe(false);
+    expect(install.content).toContain("read-only");
   });
 
   it("surfaces an explicit timeout from multi-agent wait", async () => {
@@ -673,11 +690,16 @@ describe("ToolRuntime", () => {
     expect(result.content).toContain("apply_patch");
   });
 
-  it("exposes both managed file writing tools directly", () => {
+  it("exposes managed writing and extension installation tools directly", () => {
     const { direct, deferred } = new ToolRuntime().listToolSpecs();
 
     expect(direct.map((tool) => tool.name)).toContain("apply_patch");
     expect(direct.map((tool) => tool.name)).toContain("fs.write_file");
+    expect(direct.map((tool) => tool.name)).toEqual(expect.arrayContaining([
+      "skills.install",
+      "plugins.install",
+      "mcp.install"
+    ]));
     expect(deferred.map((tool) => tool.name)).not.toContain("fs.write_file");
   });
 
