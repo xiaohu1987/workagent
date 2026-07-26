@@ -18232,6 +18232,27 @@ select option:checked {
   pointer-events: none;
 }
 
+.app-background-motion,
+.app-background-parallax {
+  position: absolute;
+  inset: 0;
+}
+
+.app-background-motion.is-enabled {
+  animation: app-background-ken-burns 42s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+.app-background-parallax {
+  transform: translate3d(
+    var(--app-background-parallax-x, 0px),
+    var(--app-background-parallax-y, 0px),
+    0
+  );
+  transition: transform 720ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  will-change: transform;
+}
+
 .app-background-layer img {
   position: absolute;
   inset: -36px;
@@ -18240,6 +18261,22 @@ select option:checked {
   object-position: center center;
   transform-origin: center;
   transition: opacity 600ms ease, filter 120ms ease, transform 120ms ease;
+}
+
+@keyframes app-background-ken-burns {
+  from { transform: translate3d(-0.8%, 0.6%, 0) scale(1.012); }
+  to { transform: translate3d(0.8%, -0.6%, 0) scale(1.065); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-background-motion.is-enabled {
+    animation: none;
+  }
+
+  .app-background-parallax {
+    transform: none;
+    transition: none;
+  }
 }
 
 .app-shell > .windowbar,
@@ -18701,6 +18738,45 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 .chat-background-heading span {
   color: #7f8590;
   font-size: 12px;
+}
+
+.chat-background-motion-settings {
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.chat-background-motion-setting {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 11px;
+  background: #17191d;
+}
+
+.chat-background-motion-setting > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.chat-background-motion-setting strong {
+  color: #daddE3;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-background-motion-setting > div > span {
+  overflow: hidden;
+  color: #7f8590;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-background-library {

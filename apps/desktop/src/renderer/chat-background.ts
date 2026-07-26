@@ -14,6 +14,8 @@ export type ChatBackgroundSettings = {
   enabled: boolean;
   rotationEnabled: boolean;
   rotationIntervalSeconds: number;
+  motionEnabled: boolean;
+  parallaxEnabled: boolean;
   opacity: number;
   blur: number;
   fit: ChatBackgroundFit;
@@ -50,6 +52,8 @@ export const DEFAULT_CHAT_BACKGROUND_SETTINGS: ChatBackgroundSettings = {
   enabled: true,
   rotationEnabled: false,
   rotationIntervalSeconds: 60,
+  motionEnabled: true,
+  parallaxEnabled: true,
   opacity: 24,
   blur: 8,
   fit: "cover",
@@ -101,6 +105,8 @@ export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundS
     enabled: source.enabled !== false,
     rotationEnabled: source.rotationEnabled === true,
     rotationIntervalSeconds: Math.round(clamp(source.rotationIntervalSeconds, 10, 600, DEFAULT_CHAT_BACKGROUND_SETTINGS.rotationIntervalSeconds)),
+    motionEnabled: source.motionEnabled !== false,
+    parallaxEnabled: source.parallaxEnabled !== false,
     opacity: Math.round(clamp(source.opacity, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.opacity)),
     blur: Math.round(clamp(source.blur, 0, 30, DEFAULT_CHAT_BACKGROUND_SETTINGS.blur)),
     fit: source.fit === "contain" ? "contain" : "cover",

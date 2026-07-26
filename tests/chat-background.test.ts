@@ -17,6 +17,8 @@ describe("chat background settings", () => {
       enabled: false,
       rotationEnabled: true,
       rotationIntervalSeconds: 4,
+      motionEnabled: false,
+      parallaxEnabled: false,
       opacity: 145,
       blur: -8,
       fit: "unexpected",
@@ -36,6 +38,8 @@ describe("chat background settings", () => {
       enabled: false,
       rotationEnabled: true,
       rotationIntervalSeconds: 10,
+      motionEnabled: false,
+      parallaxEnabled: false,
       opacity: 100,
       blur: 0,
       fit: "cover",
@@ -61,6 +65,13 @@ describe("chat background settings", () => {
     });
   });
 
+  it("enables the lightweight motion effects for existing background settings", () => {
+    expect(normalizeChatBackgroundSettings({ enabled: true })).toMatchObject({
+      motionEnabled: true,
+      parallaxEnabled: true
+    });
+  });
+
   it("falls back when persisted JSON is malformed", () => {
     const storage = { getItem: () => "not-json" };
     expect(readChatBackgroundSettings(storage)).toEqual(DEFAULT_CHAT_BACKGROUND_SETTINGS);
@@ -73,6 +84,8 @@ describe("chat background settings", () => {
         enabled: true,
         rotationEnabled: true,
         rotationIntervalSeconds: 72.4,
+        motionEnabled: true,
+        parallaxEnabled: false,
         opacity: 32.4,
         blur: 12.7,
         fit: "contain",
@@ -92,6 +105,8 @@ describe("chat background settings", () => {
       enabled: true,
       rotationEnabled: true,
       rotationIntervalSeconds: 72,
+      motionEnabled: true,
+      parallaxEnabled: false,
       opacity: 32,
       blur: 13,
       fit: "contain",
