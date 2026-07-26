@@ -20,16 +20,22 @@ type RendererNotificationNavigationTarget = import("@shared-types").Notification
 declare global {
   interface Window {
     codexh: {
-      getApplicationBackground: () => Promise<{
-        bytes: ArrayBuffer;
-        mimeType: string;
-        fileName: string;
+      getApplicationBackgrounds: () => Promise<{
+        items: Array<{
+          id: string;
+          bytes: ArrayBuffer;
+          mimeType: string;
+          fileName: string;
+        }>;
         settings: unknown;
       } | null>;
-      saveApplicationBackground: (payload: {
-        bytes: ArrayBuffer;
-        mimeType: string;
-        fileName: string;
+      saveApplicationBackgrounds: (payload: {
+        items: Array<{
+          id: string;
+          bytes: ArrayBuffer;
+          mimeType: string;
+          fileName: string;
+        }>;
         settings: unknown;
       }) => Promise<void>;
       saveApplicationBackgroundSettings: (settings: unknown) => Promise<void>;
@@ -82,7 +88,7 @@ declare global {
       createGitPullRequest: (threadId: string) => Promise<any>;
       deleteThread: (threadId: string) => Promise<void>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
-      getThreadSnapshot: (threadId: string, messageLimit?: number) => Promise<any>;
+      getThreadSnapshot: (threadId: string) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[] }) => Promise<void>;
       replaceMessage: (payload: { threadId: string; messageId: string; content: string }) => Promise<void>;
       deleteQueuedMessage: (payload: { threadId: string; id: string }) => Promise<void>;

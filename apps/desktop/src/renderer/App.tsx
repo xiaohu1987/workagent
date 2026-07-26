@@ -94,6 +94,7 @@ import {
   readChatBackgroundSettings,
   removeChatBackgroundBlob,
   writeChatBackgroundSettings,
+  isChatBackgroundRotationActive,
   CHAT_BACKGROUND_SURFACE_OPTIONS,
   DEFAULT_CHAT_BACKGROUND_SURFACES,
   type ChatBackgroundSettings,
@@ -102,6 +103,13 @@ import {
 } from "./chat-background";
 
 type SettingsTab = "general" | "appearance" | "usage" | "knowledge" | "memory" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
+type ChatBackgroundImage = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  bytes: ArrayBuffer;
+  url: string;
+};
 type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";
 type ManagedRemoval =
   | { kind: "plugin"; plugin: PluginRecord }
@@ -764,12 +772,10 @@ export function App() {
   const pendingUserMessagesRef = useRef<Record<string, MessageRecord[]>>({});
   const pendingOneShotSkillRemovalsRef = useRef<Record<string, string[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
-  const snapshotMessageLimitsRef = useRef<Record<string, number>>({});
   /** After Stop, ignore late runtime events that would revive the "执行中" UI. */
   const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
-  const [isLoadingEarlierMessages, setIsLoadingEarlierMessages] = useState(false);
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
   const pluginToggleQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -853,10 +859,14 @@ export function App() {
   const [chatBackgroundSettings, setChatBackgroundSettings] = useState<ChatBackgroundSettings>(() =>
     readChatBackgroundSettings()
   );
-  const [chatBackgroundUrl, setChatBackgroundUrl] = useState<string | null>(null);
+  const [chatBackgroundImages, setChatBackgroundImages] = useState<ChatBackgroundImage[]>([]);
+  const [activeChatBackgroundIndex, setActiveChatBackgroundIndex] = useState(0);
+  const [chatBackgroundRotationEpoch, setChatBackgroundRotationEpoch] = useState(0);
   const [isChatBackgroundDragging, setIsChatBackgroundDragging] = useState(false);
   const chatBackgroundInputRef = useRef<HTMLInputElement | null>(null);
   const chatBackgroundHydratedRef = useRef(false);
+  const chatBackgroundUrlsRef = useRef<Set<string>>(new Set());
+  const chatBackgroundImagesRef = useRef<ChatBackgroundImage[]>([]);
   const chatBackgroundDragRef = useRef<null | {
     pointerId: number;
     startX: number;
@@ -866,6 +876,8 @@ export function App() {
     width: number;
     height: number;
   }>(null);
+  const activeChatBackground = chatBackgroundImages[activeChatBackgroundIndex] ?? null;
+  const chatBackgroundUrl = activeChatBackground?.url ?? null;
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [updateConfirmDialog, setUpdateConfirmDialog] = useState<null | {
     kind: "download" | "install";
@@ -1326,30 +1338,39 @@ export function App() {
   useEffect(() => {
     let active = true;
     void (async () => {
-      const persisted = await window.codexh.getApplicationBackground();
+      const persisted = await window.codexh.getApplicationBackgrounds();
       if (persisted) {
         if (!active) return;
         const restoredSettings = normalizeChatBackgroundSettings(persisted.settings);
         setChatBackgroundSettings(normalizeChatBackgroundSettings({
           ...restoredSettings,
-          fileName: restoredSettings.fileName ?? persisted.fileName
+          fileName: restoredSettings.fileName ?? persisted.items[0]?.fileName ?? null
         }));
-        setChatBackgroundUrl(URL.createObjectURL(new Blob([persisted.bytes], { type: persisted.mimeType })));
+        const images = persisted.items.map((item) => {
+          const url = URL.createObjectURL(new Blob([item.bytes], { type: item.mimeType }));
+          chatBackgroundUrlsRef.current.add(url);
+          return { ...item, url };
+        });
+        setChatBackgroundImages(images);
+        setActiveChatBackgroundIndex(0);
         return;
       }
 
       const legacyBlob = await loadChatBackgroundBlob();
       if (!legacyBlob) return;
       const legacySettings = readChatBackgroundSettings();
-      await window.codexh.saveApplicationBackground({
-        bytes: await legacyBlob.arrayBuffer(),
-        mimeType: legacyBlob.type,
-        fileName: legacySettings.fileName ?? "background",
+      const bytes = await legacyBlob.arrayBuffer();
+      const id = globalThis.crypto.randomUUID();
+      await window.codexh.saveApplicationBackgrounds({
+        items: [{ id, bytes, mimeType: legacyBlob.type, fileName: legacySettings.fileName ?? "background" }],
         settings: legacySettings
       });
       await removeChatBackgroundBlob();
       if (!active) return;
-      setChatBackgroundUrl(URL.createObjectURL(legacyBlob));
+      const url = URL.createObjectURL(legacyBlob);
+      chatBackgroundUrlsRef.current.add(url);
+      setChatBackgroundImages([{ id, bytes, mimeType: legacyBlob.type, fileName: legacySettings.fileName ?? "background", url }]);
+      setActiveChatBackgroundIndex(0);
     })()
       .catch(() => {
         if (active) {
@@ -1394,8 +1415,30 @@ export function App() {
   }, [chatBackgroundUrl, chatBackgroundSettings.enabled, chatBackgroundSettings.surfaces]);
 
   useEffect(() => () => {
-    if (chatBackgroundUrl) URL.revokeObjectURL(chatBackgroundUrl);
-  }, [chatBackgroundUrl]);
+    for (const url of chatBackgroundUrlsRef.current) URL.revokeObjectURL(url);
+    chatBackgroundUrlsRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    chatBackgroundImagesRef.current = chatBackgroundImages;
+    setActiveChatBackgroundIndex((current) => Math.min(current, Math.max(0, chatBackgroundImages.length - 1)));
+  }, [chatBackgroundImages]);
+
+  useEffect(() => {
+    if (!isChatBackgroundRotationActive(chatBackgroundSettings, chatBackgroundImages.length)) return;
+    const interval = window.setInterval(() => {
+      setActiveChatBackgroundIndex((current) => (current + 1) % chatBackgroundImages.length);
+    }, chatBackgroundSettings.rotationIntervalSeconds * 1_000);
+    return () => window.clearInterval(interval);
+  }, [chatBackgroundImages.length, chatBackgroundRotationEpoch, chatBackgroundSettings]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden) setChatBackgroundRotationEpoch((current) => current + 1);
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, []);
 
   useEffect(() => {
     threadsRef.current = threads;
@@ -3569,8 +3612,7 @@ export function App() {
     const requestId = (snapshotRequestIdsRef.current[threadId] ?? 0) + 1;
     snapshotRequestIdsRef.current[threadId] = requestId;
     try {
-      const messageLimit = snapshotMessageLimitsRef.current[threadId] ?? 160;
-      const next = (await window.codexh.getThreadSnapshot(threadId, messageLimit)) as RuntimeThreadSnapshot;
+      const next = (await window.codexh.getThreadSnapshot(threadId)) as RuntimeThreadSnapshot;
       if (snapshotRequestIdsRef.current[threadId] !== requestId || selectedThreadIdRef.current !== threadId) {
         return;
       }
@@ -3668,8 +3710,6 @@ export function App() {
   async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
     const isSwitchingThread = selectedThreadIdRef.current !== threadId;
     if (isSwitchingThread) {
-      // A previously expanded transcript should not make later history switches heavy again.
-      delete snapshotMessageLimitsRef.current[threadId];
       setIsThreadSwitching(true);
     }
     if (options?.scrollToLatest) {
@@ -3684,26 +3724,6 @@ export function App() {
     // Switching chats must never auto-start GPA. Same-session incomplete plans only
     // restore the GPA chip/timeline; the user continues explicitly via GPA or send.
     await softRestoreSameSessionGpaPlan(threadId);
-  }
-
-  async function loadEarlierMessages() {
-    if (!selectedThreadId || !snapshot?.hasMoreMessages || isLoadingEarlierMessages) return;
-
-    const previousLimit = snapshotMessageLimitsRef.current[selectedThreadId] ?? 160;
-    snapshotMessageLimitsRef.current[selectedThreadId] = Math.min(previousLimit + 240, snapshot.messageCount);
-    const scrollNode = chatScrollRef.current;
-    const previousHeight = scrollNode?.scrollHeight ?? 0;
-    const previousTop = scrollNode?.scrollTop ?? 0;
-    setIsLoadingEarlierMessages(true);
-    try {
-      await refreshSnapshot(selectedThreadId);
-      window.requestAnimationFrame(() => {
-        if (!scrollNode) return;
-        scrollNode.scrollTop = previousTop + Math.max(0, scrollNode.scrollHeight - previousHeight);
-      });
-    } finally {
-      setIsLoadingEarlierMessages(false);
-    }
   }
 
   async function softRestoreSameSessionGpaPlan(threadId: string): Promise<void> {
@@ -5606,9 +5626,9 @@ export function App() {
     updateChatBackgroundSettings({ surfaces: { [key]: value } });
   }
 
-  function beginChatBackgroundDrag(event: ReactPointerEvent<HTMLDivElement>) {
+  function beginChatBackgroundDrag(event: ReactPointerEvent<HTMLImageElement>) {
     if (!chatBackgroundUrl || event.button !== 0) return;
-    const bounds = event.currentTarget.getBoundingClientRect();
+    const bounds = event.currentTarget.parentElement?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect();
     chatBackgroundDragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -5622,7 +5642,7 @@ export function App() {
     setIsChatBackgroundDragging(true);
   }
 
-  function moveChatBackground(event: ReactPointerEvent<HTMLDivElement>) {
+  function moveChatBackground(event: ReactPointerEvent<HTMLImageElement>) {
     const drag = chatBackgroundDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     updateChatBackgroundSettings({
@@ -5631,7 +5651,7 @@ export function App() {
     });
   }
 
-  function endChatBackgroundDrag(event: ReactPointerEvent<HTMLDivElement>) {
+  function endChatBackgroundDrag(event: ReactPointerEvent<HTMLImageElement>) {
     const drag = chatBackgroundDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     chatBackgroundDragRef.current = null;
@@ -5671,13 +5691,22 @@ export function App() {
         enabled: true,
         fileName: file.name
       });
-      await window.codexh.saveApplicationBackground({
-        bytes: await file.arrayBuffer(),
+      const bytes = await file.arrayBuffer();
+      const nextImage: ChatBackgroundImage = {
+        id: globalThis.crypto.randomUUID(),
+        bytes,
         mimeType: file.type,
         fileName: file.name,
+        url: nextUrl
+      };
+      const nextImages = [...chatBackgroundImagesRef.current, nextImage];
+      await window.codexh.saveApplicationBackgrounds({
+        items: nextImages.map(({ id, bytes: imageBytes, mimeType, fileName }) => ({ id, bytes: imageBytes, mimeType, fileName })),
         settings: nextSettings
       });
-      setChatBackgroundUrl(nextUrl);
+      chatBackgroundUrlsRef.current.add(nextUrl);
+      chatBackgroundImagesRef.current = nextImages;
+      setChatBackgroundImages(nextImages);
       setChatBackgroundSettings(nextSettings);
       showNotice("应用背景已更新", { message: "位置、模糊度和透明度可继续实时调整。", tone: "success" });
     } catch (error) {
@@ -5689,10 +5718,70 @@ export function App() {
     }
   }
 
+  async function importChatBackgroundFiles(files: FileList | File[]) {
+    const selectedFiles = Array.from(files);
+    if (chatBackgroundImagesRef.current.length + selectedFiles.length > 50) {
+      showNotice("图片数量过多", { message: "应用背景最多支持 50 张图片。", tone: "warning" });
+      return;
+    }
+    for (const file of selectedFiles) {
+      await importChatBackground(file);
+    }
+  }
+
+  async function removeChatBackgroundImage(id: string) {
+    const currentImages = chatBackgroundImagesRef.current;
+    const removed = currentImages.find((image) => image.id === id);
+    const nextImages = currentImages.filter((image) => image.id !== id);
+    try {
+      if (nextImages.length === 0) {
+        await window.codexh.clearApplicationBackground();
+        updateChatBackgroundSettings({ fileName: null });
+      } else {
+        await window.codexh.saveApplicationBackgrounds({
+          items: nextImages.map(({ id: imageId, bytes, mimeType, fileName }) => ({ id: imageId, bytes, mimeType, fileName })),
+          settings: chatBackgroundSettings
+        });
+      }
+      if (removed) {
+        URL.revokeObjectURL(removed.url);
+        chatBackgroundUrlsRef.current.delete(removed.url);
+      }
+      chatBackgroundImagesRef.current = nextImages;
+      setChatBackgroundImages(nextImages);
+      showNotice(nextImages.length ? "背景图片已删除" : "应用背景已清除", { tone: "success" });
+    } catch (error) {
+      showNotice("删除背景图片失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
+    }
+  }
+
+  async function moveChatBackgroundImage(sourceId: string, targetId: string) {
+    const currentImages = chatBackgroundImagesRef.current;
+    const from = currentImages.findIndex((image) => image.id === sourceId);
+    const to = currentImages.findIndex((image) => image.id === targetId);
+    if (from < 0 || to < 0 || from === to) return;
+    const nextImages = [...currentImages];
+    const [moved] = nextImages.splice(from, 1);
+    nextImages.splice(to, 0, moved);
+    try {
+      await window.codexh.saveApplicationBackgrounds({
+        items: nextImages.map(({ id, bytes, mimeType, fileName }) => ({ id, bytes, mimeType, fileName })),
+        settings: chatBackgroundSettings
+      });
+      chatBackgroundImagesRef.current = nextImages;
+      setChatBackgroundImages(nextImages);
+    } catch (error) {
+      showNotice("背景排序保存失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
+    }
+  }
+
   async function clearChatBackground() {
     try {
       await window.codexh.clearApplicationBackground();
-      setChatBackgroundUrl(null);
+      for (const image of chatBackgroundImagesRef.current) URL.revokeObjectURL(image.url);
+      for (const image of chatBackgroundImagesRef.current) chatBackgroundUrlsRef.current.delete(image.url);
+      chatBackgroundImagesRef.current = [];
+      setChatBackgroundImages([]);
       updateChatBackgroundSettings({ fileName: null });
       showNotice("应用背景已清除", { tone: "success" });
     } catch (error) {
@@ -6717,17 +6806,21 @@ export function App() {
     >
       {chatBackgroundUrl && chatBackgroundSettings.enabled ? (
         <div className="app-background-layer" aria-hidden="true">
-          <img
-            src={chatBackgroundUrl}
-            alt=""
-            style={{
-              filter: `blur(${chatBackgroundSettings.blur}px)`,
-              opacity: chatBackgroundSettings.opacity / 100,
-              objectFit: chatBackgroundSettings.fit,
-              objectPosition: "center",
-              transform: getChatBackgroundTransform(chatBackgroundSettings)
-            }}
-          />
+          {chatBackgroundImages.map((image, index) => (
+            <img
+              key={image.id}
+              className={index === activeChatBackgroundIndex ? "is-active" : ""}
+              src={image.url}
+              alt=""
+              style={{
+                filter: `blur(${chatBackgroundSettings.blur}px)`,
+                opacity: index === activeChatBackgroundIndex ? chatBackgroundSettings.opacity / 100 : 0,
+                objectFit: chatBackgroundSettings.fit,
+                objectPosition: "center",
+                transform: getChatBackgroundTransform(chatBackgroundSettings)
+              }}
+            />
+          ))}
         </div>
       ) : null}
       <header className="windowbar">
@@ -7167,18 +7260,6 @@ export function App() {
               </div>
             ) : (
               <div key={activeSnapshotThreadId ?? selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
-                {snapshot?.hasMoreMessages ? (
-                  <button
-                    type="button"
-                    className="transcript-load-earlier"
-                    onClick={() => void loadEarlierMessages()}
-                    disabled={isLoadingEarlierMessages}
-                  >
-                    {isLoadingEarlierMessages
-                      ? "正在加载更早消息..."
-                      : `加载更早消息（已显示 ${visibleMessages.length} / ${snapshot.messageCount}）`}
-                  </button>
-                ) : null}
                 {timelineEntries.map((entry) =>
                   entry.kind === "message" ? (
                     renderTranscriptMessage(
@@ -7668,27 +7749,30 @@ export function App() {
                     ref={chatBackgroundInputRef}
                     className="chat-background-file-input"
                     type="file"
+                    multiple
                     accept="image/png,image/jpeg,image/webp,image/gif"
                     onChange={(event) => {
-                      const file = event.target.files?.[0];
+                      const files = Array.from(event.target.files ?? []);
                       event.currentTarget.value = "";
-                      if (file) void importChatBackground(file);
+                      if (files.length) void importChatBackgroundFiles(files);
                     }}
                   />
 
                   <div className="chat-background-editor">
-                    <div
-                      className={`chat-background-preview ${chatBackgroundUrl ? "is-positionable" : ""} ${isChatBackgroundDragging ? "is-dragging" : ""}`}
-                      data-fit={chatBackgroundSettings.fit}
-                      onPointerDown={beginChatBackgroundDrag}
-                      onPointerMove={moveChatBackground}
-                      onPointerUp={endChatBackgroundDrag}
-                      onPointerCancel={endChatBackgroundDrag}
-                    >
+                    <div className="chat-background-preview-column">
+                      <div
+                        className={`chat-background-preview ${chatBackgroundUrl ? "is-positionable" : ""} ${isChatBackgroundDragging ? "is-dragging" : ""}`}
+                        data-fit={chatBackgroundSettings.fit}
+                      >
                       {chatBackgroundUrl ? (
                         <img
                           src={chatBackgroundUrl}
                           alt="背景预览"
+                          draggable={false}
+                          onPointerDown={beginChatBackgroundDrag}
+                          onPointerMove={moveChatBackground}
+                          onPointerUp={endChatBackgroundDrag}
+                          onPointerCancel={endChatBackgroundDrag}
                           style={{
                             filter: `blur(${chatBackgroundSettings.blur}px)`,
                             opacity: chatBackgroundSettings.enabled ? chatBackgroundSettings.opacity / 100 : 0,
@@ -7719,13 +7803,87 @@ export function App() {
                           </div>
                         </div>
                       ) : null}
+                      </div>
+
+                      <section className="chat-background-library" aria-label="背景图片管理">
+                        <div className="chat-background-library-header">
+                          <div className="chat-background-control-label">
+                            <span>背景图片</span>
+                            <em>{chatBackgroundImages.length ? "拖动图片调整轮播顺序" : "导入图片后可开启动态切换"}</em>
+                          </div>
+                          <button type="button" className="chat-background-add-button" onClick={() => chatBackgroundInputRef.current?.click()}>
+                            <IconUpload />
+                            <span>{chatBackgroundImages.length ? "添加图片" : "导入图片"}</span>
+                          </button>
+                        </div>
+                        {chatBackgroundImages.length > 0 ? (
+                          <div className="chat-background-image-list">
+                            {chatBackgroundImages.map((image, index) => (
+                              <div
+                                key={image.id}
+                                className={`chat-background-image-item ${index === activeChatBackgroundIndex ? "is-active" : ""}`}
+                                draggable
+                                onDragStart={(event) => event.dataTransfer.setData("text/plain", image.id)}
+                                onDragOver={(event) => event.preventDefault()}
+                                onDrop={(event) => {
+                                  event.preventDefault();
+                                  const sourceId = event.dataTransfer.getData("text/plain");
+                                  if (sourceId) void moveChatBackgroundImage(sourceId, image.id);
+                                }}
+                              >
+                                <button type="button" className="chat-background-image-select" onClick={() => setActiveChatBackgroundIndex(index)} title={`预览 ${image.fileName}`}>
+                                  <img src={image.url} alt="" />
+                                  <span>{image.fileName}</span>
+                                </button>
+                                <button type="button" className="chat-background-image-remove" onClick={() => void removeChatBackgroundImage(image.id)} title={`删除 ${image.fileName}`} aria-label={`删除 ${image.fileName}`}>
+                                  <IconTrash />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <button type="button" className="chat-background-library-empty" onClick={() => chatBackgroundInputRef.current?.click()}>
+                            <IconImage />
+                            <span>导入图片开始设置</span>
+                          </button>
+                        )}
+                        <div className="chat-background-rotation-row">
+                          <div>
+                            <strong>动态切换</strong>
+                            <span>{chatBackgroundImages.length < 2 ? "添加至少两张图片后可用" : "按当前排序顺序循环播放"}</span>
+                          </div>
+                          <label className="chat-background-toggle">
+                            <input
+                              type="checkbox"
+                              checked={chatBackgroundSettings.rotationEnabled}
+                              disabled={chatBackgroundImages.length < 2}
+                              onChange={(event) => updateChatBackgroundSettings({ rotationEnabled: event.target.checked })}
+                            />
+                            <span aria-hidden="true" />
+                            <em>{chatBackgroundSettings.rotationEnabled ? "开启" : "关闭"}</em>
+                          </label>
+                        </div>
+                        <label className="chat-background-rotation-interval">
+                          <span>切换间隔</span>
+                          <input
+                            type="range"
+                            min="10"
+                            max="600"
+                            step="10"
+                            value={chatBackgroundSettings.rotationIntervalSeconds}
+                            disabled={chatBackgroundImages.length < 2 || !chatBackgroundSettings.rotationEnabled}
+                            onChange={(event) => updateChatBackgroundSettings({ rotationIntervalSeconds: Number(event.target.value) })}
+                          />
+                          <output>{chatBackgroundSettings.rotationIntervalSeconds} 秒</output>
+                        </label>
+                      </section>
                     </div>
 
                     <div className="chat-background-controls">
                       <div className="chat-background-heading">
                         <div>
-                          <strong>{chatBackgroundSettings.fileName ?? "尚未导入图片"}</strong>
-                          <span>{chatBackgroundUrl ? "本地背景" : "PNG、JPEG、WebP、GIF · 最大 40 MB"}</span>
+                          <strong>应用背景</strong>
+                          <span>{chatBackgroundImages.length ? `${chatBackgroundImages.length} 张本地图片` : "PNG、JPEG、WebP、GIF · 最大 40 MB"}</span>
                         </div>
                         <label className="chat-background-toggle">
                           <input
@@ -7739,7 +7897,8 @@ export function App() {
                         </label>
                       </div>
 
-                      <div className="chat-background-control-group">
+                      <div className="chat-background-visual-controls">
+                      <div className="chat-background-control-group chat-background-fit-control">
                         <div className="chat-background-control-label">
                           <span>填充方式</span>
                         </div>
@@ -7758,49 +7917,6 @@ export function App() {
                           >
                             完整显示
                           </button>
-                        </div>
-                      </div>
-
-                      <div className="chat-background-control-group">
-                        <div className="chat-background-control-label">
-                          <span>图片位置</span>
-                          <button
-                            type="button"
-                            className="chat-background-center-button"
-                            onClick={() => updateChatBackgroundSettings({ positionX: 50, positionY: 50 })}
-                            disabled={!chatBackgroundUrl}
-                          >
-                            <IconRefresh />
-                            <span>居中</span>
-                          </button>
-                        </div>
-                        <div className="chat-background-position-controls">
-                          <label>
-                            <span>水平</span>
-                            <input
-                              type="range"
-                              min="0"
-                              max="100"
-                              step="1"
-                              value={chatBackgroundSettings.positionX}
-                              disabled={!chatBackgroundUrl}
-                              onChange={(event) => updateChatBackgroundSettings({ positionX: Number(event.target.value) })}
-                            />
-                            <output>{chatBackgroundSettings.positionX}%</output>
-                          </label>
-                          <label>
-                            <span>垂直</span>
-                            <input
-                              type="range"
-                              min="0"
-                              max="100"
-                              step="1"
-                              value={chatBackgroundSettings.positionY}
-                              disabled={!chatBackgroundUrl}
-                              onChange={(event) => updateChatBackgroundSettings({ positionY: Number(event.target.value) })}
-                            />
-                            <output>{chatBackgroundSettings.positionY}%</output>
-                          </label>
                         </div>
                       </div>
 
@@ -7849,6 +7965,7 @@ export function App() {
                           onChange={(event) => updateChatBackgroundSettings({ opacity: Number(event.target.value) })}
                         />
                       </label>
+                      </div>
 
                       <div className="chat-background-control-group chat-background-surface-group">
                         <div className="chat-background-control-label">
@@ -7875,10 +7992,6 @@ export function App() {
                       </div>
 
                       <div className="chat-background-actions">
-                        <button type="button" className="background-action-primary" onClick={() => chatBackgroundInputRef.current?.click()}>
-                          <IconUpload />
-                          <span>{chatBackgroundUrl ? "替换图片" : "导入图片"}</span>
-                        </button>
                         <button
                           type="button"
                           onClick={resetChatBackgroundSurfaces}

@@ -4,6 +4,7 @@ import {
   DEFAULT_CHAT_BACKGROUND_SURFACES,
   getChatBackgroundSurfaceStyleVars,
   getChatBackgroundTransform,
+  isChatBackgroundRotationActive,
   normalizeChatBackgroundSettings,
   normalizeChatBackgroundSurfaces,
   readChatBackgroundSettings,
@@ -14,6 +15,8 @@ describe("chat background settings", () => {
   it("normalizes invalid and out-of-range values", () => {
     expect(normalizeChatBackgroundSettings({
       enabled: false,
+      rotationEnabled: true,
+      rotationIntervalSeconds: 4,
       opacity: 145,
       blur: -8,
       fit: "unexpected",
@@ -31,6 +34,8 @@ describe("chat background settings", () => {
       }
     })).toEqual({
       enabled: false,
+      rotationEnabled: true,
+      rotationIntervalSeconds: 10,
       opacity: 100,
       blur: 0,
       fit: "cover",
@@ -66,6 +71,8 @@ describe("chat background settings", () => {
     writeChatBackgroundSettings(
       {
         enabled: true,
+        rotationEnabled: true,
+        rotationIntervalSeconds: 72.4,
         opacity: 32.4,
         blur: 12.7,
         fit: "contain",
@@ -83,6 +90,8 @@ describe("chat background settings", () => {
     );
     expect(JSON.parse(persisted)).toEqual({
       enabled: true,
+      rotationEnabled: true,
+      rotationIntervalSeconds: 72,
       opacity: 32,
       blur: 13,
       fit: "contain",
@@ -120,5 +129,16 @@ describe("chat background settings", () => {
       "--app-bg-terminal": "0.4",
       "--app-bg-dialog": "0.62"
     });
+  });
+
+  it("only rotates an enabled background collection with multiple images", () => {
+    expect(isChatBackgroundRotationActive({
+      ...DEFAULT_CHAT_BACKGROUND_SETTINGS,
+      rotationEnabled: true
+    }, 1)).toBe(false);
+    expect(isChatBackgroundRotationActive({
+      ...DEFAULT_CHAT_BACKGROUND_SETTINGS,
+      rotationEnabled: true
+    }, 2)).toBe(true);
   });
 });

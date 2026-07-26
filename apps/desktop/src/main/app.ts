@@ -86,15 +86,31 @@ const APPLICATION_BACKGROUND_MIME_TYPES = new Set([
   "image/gif"
 ]);
 
-type ApplicationBackgroundPayload = {
+type ApplicationBackgroundItemPayload = {
+  id: string;
   bytes: ArrayBuffer;
   mimeType: string;
   fileName: string;
+};
+
+type ApplicationBackgroundCollectionPayload = {
+  items: ApplicationBackgroundItemPayload[];
   settings: unknown;
 };
 
-type ApplicationBackgroundMetadata = Omit<ApplicationBackgroundPayload, "bytes"> & {
+type ApplicationBackgroundItemMetadata = Omit<ApplicationBackgroundItemPayload, "bytes">;
+
+type ApplicationBackgroundMetadata = {
+  version: 2;
+  items: ApplicationBackgroundItemMetadata[];
+  settings: unknown;
+};
+
+type LegacyApplicationBackgroundMetadata = {
   version: 1;
+  mimeType: string;
+  fileName: string;
+  settings: unknown;
 };
 
 function redactDatabaseErrorMessage(message: string, password?: string): string {
@@ -805,7 +821,7 @@ export class DesktopBackend {
     return { path: relativePath };
   }
 
-  public getThreadSnapshot(threadId: string, messageLimit = 160): RuntimeThreadSnapshot {
+  public getThreadSnapshot(threadId: string): RuntimeThreadSnapshot {
     const thread = this.#db.getThread(threadId);
     const subagents = this.getCurrentRequestSubagents(thread);
     const childApprovals = thread.parentThreadId
@@ -816,16 +832,12 @@ export class DesktopBackend {
       : subagents.flatMap((child) => this.#db.listUserPrompts(child.id).filter((prompt) => prompt.status === "pending"));
     const browserTabs = this.removePersistedBrowserErrorTabs(threadId);
     this.#browser.syncPersistedTabs(threadId, browserTabs);
-    const cappedMessageLimit = Number.isFinite(messageLimit)
-      ? Math.min(2_000, Math.max(1, Math.floor(messageLimit)))
-      : 160;
     const messageCount = this.#db.countMessages(threadId);
-    const messages = this.#db.listRecentMessages(threadId, cappedMessageLimit);
+    const messages = this.#db.listRecentMessages(threadId, Math.max(1, messageCount));
     return {
       thread,
       messages,
       messageCount,
-      hasMoreMessages: messageCount > messages.length,
       queuedMessages: this.#db.listQueuedMessages(threadId).filter((message) => message.status === "queued"),
       approvals: [...this.#db.listApprovals(threadId), ...childApprovals],
       prompts: [...this.#db.listUserPrompts(threadId), ...childPrompts],
@@ -1509,20 +1521,49 @@ export class DesktopBackend {
     return this.#config;
   }
 
-  public async getApplicationBackground(): Promise<ApplicationBackgroundPayload | null> {
+  public async getApplicationBackgrounds(): Promise<ApplicationBackgroundCollectionPayload | null> {
     const appearanceDir = path.join(this.#layout.root, "appearance");
     try {
-      const [bytes, rawMetadata] = await Promise.all([
-        fs.readFile(path.join(appearanceDir, "background-image")),
-        fs.readFile(path.join(appearanceDir, "background.json"), "utf8")
-      ]);
-      const metadata = JSON.parse(rawMetadata) as Partial<ApplicationBackgroundMetadata>;
-      if (!APPLICATION_BACKGROUND_MIME_TYPES.has(metadata.mimeType ?? "")) return null;
+      const rawMetadata = await fs.readFile(path.join(appearanceDir, "background.json"), "utf8");
+      const metadata = JSON.parse(rawMetadata) as Partial<ApplicationBackgroundMetadata> | Partial<LegacyApplicationBackgroundMetadata>;
+      if (metadata.version === 2 && "items" in metadata && Array.isArray(metadata.items)) {
+        const items = await Promise.all(metadata.items.map(async (item) => {
+          if (
+            !item ||
+            typeof item.id !== "string" ||
+            !/^[a-zA-Z0-9_-]{1,128}$/.test(item.id) ||
+            !APPLICATION_BACKGROUND_MIME_TYPES.has(item.mimeType ?? "")
+          ) {
+            return null;
+          }
+          try {
+            const bytes = await fs.readFile(path.join(appearanceDir, "backgrounds", item.id));
+            return {
+              id: item.id,
+              bytes: Uint8Array.from(bytes).buffer,
+              mimeType: item.mimeType,
+              fileName: typeof item.fileName === "string" ? item.fileName : "background"
+            };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+            throw error;
+          }
+        }));
+        const availableItems = items.filter((item): item is ApplicationBackgroundItemPayload => item !== null);
+        return availableItems.length > 0 ? { items: availableItems, settings: metadata.settings } : null;
+      }
+
+      const legacyMetadata = metadata as Partial<LegacyApplicationBackgroundMetadata>;
+      if (!APPLICATION_BACKGROUND_MIME_TYPES.has(legacyMetadata.mimeType ?? "")) return null;
+      const bytes = await fs.readFile(path.join(appearanceDir, "background-image"));
       return {
-        bytes: Uint8Array.from(bytes).buffer,
-        mimeType: metadata.mimeType!,
-        fileName: typeof metadata.fileName === "string" ? metadata.fileName : "background",
-        settings: metadata.settings
+        items: [{
+          id: "legacy-background",
+          bytes: Uint8Array.from(bytes).buffer,
+          mimeType: legacyMetadata.mimeType!,
+          fileName: typeof legacyMetadata.fileName === "string" ? legacyMetadata.fileName : "background"
+        }],
+        settings: legacyMetadata.settings
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -1530,20 +1571,39 @@ export class DesktopBackend {
     }
   }
 
-  public async saveApplicationBackground(payload: ApplicationBackgroundPayload): Promise<void> {
-    const bytes = new Uint8Array(payload.bytes);
-    if (bytes.byteLength === 0 || bytes.byteLength > MAX_APPLICATION_BACKGROUND_BYTES) {
-      throw new Error("背景图片必须小于 40 MB。");
+  public async saveApplicationBackgrounds(payload: ApplicationBackgroundCollectionPayload): Promise<void> {
+    if (!Array.isArray(payload.items) || payload.items.length === 0) {
+      throw new Error("请至少保留一张背景图片。");
     }
-    if (!APPLICATION_BACKGROUND_MIME_TYPES.has(payload.mimeType)) {
-      throw new Error("仅支持 PNG、JPEG、WebP 或 GIF 图片。");
+    if (payload.items.length > 50) {
+      throw new Error("背景图片最多支持 50 张。");
     }
+
+    const seenIds = new Set<string>();
+    const items = payload.items.map((item) => {
+      const bytes = new Uint8Array(item.bytes);
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(item.id) || seenIds.has(item.id)) {
+        throw new Error("背景图片标识无效。");
+      }
+      seenIds.add(item.id);
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_APPLICATION_BACKGROUND_BYTES) {
+        throw new Error("背景图片必须小于 40 MB。");
+      }
+      if (!APPLICATION_BACKGROUND_MIME_TYPES.has(item.mimeType)) {
+        throw new Error("仅支持 PNG、JPEG、WebP 或 GIF 图片。");
+      }
+      return {
+        id: item.id,
+        bytes,
+        mimeType: item.mimeType,
+        fileName: path.basename(item.fileName || "background").slice(0, 255)
+      };
+    });
 
     const appearanceDir = path.join(this.#layout.root, "appearance");
     const metadata: ApplicationBackgroundMetadata = {
-      version: 1,
-      mimeType: payload.mimeType,
-      fileName: path.basename(payload.fileName || "background").slice(0, 255),
+      version: 2,
+      items: items.map(({ id, mimeType, fileName }) => ({ id, mimeType, fileName })),
       settings: payload.settings
     };
     const serializedMetadata = JSON.stringify(metadata, null, 2);
@@ -1552,10 +1612,14 @@ export class DesktopBackend {
     }
 
     await fs.mkdir(appearanceDir, { recursive: true });
-    await fs.writeFile(
-      path.join(appearanceDir, "background-image"),
-      Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-    );
+    const backgroundsDir = path.join(appearanceDir, "backgrounds");
+    await fs.rm(backgroundsDir, { recursive: true, force: true });
+    await fs.mkdir(backgroundsDir, { recursive: true });
+    await Promise.all(items.map((item) => fs.writeFile(
+      path.join(backgroundsDir, item.id),
+      Buffer.from(item.bytes.buffer, item.bytes.byteOffset, item.bytes.byteLength)
+    )));
+    await fs.rm(path.join(appearanceDir, "background-image"), { force: true });
     await fs.writeFile(path.join(appearanceDir, "background.json"), serializedMetadata, "utf8");
   }
 
@@ -1563,7 +1627,7 @@ export class DesktopBackend {
     const appearanceDir = path.join(this.#layout.root, "appearance");
     const metadataPath = path.join(appearanceDir, "background.json");
     try {
-      const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8")) as ApplicationBackgroundMetadata;
+      const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8")) as ApplicationBackgroundMetadata | LegacyApplicationBackgroundMetadata;
       metadata.settings = settings;
       const serializedMetadata = JSON.stringify(metadata, null, 2);
       if (Buffer.byteLength(serializedMetadata, "utf8") > 64 * 1024) {
@@ -1576,10 +1640,11 @@ export class DesktopBackend {
     }
   }
 
-  public async clearApplicationBackground(): Promise<void> {
+  public async clearApplicationBackgrounds(): Promise<void> {
     const appearanceDir = path.join(this.#layout.root, "appearance");
     await Promise.all([
       fs.rm(path.join(appearanceDir, "background-image"), { force: true }),
+      fs.rm(path.join(appearanceDir, "backgrounds"), { recursive: true, force: true }),
       fs.rm(path.join(appearanceDir, "background.json"), { force: true })
     ]);
   }

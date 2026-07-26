@@ -331,12 +331,12 @@ function reportStartupError(error: unknown): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle("appearance:background:get", () => backend.getApplicationBackground());
-  ipcMain.handle("appearance:background:save", (_event, payload) => backend.saveApplicationBackground(payload));
+  ipcMain.handle("appearance:background:get", () => backend.getApplicationBackgrounds());
+  ipcMain.handle("appearance:background:save", (_event, payload) => backend.saveApplicationBackgrounds(payload));
   ipcMain.handle("appearance:background:save-settings", (_event, settings) =>
     backend.saveApplicationBackgroundSettings(settings)
   );
-  ipcMain.handle("appearance:background:clear", () => backend.clearApplicationBackground());
+  ipcMain.handle("appearance:background:clear", () => backend.clearApplicationBackgrounds());
   ipcMain.handle("threads:list", () => backend.listThreads());
   ipcMain.handle("threads:token-usage", (_event, threadId: string) => backend.getThreadTokenUsage(threadId));
   ipcMain.handle("usage-analytics:get", (_event, input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) =>
@@ -424,8 +424,8 @@ function registerIpc(): void {
   ipcMain.handle("threads:clear-conversation", (_event, threadId: string) =>
     backend.clearThreadConversation(threadId)
   );
-  ipcMain.handle("threads:snapshot", (_event, threadId: string, messageLimit?: number) =>
-    backend.getThreadSnapshot(threadId, messageLimit)
+  ipcMain.handle("threads:snapshot", (_event, threadId: string) =>
+    backend.getThreadSnapshot(threadId)
   );
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)

@@ -11572,29 +11572,6 @@ select:focus {
   max-width: 100%;
 }
 
-.transcript-load-earlier {
-  align-self: center;
-  min-height: 32px;
-  padding: 6px 12px;
-  border: 1px solid var(--border-subtle, #30343b);
-  border-radius: 6px;
-  background: var(--surface-raised, #181a1f);
-  color: var(--text-secondary, #aeb6c2);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.transcript-load-earlier:hover:not(:disabled) {
-  border-color: var(--accent, #5d9cff);
-  color: var(--text-primary, #f4f7fb);
-}
-
-.transcript-load-earlier:disabled {
-  cursor: wait;
-  opacity: 0.65;
-}
-
 .message-card {
   display: flex;
   flex-direction: column;
@@ -18262,7 +18239,7 @@ select option:checked {
   height: calc(100% + 72px);
   object-position: center center;
   transform-origin: center;
-  transition: opacity 120ms ease, filter 120ms ease, transform 120ms ease;
+  transition: opacity 600ms ease, filter 120ms ease, transform 120ms ease;
 }
 
 .app-shell > .windowbar,
@@ -18507,10 +18484,6 @@ select option:checked {
   background: rgba(23, 25, 29, min(0.55, calc(var(--app-bg-dialog) * 0.75)));
 }
 
-.app-shell.has-app-background .chat-background-center-button {
-  background: rgba(25, 27, 32, min(0.55, calc(var(--app-bg-dialog) * 0.7)));
-}
-
 body:has(.app-shell.has-app-background) .fetch-models-overlay,
 body:has(.app-shell.has-app-background) .message-image-lightbox,
 body:has(.app-shell.has-app-background) .file-preview-lightbox {
@@ -18554,6 +18527,13 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   align-items: start;
 }
 
+.chat-background-preview-column {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+  align-content: start;
+}
+
 .chat-background-preview {
   position: relative;
   width: 100%;
@@ -18586,8 +18566,13 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   height: calc(100% + 64px);
   object-position: center;
   transform-origin: center;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
   transition: opacity 120ms ease, filter 120ms ease, transform 120ms ease;
 }
+
+.chat-background-preview.is-dragging > img { cursor: grabbing; }
 
 .chat-background-empty {
   position: absolute;
@@ -18678,7 +18663,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
 .chat-background-controls {
   display: grid;
-  gap: 20px;
+  gap: 16px;
   align-content: start;
   max-height: min(72vh, 760px);
   overflow: auto;
@@ -18716,6 +18701,103 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 .chat-background-heading span {
   color: #7f8590;
   font-size: 12px;
+}
+
+.chat-background-library {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(18, 20, 24, 0.68);
+}
+
+.chat-background-library-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-background-library-header .chat-background-control-label {
+  min-width: 0;
+}
+
+.chat-background-add-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid rgba(225, 164, 84, 0.35);
+  border-radius: 5px;
+  color: #fff8ed;
+  background: #815a2d;
+  font-size: 11px;
+}
+
+.chat-background-add-button:hover {
+  border-color: rgba(242, 189, 116, 0.52);
+  background: #956a34;
+}
+
+.chat-background-add-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-background-library-empty {
+  display: flex;
+  min-height: 74px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  color: #8f959f;
+  background: rgba(11, 13, 16, 0.34);
+  font-size: 12px;
+}
+
+.chat-background-library-empty:hover {
+  color: #e5e8ed;
+  border-color: rgba(225, 164, 84, 0.48);
+  background: rgba(129, 90, 45, 0.16);
+}
+
+.chat-background-library-empty svg {
+  width: 17px;
+  height: 17px;
+}
+
+.chat-background-rotation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 2px;
+}
+
+.chat-background-rotation-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.chat-background-rotation-row strong {
+  color: #d6d9df;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-background-rotation-row > div > span {
+  overflow: hidden;
+  color: #7f8590;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-background-toggle {
@@ -18833,52 +18915,107 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   opacity: 0.4;
 }
 
-.chat-background-center-button {
-  display: inline-flex;
-  min-height: 28px;
-  align-items: center;
-  gap: 6px;
-  padding: 0 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 5px;
-  color: #aeb4bd;
-  background: #191b20;
-  font-size: 11px;
-}
-
-.chat-background-center-button:hover:not(:disabled) {
-  border-color: rgba(255, 255, 255, 0.16);
-  color: #f1f3f6;
-  background: #23262c;
-}
-
-.chat-background-center-button:disabled {
-  opacity: 0.4;
-}
-
-.chat-background-center-button svg {
-  width: 13px;
-  height: 13px;
-}
-
-.chat-background-position-controls {
+.chat-background-rotation-interval {
   display: grid;
-  gap: 8px;
-}
-
-.chat-background-position-controls label {
-  display: grid;
-  grid-template-columns: 34px minmax(100px, 1fr) 40px;
+  grid-template-columns: 72px minmax(100px, 1fr) 52px;
   align-items: center;
   gap: 10px;
   color: #8f959f;
   font-size: 11px;
 }
 
-.chat-background-position-controls output {
-  color: #c6cad1;
+.chat-background-rotation-interval output {
+  color: #f0c47b;
   font-family: var(--font-mono);
   text-align: right;
+}
+
+.chat-background-image-list {
+  display: flex;
+  gap: 8px;
+  max-width: 100%;
+  padding: 1px 1px 7px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.chat-background-image-item {
+  position: relative;
+  flex: 0 0 122px;
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  background: #15171b;
+  overflow: hidden;
+}
+
+.chat-background-image-item.is-active {
+  border-color: rgba(225, 164, 84, 0.7);
+  box-shadow: 0 0 0 1px rgba(225, 164, 84, 0.15);
+}
+
+.chat-background-image-select {
+  display: grid;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: #c6cad1;
+  background: transparent;
+  text-align: left;
+}
+
+.chat-background-image-select img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.chat-background-image-select span {
+  padding: 6px 7px;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-background-image-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  color: #f0d5d5;
+  background: rgba(20, 21, 24, 0.76);
+}
+
+.chat-background-image-remove:hover {
+  color: #ffffff;
+  background: rgba(152, 69, 69, 0.88);
+}
+
+.chat-background-image-remove svg {
+  width: 13px;
+  height: 13px;
+}
+
+.chat-background-visual-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px 16px;
+  padding-top: 2px;
+}
+
+.chat-background-visual-controls .chat-background-control-group {
+  min-width: 0;
+}
+
+.chat-background-visual-controls .chat-background-fit-control {
+  grid-column: 1 / -1;
 }
 
 .settings-body .chat-background-control-group input[type="range"] {
@@ -18932,7 +19069,8 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding-top: 3px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 .chat-background-actions button {
@@ -18972,6 +19110,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 }
 
 .chat-background-actions .background-action-danger {
+  margin-left: auto;
   color: #dba6a6;
 }
 
@@ -18985,6 +19124,10 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
   .chat-background-controls {
     padding-bottom: 24px;
+  }
+
+  .chat-background-library {
+    padding: 15px;
   }
 }
 
@@ -19001,6 +19144,22 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
   .chat-background-heading {
     align-items: flex-start;
+  }
+
+  .chat-background-visual-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-background-visual-controls .chat-background-fit-control {
+    grid-column: auto;
+  }
+
+  .chat-background-library-header {
+    align-items: flex-start;
+  }
+
+  .chat-background-rotation-row > div > span {
+    white-space: normal;
   }
 }
 

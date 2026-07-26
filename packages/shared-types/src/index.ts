@@ -1056,9 +1056,8 @@ export interface RuntimePromptBundle {
 export interface RuntimeThreadSnapshot {
   thread: ThreadRecord;
   messages: MessageRecord[];
-  /** Total persisted messages; snapshots may contain only the recent portion. */
+  /** Total persisted messages included in the snapshot. */
   messageCount: number;
-  hasMoreMessages: boolean;
   queuedMessages: QueuedMessageRecord[];
   approvals: ApprovalRequest[];
   prompts: UserInputPrompt[];

@@ -12,6 +12,8 @@ export type ChatBackgroundSurfaces = Record<ChatBackgroundSurfaceKey, number>;
 
 export type ChatBackgroundSettings = {
   enabled: boolean;
+  rotationEnabled: boolean;
+  rotationIntervalSeconds: number;
   opacity: number;
   blur: number;
   fit: ChatBackgroundFit;
@@ -46,6 +48,8 @@ export const CHAT_BACKGROUND_SURFACE_OPTIONS: Array<{
 
 export const DEFAULT_CHAT_BACKGROUND_SETTINGS: ChatBackgroundSettings = {
   enabled: true,
+  rotationEnabled: false,
+  rotationIntervalSeconds: 60,
   opacity: 24,
   blur: 8,
   fit: "cover",
@@ -95,6 +99,8 @@ export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundS
   const source = value as Partial<ChatBackgroundSettings>;
   return {
     enabled: source.enabled !== false,
+    rotationEnabled: source.rotationEnabled === true,
+    rotationIntervalSeconds: Math.round(clamp(source.rotationIntervalSeconds, 10, 600, DEFAULT_CHAT_BACKGROUND_SETTINGS.rotationIntervalSeconds)),
     opacity: Math.round(clamp(source.opacity, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.opacity)),
     blur: Math.round(clamp(source.blur, 0, 30, DEFAULT_CHAT_BACKGROUND_SETTINGS.blur)),
     fit: source.fit === "contain" ? "contain" : "cover",
@@ -104,6 +110,10 @@ export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundS
     fileName: typeof source.fileName === "string" && source.fileName.trim() ? source.fileName.trim() : null,
     surfaces: normalizeChatBackgroundSurfaces(source.surfaces)
   };
+}
+
+export function isChatBackgroundRotationActive(settings: ChatBackgroundSettings, imageCount: number): boolean {
+  return settings.enabled && settings.rotationEnabled && imageCount > 1;
 }
 
 export function getChatBackgroundSurfaceStyleVars(

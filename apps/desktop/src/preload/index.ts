@@ -2,11 +2,14 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { NotificationNavigationTarget } from "@shared-types";
 
 const api = {
-  getApplicationBackground: () => ipcRenderer.invoke("appearance:background:get"),
-  saveApplicationBackground: (payload: {
-    bytes: ArrayBuffer;
-    mimeType: string;
-    fileName: string;
+  getApplicationBackgrounds: () => ipcRenderer.invoke("appearance:background:get"),
+  saveApplicationBackgrounds: (payload: {
+    items: Array<{
+      id: string;
+      bytes: ArrayBuffer;
+      mimeType: string;
+      fileName: string;
+    }>;
     settings: unknown;
   }) => ipcRenderer.invoke("appearance:background:save", payload),
   saveApplicationBackgroundSettings: (settings: unknown) =>
@@ -61,8 +64,7 @@ const api = {
   createGitPullRequest: (threadId: string) => ipcRenderer.invoke("git:create-pr", threadId),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
   clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),
-  getThreadSnapshot: (threadId: string, messageLimit?: number) =>
-    ipcRenderer.invoke("threads:snapshot", threadId, messageLimit),
+  getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[] }) =>
     ipcRenderer.invoke("threads:send", payload),
   replaceMessage: (payload: { threadId: string; messageId: string; content: string }) =>
