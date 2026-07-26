@@ -1421,6 +1421,10 @@ export function App() {
     const reset = () => {
       shell.style.setProperty("--app-background-parallax-x", "0px");
       shell.style.setProperty("--app-background-parallax-y", "0px");
+      shell.style.setProperty("--app-background-parallax-back-x", "0px");
+      shell.style.setProperty("--app-background-parallax-back-y", "0px");
+      shell.style.setProperty("--app-background-parallax-front-x", "0px");
+      shell.style.setProperty("--app-background-parallax-front-y", "0px");
     };
     if (!chatBackgroundUrl || !chatBackgroundSettings.enabled || !chatBackgroundSettings.parallaxEnabled) {
       reset();
@@ -1434,6 +1438,10 @@ export function App() {
       animationFrame = 0;
       shell.style.setProperty("--app-background-parallax-x", `${targetX.toFixed(2)}px`);
       shell.style.setProperty("--app-background-parallax-y", `${targetY.toFixed(2)}px`);
+      shell.style.setProperty("--app-background-parallax-back-x", `${(targetX * 0.42).toFixed(2)}px`);
+      shell.style.setProperty("--app-background-parallax-back-y", `${(targetY * 0.42).toFixed(2)}px`);
+      shell.style.setProperty("--app-background-parallax-front-x", `${(targetX * 1.5).toFixed(2)}px`);
+      shell.style.setProperty("--app-background-parallax-front-y", `${(targetY * 1.5).toFixed(2)}px`);
     };
     const handlePointerMove = (event: PointerEvent) => {
       targetX = ((event.clientX / Math.max(1, window.innerWidth)) - 0.5) * 14;
@@ -6847,26 +6855,60 @@ export function App() {
     >
       {chatBackgroundUrl && chatBackgroundSettings.enabled ? (
         <div className="app-background-layer" aria-hidden="true">
-          {chatBackgroundImages.map((image, index) => (
-            <div
-              key={image.id}
-              className={`app-background-motion ${index === activeChatBackgroundIndex ? "is-active" : ""} ${chatBackgroundSettings.motionEnabled ? "is-enabled" : ""}`}
-            >
-              <div className="app-background-parallax">
-                <img
-                  src={image.url}
-                  alt=""
-                  style={{
-                    filter: `blur(${chatBackgroundSettings.blur}px)`,
-                    opacity: index === activeChatBackgroundIndex ? chatBackgroundSettings.opacity / 100 : 0,
-                    objectFit: chatBackgroundSettings.fit,
-                    objectPosition: "center",
-                    transform: getChatBackgroundTransform(chatBackgroundSettings)
-                  }}
-                />
+          {chatBackgroundImages.map((image, index) => {
+            const isActive = index === activeChatBackgroundIndex;
+            const opacity = isActive ? chatBackgroundSettings.opacity / 100 : 0;
+            const imageStyle = {
+              objectFit: chatBackgroundSettings.fit,
+              objectPosition: "center",
+              transform: getChatBackgroundTransform(chatBackgroundSettings)
+            };
+            return (
+              <div
+                key={image.id}
+                className={`app-background-motion ${isActive ? "is-active" : ""} ${chatBackgroundSettings.motionEnabled ? "is-enabled" : ""}`}
+              >
+                {chatBackgroundSettings.depthEnabled ? (
+                  <div className="app-background-depth-backdrop">
+                    <img
+                      src={image.url}
+                      alt=""
+                      style={{
+                        ...imageStyle,
+                        filter: `blur(${chatBackgroundSettings.blur + 8}px) saturate(0.86)`,
+                        opacity: opacity * 0.34
+                      }}
+                    />
+                  </div>
+                ) : null}
+                <div className="app-background-parallax">
+                  <img
+                    src={image.url}
+                    alt=""
+                    style={{
+                      ...imageStyle,
+                      filter: `blur(${chatBackgroundSettings.blur}px)`,
+                      opacity
+                    }}
+                  />
+                </div>
+                {chatBackgroundSettings.depthEnabled ? (
+                  <div className="app-background-depth-foreground">
+                    <img
+                      src={image.url}
+                      alt=""
+                      style={{
+                        ...imageStyle,
+                        filter: `blur(${Math.max(0, chatBackgroundSettings.blur - 2)}px) saturate(1.08)`,
+                        opacity: opacity * 0.24
+                      }}
+                    />
+                  </div>
+                ) : null}
+                {chatBackgroundSettings.atmosphereEnabled && isActive ? <div className="app-background-atmosphere" /> : null}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : null}
       <header className="windowbar">
@@ -7923,13 +7965,66 @@ export function App() {
                           <output>{chatBackgroundSettings.rotationIntervalSeconds} 秒</output>
                         </label>
                       </section>
+
+                      <section className="chat-background-motion-panel" aria-label="背景动效">
+                        <div className="chat-background-control-label">
+                          <span>背景动效</span>
+                          <em>不使用视频模型</em>
+                        </div>
+                        <div className="chat-background-motion-settings chat-background-motion-settings-in-panel">
+                          <div className="chat-background-motion-setting">
+                            <div>
+                              <strong>缓慢镜头运动</strong>
+                              <span>自动缩放与平移单张背景</span>
+                            </div>
+                            <label className="chat-background-toggle">
+                              <input type="checkbox" checked={chatBackgroundSettings.motionEnabled} disabled={!chatBackgroundUrl} onChange={(event) => updateChatBackgroundSettings({ motionEnabled: event.target.checked })} />
+                              <span aria-hidden="true" />
+                              <em>{chatBackgroundSettings.motionEnabled ? "开启" : "关闭"}</em>
+                            </label>
+                          </div>
+                          <div className="chat-background-motion-setting">
+                            <div>
+                              <strong>鼠标视差</strong>
+                              <span>背景随鼠标轻微跟随</span>
+                            </div>
+                            <label className="chat-background-toggle">
+                              <input type="checkbox" checked={chatBackgroundSettings.parallaxEnabled} disabled={!chatBackgroundUrl} onChange={(event) => updateChatBackgroundSettings({ parallaxEnabled: event.target.checked })} />
+                              <span aria-hidden="true" />
+                              <em>{chatBackgroundSettings.parallaxEnabled ? "开启" : "关闭"}</em>
+                            </label>
+                          </div>
+                          <div className="chat-background-motion-setting">
+                            <div>
+                              <strong>空间层次</strong>
+                              <span>以远景和前景强化视差深度</span>
+                            </div>
+                            <label className="chat-background-toggle">
+                              <input type="checkbox" checked={chatBackgroundSettings.depthEnabled} disabled={!chatBackgroundUrl} onChange={(event) => updateChatBackgroundSettings({ depthEnabled: event.target.checked })} />
+                              <span aria-hidden="true" />
+                              <em>{chatBackgroundSettings.depthEnabled ? "开启" : "关闭"}</em>
+                            </label>
+                          </div>
+                          <div className="chat-background-motion-setting">
+                            <div>
+                              <strong>氛围光影</strong>
+                              <span>缓慢掠过的柔和光线</span>
+                            </div>
+                            <label className="chat-background-toggle">
+                              <input type="checkbox" checked={chatBackgroundSettings.atmosphereEnabled} disabled={!chatBackgroundUrl} onChange={(event) => updateChatBackgroundSettings({ atmosphereEnabled: event.target.checked })} />
+                              <span aria-hidden="true" />
+                              <em>{chatBackgroundSettings.atmosphereEnabled ? "开启" : "关闭"}</em>
+                            </label>
+                          </div>
+                        </div>
+                      </section>
                     </div>
 
                     <div className="chat-background-controls">
                       <div className="chat-background-heading">
                         <div>
-                          <strong>应用背景</strong>
-                          <span>{chatBackgroundImages.length ? `${chatBackgroundImages.length} 张本地图片` : "PNG、JPEG、WebP、GIF · 最大 40 MB"}</span>
+                          <strong>显示效果</strong>
+                          <span>{chatBackgroundUrl ? "画面显示与模块可读性" : "导入背景图片后可调整"}</span>
                         </div>
                         <label className="chat-background-toggle">
                           <input
@@ -7941,41 +8036,6 @@ export function App() {
                           <span aria-hidden="true" />
                           <em>{!chatBackgroundUrl ? "未设置" : chatBackgroundSettings.enabled ? "已启用" : "已停用"}</em>
                         </label>
-                      </div>
-
-                      <div className="chat-background-motion-settings" aria-label="背景动效">
-                        <div className="chat-background-motion-setting">
-                          <div>
-                            <strong>缓慢镜头运动</strong>
-                            <span>自动缩放与平移单张背景</span>
-                          </div>
-                          <label className="chat-background-toggle">
-                            <input
-                              type="checkbox"
-                              checked={chatBackgroundSettings.motionEnabled}
-                              disabled={!chatBackgroundUrl}
-                              onChange={(event) => updateChatBackgroundSettings({ motionEnabled: event.target.checked })}
-                            />
-                            <span aria-hidden="true" />
-                            <em>{chatBackgroundSettings.motionEnabled ? "开启" : "关闭"}</em>
-                          </label>
-                        </div>
-                        <div className="chat-background-motion-setting">
-                          <div>
-                            <strong>鼠标视差</strong>
-                            <span>背景随鼠标轻微跟随</span>
-                          </div>
-                          <label className="chat-background-toggle">
-                            <input
-                              type="checkbox"
-                              checked={chatBackgroundSettings.parallaxEnabled}
-                              disabled={!chatBackgroundUrl}
-                              onChange={(event) => updateChatBackgroundSettings({ parallaxEnabled: event.target.checked })}
-                            />
-                            <span aria-hidden="true" />
-                            <em>{chatBackgroundSettings.parallaxEnabled ? "开启" : "关闭"}</em>
-                          </label>
-                        </div>
                       </div>
 
                       <div className="chat-background-visual-controls">

@@ -18233,7 +18233,10 @@ select option:checked {
 }
 
 .app-background-motion,
-.app-background-parallax {
+.app-background-parallax,
+.app-background-depth-backdrop,
+.app-background-depth-foreground,
+.app-background-atmosphere {
   position: absolute;
   inset: 0;
 }
@@ -18253,6 +18256,46 @@ select option:checked {
   will-change: transform;
 }
 
+.app-background-depth-backdrop {
+  transform: translate3d(
+    var(--app-background-parallax-back-x, 0px),
+    var(--app-background-parallax-back-y, 0px),
+    0
+  ) scale(1.035);
+  transition: transform 720ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  will-change: transform;
+}
+
+.app-background-depth-foreground {
+  overflow: hidden;
+  transform: translate3d(
+    var(--app-background-parallax-front-x, 0px),
+    var(--app-background-parallax-front-y, 0px),
+    0
+  ) scale(1.025);
+  transition: transform 720ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  mask-image: linear-gradient(to bottom, transparent 35%, rgba(0, 0, 0, 0.25) 60%, #000 100%);
+  will-change: transform;
+}
+
+.app-background-atmosphere {
+  overflow: hidden;
+  opacity: 0.18;
+  mix-blend-mode: soft-light;
+}
+
+.app-background-atmosphere::before {
+  content: "";
+  position: absolute;
+  top: -20%;
+  bottom: -20%;
+  left: -55%;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, rgba(255, 244, 210, 0.42), transparent);
+  transform: skewX(-16deg);
+  animation: app-background-light-sweep 18s ease-in-out infinite;
+}
+
 .app-background-layer img {
   position: absolute;
   inset: -36px;
@@ -18268,14 +18311,27 @@ select option:checked {
   to { transform: translate3d(0.8%, -0.6%, 0) scale(1.065); }
 }
 
+@keyframes app-background-light-sweep {
+  0%, 28% { translate: 0 0; opacity: 0; }
+  38% { opacity: 0.8; }
+  64% { translate: 520% 0; opacity: 0; }
+  100% { translate: 520% 0; opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .app-background-motion.is-enabled {
     animation: none;
   }
 
-  .app-background-parallax {
+  .app-background-parallax,
+  .app-background-depth-backdrop,
+  .app-background-depth-foreground {
     transform: none;
     transition: none;
+  }
+
+  .app-background-atmosphere::before {
+    animation: none;
   }
 }
 
@@ -18747,6 +18803,16 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.06);
+}
+
+.chat-background-motion-panel {
+  display: grid;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.chat-background-motion-settings-in-panel {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .chat-background-motion-setting {
@@ -19223,6 +19289,10 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   }
 
   .chat-background-visual-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-background-motion-settings-in-panel {
     grid-template-columns: 1fr;
   }
 
