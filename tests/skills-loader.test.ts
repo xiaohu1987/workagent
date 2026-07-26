@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadSkillsFromRoots, SkillsManager, type SkillRootDefinition } from "@skills-runtime";
+import { discoverSkillRoots, loadSkillsFromRoots, SkillsManager, type SkillRootDefinition } from "@skills-runtime";
 
 const tempDirs: string[] = [];
 
@@ -17,6 +17,15 @@ afterEach(async () => {
 });
 
 describe("loadSkillsFromRoots", () => {
+  it("uses .codexh/skills as the canonical project skill directory", async () => {
+    const root = await makeTempDir();
+    const roots = discoverSkillRoots(path.join(root, "app-home"), root).map((entry) => entry.path);
+
+    expect(roots).toContain(path.join(root, ".codexh", "skills"));
+    expect(roots).not.toContain(path.join(root, ".claude", "skills"));
+    expect(roots).not.toContain(path.join(root, ".grok", "skills"));
+  });
+
   it("loads skills and respects scope metadata", async () => {
     const root = await makeTempDir();
     const repoSkillDir = path.join(root, ".codexh", "skills", "local-skill");

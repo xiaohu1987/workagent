@@ -56,7 +56,9 @@ function normalizeMultiAgentSettings(value?: Partial<MultiAgentSettings> | null)
     defaultContextFork: source.defaultContextFork === "none" || source.defaultContextFork === "recent" ? source.defaultContextFork : "all",
     defaultModelId: typeof source.defaultModelId === "string" ? source.defaultModelId : undefined,
     defaultProviderId: typeof source.defaultProviderId === "string" ? source.defaultProviderId : undefined,
-    defaultReasoningEffort: source.defaultReasoningEffort === "low" || source.defaultReasoningEffort === "high" ? source.defaultReasoningEffort : "medium"
+    defaultReasoningEffort: ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(source.defaultReasoningEffort ?? "")
+      ? source.defaultReasoningEffort
+      : "medium"
   };
 }
 
@@ -159,7 +161,16 @@ export function defaultConfig(): AppConfig {
     {
       id: "anthropic",
       type: "anthropic",
+      baseUrl: "https://api.anthropic.com/v1",
       apiKeyEnv: "ANTHROPIC_API_KEY"
+    },
+    {
+      id: "xai",
+      name: "xAI",
+      type: "openai-compatible",
+      transport: "responses",
+      baseUrl: "https://api.x.ai/v1",
+      apiKeyEnv: "XAI_API_KEY"
     },
     {
       id: "gemini",
@@ -203,6 +214,44 @@ export function defaultConfig(): AppConfig {
       supportsReasoningSummary: true,
       defaultTemperature: 0.2,
       defaultMaxOutputTokens: 4_096
+    },
+    {
+      id: "claude-sonnet-4-20250514",
+      providerId: "anthropic",
+      displayName: "Claude Sonnet 4",
+      contextWindow: 200_000,
+      supportsStreaming: true,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: false,
+      supportsMultimodalInput: true,
+      role: "reasoning",
+      supportsImageGeneration: false,
+      supportsVideoGeneration: false,
+      agentCapability: "unknown",
+      supportsReasoningSummary: true,
+      supportedReasoningEfforts: ["low", "medium", "high"],
+      defaultReasoningEffort: "medium",
+      defaultMaxOutputTokens: 8_192
+    },
+    {
+      id: "grok-4-0709",
+      providerId: "xai",
+      displayName: "Grok 4",
+      contextWindow: 256_000,
+      supportsStreaming: true,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: true,
+      role: "reasoning",
+      supportsImageGeneration: false,
+      supportsVideoGeneration: false,
+      agentCapability: "unknown",
+      supportsReasoningSummary: true,
+      supportedReasoningEfforts: ["minimal", "low", "medium", "high"],
+      defaultReasoningEffort: "high",
+      defaultMaxOutputTokens: 8_192
     }
   ];
 
@@ -357,11 +406,26 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     };
   }) as ModelProfile[];
 
+  // Existing installations have a persisted config file and therefore never
+  // revisit defaultConfig(). Add newly shipped entries without replacing a
+  // provider or model already managed by the user.
+  const defaults = defaultConfig();
+  const missingProviders = defaults.providers.filter(
+    (defaultProvider) => !providers.some((provider) => provider.id === defaultProvider.id)
+  );
+  const missingModels = defaults.models.filter(
+    (defaultModel) => !models.some(
+      (model) => model.id === defaultModel.id && model.providerId === defaultModel.providerId
+    )
+  );
+  providers.push(...missingProviders);
+  models.push(...missingModels);
+
   const image = readModalityDefaults(parsed.multimodal?.image, 'image', models);
   const video = readModalityDefaults(parsed.multimodal?.video, 'video', models);
   const input = readModalityDefaults(parsed.multimodal?.input, 'input', models);
 
-  return {
+  const config: AppConfig = {
     defaultModel: parsed.defaultModel ?? 'mock-codexh',
     defaultProvider: parsed.defaultProvider ?? 'mock',
     providers,
@@ -395,6 +459,10 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     })) satisfies McpServerConfig[],
     databaseConnections: normalizeDatabaseConnections(parsed.databaseConnections)
   };
+  if (missingProviders.length > 0 || missingModels.length > 0) {
+    await saveConfig(configFile, config);
+  }
+  return config;
 }
 
 export async function saveConfig(configFile: string, config: AppConfig): Promise<void> {

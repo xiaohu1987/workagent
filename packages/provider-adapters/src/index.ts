@@ -98,6 +98,9 @@ export class ProviderFactory {
       case "vllm":
       case "gateway":
       case "openai-compatible":
+        if (provider.transport === "responses") {
+          return new OpenAiResponsesProvider(provider, { fetch: this.#fetch });
+        }
         return new OpenAiCompatibleProvider(provider, { fetch: this.#fetch });
       default:
         return assertNever(provider.type);
@@ -316,6 +319,9 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
     const response = await this.#client.chat.completions.create(request as any, {
       signal: input.abortSignal
     });
+    const finishReason = response?.choices?.[0]?.finish_reason;
+    if (finishReason === "length") throw new ProviderStreamIncompleteError("length");
+    if (finishReason === "content_filter") throw new ProviderStreamIncompleteError("content_filter");
     const nonStreamDecision = compat.parseResponse(response, ctx, Boolean(nativeTools));
     const nonStreamReasoning = compat.extractReasoningFromMessage(response?.choices?.[0]?.message);
     return nonStreamReasoning
@@ -465,6 +471,75 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
 
     throw new Error("Video generation timed out while waiting for the provider result.");
   }
+}
+
+/**
+ * OpenAI Responses-compatible transport used by xAI's current agent API.
+ * It is deliberately separate from Chat Completions: the request transcript,
+ * streaming events, and function-result wire shapes are different.
+ */
+class OpenAiResponsesProvider implements ProviderAdapter {
+  readonly #client: OpenAI;
+  readonly #chatFallback: OpenAiCompatibleProvider;
+
+  public constructor(
+    private readonly provider: ProviderDefinition,
+    options?: { fetch?: ProviderFetch }
+  ) {
+    this.#client = new OpenAI({
+      apiKey: resolveApiKey(provider),
+      baseURL: provider.baseUrl,
+      defaultHeaders: provider.headers
+    });
+    this.#chatFallback = new OpenAiCompatibleProvider(provider, options);
+  }
+
+  public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
+      ? input.availableTools.map((tool) => ({
+          type: "function" as const,
+          name: nativeToolName(tool.name),
+          description: tool.description,
+          parameters: tool.inputSchema,
+          strict: false
+        }))
+      : undefined;
+    const reasoningEffort = input.reasoningEffort ?? input.model.defaultReasoningEffort;
+    const request: Record<string, unknown> = {
+      model: input.model.id,
+      instructions: input.systemPrompt || undefined,
+      input: await buildResponsesInput(input),
+      max_output_tokens: input.model.defaultMaxOutputTokens,
+      ...(nativeTools ? { tools: nativeTools, parallel_tool_calls: input.model.supportsParallelToolCalls } : {}),
+      ...(reasoningEffort && reasoningEffort !== "none" && reasoningEffort !== "minimal"
+        ? { reasoning: { effort: reasoningEffort, summary: "concise" } }
+        : {})
+    };
+
+    try {
+      if (input.stream && input.model.supportsStreaming) {
+        const stream = await this.#client.responses.create({ ...request, stream: true } as any, {
+          signal: input.abortSignal
+        }) as any;
+        if (isAsyncIterable(stream)) {
+          return consumeResponsesStream(stream, input);
+        }
+        return parseResponsesResponse(stream, input);
+      }
+      const response = await this.#client.responses.create(request as any, { signal: input.abortSignal });
+      return parseResponsesResponse(response, input);
+    } catch (error) {
+      if (supportsChatCompletionsFallback(error)) {
+        return this.#chatFallback.runTurn(input);
+      }
+      throw error;
+    }
+  }
+}
+
+function supportsChatCompletionsFallback(error: unknown): boolean {
+  const status = isRecord(error) ? error.status : undefined;
+  return status === 404 || status === 405 || status === 501;
 }
 
 export function nativeToolName(name: string): string {
@@ -664,50 +739,159 @@ class AnthropicProvider implements ProviderAdapter {
           input_schema: tool.inputSchema as any
         }))
       : undefined;
-    const response = await this.#client.messages.create(
-      {
-        model: input.model.id,
-        system: input.systemPrompt,
-        max_tokens: input.model.defaultMaxOutputTokens ?? 2048,
-        messages: await buildAnthropicMessages(input),
-        ...(nativeTools ? { tools: nativeTools } : {})
-      } as any,
-      { signal: input.abortSignal }
-    );
+    const reasoningEffort = input.reasoningEffort ?? input.model.defaultReasoningEffort;
+    const request: Record<string, unknown> = {
+      model: input.model.id,
+      system: input.systemPrompt,
+      max_tokens: input.model.defaultMaxOutputTokens ?? 2048,
+      messages: await buildAnthropicMessages(input),
+      ...(nativeTools ? {
+        tools: nativeTools,
+        tool_choice: { type: "auto", disable_parallel_tool_use: !input.model.supportsParallelToolCalls }
+      } : {}),
+      ...(reasoningEffort && reasoningEffort !== "none" && reasoningEffort !== "minimal"
+        ? { thinking: { type: "adaptive" }, output_config: { effort: reasoningEffort } }
+        : {})
+    };
+    if (input.stream && input.model.supportsStreaming) {
+      const stream = await this.#client.messages.create({ ...request, stream: true } as any, {
+        signal: input.abortSignal
+      }) as any;
+      if (isAsyncIterable(stream)) return consumeAnthropicStream(stream, input, Boolean(nativeTools));
+      return parseAnthropicResponse(stream, input, Boolean(nativeTools));
+    }
+    const response = await this.#client.messages.create(request as any, { signal: input.abortSignal });
+    return parseAnthropicResponse(response, input, Boolean(nativeTools));
+  }
+}
 
-    const nativeCalls = response.content.flatMap((part) => {
-      if (part.type !== "tool_use") return [];
-      const name = originalToolName(part.name, input.availableTools);
-      if (!name) return [];
-      return [{
-        id: part.id || crypto.randomUUID(),
-        name,
-        arguments: objectToolArguments(part.input)
-      }];
-    });
-    if (nativeCalls.length > 0) {
-      return withTokenUsage({
-        assistantMessage: response.content
-          .filter((part) => part.type === "text")
-          .map((part) => part.text)
-          .join("\n")
-          .trim() || undefined,
-        toolCalls: nativeCalls,
+function parseAnthropicResponse(
+  response: any,
+  input: ProviderTurnInput,
+  hasNativeTools: boolean
+): ProviderTurnDecision {
+  const stopReason = typeof response?.stop_reason === "string" ? response.stop_reason : "end_turn";
+  throwForAnthropicStopReason(stopReason);
+  const content = Array.isArray(response?.content) ? response.content : [];
+  const text = content
+    .flatMap((block: any) => block?.type === "text" && typeof block.text === "string" ? [block.text] : [])
+    .join("\n")
+    .trim();
+  const reasoning = content
+    .flatMap((block: any) => block?.type === "thinking" && typeof block.thinking === "string" ? [block.thinking] : [])
+    .join("\n")
+    .trim();
+  const toolCalls = content.flatMap((block: any) => {
+    if (block?.type !== "tool_use" || typeof block.name !== "string") return [];
+    const name = originalToolName(block.name, input.availableTools);
+    return name ? [{
+      id: typeof block.id === "string" && block.id ? block.id : crypto.randomUUID(),
+      name,
+      arguments: objectToolArguments(block.input)
+    }] : [];
+  });
+  const decision = toolCalls.length > 0
+    ? {
+        assistantMessage: text || undefined,
+        toolCalls,
         endTurn: false,
         goalCompleted: false,
         isStructured: true
-      }, response.usage);
-    }
-    const text = response.content
-      .map((part) => ("text" in part ? part.text : ""))
-      .join("\n")
-      .trim();
+      }
+    : hasNativeTools
+      ? nativeTextDecision(text)
+      : parseDecisionFromText(text);
+  const withUsage = withTokenUsage(decision, response?.usage);
+  return reasoning && !withUsage.reasoningSummary
+    ? { ...withUsage, reasoningSummary: reasoning }
+    : withUsage;
+}
 
-    return withTokenUsage(
-      nativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
-      response.usage
-    );
+async function consumeAnthropicStream(
+  stream: AsyncIterable<any>,
+  input: ProviderTurnInput,
+  hasNativeTools: boolean
+): Promise<ProviderTurnDecision> {
+  let text = "";
+  let reasoning = "";
+  let stopReason: string | undefined;
+  let usage: Record<string, unknown> | undefined;
+  let completed = false;
+  const blocks = new Map<number, { id?: string; name?: string; input: string }>();
+
+  for await (const event of stream) {
+    switch (event?.type) {
+      case "message_start":
+        usage = mergeProviderUsage(usage, event.message?.usage);
+        break;
+      case "content_block_start": {
+        const index = typeof event.index === "number" ? event.index : blocks.size;
+        const block = event.content_block;
+        if (block?.type === "tool_use") {
+          blocks.set(index, {
+            id: typeof block.id === "string" ? block.id : undefined,
+            name: typeof block.name === "string" ? block.name : undefined,
+            input: isRecord(block.input) && Object.keys(block.input).length > 0 ? JSON.stringify(block.input) : ""
+          });
+        }
+        break;
+      }
+      case "content_block_delta": {
+        const delta = event.delta;
+        if (delta?.type === "text_delta" && typeof delta.text === "string") {
+          text += delta.text;
+          await input.onTextDelta?.(delta.text);
+        } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
+          reasoning += delta.thinking;
+        } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+          const index = typeof event.index === "number" ? event.index : 0;
+          const call = blocks.get(index) ?? { input: "" };
+          call.input += delta.partial_json;
+          blocks.set(index, call);
+        }
+        break;
+      }
+      case "message_delta":
+        usage = mergeProviderUsage(usage, event.usage);
+        if (typeof event.delta?.stop_reason === "string") stopReason = event.delta.stop_reason;
+        break;
+      case "message_stop":
+        completed = true;
+        break;
+    }
   }
+
+  if (!completed) throw new ProviderStreamIncompleteError("missing_finish_reason");
+  throwForAnthropicStopReason(stopReason ?? "end_turn");
+  const toolCalls = [...blocks.entries()]
+    .sort(([left], [right]) => left - right)
+    .flatMap(([, call]) => {
+      const name = call.name ? originalToolName(call.name, input.availableTools) : null;
+      return name ? [{
+        id: call.id || crypto.randomUUID(),
+        name,
+        arguments: parseNativeToolArguments(call.input)
+      }] : [];
+    });
+  const decision = toolCalls.length > 0
+    ? { assistantMessage: text || undefined, toolCalls, endTurn: false, goalCompleted: false, isStructured: true }
+    : hasNativeTools
+      ? nativeTextDecision(text)
+      : parseDecisionFromText(text);
+  const withUsage = withTokenUsage(decision, usage);
+  return reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
+}
+
+function throwForAnthropicStopReason(stopReason: string): void {
+  if (stopReason === "max_tokens") throw new ProviderStreamIncompleteError("length");
+  if (stopReason === "refusal") throw new Error("Anthropic refused to generate a response.");
+}
+
+function mergeProviderUsage(
+  previous: Record<string, unknown> | undefined,
+  next: unknown
+): Record<string, unknown> | undefined {
+  return isRecord(next) ? { ...previous, ...next } : previous;
 }
 
 class GeminiProvider implements ProviderAdapter {
@@ -745,16 +929,21 @@ class GeminiProvider implements ProviderAdapter {
       signal: input.abortSignal
     });
 
-    const rawText = await response.text();
     let payload: unknown = null;
-    if (rawText.trim()) {
-      try {
-        payload = JSON.parse(rawText);
-      } catch {
-        payload = null;
+    let rawText = "";
+    if (typeof response.text === "function") {
+      rawText = await response.text();
+      if (rawText.trim()) {
+        try {
+          payload = JSON.parse(rawText);
+        } catch {
+          payload = null;
+        }
       }
+    } else if (typeof response.json === "function") {
+      payload = await response.json();
     }
-    if (!response.ok) {
+    if (response.ok === false) {
       const detail =
         (payload && typeof payload === "object" && !Array.isArray(payload)
           ? extractVideoErrorMessage(payload as Record<string, unknown>)
@@ -1133,6 +1322,161 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
   }
 
   return mergeAdjacentProviderMessages(messages, "content");
+}
+
+async function buildResponsesInput(input: ProviderTurnInput): Promise<any[]> {
+  const items: any[] = [];
+  const calls = new Map<string, RuntimeToolCall>();
+  for (const message of input.transcript) {
+    if (message.role === "system") continue;
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      if (message.content) {
+        items.push({ role: "assistant", content: [{ type: "output_text", text: message.content }] });
+      }
+      for (const call of message.toolCalls) {
+        calls.set(call.id, call);
+        items.push({
+          type: "function_call",
+          call_id: call.id,
+          name: nativeToolName(call.name),
+          arguments: JSON.stringify(call.arguments)
+        });
+      }
+      continue;
+    }
+    if (message.role === "tool" && message.toolCallId) {
+      const call = calls.get(message.toolCallId);
+      if (call) {
+        items.push({
+          type: "function_call_output",
+          call_id: call.id,
+          output: message.content
+        });
+        continue;
+      }
+    }
+    const role = message.role === "assistant" ? "assistant" : "user";
+    items.push({
+      role,
+      content: [{ type: role === "assistant" ? "output_text" : "input_text", text: contentWithFileAttachments(message.content, message.attachments) }]
+    });
+  }
+  return items;
+}
+
+function parseResponsesResponse(response: any, input: ProviderTurnInput): ProviderTurnDecision {
+  const status = typeof response?.status === "string" ? response.status : "completed";
+  if (status === "incomplete") {
+    throw new ProviderStreamIncompleteError("length");
+  }
+  if (status === "failed") {
+    throw new Error(response?.error?.message || "The Responses API request failed.");
+  }
+  const text = extractResponsesText(response?.output);
+  const reasoning = extractResponsesReasoning(response?.output);
+  const toolCalls = extractResponsesToolCalls(response?.output, input);
+  const decision = toolCalls.length > 0
+    ? {
+        assistantMessage: text || undefined,
+        toolCalls,
+        endTurn: false,
+        goalCompleted: false,
+        isStructured: true
+      }
+    : nativeTextDecision(text);
+  const withUsage = withTokenUsage(decision, response?.usage);
+  return reasoning && !withUsage.reasoningSummary
+    ? { ...withUsage, reasoningSummary: reasoning }
+    : withUsage;
+}
+
+async function consumeResponsesStream(stream: AsyncIterable<any>, input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+  let text = "";
+  let reasoning = "";
+  let terminalResponse: any;
+  const calls = new Map<number, { id?: string; name?: string; arguments: string }>();
+  const itemToIndex = new Map<string, number>();
+  for await (const event of stream) {
+    if (event?.type === "response.output_text.delta" && typeof event.delta === "string") {
+      text += event.delta;
+      await input.onTextDelta?.(event.delta);
+      continue;
+    }
+    if (event?.type === "response.reasoning_summary_text.delta" && typeof event.delta === "string") {
+      reasoning += event.delta;
+      continue;
+    }
+    if (event?.type === "response.output_item.added" && event.item?.type === "function_call") {
+      const index = typeof event.output_index === "number" ? event.output_index : calls.size;
+      calls.set(index, {
+        id: event.item.call_id,
+        name: event.item.name,
+        arguments: typeof event.item.arguments === "string" ? event.item.arguments : ""
+      });
+      if (typeof event.item.id === "string") itemToIndex.set(event.item.id, index);
+      continue;
+    }
+    if (event?.type === "response.function_call_arguments.delta" && typeof event.delta === "string") {
+      const index = typeof event.output_index === "number"
+        ? event.output_index
+        : itemToIndex.get(event.item_id) ?? 0;
+      const call = calls.get(index) ?? { arguments: "" };
+      call.arguments += event.delta;
+      calls.set(index, call);
+      continue;
+    }
+    if (event?.type === "response.completed") {
+      terminalResponse = event.response;
+      continue;
+    }
+    if (event?.type === "response.incomplete") {
+      throw new ProviderStreamIncompleteError("length");
+    }
+    if (event?.type === "response.failed") {
+      throw new Error(event.response?.error?.message || "The Responses API stream failed.");
+    }
+  }
+  if (!terminalResponse) throw new ProviderStreamIncompleteError("missing_finish_reason");
+  const streamedCalls = [...calls.entries()]
+    .sort(([left], [right]) => left - right)
+    .flatMap(([, call]) => {
+      const name = call.name ? originalToolName(call.name, input.availableTools) : null;
+      return name ? [{ id: call.id || crypto.randomUUID(), name, arguments: parseNativeToolArguments(call.arguments) }] : [];
+    });
+  const decision = streamedCalls.length > 0
+    ? { assistantMessage: text || undefined, toolCalls: streamedCalls, endTurn: false, goalCompleted: false, isStructured: true }
+    : nativeTextDecision(text);
+  const withUsage = withTokenUsage(decision, terminalResponse.usage);
+  return reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
+}
+
+function extractResponsesText(output: unknown): string {
+  if (!Array.isArray(output)) return "";
+  return output.flatMap((item: any) => {
+    if (item?.type !== "message" || !Array.isArray(item.content)) return [];
+    return item.content.flatMap((part: any) => part?.type === "output_text" && typeof part.text === "string" ? [part.text] : []);
+  }).join("\n").trim();
+}
+
+function extractResponsesReasoning(output: unknown): string {
+  if (!Array.isArray(output)) return "";
+  return output.flatMap((item: any) => {
+    if (item?.type !== "reasoning" || !Array.isArray(item.summary)) return [];
+    return item.summary.flatMap((part: any) => typeof part?.text === "string" ? [part.text] : []);
+  }).join("\n").trim();
+}
+
+function extractResponsesToolCalls(output: unknown, input: ProviderTurnInput): RuntimeToolCall[] {
+  if (!Array.isArray(output)) return [];
+  return output.flatMap((item: any) => {
+    if (item?.type !== "function_call" || typeof item.name !== "string") return [];
+    const name = originalToolName(item.name, input.availableTools);
+    return name ? [{
+      id: typeof item.call_id === "string" && item.call_id ? item.call_id : crypto.randomUUID(),
+      name,
+      arguments: parseNativeToolArguments(typeof item.arguments === "string" ? item.arguments : "")
+    }] : [];
+  });
 }
 
 function normalizeOpenAiCompatibleRole(role: ProviderTurnInput["transcript"][number]["role"]) {
@@ -1516,6 +1860,8 @@ export function parseProviderTokenUsage(rawUsage: unknown): TokenUsage | null {
     const inputCacheWriteTokens = numberOrZero(usage.cache_creation_input_tokens);
     const inputTokens = numberOrZero(usage.input_tokens) + inputCacheHitTokens + inputCacheWriteTokens;
     const outputTokens = numberOrZero(usage.output_tokens);
+    const outputDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : {};
+    const outputReasoningTokens = numberOrZero(outputDetails.thinking_tokens ?? usage.thinking_tokens);
     return finalizeTokenUsage({
       totalTokens: inputTokens + outputTokens,
       inputTokens,
@@ -1523,8 +1869,8 @@ export function parseProviderTokenUsage(rawUsage: unknown): TokenUsage | null {
       inputCacheMissTokens: Math.max(0, numberOrZero(usage.input_tokens)),
       inputCacheWriteTokens,
       outputTokens,
-      outputReasoningTokens: 0,
-      outputContentTokens: outputTokens
+      outputReasoningTokens,
+      outputContentTokens: Math.max(0, outputTokens - outputReasoningTokens)
     });
   }
 

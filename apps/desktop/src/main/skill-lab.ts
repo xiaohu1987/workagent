@@ -24,6 +24,10 @@ import {
 export const SKILL_LAB_ITERATIONS = 5;
 export const SKILL_LAB_MIN_ITERATIONS = 1;
 export const SKILL_LAB_MAX_ITERATIONS = 20;
+export const SKILL_LAB_MODEL_CALL_TIMEOUT_MS = 300_000;
+export const SKILL_LAB_MODEL_CALL_ATTEMPTS = 3;
+export const SKILL_LAB_GENERATION_MIN_OUTPUT_TOKENS = 8_192;
+export const SKILL_LAB_MAX_CONSECUTIVE_REMEDIATION_FAILURES = 3;
 const SKILL_LAB_MAX_TOOL_TURNS = 24;
 
 type WithoutCreatedAt<T> = T extends unknown ? Omit<T, "createdAt"> : never;
@@ -44,6 +48,7 @@ type SkillLabServices = {
   refreshSkills: () => Promise<void>;
   listSkills: () => SkillMetadata[];
   emit: (event: SkillLabEvent) => void;
+  log?: (kind: string, payload: Record<string, unknown>) => Promise<void>;
 };
 
 type McpToolEntry = {
@@ -185,7 +190,7 @@ export class SkillLabService {
 
       if (optimizationTarget) {
         draft = optimizationTarget.draft;
-        previousTests = await this.#testSkillDraft(job, provider, model, prompt, draft, availableTools);
+        previousTests = await this.#testSkillDraft(jobId, job, provider, model, prompt, draft, availableTools);
         this.#emit({
           type: "skill-lab.progress",
           jobId,
@@ -214,11 +219,11 @@ export class SkillLabService {
           content: buildLabPrompt(prompt, skillCatalog, mcpTools, mcpResources, null, [])
         });
         const initialResult = await this.#runModelTurn(jobId, job, provider, model, availableTools, transcript);
-        const initialDraft = await this.#parseOrRepairDraft(job, provider, model, initialResult.assistantMessage ?? "", requestedName || prompt.slice(0, 64));
+        const initialDraft = await this.#parseOrRepairDraft(jobId, job, provider, model, initialResult.assistantMessage ?? "", requestedName || prompt.slice(0, 64));
         draft = requestedName?.trim()
           ? { ...initialDraft.draft, name: normalizeUserSkillName(requestedName) }
           : initialDraft.draft;
-        previousTests = await this.#testSkillDraft(job, provider, model, prompt, draft, availableTools);
+        previousTests = await this.#testSkillDraft(jobId, job, provider, model, prompt, draft, availableTools);
         this.#emit({
           type: "skill-lab.progress",
           jobId,
@@ -255,13 +260,13 @@ export class SkillLabService {
           state: "running"
         });
         const result = await this.#runModelTurn(jobId, job, provider, model, availableTools, transcript);
-        const iterationResult = await this.#parseOrRepairDraft(job, provider, model, result.assistantMessage ?? "", requestedName || prompt.slice(0, 64));
+        const iterationResult = await this.#parseOrRepairDraft(jobId, job, provider, model, result.assistantMessage ?? "", requestedName || prompt.slice(0, 64));
         draft = optimizationTarget
           ? { ...iterationResult.draft, name: optimizationTarget.draft.name }
           : requestedName?.trim()
             ? { ...iterationResult.draft, name: normalizeUserSkillName(requestedName) }
             : iterationResult.draft;
-        const tests = await this.#testSkillDraft(job, provider, model, prompt, draft, availableTools);
+        const tests = await this.#testSkillDraft(jobId, job, provider, model, prompt, draft, availableTools);
         previousTests = tests;
         this.#emit({
           type: "skill-lab.progress",
@@ -279,10 +284,69 @@ export class SkillLabService {
         });
       }
 
+      let remediationAttempts = 0;
+      let consecutiveRemediationFailures = 0;
+      while (
+        previousTests.some((test) => !test.passed) &&
+        consecutiveRemediationFailures < SKILL_LAB_MAX_CONSECUTIVE_REMEDIATION_FAILURES
+      ) {
+        remediationAttempts += 1;
+        this.#assertNotAborted(job);
+        const failedTests = previousTests.filter((test) => !test.passed);
+        this.#emit({
+          type: "skill-lab.progress",
+          jobId,
+          iteration: iterationCount,
+          totalIterations: iterationCount,
+          phase: `自动修复未通过项 · 第 ${remediationAttempts} 轮`,
+          summary: "正在按自检失败项逐条修订并重新验证，将持续执行至全部通过或用户取消。",
+          state: "running"
+        });
+        transcript.push({
+          role: "user",
+          content: buildSkillLabRemediationPrompt(prompt, draft, failedTests)
+        });
+        const result = await this.#runModelTurn(jobId, job, provider, model, availableTools, transcript);
+        const repaired = await this.#parseOrRepairDraft(jobId, job, provider, model, result.assistantMessage ?? "", draft.name);
+        draft = optimizationTarget
+          ? { ...repaired.draft, name: optimizationTarget.draft.name }
+          : requestedName?.trim()
+            ? { ...repaired.draft, name: normalizeUserSkillName(requestedName) }
+            : repaired.draft;
+        previousTests = await this.#testSkillDraft(jobId, job, provider, model, prompt, draft, availableTools);
+        if (previousTests.some((test) => !test.passed)) {
+          consecutiveRemediationFailures += 1;
+        }
+        this.#emit({
+          type: "skill-lab.progress",
+          jobId,
+          iteration: iterationCount,
+          totalIterations: iterationCount,
+          phase: `自动修复未通过项 · 第 ${remediationAttempts} 轮`,
+          summary: previousTests.some((test) => !test.passed)
+            ? `${buildTestSummary(previousTests)}；连续失败 ${consecutiveRemediationFailures}/${SKILL_LAB_MAX_CONSECUTIVE_REMEDIATION_FAILURES}`
+            : buildTestSummary(previousTests),
+          state: "tested"
+        });
+        transcript.push({
+          role: "assistant",
+          content: result.assistantMessage ?? "",
+          toolCalls: result.toolCalls.length ? result.toolCalls : undefined
+        });
+      }
+
       this.#assertNotAborted(job);
       const failedTests = previousTests.filter((test) => !test.passed);
       if (failedTests.length > 0) {
-        throw new Error(`技能自检未通过：${failedTests.map((test) => test.detail).join("；")}`);
+        await this.#services.log?.("skill_lab.verification_failed", {
+          jobId,
+          remediationAttempts,
+          consecutiveRemediationFailures,
+          failedTests
+        });
+        throw new Error(
+          `技能实验室已连续 ${consecutiveRemediationFailures} 次自动修复未通过验证，已停止发布不完整的 Skill。`
+        );
       }
       const directory = optimizationTarget
         ? path.dirname(optimizationTarget.skill.skillPath)
@@ -316,13 +380,18 @@ export class SkillLabService {
       }
     } catch (error) {
       if (job.abort.signal.aborted) {
+        await this.#services.log?.("skill_lab.cancelled", { jobId });
         this.#emit({ type: "skill-lab.cancelled", jobId });
         return;
       }
+      await this.#services.log?.("skill_lab.failed", {
+        jobId,
+        error: error instanceof Error ? error.message : String(error)
+      });
       this.#emit({
         type: "skill-lab.failed",
         jobId,
-        error: error instanceof Error ? error.message : String(error)
+        error: describeSkillLabFailure(error)
       });
     }
   }
@@ -353,23 +422,17 @@ export class SkillLabService {
     transcript: Array<{ role: "user" | "assistant" | "tool"; content: string; toolCalls?: RuntimeToolCall[]; toolCallId?: string }>
   ) {
     const adapter = this.#services.providerFactory.create(provider);
-    const timeoutSignal = this.#services.config.timeouts.modelDecisionMs > 0
-      ? AbortSignal.timeout(this.#services.config.timeouts.modelDecisionMs)
-      : null;
-    const abortSignal = timeoutSignal
-      ? AbortSignal.any([job.abort.signal, timeoutSignal])
-      : job.abort.signal;
     for (let attempt = 0; attempt < SKILL_LAB_MAX_TOOL_TURNS; attempt += 1) {
       this.#assertNotAborted(job);
-      const decision = await adapter.runTurn({
+      const decision = await this.#runModelCall(jobId, job, "生成 Skill", (abortSignal) => adapter.runTurn({
         systemPrompt: buildLabSystemPrompt(),
         transcript,
         availableTools,
-        model: { ...model, supportsStreaming: false },
+        model: skillLabGenerationModel(model),
         provider,
         stream: false,
         abortSignal
-      });
+      }));
       if (!decision.toolCalls.length) return decision;
       transcript.push({
         role: "assistant",
@@ -386,15 +449,15 @@ export class SkillLabService {
       role: "user",
       content: "工具探索阶段已经结束。禁止继续调用工具，请仅根据当前上下文返回本轮要求的结构化 Skill JSON。"
     });
-    const finalDecision = await adapter.runTurn({
+    const finalDecision = await this.#runModelCall(jobId, job, "完成 Skill 草稿", (abortSignal) => adapter.runTurn({
       systemPrompt: buildLabSystemPrompt(),
       transcript,
       availableTools: [],
-      model: { ...model, supportsStreaming: false },
+      model: skillLabGenerationModel(model),
       provider,
       stream: false,
       abortSignal
-    });
+    }));
     if (finalDecision.toolCalls.length > 0) {
       throw new Error("模型在工具探索结束后仍未返回技能草稿，请重试。");
     }
@@ -409,13 +472,7 @@ export class SkillLabService {
     prompt: string
   ): Promise<string> {
     const adapter = this.#services.providerFactory.create(provider);
-    const timeoutSignal = this.#services.config.timeouts.modelDecisionMs > 0
-      ? AbortSignal.timeout(this.#services.config.timeouts.modelDecisionMs)
-      : null;
-    const abortSignal = timeoutSignal
-      ? AbortSignal.any([job.abort.signal, timeoutSignal])
-      : job.abort.signal;
-    const decision = await adapter.runTurn({
+    const decision = await this.#runModelCall(jobId, job, "分析需求", (abortSignal) => adapter.runTurn({
       systemPrompt: [
         "你负责判断当前 Skill 生成或完善步骤是否必须向用户澄清。",
         "只返回 JSON：{\"summary\":\"你对目标的理解\",\"questions\":[{\"id\":\"q1\",\"question\":\"需要用户确认的问题\",\"required\":true,\"options\":[\"选项 A\",\"选项 B\"],\"allowOther\":true}]}。",
@@ -427,7 +484,7 @@ export class SkillLabService {
       provider,
       stream: false,
       abortSignal
-    });
+    }));
     const clarification = parseSkillLabClarification(decision.assistantMessage ?? "", prompt);
     if (clarification.questions.length === 0) {
       return [prompt, `澄清检查：${clarification.summary}`, "无需用户补充，可以继续。"].join("\n\n");
@@ -471,6 +528,7 @@ export class SkillLabService {
   }
 
   async #testSkillDraft(
+    jobId: string,
     job: SkillLabJob,
     provider: ProviderDefinition,
     model: ModelProfile,
@@ -480,13 +538,7 @@ export class SkillLabService {
   ): Promise<SkillLabTestResult[]> {
     const staticTests = runSkillDraftTests(draft, availableTools);
     const adapter = this.#services.providerFactory.create(provider);
-    const timeoutSignal = this.#services.config.timeouts.modelDecisionMs > 0
-      ? AbortSignal.timeout(this.#services.config.timeouts.modelDecisionMs)
-      : null;
-    const abortSignal = timeoutSignal
-      ? AbortSignal.any([job.abort.signal, timeoutSignal])
-      : job.abort.signal;
-    const decision = await adapter.runTurn({
+    const decision = await this.#runModelCall(jobId, job, "测试 Skill 草稿", (abortSignal) => adapter.runTurn({
       systemPrompt: [
         "你是 Skill 沙箱测试器，只测试现有 Skill，不修改它，也不调用任何工具。",
         "根据用户目标构造正常、边缘和失败恢复三类场景，逐项模拟执行 Skill 指令。",
@@ -506,7 +558,7 @@ export class SkillLabService {
       provider,
       stream: false,
       abortSignal
-    });
+    }));
     const dryRun = parseSkillDryRun(decision.assistantMessage ?? "");
     return [
       ...staticTests,
@@ -521,6 +573,7 @@ export class SkillLabService {
   }
 
   async #parseOrRepairDraft(
+    jobId: string,
     job: SkillLabJob,
     provider: ProviderDefinition,
     model: ModelProfile,
@@ -531,7 +584,7 @@ export class SkillLabService {
       return parseSkillLabIteration(response, fallbackTitle);
     } catch {
       const adapter = this.#services.providerFactory.create(provider);
-      const repaired = await adapter.runTurn({
+      const repaired = await this.#runModelCall(jobId, job, "修复 Skill 草稿格式", (abortSignal) => adapter.runTurn({
         systemPrompt: "将输入转换为有效的技能实验室 JSON。只返回 {\"draft\":{\"name\":\"lowercase-hyphen-name\",\"description\":\"能力和触发场景\",\"workflow\":\"Markdown 指令\"},\"qualityIssues\":[],\"changes\":[],\"nextGoal\":\"\"}，不要解释，不要调用工具。",
         transcript: [{
           role: "user",
@@ -541,8 +594,8 @@ export class SkillLabService {
         model: { ...model, supportsStreaming: false },
         provider,
         stream: false,
-        abortSignal: job.abort.signal
-      });
+        abortSignal
+      }));
       const repairedResponse = repaired.assistantMessage ?? "";
       try {
         return parseSkillLabIteration(repairedResponse, fallbackTitle);
@@ -630,6 +683,83 @@ export class SkillLabService {
   #assertNotAborted(job: SkillLabJob): void {
     if (job.abort.signal.aborted) throw new Error("Skill lab cancelled.");
   }
+
+  async #runModelCall<T>(
+    jobId: string,
+    job: SkillLabJob,
+    phase: string,
+    request: (abortSignal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= SKILL_LAB_MODEL_CALL_ATTEMPTS; attempt += 1) {
+      this.#assertNotAborted(job);
+      const timeout = new AbortController();
+      const timeoutId = setTimeout(() => timeout.abort(), SKILL_LAB_MODEL_CALL_TIMEOUT_MS);
+      const abortSignal = AbortSignal.any([job.abort.signal, timeout.signal]);
+      const startedAt = Date.now();
+      try {
+        await this.#services.log?.("skill_lab.model_call_started", { jobId, phase, attempt });
+        const result = await request(abortSignal);
+        await this.#services.log?.("skill_lab.model_call_completed", {
+          jobId,
+          phase,
+          attempt,
+          elapsedMs: Date.now() - startedAt
+        });
+        return result;
+      } catch (error) {
+        lastError = error;
+        const timedOut = timeout.signal.aborted;
+        await this.#services.log?.("skill_lab.model_call_failed", {
+          jobId,
+          phase,
+          attempt,
+          elapsedMs: Date.now() - startedAt,
+          timedOut,
+          cancelled: job.abort.signal.aborted,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        if (job.abort.signal.aborted) throw error;
+        if (!timedOut && !isSkillLabRecoverableError(error)) throw error;
+        if (attempt === SKILL_LAB_MODEL_CALL_ATTEMPTS) break;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+}
+
+export function isSkillLabAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /^abort/i.test(error.name) || /request was aborted|\baborted\b/i.test(error.message);
+}
+
+export function isSkillLabOutputLimitError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /response reached its output limit|finish_reason[=: ]+length/i.test(error.message);
+}
+
+export function isSkillLabRecoverableError(error: unknown): boolean {
+  return isSkillLabAbortError(error) || isSkillLabOutputLimitError(error);
+}
+
+export function describeSkillLabFailure(error: unknown): string {
+  if (isSkillLabOutputLimitError(error)) {
+    return `技能实验室生成内容超过供应商单次输出上限，已采用紧凑输出和更高的输出预算重试 ${SKILL_LAB_MODEL_CALL_ATTEMPTS} 次，仍未完成。请稍后重试或更换输出上限更高的模型。`;
+  }
+  if (isSkillLabAbortError(error)) {
+    return `技能实验室的模型请求已中止，已进行 ${SKILL_LAB_MODEL_CALL_ATTEMPTS} 次尝试（含 ${SKILL_LAB_MODEL_CALL_ATTEMPTS - 1} 次自动重试）。请检查供应商服务是否持续返回；本次单次请求最长等待 ${SKILL_LAB_MODEL_CALL_TIMEOUT_MS / 60_000} 分钟。`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function skillLabGenerationModel(model: ModelProfile): ModelProfile {
+  return {
+    ...model,
+    supportsStreaming: false,
+    defaultMaxOutputTokens: Math.max(model.defaultMaxOutputTokens ?? 0, SKILL_LAB_GENERATION_MIN_OUTPUT_TOKENS)
+  };
 }
 
 export function resolveSkillLabModel(
@@ -704,6 +834,7 @@ function buildLabSystemPrompt(): string {
     "需要上下文时先调用 skills.load 或只读 MCP 工具，不要编造不存在的工具。",
     "当上下文包含当前草稿和程序测试结果时，必须基于现有 Skill 定点修复失败项，不要从头重写或破坏已经通过测试的行为。",
     "每轮必须只返回一个 JSON 对象：{\"draft\":{\"name\":\"lowercase-hyphen-name\",\"description\":\"能力和触发场景\",\"workflow\":\"Markdown 指令\"},\"qualityIssues\":[\"问题\"],\"changes\":[\"本轮修改\"],\"nextGoal\":\"下一轮目标\"}。",
+    "输出必须紧凑且完整：不要复述用户需求、工具目录或测试报告；不要在 JSON 外解释；不得以省略号、占位文本或截断模板代替必填内容。",
     "workflow 必须可复用、包含输入约束、执行步骤、工具名称、失败处理和验收标准，不得包含密码、Token 或真实业务数据。"
   ].join("\n");
 }
@@ -727,6 +858,21 @@ function buildLabPrompt(
     `程序上一轮自检：\n${JSON.stringify(previousTests)}`,
     previousBlock,
     "本轮重点：检查需求覆盖、可复用性、工具真实性、安全边界和失败恢复。"
+  ].join("\n\n");
+}
+
+function buildSkillLabRemediationPrompt(
+  request: string,
+  draft: { name: string; description: string; workflow: string },
+  failedTests: SkillLabTestResult[]
+): string {
+  return [
+    "这是发布前的强制修复轮。上一版未通过自检；必须逐条解决下列失败项，不能将其视为建议，也不能只解释原因。",
+    "输出完整的替换 Skill JSON，保留已通过内容，并在 workflow 中补齐所有缺失字段、失败处理、安全边界和验收标准。",
+    `用户原始需求：\n${request}`,
+    `当前 Skill 草稿：\n${JSON.stringify(draft)}`,
+    `必须修复的失败项：\n${JSON.stringify(failedTests)}`,
+    "完成前逐项核对：任何模板、状态枚举、测试报告字段或收口章节都不得截断；不要把未验证的结果标记为 completed。"
   ].join("\n\n");
 }
 

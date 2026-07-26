@@ -99,7 +99,7 @@ export interface MultiAgentSettings {
   defaultContextFork?: "none" | "all" | "recent";
   defaultModelId?: string;
   defaultProviderId?: string;
-  defaultReasoningEffort?: "low" | "medium" | "high";
+  defaultReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 /** Long-lived, redacted experience distilled from completed root tasks. */
@@ -709,6 +709,11 @@ export interface ProviderDefinition {
   id: string;
   name?: string;
   type: ProviderType;
+  /**
+   * Optional wire protocol override for providers that expose more than one
+   * API. Existing openai-compatible providers continue to use chat-completions.
+   */
+  transport?: "chat-completions" | "responses" | "messages";
   baseUrl?: string;
   apiKeyEnv?: string;
   apiKey?: string;
@@ -737,6 +742,10 @@ export interface ModelProfile {
   agentCapabilityCheckedAt?: string;
   agentCapabilityReason?: string;
   supportsReasoningSummary: boolean;
+  /** Provider-supported reasoning effort values. Omitted keeps the provider default. */
+  supportedReasoningEfforts?: Array<"none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">;
+  /** Default reasoning effort for this model when it is selected. */
+  defaultReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   defaultTemperature?: number;
   defaultMaxOutputTokens?: number;
 }
@@ -942,6 +951,7 @@ export interface ProviderTurnInput {
   availableTools: ToolSpecDefinition[];
   model: ModelProfile;
   provider: ProviderDefinition;
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   /** Use the JSON decision envelope instead of provider-native function calls. */
   forceTextToolProtocol?: boolean;
   stream?: boolean;

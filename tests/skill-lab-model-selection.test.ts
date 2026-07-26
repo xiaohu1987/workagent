@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "@shared-types";
-import { resolveSkillLabModel } from "../apps/desktop/src/main/skill-lab";
+import {
+  describeSkillLabFailure,
+  isSkillLabAbortError,
+  isSkillLabOutputLimitError,
+  resolveSkillLabModel,
+  SKILL_LAB_MAX_CONSECUTIVE_REMEDIATION_FAILURES,
+  SKILL_LAB_MODEL_CALL_ATTEMPTS,
+  SKILL_LAB_MODEL_CALL_TIMEOUT_MS
+} from "../apps/desktop/src/main/skill-lab";
 
 function makeConfig(): AppConfig {
   return {
@@ -85,5 +93,26 @@ describe("skill lab model selection", () => {
     config.models[1].supportsToolCalling = false;
     expect(() => resolveSkillLabModel(config, "lab", "custom-model"))
       .toThrow("未启用工具调用");
+  });
+
+  it("recognizes provider aborts as recoverable skill lab failures", () => {
+    const error = new Error("Request was aborted.");
+    error.name = "APIUserAbortError";
+    expect(isSkillLabAbortError(error)).toBe(true);
+  });
+
+  it("replaces a raw provider abort message with actionable guidance", () => {
+    expect(describeSkillLabFailure(new Error("Request was aborted.")))
+      .toContain("含 2 次自动重试");
+    expect(SKILL_LAB_MODEL_CALL_TIMEOUT_MS).toBe(300_000);
+    expect(SKILL_LAB_MAX_CONSECUTIVE_REMEDIATION_FAILURES).toBe(3);
+    expect(SKILL_LAB_MODEL_CALL_ATTEMPTS).toBe(3);
+  });
+
+  it("treats a provider output limit as recoverable and explains it clearly", () => {
+    const error = new Error("Provider stream terminated because the response reached its output limit.");
+    error.name = "ProviderStreamIncompleteError";
+    expect(isSkillLabOutputLimitError(error)).toBe(true);
+    expect(describeSkillLabFailure(error)).toContain("输出上限");
   });
 });

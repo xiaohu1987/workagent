@@ -267,7 +267,8 @@ export class DesktopBackend {
       skillsDraftsDir: this.#layout.skillsDraftsDir,
       refreshSkills: () => this.refreshSkills(),
       listSkills: () => this.#skills.list(),
-      emit: (event) => this.#skillLabEvents.emit("skill-lab-event", event)
+      emit: (event) => this.#skillLabEvents.emit("skill-lab-event", event),
+      log: (kind, payload) => this.#logs.append(kind, payload)
     });
 
     this.#runtime = new AgentRuntimeService({
@@ -1326,12 +1327,20 @@ export class DesktopBackend {
       throw new Error("缺少 API Key");
     }
     const endpoint = `${baseUrl}/models`;
+    const configuredProvider = this.#config.providers.find((provider) => provider.id === input.id);
+    const headers = input.type === "anthropic"
+      ? {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          ...configuredProvider?.headers
+        }
+      : {
+          Authorization: `Bearer ${apiKey}`,
+          ...configuredProvider?.headers
+        };
     const response = await fetch(endpoint, {
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        ...this.#config.providers.find((provider) => provider.id === input.id)?.headers
-      }
+      headers
     });
     if (!response.ok) {
       const text = await response.text().catch(() => "");

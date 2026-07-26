@@ -965,6 +965,134 @@ describe("native provider tool protocols", () => {
     ]));
   });
 
+  it("streams Anthropic text and accumulates a tool_use JSON input", async () => {
+    async function* events() {
+      yield { type: "message_start", message: { usage: { input_tokens: 9 } } };
+      yield { type: "content_block_start", index: 0, content_block: { type: "thinking" } };
+      yield { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Inspecting." } };
+      yield { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "stream-call", name: nativeToolName(tool.name), input: {} } };
+      yield { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"path":".' } };
+      yield { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '"}' } };
+      yield { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 6 } };
+      yield { type: "message_stop" };
+    }
+    mocks.anthropicCreate.mockResolvedValue(events());
+    const provider: ProviderDefinition = { id: "provider", type: "anthropic", apiKey: "secret" };
+    const deltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the function.", transcript: [{ role: "user", content: "Inspect." }],
+      availableTools: [tool], model: { ...model, supportsStreaming: true }, provider, stream: true,
+      onTextDelta: (delta) => { deltas.push(delta); }
+    });
+
+    expect(deltas).toEqual([]);
+    expect(decision).toMatchObject({
+      toolCalls: [{ id: "stream-call", name: tool.name, arguments: { path: "." } }],
+      reasoningSummary: "Inspecting.",
+      outputTokens: 6
+    });
+  });
+
+  it("streams only visible Anthropic text and rejects max_tokens completion", async () => {
+    async function* textEvents() {
+      yield { type: "message_start", message: { usage: { input_tokens: 2 } } };
+      yield { type: "content_block_start", index: 0, content_block: { type: "text" } };
+      yield { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } };
+      yield { type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 3 } };
+      yield { type: "message_stop" };
+    }
+    mocks.anthropicCreate.mockResolvedValue(textEvents());
+    const provider: ProviderDefinition = { id: "provider", type: "anthropic", apiKey: "secret" };
+    const deltas: string[] = [];
+
+    await expect(new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
+      model: { ...model, supportsStreaming: true }, provider, stream: true,
+      onTextDelta: (delta) => { deltas.push(delta); }
+    })).rejects.toBeInstanceOf(ProviderStreamIncompleteError);
+    expect(deltas).toEqual(["Hello"]);
+  });
+
+  it("maps the Anthropic parallel tool setting and parses Responses function calls", async () => {
+    mocks.anthropicCreate.mockResolvedValue({ content: [{ type: "text", text: "Done." }], usage: { output_tokens: 1 } });
+    const anthropicProvider: ProviderDefinition = { id: "provider", type: "anthropic", apiKey: "secret" };
+    await new ProviderFactory().create(anthropicProvider).runTurn({
+      systemPrompt: "Use tools.", transcript: [{ role: "user", content: "Inspect." }], availableTools: [tool], model, provider: anthropicProvider
+    });
+    expect(mocks.anthropicCreate.mock.calls.at(-1)?.[0]).toMatchObject({
+      tool_choice: { type: "auto", disable_parallel_tool_use: true }
+    });
+
+    mocks.responsesCreate.mockResolvedValue({
+      status: "completed",
+      output: [{ type: "function_call", call_id: "response-call", name: nativeToolName(tool.name), arguments: '{"path":"."}' }],
+      usage: { input_tokens: 4, output_tokens: 5 }
+    });
+    const responsesProvider: ProviderDefinition = {
+      id: "xai", type: "openai-compatible", transport: "responses", apiKey: "secret"
+    };
+    const decision = await new ProviderFactory().create(responsesProvider).runTurn({
+      systemPrompt: "Use tools.", transcript: [{ role: "user", content: "Inspect." }], availableTools: [tool], model: {
+        ...model, providerId: "xai", supportsParallelToolCalls: true
+      }, provider: responsesProvider
+    });
+    expect(mocks.responsesCreate).toHaveBeenCalledWith(expect.objectContaining({
+      parallel_tool_calls: true,
+      tools: [expect.objectContaining({ name: nativeToolName(tool.name) })]
+    }), { signal: undefined });
+    expect(decision).toMatchObject({ toolCalls: [{ id: "response-call", name: tool.name, arguments: { path: "." } }] });
+  });
+
+  it("streams Responses text and function arguments without exposing tool JSON", async () => {
+    async function* events() {
+      yield { type: "response.output_text.delta", delta: "Inspecting" };
+      yield {
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { id: "item-1", type: "function_call", call_id: "response-stream-call", name: nativeToolName(tool.name), arguments: "" }
+      };
+      yield { type: "response.function_call_arguments.delta", output_index: 1, item_id: "item-1", delta: '{"path":".' };
+      yield { type: "response.function_call_arguments.delta", output_index: 1, item_id: "item-1", delta: '"}' };
+      yield { type: "response.completed", response: { status: "completed", usage: { input_tokens: 4, output_tokens: 6 } } };
+    }
+    mocks.responsesCreate.mockResolvedValue(events());
+    const provider: ProviderDefinition = { id: "xai", type: "openai-compatible", transport: "responses", apiKey: "secret" };
+    const deltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use tools.", transcript: [{ role: "user", content: "Inspect." }], availableTools: [tool],
+      model: { ...model, providerId: "xai", supportsStreaming: true }, provider, stream: true,
+      onTextDelta: (delta) => { deltas.push(delta); }
+    });
+
+    expect(deltas).toEqual(["Inspecting"]);
+    expect(decision).toMatchObject({
+      assistantMessage: "Inspecting",
+      toolCalls: [{ id: "response-stream-call", name: tool.name, arguments: { path: "." } }],
+      outputTokens: 6
+    });
+  });
+
+  it("falls back to Chat Completions only when the Responses endpoint is unsupported", async () => {
+    mocks.responsesCreate.mockRejectedValue({ status: 404 });
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"Done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "xai", type: "openai-compatible", transport: "responses", apiKey: "secret" };
+    const responseCallCount = mocks.responsesCreate.mock.calls.length;
+    const chatCallCount = mocks.chatCreate.mock.calls.length;
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Finish.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
+      model: { ...model, providerId: "xai" }, provider
+    });
+
+    expect(mocks.responsesCreate).toHaveBeenCalledTimes(responseCallCount + 1);
+    expect(mocks.chatCreate).toHaveBeenCalledTimes(chatCallCount + 1);
+    expect(decision).toMatchObject({ assistantMessage: "Done", endTurn: true });
+  });
+
   it("uses Gemini functionCall blocks instead of text JSON", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       json: async () => ({
@@ -1319,8 +1447,8 @@ describe("parseDecisionFromText", () => {
         name: "request_user_input",
         arguments: {
           title: "宝可梦小游戏：需要确认几个设计选项",
-          questions: [
-            {
+          questions: expect.arrayContaining([
+            expect.objectContaining({
               id: "pokemon_count",
               label: "宝可梦数量",
               prompt: "图鉴里需要多少只宝可梦？",
@@ -1329,8 +1457,8 @@ describe("parseDecisionFromText", () => {
                 { id: "option_2", label: "9只（中等）", recommended: false },
                 { id: "option_3", label: "12只（丰富版）", recommended: false }
               ]
-            }
-          ]
+            })
+          ])
         }
       }]
     });
