@@ -174,7 +174,6 @@ declare global {
         latencyMs: number;
         outputTokens: number;
         tokensPerSecond: number;
-        contextWindow?: number;
         agentCapability: "verified" | "unsupported";
         agentCapabilityReason?: string;
       }>;

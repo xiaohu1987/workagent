@@ -2259,7 +2259,7 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
     "Never expose private chain-of-thought; reasoning_summary is internal only and must never be rendered.",
     "tool_calls must be an array of { name, arguments }.",
     "For every GPA ACT decision, include completed_task_ids: use [] when no new PLAN task is complete, otherwise cumulatively list every completed PLAN task id. Before starting a later PLAN task, return a decision that marks the preceding accepted task complete. completion_evidence must be an array of { task_id, tool_call_id, kind }, where kind is observation, delivery, or verification and tool_call_id comes from an actual successful tool result.",
-    "When request_user_input is listed, use that tool for a material user decision instead of placing questions in assistant_message. Do not call tools that were not listed.",
+    "When request_user_input is listed, call it only for a material decision that tools and the current context cannot resolve safely. Provide one to four concise questions with two to four mutually exclusive options, then wait for the tool result. Do not place such questions in assistant_message, and do not use it for facts that can be inspected or verified with tools. Do not call tools that were not listed.",
     "Only call tools that were provided in the tool list.",
     "When shell.exec is listed, it is the command execution tool. Do not state that command execution is unavailable; call shell.exec with {\"command\": \"...\"} instead.",
     ...(process.platform === "win32"

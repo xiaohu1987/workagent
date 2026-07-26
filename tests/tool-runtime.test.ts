@@ -295,8 +295,9 @@ describe("ToolRuntime", () => {
     expect(result.json).toMatchObject({ selections: [{ answer: "Option B" }] });
   });
 
-  it("rejects request_user_input outside GPA mode", async () => {
+  it("accepts request_user_input outside GPA mode as a generic clarification", async () => {
     const runtime = new ToolRuntime();
+    const requestUserInput = vi.fn().mockResolvedValue({ choice: "one" });
     const result = await runtime.execute(
       {
         id: "gpa-skip",
@@ -314,12 +315,12 @@ describe("ToolRuntime", () => {
       {
         cwd: process.cwd(),
         requestUserInputEnabled: false,
-        requestUserInput: vi.fn()
+        requestUserInput
       } as unknown as ToolRuntimeContext
     );
 
-    expect(result).toMatchObject({ ok: false });
-    expect(result.content).toContain("only available while GPA mode is active");
+    expect(requestUserInput).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ ok: true, json: { selections: [{ answer: "One" }] } });
   });
 
   it("prefers rg and falls back to grep for Windows workspace searches", () => {

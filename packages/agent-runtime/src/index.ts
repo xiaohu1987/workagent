@@ -3508,7 +3508,7 @@ class ThreadSessionRuntime {
                   questions: input.questions.slice(0, 4)
                 });
               },
-              requestUserInputEnabled: this.#gpa.stage !== "off",
+              requestUserInputEnabled: true,
               webFrontendGuard,
               spawnChildAgent: (input) => this.services.spawnChildAgent(this.threadId, input),
               sendAgentMessage: (input) => this.services.sendAgentMessage(this.threadId, input),
@@ -3678,7 +3678,6 @@ class ThreadSessionRuntime {
               readOnlyAgent: thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
               hiddenToolNames: [
                 ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read"]),
-                ...(this.#gpa.stage === "off" ? ["request_user_input"] : []),
                 ...(resolveDefaultModalityModel(this.services.config, "image") ? [] : ["image.generate"]),
                 ...(resolveDefaultModalityModel(this.services.config, "video") ? [] : ["video.generate"])
               ],

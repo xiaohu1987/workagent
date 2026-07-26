@@ -1379,21 +1379,11 @@ export class DesktopBackend {
     latencyMs: number;
     outputTokens: number;
     tokensPerSecond: number;
-    contextWindow?: number;
     agentCapability: "verified" | "unsupported";
     agentCapabilityReason?: string;
   }> {
     const startedAt = performance.now();
     const adapter = this.#providerFactory.create(input.provider);
-    const detectedContextWindow = this.fetchProviderModels({
-      baseUrl: input.provider.baseUrl,
-      apiKey: input.provider.apiKey,
-      apiKeyEnv: input.provider.apiKeyEnv,
-      type: input.provider.type,
-      id: input.provider.id
-    })
-      .then((models) => models.find((model) => model.id === input.model.id)?.contextWindow)
-      .catch(() => undefined);
     const timeout = new AbortController();
     const timeoutId = this.#config.timeouts.modelTestMs > 0
       ? setTimeout(() => timeout.abort(), this.#config.timeouts.modelTestMs)
@@ -1415,7 +1405,6 @@ export class DesktopBackend {
           latencyMs,
           outputTokens: 0,
           tokensPerSecond: 0,
-          contextWindow: await detectedContextWindow,
           agentCapability: "unsupported",
           agentCapabilityReason: "Image-generation models do not run Agent tools."
         };
@@ -1503,7 +1492,6 @@ export class DesktopBackend {
         latencyMs,
         outputTokens,
         tokensPerSecond: Number((outputTokens / (latencyMs / 1_000)).toFixed(2)),
-        contextWindow: await detectedContextWindow,
         agentCapability,
         agentCapabilityReason
       };

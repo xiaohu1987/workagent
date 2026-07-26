@@ -43,7 +43,7 @@ describe("model configuration storage", () => {
     ]);
   });
 
-  it("adds newly shipped defaults to an existing config without replacing user entries", async () => {
+  it("preserves deleted built-in providers and models", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-model-migration-"));
     temporaryDirectories.push(directory);
     const configFile = path.join(directory, "config.toml");
@@ -56,12 +56,14 @@ describe("model configuration storage", () => {
 
     const loaded = await loadConfig(configFile);
 
-    expect(loaded.providers).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "anthropic", baseUrl: "https://proxy.example/anthropic" }),
-      expect.objectContaining({ id: "xai", transport: "responses" })
-    ]));
-    expect(loaded.models).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "grok-4-0709", providerId: "xai" })
-    ]));
+    expect(loaded.providers).toEqual([
+      expect.objectContaining({ id: "mock" }),
+      expect.objectContaining({ id: "anthropic", baseUrl: "https://proxy.example/anthropic" })
+    ]);
+    expect(loaded.models.map((model) => model.providerId)).toEqual(
+      expect.arrayContaining(["mock", "anthropic"])
+    );
+    expect(loaded.providers.some((provider) => provider.id === "xai")).toBe(false);
+    expect(loaded.models.some((model) => model.providerId === "xai")).toBe(false);
   });
 });

@@ -406,21 +406,6 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     };
   }) as ModelProfile[];
 
-  // Existing installations have a persisted config file and therefore never
-  // revisit defaultConfig(). Add newly shipped entries without replacing a
-  // provider or model already managed by the user.
-  const defaults = defaultConfig();
-  const missingProviders = defaults.providers.filter(
-    (defaultProvider) => !providers.some((provider) => provider.id === defaultProvider.id)
-  );
-  const missingModels = defaults.models.filter(
-    (defaultModel) => !models.some(
-      (model) => model.id === defaultModel.id && model.providerId === defaultModel.providerId
-    )
-  );
-  providers.push(...missingProviders);
-  models.push(...missingModels);
-
   const image = readModalityDefaults(parsed.multimodal?.image, 'image', models);
   const video = readModalityDefaults(parsed.multimodal?.video, 'video', models);
   const input = readModalityDefaults(parsed.multimodal?.input, 'input', models);
@@ -459,9 +444,6 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     })) satisfies McpServerConfig[],
     databaseConnections: normalizeDatabaseConnections(parsed.databaseConnections)
   };
-  if (missingProviders.length > 0 || missingModels.length > 0) {
-    await saveConfig(configFile, config);
-  }
   return config;
 }
 

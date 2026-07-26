@@ -1193,10 +1193,6 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "low"
     },
     async (args, ctx) => {
-      if (ctx.requestUserInputEnabled !== true) {
-        return { ok: false, content: "request_user_input is only available while GPA mode is active." };
-      }
-
       const rawQuestions = Array.isArray(args.questions) ? args.questions.slice(0, 4) : [];
       const questions = rawQuestions.map((question, index) => ({
         id: String((question as any).id ?? `q${index + 1}`),

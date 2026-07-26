@@ -1,6 +1,6 @@
 import { Fragment, createElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import c from "highlight.js/lib/languages/c";
@@ -831,8 +831,7 @@ export function App() {
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
   const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "plugins" | "skills" | "mcp" | "database">("root");
-  const [composerAddSubmenuPosition, setComposerAddSubmenuPosition] = useState<{ left: number; top: number; anchorTop: number; maxHeight: number } | null>(null);
-  const composerAddSubmenuRef = useRef<HTMLDivElement | null>(null);
+  const [composerAddSubmenuAnchor, setComposerAddSubmenuAnchor] = useState<HTMLElement | null>(null);
   const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
   const gpaAnchorRef = useRef<HTMLDivElement | null>(null);
   const composerAddMenuCloseTimerRef = useRef<number | null>(null);
@@ -5398,34 +5397,9 @@ export function App() {
 
   function openComposerAddSubmenu(view: "plugins" | "skills" | "mcp" | "database", target: HTMLElement) {
     clearComposerAddMenuCloseTimer();
-    const rect = target.getBoundingClientRect();
-    const viewportMargin = 12;
-    const width = 252;
-    const height = Math.min(380, Math.max(160, window.innerHeight - viewportMargin * 2));
-    const opensRight = rect.right + 6 + width <= window.innerWidth - viewportMargin;
-    setComposerAddSubmenuPosition({
-      left: opensRight ? rect.right + 6 : Math.max(viewportMargin, rect.left - width - 6),
-      top: Math.min(Math.max(viewportMargin, rect.top), window.innerHeight - height - viewportMargin),
-      anchorTop: rect.top,
-      maxHeight: height
-    });
+    setComposerAddSubmenuAnchor(target);
     setComposerAddMenuView(view);
   }
-
-  useLayoutEffect(() => {
-    if (composerAddMenuView === "root" || !composerAddSubmenuPosition || !composerAddSubmenuRef.current) {
-      return;
-    }
-    const viewportMargin = 12;
-    const actualHeight = composerAddSubmenuRef.current.getBoundingClientRect().height;
-    const top = Math.min(
-      Math.max(viewportMargin, composerAddSubmenuPosition.anchorTop),
-      window.innerHeight - actualHeight - viewportMargin
-    );
-    if (Math.abs(top - composerAddSubmenuPosition.top) > 1) {
-      setComposerAddSubmenuPosition((current) => current ? { ...current, top } : current);
-    }
-  }, [composerAddMenuView, composerAddSubmenuPosition]);
 
   function removeComposerAttachment(id: string) {
     if (removingComposerAttachmentId) return;
@@ -6156,8 +6130,7 @@ export function App() {
       const capabilityPatch = {
         agentCapability: result.agentCapability,
         agentCapabilityCheckedAt: new Date().toISOString(),
-        agentCapabilityReason: result.agentCapabilityReason,
-        ...(result.contextWindow ? { contextWindow: result.contextWindow } : {})
+        agentCapabilityReason: result.agentCapabilityReason
       };
       updateModelDraft(provider.id, model.id, capabilityPatch);
       try {
@@ -6165,8 +6138,7 @@ export function App() {
           providerId: provider.id,
           modelId: model.id,
           agentCapability: result.agentCapability,
-          agentCapabilityReason: result.agentCapabilityReason,
-          contextWindow: result.contextWindow
+          agentCapabilityReason: result.agentCapabilityReason
         });
         setConfig((current) => current
           ? {
@@ -8168,10 +8140,6 @@ export function App() {
                                             输出 {modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].outputTokens} Tokens
                                             <i aria-hidden="true">·</i>
                                             {formatTokensPerSecond(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].tokensPerSecond)}
-                                            <i aria-hidden="true">&#183;</i>
-                                            {modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].contextWindow
-                                              ? `上下文 ${formatTokenCount(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].contextWindow!)} Tokens`
-                                              : "上下文未返回"}
                                           </span>
                                         ) : null}
                                         <span
@@ -10792,16 +10760,13 @@ export function App() {
                   {gpaState.stage !== "off" ? <span className="gpa-popover-item-check">已开启</span> : null}
                 </button>
               </div>
-              {gpaMenuOpen && composerAddMenuView !== "root" && composerAddSubmenuPosition ? (
-                <div
-                  ref={composerAddSubmenuRef}
+              {gpaMenuOpen && composerAddMenuView !== "root" ? (
+                <FloatingSideMenu
+                  anchor={composerAddSubmenuAnchor}
+                  open={Boolean(composerAddSubmenuAnchor)}
+                  width={252}
+                  placementKey={composerAddMenuView}
                   className="composer-add-menu-submenu composer-add-menu-submenu-floating"
-                  role="menu"
-                  style={{
-                    left: composerAddSubmenuPosition.left,
-                    top: composerAddSubmenuPosition.top,
-                    maxHeight: composerAddSubmenuPosition.maxHeight
-                  }}
                   onMouseEnter={clearComposerAddMenuCloseTimer}
                   onMouseLeave={scheduleComposerAddMenuClose}
                 >
@@ -10894,7 +10859,7 @@ export function App() {
                       </>
                     )}
                   </div>
-                </div>
+                </FloatingSideMenu>
               ) : null}
             </>,
             document.body
@@ -13133,6 +13098,89 @@ function ContextUsageReport({ usage, motionPhase, onClose }: { usage: ContextUsa
   );
 }
 
+function FloatingSideMenu({
+  anchor,
+  open,
+  width,
+  placementKey,
+  className,
+  children,
+  panelRef,
+  onMouseEnter,
+  onMouseLeave
+}: {
+  anchor: HTMLElement | null;
+  open: boolean;
+  width: number;
+  placementKey?: string;
+  className: string;
+  children: ReactNode;
+  panelRef?: MutableRefObject<HTMLDivElement | null>;
+  onMouseEnter?: () => void;
+  onMouseLeave?: () => void;
+}) {
+  const localPanelRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number; maxHeight: number; anchorTop: number } | null>(null);
+  const viewportMargin = 12;
+  const gap = 6;
+
+  useLayoutEffect(() => {
+    if (!open || !anchor) {
+      setPosition(null);
+      return;
+    }
+    const updatePosition = () => {
+      const rect = anchor.getBoundingClientRect();
+      const maxHeight = Math.min(380, Math.max(160, window.innerHeight - viewportMargin * 2));
+      const opensRight = rect.right + gap + width <= window.innerWidth - viewportMargin;
+      setPosition({
+        left: opensRight ? rect.right + gap : Math.max(viewportMargin, rect.left - width - gap),
+        top: Math.min(Math.max(viewportMargin, rect.top), window.innerHeight - maxHeight - viewportMargin),
+        maxHeight,
+        anchorTop: rect.top
+      });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    return () => window.removeEventListener("resize", updatePosition);
+  }, [anchor, open, placementKey, width]);
+
+  useLayoutEffect(() => {
+    if (!position || !localPanelRef.current) {
+      return;
+    }
+    const actualHeight = localPanelRef.current.getBoundingClientRect().height;
+    const top = Math.min(
+      Math.max(viewportMargin, position.anchorTop),
+      window.innerHeight - actualHeight - viewportMargin
+    );
+    if (Math.abs(top - position.top) > 1) {
+      setPosition((current) => current ? { ...current, top } : current);
+    }
+  }, [position]);
+
+  if (!open || !position) {
+    return null;
+  }
+
+  return createPortal(
+    <div
+      ref={(node) => {
+        localPanelRef.current = node;
+        if (panelRef) panelRef.current = node;
+      }}
+      className={`floating-side-menu ${className}`}
+      role="menu"
+      style={{ left: position.left, top: position.top, maxHeight: position.maxHeight }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+    >
+      {children}
+    </div>,
+    document.body
+  );
+}
+
 function ComposerModelPicker({
   triggerLabel,
   providers,
@@ -13154,8 +13202,9 @@ function ComposerModelPicker({
   const menuPresence = useMotionPresence(isOpen ? true : null, 140);
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [hoveredProviderId, setHoveredProviderId] = useState<string | null>(null);
-  const [modelsOpenRight, setModelsOpenRight] = useState(false);
+  const [modelsPanelAnchor, setModelsPanelAnchor] = useState<HTMLElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const modelsPanelRef = useRef<HTMLDivElement | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
 
   const clearHoverTimer = () => {
@@ -13169,38 +13218,9 @@ function ComposerModelPicker({
     if (disabled && isOpen) {
       setIsOpen(false);
       setActiveProviderId(null);
+      setModelsPanelAnchor(null);
     }
   }, [disabled, isOpen]);
-
-  useLayoutEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-    const node = rootRef.current;
-    if (!node) {
-      return;
-    }
-    const triggerRect = node.getBoundingClientRect();
-    const MODEL_PANEL_WIDTH = 264;
-    setModelsOpenRight(triggerRect.left < MODEL_PANEL_WIDTH + 16);
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-    const handleResize = () => {
-      const node = rootRef.current;
-      if (!node) {
-        return;
-      }
-      const triggerRect = node.getBoundingClientRect();
-      const MODEL_PANEL_WIDTH = 264;
-      setModelsOpenRight(triggerRect.left < MODEL_PANEL_WIDTH + 16);
-    };
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, [isOpen]);
 
   useEffect(() => {
     return () => {
@@ -13214,10 +13234,12 @@ function ComposerModelPicker({
       return;
     }
     const handlePointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (!rootRef.current?.contains(target) && !modelsPanelRef.current?.contains(target)) {
         setIsOpen(false);
         setActiveProviderId(null);
         setHoveredProviderId(null);
+        setModelsPanelAnchor(null);
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -13225,6 +13247,7 @@ function ComposerModelPicker({
         setIsOpen(false);
         setActiveProviderId(null);
         setHoveredProviderId(null);
+        setModelsPanelAnchor(null);
       }
     };
     window.addEventListener("pointerdown", handlePointerDown);
@@ -13252,7 +13275,7 @@ function ComposerModelPicker({
       if (providerItem) {
         const providerId = providerItem.dataset.providerId;
         if (providerId) {
-          handleProviderHover(providerId);
+          handleProviderHover(providerId, providerItem);
           return;
         }
       }
@@ -13281,11 +13304,13 @@ function ComposerModelPicker({
     setIsOpen(true);
     setActiveProviderId(initialProviderId);
     setHoveredProviderId(null);
+    setModelsPanelAnchor(null);
   };
 
-  const handleProviderHover = (providerId: string) => {
+  const handleProviderHover = (providerId: string, providerItem?: HTMLElement) => {
     clearHoverTimer();
     setHoveredProviderId(providerId);
+    if (providerItem) setModelsPanelAnchor(providerItem);
   };
 
   const handleProviderLeave = () => {
@@ -13307,11 +13332,12 @@ function ComposerModelPicker({
   };
 
   const visibleSecondaryProviderId = hoveredProviderId ?? activeProviderId;
+  const visibleSecondaryProvider = providers.find((provider) => provider.value === visibleSecondaryProviderId);
 
   return (
     <div
       ref={rootRef}
-      className={`composer-model-picker ${isOpen ? "open" : ""} ${disabled ? "disabled" : ""} ${modelsOpenRight ? "models-open-right" : ""}`}
+      className={`composer-model-picker ${isOpen ? "open" : ""} ${disabled ? "disabled" : ""}`}
     >
       <button
         type="button"
@@ -13324,6 +13350,7 @@ function ComposerModelPicker({
             setIsOpen(false);
             setActiveProviderId(null);
             setHoveredProviderId(null);
+            setModelsPanelAnchor(null);
             return;
           }
           openMenu(null);
@@ -13351,12 +13378,15 @@ function ComposerModelPicker({
                   type="button"
                   data-provider-id={provider.value}
                   className={`composer-model-picker-provider ${visibleSecondaryProviderId === provider.value ? "is-active" : ""}`}
-                  onClick={() => {
+                  onClick={(event) => {
                     setActiveProviderId(provider.value);
-                    handleProviderHover(provider.value);
+                    handleProviderHover(provider.value, event.currentTarget);
                   }}
-                  onMouseEnter={() => handleProviderHover(provider.value)}
-                  onFocus={() => setActiveProviderId(provider.value)}
+                  onMouseEnter={(event) => handleProviderHover(provider.value, event.currentTarget)}
+                  onFocus={(event) => {
+                    setActiveProviderId(provider.value);
+                    handleProviderHover(provider.value, event.currentTarget);
+                  }}
                   role="option"
                   aria-selected={selectedProviderId === provider.value}
                 >
@@ -13368,13 +13398,21 @@ function ComposerModelPicker({
               </li>
             ))}
           </ul>
-          {visibleSecondaryProviderId ? (
-            <ul
+          {visibleSecondaryProviderId && modelsPanelAnchor ? (
+            <FloatingSideMenu
+              anchor={modelsPanelAnchor}
+              open={isOpen}
+              width={264}
+              placementKey={visibleSecondaryProviderId}
               className="composer-model-picker-models"
+              panelRef={modelsPanelRef}
               onMouseEnter={handleModelPanelEnter}
               onMouseLeave={handleModelPanelLeave}
             >
-              <li className="composer-model-picker-models-title">模型</li>
+            <ul className="composer-model-picker-models-list">
+              <li className="composer-model-picker-models-title">
+                {visibleSecondaryProvider ? `${visibleSecondaryProvider.label} · 模型` : "模型"}
+              </li>
               {modelGroups
                 .find((group) => group.providerId === visibleSecondaryProviderId)
                 ?.models.map((model) => (
@@ -13389,6 +13427,7 @@ function ComposerModelPicker({
                         setIsOpen(false);
                         setActiveProviderId(null);
                         setHoveredProviderId(null);
+                        setModelsPanelAnchor(null);
                       }}
                       role="option"
                       aria-selected={selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id}
@@ -13408,6 +13447,7 @@ function ComposerModelPicker({
                   </li>
                 ))}
             </ul>
+            </FloatingSideMenu>
           ) : null}
         </div>
       ) : null}
