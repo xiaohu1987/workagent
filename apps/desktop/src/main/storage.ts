@@ -1313,6 +1313,13 @@ export class DatabaseService {
       .map(mapMessageRow);
   }
 
+  public listMessagesCreatedSince(threadId: string, createdAt: string): MessageRecord[] {
+    return this.#db
+      .prepare("SELECT * FROM messages WHERE thread_id = ? AND created_at >= ? ORDER BY created_at ASC, rowid ASC")
+      .all(threadId, createdAt)
+      .map(mapMessageRow);
+  }
+
   public countMessages(threadId: string): number {
     const row = this.#db
       .prepare("SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?")
@@ -1703,6 +1710,34 @@ export class DatabaseService {
         startedAt: row.started_at,
         completedAt: row.completed_at
       }));
+  }
+
+  public listToolCallsChangedSince(threadId: string, observedAt: string): ToolCallRecord[] {
+    return this.#db
+      .prepare(
+        "SELECT * FROM tool_calls WHERE thread_id = ? AND (started_at >= ? OR completed_at >= ?) ORDER BY started_at ASC"
+      )
+      .all(threadId, observedAt, observedAt)
+      .map((row: any) => ({
+        id: row.id,
+        threadId: row.thread_id,
+        turnRunId: row.turn_run_id,
+        toolName: row.tool_name,
+        argumentsJson: row.arguments_json,
+        resultJson: row.result_json,
+        status: row.status,
+        riskLevel: row.risk_level,
+        approvalMode: row.approval_mode,
+        startedAt: row.started_at,
+        completedAt: row.completed_at
+      }));
+  }
+
+  public countToolCalls(threadId: string): number {
+    const row = this.#db
+      .prepare("SELECT COUNT(*) AS count FROM tool_calls WHERE thread_id = ?")
+      .get(threadId) as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
   }
 
   public aggregateSkillUsageStats(): Array<{
@@ -2450,6 +2485,37 @@ export class DatabaseService {
         status: row.status,
         createdAt: row.created_at
       }));
+  }
+
+  public listArtifactsCreatedSince(threadId: string, createdAt: string): ArtifactRecord[] {
+    return this.#db
+      .prepare("SELECT * FROM artifacts WHERE thread_id = ? AND created_at >= ? ORDER BY created_at DESC")
+      .all(threadId, createdAt)
+      .map((row: any) => ({
+        id: row.id,
+        threadId: row.thread_id,
+        turnRunId: row.turn_run_id,
+        messageId: row.message_id,
+        toolCallId: row.tool_call_id,
+        artifactKind: row.artifact_kind,
+        displayName: row.display_name,
+        absolutePath: row.absolute_path,
+        relativePath: row.relative_path,
+        mimeType: row.mime_type,
+        sizeBytes: row.size_bytes,
+        sha256: row.sha256,
+        sourceKind: row.source_kind,
+        isUserVisible: Boolean(row.is_user_visible),
+        status: row.status,
+        createdAt: row.created_at
+      }));
+  }
+
+  public countArtifacts(threadId: string): number {
+    const row = this.#db
+      .prepare("SELECT COUNT(*) AS count FROM artifacts WHERE thread_id = ?")
+      .get(threadId) as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
   }
 
   public createKnowledgeBase(input: Omit<KnowledgeBaseRecord, "id" | "createdAt" | "updatedAt">): KnowledgeBaseRecord {

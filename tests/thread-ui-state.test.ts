@@ -19,6 +19,7 @@ import {
   isFileWriteTool,
   isInternalAgentProtocolMessage,
   isPatchAssistantMessage,
+  mergeSnapshotRecords,
   reconcilePendingUserMessages
 } from "../apps/desktop/src/renderer/App";
 import type { MessageRecord, ToolCallRecord } from "../packages/shared-types/src";
@@ -375,6 +376,33 @@ describe("optimistic user message reconciliation", () => {
     const persisted: MessageRecord = { ...first, id: "persisted-1", createdAt: "2026-07-15T01:00:02.000Z" };
 
     expect(reconcilePendingUserMessages([first, second], [persisted])).toEqual([second]);
+  });
+});
+
+describe("incremental snapshot merging", () => {
+  it("appends new records, applies updates, and keeps chronological order", () => {
+    const existing = [
+      { id: "tool-1", createdAt: "2026-07-15T01:00:00.000Z", status: "running" },
+      { id: "tool-2", createdAt: "2026-07-15T01:02:00.000Z", status: "completed" }
+    ];
+    const changes = [
+      { id: "tool-1", createdAt: "2026-07-15T01:00:00.000Z", status: "completed" },
+      { id: "tool-3", createdAt: "2026-07-15T01:01:00.000Z", status: "completed" }
+    ];
+
+    expect(mergeSnapshotRecords(existing, changes, (item) => item.createdAt)).toEqual([
+      { id: "tool-1", createdAt: "2026-07-15T01:00:00.000Z", status: "completed" },
+      { id: "tool-3", createdAt: "2026-07-15T01:01:00.000Z", status: "completed" },
+      { id: "tool-2", createdAt: "2026-07-15T01:02:00.000Z", status: "completed" }
+    ]);
+  });
+
+  it("keeps artifact ordering newest first", () => {
+    const existing = [{ id: "artifact-1", createdAt: "2026-07-15T01:00:00.000Z" }];
+    const changes = [{ id: "artifact-2", createdAt: "2026-07-15T01:02:00.000Z" }];
+
+    expect(mergeSnapshotRecords(existing, changes, (item) => item.createdAt, "descending"))
+      .toEqual([{ id: "artifact-2", createdAt: "2026-07-15T01:02:00.000Z" }, existing[0]]);
   });
 });
 

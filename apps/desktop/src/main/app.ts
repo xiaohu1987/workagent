@@ -34,6 +34,7 @@ import type {
   QuickNoteRecord,
   ErrorSolutionRecord,
   RuntimeEvent,
+  RuntimeThreadSnapshotCursor,
   RuntimeThreadSnapshot,
   SkillLabEvent,
   SkillMetadata,
@@ -821,7 +822,7 @@ export class DesktopBackend {
     return { path: relativePath };
   }
 
-  public getThreadSnapshot(threadId: string): RuntimeThreadSnapshot {
+  public getThreadSnapshot(threadId: string, cursor?: RuntimeThreadSnapshotCursor): RuntimeThreadSnapshot {
     const thread = this.#db.getThread(threadId);
     const subagents = this.getCurrentRequestSubagents(thread);
     const childApprovals = thread.parentThreadId
@@ -833,19 +834,39 @@ export class DesktopBackend {
     const browserTabs = this.removePersistedBrowserErrorTabs(threadId);
     this.#browser.syncPersistedTabs(threadId, browserTabs);
     const messageCount = this.#db.countMessages(threadId);
-    const messages = this.#db.listRecentMessages(threadId, Math.max(1, messageCount));
+    const toolCallCount = this.#db.countToolCalls(threadId);
+    const artifactCount = this.#db.countArtifacts(threadId);
+    const canUseDelta = Boolean(
+      cursor &&
+      cursor.messageCount <= messageCount &&
+      cursor.toolCallCount <= toolCallCount &&
+      cursor.artifactCount <= artifactCount &&
+      cursor.observedAt
+    );
+    const messages = canUseDelta && cursor
+      ? this.#db.listMessagesCreatedSince(threadId, cursor.observedAt)
+      : this.#db.listRecentMessages(threadId, Math.max(1, messageCount));
+    const toolCalls = canUseDelta && cursor
+      ? this.#db.listToolCallsChangedSince(threadId, cursor.observedAt)
+      : this.#db.listToolCalls(threadId);
+    const artifacts = canUseDelta && cursor
+      ? this.#db.listArtifactsCreatedSince(threadId, cursor.observedAt)
+      : this.#db.listArtifacts(threadId);
+    const observedAt = new Date().toISOString();
     return {
+      snapshotMode: canUseDelta ? "delta" : "full",
+      snapshotCursor: { observedAt, messageCount, toolCallCount, artifactCount },
       thread,
       messages,
       messageCount,
       queuedMessages: this.#db.listQueuedMessages(threadId).filter((message) => message.status === "queued"),
       approvals: [...this.#db.listApprovals(threadId), ...childApprovals],
       prompts: [...this.#db.listUserPrompts(threadId), ...childPrompts],
-      artifacts: this.#db.listArtifacts(threadId),
+      artifacts,
       knowledgeBases: this.listVisibleKnowledgeBasesForThread(thread),
       browserTabs,
       projectPlugins: this.listProjectPluginsForThread(thread),
-      toolCalls: messages.length > 0 ? this.#db.listToolCalls(threadId, messages[0].createdAt) : [],
+      toolCalls,
       contextCompaction: this.#db.getLatestContextCompaction(threadId),
       gpa: this.getGpaState(threadId),
       subagents,

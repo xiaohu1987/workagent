@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { NotificationNavigationTarget } from "@shared-types";
+import type { NotificationNavigationTarget, RuntimeThreadSnapshotCursor } from "@shared-types";
 
 const api = {
   getApplicationBackgrounds: () => ipcRenderer.invoke("appearance:background:get"),
@@ -64,7 +64,8 @@ const api = {
   createGitPullRequest: (threadId: string) => ipcRenderer.invoke("git:create-pr", threadId),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
   clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),
-  getThreadSnapshot: (threadId: string) => ipcRenderer.invoke("threads:snapshot", threadId),
+  getThreadSnapshot: (threadId: string, cursor?: RuntimeThreadSnapshotCursor) =>
+    ipcRenderer.invoke("threads:snapshot", threadId, cursor),
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[] }) =>
     ipcRenderer.invoke("threads:send", payload),
   replaceMessage: (payload: { threadId: string; messageId: string; content: string }) =>

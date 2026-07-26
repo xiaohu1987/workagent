@@ -424,8 +424,8 @@ function registerIpc(): void {
   ipcMain.handle("threads:clear-conversation", (_event, threadId: string) =>
     backend.clearThreadConversation(threadId)
   );
-  ipcMain.handle("threads:snapshot", (_event, threadId: string) =>
-    backend.getThreadSnapshot(threadId)
+  ipcMain.handle("threads:snapshot", (_event, threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) =>
+    backend.getThreadSnapshot(threadId, cursor)
   );
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)

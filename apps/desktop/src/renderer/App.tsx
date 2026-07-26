@@ -48,6 +48,7 @@ import type {
   ProviderDefinition,
   ProviderType,
   RuntimeEvent,
+  RuntimeThreadSnapshotCursor,
   ErrorSolutionRecord,
   SelfImprovementMemoryRecord,
   RuntimeThreadSnapshot,
@@ -756,6 +757,10 @@ export function App() {
   const [terminalSessionsByThread, setTerminalSessionsByThread] = useState<
     Record<string, Record<string, TerminalSessionState>>
   >({});
+  const terminalOutputFramesRef = useRef<Record<string, { data: string; frame: number }>>({});
+  const streamingAssistantFramesRef = useRef<
+    Record<string, { threadId: string; content: string; frame: number }>
+  >({});
   const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
   const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
   const [gitLoading, setGitLoading] = useState(false);
@@ -772,12 +777,15 @@ export function App() {
   const pendingUserMessagesRef = useRef<Record<string, MessageRecord[]>>({});
   const pendingOneShotSkillRemovalsRef = useRef<Record<string, string[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
+  const snapshotRefreshInFlightRef = useRef<Record<string, Promise<void>>>({});
+  const snapshotRefreshPendingRef = useRef<Record<string, boolean>>({});
   /** After Stop, ignore late runtime events that would revive the "执行中" UI. */
   const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
+  const snapshotCursorByThreadRef = useRef<Record<string, RuntimeThreadSnapshotCursor>>({});
   const pluginToggleQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pluginEnabledStateRef = useRef<Map<string, boolean>>(new Map());
   const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
@@ -1489,6 +1497,17 @@ export function App() {
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, []);
 
+  useEffect(() => () => {
+    for (const pending of Object.values(terminalOutputFramesRef.current)) {
+      window.cancelAnimationFrame(pending.frame);
+    }
+    terminalOutputFramesRef.current = {};
+    for (const pending of Object.values(streamingAssistantFramesRef.current)) {
+      window.cancelAnimationFrame(pending.frame);
+    }
+    streamingAssistantFramesRef.current = {};
+  }, []);
+
   useEffect(() => {
     threadsRef.current = threads;
     for (const thread of threads) {
@@ -1735,9 +1754,16 @@ export function App() {
   }, [resizingPane, rightWorkspaceWidth, sidebarWidth]);
 
   function selectThreadId(nextThreadId: string | null) {
-    selectedThreadIdRef.current = nextThreadId;
-    setSelectedThreadId(nextThreadId);
-    setFilePreviewPath(null);
+    const select = () => {
+      selectedThreadIdRef.current = nextThreadId;
+      setSelectedThreadId(nextThreadId);
+      setFilePreviewPath(null);
+    };
+    if (selectedThreadIdRef.current === nextThreadId) {
+      select();
+      return;
+    }
+    select();
   }
 
   const currentTerminalTabs = selectedThreadId ? terminalTabsByThread[selectedThreadId] ?? [] : [];
@@ -1859,6 +1885,75 @@ export function App() {
         [sessionId]: updater(current[threadId]?.[sessionId] ?? null)
       }
     }));
+  }
+
+  function queueTerminalOutput(threadId: string, sessionId: string, data: string) {
+    const key = `${threadId}:${sessionId}`;
+    const pending = terminalOutputFramesRef.current[key];
+    if (pending) {
+      pending.data = `${pending.data}${data}`.slice(-80_000);
+      return;
+    }
+    terminalOutputFramesRef.current[key] = {
+      data: data.slice(-80_000),
+      frame: window.requestAnimationFrame(() => {
+        const buffered = terminalOutputFramesRef.current[key];
+        delete terminalOutputFramesRef.current[key];
+        if (!buffered) return;
+        updateTerminalSessionState(threadId, sessionId, (current) => ({
+          output: `${current?.output ?? ""}${buffered.data}`.slice(-80_000),
+          cwd: current?.cwd ?? "",
+          shell: current?.shell ?? "PowerShell"
+        }));
+      })
+    };
+  }
+
+  function flushStreamingAssistant(turnRunId: string) {
+    const pending = streamingAssistantFramesRef.current[turnRunId];
+    if (!pending) return;
+
+    window.cancelAnimationFrame(pending.frame);
+    delete streamingAssistantFramesRef.current[turnRunId];
+    setStreamingAssistants((current) => ({
+      ...current,
+      [turnRunId]: {
+        ...current[turnRunId],
+        threadId: pending.threadId,
+        turnRunId,
+        content: pending.content,
+        completed: false
+      }
+    }));
+  }
+
+  function discardQueuedStreamingAssistant(turnRunId: string) {
+    const pending = streamingAssistantFramesRef.current[turnRunId];
+    if (!pending) return;
+    window.cancelAnimationFrame(pending.frame);
+    delete streamingAssistantFramesRef.current[turnRunId];
+  }
+
+  function discardQueuedStreamingAssistantsForThread(threadId: string) {
+    for (const [turnRunId, pending] of Object.entries(streamingAssistantFramesRef.current)) {
+      if (pending.threadId === threadId) {
+        discardQueuedStreamingAssistant(turnRunId);
+      }
+    }
+  }
+
+  function queueStreamingAssistant(threadId: string, turnRunId: string, content: string) {
+    const pending = streamingAssistantFramesRef.current[turnRunId];
+    if (pending) {
+      pending.content = content;
+      return;
+    }
+
+    streamingAssistantFramesRef.current[turnRunId] = {
+      threadId,
+      content,
+      frame: window.requestAnimationFrame(() => flushStreamingAssistant(turnRunId))
+    };
   }
 
   function selectProjectFile(path: string) {
@@ -2066,6 +2161,23 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let runtimeRefreshTimer: number | null = null;
+    let shouldRefreshSelectedSnapshot = false;
+    const scheduleRuntimeRefresh = (threadId?: string) => {
+      if (!threadId || threadId === selectedThreadIdRef.current) {
+        shouldRefreshSelectedSnapshot = true;
+      }
+      if (runtimeRefreshTimer !== null) window.clearTimeout(runtimeRefreshTimer);
+      runtimeRefreshTimer = window.setTimeout(() => {
+        runtimeRefreshTimer = null;
+        const snapshotThreadId = shouldRefreshSelectedSnapshot ? selectedThreadIdRef.current : null;
+        shouldRefreshSelectedSnapshot = false;
+        void refreshThreads();
+        if (snapshotThreadId) {
+          void refreshSnapshot(snapshotThreadId);
+        }
+      }, 120);
+    };
     const dispose = window.codexh.onRuntimeEvent((event) => {
       const runtimeEvent = event as RuntimeEvent;
       const typed = event as {
@@ -2120,11 +2232,7 @@ export function App() {
       if (typed.type === "terminal.output" && typed.threadId) {
         const sessionId = typeof typed.payload?.sessionId === "string" ? typed.payload.sessionId : "default";
         ensureThreadTerminalTab(typed.threadId, sessionId);
-        updateTerminalSessionState(typed.threadId, sessionId, (current) => ({
-          output: `${current?.output ?? ""}${typed.payload?.data ?? ""}`.slice(-80_000),
-          cwd: current?.cwd ?? "",
-          shell: current?.shell ?? "PowerShell"
-        }));
+        queueTerminalOutput(typed.threadId, sessionId, typed.payload?.data ?? "");
         return;
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
@@ -2250,12 +2358,6 @@ export function App() {
           );
         }
         return;
-      }
-      if (typed.type === "browser.updated" && typed.threadId) {
-        const browserThreadId = typed.threadId;
-        void window.codexh.getThreadSnapshot(browserThreadId).then((next: RuntimeThreadSnapshot) => {
-          setBrowserTabsByThread((current) => ({ ...current, [browserThreadId]: next.browserTabs }));
-        }).catch(() => undefined);
       }
       if (typed.type === "browser.assertion_completed" && typed.threadId) {
         appendRuntimeStatus(typed.threadId, typed.payload?.passed === false ? "页面断言未通过，正在修复" : "页面断言已通过", typed.createdAt);
@@ -2397,20 +2499,13 @@ export function App() {
       }
       if (typed.type === "assistant.delta" && typed.threadId && typed.payload?.turnRunId) {
         const threadId = typed.threadId;
-        if (suppressRuntimeProgressRef.current[threadId]) {
-          return;
-        }
         const payload = typed.payload;
         const turnRunId = payload.turnRunId as string;
-        setStreamingAssistants((current) => ({
-          ...current,
-          [turnRunId]: {
-            threadId,
-            turnRunId,
-            content: payload.content ?? "",
-            completed: false
-          }
-        }));
+        if (suppressRuntimeProgressRef.current[threadId]) {
+          discardQueuedStreamingAssistant(turnRunId);
+          return;
+        }
+        queueStreamingAssistant(threadId, turnRunId, payload.content ?? "");
         appendRuntimeStatus(threadId, "正在生成回复", typed.createdAt);
         if (notificationThreadId) {
           updateThreadNotification(notificationThreadId, "正在生成回复。", typed.createdAt);
@@ -2426,6 +2521,7 @@ export function App() {
         if (turnRunId) {
           // Internal recovery output may be malformed decision JSON. It is not
           // user-facing content and must not remain as a stale streaming block.
+          discardQueuedStreamingAssistant(turnRunId);
           setStreamingAssistants((current) => {
             if (!current[turnRunId]) return current;
             const next = { ...current };
@@ -2539,9 +2635,6 @@ export function App() {
       if (!isPluginStateUpdate && typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
         applyThreadStatusNotification(runtimeEvent);
         const runtimeThreadId = typed.threadId;
-        if (typed.payload.childThread && runtimeThreadId === currentSelectedThreadId) {
-          void refreshSnapshot(runtimeThreadId);
-        }
         const status = typed.payload.thread.status;
         const resumePlan = gpaPlanResumeAttemptRef.current.get(runtimeThreadId);
         if (status === "failed") {
@@ -2581,8 +2674,14 @@ export function App() {
       }
       if (typed.type === "assistant.completed" && typed.payload?.turnRunId) {
         const { turnRunId, messageId, discarded } = typed.payload;
+        const suppressed = !!typed.threadId && suppressRuntimeProgressRef.current[typed.threadId];
+        if (discarded === true || suppressed) {
+          discardQueuedStreamingAssistant(turnRunId);
+        } else {
+          flushStreamingAssistant(turnRunId);
+        }
         setStreamingAssistants((current) => {
-          if (discarded === true) {
+          if (discarded === true || suppressed) {
             if (!current[turnRunId]) return current;
             const next = { ...current };
             delete next[turnRunId];
@@ -2630,24 +2729,23 @@ export function App() {
           });
         }
       }
-      if (!isPluginStateUpdate) {
-        void refreshThreads();
-
-        if (!typed.threadId || typed.threadId === currentSelectedThreadId) {
-          void refreshSnapshot(typed.threadId ?? currentSelectedThreadId);
-        }
-
-        if (
-          typed.type === "thread.updated" ||
-          typed.type === "browser.updated" ||
-          typed.type === "knowledge.imported"
-        ) {
-          void refreshPlugins();
-          void refreshSkills();
-        }
+      if (!isPluginStateUpdate && (
+        typed.type === "thread.updated" ||
+        typed.type === "message.created" ||
+        typed.type === "assistant.completed" ||
+        typed.type === "browser.updated" ||
+        typed.type === "knowledge.imported"
+      )) {
+        scheduleRuntimeRefresh(typed.threadId);
+      }
+      if (typed.type === "knowledge.imported") {
+        void refreshSkills();
       }
     });
-    return dispose;
+    return () => {
+      if (runtimeRefreshTimer !== null) window.clearTimeout(runtimeRefreshTimer);
+      dispose();
+    };
   }, []);
 
   useEffect(() => {
@@ -3185,6 +3283,15 @@ export function App() {
   const isProjectWelcome = selectedThread?.mode === "project";
   const welcomeCards = isProjectWelcome ? WELCOME_CARDS : CHAT_WELCOME_CARDS;
   const latestVisibleMessageId = timelineEntries[timelineEntries.length - 1]?.id ?? null;
+  const transcriptUserMessageActions = useMemo<UserMessageActions>(() => ({
+    editingMessage: editingUserMessage,
+    onEditDraftChange: (content) =>
+      setEditingUserMessage((current) => current ? { ...current, content } : current),
+    onCopy: (content) => void copyUserMessage(content),
+    onEdit: beginUserMessageEdit,
+    onEditCancel: cancelUserMessageEdit,
+    onEditSubmit: () => void submitUserMessageEdit()
+  }), [editingUserMessage, isActiveThreadExecuting, isPreparingRuntime, selectedThreadId]);
   const settingsProvider = useMemo(() => {
     if (!configDraft) {
       return null;
@@ -3654,16 +3761,49 @@ export function App() {
 
   async function refreshSnapshot(threadId: string | null) {
     if (!threadId) {
+      snapshotCursorByThreadRef.current = {};
       setSnapshot(null);
       return;
     }
 
+    const inFlight = snapshotRefreshInFlightRef.current[threadId];
+    if (inFlight) {
+      snapshotRefreshPendingRef.current[threadId] = true;
+      await inFlight;
+      return;
+    }
+
+    let refreshPromise: Promise<void>;
+    refreshPromise = (async () => {
+      try {
+        do {
+          snapshotRefreshPendingRef.current[threadId] = false;
+          await refreshSnapshotOnce(threadId);
+        } while (snapshotRefreshPendingRef.current[threadId]);
+      } finally {
+        if (snapshotRefreshInFlightRef.current[threadId] === refreshPromise) {
+          delete snapshotRefreshInFlightRef.current[threadId];
+        }
+        delete snapshotRefreshPendingRef.current[threadId];
+      }
+    })();
+    snapshotRefreshInFlightRef.current[threadId] = refreshPromise;
+    await refreshPromise;
+  }
+
+  async function refreshSnapshotOnce(threadId: string) {
     const requestId = (snapshotRequestIdsRef.current[threadId] ?? 0) + 1;
     snapshotRequestIdsRef.current[threadId] = requestId;
     try {
-      const next = (await window.codexh.getThreadSnapshot(threadId)) as RuntimeThreadSnapshot;
+      const cursor = snapshotThreadIdRef.current === threadId
+        ? snapshotCursorByThreadRef.current[threadId]
+        : undefined;
+      const next = (await window.codexh.getThreadSnapshot(threadId, cursor)) as RuntimeThreadSnapshot;
       if (snapshotRequestIdsRef.current[threadId] !== requestId || selectedThreadIdRef.current !== threadId) {
         return;
+      }
+      if (next.snapshotCursor) {
+        snapshotCursorByThreadRef.current[threadId] = next.snapshotCursor;
       }
       const pending = pendingUserMessagesRef.current[threadId] ?? [];
       const remaining = reconcilePendingUserMessages(pending, next.messages);
@@ -3672,9 +3812,35 @@ export function App() {
       } else {
         delete pendingUserMessagesRef.current[threadId];
       }
-      setSnapshot({
-        ...next,
-        messages: remaining.length > 0 ? [...next.messages, ...remaining] : next.messages
+      const nextMessages = remaining.length > 0 ? [...next.messages, ...remaining] : next.messages;
+      setSnapshot((current) => {
+        if (!current || current.thread.id !== threadId) {
+          return { ...next, messages: nextMessages };
+        }
+        const messages = next.snapshotMode === "delta"
+          ? mergeSnapshotRecords(
+              current.messages.filter((message) =>
+                !message.id.startsWith("optimistic-") || remaining.some((item) => item.id === message.id)
+              ),
+              nextMessages,
+              (message) => message.createdAt
+            )
+          : nextMessages;
+        const toolCalls = next.snapshotMode === "delta"
+          ? mergeSnapshotRecords(current.toolCalls, next.toolCalls, (toolCall) => toolCall.startedAt)
+          : next.toolCalls;
+        const artifacts = next.snapshotMode === "delta"
+          ? mergeSnapshotRecords(current.artifacts, next.artifacts, (artifact) => artifact.createdAt, "descending")
+          : next.artifacts;
+        return {
+          ...next,
+          messages: reuseEquivalentRecordArray(current.messages, messages),
+          toolCalls: reuseEquivalentRecordArray(current.toolCalls, toolCalls),
+          artifacts: reuseEquivalentRecordArray(current.artifacts, artifacts),
+          queuedMessages: reuseEquivalentRecordArray(current.queuedMessages, next.queuedMessages),
+          approvals: reuseEquivalentRecordArray(current.approvals, next.approvals),
+          prompts: reuseEquivalentRecordArray(current.prompts, next.prompts)
+        };
       });
       if (selectedThreadIdRef.current === threadId) {
         setIsThreadSwitching(false);
@@ -4056,7 +4222,9 @@ export function App() {
     try {
       await window.codexh.clearThreadConversation(threadId);
       delete pendingUserMessagesRef.current[threadId];
+      delete snapshotCursorByThreadRef.current[threadId];
       delete suppressRuntimeProgressRef.current[threadId];
+      discardQueuedStreamingAssistantsForThread(threadId);
       gpaSameSessionAutoResumeRef.current.delete(threadId);
       gpaPlanResumeDismissedRef.current.delete(threadId);
       gpaPlanResumeAttemptRef.current.delete(threadId);
@@ -4372,6 +4540,7 @@ export function App() {
     const messageId = editingMessage.id;
     if (!threadId) return;
     await window.codexh.replaceMessage({ threadId, messageId, content });
+    delete snapshotCursorByThreadRef.current[threadId];
     setEditingUserMessage(null);
     await refreshSnapshot(threadId);
   }
@@ -4539,6 +4708,7 @@ export function App() {
 
     // Block late tool/retry/delta events from flipping the UI back to "执行中".
     suppressRuntimeProgressRef.current[threadId] = true;
+    discardQueuedStreamingAssistantsForThread(threadId);
 
     // Switch the control back immediately. The subsequent refresh reconciles
     // the optimistic state with the persisted runtime state.
@@ -7350,20 +7520,13 @@ export function App() {
               <div key={activeSnapshotThreadId ?? selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
                 {timelineEntries.map((entry) =>
                   entry.kind === "message" ? (
-                    renderTranscriptMessage(
-                      entry.message,
-                      activeAssistantLabel,
-                      {
-                        editingMessage: editingUserMessage,
-                        onEditDraftChange: (content) =>
-                          setEditingUserMessage((current) => current ? { ...current, content } : current),
-                        onCopy: (content) => void copyUserMessage(content),
-                        onEdit: beginUserMessageEdit,
-                        onEditCancel: cancelUserMessageEdit,
-                        onEditSubmit: () => void submitUserMessageEdit()
-                      },
-                      entry.message.id === gpaPlanMessageId
-                    )
+                    <TranscriptMessage
+                      key={entry.id}
+                      message={entry.message}
+                      assistantLabel={activeAssistantLabel}
+                      userMessageActions={transcriptUserMessageActions}
+                      isGpaPlanMessage={entry.message.id === gpaPlanMessageId}
+                    />
                   ) : entry.kind === "file-summary" ? (
                     <FileChangeSummary
                       key={entry.id}
@@ -15812,15 +15975,22 @@ type UserMessageActions = {
   onEditSubmit: () => void;
 };
 
-function renderTranscriptMessage(
-  message: MessageRecord,
-  assistantLabel: string,
-  userMessageActions: UserMessageActions,
+type TranscriptMessageProps = {
+  message: MessageRecord;
+  assistantLabel: string;
+  userMessageActions: UserMessageActions;
+  isGpaPlanMessage?: boolean;
+};
+
+const TranscriptMessage = memo(function TranscriptMessage({
+  message,
+  assistantLabel,
+  userMessageActions,
   isGpaPlanMessage = false
-) {
+}: TranscriptMessageProps) {
   const gpaTaskProgress = getGpaTaskProgress(message);
   if (gpaTaskProgress) {
-    return <GpaTaskProgressMessage key={message.id} message={message} task={gpaTaskProgress} />;
+    return <GpaTaskProgressMessage message={message} task={gpaTaskProgress} />;
   }
   const displayContent = getDisplayMessageContent(message);
   if (message.role === "assistant" && !displayContent.trim()) {
@@ -15829,7 +15999,7 @@ function renderTranscriptMessage(
 
   if (message.role === "user") {
     return (
-      <article id={`transcript-message-${message.id}`} key={message.id} className="message-card user">
+      <article id={`transcript-message-${message.id}`} className="message-card user">
         {renderMessageContent(message, displayContent, userMessageActions)}
       </article>
     );
@@ -15838,7 +16008,6 @@ function renderTranscriptMessage(
   return (
     <article
       id={`transcript-message-${message.id}`}
-      key={message.id}
       className={`message-card ${message.role}${getMessageDisplayKind(message) === "commentary" ? " commentary" : ""}`}
     >
       <div className="message-header">
@@ -15852,6 +16021,69 @@ function renderTranscriptMessage(
       </div>
     </article>
   );
+}, areTranscriptMessagePropsEqual);
+
+function areTranscriptMessagePropsEqual(
+  previous: Readonly<TranscriptMessageProps>,
+  next: Readonly<TranscriptMessageProps>
+): boolean {
+  if (previous.assistantLabel !== next.assistantLabel || previous.isGpaPlanMessage !== next.isGpaPlanMessage) {
+    return false;
+  }
+  const previousMessage = previous.message;
+  const nextMessage = next.message;
+  if (previousMessage !== nextMessage) {
+    const previousKeys = Object.keys(previousMessage) as Array<keyof MessageRecord>;
+    const nextKeys = Object.keys(nextMessage) as Array<keyof MessageRecord>;
+    if (previousKeys.length !== nextKeys.length || previousKeys.some((key) => previousMessage[key] !== nextMessage[key])) {
+      return false;
+    }
+  }
+  return previousMessage.role !== "user" || previous.userMessageActions === next.userMessageActions;
+}
+
+function reuseEquivalentRecordArray<T extends object>(previous: T[], next: T[]): T[] {
+  if (previous === next || previous.length !== next.length) {
+    return next;
+  }
+
+  for (let index = 0; index < previous.length; index += 1) {
+    const previousItem = previous[index] as Record<string, unknown>;
+    const nextItem = next[index] as Record<string, unknown>;
+    const previousKeys = Object.keys(previousItem);
+    const nextKeys = Object.keys(nextItem);
+    if (
+      previousKeys.length !== nextKeys.length ||
+      previousKeys.some((key) => previousItem[key] !== nextItem[key])
+    ) {
+      return next;
+    }
+  }
+
+  return previous;
+}
+
+export function mergeSnapshotRecords<T extends { id: string }>(
+  previous: T[],
+  changes: T[],
+  getCreatedAt: (item: T) => string,
+  direction: "ascending" | "descending" = "ascending"
+): T[] {
+  if (changes.length === 0) {
+    return previous;
+  }
+
+  const changedById = new Map(changes.map((item) => [item.id, item]));
+  const merged = previous.map((item) => changedById.get(item.id) ?? item);
+  const existingIds = new Set(previous.map((item) => item.id));
+  for (const item of changes) {
+    if (!existingIds.has(item.id)) {
+      merged.push(item);
+    }
+  }
+
+  const multiplier = direction === "ascending" ? 1 : -1;
+  return merged.sort((left, right) => multiplier * getCreatedAt(left).localeCompare(getCreatedAt(right)));
 }
 
 type GpaTaskProgress = {

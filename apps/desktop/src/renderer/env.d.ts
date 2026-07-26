@@ -88,7 +88,7 @@ declare global {
       createGitPullRequest: (threadId: string) => Promise<any>;
       deleteThread: (threadId: string) => Promise<void>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
-      getThreadSnapshot: (threadId: string) => Promise<any>;
+      getThreadSnapshot: (threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[] }) => Promise<void>;
       replaceMessage: (payload: { threadId: string; messageId: string; content: string }) => Promise<void>;
       deleteQueuedMessage: (payload: { threadId: string; id: string }) => Promise<void>;

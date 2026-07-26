@@ -1053,10 +1053,19 @@ export interface RuntimePromptBundle {
   workflowPackContext?: string | null;
 }
 
+export interface RuntimeThreadSnapshotCursor {
+  observedAt: string;
+  messageCount: number;
+  toolCallCount: number;
+  artifactCount: number;
+}
+
 export interface RuntimeThreadSnapshot {
+  snapshotMode?: "full" | "delta";
+  snapshotCursor?: RuntimeThreadSnapshotCursor;
   thread: ThreadRecord;
   messages: MessageRecord[];
-  /** Total persisted messages included in the snapshot. */
+  /** Total persisted messages for the thread, including those omitted from delta payloads. */
   messageCount: number;
   queuedMessages: QueuedMessageRecord[];
   approvals: ApprovalRequest[];

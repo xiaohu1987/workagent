@@ -11570,6 +11570,9 @@ select:focus {
 .chat-transcript > * {
   min-width: 0;
   max-width: 100%;
+  /* Keep the full transcript available while skipping offscreen layout and paint. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
 }
 
 .message-card {
