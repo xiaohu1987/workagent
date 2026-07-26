@@ -4539,10 +4539,20 @@ export function App() {
     const threadId = selectedThreadId;
     const messageId = editingMessage.id;
     if (!threadId) return;
-    await window.codexh.replaceMessage({ threadId, messageId, content });
-    delete snapshotCursorByThreadRef.current[threadId];
+
+    // Message replacement starts a new queued turn. Close the inline editor
+    // immediately instead of holding it open while the main process dispatches.
     setEditingUserMessage(null);
-    await refreshSnapshot(threadId);
+    delete snapshotCursorByThreadRef.current[threadId];
+    try {
+      await window.codexh.replaceMessage({ threadId, messageId, content });
+      await refreshSnapshot(threadId);
+    } catch (error) {
+      setEditingUserMessage((current) => current ?? editingMessage);
+      showNotice("更新消息失败。", {
+        message: error instanceof Error ? error.message : "请稍后重试。"
+      });
+    }
   }
 
   async function handleGpaStageSelect(stage: GpaStage) {
@@ -11125,7 +11135,7 @@ export function App() {
                     <span className="gpa-popover-item-title">完全访问</span>
                     <span className="gpa-popover-item-hint">最大权限，执行时无需确认</span>
                   </span>
-                  {gpaState.fullAccess ? <span className="gpa-popover-item-check">已开启</span> : null}
+                  {gpaState.fullAccess ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
                 </button>
                 <button
                   className={`gpa-popover-item gpa-popover-item-knowledge ${gpaState.knowledgeEnabled ? "is-active" : ""}`}
@@ -11139,7 +11149,7 @@ export function App() {
                     <span className="gpa-popover-item-title">开启知识库</span>
                     <span className="gpa-popover-item-hint">允许本对话检索本地知识库</span>
                   </span>
-                  {gpaState.knowledgeEnabled ? <span className="gpa-popover-item-check">已开启</span> : null}
+                  {gpaState.knowledgeEnabled ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
                 </button>
                 <button
                   className={`gpa-popover-item gpa-popover-item-agent ${multiAgentMode === "proactive" ? "is-active" : ""}`}
@@ -11174,7 +11184,7 @@ export function App() {
                         : "仅项目对话可用，请先新建项目"}
                     </span>
                   </span>
-                  {gpaState.stage !== "off" ? <span className="gpa-popover-item-check">已开启</span> : null}
+                  {gpaState.stage !== "off" ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
                 </button>
               </div>
               {gpaMenuOpen && composerAddMenuView !== "root" ? (

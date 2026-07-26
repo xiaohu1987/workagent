@@ -11575,6 +11575,11 @@ select:focus {
   contain-intrinsic-size: auto 180px;
 }
 
+/* User message actions are positioned above their bubble, outside the card bounds. */
+.chat-transcript > .message-card.user {
+  content-visibility: visible;
+}
+
 .message-card {
   display: flex;
   flex-direction: column;
@@ -13699,6 +13704,7 @@ select:focus {
 .gpa-popover-item.is-active { background: rgba(255, 255, 255, 0.10); }
 .gpa-popover-item:disabled { cursor: default; opacity: 0.52; }
 .gpa-popover-item:disabled:hover { background: rgba(255, 255, 255, 0.10); }
+.gpa-popover-item.is-active:disabled { opacity: 1; }
 
 .gpa-popover-item-icon {
   display: inline-flex;
