@@ -389,6 +389,7 @@ export interface StandardCompletionValidationResult {
   reasons: string[];
   missingDelivery: boolean;
   missingVerification: boolean;
+  missingRequestedDeliverable: boolean;
 }
 
 export interface ManagedWriteRecoveryState {
@@ -2780,6 +2781,7 @@ class ThreadSessionRuntime {
             role: "user",
             content: buildProgressOnlyCompletionRecoveryInstruction(progressOnlyCompletionAttempts)
           });
+          await discardStreamedAssistant();
           decision.assistantMessage = undefined;
           decision.endTurn = false;
           decision.goalCompleted = false;
@@ -2793,6 +2795,7 @@ class ThreadSessionRuntime {
         ) {
           const standardCompletion = validateStandardCompletion({
             decision,
+            originalRequest: initialInput,
             requiresFileDelivery: isProjectFileMutationRequest(initialInput),
             deliveredPaths: [...managedWriteCompletion.deliveredPaths],
             successfulEvidence: successfulToolEvidence
@@ -2804,7 +2807,8 @@ class ThreadSessionRuntime {
               attempt: standardCompletionAttempts,
               reasons: standardCompletion.reasons,
               missingDelivery: standardCompletion.missingDelivery,
-              missingVerification: standardCompletion.missingVerification
+              missingVerification: standardCompletion.missingVerification,
+              missingRequestedDeliverable: standardCompletion.missingRequestedDeliverable
             });
             if (standardCompletionAttempts >= MAX_AGENT_PROTOCOL_FAILURES) {
               throw new Error(
@@ -2815,6 +2819,7 @@ class ThreadSessionRuntime {
               role: "user",
               content: buildStandardCompletionRecoveryInstruction(standardCompletion)
             });
+            await discardStreamedAssistant();
             decision.assistantMessage = undefined;
             decision.endTurn = false;
             decision.goalCompleted = false;
@@ -5726,6 +5731,7 @@ export function buildGpaPlanProgressCheckpointInstruction(task: GpaState["planTa
 
 export function validateStandardCompletion(input: {
   decision: Pick<ProviderTurnDecision, "assistantMessage" | "toolCalls" | "endTurn" | "goalCompleted">;
+  originalRequest?: string;
   requiresFileDelivery: boolean;
   deliveredPaths: string[];
   successfulEvidence: SuccessfulToolEvidence[];
@@ -5736,6 +5742,8 @@ export function validateStandardCompletion(input: {
   const missingVerification = input.requiresFileDelivery && !input.successfulEvidence.some(
     (item) => item.kinds.includes("verification")
   );
+  const missingRequestedDeliverable = requiresStructuredTestCaseDeliverable(input.originalRequest ?? "") &&
+    !hasSubstantiveTestCaseDeliverable(assistantMessage);
 
   if (!input.decision.endTurn) reasons.push("The model did not end the turn.");
   if (input.decision.toolCalls.length > 0) reasons.push("Tool calls are still pending.");
@@ -5749,13 +5757,52 @@ export function validateStandardCompletion(input: {
   }
   if (missingDelivery) reasons.push("The requested project file change has no verified file delivery.");
   if (missingVerification) reasons.push("The requested project file change has no post-delivery verification.");
+  if (missingRequestedDeliverable) {
+    reasons.push("The requested test-case deliverable does not contain actual structured test cases.");
+  }
 
   return {
     valid: reasons.length === 0,
     reasons,
     missingDelivery,
-    missingVerification
+    missingVerification,
+    missingRequestedDeliverable
   };
+}
+
+export function requiresStructuredTestCaseDeliverable(request: string): boolean {
+  const normalized = request.trim().replace(/\s+/g, " ");
+  if (!/(?:\btest\s*cases?\b|\btestcases?\b|\u6d4b\u8bd5(?:\u7528\u4f8b|\u6848\u4f8b))/i.test(normalized)) {
+    return false;
+  }
+  if (/(?:\u4e00\u53e5(?:\u8bdd)?(?:\u603b\u7ed3|\u6982\u62ec)|\u4e00\u53e5(?:\u8bdd)?\u6458\u8981|one[- ]sentence\s+(?:summary|overview)|single[- ]sentence\s+(?:summary|overview))/i.test(normalized)) {
+    return false;
+  }
+  return /(?:\u8f93\u51fa|\u751f\u6210|\u7f16\u5199|\u8bbe\u8ba1|\u63d0\u4f9b|\u5217\u51fa|\u6574\u7406|\u521b\u5efa|\u7ed9\u6211|\u4ea7\u51fa|\u8865\u5145|\u5199(?:\u4e00\u4efd|\u51fa)?|\bwrite\b|\bgenerate\b|\bcreate\b|\bprovide\b|\blist\b|\bproduce\b|\bdesign\b|\bdraft\b|\bgive\s+me\b)/i.test(normalized);
+}
+
+export function hasSubstantiveTestCaseDeliverable(content: string): boolean {
+  const normalized = content.trim();
+  if (!normalized) return false;
+
+  const hasCaseIdentity = /(?:^|\n)\s*(?:[-*]\s*)?(?:#{1,6}\s*)?(?:(?:\u6d4b\u8bd5)?\u7528\u4f8b(?:\s*(?:\u540d\u79f0|\u6807\u9898|\u7f16\u53f7|ID))?|test\s*case|case\s*id|TC)\s*(?:(?:[:\uFF1A#-]\s*)(?:[A-Z]{0,4}[-_]?)?\d+|[:\uFF1A])/im.test(normalized) ||
+    /\bTC[-_ ]?\d+\b/i.test(normalized);
+  const hasSteps = /(?:\u6d4b\u8bd5\u6b65\u9aa4|\u64cd\u4f5c\u6b65\u9aa4|(?:^|[|\n,{])\s*\u6b65\u9aa4\s*(?:[|:\uFF1A"}]|$)|\bsteps?\b)/im.test(normalized);
+  const hasExpectedResult = /(?:\u9884\u671f\u7ed3\u679c|(?:^|[|\n,{])\s*\u9884\u671f\s*(?:[|:\uFF1A"}]|$)|\bexpected(?:\s+result)?\b)/im.test(normalized);
+  if (hasCaseIdentity && hasSteps && hasExpectedResult) return true;
+
+  const tableLines = normalized.split(/\r?\n/).filter((line) => /^\s*\|/.test(line));
+  const tableHeader = tableLines.find((line) =>
+    /(?:\u7528\u4f8b|case|\u573a\u666f|scenario)/i.test(line) &&
+    /(?:\u9884\u671f|expected)/i.test(line)
+  );
+  const tableDataRows = tableLines.filter((line) =>
+    !/^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(line) && line !== tableHeader
+  );
+  if (tableHeader && tableDataRows.length > 0) return true;
+
+  const numberedCases = normalized.match(/(?:^|\n)\s*(?:#{1,6}\s*)?(?:\d+[.)\u3001]|[-*]\s+(?:TC\b|(?:\u6d4b\u8bd5)?\u7528\u4f8b\b|\u573a\u666f\b))/gim) ?? [];
+  return numberedCases.length > 0 && hasSteps && hasExpectedResult;
 }
 
 export function buildStandardCompletionRecoveryInstruction(
@@ -5769,6 +5816,9 @@ export function buildStandardCompletionRecoveryInstruction(
       : []),
     ...(result.missingVerification
       ? ["After the file change, run a targeted read-back, diff, build, or test and require it to succeed."]
+      : []),
+    ...(result.missingRequestedDeliverable
+      ? ["Provide the actual test cases now. Include identifiable cases with test steps and expected results; do not return only an introduction, scope note, or promise to provide them."]
       : []),
     "Do not return a bare tool name or progress promise.",
     "Only end the turn with goal_completed true after the original request is delivered and verified."

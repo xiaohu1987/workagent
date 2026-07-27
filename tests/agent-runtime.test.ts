@@ -490,6 +490,83 @@ describe("standard completion validation", () => {
     expect(result.reasons).toContain("The assistant message is progress commentary, not a final summary.");
   });
 
+  it("rejects a test-case request when the response contains only an introduction", () => {
+    const result = validateStandardCompletion({
+      originalRequest: "\u4ece\u6d4b\u8bd5\u7684\u89d2\u5ea6\u7ed9\u6211\u8f93\u51fa\u4e00\u4efd\u6d4b\u8bd5\u7528\u4f8b",
+      decision: {
+        assistantMessage: "\u4ee5\u4e0b\u6d4b\u8bd5\u7528\u4f8b\u57fa\u4e8e\u524d\u8ff0 AI Token \u6210\u672c\u8d2f\u7a7f BizCase\u3001\u7acb\u9879\u3001\u9884\u7b97\u3001\u8d39\u7528\u56de\u4f20\u3001\u7ed3\u9879\u53ca\u9879\u76ee\u72b6\u6001\u53d8\u66f4\u7684\u65b9\u6848\u6574\u7406\u3002\u76f8\u5173\u7528\u4f8b\u5df2\u6807\u6ce8\u4e3a\u5f85\u786e\u8ba4\u9879\u3002",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.missingRequestedDeliverable).toBe(true);
+    expect(result.reasons).toContain("The requested test-case deliverable does not contain actual structured test cases.");
+    expect(buildStandardCompletionRecoveryInstruction(result)).toContain("Provide the actual test cases now");
+  });
+
+  it("accepts a test-case response containing identifiable steps and expected results", () => {
+    const result = validateStandardCompletion({
+      originalRequest: "\u8bf7\u8f93\u51fa\u4e00\u4efd\u6d4b\u8bd5\u7528\u4f8b",
+      decision: {
+        assistantMessage: [
+          "| \u7528\u4f8b\u7f16\u53f7 | \u573a\u666f | \u6d4b\u8bd5\u6b65\u9aa4 | \u9884\u671f\u7ed3\u679c |",
+          "| --- | --- | --- | --- |",
+          "| TC-001 | \u9884\u7b97\u8db3\u591f | \u63d0\u4ea4\u7ed3\u9879\u7533\u8bf7 | \u7533\u8bf7\u6210\u529f\uff0c\u8bb0\u5f55 Token \u6210\u672c |"
+        ].join("\n"),
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.missingRequestedDeliverable).toBe(false);
+  });
+
+  it("does not apply structured test-case validation to an ordinary short answer", () => {
+    const result = validateStandardCompletion({
+      originalRequest: "What is the current status?",
+      decision: {
+        assistantMessage: "The task is still running.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.missingRequestedDeliverable).toBe(false);
+  });
+
+  it("allows an explicitly requested one-sentence test-case summary", () => {
+    const result = validateStandardCompletion({
+      originalRequest: "\u8bf7\u7528\u4e00\u53e5\u8bdd\u603b\u7ed3\u8fd9\u4efd\u6d4b\u8bd5\u7528\u4f8b",
+      decision: {
+        assistantMessage: "\u8be5\u6d4b\u8bd5\u96c6\u8986\u76d6\u9879\u76ee\u5168\u751f\u547d\u5468\u671f\u4e2d Token \u6210\u672c\u7684\u6b63\u5e38\u3001\u5f02\u5e38\u4e0e\u8fb9\u754c\u573a\u666f\u3002",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(true);
+  });
+
   it("switches repeated patch conflicts to a fresh full-file write instead of ending the task", () => {
     const instruction = buildStrategySwitchInstruction({
       toolName: "apply_patch",
