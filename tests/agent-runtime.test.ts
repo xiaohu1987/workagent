@@ -78,6 +78,7 @@ import {
   resolveRepositoryCompletionBlock,
   summarizeToolResultForModel,
   shouldFinishGpaAnalysisTurn,
+  resolveTerminalTurnDisposition,
   parseCanonicalGpaPlanTasks,
   parseGpaPlanTasks,
   reconcileGpaPlanTasks,
@@ -760,6 +761,53 @@ describe("GPA analysis turn completion", () => {
   });
 });
 
+describe("terminal turn state machine", () => {
+  it("waits for active delegated work before completing a root task", () => {
+    expect(resolveTerminalTurnDisposition({
+      isRootThread: true,
+      hasActiveSubagents: true,
+      toolCallCount: 0,
+      endTurn: true,
+      goalCompleted: true,
+      gpaStage: "off",
+      gpaActCompletedSuccessfully: false
+    })).toBe("wait_for_subagents");
+  });
+
+  it("does not treat an analysis-stage response as task completion", () => {
+    expect(resolveTerminalTurnDisposition({
+      isRootThread: true,
+      hasActiveSubagents: false,
+      toolCallCount: 0,
+      endTurn: true,
+      goalCompleted: false,
+      gpaStage: "plan",
+      gpaActCompletedSuccessfully: false
+    })).toBe("awaiting_user_confirmation");
+  });
+
+  it("requires the runtime's ACT completion validation", () => {
+    expect(resolveTerminalTurnDisposition({
+      isRootThread: true,
+      hasActiveSubagents: false,
+      toolCallCount: 0,
+      endTurn: true,
+      goalCompleted: true,
+      gpaStage: "act",
+      gpaActCompletedSuccessfully: false
+    })).toBe("continue");
+    expect(resolveTerminalTurnDisposition({
+      isRootThread: false,
+      hasActiveSubagents: false,
+      toolCallCount: 0,
+      endTurn: true,
+      goalCompleted: true,
+      gpaStage: "act",
+      gpaActCompletedSuccessfully: true
+    })).toBe("complete_task");
+  });
+});
+
 describe("GPA ACT completion evidence", () => {
   const planTasks = [{ id: "T1", title: "Create the game", done: false }];
 
@@ -1034,6 +1082,7 @@ describe("GPA ACT completion evidence", () => {
 
   it("rejects real Chinese progress messages as final answers", () => {
     expect(isProgressOnlyAssistantMessage("接下来我会创建文件。")).toBe(true);
+    expect(isProgressOnlyAssistantMessage("我会将原先所有‘立项申请、审批通过、结项流程’的测试项从测试范围中剔除。")).toBe(true);
     expect(isProgressOnlyAssistantMessage("让我继续查看完整的语音相关代码：")).toBe(true);
     expect(isProgressOnlyAssistantMessage("... 让我检查音色选择逻辑：")).toBe(true);
     expect(isProgressOnlyAssistantMessage("让我验证一下修改是否完整应用：")).toBe(true);

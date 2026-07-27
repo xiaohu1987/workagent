@@ -1101,6 +1101,55 @@ class ThreadSessionRuntime {
           await this.services.log("turn.unhandled_error", this.threadId, {
             error: error instanceof Error ? error.message : String(error)
           });
+          // Preflight can fail before runTurn creates a turn record. Persist the
+          // failure so the renderer can reconcile its optimistic submission.
+          if (!this.#activeTurnRunId) {
+            const completedAt = new Date().toISOString();
+            try {
+              const userMessage = await this.services.persistence.createMessage({
+                threadId: this.threadId,
+                turnRunId: null,
+                role: "user",
+                content: queued.content,
+                metadataJson: JSON.stringify(
+                  buildUserMessageMetadata(queued.content, queued.displayContent, queued.attachments) ?? {}
+                )
+              });
+              await this.services.emit({
+                type: "message.created",
+                threadId: this.threadId,
+                payload: { message: userMessage },
+                createdAt: completedAt
+              });
+              const failureMessage = await this.services.persistence.createMessage({
+                threadId: this.threadId,
+                turnRunId: null,
+                role: "assistant",
+                content: buildRuntimeFailureRecoveryMessage(error),
+                metadataJson: JSON.stringify({ failedBeforeTurnStart: true })
+              });
+              await this.services.emit({
+                type: "message.created",
+                threadId: this.threadId,
+                payload: { message: failureMessage },
+                createdAt: completedAt
+              });
+              const failedThread = await this.services.persistence.updateThread(this.threadId, {
+                status: "failed",
+                updatedAt: completedAt
+              });
+              await this.services.emit({
+                type: "thread.updated",
+                threadId: this.threadId,
+                payload: { thread: failedThread },
+                createdAt: completedAt
+              });
+            } catch (cleanupError) {
+              await this.services.log("turn.unhandled_error_cleanup_failed", this.threadId, {
+                error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+              });
+            }
+          }
         } finally {
           await this.services.persistence.completeQueuedMessage(queued.id);
           await this.services.emit({
@@ -2699,7 +2748,6 @@ class ThreadSessionRuntime {
         }
         if (
           this.#gpa.stage !== "act" &&
-          hasExecutedToolCall &&
           decision.toolCalls.length === 0 &&
           decision.endTurn &&
           assistantMessage &&
@@ -3061,7 +3109,44 @@ class ThreadSessionRuntime {
           ? []
           : await this.services.listSubagents(this.threadId);
 
-        const isPrematureRootReport = currentChildAgents.length > 0
+        const hasActiveRootSubagents = !thread.parentThreadId
+          && currentChildAgents.length > 0
+          && await this.services.hasActiveSubagents(this.threadId);
+
+        const terminalDisposition = resolveTerminalTurnDisposition({
+          isRootThread: !thread.parentThreadId,
+          hasActiveSubagents: hasActiveRootSubagents,
+          toolCallCount: decision.toolCalls.length,
+          endTurn: decision.endTurn,
+          goalCompleted: decision.goalCompleted,
+          gpaStage: this.#gpa.stage,
+          gpaActCompletedSuccessfully
+        });
+
+        if (terminalDisposition === "wait_for_subagents") {
+          // Completing a parent task is a runtime-owned state transition. A
+          // model final response cannot override live delegated work.
+          await discardStreamedAssistant();
+          decision = {
+            ...decision,
+            assistantMessage: undefined,
+            toolCalls: [{
+              id: randomUUID(),
+              name: "wait_agent",
+              arguments: { timeoutMs: 30_000 }
+            }],
+            endTurn: false,
+            goalCompleted: false
+          };
+          await this.services.log("turn.completion_deferred_for_subagents", this.threadId, {
+            turnRunId: turn.id,
+            activeAgentPaths: currentChildAgents
+              .filter((agent) => agent.status === "running" || agent.status === "waiting")
+              .map((agent) => agent.agentPath)
+          });
+        }
+
+        const isPrematureRootReport = hasActiveRootSubagents
           && Boolean(decision.assistantMessage)
           && (decision.toolCalls.length > 0 || !decision.endTurn);
         if (isPrematureRootReport) {
@@ -3143,13 +3228,18 @@ class ThreadSessionRuntime {
         }
 
         if (decision.toolCalls.length === 0 && decision.endTurn) {
+          if (terminalDisposition === "continue") {
+            throw new Error("Terminal turn was not accepted by the runtime completion state machine.");
+          }
           await persistRecoveredEpisodes();
           await this.services.persistence.finishTurn(turn.id, {
             status: "completed",
             completedAt: new Date().toISOString()
           });
           terminalThread = await this.services.persistence.updateThread(this.threadId, {
-            status: "completed",
+            // GOAL and PLAN end a response, not the user task. The confirmed
+            // workflow remains available for the next explicit user action.
+            status: terminalDisposition === "awaiting_user_confirmation" ? "idle" : "completed",
             updatedAt: new Date().toISOString()
           });
           break;
@@ -5134,6 +5224,44 @@ export function shouldFinishGpaAnalysisTurn(
     decision.isStructured &&
     decision.toolCalls.length === 0
   );
+}
+
+export type TerminalTurnDisposition =
+  | "continue"
+  | "wait_for_subagents"
+  | "awaiting_user_confirmation"
+  | "complete_task";
+
+/**
+ * The model may end a response at any time, but only the runtime may mark the
+ * task complete. This keeps turn boundaries, user-confirmation boundaries, and
+ * delegated-work boundaries distinct.
+ */
+export function resolveTerminalTurnDisposition(input: {
+  isRootThread: boolean;
+  hasActiveSubagents: boolean;
+  toolCallCount: number;
+  endTurn: boolean;
+  goalCompleted: boolean;
+  gpaStage: GpaStage;
+  gpaActCompletedSuccessfully: boolean;
+}): TerminalTurnDisposition {
+  if (!input.endTurn || input.toolCallCount > 0) {
+    return "continue";
+  }
+  if (input.isRootThread && input.hasActiveSubagents) {
+    return "wait_for_subagents";
+  }
+  if (input.gpaStage === "goal" || input.gpaStage === "plan") {
+    return "awaiting_user_confirmation";
+  }
+  if (!input.goalCompleted) {
+    return "continue";
+  }
+  if (input.gpaStage === "act" && !input.gpaActCompletedSuccessfully) {
+    return "continue";
+  }
+  return "complete_task";
 }
 
 const OBSERVATION_TOOL_NAMES = new Set([

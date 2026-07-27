@@ -67,6 +67,7 @@ describe("thread UI state helpers", () => {
     expect(shouldPreservePreparingRuntime("idle", 1, false)).toBe(true);
     expect(shouldPreservePreparingRuntime("running", 1, false)).toBe(false);
     expect(shouldPreservePreparingRuntime("idle", 0, false)).toBe(false);
+    expect(shouldPreservePreparingRuntime("completed", 0, false)).toBe(false);
     expect(shouldPreservePreparingRuntime("idle", 1, true)).toBe(false);
   });
 

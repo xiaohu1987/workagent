@@ -575,13 +575,13 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
 ];
 
-const SETTINGS_MENU_GROUPS: Array<{ id: string; label: string; hint: string; tabs: SettingsTab[] }> = [
-  { id: "general", label: "通用设置", hint: "超时、重试和子智能体", tabs: ["timeouts"] },
-  { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"] },
-  { id: "connections", label: "连接", hint: "MCP 与数据库", tabs: ["mcp", "database"] },
-  { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory"] },
-  { id: "capabilities", label: "能力中心", hint: "技能与插件", tabs: ["capabilities"] },
-  { id: "application", label: "应用", hint: "外观、统计与更新", tabs: ["appearance", "usage", "update"] }
+const SETTINGS_MENU_GROUPS: Array<{ id: string; label: string; hint: string; tabs: SettingsTab[]; icon: () => ReactNode }> = [
+  { id: "general", label: "通用设置", hint: "超时、重试和子智能体", tabs: ["timeouts"], icon: IconGear },
+  { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"], icon: IconGlobe },
+  { id: "connections", label: "连接", hint: "MCP 与数据库", tabs: ["mcp", "database"], icon: IconMcp },
+  { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory"], icon: IconKnowledge },
+  { id: "capabilities", label: "能力中心", hint: "技能与插件", tabs: ["capabilities"], icon: IconSkills },
+  { id: "application", label: "应用", hint: "外观、统计与更新", tabs: ["appearance", "usage", "update"], icon: IconSinglePanel }
 ];
 
 const DATABASE_PERMISSION_OPTIONS: Array<{ value: DatabasePermission; label: string }> = [
@@ -2731,6 +2731,7 @@ export function App() {
       }
       if (!isPluginStateUpdate && (
         typed.type === "thread.updated" ||
+        typed.type === "queue.updated" ||
         typed.type === "message.created" ||
         typed.type === "assistant.completed" ||
         typed.type === "browser.updated" ||
@@ -3511,6 +3512,7 @@ export function App() {
     () => SETTINGS_MENU_GROUPS.find((group) => group.tabs.includes(settingsTab)) ?? SETTINGS_MENU_GROUPS[0],
     [settingsTab]
   );
+  const SettingsTitleIcon = activeSettingsGroup.icon;
 
   function cancelPendingAutoScrollFrame() {
     if (autoScrollFrameRef.current === null) {
@@ -3857,8 +3859,12 @@ export function App() {
         setRuntimeProgress((current) => {
           if (current?.threadId !== threadId) return current;
           if (!current.runtimeObserved) {
-            preserveLocalPreparing = true;
-            return current;
+            preserveLocalPreparing = shouldPreservePreparingRuntime(
+              next.thread.status,
+              next.queuedMessages.length,
+              false
+            );
+            return preserveLocalPreparing ? current : null;
           }
           return shouldPreservePreparingRuntime(
             next.thread.status,
@@ -7947,7 +7953,7 @@ export function App() {
         >
           <div className="settings-dialog">
             <div className="settings-topbar">
-              <h2>{settingsTitle}</h2>
+              <h2><SettingsTitleIcon /><span>{settingsTitle}</span></h2>
               <button className="settings-close-button" onClick={() => setIsSettingsOpen(false)} title="关闭">
                 <IconClose />
               </button>
@@ -7956,16 +7962,20 @@ export function App() {
             <div className="settings-layout">
               <aside className="settings-sidebar">
                 <div className="settings-tab-strip settings-tab-strip-vertical">
-                  {SETTINGS_MENU_GROUPS.map((group) => (
-                    <button
-                      key={group.id}
-                      className={`settings-strip-tab ${activeSettingsGroup.id === group.id ? "active" : ""}`}
-                      onClick={() => setSettingsTab(group.tabs[0])}
-                      title={group.hint}
-                    >
-                      {group.label}
-                    </button>
-                  ))}
+                  {SETTINGS_MENU_GROUPS.map((group) => {
+                    const GroupIcon = group.icon;
+                    return (
+                      <button
+                        key={group.id}
+                        className={`settings-strip-tab ${activeSettingsGroup.id === group.id ? "active" : ""}`}
+                        onClick={() => setSettingsTab(group.tabs[0])}
+                        title={group.hint}
+                      >
+                        <GroupIcon />
+                        <span>{group.label}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               </aside>
 
@@ -8328,7 +8338,7 @@ export function App() {
                 <div className="settings-section">
                   <div className="general-overview">
                     <div className="general-overview-heading">
-                      <strong>运行概览</strong>
+                      <strong><IconChart />运行概览</strong>
                       <span className="general-overview-status"><i aria-hidden />本地服务正常</span>
                     </div>
                     <div className="general-overview-stats">
@@ -8353,7 +8363,7 @@ export function App() {
 
                   <div className="config-block general-defaults-panel">
                     <div className="section-copy">
-                      <strong>当前默认配置</strong>
+                      <strong><IconGear />当前默认配置</strong>
                       <span>全局执行与桌面服务状态</span>
                     </div>
                     <div className="general-defaults-grid">
@@ -8384,7 +8394,7 @@ export function App() {
                   {configDraft ? (
                     <div className="config-block general-subagent-settings">
                       <div className="section-copy">
-                        <strong>子智能体</strong>
+                        <strong><IconSkills />子智能体</strong>
                         <span>子任务共享当前工作区并沿用审批策略；模型未指定时跟随创建它的主任务。</span>
                       </div>
                       <div className="general-subagent-settings-grid">

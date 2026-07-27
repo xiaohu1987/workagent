@@ -9237,9 +9237,19 @@ select:focus {
 }
 
 .settings-topbar h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-size: clamp(28px, 2vw, 34px);
   font-weight: 500;
   letter-spacing: -0.04em;
+}
+
+.settings-topbar h2 svg {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  color: #79aef8;
 }
 
 .settings-close-button {
@@ -9278,6 +9288,7 @@ select:focus {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  gap: 8px;
   min-height: 40px;
   padding: 0 12px;
   border: 1px solid transparent;
@@ -9287,6 +9298,19 @@ select:focus {
   font-size: 13px;
   font-weight: 600;
   text-align: left;
+}
+
+.settings-strip-tab > svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+.settings-strip-tab > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-strip-tab:hover {
@@ -15514,7 +15538,15 @@ body.panel-resizing {
   min-height: 24px;
 }
 
-.general-overview-heading > strong { color: var(--text, #f1f3f6); font-size: 14px; font-weight: 650; }
+.general-overview-heading > strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text, #f1f3f6);
+  font-size: 14px;
+  font-weight: 650;
+}
+.general-overview-heading > strong svg { width: 16px; height: 16px; color: #79aef8; }
 .general-overview-status {
   display: inline-flex;
   align-items: center;
@@ -15577,6 +15609,19 @@ body.panel-resizing {
 .general-defaults-panel { gap: 10px; padding: 13px 14px; }
 .general-defaults-panel > .section-copy { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .general-defaults-panel > .section-copy span { white-space: nowrap; }
+.general-defaults-panel > .section-copy > strong,
+.general-subagent-settings > .section-copy > strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.general-defaults-panel > .section-copy > strong svg,
+.general-subagent-settings > .section-copy > strong svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: #79aef8;
+}
 .general-defaults-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -18767,9 +18812,6 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   display: grid;
   gap: 16px;
   align-content: start;
-  max-height: min(72vh, 760px);
-  overflow: auto;
-  padding-right: 4px;
 }
 
 .chat-background-heading {
