@@ -911,8 +911,14 @@ describe("native provider tool protocols", () => {
       usage: { output_tokens: 7 }
     });
     const provider: ProviderDefinition = { id: "provider", type: "anthropic", apiKey: "secret" };
+    const adapter = new ProviderFactory().create(provider);
 
-    const decision = await new ProviderFactory().create(provider).runTurn({
+    expect(mocks.anthropicConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      apiKey: "secret",
+      authToken: null
+    }));
+
+    const decision = await adapter.runTurn({
       systemPrompt: "Use the function.", transcript: [{ role: "user", content: "Inspect." }],
       availableTools: [tool], model, provider
     });

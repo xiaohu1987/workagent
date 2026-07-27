@@ -726,6 +726,8 @@ class AnthropicProvider implements ProviderAdapter {
   public constructor(private readonly provider: ProviderDefinition) {
     this.#client = new Anthropic({
       apiKey: resolveApiKey(provider),
+      // Keep a global Anthropic OAuth token from overriding this provider's API key.
+      authToken: null,
       baseURL: provider.baseUrl,
       defaultHeaders: provider.headers
     });
