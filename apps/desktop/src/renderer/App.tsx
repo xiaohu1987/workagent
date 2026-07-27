@@ -7644,6 +7644,7 @@ export function App() {
                 ) : null}
                 {showRuntimeActivityPanel ? (
                   <RuntimeActivityPanel
+                    key={activeSnapshotThreadId ?? "runtime-activity"}
                     label={taskProcessingLabel}
                     startedAt={
                       activeRuntimeActivity?.startedAt
@@ -15225,10 +15226,106 @@ function RuntimeActivityPanel({
   streamingDraft?: { content: string; turnRunId: string } | null;
   preferLabel?: boolean;
 }) {
+  const [stableDraft, setStableDraft] = useState(streamingDraft ?? null);
+  const [isDraftViewerOpen, setIsDraftViewerOpen] = useState(false);
+  const [isDraftViewerFollowing, setIsDraftViewerFollowing] = useState(true);
+  const livePreviewRef = useRef<HTMLDivElement | null>(null);
+  const viewerContentRef = useRef<HTMLDivElement | null>(null);
+  const draftViewerFollowingRef = useRef(true);
+  const draftViewerPresence = useMotionPresence(isDraftViewerOpen ? true : null, 180);
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
   const resolvedStartedAt = startedAt || getRuntimeActivityStartedAt(entries);
   const elapsedMs = useElapsedClock(resolvedStartedAt, active !== false);
   const displayLabel = preferLabel ? label : latestStatus?.label ?? label;
+
+  useEffect(() => {
+    if (streamingDraft?.content.trim()) {
+      setStableDraft(streamingDraft);
+    }
+  }, [streamingDraft?.content, streamingDraft?.turnRunId]);
+
+  useLayoutEffect(() => {
+    const node = livePreviewRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [stableDraft?.content]);
+
+  useLayoutEffect(() => {
+    const node = viewerContentRef.current;
+    if (!isDraftViewerOpen || !node || !draftViewerFollowingRef.current) return;
+    node.scrollTop = node.scrollHeight;
+  }, [isDraftViewerOpen, stableDraft?.content]);
+
+  useEffect(() => {
+    if (!isDraftViewerOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setIsDraftViewerOpen(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    return () => window.removeEventListener("keydown", closeOnEscape, true);
+  }, [isDraftViewerOpen]);
+
+  const openDraftViewer = () => {
+    draftViewerFollowingRef.current = true;
+    setIsDraftViewerFollowing(true);
+    setIsDraftViewerOpen(true);
+  };
+
+  const followLatestDraft = () => {
+    const node = viewerContentRef.current;
+    draftViewerFollowingRef.current = true;
+    setIsDraftViewerFollowing(true);
+    node?.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+  };
+
+  const draftViewer = draftViewerPresence.value && stableDraft
+    ? createPortal(
+        <div
+          className="runtime-draft-viewer-backdrop motion-overlay"
+          data-motion={draftViewerPresence.phase}
+          onPointerDown={() => setIsDraftViewerOpen(false)}
+        >
+          <aside
+            className="runtime-draft-viewer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="实时草稿"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <header className="runtime-draft-viewer-header">
+              <div>
+                <span className="runtime-draft-viewer-live"><i aria-hidden />实时草稿</span>
+                <strong>{displayLabel}</strong>
+              </div>
+              <button type="button" title="关闭" aria-label="关闭实时草稿" onClick={() => setIsDraftViewerOpen(false)}>
+                <IconClose />
+              </button>
+            </header>
+            <div
+              ref={viewerContentRef}
+              className="runtime-draft-viewer-content"
+              onScroll={(event) => {
+                const node = event.currentTarget;
+                const atLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 36;
+                draftViewerFollowingRef.current = atLatest;
+                setIsDraftViewerFollowing((current) => current === atLatest ? current : atLatest);
+              }}
+            >
+              <div>{stableDraft.content}<span className="runtime-draft-caret" aria-hidden /></div>
+            </div>
+            {!isDraftViewerFollowing ? (
+              <button type="button" className="runtime-draft-viewer-latest" onClick={followLatestDraft}>
+                <IconArrowDown />
+                <span>回到最新</span>
+              </button>
+            ) : null}
+          </aside>
+        </div>,
+        document.body
+      )
+    : null;
   const currentStatus = (
     <>
       <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
@@ -15236,17 +15333,23 @@ function RuntimeActivityPanel({
       {resolvedStartedAt ? <time>{formatElapsedClock(elapsedMs)}</time> : null}
     </>
   );
-  if (streamingDraft?.content.trim()) {
+  if (stableDraft?.content.trim()) {
     return (
-      <details className="runtime-activity-panel has-streaming-draft" aria-live="polite">
-        <summary className="runtime-activity-current">
+      <section className="runtime-activity-panel has-streaming-draft" aria-live="polite">
+        <div className="runtime-activity-current">
           {currentStatus}
-          <span className="runtime-activity-draft-chevron" aria-hidden><IconChevronRight /></span>
-        </summary>
-        <div className="runtime-activity-streaming-draft">
-          {streamingDraft.content}
         </div>
-      </details>
+        <div className="runtime-activity-live-window" aria-live="off">
+          <div ref={livePreviewRef} className="runtime-activity-streaming-draft">
+            <span>{stableDraft.content}</span><span className="runtime-draft-caret" aria-hidden />
+          </div>
+          <button type="button" className="runtime-activity-view-draft" onClick={openDraftViewer}>
+            <IconSinglePanel />
+            <span>查看完整草稿</span>
+          </button>
+        </div>
+        {draftViewer}
+      </section>
     );
   }
   return (
