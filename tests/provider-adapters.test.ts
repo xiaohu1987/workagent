@@ -1324,6 +1324,10 @@ describe("decision system prompt", () => {
     expect(prompt).toContain("goal_completed");
     expect(prompt).toContain("shell.exec");
     expect(prompt).toContain("For every GPA ACT decision, include completed_task_ids");
+    expect(prompt).toContain("Every non-final response with tool calls must include one short, natural conversational sentence");
+    expect(prompt).toContain("Do not expose tool names, Skill IDs, internal hashes, raw commands, file paths, call counts");
+    expect(prompt).toContain("choose the format that makes the information easiest to scan");
+    expect(prompt).toContain("Do not force information into a table");
   });
 });
 

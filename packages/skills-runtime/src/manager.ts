@@ -14,6 +14,9 @@ const DOMAIN_HINTS: Array<{ domain: string; patterns: RegExp[] }> = [
   { domain: "编程", patterns: [/写代码|编程|开发|实现|重构|patch|小游戏|网页|应用|功能|项目/i] },
   { domain: "数据", patterns: [/数据|csv|excel|sql|数据库|分析/i] },
   { domain: "多媒体", patterns: [/图像|图片|视频|image|video|多媒体|视觉/i] },
+  { domain: "安全", patterns: [/安全|security|appsec|威胁|threat|漏洞|vulnerability/i] },
+  { domain: "文档", patterns: [/文档|报告|知识库|notion|pdf|document/i] },
+  { domain: "项目协作", patterns: [/项目管理|任务跟踪|工单|linear|notion|协作/i] },
   { domain: "代码协作", patterns: [/git|pr|review|commit|代码审查|github/i] },
   { domain: "交付运维", patterns: [/部署|发布|deploy|release|ci|cd|运维/i] }
 ];
@@ -44,6 +47,11 @@ export function skillDomainAliases(domain: string | undefined): string[] {
   if (normalized === "规划") {
     aliases.add("规划");
     aliases.add("编程");
+  }
+  if (normalized === "安全") {
+    aliases.add("安全");
+    aliases.add("编程");
+    aliases.add("测试");
   }
   return [...aliases];
 }
@@ -205,9 +213,27 @@ export class SkillsManager {
 }
 
 function dedupeSkills(skills: SkillMetadata[]): SkillMetadata[] {
-  const unique = new Map<string, SkillMetadata>();
+  const uniquePaths = new Map<string, SkillMetadata>();
   for (const skill of skills) {
-    unique.set(skill.skillPath, skill);
+    uniquePaths.set(skill.skillPath, skill);
   }
-  return [...unique.values()];
+
+  const uniqueSkills = new Map<string, SkillMetadata>();
+  for (const skill of uniquePaths.values()) {
+    const identity = skill.pluginId ? `plugin:${skill.qualifiedName}` : `standalone:${skill.name}`;
+    const current = uniqueSkills.get(identity);
+    if (!current || skillScopePriority(skill.scope) > skillScopePriority(current.scope)) {
+      uniqueSkills.set(identity, skill);
+    }
+  }
+  return [...uniqueSkills.values()];
+}
+
+function skillScopePriority(scope: SkillMetadata["scope"]): number {
+  switch (scope) {
+    case "admin": return 4;
+    case "repo": return 3;
+    case "system": return 2;
+    case "user": return 1;
+  }
 }

@@ -58,6 +58,39 @@ describe("parseMarkdownBlocks", () => {
     expect(parseMarkdownBlocks(`\`\`\`json\n${content}\n\`\`\``)).toEqual([{ kind: "code", language: "json", content }]);
   });
 
+  it("merges repeatedly restarted numbered items with their descriptions", () => {
+    expect(parseMarkdownBlocks([
+      "1. **First repository**",
+      "",
+      "Its description.",
+      "",
+      "1. **Second repository**",
+      "",
+      "Its description."
+    ].join("\n"))).toEqual([{
+      kind: "structured-ordered-list",
+      items: [
+        { title: "**First repository**", paragraphs: ["Its description."] },
+        { title: "**Second repository**", paragraphs: ["Its description."] }
+      ]
+    }]);
+  });
+
+  it("renders Markdown horizontal rules as dedicated blocks", () => {
+    expect(parseMarkdownBlocks("Before\n\n---\n\nAfter")).toEqual([
+      { kind: "paragraph", text: "Before" },
+      { kind: "horizontal-rule" },
+      { kind: "paragraph", text: "After" }
+    ]);
+  });
+
+  it("keeps GFM task-list syntax as list items for the rich task-list renderer", () => {
+    expect(parseMarkdownBlocks("- [x] Completed\n- [ ] Pending")).toEqual([{
+      kind: "unordered-list",
+      items: ["[x] Completed", "[ ] Pending"]
+    }]);
+  });
+
   it("highlights fenced C# code and escapes source HTML", () => {
     const highlighted = highlightMarkdownCode('string title = "<script>";', "csharp");
 

@@ -47,7 +47,7 @@ import type {
   UserInputPrompt
 } from "@shared-types";
 import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy } from "./subagent-assignment";
-import { normalizeRuntimeTimeouts } from "@shared-types";
+import { normalizeResponseTone, normalizeRuntimeTimeouts } from "@shared-types";
 import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@agent-runtime";
 import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
@@ -1756,6 +1756,7 @@ export class DesktopBackend {
 
     this.#config.defaultModel = normalized.defaultModel;
     this.#config.defaultProvider = normalized.defaultProvider;
+    this.#config.responseTone = normalized.responseTone;
     this.#config.providers = [...normalized.providers];
     this.#config.models = [...normalized.models];
     this.#config.routing = { ...normalized.routing };
@@ -4163,6 +4164,7 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     ...config,
     defaultProvider,
     defaultModel,
+    responseTone: normalizeResponseTone(config.responseTone),
     providers,
     models: nextModels,
     multimodal: {

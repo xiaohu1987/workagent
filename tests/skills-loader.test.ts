@@ -109,6 +109,79 @@ policy:
     );
   });
 
+  it("localizes and categorizes newly imported skills", async () => {
+    const root = await makeTempDir();
+    const figmaDir = path.join(root, "figma-implement-design");
+    const securityDir = path.join(root, "security-threat-model");
+    const deployDir = path.join(root, "vercel-deploy");
+    await Promise.all([
+      fs.mkdir(figmaDir, { recursive: true }),
+      fs.mkdir(securityDir, { recursive: true }),
+      fs.mkdir(deployDir, { recursive: true })
+    ]);
+    await fs.writeFile(
+      path.join(figmaDir, "SKILL.md"),
+      "---\nname: figma-implement-design\ndescription: Implement designs from Figma\n---\nFigma workflow.",
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(securityDir, "SKILL.md"),
+      "---\nname: security-threat-model\ndescription: Build a repository threat model\n---\nSecurity workflow.",
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(deployDir, "SKILL.md"),
+      "---\nname: vercel-deploy\ndescription: Deploy applications to Vercel\n---\nDeployment workflow.",
+      "utf8"
+    );
+
+    const skills = await loadSkillsFromRoots([{ path: root, scope: "user" }]);
+
+    expect(skills.find((skill) => skill.name === "figma-implement-design")).toMatchObject({
+      domain: "前端",
+      description: expect.stringContaining("Figma 设计")
+    });
+    expect(skills.find((skill) => skill.name === "security-threat-model")).toMatchObject({
+      domain: "安全",
+      description: expect.stringContaining("威胁模型")
+    });
+    expect(skills.find((skill) => skill.name === "vercel-deploy")).toMatchObject({
+      domain: "交付运维",
+      description: expect.stringContaining("Vercel")
+    });
+  });
+
+  it("deduplicates standalone names while preserving project overrides and plugin namespaces", async () => {
+    const appHome = await makeTempDir();
+    const projectRoot = await makeTempDir();
+    const systemDir = path.join(appHome, "skills", "system", "shared-skill");
+    const importedDir = path.join(appHome, "skills", "imported", "shared-skill");
+    const repoDir = path.join(projectRoot, ".codexh", "skills", "shared-skill");
+    const pluginDir = path.join(appHome, "plugins", "shared-skill");
+    await Promise.all([
+      fs.mkdir(systemDir, { recursive: true }),
+      fs.mkdir(importedDir, { recursive: true }),
+      fs.mkdir(repoDir, { recursive: true }),
+      fs.mkdir(pluginDir, { recursive: true })
+    ]);
+    await fs.writeFile(path.join(systemDir, "SKILL.md"), "---\nname: shared-skill\ndescription: System version\n---\nSystem.", "utf8");
+    await fs.writeFile(path.join(importedDir, "SKILL.md"), "---\nname: shared-skill\ndescription: Imported version\n---\nImported.", "utf8");
+    await fs.writeFile(path.join(repoDir, "SKILL.md"), "---\nname: shared-skill\ndescription: Project version\n---\nProject.", "utf8");
+    await fs.writeFile(path.join(pluginDir, "SKILL.md"), "---\nname: shared-skill\ndescription: Plugin version\n---\nPlugin.", "utf8");
+
+    const manager = new SkillsManager();
+    const skills = await manager.refresh(appHome, projectRoot, [{
+      path: pluginDir,
+      scope: "user",
+      pluginId: "example-plugin"
+    }]);
+    const standalone = skills.filter((skill) => !skill.pluginId && skill.name === "shared-skill");
+
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0]).toMatchObject({ scope: "repo", description: "Project version" });
+    expect(skills.find((skill) => skill.qualifiedName === "example-plugin:shared-skill")).toBeDefined();
+  });
+
   it("recommends frontend-domain skills for Chinese web-game queries", async () => {
     const appHome = await makeTempDir();
     const frontendDir = path.join(appHome, "skills", "imported", "web-game");

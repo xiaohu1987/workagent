@@ -15,6 +15,7 @@ describe("model configuration storage", () => {
     const config = defaultConfig();
 
     expect(config.defaultModel).toBe("mock-codexh");
+    expect(config.responseTone).toBe("standard");
     expect(config.providers).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "anthropic", baseUrl: "https://api.anthropic.com/v1" }),
       expect.objectContaining({ id: "xai", transport: "responses", baseUrl: "https://api.x.ai/v1" })
@@ -23,6 +24,19 @@ describe("model configuration storage", () => {
       expect.objectContaining({ id: "claude-sonnet-4-20250514", providerId: "anthropic", defaultReasoningEffort: "medium" }),
       expect.objectContaining({ id: "grok-4-0709", providerId: "xai", defaultReasoningEffort: "high" })
     ]));
+  });
+
+  it("persists the selected response tone", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tone-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    const config = defaultConfig();
+    config.responseTone = "cute_lolita";
+
+    await saveConfig(configFile, config);
+    const loaded = await loadConfig(configFile);
+
+    expect(loaded.responseTone).toBe("cute_lolita");
   });
 
   it("keeps same-named models from different providers", async () => {

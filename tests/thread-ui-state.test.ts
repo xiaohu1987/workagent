@@ -10,8 +10,12 @@ import {
 } from "../apps/desktop/src/renderer/thread-ui-state";
 import {
   buildTimelineEntries,
+  buildConversationTurnSections,
+  getDefaultCollapsedConversationTurnIds,
+  createOptimisticThreadSnapshot,
   getThreadDeleteFailureMessage,
   getToolProcessingLabel,
+  getActiveSubagents,
   getSubagentWaitLabel,
   isSubagentWaitTool,
   getToolActivityPresentation,
@@ -21,13 +25,13 @@ import {
   isFileWriteTool,
   isInternalAgentProtocolMessage,
   isPatchAssistantMessage,
+  getStreamingAssistantDisplayContent,
   mergeSnapshotRecords,
   preserveStreamingDraftContent,
-  resolveRuntimeStreamingDraft,
   reconcilePendingUserMessages,
   shouldKeepStreamingAssistant
 } from "../apps/desktop/src/renderer/App";
-import type { MessageRecord, ToolCallRecord } from "../packages/shared-types/src";
+import type { MessageRecord, ThreadRecord, ToolCallRecord } from "../packages/shared-types/src";
 
 function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
   return {
@@ -274,6 +278,57 @@ describe("tool activity summaries", () => {
 });
 
 describe("tool timeline grouping", () => {
+  it("collapses every completed history turn while leaving only the live turn open", () => {
+    const sections = [{ id: "turn-1" }, { id: "turn-2" }, { id: "turn-3" }];
+
+    expect(getDefaultCollapsedConversationTurnIds(sections, "turn-3", true)).toEqual(["turn-1", "turn-2"]);
+    expect(getDefaultCollapsedConversationTurnIds(sections, "turn-3", false)).toEqual(["turn-1", "turn-2", "turn-3"]);
+  });
+
+  it("builds message, elapsed-control, and response sections for every user turn", () => {
+    const makeMessage = (id: string, role: MessageRecord["role"], createdAt: string): MessageRecord => ({
+      id,
+      threadId: "thread-1",
+      turnRunId: `turn-${id}`,
+      role,
+      content: id,
+      metadataJson: null,
+      createdAt
+    });
+    const entries = buildTimelineEntries([
+      makeMessage("user-1", "user", "2026-07-15T00:00:00.000Z"),
+      {
+        ...makeMessage("progress-1", "assistant", "2026-07-15T00:00:00.500Z"),
+        metadataJson: JSON.stringify({ displayKind: "commentary", toolCallIds: [] })
+      },
+      makeMessage("assistant-1", "assistant", "2026-07-15T00:00:01.000Z"),
+      makeMessage("user-2", "user", "2026-07-15T00:00:02.000Z"),
+      makeMessage("assistant-2", "assistant", "2026-07-15T00:00:03.000Z"),
+      makeMessage("user-3", "user", "2026-07-15T00:00:04.000Z")
+    ], [], []);
+
+    expect(buildConversationTurnSections(entries)).toEqual([
+      expect.objectContaining({
+        id: "message-user-1",
+        userEntryId: "message-user-1",
+        summaryEntryId: "message-assistant-1",
+        entryIds: ["message-user-1", "message-progress-1", "message-assistant-1"]
+      }),
+      expect.objectContaining({
+        id: "message-user-2",
+        userEntryId: "message-user-2",
+        summaryEntryId: "message-assistant-2",
+        entryIds: ["message-user-2", "message-assistant-2"]
+      }),
+      expect.objectContaining({
+        id: "message-user-3",
+        userEntryId: "message-user-3",
+        summaryEntryId: null,
+        entryIds: ["message-user-3"]
+      })
+    ]);
+  });
+
   it("interleaves persisted commentary before its tool group and final answer", () => {
     const commentary: MessageRecord = {
       id: "commentary-1",
@@ -314,6 +369,46 @@ describe("tool timeline grouping", () => {
     expect(entries[4]).toMatchObject({ kind: "message", message: { id: "final-1" } });
   });
 
+  it("keeps a context compaction notice in chronological transcript order", () => {
+    const message = (id: string, createdAt: string): MessageRecord => ({
+      id,
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: id,
+      metadataJson: null,
+      createdAt
+    });
+    const entries = buildTimelineEntries(
+      [
+        message("before", "2026-07-15T00:00:00.000Z"),
+        message("after", "2026-07-15T00:00:02.000Z")
+      ],
+      [],
+      [],
+      undefined,
+      undefined,
+      [],
+      {
+        turnRunId: "turn-1",
+        contextWindow: 128_000,
+        threshold: 100_000,
+        target: 80_000,
+        beforeTokens: 110_000,
+        afterTokens: 40_000,
+        messagesBefore: 30,
+        messagesAfter: 12,
+        createdAt: "2026-07-15T00:00:01.000Z"
+      }
+    );
+
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "message",
+      "context-compaction",
+      "message"
+    ]);
+  });
+
   it("groups calls by turn and keeps legacy calls separate", () => {
     const entries = buildTimelineEntries(
       [],
@@ -332,6 +427,40 @@ describe("tool timeline grouping", () => {
     expect(toolGroups.find((entry) => entry.id === "tool-group-legacy-legacy")?.toolCalls).toHaveLength(1);
   });
 
+  it("keeps tool-only model decisions as separate hidden-anchor segments", () => {
+    const firstAnchor: MessageRecord = {
+      id: "batch-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: "",
+      metadataJson: JSON.stringify({ displayKind: "tool_batch", toolCallIds: ["tool-1", "tool-2"] }),
+      createdAt: "2026-07-15T00:00:00.000Z"
+    };
+    const secondAnchor: MessageRecord = {
+      ...firstAnchor,
+      id: "batch-2",
+      metadataJson: JSON.stringify({ displayKind: "tool_batch", toolCallIds: ["tool-3"] }),
+      createdAt: "2026-07-15T00:00:03.000Z"
+    };
+
+    const entries = buildTimelineEntries(
+      [firstAnchor, secondAnchor],
+      [
+        makeToolCall({ id: "tool-1", startedAt: "2026-07-15T00:00:01.000Z" }),
+        makeToolCall({ id: "tool-2", startedAt: "2026-07-15T00:00:02.000Z" }),
+        makeToolCall({ id: "tool-3", startedAt: "2026-07-15T00:00:04.000Z" })
+      ],
+      []
+    );
+
+    expect(entries.map((entry) => entry.kind)).toEqual(["tool-group", "tool-group"]);
+    expect(entries.map((entry) => entry.kind === "tool-group" ? entry.toolCalls.map((call) => call.id) : [])).toEqual([
+      ["tool-1", "tool-2"],
+      ["tool-3"]
+    ]);
+  });
+
   it("keeps file changes as a separate outcome summary", () => {
     const entries = buildTimelineEntries(
       [],
@@ -348,6 +477,46 @@ describe("tool timeline grouping", () => {
 });
 
 describe("optimistic user message reconciliation", () => {
+  it("creates an immediately renderable empty snapshot for a new thread", () => {
+    const thread: ThreadRecord = {
+      id: "thread-new",
+      title: "New task",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      projectId: null,
+      workspaceId: null,
+      modelId: "model-1",
+      providerId: "provider-1",
+      status: "idle",
+      selectedSkillIds: [],
+      selectedPluginIds: [],
+      knowledgeBaseIds: [],
+      createdAt: "2026-07-27T00:00:00.000Z",
+      updatedAt: "2026-07-27T00:00:00.000Z",
+      isPinned: false,
+      pinnedAt: null,
+      gpaStateJson: null,
+      parentThreadId: null,
+      rootThreadId: "thread-new",
+      agentPath: "/root",
+      agentRole: null,
+      lastTaskMessage: null,
+      multiAgentMode: "disabled"
+    };
+
+    expect(createOptimisticThreadSnapshot(thread)).toMatchObject({
+      snapshotMode: "full",
+      thread,
+      messages: [],
+      messageCount: 0,
+      queuedMessages: [],
+      toolCalls: [],
+      subagents: [],
+      queuedSubagentIds: []
+    });
+  });
+
   it("replaces an optimistic message with the persisted display message", () => {
     const optimistic: MessageRecord = {
       id: "optimistic-1",
@@ -404,6 +573,22 @@ describe("subagent waiting status", () => {
     expect(getSubagentWaitLabel([{ id: "input", status: "waiting" }], new Set())).toBe("正在等待 1 个子智能体 · 1 等待处理");
     expect(getSubagentWaitLabel([{ id: "done", status: "completed" }], new Set())).toBeNull();
   });
+
+  it("keeps only live subagents in the execution disclosure", () => {
+    const agents = [
+      { id: "running", status: "running" as const },
+      { id: "waiting", status: "waiting" as const },
+      { id: "queued", status: "idle" as const },
+      { id: "done", status: "completed" as const },
+      { id: "failed", status: "failed" as const }
+    ];
+
+    expect(getActiveSubagents(agents, new Set(["queued"])).map((agent) => agent.id)).toEqual([
+      "running",
+      "waiting",
+      "queued"
+    ]);
+  });
 });
 
 describe("streaming assistant lifecycle", () => {
@@ -443,26 +628,29 @@ describe("streaming assistant lifecycle", () => {
     expect(preserveStreamingDraftContent("rendered draft", undefined)).toBe("rendered draft");
   });
 
-  it("keeps all uncommitted streaming text inside the runtime draft disclosure", () => {
-    expect(resolveRuntimeStreamingDraft({
-      turnRunId: "turn-1",
-      content: "provisional response",
+  it("renders only active user-visible streaming text", () => {
+    expect(getStreamingAssistantDisplayContent({
+      content: "第一段回复\n\n第二段正在生成",
       presentation: "draft"
-    })).toEqual({ turnRunId: "turn-1", content: "provisional response" });
-    expect(resolveRuntimeStreamingDraft({
-      turnRunId: "turn-1",
-      content: "retry draft",
+    })).toBe("第一段回复\n\n第二段正在生成");
+    expect(getStreamingAssistantDisplayContent({
+      content: "已经落库",
+      presentation: "committed"
+    })).toBe("已经落库");
+    expect(getStreamingAssistantDisplayContent({
+      content: "已放弃的中间回复",
       presentation: "continuing"
-    })).toEqual({ turnRunId: "turn-1", content: "retry draft" });
+    })).toBe("");
+    expect(getStreamingAssistantDisplayContent({
+      content: '{"assistant_message":"内部协议",',
+      presentation: "draft"
+    })).toBe("");
+    expect(getStreamingAssistantDisplayContent({
+      content: "正文\n<tool_calls>[{\"name\":\"fs.read_file\"}]</tool_calls>",
+      presentation: "draft"
+    })).toBe("正文\n");
   });
 
-  it("leaves committed streaming text to the persisted message timeline", () => {
-    expect(resolveRuntimeStreamingDraft({
-      turnRunId: "turn-1",
-      content: "final response",
-      presentation: "committed"
-    })).toBeNull();
-  });
 });
 
 describe("incremental snapshot merging", () => {

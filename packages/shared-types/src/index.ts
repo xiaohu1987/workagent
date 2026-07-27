@@ -793,6 +793,14 @@ export const DEFAULT_RUNTIME_TIMEOUTS: RuntimeTimeoutSettings = {
   videoPollIntervalMs: 5_000
 };
 
+export type ResponseTone = "standard" | "cute_lolita" | "mature_lady";
+
+export const DEFAULT_RESPONSE_TONE: ResponseTone = "standard";
+
+export function normalizeResponseTone(value: unknown): ResponseTone {
+  return value === "cute_lolita" || value === "mature_lady" ? value : DEFAULT_RESPONSE_TONE;
+}
+
 export function normalizeRuntimeTimeouts(value?: Partial<RuntimeTimeoutSettings> | null): RuntimeTimeoutSettings {
   const source = value ?? {};
   const nonNegativeNumber = (input: unknown, fallback: number) => {
@@ -815,6 +823,7 @@ export function normalizeRuntimeTimeouts(value?: Partial<RuntimeTimeoutSettings>
 export interface AppConfig {
   defaultModel: string;
   defaultProvider: string;
+  responseTone: ResponseTone;
   providers: ProviderDefinition[];
   models: ModelProfile[];
   routing: {

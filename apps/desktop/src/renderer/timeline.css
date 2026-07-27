@@ -171,7 +171,7 @@
 }
 
 .task-timeline .message-card.user {
-  align-items: flex-start;
+  align-items: flex-end;
   padding-left: 24px;
 }
 
@@ -197,8 +197,186 @@
 .task-timeline .event-markdown,
 .task-timeline .event-commentary-markdown,
 .task-timeline .event-final-markdown {
-  font-size: 14px;
-  line-height: 1.62;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) h1,
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) h2 {
+  margin: 32px 0 15px;
+  padding-left: 12px;
+  border-left: 3px solid rgba(115, 193, 255, 0.85);
+  color: #f5f9ff;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) :is(h1, h2):first-child {
+  margin-top: 4px;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) h2 {
+  font-size: 22px;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) h3 {
+  margin: 25px 0 11px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(151, 181, 211, 0.2);
+  color: #cde5ff;
+  font-size: 17px;
+  font-weight: 620;
+  letter-spacing: 0;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) :is(ul, ol) {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 22px;
+  padding: 0;
+  list-style: none;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) li {
+  position: relative;
+  min-width: 0;
+  margin: 0;
+  padding: 1px 0 1px 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) li:hover {
+  color: #ffffff;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) ol {
+  counter-reset: markdown-ordered-list;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) ol > li {
+  counter-increment: markdown-ordered-list;
+  padding-left: 34px;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) ol > li::before {
+  content: counter(markdown-ordered-list);
+  position: absolute;
+  left: 0;
+  top: 1px;
+  width: 23px;
+  padding-top: 1px;
+  border-right: 1px solid rgba(130, 189, 226, 0.42);
+  color: #7fc9ef;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: left;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) ul:not(.markdown-task-list) > li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 8px;
+  height: 2px;
+  background: #5ac9a5;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) ul:not(.markdown-task-list) > li:nth-child(3n + 2)::before {
+  background: #76b9ff;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) ul:not(.markdown-task-list) > li:nth-child(3n)::before {
+  background: #c3a6f4;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) li > strong {
+  color: #f6d59b;
+  font-weight: 650;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) ol > li > strong {
+  color: #cfe8ff;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) code {
+  padding: 1px 5px;
+  border: 1px solid rgba(143, 177, 211, 0.2);
+  border-radius: 4px;
+  color: #dcecff;
+  background: rgba(68, 79, 96, 0.62);
+}
+
+.task-timeline .markdown-structured-list {
+  padding-left: 0;
+}
+
+.task-timeline .markdown-structured-list > li {
+  margin-bottom: 0;
+  padding: 2px 0 2px 37px;
+  border-left: 0;
+  color: #f0f5fb;
+}
+
+.task-timeline .markdown-structured-list > li > p {
+  margin: 7px 0 0;
+  color: #c3cedb;
+}
+
+.task-timeline .markdown-task-list > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding-left: 0;
+}
+
+.task-timeline .markdown-task-list > li:has(input:checked) {
+  color: #aebbc8;
+}
+
+.task-timeline .markdown-task-list input {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin: 4px 0 0;
+  accent-color: #5ac9a5;
+  pointer-events: none;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) del {
+  color: #9ba7b3;
+  text-decoration-color: rgba(155, 167, 179, 0.68);
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) blockquote {
+  margin: 18px 0;
+  padding: 9px 14px;
+  border-left-color: #73c1ff;
+  color: #d4e2f1;
+  background: rgba(83, 127, 166, 0.1);
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) .markdown-link {
+  color: #8bc9ff;
+  text-decoration: underline;
+  text-decoration-color: rgba(139, 201, 255, 0.38);
+  text-underline-offset: 3px;
+}
+
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) .markdown-link:hover {
+  color: #d7edff;
+  text-decoration-color: currentColor;
+}
+
+.task-timeline .markdown-horizontal-rule {
+  height: 1px;
+  margin: 25px 0;
+  border: 0;
+  background: linear-gradient(90deg, rgba(115, 193, 255, 0.62), rgba(115, 193, 255, 0.12) 48%, transparent);
 }
 
 .task-timeline .message-header {
@@ -659,6 +837,133 @@
   background: rgba(15, 18, 22, 0.54);
 }
 
+.active-subagent-lines {
+  display: grid;
+  min-width: 0;
+  padding: 2px 12px 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.active-subagent-line {
+  min-width: 0;
+  color: #9ca7b5;
+}
+
+.active-subagent-line + .active-subagent-line {
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+}
+
+.active-subagent-line > summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 28px;
+  gap: 5px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+}
+
+.active-subagent-line > summary::-webkit-details-marker { display: none; }
+.active-subagent-line > summary:hover .active-subagent-name { color: #b9d9fb; }
+.active-subagent-line > summary:focus-visible { outline: 1px solid rgba(96, 165, 250, 0.62); outline-offset: 1px; }
+
+.active-subagent-line > summary::after {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: #626d7a;
+  content: "展开";
+  font-size: 10px;
+}
+
+.active-subagent-line[open] > summary::after { content: "收起"; }
+
+.active-subagent-name {
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  color: #8fc5ff;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-subagent-separator { flex: 0 0 auto; color: #657180; }
+
+.active-subagent-activity {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #77cfa3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-subagent-line.waiting .active-subagent-activity { color: #e5a276; }
+.active-subagent-line.queued .active-subagent-activity { color: #d9b36f; }
+
+.active-subagent-detail {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  margin: 0 0 7px 1px;
+  padding: 3px 0 2px 10px;
+  border-left: 1px solid rgba(143, 197, 255, 0.2);
+  color: #8995a4;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.active-subagent-meta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.active-subagent-meta code {
+  min-width: 0;
+  overflow: hidden;
+  color: #778493;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-subagent-meta time {
+  color: #687482;
+  font-family: var(--font-mono);
+}
+
+.active-subagent-stop {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  color: #d98787;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.active-subagent-stop:hover { color: #f0a0a0; }
+
+.active-subagent-history {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.active-subagent-history span,
+.active-subagent-empty {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-subagent-history span { color: #a5afbb; }
+.active-subagent-empty { color: #737f8d; }
+.active-subagent-prompt { color: #818d9b; overflow-wrap: anywhere; white-space: pre-wrap; }
+
 .tool-activity-row.compact:not([open]) > .tool-activity-compact-details {
   display: none;
 }
@@ -790,6 +1095,35 @@
   border-left: 1px solid rgba(96, 165, 250, 0.42);
   color: #e5edf8;
   animation: timeline-enter 160ms ease-out both;
+}
+
+.streaming-assistant-state {
+  color: #8f99a7;
+  font-size: 12px;
+}
+
+.streaming-assistant-body {
+  --streaming-text-base: #cbd3df;
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    var(--streaming-text-base) 0%,
+    var(--streaming-text-base) 42%,
+    #ffffff 50%,
+    var(--streaming-text-base) 58%,
+    var(--streaming-text-base) 100%
+  );
+  background-position: 115% 0;
+  background-size: 240% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: runtime-activity-text-sweep 2.6s ease-in-out infinite;
+}
+
+.streaming-assistant-body .event-block,
+.streaming-assistant-body .message-event-stream,
+.streaming-assistant-body .event-final-markdown {
+  color: inherit;
 }
 
 .streaming-assistant::before {
@@ -952,6 +1286,11 @@
 }
 
 /* User bubbles use intrinsic width; cap to the parent content box so right-panel resize reflows. */
+.task-timeline .message-user-content {
+  align-self: flex-end;
+  margin-left: auto;
+}
+
 .task-timeline .message-user-content:not(.is-editing) .message-user-bubble {
   width: max-content;
   max-width: 100%;
@@ -960,15 +1299,18 @@
 }
 
 .task-timeline .message-user-content:not(.is-editing)::before {
-  right: auto;
-  left: 0;
+  right: 0;
+  left: auto;
 }
 
 .task-timeline .message-user-actions {
-  right: auto;
-  left: 0;
-  transform: translateY(3px) scale(0.98);
-  transform-origin: left bottom;
+  transform: translateY(-3px) scale(0.98);
+  transform-origin: right top;
+}
+
+.task-timeline .message-user-content .message-selected-contexts,
+.task-timeline .message-user-content .message-attachment-gallery {
+  justify-content: flex-end;
 }
 
 .task-timeline .message-user-content:hover .message-user-actions,

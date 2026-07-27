@@ -24,6 +24,7 @@ import type {
   RuntimePromptBundle,
   RuntimeThreadSnapshot,
   RuntimeToolCall,
+  ResponseTone,
   SkillMetadata,
   ThreadRecord,
   SubagentResultEnvelope,
@@ -391,6 +392,12 @@ export interface StandardCompletionValidationResult {
   missingVerification: boolean;
   missingRequestedDeliverable: boolean;
 }
+
+export type StandardCompletionAuditAction =
+  | "none"
+  | "request_audit"
+  | "continue_work"
+  | "validate_completion";
 
 export interface ManagedWriteRecoveryState {
   phase: "none" | "read" | "directory" | "write";
@@ -1540,6 +1547,7 @@ class ThreadSessionRuntime {
       let prematureCompletionAttempts = 0;
       let managedWriteCompletionAttempts = 0;
       let standardCompletionAttempts = 0;
+      let standardCompletionAuditPending = false;
       let modelAwaitReason: "turn_start" | "after_tools" | "recovery" = "turn_start";
       let useTextToolProtocol = false;
       let progressOnlyCompletionAttempts = 0;
@@ -1555,6 +1563,7 @@ class ThreadSessionRuntime {
       let gpaPlanProgressCheckpointTaskId: string | null = null;
       let gpaActCompletedSuccessfully = false;
       let gpaFinalizationToolBatches = 0;
+      let rootSummaryDeferredForSubagents = false;
       const requiresAgentDecisionProtocol = () => this.#gpa.stage === "off" || this.#gpa.stage === "act";
 
       if (this.#gpa.stage === "act" && this.#gpa.planTasks.length === 0) {
@@ -1932,6 +1941,52 @@ class ThreadSessionRuntime {
       };
 
       while (!repeatedTaskFailure) {
+        if (rootSummaryDeferredForSubagents) {
+          const hasActiveSubagents = await this.services.hasActiveSubagents(this.threadId);
+          const modelGate = resolveRootSubagentModelGate({
+            isRootThread: !thread.parentThreadId,
+            summaryDeferred: true,
+            hasActiveSubagents
+          });
+          if (modelGate !== "continue") {
+            const waitResult = await this.services.waitForSubagents(this.threadId, {
+              timeoutMs: 30_000,
+              abortSignal: abortController.signal
+            });
+            if (abortController.signal.aborted) {
+              throw new Error("Turn interrupted.");
+            }
+            const stillActive = await this.services.hasActiveSubagents(this.threadId);
+            if (stillActive) {
+              await this.services.log("turn.summary_waiting_for_subagents", this.threadId, {
+                turnRunId: turn.id,
+                activeAgentPaths: (await this.services.listSubagents(this.threadId))
+                  .filter((agent) => agent.status === "running" || agent.status === "waiting")
+                  .map((agent) => agent.agentPath)
+              });
+              continue;
+            }
+
+            const waitToolCall: RuntimeToolCall = {
+              id: randomUUID(),
+              name: "wait_agent",
+              arguments: { timeoutMs: 30_000 }
+            };
+            transcript.push({ role: "assistant", content: "", toolCalls: [waitToolCall] });
+            transcript.push({
+              role: "tool",
+              content: `wait_agent\n${JSON.stringify(waitResult)}\n[tool_call_id: ${waitToolCall.id}]`,
+              toolCallId: waitToolCall.id,
+              toolResultOk: true
+            });
+            rootSummaryDeferredForSubagents = false;
+            await this.services.log("turn.summary_resumed_after_subagents", this.threadId, {
+              turnRunId: turn.id,
+              agentCount: waitResult.agents.length
+            });
+          }
+        }
+
         const prompt = buildRuntimePrompt(
           model,
           skillContext,
@@ -1968,8 +2023,10 @@ class ThreadSessionRuntime {
           interruptedVisibleContent = "";
         };
         const modelTurnAbortController = createChildAbortController(abortController.signal);
+        const suppressStreamingForActiveSubagents = !thread.parentThreadId
+          && await this.services.hasActiveSubagents(this.threadId);
         const multiAgentDirective = buildMultiAgentDirective(thread);
-        const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${prompt.systemPrompt}${
+        const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
         }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
           useTextToolProtocol
@@ -1977,7 +2034,7 @@ class ThreadSessionRuntime {
             : ""
         }`;
         const compactContext = async (
-          trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery",
+          trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery" | "task_completed",
           force = false
         ): Promise<boolean> => {
           const compaction = compactTranscriptForContext(
@@ -2048,6 +2105,9 @@ class ThreadSessionRuntime {
                 }
                 streamedVisibleContent += delta;
                 interruptedVisibleContent = streamedVisibleContent;
+                if (suppressStreamingForActiveSubagents) {
+                  return;
+                }
                 await this.services.emit({
                   type: "assistant.delta",
                   threadId: this.threadId,
@@ -2718,6 +2778,13 @@ class ThreadSessionRuntime {
         }
 
         if (decision.toolCalls.length > 0) {
+          if (this.#gpa.stage === "off" && standardCompletionAuditPending) {
+            standardCompletionAuditPending = false;
+            await this.services.log("turn.standard_completion_audit_continued", this.threadId, {
+              turnRunId: turn.id,
+              toolNames: decision.toolCalls.map((toolCall) => toolCall.name)
+            });
+          }
           prematureCompletionAttempts = 0;
           if (decision.toolCalls[0]?.name !== "fs.read_directory" || executionRecoveryAttempts < 2) {
             executionRecoveryAttempts = 0;
@@ -2759,10 +2826,12 @@ class ThreadSessionRuntime {
           }
         }
         if (
+          this.#gpa.stage !== "off" &&
           this.#gpa.stage !== "act" &&
           decision.toolCalls.length === 0 &&
           decision.endTurn &&
           assistantMessage &&
+          standardCompletionAuditPending &&
           isProgressOnlyAssistantMessage(assistantMessage)
         ) {
           progressOnlyCompletionAttempts += 1;
@@ -2793,6 +2862,36 @@ class ThreadSessionRuntime {
           decision.toolCalls.length === 0 &&
           decision.endTurn
         ) {
+          const auditAction = resolveStandardCompletionAuditAction({
+            auditPending: standardCompletionAuditPending,
+            toolCallCount: decision.toolCalls.length,
+            endTurn: decision.endTurn
+          });
+          if (auditAction === "request_audit") {
+            standardCompletionAuditPending = true;
+            await this.services.log("turn.standard_completion_audit_requested", this.threadId, {
+              turnRunId: turn.id,
+              originalRequestPreview: initialInput.slice(0, 500),
+              candidateSummaryPreview: (assistantMessage ?? "").slice(0, 500),
+              deliveredPaths: [...managedWriteCompletion.deliveredPaths],
+              successfulEvidenceCount: successfulToolEvidence.length
+            });
+            transcript.push({
+              role: "user",
+              content: buildStandardCompletionAuditInstruction({
+                originalRequest: initialInput,
+                candidateSummary: assistantMessage ?? "",
+                deliveredPaths: [...managedWriteCompletion.deliveredPaths],
+                successfulEvidence: successfulToolEvidence
+              })
+            });
+            await discardStreamedAssistant();
+            decision.assistantMessage = undefined;
+            decision.endTurn = false;
+            decision.goalCompleted = false;
+            continue;
+          }
+
           const standardCompletion = validateStandardCompletion({
             decision,
             originalRequest: initialInput,
@@ -2801,6 +2900,7 @@ class ThreadSessionRuntime {
             successfulEvidence: successfulToolEvidence
           });
           if (!standardCompletion.valid) {
+            standardCompletionAuditPending = false;
             standardCompletionAttempts += 1;
             await this.services.log("turn.standard_completion_rejected", this.threadId, {
               turnRunId: turn.id,
@@ -2825,6 +2925,12 @@ class ThreadSessionRuntime {
             decision.goalCompleted = false;
             continue;
           }
+          standardCompletionAuditPending = false;
+          await this.services.log("turn.standard_completion_audit_accepted", this.threadId, {
+            turnRunId: turn.id,
+            deliveredPaths: [...managedWriteCompletion.deliveredPaths],
+            successfulEvidenceCount: successfulToolEvidence.length
+          });
         }
 
         if (
@@ -3143,51 +3249,51 @@ class ThreadSessionRuntime {
           // Completing a parent task is a runtime-owned state transition. A
           // model final response cannot override live delegated work.
           await discardStreamedAssistant();
-          decision = {
-            ...decision,
-            assistantMessage: undefined,
-            toolCalls: [{
-              id: randomUUID(),
-              name: "wait_agent",
-              arguments: { timeoutMs: 30_000 }
-            }],
-            endTurn: false,
-            goalCompleted: false
-          };
+          rootSummaryDeferredForSubagents = true;
           await this.services.log("turn.completion_deferred_for_subagents", this.threadId, {
             turnRunId: turn.id,
             activeAgentPaths: currentChildAgents
               .filter((agent) => agent.status === "running" || agent.status === "waiting")
               .map((agent) => agent.agentPath)
           });
+          continue;
         }
 
-        const isPrematureRootReport = hasActiveRootSubagents
-          && Boolean(decision.assistantMessage)
-          && (decision.toolCalls.length > 0 || !decision.endTurn);
+        const isPrematureRootReport = shouldSuppressPrematureRootReport({
+          hasActiveRootSubagents,
+          assistantMessage: decision.assistantMessage,
+          toolCallCount: decision.toolCalls.length,
+          endTurn: decision.endTurn
+        });
         if (isPrematureRootReport) {
-          // Child work is already complete, but the root is still performing
+          // Child work is still active, and the root is still performing
           // coordination. Reserve the only visible report for the terminal
           // decision so the main chat cannot receive a partial second report.
           await discardStreamedAssistant();
           decision.assistantMessage = undefined;
         }
 
+        let recordedToolBatchAnchor = false;
         if (
           decision.assistantMessage &&
           decision.toolCalls.length > 0 &&
           !preservesGpaAnalysis &&
           isSafeCommentaryMessage(decision.assistantMessage)
         ) {
-          const commentaryKey = createCommentaryMessageKey(decision.assistantMessage, decision.toolCalls);
+          const tonedCommentary = applyResponseToneToProgressMessage(
+            decision.assistantMessage,
+            this.services.config.responseTone
+          );
+          const commentaryKey = createCommentaryMessageKey(tonedCommentary, decision.toolCalls);
           if (!visibleCommentaryMessages.has(commentaryKey)) {
             visibleCommentaryMessages.add(commentaryKey);
             const commentaryMessage = await this.recordMessage(
               "assistant",
-              decision.assistantMessage,
+              tonedCommentary,
               turn.id,
               buildCommentaryMessageMetadata(decision.toolCalls)
             );
+            recordedToolBatchAnchor = true;
             transcript.push({ role: "assistant", content: commentaryMessage.content });
             if (streamedVisibleContent) {
               await this.services.emit({
@@ -3202,6 +3308,16 @@ class ThreadSessionRuntime {
         } else if (decision.assistantMessage && decision.toolCalls.length > 0 && !preservesGpaAnalysis) {
           await discardStreamedAssistant();
           decision.assistantMessage = undefined;
+        }
+
+        if (decision.toolCalls.length > 0 && !recordedToolBatchAnchor) {
+          const fallbackCommentary = buildToolBatchProgressMessage(decision.toolCalls, this.services.config.responseTone);
+          await this.recordMessage(
+            "assistant",
+            fallbackCommentary,
+            turn.id,
+            buildCommentaryMessageMetadata(decision.toolCalls)
+          );
         }
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
@@ -3246,6 +3362,9 @@ class ThreadSessionRuntime {
         if (decision.toolCalls.length === 0 && decision.endTurn) {
           if (terminalDisposition === "continue") {
             throw new Error("Terminal turn was not accepted by the runtime completion state machine.");
+          }
+          if (terminalDisposition === "complete_task") {
+            await compactContext("task_completed", true);
           }
           await persistRecoveredEpisodes();
           await this.services.persistence.finishTurn(turn.id, {
@@ -4009,6 +4128,14 @@ class ThreadSessionRuntime {
             toolCallId: toolCall.id,
             toolResultOk: result.ok
           });
+          if (
+            result.ok &&
+            !thread.parentThreadId &&
+            (toolCall.name === "wait_agent" || toolCall.name === "multi_agents.wait") &&
+            await this.services.hasActiveSubagents(this.threadId)
+          ) {
+            rootSummaryDeferredForSubagents = true;
+          }
           if (!result.ok && toolCall.name === "shell.exec" && isTerminalCommandTimeout(result.content)) {
             await this.services.log("terminal.command_timeout_recovery", this.threadId, {
               turnRunId: turn.id,
@@ -5204,6 +5331,151 @@ export function buildCommentaryMessageMetadata(toolCalls: RuntimeToolCall[]): Re
   };
 }
 
+export function buildToolBatchProgressMessage(toolCalls: RuntimeToolCall[], tone: ResponseTone = "standard"): string {
+  if (toolCalls.length === 0) return applyResponseToneToProgressMessage("我继续把剩下的内容处理完，再回来说明结果。", tone);
+  if (toolCalls.length > 1) {
+    const kinds = new Set(toolCalls.map((toolCall) => getToolProgressKind(canonicalizeToolName(toolCall.name))));
+    if (kinds.size > 1 && kinds.has("research") && kinds.has("code")) {
+      return applyResponseToneToProgressMessage("我先一边核对相关资料，一边检查现有实现，把关键信息确认清楚后再继续。", tone);
+    }
+    if (kinds.size > 1) {
+      return applyResponseToneToProgressMessage("我先把相关的几部分一起处理一下，确认彼此没有遗漏后再继续。", tone);
+    }
+  }
+  return applyResponseToneToProgressMessage(describeToolProgress(toolCalls[0]), tone);
+}
+
+export function applyResponseToneToProgressMessage(message: string, tone: ResponseTone): string {
+  if (tone === "cute_lolita") {
+    if (/^(?:好哒|没问题呀|这就来啦)[！!，,]/.test(message) || /[呀啦呢～][。！？!?]?$/.test(message)) {
+      return message;
+    }
+    const playful = message
+      .replace(/^我先/, "我这就先")
+      .replace(/^我来/, "我这就来")
+      .replace(/^我继续/, "我这就继续")
+      .replace(/。$/, "呀～");
+    return selectResponseToneVariant(message, [
+      `好哒！${playful}`,
+      `没问题呀，${playful}`,
+      `这就来啦！${playful}`
+    ]);
+  }
+  if (tone === "mature_lady") {
+    if (/^(?:交给姐姐就好|别急，姐姐|这一步听姐姐的)/.test(message)) {
+      return message;
+    }
+    const composed = message
+      .replace(/^我先/, "我会先")
+      .replace(/^我来/, "我会")
+      .replace(/^我继续/, "我会继续");
+    const action = composed.replace(/^我会/, "").replace(/^我/, "");
+    return selectResponseToneVariant(message, [
+      `交给姐姐就好。${composed}`,
+      `别急，姐姐来把这一步拿稳：${action}`,
+      `这一步听姐姐的：${action}`
+    ]);
+  }
+  return message;
+}
+
+function selectResponseToneVariant(message: string, variants: string[]): string {
+  let hash = 0;
+  for (const character of message) {
+    hash = (hash * 31 + (character.codePointAt(0) ?? 0)) >>> 0;
+  }
+  return variants[hash % variants.length];
+}
+
+type ToolProgressKind = "research" | "code" | "change" | "check" | "coordinate" | "create" | "other";
+
+function getToolProgressKind(name: string): ToolProgressKind {
+  if (name.startsWith("web_search.") || name.startsWith("knowledge.") || name.startsWith("browser.") || name.startsWith("mcp.")) {
+    return "research";
+  }
+  if (name === "apply_patch" || name === "fs.write_file") return "change";
+  if (name.startsWith("fs.") || name.startsWith("code.") || name.startsWith("git.")) return "code";
+  if (name.startsWith("shell.") || name.startsWith("database.")) return "check";
+  if (["spawn_agent", "wait_agent", "followup_task", "send_message", "list_agents", "interrupt_agent"].includes(name)) {
+    return "coordinate";
+  }
+  if (name === "image.generate" || name === "video.generate") return "create";
+  return "other";
+}
+
+function describeToolProgress(toolCall: RuntimeToolCall): string {
+  const name = canonicalizeToolName(toolCall.name);
+  const args = toolCall.arguments;
+  const queryTarget = readToolProgressArgument(args, "query", "search_query", "searchQuery");
+
+  if (name === "skills.load") {
+    return "我先把适合这类任务的处理方法梳理清楚，再按正确的步骤继续往下做。";
+  }
+  if (name === "tool_search") {
+    return "我先找一下适合处理这个问题的方法，确认用哪种方式更稳妥。";
+  }
+  if (name.startsWith("web_search.") || name.startsWith("knowledge.")) {
+    const topic = formatConversationalTopic(queryTarget);
+    return topic
+      ? `我先查一下“${topic}”的相关资料，把关键信息核对清楚后再继续整理。`
+      : "我先查一下相关资料，把关键信息核对清楚后再继续整理。";
+  }
+  if (name.startsWith("browser.")) {
+    if (/screenshot|snapshot|capture/.test(name)) return "我截取一下当前页面，仔细确认布局和显示效果是否符合预期。";
+    if (/click|fill|press|select|scroll/.test(name)) return "我在页面上实际操作一下，确认整个交互过程是否顺畅。";
+    return "我打开相关页面仔细看一下，确认实际内容和当前状态。";
+  }
+  if (name === "wait_agent") return "我先等其他部分全部处理完成，拿到结果后再统一核对和整理。";
+  if (name === "spawn_agent") return "我先把可以同时推进的部分安排下去，这边继续处理剩余内容。";
+  if (name === "followup_task" || name === "send_message") {
+    return "我补充一下处理要求，确保相关部分按同一个目标继续推进。";
+  }
+  if (name === "list_agents") return "我看一下其他部分目前处理到哪里，确认是否还有内容需要衔接。";
+  if (name === "interrupt_agent") return "我先调整一下当前的处理安排，避免继续沿着不合适的方向推进。";
+  if (name === "apply_patch" || name === "fs.write_file") return "我来把相关内容修改好，完成后再检查是否还有遗漏。";
+  if (name === "fs.read_file") return "我先把相关代码读一遍，弄清楚现在的实现和前后关系。";
+  if (name.startsWith("code.")) return name.includes("search")
+    ? "我先在代码里找出所有相关位置，确认这次修改会影响到哪些地方。"
+    : "我先梳理一下相关代码的结构，确认应该从哪里着手调整。";
+  if (name.startsWith("fs.")) return name.includes("search")
+    ? "我先在项目里找出相关内容，避免漏掉需要一起处理的位置。"
+    : "我先看看项目里有哪些相关文件，确认代码和资源分别放在哪里。";
+  if (name.startsWith("git.")) return "我先核对一下当前的改动，确认没有混入无关内容。";
+  if (name.startsWith("shell.")) {
+    const command = readToolProgressArgument(args, "command", "cmd") ?? "";
+    if (/\b(?:test|vitest|jest|pytest|cargo test|go test)\b/i.test(command)) {
+      return "我先把相关测试跑一遍，确认修改后的行为没有问题。";
+    }
+    if (/\b(?:build|compile|tsc)\b/i.test(command)) {
+      return "我先完整构建一次，确认修改后仍然可以正常打包和运行。";
+    }
+    if (/\b(?:install|add|update)\b/i.test(command)) {
+      return "我先把需要的依赖准备好，再继续处理后面的内容。";
+    }
+    return "我先执行一下必要的检查，根据实际结果再决定下一步怎么处理。";
+  }
+  if (name.startsWith("database.")) return "我先查一下相关数据，确认实际记录和预期是否一致。";
+  if (name === "image.generate") return "我来生成需要的图片，并检查画面是否符合这次的要求。";
+  if (name === "video.generate") return "我来生成需要的视频，并确认内容和呈现效果是否合适。";
+  if (name.startsWith("mcp.")) return "我先从关联的信息源里确认一下，拿到可靠结果后再继续整理。";
+  return "我继续把这一步处理清楚，确认结果后再往下进行。";
+}
+
+function readToolProgressArgument(args: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function formatConversationalTopic(value: string | undefined, limit = 48): string | undefined {
+  if (!value) return undefined;
+  const normalized = redactSensitiveText(value).replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`;
+}
+
 export function isSafeCommentaryMessage(content: string): boolean {
   const normalized = content.trim();
   if (!normalized || isPatchPayload(normalized)) return false;
@@ -5275,6 +5547,35 @@ export type TerminalTurnDisposition =
   | "wait_for_subagents"
   | "awaiting_user_confirmation"
   | "complete_task";
+
+export type RootSubagentModelGate = "continue" | "wait_for_subagents" | "resume_with_results";
+
+export function resolveRootSubagentModelGate(input: {
+  isRootThread: boolean;
+  summaryDeferred: boolean;
+  hasActiveSubagents: boolean;
+}): RootSubagentModelGate {
+  if (!input.isRootThread || !input.summaryDeferred) return "continue";
+  return input.hasActiveSubagents ? "wait_for_subagents" : "resume_with_results";
+}
+
+export function shouldSuppressPrematureRootReport(input: {
+  hasActiveRootSubagents: boolean;
+  assistantMessage?: string;
+  toolCallCount: number;
+  endTurn: boolean;
+}): boolean {
+  if (!input.hasActiveRootSubagents || !input.assistantMessage) return false;
+  const isToolBoundCommentary = input.toolCallCount > 0 && isSafeCommentaryMessage(input.assistantMessage);
+  return !isToolBoundCommentary && (input.toolCallCount > 0 || !input.endTurn);
+}
+
+export function buildToolBatchMessageMetadata(toolCalls: RuntimeToolCall[]): Record<string, unknown> {
+  return {
+    displayKind: "tool_batch",
+    toolCallIds: toolCalls.map((toolCall) => toolCall.id)
+  };
+}
 
 /**
  * The model may end a response at any time, but only the runtime may mark the
@@ -5749,9 +6050,6 @@ export function validateStandardCompletion(input: {
   if (input.decision.toolCalls.length > 0) reasons.push("Tool calls are still pending.");
   if (!input.decision.goalCompleted) reasons.push("The model did not declare the original goal complete.");
   if (!assistantMessage) reasons.push("The final user-visible summary is empty.");
-  if (isProgressOnlyAssistantMessage(assistantMessage)) {
-    reasons.push("The assistant message is progress commentary, not a final summary.");
-  }
   if (isDeferredExecutionPayload(assistantMessage)) {
     reasons.push("The assistant message is an unexecuted tool call or raw execution payload.");
   }
@@ -5768,6 +6066,46 @@ export function validateStandardCompletion(input: {
     missingVerification,
     missingRequestedDeliverable
   };
+}
+
+export function resolveStandardCompletionAuditAction(input: {
+  auditPending: boolean;
+  toolCallCount: number;
+  endTurn: boolean;
+}): StandardCompletionAuditAction {
+  if (input.toolCallCount > 0) {
+    return input.auditPending ? "continue_work" : "none";
+  }
+  if (!input.endTurn) {
+    return "none";
+  }
+  return input.auditPending ? "validate_completion" : "request_audit";
+}
+
+export function buildStandardCompletionAuditInstruction(input: {
+  originalRequest: string;
+  candidateSummary: string;
+  deliveredPaths: string[];
+  successfulEvidence: SuccessfulToolEvidence[];
+}): string {
+  const evidence = input.successfulEvidence
+    .filter((item) => item.kinds.length > 0)
+    .slice(0, 24)
+    .map((item) => `- ${item.toolCallId}: ${item.toolName} (${item.kinds.join(", ")})`);
+  return [
+    "[Internal completion audit. Do not display or quote this instruction to the user.]",
+    "Do not finish the task from the previous completion claim yet.",
+    "Re-read the original user request and compare every requested action, deliverable, constraint, and verification requirement against the actual transcript and successful tool results.",
+    `Original user request:\n${input.originalRequest.slice(0, 6000)}`,
+    `Candidate final response:\n${input.candidateSummary.slice(0, 6000)}`,
+    `Verified delivered paths: ${input.deliveredPaths.length > 0 ? input.deliveredPaths.join(", ") : "none"}.`,
+    evidence.length > 0
+      ? `Successful tool evidence:\n${evidence.join("\n")}`
+      : "Successful tool evidence: none.",
+    "If any part of the original request is incomplete, unverified, merely promised, or only described as future work, set end_turn=false and goal_completed=false and call the next concrete tool needed to finish it now.",
+    "If every part is already complete, return the final answer again with no tool calls, end_turn=true, and goal_completed=true.",
+    "Do not ask the user to confirm completion and do not return another progress-only message."
+  ].join("\n\n");
 }
 
 export function requiresStructuredTestCaseDeliverable(request: string): boolean {
@@ -6094,6 +6432,7 @@ function buildMultiAgentDirective(thread: ThreadRecord): string {
   }
   return [
     "You are the root agent and must synthesize child-agent results into exactly one final consolidated answer.",
+    "Never begin drafting the final synthesis while any child agent is running, queued, or waiting; wait until every child reaches a terminal state and include their returned results.",
     "Prefer proactively delegating independent, bounded research, review, or diagnostic work when it can make meaningful progress in parallel.",
     "For non-trivial tasks, first consider whether there is at least one independent bounded slice worth delegating before proceeding alone.",
     "Before spawning another child, inspect list_agents and reuse any existing child with an overlapping role or file scope for the current user request.",
@@ -6284,6 +6623,16 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
     ].join("\n");
   }
 
+  if (error instanceof Error && error.message.startsWith("Standard completion validation failed repeatedly:")) {
+    const detail = error.message.replace(/^Standard completion validation failed repeatedly:\s*/, "");
+    return [
+      "任务尚未确认完成。",
+      "模型连续两次未通过最终完成检查。为避免把未完成的任务误报为成功，系统已暂停本次执行。",
+      `未通过项：${localizeStandardCompletionFailure(detail)}`,
+      "已经完成的修改、工具结果和执行记录都已保留。直接发送“继续完成”，agent 会从当前状态继续处理。"
+    ].join("\n");
+  }
+
   if (error instanceof Error && error.message.startsWith("Model rate limit persisted after")) {
     return [
       "任务暂时停止：模型服务持续返回 429（请求过于频繁）。",
@@ -6298,6 +6647,23 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
     `原因：${detail}`,
     "建议：根据原因修正项目路径、权限、工具配置或模型配置后重试。已有执行记录已保留；重新提交时 agent 会从当前项目状态继续，而不是假设未完成的修改已经成功。"
   ].join("\n");
+}
+
+function localizeStandardCompletionFailure(detail: string): string {
+  const reasons = [
+    ["The model did not end the turn.", "模型没有正确结束本轮处理"],
+    ["Tool calls are still pending.", "仍有工具调用尚未完成"],
+    ["The model did not declare the original goal complete.", "模型没有确认原始任务已全部完成"],
+    ["The final user-visible summary is empty.", "缺少最终回复"],
+    ["The assistant message is an unexecuted tool call or raw execution payload.", "最终回复仍是待执行的工具信息"],
+    ["The requested project file change has no verified file delivery.", "没有确认项目文件修改已实际写入"],
+    ["The requested project file change has no post-delivery verification.", "文件修改后还没有完成验证"],
+    ["The requested test-case deliverable does not contain actual structured test cases.", "请求的测试用例内容尚未完整输出"]
+  ] as const;
+  const matched = reasons
+    .filter(([source]) => detail.includes(source))
+    .map(([, localized]) => localized);
+  return matched.length > 0 ? `${matched.join("；")}。` : "最终完成信息不完整。";
 }
 
 function stableSerialize(value: unknown): string {
@@ -6685,6 +7051,39 @@ export function buildProjectWorkspacePriorityPrompt(
   return lines.join("\n");
 }
 
+export function buildResponseTonePrompt(tone: ResponseTone): string {
+  const shared = [
+    "Apply this tone only to user-visible assistant messages, including short progress updates and the final answer.",
+    "Keep factual accuracy, technical precision, safety boundaries, tool decisions, and task completion standards unchanged.",
+    "Use the user's current language. A direct tone request from the user overrides this preset."
+  ];
+  if (tone === "cute_lolita") {
+    return [
+      "## Response Tone: Cute Lolita",
+      "Write with a bright, sweet, playful, and friendly voice. The difference from Standard must be obvious in every prose reply, even in a one-sentence progress update; do not merely swap one or two neutral words.",
+      "In Chinese, give each short progress update at least one natural cute marker, such as 好哒、这就来、呀、啦、呢 or ～. Vary the wording and sentence rhythm so it feels lively rather than repetitive.",
+      "Final answers should remain concise and useful, but should also carry clearly warm, lively phrasing rather than reverting to a neutral professional voice.",
+      "Do not pretend to be a child, claim an age, become flirtatious, overuse symbols, or sacrifice clarity for cuteness.",
+      ...shared
+    ].join("\n");
+  }
+  if (tone === "mature_lady") {
+    return [
+      "## Response Tone: Mature Lady",
+      "Write with an unmistakable Chinese 御姐 voice: mature, composed, confident, warm, polished, and slightly commanding. This is a characterful big-sister tone, not merely a neutral professional or generally mature tone.",
+      "The difference from Standard must be obvious in every prose reply, even in a one-sentence progress update. Use natural 姐姐-style self-reference and assured phrasing such as 交给姐姐就好、别急，姐姐来处理、这一步听姐姐的 when it fits, and vary the wording rather than repeating one catchphrase.",
+      "Final answers should retain that 御姐 presence: lead decisively, make judgment calls plainly, and speak with calm control and a touch of commanding warmth instead of reverting to a neutral professional voice.",
+      "Do not become sexual, demeaning, melodramatic, or excessively formal. Never sacrifice clarity or technical precision for the persona.",
+      ...shared
+    ].join("\n");
+  }
+  return [
+    "## Response Tone: Standard",
+    "Write in a natural, clear, professional, and approachable voice. Prefer direct wording without sounding stiff or mechanical.",
+    ...shared
+  ].join("\n");
+}
+
 function buildRuntimePrompt(
   model: ModelProfile,
   skillContext: RuntimePromptBundle["skillContext"],
@@ -6820,12 +7219,22 @@ function formatRuntimeDate(date: Date): string {
 
 function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {
   const maxMessages = 24;
-  const visible = messages.slice(-maxMessages);
+  const visible = messages.filter((message) => !isToolBatchAnchorMessage(message)).slice(-maxMessages);
   return visible.map((message) => ({
     role: message.role,
     content: message.content,
     attachments: getMessageAttachments(message)
   }));
+}
+
+function isToolBatchAnchorMessage(message: MessageRecord): boolean {
+  if (!message.metadataJson) return false;
+  try {
+    const metadata = JSON.parse(message.metadataJson) as { displayKind?: unknown };
+    return metadata.displayKind === "tool_batch";
+  } catch {
+    return false;
+  }
 }
 
 function getMessageAttachments(message: MessageRecord): MessageAttachment[] | undefined {

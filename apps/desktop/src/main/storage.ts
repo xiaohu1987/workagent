@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
-import { normalizeRuntimeTimeouts, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson } from "@shared-types";
+import { normalizeResponseTone, normalizeRuntimeTimeouts, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson } from "@shared-types";
 import type {
   AppConfig,
   ApprovalResolutionMode,
@@ -258,6 +258,7 @@ export function defaultConfig(): AppConfig {
   return {
     defaultModel: "mock-codexh",
     defaultProvider: "mock",
+    responseTone: "standard",
     providers,
     models,
     routing: {},
@@ -413,6 +414,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
   const config: AppConfig = {
     defaultModel: parsed.defaultModel ?? 'mock-codexh',
     defaultProvider: parsed.defaultProvider ?? 'mock',
+    responseTone: normalizeResponseTone(parsed.responseTone),
     providers,
     models,
     routing: parsed.routing ?? {},
@@ -451,6 +453,7 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
   const tomlObject = {
     defaultModel: config.defaultModel,
     defaultProvider: config.defaultProvider,
+    responseTone: normalizeResponseTone(config.responseTone),
     routing: config.routing,
     multimodal: config.multimodal,
     desktop: config.desktop,

@@ -63,7 +63,7 @@ import type {
   ToolCallRecord,
   UserInputPrompt
 } from "@shared-types";
-import { DEFAULT_RUNTIME_TIMEOUTS, createEmptyTokenUsage } from "@shared-types";
+import { DEFAULT_RESPONSE_TONE, DEFAULT_RUNTIME_TIMEOUTS, createEmptyTokenUsage } from "@shared-types";
 import {
   canDeleteThread,
   getComposerPrimaryActionState,
@@ -439,6 +439,8 @@ type MarkdownBlock =
   | { kind: "paragraph"; text: string }
   | { kind: "unordered-list"; items: string[] }
   | { kind: "ordered-list"; items: string[] }
+  | { kind: "structured-ordered-list"; items: Array<{ title: string; paragraphs: string[] }> }
+  | { kind: "horizontal-rule" }
   | { kind: "blockquote"; lines: string[] }
   | { kind: "code"; language?: string; content: string }
   | { kind: "echarts"; content: string }
@@ -490,7 +492,27 @@ type TimelineEntry =
   | { kind: "tool-group"; id: string; createdAt: string; toolCalls: ToolCallRecord[] }
   | { kind: "file-summary"; id: string; createdAt: string; files: FileChangeSummaryItem[] }
   | { kind: "directory-read-group"; id: string; createdAt: string; directory: string; count: number }
+  | { kind: "context-compaction"; id: string; createdAt: string; compaction: ContextCompactionRecord }
   | { kind: "user-input"; id: string; createdAt: string; prompt: UserInputPrompt };
+
+type ConversationTurnSection = {
+  id: string;
+  userEntryId: string;
+  summaryEntryId: string | null;
+  entryIds: string[];
+  startedAt: string;
+  completedAt: string;
+};
+
+const RESPONSE_TONE_OPTIONS: Array<{
+  value: AppConfig["responseTone"];
+  label: string;
+  description: string;
+}> = [
+  { value: "standard", label: "标准", description: "自然、清晰、专业" },
+  { value: "cute_lolita", label: "可爱萝莉", description: "活泼、软萌、轻快" },
+  { value: "mature_lady", label: "成熟御姐", description: "从容、温和、有分寸" }
+];
 
 type FileChangeAction = "created" | "modified" | "deleted";
 
@@ -822,6 +844,8 @@ export function App() {
   const [renamingHistoryThread, setRenamingHistoryThread] = useState<{ id: string; title: string } | null>(null);
   const skipHistoryRenameCommitRef = useRef(false);
   const [editingUserMessage, setEditingUserMessage] = useState<{ id: string; content: string } | null>(null);
+  const [collapsedConversationTurns, setCollapsedConversationTurns] = useState<Record<string, Set<string>>>({});
+  const initializedConversationTurnsByThreadRef = useRef<Record<string, Set<string>>>({});
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [removingComposerAttachmentId, setRemovingComposerAttachmentId] = useState<string | null>(null);
   const [isContextReportOpen, setIsContextReportOpen] = useState(false);
@@ -2594,9 +2618,18 @@ export function App() {
       }
       if (typed.type === "agent.context_compacted" && typed.threadId) {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
-          appendRuntimeStatus(typed.threadId, "上下文已自动压缩，继续分析中", typed.createdAt);
+          const completedTaskCompaction = (typed.payload as { trigger?: unknown } | undefined)?.trigger === "task_completed";
+          appendRuntimeStatus(
+            typed.threadId,
+            completedTaskCompaction ? "任务完成，已自动压缩上下文" : "上下文已自动压缩，继续分析中",
+            typed.createdAt
+          );
           if (notificationThreadId) {
-            updateThreadNotification(notificationThreadId, "上下文已压缩，继续分析。", typed.createdAt);
+            updateThreadNotification(
+              notificationThreadId,
+              completedTaskCompaction ? "任务完成，上下文已压缩。" : "上下文已压缩，继续分析。",
+              typed.createdAt
+            );
           }
         }
       }
@@ -3213,16 +3246,26 @@ export function App() {
         snapshot?.artifacts ?? [],
         snapshotWorkspaceRoot,
         selectedThreadStatus,
-        timelinePrompts
+        timelinePrompts,
+        snapshot?.contextCompaction
       ),
     [
       snapshotWorkspaceRoot,
       selectedThreadStatus,
       snapshot?.artifacts,
+      snapshot?.contextCompaction,
       snapshot?.toolCalls,
       timelinePrompts,
       visibleMessages
     ]
+  );
+  const conversationTurnSections = useMemo(
+    () => buildConversationTurnSections(timelineEntries),
+    [timelineEntries]
+  );
+  const timelineTurnByEntryId = useMemo(
+    () => new Map(conversationTurnSections.flatMap((section) => section.entryIds.map((entryId) => [entryId, section] as const))),
+    [conversationTurnSections]
   );
   const conversationTurns = useMemo(
     () => buildConversationTurnItems(visibleMessages, snapshot?.toolCalls ?? [], snapshotWorkspaceRoot),
@@ -3241,18 +3284,21 @@ export function App() {
       return null;
     }
     return Object.values(streamingAssistants)
-      .filter(
-        (entry) =>
-          entry.threadId === activeSnapshotThreadId &&
-          (entry.presentation === "continuing" || (
-            entry.content &&
-            !isPatchAssistantMessage(entry.content) &&
-            !isInternalAgentProtocolMessage(entry.content)
-          ))
-      )
+      .filter((entry) => {
+        if (entry.threadId !== activeSnapshotThreadId) return false;
+        const persisted = entry.messageId
+          ? visibleMessages.some((message) => message.id === entry.messageId)
+          : visibleMessages.some(
+              (message) => message.role === "assistant" && message.turnRunId === entry.turnRunId
+            );
+        return !persisted && getStreamingAssistantDisplayContent(entry).trim().length > 0;
+      })
       .sort((left, right) => left.turnRunId.localeCompare(right.turnRunId))
       .at(-1) ?? null;
-  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, streamingAssistants]);
+  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, streamingAssistants, visibleMessages]);
+  const activeStreamingContent = activeStreamingAssistant
+    ? getStreamingAssistantDisplayContent(activeStreamingAssistant)
+    : "";
   const composerPrimaryAction = getComposerPrimaryActionState(
     selectedThreadStatus,
     input.trim() || composerAttachments.some((attachment) => !isPersistentComposerContextKind(attachment.kind)) ? "content" : ""
@@ -3279,15 +3325,39 @@ export function App() {
   const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
     isTaskProcessing
   );
-  // Streaming model text is provisional until the runtime persists it as a
-  // message. Keep every uncommitted draft behind the live status disclosure so
-  // rejected/retried decisions never look like finalized chat content.
-  const runtimeStreamingDraft = resolveRuntimeStreamingDraft(activeStreamingAssistant);
+  const collapsedTurnIds = activeSnapshotThreadId ? collapsedConversationTurns[activeSnapshotThreadId] ?? new Set<string>() : new Set<string>();
+  const latestConversationTurn = conversationTurnSections.at(-1) ?? null;
+  useEffect(() => {
+    if (!activeSnapshotThreadId) return;
+    const initializedTurnIds = initializedConversationTurnsByThreadRef.current[activeSnapshotThreadId] ?? new Set<string>();
+    const turnIdsToCollapse = getDefaultCollapsedConversationTurnIds(
+      conversationTurnSections,
+      latestConversationTurn?.id ?? null,
+      isTaskProcessing
+    ).filter((turnId) => !initializedTurnIds.has(turnId));
+    if (turnIdsToCollapse.length === 0) return;
+
+    initializedConversationTurnsByThreadRef.current[activeSnapshotThreadId] = new Set([
+      ...initializedTurnIds,
+      ...turnIdsToCollapse
+    ]);
+    setCollapsedConversationTurns((current) => {
+      const currentIds = current[activeSnapshotThreadId] ?? new Set<string>();
+      return {
+        ...current,
+        [activeSnapshotThreadId]: new Set([...currentIds, ...turnIdsToCollapse])
+      };
+    });
+  }, [activeSnapshotThreadId, conversationTurnSections, isTaskProcessing, latestConversationTurn?.id]);
   const latestRootRuntimeTool = useMemo(
     () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
       (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
     )?.toolCall ?? null,
     [activeRuntimeActivity?.entries]
+  );
+  const activeSubagents = useMemo(
+    () => getActiveSubagents(currentSubagents, queuedSubagentIds),
+    [currentSubagents, queuedSubagentIds]
   );
   const subagentWaitLabel = getSubagentWaitLabel(currentSubagents, queuedSubagentIds);
   const isWaitingForSubagents = Boolean(
@@ -3325,6 +3395,16 @@ export function App() {
   const isProjectWelcome = selectedThread?.mode === "project";
   const welcomeCards = isProjectWelcome ? WELCOME_CARDS : CHAT_WELCOME_CARDS;
   const latestVisibleMessageId = timelineEntries[timelineEntries.length - 1]?.id ?? null;
+  function toggleConversationTurnCollapsed(turnId: string) {
+    const threadId = activeSnapshotThreadId;
+    if (!threadId) return;
+    setCollapsedConversationTurns((current) => {
+      const nextIds = new Set(current[threadId] ?? []);
+      if (nextIds.has(turnId)) nextIds.delete(turnId);
+      else nextIds.add(turnId);
+      return { ...current, [threadId]: nextIds };
+    });
+  }
   const transcriptUserMessageActions = useMemo<UserMessageActions>(() => ({
     editingMessage: editingUserMessage,
     onEditDraftChange: (content) =>
@@ -3938,7 +4018,7 @@ export function App() {
 
   function appendOptimisticUserMessage(threadId: string, content: string, attachments: MessageAttachment[] = []): MessageRecord {
     const optimisticMessage: MessageRecord = {
-      id: `optimistic-${Date.now()}`,
+      id: `optimistic-${globalThis.crypto.randomUUID()}`,
       threadId,
       turnRunId: null,
       role: "user",
@@ -3961,6 +4041,49 @@ export function App() {
       };
     });
     return optimisticMessage;
+  }
+
+  function removeOptimisticUserMessage(threadId: string, messageId: string) {
+    const remaining = (pendingUserMessagesRef.current[threadId] ?? [])
+      .filter((message) => message.id !== messageId);
+    if (remaining.length > 0) {
+      pendingUserMessagesRef.current[threadId] = remaining;
+    } else {
+      delete pendingUserMessagesRef.current[threadId];
+    }
+    setSnapshot((current) => current?.thread.id === threadId
+      ? { ...current, messages: current.messages.filter((message) => message.id !== messageId) }
+      : current
+    );
+  }
+
+  function updateOptimisticUserMessageAttachments(
+    threadId: string,
+    messageId: string,
+    attachments: MessageAttachment[]
+  ) {
+    if (attachments.length === 0) return;
+    const metadataJson = JSON.stringify({ attachments });
+    pendingUserMessagesRef.current[threadId] = (pendingUserMessagesRef.current[threadId] ?? []).map((message) =>
+      message.id === messageId ? { ...message, metadataJson } : message
+    );
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      return {
+        ...current,
+        messages: current.messages.map((message) =>
+          message.id === messageId ? { ...message, metadataJson } : message
+        )
+      };
+    });
+  }
+
+  function seedOptimisticThreadSnapshot(thread: ThreadRecord) {
+    snapshotThreadIdRef.current = thread.id;
+    delete snapshotCursorByThreadRef.current[thread.id];
+    setSnapshot(createOptimisticThreadSnapshot(thread));
+    setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
+    setIsThreadSwitching(false);
   }
 
   async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
@@ -4363,6 +4486,7 @@ export function App() {
       const thread = await createThreadRecord("chat");
       threadId = thread.id;
       selectThreadId(thread.id);
+      seedOptimisticThreadSnapshot(thread);
       void refreshThreads();
       void refreshSnapshot(thread.id);
     }
@@ -4381,31 +4505,15 @@ export function App() {
       return;
     }
 
-    const stage = stageOverride ?? gpaState.stage;
-    if (stage !== "off") {
-      const targetThread = threads.find((thread) => thread.id === threadId) ?? selectedThread;
-      if (targetThread?.mode !== "project") {
-        showNotice("GPA 仅支持项目模式", {
-          message: "当前不是项目对话，已按普通聊天发送；请新建项目后再开启 GPA。"
-        });
-        setGpaComposerSelected(false);
-        if (gpaState.stage !== "off") {
-          setGpaState((prev) => ({ ...prev, stage: "off", awaitingConfirmation: null, planTasks: [] }));
-        }
-      } else {
-        await window.codexh.setGpaStage({ threadId, stage });
-      }
-    }
-    if (gpaState.fullAccess) {
-      await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
-    }
-
     const displayContent = options?.displayContent
       ?? (options?.internal && (forcedContent ?? inputContent).trim().startsWith("[internal:")
         ? "继续"
         : forcedContent ?? inputContent);
     const queueingBehindActiveTask = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime;
     let startedLocalRuntime = false;
+    const optimisticMessage = !options?.internal
+      ? appendOptimisticUserMessage(threadId, displayContent)
+      : null;
     // Start the under-message heartbeat immediately so send never looks like a
     // silent no-op while attachments/skills/runtime wake are still in flight.
     if (!options?.internal && !queueingBehindActiveTask) {
@@ -4413,7 +4521,6 @@ export function App() {
       startRuntimeActivity(threadId);
       setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
       startedLocalRuntime = true;
-      appendOptimisticUserMessage(threadId, displayContent);
     } else if (!options?.internal) {
       setComposerSubmission(null);
     }
@@ -4425,39 +4532,62 @@ export function App() {
       setComposerAttachments([]);
     }
 
-    if (!forcedContent) {
-      const skillIds = submittedAttachments
-        .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
-        .map((attachment) => attachment.skillId);
-      for (const skillId of new Set(skillIds)) {
-        await window.codexh.addThreadSkill({ threadId, skillId });
+    try {
+      const stage = stageOverride ?? gpaState.stage;
+      if (stage !== "off") {
+        const targetThread = threads.find((thread) => thread.id === threadId) ?? selectedThread;
+        if (targetThread?.mode !== "project") {
+          showNotice("GPA 仅支持项目模式", {
+            message: "当前不是项目对话，已按普通聊天发送；请新建项目后再开启 GPA。"
+          });
+          setGpaComposerSelected(false);
+          if (gpaState.stage !== "off") {
+            setGpaState((prev) => ({ ...prev, stage: "off", awaitingConfirmation: null, planTasks: [] }));
+          }
+        } else {
+          await window.codexh.setGpaStage({ threadId, stage });
+        }
       }
+      if (gpaState.fullAccess) {
+        await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
+      }
+    } catch (error) {
+      if (optimisticMessage) removeOptimisticUserMessage(threadId, optimisticMessage.id);
+      setComposerSubmission(null);
+      if (!forcedContent) {
+        setInput((current) => current.trim() ? current : inputContent);
+        setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
+      }
+      if (startedLocalRuntime) {
+        clearRuntimeActivity(threadId);
+        setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+      }
+      showNotice("GPA 配置失败", { message: error instanceof Error ? error.message : String(error) });
+      return;
     }
 
     let importedAttachments: MessageAttachment[] = [];
-    if (!forcedContent) {
-      try {
-        importedAttachments = await importComposerAttachments(threadId, submittedAttachments);
-      } catch (error) {
-        setComposerSubmission(null);
-        setInput((current) => current.trim() ? current : inputContent);
-        setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
-        if (startedLocalRuntime) {
-          const pendingOptimistic = (pendingUserMessagesRef.current[threadId] ?? []).at(-1);
-          if (pendingOptimistic) {
-            pendingUserMessagesRef.current[threadId] = (pendingUserMessagesRef.current[threadId] ?? [])
-              .filter((message) => message.id !== pendingOptimistic.id);
-            setSnapshot((current) => current?.thread.id === threadId
-              ? { ...current, messages: current.messages.filter((message) => message.id !== pendingOptimistic.id) }
-              : current
-            );
-          }
-          clearRuntimeActivity(threadId);
-          setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+    try {
+      if (!forcedContent) {
+        const skillIds = submittedAttachments
+          .filter((attachment): attachment is Extract<ComposerAttachment, { kind: "skill" }> => attachment.kind === "skill")
+          .map((attachment) => attachment.skillId);
+        for (const skillId of new Set(skillIds)) {
+          await window.codexh.addThreadSkill({ threadId, skillId });
         }
-        showNotice("添加附件失败", { message: error instanceof Error ? error.message : String(error) });
-        return;
+        importedAttachments = await importComposerAttachments(threadId, submittedAttachments);
       }
+    } catch (error) {
+      if (optimisticMessage) removeOptimisticUserMessage(threadId, optimisticMessage.id);
+      setComposerSubmission(null);
+      setInput((current) => current.trim() ? current : inputContent);
+      setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
+      if (startedLocalRuntime) {
+        clearRuntimeActivity(threadId);
+        setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+      }
+      showNotice("添加附件失败", { message: error instanceof Error ? error.message : String(error) });
+      return;
     }
     const oneShotSkillIds = !forcedContent
       ? [...new Set(
@@ -4468,34 +4598,8 @@ export function App() {
       : [];
     const raw = (forcedContent ?? [inputContent, formatComposerAttachments(submittedAttachments.filter((attachment) => attachment.kind !== "file" && attachment.kind !== "image"))]
       .filter(Boolean).join("\n\n")).trim();
-    const optimisticMessage = !options?.internal && !startedLocalRuntime
-      ? appendOptimisticUserMessage(threadId, displayContent, importedAttachments)
-      : !options?.internal && startedLocalRuntime
-        ? (pendingUserMessagesRef.current[threadId] ?? []).at(-1) ?? null
-        : null;
-    if (startedLocalRuntime && importedAttachments.length > 0 && optimisticMessage) {
-      pendingUserMessagesRef.current[threadId] = (pendingUserMessagesRef.current[threadId] ?? []).map((message) =>
-        message.id === optimisticMessage.id
-          ? {
-              ...message,
-              metadataJson: JSON.stringify({ attachments: importedAttachments })
-            }
-          : message
-      );
-      setSnapshot((current) => {
-        if (!current || current.thread.id !== threadId) return current;
-        return {
-          ...current,
-          messages: current.messages.map((message) =>
-            message.id === optimisticMessage.id
-              ? {
-                  ...message,
-                  metadataJson: JSON.stringify({ attachments: importedAttachments })
-                }
-              : message
-          )
-        };
-      });
+    if (optimisticMessage) {
+      updateOptimisticUserMessageAttachments(threadId, optimisticMessage.id, importedAttachments);
     }
     if (!options?.internal) {
       setComposerSubmission(null);
@@ -4504,12 +4608,7 @@ export function App() {
       await window.codexh.sendMessage({ threadId, content: raw, displayContent, attachments: importedAttachments });
     } catch (error) {
       if (optimisticMessage) {
-        pendingUserMessagesRef.current[threadId] = (pendingUserMessagesRef.current[threadId] ?? [])
-          .filter((message) => message.id !== optimisticMessage.id);
-        setSnapshot((current) => current?.thread.id === threadId
-          ? { ...current, messages: current.messages.filter((message) => message.id !== optimisticMessage.id) }
-          : current
-        );
+        removeOptimisticUserMessage(threadId, optimisticMessage.id);
       }
       setComposerSubmission(null);
       if (!forcedContent) {
@@ -7444,22 +7543,6 @@ export function App() {
                     </div>
                   </header>
                   <div className="notification-center-body">
-                    {currentSubagents.length ? (
-                      <section className="notification-center-group" aria-label="子智能体">
-                        <div className="notification-center-group-title">子智能体<span>{currentSubagents.length}</span></div>
-                        <SubagentActivityList
-                          compact
-                          agents={currentSubagents}
-                          queuedAgentIds={queuedSubagentIds}
-                          runtimeActivities={runtimeActivities}
-                          onInterrupt={(agent) => {
-                            if (!selectedThreadId) return;
-                            void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
-                              .then(() => refreshSnapshot(selectedThreadId));
-                          }}
-                        />
-                      </section>
-                    ) : null}
                     {!sortedNotificationItems.length ? (
                       <div className="notification-center-empty"><IconBell /><span>暂无后台任务或消息</span></div>
                     ) : (
@@ -7569,35 +7652,60 @@ export function App() {
               </div>
             ) : (
               <div key={activeSnapshotThreadId ?? selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
-                {timelineEntries.map((entry) =>
-                  entry.kind === "message" ? (
-                    <TranscriptMessage
-                      key={entry.id}
-                      message={entry.message}
-                      assistantLabel={activeAssistantLabel}
-                      userMessageActions={transcriptUserMessageActions}
-                      isGpaPlanMessage={entry.message.id === gpaPlanMessageId}
-                    />
-                  ) : entry.kind === "file-summary" ? (
-                    <FileChangeSummary
-                      key={entry.id}
-                      files={entry.files}
-                      onOpenFolder={(filePath) => void openGeneratedFileLocation(filePath)}
-                    />
-                  ) : entry.kind === "directory-read-group" ? (
-                    <DirectoryReadGroup key={entry.id} directory={entry.directory} count={entry.count} />
-                  ) : entry.kind === "user-input" ? (
-                    <UserInputPromptCard
-                      key={entry.id}
-                      prompt={entry.prompt}
-                      resolving={false}
-                      canAnswer={false}
-                      onAnswer={() => undefined}
-                    />
-                  ) : (
-                    <ToolActivityGroup key={entry.id} toolCalls={entry.toolCalls} />
-                  )
-                )}
+                {timelineEntries.map((entry) => {
+                  const entryTurn = timelineTurnByEntryId.get(entry.id);
+                  const isLatestTurn = entryTurn?.id === latestConversationTurn?.id;
+                  const isActiveTurn = Boolean(isLatestTurn && isTaskProcessing);
+                  const isHiddenByTurnCollapse = Boolean(
+                    entryTurn &&
+                    collapsedTurnIds.has(entryTurn.id) &&
+                    entry.id !== entryTurn.userEntryId &&
+                    entry.id !== entryTurn.summaryEntryId
+                  );
+                  return (
+                  <Fragment key={entry.id}>
+                    {!isHiddenByTurnCollapse && (entry.kind === "message" ? (
+                      <TranscriptMessage
+                        message={entry.message}
+                        assistantLabel={activeAssistantLabel}
+                        userMessageActions={transcriptUserMessageActions}
+                        isGpaPlanMessage={entry.message.id === gpaPlanMessageId}
+                      />
+                    ) : entry.kind === "file-summary" ? (
+                      <FileChangeSummary
+                        files={entry.files}
+                        onOpenFolder={(filePath) => void openGeneratedFileLocation(filePath)}
+                      />
+                    ) : entry.kind === "directory-read-group" ? (
+                      <DirectoryReadGroup directory={entry.directory} count={entry.count} />
+                    ) : entry.kind === "context-compaction" ? (
+                      <ContextCompactionNotice compaction={entry.compaction} />
+                    ) : entry.kind === "user-input" ? (
+                      <UserInputPromptCard
+                        prompt={entry.prompt}
+                        resolving={false}
+                        canAnswer={false}
+                        onAnswer={() => undefined}
+                      />
+                    ) : (
+                      <ToolActivityGroup toolCalls={entry.toolCalls} />
+                    ))}
+                    {entryTurn && entry.id === entryTurn.userEntryId ? (
+                      <TurnElapsedBanner
+                        startedAt={entryTurn.startedAt}
+                        completedAt={isActiveTurn
+                          ? null
+                          : !isActiveTurn && isLatestTurn && completedTurnTimer
+                            ? completedTurnTimer.completedAt
+                            : entryTurn.completedAt}
+                        active={isActiveTurn}
+                        collapsed={collapsedTurnIds.has(entryTurn.id)}
+                        onToggle={() => toggleConversationTurnCollapsed(entryTurn.id)}
+                      />
+                    ) : null}
+                  </Fragment>
+                  );
+                })}
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -7639,26 +7747,28 @@ export function App() {
                     onConfirm={() => void confirmGpaPlanResumeRetry()}
                   />
                 ) : null}
-                {activeContextCompaction ? (
-                  <ContextCompactionNotice compaction={activeContextCompaction} />
+                {activeStreamingAssistant && activeStreamingContent ? (
+                  <StreamingAssistantMessage
+                    key={`streaming-${activeStreamingAssistant.turnRunId}`}
+                    assistantLabel={activeAssistantLabel}
+                    content={activeStreamingContent}
+                    turnRunId={activeStreamingAssistant.turnRunId}
+                  />
                 ) : null}
-                {showRuntimeActivityPanel ? (
+                {showRuntimeActivityPanel && !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id)) ? (
                   <RuntimeActivityPanel
                     key={activeSnapshotThreadId ?? "runtime-activity"}
                     label={taskProcessingLabel}
-                    startedAt={
-                      activeRuntimeActivity?.startedAt
-                      ?? (activeRuntimeActivity ? getRuntimeActivityStartedAt(activeRuntimeActivity.entries) : undefined)
-                    }
-                    active
                     entries={activeRuntimeActivity?.entries ?? []}
-                    streamingDraft={runtimeStreamingDraft}
                     preferLabel={isWaitingForSubagents}
-                  />
-                ) : completedTurnTimer ? (
-                  <TurnElapsedBanner
-                    startedAt={completedTurnTimer.startedAt}
-                    completedAt={completedTurnTimer.completedAt}
+                    activeSubagents={activeSubagents}
+                    queuedSubagentIds={queuedSubagentIds}
+                    runtimeActivities={runtimeActivities}
+                    onInterruptSubagent={(agent) => {
+                      if (!selectedThreadId) return;
+                      void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
+                        .then(() => refreshSnapshot(selectedThreadId));
+                    }}
                   />
                 ) : null}
               </div>
@@ -8963,6 +9073,39 @@ export function App() {
                       </div>
                     </>
                   ) : <div className="config-block"><div className="detail-empty">正在加载超时配置...</div></div>}
+                </div>
+              ) : null}
+
+              {settingsTab === "timeouts" && configDraft ? (
+                <div className="settings-section">
+                  <div className="config-block general-tone-settings">
+                    <div className="section-copy">
+                      <strong>语气设置</strong>
+                      <span>选择聊天回复的整体表达风格，不影响任务执行、工具调用和结果准确性。</span>
+                    </div>
+                    <div className="general-tone-segmented" role="radiogroup" aria-label="回复语气">
+                      {RESPONSE_TONE_OPTIONS.map((option) => {
+                        const active = (configDraft.responseTone ?? DEFAULT_RESPONSE_TONE) === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            className={active ? "active" : ""}
+                            onClick={() => setConfigDraft((current) => current ? { ...current, responseTone: option.value } : current)}
+                          >
+                            <strong>{option.label}</strong>
+                            <span>{option.description}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="settings-save-row">
+                      <span className="subtle-inline">保存后立即应用于后续回复。</span>
+                      <button className="button warm" type="button" onClick={() => void saveConfigDraft()}>保存</button>
+                    </div>
+                  </div>
                 </div>
               ) : null}
 
@@ -13936,7 +14079,8 @@ export function buildTimelineEntries(
   artifacts: ArtifactRecord[],
   workspaceRoot?: string | null,
   threadStatus?: ThreadRecord["status"] | null,
-  prompts: UserInputPrompt[] = []
+  prompts: UserInputPrompt[] = [],
+  contextCompaction: ContextCompactionRecord | null = null
 ): TimelineEntry[] {
   const filesByTurn = collectFileChangesByTurn(toolCalls, workspaceRoot);
   for (const artifact of artifacts) {
@@ -13974,6 +14118,7 @@ export function buildTimelineEntries(
   for (const message of messages) {
     if (
       message.role === "tool" ||
+      getMessageDisplayKind(message) === "tool_batch" ||
       isPatchAssistantMessage(message.content) ||
       (message.role === "assistant" && isInternalAgentProtocolMessage(message.content))
     ) {
@@ -14010,10 +14155,70 @@ export function buildTimelineEntries(
     createdAt: prompt.answeredAt ?? prompt.createdAt,
     prompt
   }));
-  const sortedEntries = [...messageEntries, ...toolEntries, ...fileSummaryEntries, ...promptEntries].sort(
+  const contextCompactionEntries: TimelineEntry[] = contextCompaction ? [{
+    kind: "context-compaction",
+    id: `context-compaction-${contextCompaction.turnRunId}-${contextCompaction.createdAt}`,
+    createdAt: contextCompaction.createdAt,
+    compaction: contextCompaction
+  }] : [];
+  const sortedEntries = [...messageEntries, ...toolEntries, ...fileSummaryEntries, ...promptEntries, ...contextCompactionEntries].sort(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
   );
   return collapseDirectoryReadMessages(sortedEntries);
+}
+
+export function buildConversationTurnSections(entries: TimelineEntry[]): ConversationTurnSection[] {
+  const sections: ConversationTurnSection[] = [];
+  let current: (ConversationTurnSection & {
+    lastFormalAssistantEntryId: string | null;
+  }) | null = null;
+
+  const finishCurrent = () => {
+    if (!current) return;
+    const { lastFormalAssistantEntryId, ...section } = current;
+    sections.push({
+      ...section,
+      summaryEntryId: lastFormalAssistantEntryId
+    });
+  };
+
+  for (const entry of entries) {
+    if (entry.kind === "message" && entry.message.role === "user") {
+      finishCurrent();
+      current = {
+        id: entry.id,
+        userEntryId: entry.id,
+        summaryEntryId: null,
+        entryIds: [entry.id],
+        startedAt: entry.createdAt,
+        completedAt: entry.createdAt,
+        lastFormalAssistantEntryId: null
+      };
+      continue;
+    }
+    if (!current) continue;
+    current.entryIds.push(entry.id);
+    if (Date.parse(entry.createdAt) > Date.parse(current.completedAt)) {
+      current.completedAt = entry.createdAt;
+    }
+    if (entry.kind === "message" && entry.message.role === "assistant") {
+      if (getMessageDisplayKind(entry.message) !== "commentary") {
+        current.lastFormalAssistantEntryId = entry.id;
+      }
+    }
+  }
+  finishCurrent();
+  return sections;
+}
+
+export function getDefaultCollapsedConversationTurnIds(
+  sections: Array<{ id: string }>,
+  latestTurnId: string | null,
+  isTaskProcessing: boolean
+): string[] {
+  return sections
+    .filter((section) => !isTaskProcessing || section.id !== latestTurnId)
+    .map((section) => section.id);
 }
 
 function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[], messages: MessageRecord[]): TimelineEntry[] {
@@ -14031,7 +14236,7 @@ function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[], messages: Me
     if (groupedToolCalls.length === 0) continue;
 
     for (const toolCall of groupedToolCalls) assignedCallIds.add(toolCall.id);
-    entries.push(createToolGroupTimelineEntry(`commentary-${message.id}`, message.createdAt, groupedToolCalls));
+    entries.push(createToolGroupTimelineEntry(`commentary-${message.id}`, groupedToolCalls));
   }
 
   // Older messages predate commentary metadata. Infer their batches from the
@@ -14054,24 +14259,31 @@ function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[], messages: Me
       .filter((message) => Date.parse(message.createdAt) <= Date.parse(toolCall.startedAt))
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
     const groupId = precedingMessage ? `message-${precedingMessage.id}` : toolCall.turnRunId || `legacy-${toolCall.id}`;
-    const createdAt = precedingMessage?.createdAt ?? toolCall.startedAt;
+    const createdAt = toolCall.startedAt;
     const group = fallbackGroups.get(groupId) ?? { createdAt, toolCalls: [] };
     group.toolCalls.push(toolCall);
     fallbackGroups.set(groupId, group);
   }
 
   for (const [groupId, group] of fallbackGroups) {
-    entries.push(createToolGroupTimelineEntry(groupId, group.createdAt, group.toolCalls));
+    entries.push(createToolGroupTimelineEntry(groupId, group.toolCalls, group.createdAt));
   }
   return entries;
 }
 
-function createToolGroupTimelineEntry(groupId: string, createdAt: string, toolCalls: ToolCallRecord[]): TimelineEntry {
+function createToolGroupTimelineEntry(
+  groupId: string,
+  toolCalls: ToolCallRecord[],
+  fallbackCreatedAt?: string
+): TimelineEntry {
+  const sortedToolCalls = [...toolCalls].sort(
+    (left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt)
+  );
   return {
     kind: "tool-group",
     id: `tool-group-${groupId}`,
-    createdAt,
-    toolCalls: [...toolCalls].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
+    createdAt: sortedToolCalls[0]?.startedAt ?? fallbackCreatedAt ?? new Date().toISOString(),
+    toolCalls: sortedToolCalls
   };
 }
 
@@ -14079,7 +14291,7 @@ function getCommentaryToolCallIds(message: MessageRecord): string[] {
   if (message.role !== "assistant" || !message.metadataJson) return [];
   try {
     const metadata = JSON.parse(message.metadataJson) as { displayKind?: unknown; toolCallIds?: unknown };
-    return metadata.displayKind === "commentary" && Array.isArray(metadata.toolCallIds)
+    return (metadata.displayKind === "commentary" || metadata.displayKind === "tool_batch") && Array.isArray(metadata.toolCallIds)
       ? metadata.toolCallIds.filter((toolCallId): toolCallId is string => typeof toolCallId === "string")
       : [];
   } catch {
@@ -14992,112 +15204,71 @@ function formatElapsedClock(durationMs: number): string {
   return `${seconds}s`;
 }
 
-function SubagentActivityList({
+function ActiveSubagentLines({
   agents,
   queuedAgentIds,
   runtimeActivities,
-  onInterrupt,
-  compact = false
+  onInterrupt
 }: {
   agents: ThreadRecord[];
-  queuedAgentIds?: Set<string>;
+  queuedAgentIds: Set<string>;
   runtimeActivities: Record<string, RuntimeActivity>;
   onInterrupt: (agent: ThreadRecord) => void;
-  compact?: boolean;
 }) {
-  const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
-  const queuedCount = agents.filter((agent) => queuedAgentIds?.has(agent.id)).length;
-  const activeCount = agents.filter((agent) => !queuedAgentIds?.has(agent.id) && (agent.status === "running" || agent.status === "waiting")).length;
-  const failedCount = agents.filter((agent) => agent.status === "failed").length;
-  const completedCount = agents.filter((agent) => agent.status === "completed").length;
-  const stoppedCount = agents.filter((agent) => agent.status === "idle").length;
-  const summaryLabel = activeCount > 0
-    ? `${activeCount} 个运行中`
-    : queuedCount > 0
-      ? `${queuedCount} 个排队中`
-    : failedCount > 0
-      ? `${failedCount} 个需处理`
-      : completedCount === agents.length
-        ? `${completedCount} 个已完成`
-        : stoppedCount > 0
-          ? `${stoppedCount} 个已停止`
-          : `${agents.length} 个已结束`;
-
   return (
-    <section className={`agent-activity-list ${compact ? "is-notification" : ""}`} aria-label="子智能体活动" tabIndex={0}>
-      <div className="agent-activity-summary" aria-live="polite">
-        <span className={`agent-activity-indicator ${activeCount > 0 ? "running" : failedCount > 0 ? "failed" : "completed"}`} aria-hidden="true" />
-        <IconSkills />
-        <span className="agent-activity-heading">子智能体</span>
-        <span className="agent-activity-count">{summaryLabel}</span>
-      </div>
-      <div className="agent-activity-details">
-        {agents.map((agent) => {
-        const queued = queuedAgentIds?.has(agent.id) ?? false;
-        const active = !queued && (agent.status === "running" || agent.status === "waiting");
+    <div className="active-subagent-lines" aria-label="运行中的子智能体" aria-live="polite">
+      {agents.map((agent) => {
+        const queued = queuedAgentIds.has(agent.id);
+        const state = queued ? "queued" : agent.status === "waiting" ? "waiting" : "running";
         const runtimeActivity = runtimeActivities[agent.id];
         const runtimeLabel = getSubagentRuntimeLabel(runtimeActivity);
         const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity);
         const title = getSubagentTitle(agent);
-        const statusLabel = queued
-          ? "排队中"
-          : agent.status === "completed"
-          ? "已完成"
-          : agent.status === "failed"
-            ? "失败"
-            : agent.status === "waiting"
-              ? "等待中"
-              : active
-                ? "运行中"
-                : "已停止";
+        const statusLabel = queued ? "排队中" : agent.status === "waiting" ? "等待中" : "运行中";
+        const activityLabel = queued
+          ? "等待可用名额"
+          : runtimeLabel ?? (agent.status === "waiting" ? "等待处理中" : "正在准备任务");
         return (
-          <div key={agent.id} className={`agent-activity-row ${queued ? "queued" : agent.status} ${expandedAgentId === agent.id ? "is-open" : ""}`}>
-            <button
-              type="button"
-              className="agent-activity-main"
-              aria-expanded={expandedAgentId === agent.id}
-              onClick={() => setExpandedAgentId((current) => current === agent.id ? null : agent.id)}
-              title={expandedAgentId === agent.id ? "收起子任务详情" : "展开子任务详情"}
-            >
-              <span className="agent-activity-title-row">
-                <span className="agent-activity-disclosure" aria-hidden="true"><IconChevronRight /></span>
-                <span className="agent-activity-title">{title}</span>
-                <span className="agent-activity-path">{agent.agentPath}</span>
-              </span>
-              <span key={`${agent.id}-${runtimeLabel ?? "preparing"}`} className="agent-activity-task agent-runtime-update">
-                {queued ? "等待可用的子智能体名额" : runtimeLabel ?? "正在准备任务"}
-              </span>
-            </button>
-            <span className="agent-activity-status">
-              <span>{statusLabel}</span>
-              <SubagentElapsedTime
-                startedAt={runtimeActivity?.startedAt ?? agent.createdAt}
-                active={active || queued}
-                completedAt={active || queued ? null : agent.updatedAt}
-              />
-            </span>
-            {active || queued ? (
-              <button type="button" className="agent-activity-stop" title="停止子任务" onClick={() => onInterrupt(agent)}>
-                停止
-              </button>
-            ) : null}
-            {expandedAgentId === agent.id ? (
-              <div className="agent-activity-task-detail">
-                <div className="agent-activity-detail-heading">运行动态</div>
-                {runtimeHistory.length > 0 ? (
-                  <div className="agent-activity-runtime-history">
-                    {runtimeHistory.map((entry) => <span key={entry.id}>{entry.label}</span>)}
-                  </div>
-                ) : <div className="agent-activity-runtime-empty">正在等待子智能体返回运行状态。</div>}
-                <div className="agent-activity-detail-heading">任务说明</div>
-                <div className="agent-activity-task-prompt">{agent.lastTaskMessage || agent.agentRole || "该子任务暂无任务说明。"}</div>
+          <details key={agent.id} className={`active-subagent-line ${state}`}>
+            <summary title="展开子智能体详情">
+              <span className="active-subagent-name">子智能体 {title}</span>
+              <span className="active-subagent-separator">:</span>
+              <span className="active-subagent-activity">{activityLabel}</span>
+            </summary>
+            <div className="active-subagent-detail">
+              <div className="active-subagent-meta">
+                <code>{agent.agentPath}</code>
+                <span>{statusLabel}</span>
+                <span aria-hidden>·</span>
+                <SubagentElapsedTime
+                  startedAt={runtimeActivity?.startedAt ?? agent.createdAt}
+                  active
+                  completedAt={null}
+                />
+                <button type="button" className="active-subagent-stop" onClick={() => onInterrupt(agent)}>
+                  停止
+                </button>
               </div>
-            ) : null}
-          </div>
+              {runtimeHistory.length > 0 ? (
+                <div className="active-subagent-history">
+                  {runtimeHistory.map((entry) => <span key={entry.id}>{entry.label}</span>)}
+                </div>
+              ) : <div className="active-subagent-empty">正在等待运行状态。</div>}
+              <div className="active-subagent-prompt">{agent.lastTaskMessage || agent.agentRole || "暂无任务说明。"}</div>
+            </div>
+          </details>
         );
-        })}
-      </div>
-    </section>
+      })}
+    </div>
+  );
+}
+
+export function getActiveSubagents<T extends Pick<ThreadRecord, "id" | "status">>(
+  agents: T[],
+  queuedAgentIds: Set<string>
+): T[] {
+  return agents.filter(
+    (agent) => queuedAgentIds.has(agent.id) || agent.status === "running" || agent.status === "waiting"
   );
 }
 
@@ -15172,16 +15343,33 @@ function getSubagentRuntimeHistory(activity: RuntimeActivity | undefined): Array
 function TurnElapsedBanner({
   startedAt,
   completedAt,
-  active = false
+  active = false,
+  collapsed = false,
+  onToggle
 }: {
   startedAt: string;
   completedAt?: string | null;
   active?: boolean;
+  collapsed?: boolean;
+  onToggle?: () => void;
 }) {
   const elapsedMs = useElapsedClock(startedAt, active, completedAt);
   return (
     <div className={`turn-elapsed-banner ${active ? "active" : "completed"}`} aria-live="polite">
-      <span className="turn-elapsed-label">已处理 {formatElapsedClock(elapsedMs)}</span>
+      <div className="turn-elapsed-head">
+        <span className="turn-elapsed-label">已处理 {formatElapsedClock(elapsedMs)}</span>
+        {onToggle ? (
+          <button
+            type="button"
+            className={`turn-elapsed-toggle ${collapsed ? "" : "is-expanded"}`}
+            aria-expanded={!collapsed}
+            title={collapsed ? "展开处理过程" : "折叠处理过程"}
+            onClick={onToggle}
+          >
+            <IconChevronRight />
+          </button>
+        ) : null}
+      </div>
       <div className="turn-elapsed-track" aria-hidden="true">
         <span className="turn-elapsed-bar" />
       </div>
@@ -15213,150 +15401,57 @@ function ComposerSubmissionStatus({ submission }: { submission: ComposerSubmissi
 
 function RuntimeActivityPanel({
   label,
-  startedAt,
-  active,
   entries,
-  streamingDraft,
-  preferLabel = false
+  preferLabel = false,
+  activeSubagents,
+  queuedSubagentIds,
+  runtimeActivities,
+  onInterruptSubagent
 }: {
   label: string;
-  startedAt?: string;
-  active?: boolean;
   entries: RuntimeActivityEntry[];
-  streamingDraft?: { content: string; turnRunId: string } | null;
   preferLabel?: boolean;
+  activeSubagents: ThreadRecord[];
+  queuedSubagentIds: Set<string>;
+  runtimeActivities: Record<string, RuntimeActivity>;
+  onInterruptSubagent: (agent: ThreadRecord) => void;
 }) {
-  const [stableDraft, setStableDraft] = useState(streamingDraft ?? null);
-  const [isDraftViewerOpen, setIsDraftViewerOpen] = useState(false);
-  const [isDraftViewerFollowing, setIsDraftViewerFollowing] = useState(true);
-  const livePreviewRef = useRef<HTMLDivElement | null>(null);
-  const viewerContentRef = useRef<HTMLDivElement | null>(null);
-  const draftViewerFollowingRef = useRef(true);
-  const draftViewerPresence = useMotionPresence(isDraftViewerOpen ? true : null, 180);
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
-  const resolvedStartedAt = startedAt || getRuntimeActivityStartedAt(entries);
-  const elapsedMs = useElapsedClock(resolvedStartedAt, active !== false);
+  const runningToolCall = [...entries].reverse().find(
+    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> =>
+      entry.kind === "tool" && (entry.toolCall.status === "pending" || entry.toolCall.status === "running")
+  )?.toolCall ?? null;
   const displayLabel = preferLabel ? label : latestStatus?.label ?? label;
-
-  useEffect(() => {
-    if (streamingDraft?.content.trim()) {
-      setStableDraft(streamingDraft);
-    }
-  }, [streamingDraft?.content, streamingDraft?.turnRunId]);
-
-  useLayoutEffect(() => {
-    const node = livePreviewRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [stableDraft?.content]);
-
-  useLayoutEffect(() => {
-    const node = viewerContentRef.current;
-    if (!isDraftViewerOpen || !node || !draftViewerFollowingRef.current) return;
-    node.scrollTop = node.scrollHeight;
-  }, [isDraftViewerOpen, stableDraft?.content]);
-
-  useEffect(() => {
-    if (!isDraftViewerOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        setIsDraftViewerOpen(false);
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape, true);
-    return () => window.removeEventListener("keydown", closeOnEscape, true);
-  }, [isDraftViewerOpen]);
-
-  const openDraftViewer = () => {
-    draftViewerFollowingRef.current = true;
-    setIsDraftViewerFollowing(true);
-    setIsDraftViewerOpen(true);
-  };
-
-  const followLatestDraft = () => {
-    const node = viewerContentRef.current;
-    draftViewerFollowingRef.current = true;
-    setIsDraftViewerFollowing(true);
-    node?.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-  };
-
-  const draftViewer = draftViewerPresence.value && stableDraft
-    ? createPortal(
-        <div
-          className="runtime-draft-viewer-backdrop motion-overlay"
-          data-motion={draftViewerPresence.phase}
-          onPointerDown={() => setIsDraftViewerOpen(false)}
-        >
-          <aside
-            className="runtime-draft-viewer"
-            role="dialog"
-            aria-modal="true"
-            aria-label="实时草稿"
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <header className="runtime-draft-viewer-header">
-              <div>
-                <span className="runtime-draft-viewer-live"><i aria-hidden />实时草稿</span>
-                <strong>{displayLabel}</strong>
-              </div>
-              <button type="button" title="关闭" aria-label="关闭实时草稿" onClick={() => setIsDraftViewerOpen(false)}>
-                <IconClose />
-              </button>
-            </header>
-            <div
-              ref={viewerContentRef}
-              className="runtime-draft-viewer-content"
-              onScroll={(event) => {
-                const node = event.currentTarget;
-                const atLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 36;
-                draftViewerFollowingRef.current = atLatest;
-                setIsDraftViewerFollowing((current) => current === atLatest ? current : atLatest);
-              }}
-            >
-              <div>{stableDraft.content}<span className="runtime-draft-caret" aria-hidden /></div>
-            </div>
-            {!isDraftViewerFollowing ? (
-              <button type="button" className="runtime-draft-viewer-latest" onClick={followLatestDraft}>
-                <IconArrowDown />
-                <span>回到最新</span>
-              </button>
-            ) : null}
-          </aside>
-        </div>,
-        document.body
-      )
+  const runningCommand = displayLabel.startsWith("正在运行 ")
+    ? displayLabel.slice("正在运行 ".length)
     : null;
+
   const currentStatus = (
-    <>
-      <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
-      <strong>{displayLabel}</strong>
-      {resolvedStartedAt ? <time>{formatElapsedClock(elapsedMs)}</time> : null}
-    </>
+    <div className="runtime-activity-current">
+      {runningToolCall ? (
+        <span className="runtime-activity-current-icon" aria-hidden>
+          <ToolActivityIcon toolName={runningToolCall.toolName} />
+        </span>
+      ) : null}
+      {runningCommand ? (
+        <span className="runtime-activity-command">
+          <span>正在运行</span>
+          <code title={runningCommand}>{runningCommand}</code>
+        </span>
+      ) : <strong>{displayLabel}</strong>}
+    </div>
   );
-  if (stableDraft?.content.trim()) {
-    return (
-      <section className="runtime-activity-panel has-streaming-draft" aria-live="polite">
-        <div className="runtime-activity-current">
-          {currentStatus}
-        </div>
-        <div className="runtime-activity-live-window" aria-live="off">
-          <div ref={livePreviewRef} className="runtime-activity-streaming-draft">
-            <span>{stableDraft.content}</span><span className="runtime-draft-caret" aria-hidden />
-          </div>
-          <button type="button" className="runtime-activity-view-draft" onClick={openDraftViewer}>
-            <IconSinglePanel />
-            <span>查看完整草稿</span>
-          </button>
-        </div>
-        {draftViewer}
-      </section>
-    );
-  }
   return (
     <section className="runtime-activity-panel" aria-live="polite">
-      <div className="runtime-activity-current">
-        {currentStatus}
-      </div>
+      {currentStatus}
+      {activeSubagents.length > 0 ? (
+        <ActiveSubagentLines
+          agents={activeSubagents}
+          queuedAgentIds={queuedSubagentIds}
+          runtimeActivities={runtimeActivities}
+          onInterrupt={onInterruptSubagent}
+        />
+      ) : null}
     </section>
   );
 }
@@ -15636,11 +15731,31 @@ function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
   );
 }
 
-const ToolActivityGroup = memo(function ToolActivityGroup({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
-  const [expanded, setExpanded] = useState(false);
-  const { runningCall, status } = getToolActivityPresentation(toolCalls);
+type ToolActivityGroupProps = {
+  toolCalls: ToolCallRecord[];
+};
+
+const ToolActivityGroup = memo(function ToolActivityGroup({
+  toolCalls
+}: ToolActivityGroupProps) {
+  const toolPresentation = getToolActivityPresentation(toolCalls);
+  const { runningCall } = toolPresentation;
   const isRunning = Boolean(runningCall);
+  const [expanded, setExpanded] = useState(false);
+  const wasRunningRef = useRef(isRunning);
+  const status = toolPresentation.status;
   const conciseLabel = getConciseToolActivityLabel(toolCalls, runningCall);
+
+  useEffect(() => {
+    if (isRunning) {
+      wasRunningRef.current = true;
+      return;
+    }
+    if (wasRunningRef.current) {
+      wasRunningRef.current = false;
+      setExpanded(false);
+    }
+  }, [isRunning]);
 
   return (
     <section className={`tool-activity-group ${status} ${expanded ? "is-expanded" : ""}`} aria-live="polite">
@@ -16203,6 +16318,31 @@ type TranscriptMessageProps = {
   isGpaPlanMessage?: boolean;
 };
 
+type StreamingAssistantMessageProps = {
+  assistantLabel: string;
+  content: string;
+  turnRunId: string;
+};
+
+const StreamingAssistantMessage = memo(function StreamingAssistantMessage({
+  assistantLabel,
+  content,
+  turnRunId
+}: StreamingAssistantMessageProps) {
+  return (
+    <article className="message-card assistant streaming-assistant" aria-live="polite" aria-busy="true">
+      <div className="message-header">
+        <span className="message-author assistant">{assistantLabel}</span>
+        <span className="streaming-assistant-state">正在回复</span>
+      </div>
+      <div className="message-flat-body streaming-assistant-body">
+        {renderStreamingAssistant(content, `streaming-${turnRunId}`)}
+        <span className="streaming-caret" aria-hidden />
+      </div>
+    </article>
+  );
+});
+
 const TranscriptMessage = memo(function TranscriptMessage({
   message,
   assistantLabel,
@@ -16408,27 +16548,29 @@ function renderMessageContent(
               {content ? <div className="message-user-text">{content}</div> : null}
               <MessageSelectedContextChips content={message.content} />
               <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
-              <div className="message-user-actions" aria-label="消息操作">
-                <button
-                  type="button"
-                  title="复制消息"
-                  aria-label="复制消息"
-                  onClick={() => userMessageActions.onCopy(content)}
-                >
-                  <IconCopy />
-                </button>
-                <button
-                  type="button"
-                  title="重新编辑消息"
-                  aria-label="重新编辑消息"
-                  onClick={() => userMessageActions.onEdit(message)}
-                >
-                  <IconCompose />
-                </button>
-              </div>
             </>
           )}
         </div>
+        {!editingMessage ? (
+          <div className="message-user-actions" aria-label="消息操作">
+            <button
+              type="button"
+              title="复制消息"
+              aria-label="复制消息"
+              onClick={() => userMessageActions.onCopy(content)}
+            >
+              <IconCopy />
+            </button>
+            <button
+              type="button"
+              title="重新编辑消息"
+              aria-label="重新编辑消息"
+              onClick={() => userMessageActions.onEdit(message)}
+            >
+              <IconCompose />
+            </button>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -17638,14 +17780,27 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
     }
     case "paragraph":
       return <p key={key}>{renderMarkdownInline(block.text, `${key}-inline`)}</p>;
-    case "unordered-list":
+    case "unordered-list": {
+      const taskItems = block.items.map((item) => item.match(/^\[([ xX])\]\s+(.*)$/));
+      const isTaskList = taskItems.every((item) => item !== null);
       return (
-        <ul key={key}>
-          {block.items.map((item, index) => (
-            <li key={`${key}-item-${index}`}>{renderMarkdownInline(item, `${key}-item-inline-${index}`)}</li>
-          ))}
+        <ul key={key} className={isTaskList ? "markdown-task-list" : undefined}>
+          {block.items.map((item, index) => {
+            const taskItem = taskItems[index];
+            return (
+              <li key={`${key}-item-${index}`}>
+                {taskItem ? (
+                  <>
+                    <input type="checkbox" checked={taskItem[1].toLowerCase() === "x"} readOnly tabIndex={-1} />
+                    {renderMarkdownInline(taskItem[2], `${key}-item-inline-${index}`)}
+                  </>
+                ) : renderMarkdownInline(item, `${key}-item-inline-${index}`)}
+              </li>
+            );
+          })}
         </ul>
       );
+    }
     case "ordered-list":
       return (
         <ol key={key}>
@@ -17654,6 +17809,23 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
           ))}
         </ol>
       );
+    case "structured-ordered-list":
+      return (
+        <ol key={key} className="markdown-structured-list">
+          {block.items.map((item, index) => (
+            <li key={`${key}-item-${index}`}>
+              <strong>{renderMarkdownInline(item.title, `${key}-item-title-${index}`)}</strong>
+              {item.paragraphs.map((paragraph, paragraphIndex) => (
+                <p key={`${key}-item-${index}-paragraph-${paragraphIndex}`}>
+                  {renderMarkdownInline(paragraph, `${key}-item-paragraph-${index}-${paragraphIndex}`)}
+                </p>
+              ))}
+            </li>
+          ))}
+        </ol>
+      );
+    case "horizontal-rule":
+      return <hr key={key} className="markdown-horizontal-rule" />;
     case "blockquote":
       return (
         <blockquote key={key}>
@@ -17827,7 +17999,7 @@ async function copyTextToClipboard(content: string): Promise<boolean> {
 
 function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const tokenPattern = /!\[([^\]]*)\]\(([^)]+)\)|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+  const tokenPattern = /!\[([^\]]*)\]\(([^)]+)\)|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|~~([^~]+)~~|\*([^*]+)\*/g;
   let cursor = 0;
   let tokenIndex = 0;
   let match: RegExpExecArray | null;
@@ -17852,7 +18024,9 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
     } else if (match[6]) {
       nodes.push(<strong key={`${keyPrefix}-strong-${tokenIndex}`}>{match[6]}</strong>);
     } else if (match[7]) {
-      nodes.push(<em key={`${keyPrefix}-em-${tokenIndex}`}>{match[7]}</em>);
+      nodes.push(<del key={`${keyPrefix}-delete-${tokenIndex}`}>{match[7]}</del>);
+    } else if (match[8]) {
+      nodes.push(<em key={`${keyPrefix}-em-${tokenIndex}`}>{match[8]}</em>);
     }
 
     cursor = tokenPattern.lastIndex;
@@ -18048,6 +18222,12 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
       continue;
     }
 
+    if (/^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+      flushTextualState();
+      blocks.push({ kind: "horizontal-rule" });
+      continue;
+    }
+
     const unorderedMatch = trimmed.match(/^[-*+]\s+(.*)$/);
     if (unorderedMatch) {
       flushParagraph();
@@ -18095,7 +18275,49 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
     });
   }
 
-  return blocks;
+  return consolidateLooseOrderedLists(blocks);
+}
+
+function consolidateLooseOrderedLists(blocks: MarkdownBlock[]): MarkdownBlock[] {
+  const normalized: MarkdownBlock[] = [];
+
+  for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
+    const firstBlock = blocks[blockIndex];
+    if (firstBlock.kind !== "ordered-list" || firstBlock.items.length !== 1) {
+      normalized.push(firstBlock);
+      continue;
+    }
+
+    const items = [{ title: firstBlock.items[0], paragraphs: [] as string[] }];
+    let nextIndex = blockIndex + 1;
+    while (nextIndex < blocks.length) {
+      const paragraphs: string[] = [];
+      while (blocks[nextIndex]?.kind === "paragraph") {
+        paragraphs.push((blocks[nextIndex] as Extract<MarkdownBlock, { kind: "paragraph" }>).text);
+        nextIndex += 1;
+      }
+
+      const nextBlock = blocks[nextIndex];
+      if (nextBlock?.kind !== "ordered-list" || nextBlock.items.length !== 1) {
+        items[items.length - 1].paragraphs = paragraphs;
+        break;
+      }
+
+      items[items.length - 1].paragraphs = paragraphs;
+      items.push({ title: nextBlock.items[0], paragraphs: [] });
+      nextIndex += 1;
+    }
+
+    if (items.length === 1) {
+      normalized.push(firstBlock);
+      continue;
+    }
+
+    normalized.push({ kind: "structured-ordered-list", items });
+    blockIndex = nextIndex - 1;
+  }
+
+  return normalized;
 }
 
 function isMarkdownTableRow(line: string): boolean {
@@ -18196,6 +18418,7 @@ function cloneConfig(config: AppConfig): AppConfig {
   return {
     defaultModel: config.defaultModel,
     defaultProvider: config.defaultProvider,
+    responseTone: config.responseTone ?? DEFAULT_RESPONSE_TONE,
     providers: config.providers.map((provider) => ({
       ...provider,
       headers: provider.headers ? { ...provider.headers } : undefined
@@ -18773,6 +18996,27 @@ export function reconcilePendingUserMessages(
   });
 }
 
+export function createOptimisticThreadSnapshot(thread: ThreadRecord): RuntimeThreadSnapshot {
+  return {
+    snapshotMode: "full",
+    thread,
+    messages: [],
+    messageCount: 0,
+    queuedMessages: [],
+    approvals: [],
+    prompts: [],
+    artifacts: [],
+    knowledgeBases: [],
+    browserTabs: [],
+    projectPlugins: [],
+    toolCalls: [],
+    contextCompaction: null,
+    gpa: null,
+    subagents: [],
+    queuedSubagentIds: []
+  };
+}
+
 export function shouldKeepStreamingAssistant(
   entry: { turnRunId: string; completed: boolean; messageId?: string },
   persistedMessages: MessageRecord[],
@@ -18797,14 +19041,10 @@ export function preserveStreamingDraftContent(
   return queuedContent ?? activeContent ?? "";
 }
 
-export function resolveRuntimeStreamingDraft(entry: {
-  turnRunId: string;
-  content: string;
-  presentation: StreamingAssistant["presentation"];
-} | null): { turnRunId: string; content: string } | null {
-  if (!entry || entry.presentation === "committed") return null;
-  const content = stripAssistantToolMarkup(entry.content);
-  return content.trim() ? { turnRunId: entry.turnRunId, content } : null;
+export function getStreamingAssistantDisplayContent(entry: Pick<StreamingAssistant, "content" | "presentation">): string {
+  if (entry.presentation === "continuing") return "";
+  if (isPatchAssistantMessage(entry.content) || isInternalAgentProtocolMessage(entry.content)) return "";
+  return stripAssistantToolMarkup(entry.content);
 }
 
 function normalizeUserMessageForReconciliation(content: string): string {

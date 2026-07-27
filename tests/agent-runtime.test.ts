@@ -5,7 +5,12 @@ import {
   createToolCallFingerprint,
   createCommentaryMessageKey,
   buildCommentaryMessageMetadata,
+  buildToolBatchMessageMetadata,
+  buildToolBatchProgressMessage,
+  applyResponseToneToProgressMessage,
+  buildResponseTonePrompt,
   isSafeCommentaryMessage,
+  shouldSuppressPrematureRootReport,
   buildUserMessageMetadata,
   buildBrowserTestChoiceQuestion,
   buildAgentProtocolRecoveryQuestion,
@@ -20,6 +25,8 @@ import {
   validateManagedWriteCompletion,
   buildManagedWriteCompletionRecoveryInstruction,
   validateStandardCompletion,
+  resolveStandardCompletionAuditAction,
+  buildStandardCompletionAuditInstruction,
   buildStandardCompletionRecoveryInstruction,
   isDeferredExecutionPayload,
   isProjectFileMutationRequest,
@@ -79,6 +86,7 @@ import {
   summarizeToolResultForModel,
   shouldFinishGpaAnalysisTurn,
   resolveTerminalTurnDisposition,
+  resolveRootSubagentModelGate,
   parseCanonicalGpaPlanTasks,
   parseGpaPlanTasks,
   reconcileGpaPlanTasks,
@@ -371,12 +379,124 @@ describe("commentary messages", () => {
     expect(createCommentaryMessageKey("I will inspect the renderer.", toolCalls)).toContain("fs.read_file");
   });
 
+  it("creates a hidden anchor for a tool batch without commentary", () => {
+    expect(buildToolBatchMessageMetadata(toolCalls)).toEqual({
+      displayKind: "tool_batch",
+      toolCallIds: ["read-1"]
+    });
+  });
+
+  it("provides visible fallback progress when a tool batch omits commentary", () => {
+    expect(buildToolBatchProgressMessage([
+      { id: "search-1", name: "web_search.search_query", arguments: { query: "Codex skills" } }
+    ])).toBe("我先查一下“Codex skills”的相关资料，把关键信息核对清楚后再继续整理。");
+    expect(buildToolBatchProgressMessage(toolCalls)).toBe("我先把相关代码读一遍，弄清楚现在的实现和前后关系。");
+    expect(buildToolBatchProgressMessage([
+      { id: "custom-1", name: "custom.inspect", arguments: {} }
+    ])).toBe("我继续把这一步处理清楚，确认结果后再往下进行。");
+  });
+
+  it("uses conversational language without exposing internal execution details", () => {
+    expect(buildToolBatchProgressMessage([
+      { id: "shell-1", name: "shell.exec", arguments: { command: "pnpm test" } }
+    ])).toBe("我先把相关测试跑一遍，确认修改后的行为没有问题。");
+    expect(buildToolBatchProgressMessage([
+      { id: "skill-1", name: "skills.load", arguments: { skill_id: "8e63e393c32f27420c5866853cc00a4f11d0ac7ce34ad33b312c670ff4df200e" } }
+    ])).toBe("我先把适合这类任务的处理方法梳理清楚，再按正确的步骤继续往下做。");
+    expect(buildToolBatchProgressMessage([
+      {
+        id: "patch-1",
+        name: "apply_patch",
+        arguments: { patch: "*** Begin Patch\n*** Update File: src/App.tsx\n*** End Patch" }
+      }
+    ])).toBe("我来把相关内容修改好，完成后再检查是否还有遗漏。");
+    expect(buildToolBatchProgressMessage([
+      { id: "read-1", name: "fs.read_file", arguments: { path: "src/App.tsx" } },
+      { id: "read-2", name: "fs.read_file", arguments: { path: "src/index.ts" } }
+    ])).toBe("我先把相关代码读一遍，弄清楚现在的实现和前后关系。");
+  });
+
+  it("summarizes mixed tool batches as one coherent sentence", () => {
+    expect(buildToolBatchProgressMessage([
+      { id: "search-1", name: "web_search.search_query", arguments: { query: "renderer behavior" } },
+      { id: "read-1", name: "fs.read_file", arguments: { path: "src/App.tsx" } }
+    ])).toBe("我先一边核对相关资料，一边检查现有实现，把关键信息确认清楚后再继续。");
+  });
+
+  it("applies the selected tone to fallback progress without exposing tool details", () => {
+    const call = [{ id: "read-1", name: "fs.read_file", arguments: { path: "src/secret.ts" } }];
+    const cuteProgress = buildToolBatchProgressMessage(call, "cute_lolita");
+    const matureProgress = buildToolBatchProgressMessage(call, "mature_lady");
+
+    expect(cuteProgress).toMatch(/^(好哒！|没问题呀，|这就来啦！)/);
+    expect(cuteProgress).toMatch(/呀～$/);
+    expect(matureProgress).toMatch(/^(交给姐姐就好。|别急，姐姐来把这一步拿稳：|这一步听姐姐的：)/);
+    expect(cuteProgress).not.toContain("secret.ts");
+  });
+
+  it("makes model-authored progress visibly match the selected tone without double styling", () => {
+    const neutral = "我先检查现有实现，再继续修改。";
+    const cute = applyResponseToneToProgressMessage(neutral, "cute_lolita");
+    const mature = applyResponseToneToProgressMessage(neutral, "mature_lady");
+
+    expect(cute).not.toBe(neutral);
+    expect(mature).not.toBe(neutral);
+    expect(cute).not.toBe(mature);
+    expect(applyResponseToneToProgressMessage(cute, "cute_lolita")).toBe(cute);
+    expect(applyResponseToneToProgressMessage(mature, "mature_lady")).toBe(mature);
+  });
+
+  it("keeps raw commands out of conversational progress", () => {
+    const progress = buildToolBatchProgressMessage([
+      {
+        id: "shell-1",
+        name: "shell.exec",
+        arguments: { command: `deploy --token=super-secret ${"x".repeat(120)}` }
+      }
+    ]);
+
+    expect(progress).toBe("我先执行一下必要的检查，根据实际结果再决定下一步怎么处理。");
+    expect(progress).not.toContain("super-secret");
+    expect(progress).not.toContain("--token");
+  });
+
   it("allows short user-facing progress but rejects raw execution payloads", () => {
     expect(isSafeCommentaryMessage("I will inspect the renderer before changing it.")).toBe(true);
     expect(isSafeCommentaryMessage('{"assistant_message":"I will inspect","tool_calls":[]}')).toBe(false);
     expect(isSafeCommentaryMessage("<tool_calls>[{\"name\":\"fs.read_file\"}]</tool_calls>")).toBe(false);
     expect(isSafeCommentaryMessage("*** Begin Patch\n*** Update File: src/App.tsx\n*** End Patch")).toBe(false);
     expect(isSafeCommentaryMessage("先只提交 T1，证据严格使用运行时已列出的 tool_call_id。")).toBe(false);
+  });
+
+  it("keeps tool-bound progress visible while root subagents are active", () => {
+    expect(shouldSuppressPrematureRootReport({
+      hasActiveRootSubagents: true,
+      assistantMessage: "我先等待检索结果，同时核对候选项目。",
+      toolCallCount: 1,
+      endTurn: false
+    })).toBe(false);
+  });
+
+  it("still suppresses an unbound partial report while root subagents are active", () => {
+    expect(shouldSuppressPrematureRootReport({
+      hasActiveRootSubagents: true,
+      assistantMessage: "目前已经找到几个候选项目。",
+      toolCallCount: 0,
+      endTurn: false
+    })).toBe(true);
+  });
+});
+
+describe("response tone prompt", () => {
+  it("defines distinct styles without changing execution standards", () => {
+    expect(buildResponseTonePrompt("standard")).toContain("natural, clear, professional");
+    expect(buildResponseTonePrompt("cute_lolita")).toContain("bright, sweet, playful");
+    expect(buildResponseTonePrompt("mature_lady")).toContain("composed, confident, warm");
+    expect(buildResponseTonePrompt("cute_lolita")).toContain("must be obvious");
+    expect(buildResponseTonePrompt("mature_lady")).toContain("unmistakable Chinese 御姐 voice");
+    expect(buildResponseTonePrompt("mature_lady")).toContain("姐姐-style self-reference");
+    expect(buildResponseTonePrompt("cute_lolita")).toContain("technical precision");
+    expect(buildResponseTonePrompt("mature_lady")).toContain("user overrides this preset");
   });
 });
 
@@ -473,21 +593,49 @@ describe("standard completion validation", () => {
     expect(result.reasons).toContain("The model did not declare the original goal complete.");
   });
 
-  it("rejects Chinese progress prose even when the provider declares completion", () => {
-    const result = validateStandardCompletion({
-      decision: {
-        assistantMessage: "让我继续查看完整的语音相关代码：",
-        toolCalls: [],
-        endTurn: true,
-        goalCompleted: true
-      },
-      requiresFileDelivery: false,
-      deliveredPaths: [],
-      successfulEvidence: []
+  it("requires a completion audit before validating a terminal decision", () => {
+    expect(resolveStandardCompletionAuditAction({
+      auditPending: false,
+      toolCallCount: 0,
+      endTurn: true
+    })).toBe("request_audit");
+    expect(resolveStandardCompletionAuditAction({
+      auditPending: true,
+      toolCallCount: 0,
+      endTurn: true
+    })).toBe("validate_completion");
+  });
+
+  it("requires a fresh completion audit after the audit continues with tools", () => {
+    expect(resolveStandardCompletionAuditAction({
+      auditPending: true,
+      toolCallCount: 1,
+      endTurn: false
+    })).toBe("continue_work");
+    expect(resolveStandardCompletionAuditAction({
+      auditPending: false,
+      toolCallCount: 1,
+      endTurn: false
+    })).toBe("none");
+  });
+
+  it("builds an audit that compares the original task with delivery evidence", () => {
+    const instruction = buildStandardCompletionAuditInstruction({
+      originalRequest: "修改登录页并运行测试",
+      candidateSummary: "已经处理完成。",
+      deliveredPaths: ["D:\\project\\Login.tsx"],
+      successfulEvidence: [{
+        toolCallId: "test-1",
+        toolName: "shell.exec",
+        kinds: ["verification"]
+      }]
     });
 
-    expect(result.valid).toBe(false);
-    expect(result.reasons).toContain("The assistant message is progress commentary, not a final summary.");
+    expect(instruction).toContain("修改登录页并运行测试");
+    expect(instruction).toContain("D:\\project\\Login.tsx");
+    expect(instruction).toContain("test-1: shell.exec (verification)");
+    expect(instruction).toContain("If any part of the original request is incomplete");
+    expect(instruction).toContain("call the next concrete tool needed to finish it now");
   });
 
   it("rejects a test-case request when the response contains only an introduction", () => {
@@ -599,6 +747,18 @@ describe("Agent model compatibility failures", () => {
     expect(message).toContain("invalid JSON decision");
     expect(message).toContain("稍后重试");
     expect(message).not.toContain("切换");
+  });
+
+  it("shows a friendly localized message when completion validation is exhausted", () => {
+    const message = buildRuntimeFailureRecoveryMessage(
+      new Error("Standard completion validation failed repeatedly: The model did not declare the original goal complete.")
+    );
+
+    expect(message).toContain("任务尚未确认完成");
+    expect(message).toContain("模型没有确认原始任务已全部完成");
+    expect(message).toContain("继续完成");
+    expect(message).not.toContain("Standard completion validation");
+    expect(message).not.toContain("项目路径、权限");
   });
 });
 
@@ -920,6 +1080,32 @@ describe("terminal turn state machine", () => {
       gpaStage: "off",
       gpaActCompletedSuccessfully: false
     })).toBe("wait_for_subagents");
+  });
+
+  it("blocks repeated root model requests after a summary is deferred", () => {
+    expect(resolveRootSubagentModelGate({
+      isRootThread: true,
+      summaryDeferred: true,
+      hasActiveSubagents: true
+    })).toBe("wait_for_subagents");
+    expect(resolveRootSubagentModelGate({
+      isRootThread: true,
+      summaryDeferred: true,
+      hasActiveSubagents: false
+    })).toBe("resume_with_results");
+  });
+
+  it("does not apply the root summary barrier to child or ordinary model turns", () => {
+    expect(resolveRootSubagentModelGate({
+      isRootThread: false,
+      summaryDeferred: true,
+      hasActiveSubagents: true
+    })).toBe("continue");
+    expect(resolveRootSubagentModelGate({
+      isRootThread: true,
+      summaryDeferred: false,
+      hasActiveSubagents: true
+    })).toBe("continue");
   });
 
   it("does not treat an analysis-stage response as task completion", () => {
