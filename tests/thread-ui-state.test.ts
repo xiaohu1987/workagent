@@ -12,6 +12,8 @@ import {
   buildTimelineEntries,
   getThreadDeleteFailureMessage,
   getToolProcessingLabel,
+  getSubagentWaitLabel,
+  isSubagentWaitTool,
   getToolActivityPresentation,
   getToolActivitySummary,
   getSidebarUpdateReminder,
@@ -20,7 +22,10 @@ import {
   isInternalAgentProtocolMessage,
   isPatchAssistantMessage,
   mergeSnapshotRecords,
-  reconcilePendingUserMessages
+  preserveStreamingDraftContent,
+  resolveRuntimeStreamingDraft,
+  reconcilePendingUserMessages,
+  shouldKeepStreamingAssistant
 } from "../apps/desktop/src/renderer/App";
 import type { MessageRecord, ToolCallRecord } from "../packages/shared-types/src";
 
@@ -145,6 +150,7 @@ describe("tool processing labels", () => {
     expect(getToolProcessingLabel("shell.exec")).toBe("正在执行命令");
     expect(getToolProcessingLabel("browser.open_tab")).toBe("正在操作浏览器");
     expect(getToolProcessingLabel("web_search.search_query")).toBe("正在搜索网络");
+    expect(getToolProcessingLabel("wait_agent")).toBe("正在等待子智能体");
   });
 
   it("includes the current command or target in the running status", () => {
@@ -377,6 +383,85 @@ describe("optimistic user message reconciliation", () => {
     const persisted: MessageRecord = { ...first, id: "persisted-1", createdAt: "2026-07-15T01:00:02.000Z" };
 
     expect(reconcilePendingUserMessages([first, second], [persisted])).toEqual([second]);
+  });
+});
+
+describe("subagent waiting status", () => {
+  it("recognizes both canonical and compatibility wait tool names", () => {
+    expect(isSubagentWaitTool("wait_agent")).toBe(true);
+    expect(isSubagentWaitTool("multi_agents.wait")).toBe(true);
+    expect(isSubagentWaitTool("spawn_agent")).toBe(false);
+  });
+
+  it("reports only active and queued subagents in the root waiting label", () => {
+    const agents = [
+      { id: "running", status: "running" as const },
+      { id: "queued", status: "idle" as const },
+      { id: "done", status: "completed" as const }
+    ];
+
+    expect(getSubagentWaitLabel(agents, new Set(["queued"]))).toBe("正在等待 2 个子智能体 · 1 运行 · 1 排队");
+    expect(getSubagentWaitLabel([{ id: "input", status: "waiting" }], new Set())).toBe("正在等待 1 个子智能体 · 1 等待处理");
+    expect(getSubagentWaitLabel([{ id: "done", status: "completed" }], new Set())).toBeNull();
+  });
+});
+
+describe("streaming assistant lifecycle", () => {
+  const persistedFailure: MessageRecord = {
+    id: "failure-message",
+    threadId: "thread-1",
+    turnRunId: "failed-turn",
+    role: "assistant",
+    content: "The task failed.",
+    metadataJson: null,
+    createdAt: "2026-07-27T07:25:27.191Z"
+  };
+
+  it("removes an uncommitted draft when its thread reaches a terminal state", () => {
+    expect(shouldKeepStreamingAssistant(
+      { turnRunId: "failed-turn", completed: false },
+      [persistedFailure],
+      "failed"
+    )).toBe(false);
+  });
+
+  it("keeps only an unfinished draft while its thread is still executing", () => {
+    expect(shouldKeepStreamingAssistant(
+      { turnRunId: "active-turn", completed: false },
+      [],
+      "running"
+    )).toBe(true);
+    expect(shouldKeepStreamingAssistant(
+      { turnRunId: "failed-turn", completed: true, messageId: persistedFailure.id },
+      [persistedFailure],
+      "running"
+    )).toBe(false);
+  });
+
+  it("preserves the latest draft while the runtime continues processing", () => {
+    expect(preserveStreamingDraftContent("rendered draft", "queued draft")).toBe("queued draft");
+    expect(preserveStreamingDraftContent("rendered draft", undefined)).toBe("rendered draft");
+  });
+
+  it("keeps all uncommitted streaming text inside the runtime draft disclosure", () => {
+    expect(resolveRuntimeStreamingDraft({
+      turnRunId: "turn-1",
+      content: "provisional response",
+      presentation: "draft"
+    })).toEqual({ turnRunId: "turn-1", content: "provisional response" });
+    expect(resolveRuntimeStreamingDraft({
+      turnRunId: "turn-1",
+      content: "retry draft",
+      presentation: "continuing"
+    })).toEqual({ turnRunId: "turn-1", content: "retry draft" });
+  });
+
+  it("leaves committed streaming text to the persisted message timeline", () => {
+    expect(resolveRuntimeStreamingDraft({
+      turnRunId: "turn-1",
+      content: "final response",
+      presentation: "committed"
+    })).toBeNull();
   });
 });
 

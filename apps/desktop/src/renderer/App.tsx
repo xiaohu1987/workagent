@@ -63,7 +63,7 @@ import type {
   ToolCallRecord,
   UserInputPrompt
 } from "@shared-types";
-import { DEFAULT_RUNTIME_TIMEOUTS, createEmptyTokenUsage, addTokenUsage, finalizeTokenUsage } from "@shared-types";
+import { DEFAULT_RUNTIME_TIMEOUTS, createEmptyTokenUsage } from "@shared-types";
 import {
   canDeleteThread,
   getComposerPrimaryActionState,
@@ -518,6 +518,7 @@ type StreamingAssistant = {
   turnRunId: string;
   content: string;
   completed: boolean;
+  presentation: "draft" | "continuing" | "committed";
   messageId?: string;
 };
 
@@ -1922,7 +1923,8 @@ export function App() {
         threadId: pending.threadId,
         turnRunId,
         content: pending.content,
-        completed: false
+        completed: false,
+        presentation: "draft"
       }
     }));
   }
@@ -1948,6 +1950,17 @@ export function App() {
       pending.content = content;
       return;
     }
+
+    // A rejected provisional reply remains as a compact execution indicator.
+    // The next model attempt should replace that indicator, not revive stale text.
+    setStreamingAssistants((current) => {
+      const active = current[turnRunId];
+      if (!active || active.presentation !== "continuing") return current;
+      return {
+        ...current,
+        [turnRunId]: { ...active, content: "", completed: false, presentation: "draft" }
+      };
+    });
 
     streamingAssistantFramesRef.current[turnRunId] = {
       threadId,
@@ -2188,6 +2201,7 @@ export function App() {
           gpa?: GpaState;
           turnRunId?: string;
           discarded?: boolean;
+          nextState?: "continuing" | "discarded";
           delta?: string;
           content?: string;
           title?: string;
@@ -2520,14 +2534,9 @@ export function App() {
         const turnRunId = typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : null;
         if (turnRunId) {
           // Internal recovery output may be malformed decision JSON. It is not
-          // user-facing content and must not remain as a stale streaming block.
+          // user-facing content. Preserve the stream shell so it transitions
+          // into the existing execution indicator instead of visibly vanishing.
           discardQueuedStreamingAssistant(turnRunId);
-          setStreamingAssistants((current) => {
-            if (!current[turnRunId]) return current;
-            const next = { ...current };
-            delete next[turnRunId];
-            return next;
-          });
         }
         appendRuntimeStatus(typed.threadId, "正在校验模型输出", typed.createdAt);
         if (notificationThreadId) {
@@ -2658,6 +2667,13 @@ export function App() {
           return null;
         });
         if (status !== "running" && status !== "waiting") {
+          discardQueuedStreamingAssistantsForThread(runtimeThreadId);
+          setStreamingAssistants((current) => {
+            const remaining = Object.entries(current).filter(([, entry]) => entry.threadId !== runtimeThreadId);
+            return remaining.length === Object.keys(current).length
+              ? current
+              : Object.fromEntries(remaining);
+          });
           clearRuntimeActivity(runtimeThreadId);
           const pendingSkillIds = pendingOneShotSkillRemovalsRef.current[runtimeThreadId] ?? [];
           if (pendingSkillIds.length > 0) {
@@ -2675,17 +2691,33 @@ export function App() {
       if (typed.type === "assistant.completed" && typed.payload?.turnRunId) {
         const { turnRunId, messageId, discarded } = typed.payload;
         const suppressed = !!typed.threadId && suppressRuntimeProgressRef.current[typed.threadId];
+        const nextState = typed.payload.nextState === "continuing" ? "continuing" : "discarded";
+        const queuedDraftContent = streamingAssistantFramesRef.current[turnRunId]?.content;
         if (discarded === true || suppressed) {
           discardQueuedStreamingAssistant(turnRunId);
         } else {
           flushStreamingAssistant(turnRunId);
         }
         setStreamingAssistants((current) => {
-          if (discarded === true || suppressed) {
+          if (suppressed || (discarded === true && nextState === "discarded")) {
             if (!current[turnRunId]) return current;
             const next = { ...current };
             delete next[turnRunId];
             return next;
+          }
+          if (discarded === true && typed.threadId) {
+            const active = current[turnRunId];
+            return {
+              ...current,
+              [turnRunId]: {
+                threadId: typed.threadId,
+                turnRunId,
+                content: preserveStreamingDraftContent(active?.content, queuedDraftContent),
+                completed: false,
+                presentation: "continuing",
+                ...(active?.messageId ? { messageId: active.messageId } : {})
+              }
+            };
           }
           const active = current[turnRunId];
           if (!active) {
@@ -2697,36 +2729,21 @@ export function App() {
             [turnRunId]: {
               ...active,
               completed: true,
+              presentation: "committed",
               messageId: typeof messageId === "string" ? messageId : undefined
             }
           };
         });
       }
-      if (typed.type === "turn.usage" && typed.threadId && typed.payload?.usage) {
-        const usage = finalizeTokenUsage(typed.payload.usage as Partial<TokenUsage>);
-        const turnRunId = typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : null;
-        if (typed.threadId === currentSelectedThreadId) {
-          setThreadTokenUsage((current) => {
-            const sameTurn = turnRunId && current.turnRunId === turnRunId;
-            const previousTurn = sameTurn ? current.turn : createEmptyTokenUsage();
-            const threadWithoutPrevious = sameTurn
-              ? finalizeTokenUsage({
-                  totalTokens: Math.max(0, current.thread.totalTokens - previousTurn.totalTokens),
-                  inputTokens: Math.max(0, current.thread.inputTokens - previousTurn.inputTokens),
-                  inputCacheHitTokens: Math.max(0, current.thread.inputCacheHitTokens - previousTurn.inputCacheHitTokens),
-                  inputCacheMissTokens: Math.max(0, current.thread.inputCacheMissTokens - previousTurn.inputCacheMissTokens),
-                  inputCacheWriteTokens: Math.max(0, current.thread.inputCacheWriteTokens - previousTurn.inputCacheWriteTokens),
-                  outputTokens: Math.max(0, current.thread.outputTokens - previousTurn.outputTokens),
-                  outputReasoningTokens: Math.max(0, current.thread.outputReasoningTokens - previousTurn.outputReasoningTokens),
-                  outputContentTokens: Math.max(0, current.thread.outputContentTokens - previousTurn.outputContentTokens)
-                })
-              : current.thread;
-            return {
-              turn: usage,
-              thread: addTokenUsage(threadWithoutPrevious, usage),
-              turnRunId
-            };
-          });
+      if (typed.type === "turn.usage" && typed.threadId) {
+        if (currentSelectedThreadId && notificationThreadId === currentSelectedThreadId) {
+          void window.codexh.getThreadTokenUsage(currentSelectedThreadId)
+            .then((usage) => {
+              if (selectedThreadIdRef.current === currentSelectedThreadId) {
+                setThreadTokenUsage(usage);
+              }
+            })
+            .catch(() => undefined);
         }
       }
       if (!isPluginStateUpdate && (
@@ -3219,20 +3236,23 @@ export function App() {
     () => new Set(snapshot?.queuedSubagentIds ?? []),
     [snapshot?.queuedSubagentIds]
   );
-  const activeStreamingAssistant = useMemo(
-    () =>
-      Object.values(streamingAssistants)
-        .filter(
-          (entry) =>
-            entry.threadId === activeSnapshotThreadId &&
+  const activeStreamingAssistant = useMemo(() => {
+    if (!isThreadExecutionInProgress(activeSnapshotThreadStatus)) {
+      return null;
+    }
+    return Object.values(streamingAssistants)
+      .filter(
+        (entry) =>
+          entry.threadId === activeSnapshotThreadId &&
+          (entry.presentation === "continuing" || (
             entry.content &&
             !isPatchAssistantMessage(entry.content) &&
             !isInternalAgentProtocolMessage(entry.content)
-        )
-        .sort((left, right) => left.turnRunId.localeCompare(right.turnRunId))
-        .at(-1) ?? null,
-    [activeSnapshotThreadId, streamingAssistants]
-  );
+          ))
+      )
+      .sort((left, right) => left.turnRunId.localeCompare(right.turnRunId))
+      .at(-1) ?? null;
+  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, streamingAssistants]);
   const composerPrimaryAction = getComposerPrimaryActionState(
     selectedThreadStatus,
     input.trim() || composerAttachments.some((attachment) => !isPersistentComposerContextKind(attachment.kind)) ? "content" : ""
@@ -3259,9 +3279,28 @@ export function App() {
   const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
     isTaskProcessing
   );
+  // Streaming model text is provisional until the runtime persists it as a
+  // message. Keep every uncommitted draft behind the live status disclosure so
+  // rejected/retried decisions never look like finalized chat content.
+  const runtimeStreamingDraft = resolveRuntimeStreamingDraft(activeStreamingAssistant);
+  const latestRootRuntimeTool = useMemo(
+    () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
+      (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
+    )?.toolCall ?? null,
+    [activeRuntimeActivity?.entries]
+  );
+  const subagentWaitLabel = getSubagentWaitLabel(currentSubagents, queuedSubagentIds);
+  const isWaitingForSubagents = Boolean(
+    isTaskProcessing &&
+    subagentWaitLabel &&
+    latestRootRuntimeTool &&
+    isSubagentWaitTool(latestRootRuntimeTool.toolName)
+  );
   const taskProcessingLabel = useMemo(
     () =>
-      activeToolCall?.threadId === activeSnapshotThreadId
+      isWaitingForSubagents && subagentWaitLabel
+        ? subagentWaitLabel
+        : activeToolCall?.threadId === activeSnapshotThreadId
         ? getToolProcessingLabel(activeToolCall.toolName, activeToolCall.argumentsJson)
         : activeStreamingAssistant
           ? "正在生成回复"
@@ -3274,8 +3313,10 @@ export function App() {
       activeSnapshotThreadId,
       activeStreamingAssistant,
       activeToolCall,
+      isWaitingForSubagents,
       isPreparingRuntime,
-      localRuntimeProgress?.phase
+      localRuntimeProgress?.phase,
+      subagentWaitLabel
     ]
   );
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
@@ -3600,13 +3641,7 @@ export function App() {
           continue;
         }
 
-        const persisted = entry.messageId
-          ? snapshot.messages.some((message) => message.id === entry.messageId)
-          : snapshot.messages.some(
-              (message) => message.role === "assistant" && message.turnRunId === turnRunId
-            );
-        const turnFinished = !isThreadExecutionInProgress(snapshot.thread.status);
-        if ((entry.completed && persisted) || (turnFinished && !persisted)) {
+        if (!shouldKeepStreamingAssistant(entry, snapshot.messages, snapshot.thread.status)) {
           delete next[turnRunId];
           changed = true;
         }
@@ -7607,14 +7642,6 @@ export function App() {
                 {activeContextCompaction ? (
                   <ContextCompactionNotice compaction={activeContextCompaction} />
                 ) : null}
-                {activeStreamingAssistant ? (
-                  <section className="streaming-assistant" aria-live="polite">
-                    {renderStreamingAssistant(
-                      stripAssistantToolMarkup(activeStreamingAssistant.content),
-                      `stream-${activeStreamingAssistant.turnRunId}`
-                    )}
-                  </section>
-                ) : null}
                 {showRuntimeActivityPanel ? (
                   <RuntimeActivityPanel
                     label={taskProcessingLabel}
@@ -7624,6 +7651,8 @@ export function App() {
                     }
                     active
                     entries={activeRuntimeActivity?.entries ?? []}
+                    streamingDraft={runtimeStreamingDraft}
+                    preferLabel={isWaitingForSubagents}
                   />
                 ) : completedTurnTimer ? (
                   <TurnElapsedBanner
@@ -14900,6 +14929,8 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): 
   if (toolName === "multi_agents.spawn") {
     return "正在启动子任务";
   }
+  if (toolName === "spawn_agent") return "正在启动子智能体";
+  if (isSubagentWaitTool(toolName)) return "正在等待子智能体";
   return "正在调用工具";
 }
 
@@ -15036,7 +15067,14 @@ function SubagentActivityList({
                 {queued ? "等待可用的子智能体名额" : runtimeLabel ?? "正在准备任务"}
               </span>
             </button>
-            <span className="agent-activity-status">{statusLabel}</span>
+            <span className="agent-activity-status">
+              <span>{statusLabel}</span>
+              <SubagentElapsedTime
+                startedAt={runtimeActivity?.startedAt ?? agent.createdAt}
+                active={active || queued}
+                completedAt={active || queued ? null : agent.updatedAt}
+              />
+            </span>
             {active || queued ? (
               <button type="button" className="agent-activity-stop" title="停止子任务" onClick={() => onInterrupt(agent)}>
                 停止
@@ -15064,6 +15102,44 @@ function SubagentActivityList({
 
 function getSubagentTitle(agent: ThreadRecord): string {
   return agent.agentRole?.trim() || "子任务分析";
+}
+
+function SubagentElapsedTime({
+  startedAt,
+  active,
+  completedAt
+}: {
+  startedAt: string;
+  active: boolean;
+  completedAt: string | null;
+}) {
+  const elapsedMs = useElapsedClock(startedAt, active, completedAt);
+  return <time>{formatElapsedClock(elapsedMs)}</time>;
+}
+
+export function isSubagentWaitTool(toolName: string | null | undefined): boolean {
+  return toolName === "wait_agent" || toolName === "multi_agents.wait";
+}
+
+export function getSubagentWaitLabel(
+  agents: Array<Pick<ThreadRecord, "id" | "status">>,
+  queuedAgentIds: Set<string>
+): string | null {
+  const queuedCount = agents.filter((agent) => queuedAgentIds.has(agent.id)).length;
+  const runningCount = agents.filter(
+    (agent) => !queuedAgentIds.has(agent.id) && agent.status === "running"
+  ).length;
+  const attentionCount = agents.filter(
+    (agent) => !queuedAgentIds.has(agent.id) && agent.status === "waiting"
+  ).length;
+  const waitingCount = queuedCount + runningCount + attentionCount;
+  if (waitingCount === 0) return null;
+  const breakdown = [
+    runningCount > 0 ? `${runningCount} 运行` : null,
+    attentionCount > 0 ? `${attentionCount} 等待处理` : null,
+    queuedCount > 0 ? `${queuedCount} 排队` : null
+  ].filter(Boolean);
+  return `正在等待 ${waitingCount} 个子智能体${breakdown.length ? ` · ${breakdown.join(" · ")}` : ""}`;
 }
 
 function getSubagentRuntimeLabel(activity: RuntimeActivity | undefined): string | null {
@@ -15138,23 +15214,45 @@ function RuntimeActivityPanel({
   label,
   startedAt,
   active,
-  entries
+  entries,
+  streamingDraft,
+  preferLabel = false
 }: {
   label: string;
   startedAt?: string;
   active?: boolean;
   entries: RuntimeActivityEntry[];
+  streamingDraft?: { content: string; turnRunId: string } | null;
+  preferLabel?: boolean;
 }) {
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
   const resolvedStartedAt = startedAt || getRuntimeActivityStartedAt(entries);
   const elapsedMs = useElapsedClock(resolvedStartedAt, active !== false);
-  const displayLabel = latestStatus?.label ?? label;
+  const displayLabel = preferLabel ? label : latestStatus?.label ?? label;
+  const currentStatus = (
+    <>
+      <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
+      <strong>{displayLabel}</strong>
+      {resolvedStartedAt ? <time>{formatElapsedClock(elapsedMs)}</time> : null}
+    </>
+  );
+  if (streamingDraft?.content.trim()) {
+    return (
+      <details className="runtime-activity-panel has-streaming-draft" aria-live="polite">
+        <summary className="runtime-activity-current">
+          {currentStatus}
+          <span className="runtime-activity-draft-chevron" aria-hidden><IconChevronRight /></span>
+        </summary>
+        <div className="runtime-activity-streaming-draft">
+          {streamingDraft.content}
+        </div>
+      </details>
+    );
+  }
   return (
     <section className="runtime-activity-panel" aria-live="polite">
       <div className="runtime-activity-current">
-        <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
-        <strong>{displayLabel}</strong>
-        {resolvedStartedAt ? <time>{formatElapsedClock(elapsedMs)}</time> : null}
+        {currentStatus}
       </div>
     </section>
   );
@@ -18570,6 +18668,40 @@ export function reconcilePendingUserMessages(
     consumedPersistedIds.add(matched.id);
     return false;
   });
+}
+
+export function shouldKeepStreamingAssistant(
+  entry: { turnRunId: string; completed: boolean; messageId?: string },
+  persistedMessages: MessageRecord[],
+  threadStatus: ThreadRecord["status"] | null | undefined
+): boolean {
+  if (!isThreadExecutionInProgress(threadStatus)) {
+    return false;
+  }
+
+  const persisted = entry.messageId
+    ? persistedMessages.some((message) => message.id === entry.messageId)
+    : persistedMessages.some(
+        (message) => message.role === "assistant" && message.turnRunId === entry.turnRunId
+      );
+  return !(entry.completed && persisted);
+}
+
+export function preserveStreamingDraftContent(
+  activeContent: string | undefined,
+  queuedContent: string | undefined
+): string {
+  return queuedContent ?? activeContent ?? "";
+}
+
+export function resolveRuntimeStreamingDraft(entry: {
+  turnRunId: string;
+  content: string;
+  presentation: StreamingAssistant["presentation"];
+} | null): { turnRunId: string; content: string } | null {
+  if (!entry || entry.presentation === "committed") return null;
+  const content = stripAssistantToolMarkup(entry.content);
+  return content.trim() ? { turnRunId: entry.turnRunId, content } : null;
 }
 
 function normalizeUserMessageForReconciliation(content: string): string {

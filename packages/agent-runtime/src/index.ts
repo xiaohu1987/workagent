@@ -1181,6 +1181,7 @@ class ThreadSessionRuntime {
     const selectedMcpServerIds = extractSelectedMcpServerIds(initialInput).filter((serverId) =>
       accessibleMcpServerIds.includes(serverId)
     );
+    const explicitlyRequestedMcp = isExplicitMcpRequest(initialInput);
     const activeMcpServerIds = selectedMcpServerIds.length > 0
       ? selectedMcpServerIds
       : accessibleMcpServerIds;
@@ -1476,6 +1477,7 @@ class ThreadSessionRuntime {
       const executionPolicy = this.services.config.projectExecutionPolicies?.[policyKey] ?? DEFAULT_PROJECT_EXECUTION_POLICY;
       const expectedFileVersions = new Map<string, string>();
       let hasExecutedToolCall = false;
+      let hasInspectedLocalWorkspace = false;
       const repositoryExploration = createRepositoryExplorationState();
       const successfulToolCallFingerprints = new Set<string>();
       const successfulToolEvidence: SuccessfulToolEvidence[] = [];
@@ -1848,7 +1850,7 @@ class ThreadSessionRuntime {
       const persistBlockedToolCall = async (
         toolCall: RuntimeToolCall,
         reason: string,
-        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite"
+        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority"
       ) => {
         const toolRecord = await this.services.persistence.recordToolCall({
           threadId: this.threadId,
@@ -1940,16 +1942,25 @@ class ThreadSessionRuntime {
           selectedMcpToolsOnly.some((tool) => tool.name === "image.generate"),
           selectedMcpToolsOnly.some((tool) => tool.name === "video.generate"),
           availableSkills.filter((skill) => recommendedSkillIds.includes(skill.id)),
-          selectedMcpServerIds
+          selectedMcpServerIds,
+          {
+            mode: thread.mode,
+            cwd: thread.cwd,
+            localWorkspaceFirst:
+              selectedMcpServerIds.length === 0 && !explicitlyRequestedMcp
+          }
         );
         const adapter = this.services.providerFactory.create(provider);
         let streamedVisibleContent = "";
-        const discardStreamedAssistant = async () => {
+        const discardStreamedAssistant = async (nextState: "continuing" | "discarded" = "continuing") => {
           if (!streamedVisibleContent) return;
           await this.services.emit({
             type: "assistant.completed",
             threadId: this.threadId,
-            payload: { turnRunId: turn.id, discarded: true },
+            // Streamed text is provisional until the decision passes the
+            // runtime gates. Retain the stream shell while the same turn keeps
+            // working so the renderer does not present a visible rollback.
+            payload: { turnRunId: turn.id, discarded: true, nextState },
             createdAt: new Date().toISOString()
           });
           streamedVisibleContent = "";
@@ -3246,6 +3257,10 @@ class ThreadSessionRuntime {
         }
 
         let reevaluateAfterUserInput = false;
+        // Calls in one model decision are a batch. An MCP call in the same
+        // batch as the first local read must wait for the next decision so the
+        // model has actually seen and reasoned about the local evidence.
+        const localWorkspaceInspectedBeforeDecision = hasInspectedLocalWorkspace;
         for (const rawToolCall of decision.toolCalls) {
           if (abortController.signal.aborted) {
             throw new Error("Turn interrupted.");
@@ -3254,6 +3269,27 @@ class ThreadSessionRuntime {
             ...rawToolCall,
             name: canonicalizeToolName(rawToolCall.name)
           };
+          const projectMcpPriority = validateProjectMcpPriority({
+            toolName: toolCall.name,
+            projectMode: thread.mode === "project",
+            projectCwd: thread.cwd,
+            explicitlySelectedMcp: selectedMcpServerIds.length > 0,
+            explicitlyRequestedMcp,
+            localWorkspaceInspectedBeforeDecision
+          });
+          if (!projectMcpPriority.allowed) {
+            const reason = projectMcpPriority.message ?? PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE;
+            appendBlockedToolCallResult(toolCall, reason);
+            await persistBlockedToolCall(toolCall, reason, "project_mcp_priority");
+            transcript.push({ role: "user", content: reason });
+            await this.services.log("agent.project_mcp_preflight_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              projectCwd: thread.cwd,
+              reason
+            });
+            continue;
+          }
           const repositoryPreparation = prepareRepositoryExplorationCall(toolCall, repositoryExploration);
           if (!repositoryPreparation.ok) {
             appendBlockedToolCallResult(toolCall, repositoryPreparation.message);
@@ -3849,6 +3885,9 @@ class ThreadSessionRuntime {
           if (result.ok && toolCall.name === "fs.read_file") {
             const sha256 = typeof result.json?.sha256 === "string" ? result.json.sha256 : null;
             if (readPath && sha256) expectedFileVersions.set(readPath, sha256);
+          }
+          if (result.ok && LOCAL_WORKSPACE_OBSERVATION_TOOLS.has(toolCall.name)) {
+            hasInspectedLocalWorkspace = true;
           }
           advanceManagedWriteRecovery(managedWriteRecovery, {
             toolName: toolCall.name,
@@ -5287,6 +5326,16 @@ const OBSERVATION_TOOL_NAMES = new Set([
   "mcp.list_tools"
 ]);
 
+const LOCAL_WORKSPACE_OBSERVATION_TOOLS = new Set([
+  "fs.read_directory",
+  "fs.read_file",
+  "code.search",
+  "code.outline",
+  "code.ast_diff",
+  "git.status",
+  "git.diff"
+]);
+
 const REUSABLE_SUCCESSFUL_TOOL_NAMES = new Set([
   "fs.read_file",
   "fs.read_directory",
@@ -6415,6 +6464,47 @@ export function extractSelectedMcpServerIds(input: string): string[] {
   return [...serverIds];
 }
 
+export function isExplicitMcpRequest(input: string): boolean {
+  if (extractSelectedMcpServerIds(input).length > 0) return true;
+  if (!/mcp/i.test(input)) return false;
+
+  const clauses = input.split(/[\r\n，。！？；,!?;]/).map((clause) => clause.trim()).filter(Boolean);
+  return clauses.some((clause) => {
+    if (/(?:不要|别|无需|不需要|禁止|避免|不应|不能|不该|不准).{0,16}mcp/i.test(clause)) {
+      return false;
+    }
+    if (/^(?:为什么|为何|怎么|如何|why\b|how\b)/i.test(clause)) {
+      return false;
+    }
+    return (
+      /^\s*(?:(?:请|请你|帮我|给我|麻烦|需要|我要|我想)\s*)?(?:使用|用|通过|调用|查询|搜索|查一下)\s*(?:一下\s*)?mcp\b/i.test(clause) ||
+      /^\s*(?:(?:请|请你|帮我|给我|麻烦)\s*)?mcp\s*(?:中|里|上)?\s*(?:查询|搜索|查找|调用|读取)/i.test(clause) ||
+      /^\s*(?:please\s+)?(?:use|query|search|call)\s+(?:the\s+)?mcp\b/i.test(clause)
+    );
+  });
+}
+
+export const PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE = [
+  "This is a project task with an authoritative local workspace, but no successful local workspace inspection has been shown to the model yet.",
+  "The MCP call was blocked. First call fs.read_directory with {\"path\":\".\"}, then use code.search or fs.read_file against the current project.",
+  "Only reconsider repository MCP after reading that local evidence. Do not use a globally enabled MCP repository as a substitute for the current project."
+].join(" ");
+
+export function validateProjectMcpPriority(input: {
+  toolName: string;
+  projectMode: boolean;
+  projectCwd: string | null;
+  explicitlySelectedMcp: boolean;
+  explicitlyRequestedMcp: boolean;
+  localWorkspaceInspectedBeforeDecision: boolean;
+}): { allowed: boolean; message?: string } {
+  if (input.toolName !== "mcp.call") return { allowed: true };
+  if (!input.projectMode || !input.projectCwd) return { allowed: true };
+  if (input.explicitlySelectedMcp || input.explicitlyRequestedMcp) return { allowed: true };
+  if (input.localWorkspaceInspectedBeforeDecision) return { allowed: true };
+  return { allowed: false, message: PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE };
+}
+
 export function extractSelectedDatabaseConnectionIds(input: string): string[] {
   const ids = new Set<string>();
   const pattern = /\[Selected database\]\s*\r?\n\s*id:\s*([^\s\r\n]+)/gi;
@@ -6515,6 +6605,36 @@ function collectBrowserSources(
   sources.set(url, { title, url });
 }
 
+export interface RuntimeWorkspacePriorityContext {
+  mode: "project" | "chat";
+  cwd: string | null;
+  localWorkspaceFirst: boolean;
+}
+
+export function buildProjectWorkspacePriorityPrompt(
+  context: RuntimeWorkspacePriorityContext
+): string | null {
+  if (context.mode !== "project" || !context.cwd) return null;
+
+  const lines = [
+    "## Current Project Workspace",
+    `The current project path is ${JSON.stringify(context.cwd)}.`,
+    "For questions about this project's code, repository, files, modules, or behavior, this local workspace is the authoritative source."
+  ];
+  if (context.localWorkspaceFirst) {
+    lines.push(
+      "Inspect the local workspace with fs.read_directory, code.search, code.outline, git.status, git.diff, or fs.read_file before calling mcp.call.",
+      "Do not use a globally enabled repository MCP server as a substitute for the current project. Use repository MCP only after local evidence shows it is needed.",
+      "When delegating project inspection, state this as local-workspace-first with MCP available as a fallback. Do not turn it into a blanket MCP prohibition unless the user explicitly requested that restriction."
+    );
+  } else {
+    lines.push(
+      "The user explicitly selected or requested MCP for this turn, so that explicit request may override the normal local-workspace-first lookup order."
+    );
+  }
+  return lines.join("\n");
+}
+
 function buildRuntimePrompt(
   model: ModelProfile,
   skillContext: RuntimePromptBundle["skillContext"],
@@ -6526,16 +6646,25 @@ function buildRuntimePrompt(
   imageGenerateAvailable = false,
   videoGenerateAvailable = false,
   recommendedSkills: Array<{ id: string; qualifiedName: string; domain?: string }> = [],
-  selectedMcpServerIds: string[] = []
+  selectedMcpServerIds: string[] = [],
+  workspacePriority: RuntimeWorkspacePriorityContext = {
+    mode: "chat",
+    cwd: null,
+    localWorkspaceFirst: false
+  }
 ): RuntimePromptBundle {
   const blocks = [
     "You are codexh, a desktop agent for project and chat workflows.",
     `Current local date: ${formatRuntimeDate(new Date())}. Use this date for time-sensitive queries. Do not add, infer, or reuse a year that the user did not request.`,
     "Prefer progressive disclosure: inspect facts before making edits.",
-    "For large repositories, explore progressively: use a shallow repository tree first (maxDepth 2), then narrow by path or search term. Repository MCP tools must use maxResults and nextCursor pagination. Never request a full repository tree or repeat a broad call after a paged or shortened result.",
+    "For large repositories, explore progressively: use a shallow repository tree first (maxDepth 2), then narrow by path or search term. When repository MCP is appropriate, its tools must use maxResults and nextCursor pagination. Never request a full repository tree or repeat a broad call after a paged or shortened result.",
     "When a tool can gather needed facts, call it instead of guessing.",
     "Before responding, decide whether an available Skill is the best fit. When it is, call skills.load with that skill_id before following its instructions. Use Function Calling for Skills and external tools rather than merely claiming a Skill was used."
   ];
+  const projectWorkspacePriority = buildProjectWorkspacePriorityPrompt(workspacePriority);
+  if (projectWorkspacePriority) {
+    blocks.push(projectWorkspacePriority);
+  }
   if (imageGenerateAvailable) {
     blocks.push(
       "When the user asks to generate, draw, recreate, or vary an image (including follow-ups like 再换一张/再来一张), load the generate_image skill and call image.generate. Set count to the requested number of separate images (1-4); default to 1, or use 2 when the user clearly requests multiple images without an exact number. That tool uses the default image model from Settings → Multimodal, not the chat reasoning model. Never call image_gen, imagegen, or any invented image tool name. Never claim an image was created without a successful image.generate result."
@@ -6561,7 +6690,9 @@ function buildRuntimePrompt(
   blocks.push(
     selectedMcpServerIds.length > 0
       ? `The user explicitly selected MCP server(s): ${selectedMcpServerIds.join(", ")}. This request requires an MCP-backed answer. First call mcp.list_tools with the selected server id, then call mcp.call with a discovered tool before answering. Do not use filesystem, browser, web-search, or knowledge tools for the initial lookup.`
-      : "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
+      : workspacePriority.localWorkspaceFirst
+        ? "For MCP capabilities needed after local project inspection, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed."
+        : "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
     "For browser automation, call browser.inspect_page before browser.click, browser.fill, browser.select_option, or browser.press_key. Use only element ids returned by the latest inspection, then inspect again after navigation or page changes. Never guess selectors or claim a browser action succeeded without a tool result."
   );
   if (knowledgeEnabled) {

@@ -160,6 +160,78 @@ describe("multi-agent thread storage", () => {
     expect(summary.trend).toHaveLength(1);
   });
 
+  it("includes all descendant agent usage in the root task token total", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-agent-usage-test-"));
+    directories.push(directory);
+    const database = new DatabaseService(path.join(directory, "codexh.sqlite"));
+    databases.push(database);
+    const root = database.createThread({
+      title: "Root",
+      mode: "project",
+      workspaceKind: "project",
+      cwd: directory,
+      modelId: "mock-codexh",
+      providerId: "mock"
+    });
+    const child = database.createThread({
+      title: "Researcher",
+      mode: "project",
+      workspaceKind: "project",
+      cwd: directory,
+      modelId: "mock-codexh",
+      providerId: "mock",
+      parentThreadId: root.id,
+      rootThreadId: root.id,
+      agentPath: "/root/researcher"
+    });
+    const grandchild = database.createThread({
+      title: "Reviewer",
+      mode: "project",
+      workspaceKind: "project",
+      cwd: directory,
+      modelId: "mock-codexh",
+      providerId: "mock",
+      parentThreadId: child.id,
+      rootThreadId: root.id,
+      agentPath: "/root/researcher/reviewer"
+    });
+    const unrelated = database.createThread({
+      title: "Unrelated",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock-codexh",
+      providerId: "mock"
+    });
+
+    for (const [threadId, inputTokens, outputTokens] of [
+      [root.id, 100, 20],
+      [child.id, 50, 10],
+      [grandchild.id, 25, 5],
+      [unrelated.id, 1_000, 500]
+    ] as const) {
+      database.startTurn({
+        threadId,
+        kind: "regular",
+        status: "completed",
+        providerId: "mock",
+        modelId: "mock-codexh",
+        resolvedModelSnapshotJson: "{}",
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        usageJson: JSON.stringify({ inputTokens, outputTokens }),
+        errorMessage: null
+      });
+    }
+
+    expect(database.getThreadTokenUsage(root.id).thread).toMatchObject({
+      inputTokens: 175,
+      outputTokens: 35,
+      totalTokens: 210
+    });
+    expect(database.getThreadTokenUsage(child.id).thread.totalTokens).toBe(210);
+  });
+
   it("persists queued child-agent dispatches independently from normal message queues", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-agent-dispatch-test-"));
     directories.push(directory);

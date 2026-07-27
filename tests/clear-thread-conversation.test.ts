@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { MessageAttachment } from "@shared-types";
+import { parseEditableMessageMetadata } from "../apps/desktop/src/main/message-metadata";
 import { DatabaseService } from "../apps/desktop/src/main/storage";
 
 const temporaryDirectories: string[] = [];
@@ -162,5 +164,55 @@ describe("DatabaseService.truncateConversationFromMessage", () => {
         knowledgeEnabled: true
       })
     );
+  });
+
+  it("makes attachment metadata available before rewinding an edited message", async () => {
+    const database = await createDatabase();
+    const thread = database.createThread({
+      title: "attachment edit",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock",
+      providerId: "mock"
+    });
+    const attachment: MessageAttachment = {
+      id: "attachment-1",
+      kind: "image",
+      name: "reference.png",
+      mimeType: "image/png",
+      absolutePath: "C:\\attachments\\reference.png",
+      sizeBytes: 128,
+      width: 16,
+      height: 16,
+      source: "user"
+    };
+    const message = database.createMessage({
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: "original content",
+      metadataJson: JSON.stringify({
+        attachments: [attachment],
+        displayContent: "visible content"
+      })
+    });
+
+    const original = database.getMessage(thread.id, message.id);
+    expect(parseEditableMessageMetadata(original?.metadataJson ?? null)).toEqual({
+      attachments: [attachment],
+      displayContent: "visible content"
+    });
+
+    database.truncateConversationFromMessage(thread.id, message.id);
+    expect(database.getMessage(thread.id, message.id)).toBeNull();
+  });
+});
+
+describe("parseEditableMessageMetadata", () => {
+  it("falls back safely for malformed attachment metadata", () => {
+    expect(parseEditableMessageMetadata("not json")).toEqual({ attachments: [] });
+    expect(parseEditableMessageMetadata(JSON.stringify({ attachments: [{ id: "incomplete" }] })))
+      .toEqual({ attachments: [] });
   });
 });

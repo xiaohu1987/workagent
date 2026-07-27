@@ -46,7 +46,7 @@ import type {
   UserInputQuestion,
   UserInputPrompt
 } from "@shared-types";
-import { isOverlappingSubagentAssignment } from "./subagent-assignment";
+import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy } from "./subagent-assignment";
 import { normalizeRuntimeTimeouts } from "@shared-types";
 import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@agent-runtime";
 import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
@@ -68,6 +68,7 @@ import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime } from "./terminal-runtime";
 import { GitService } from "./git-service";
 import { SkillLabService } from "./skill-lab";
+import { parseEditableMessageMetadata } from "./message-metadata";
 import {
   DatabaseService,
   defaultConfig,
@@ -1060,8 +1061,13 @@ export class DesktopBackend {
     if (thread.status === "running" || thread.status === "waiting") {
       throw new Error("Stop the active task before editing a message.");
     }
+    const originalMessage = this.#db.getMessage(threadId, messageId);
+    if (!originalMessage || originalMessage.role !== "user") {
+      throw new Error("The message to edit is no longer available.");
+    }
+    const { attachments, displayContent } = parseEditableMessageMetadata(originalMessage.metadataJson);
     this.#db.truncateConversationFromMessage(threadId, messageId);
-    await this.sendMessage(threadId, content);
+    await this.sendMessage(threadId, content, attachments, displayContent);
   }
 
   public async deleteQueuedMessage(threadId: string, id: string): Promise<void> {
@@ -3387,6 +3393,12 @@ export class DesktopBackend {
     }
     const tree = this.#db.listAgentTree(parent.rootThreadId);
     const root = this.#db.getThread(parent.rootThreadId);
+    const latestRootUserMessage = this.#db.getLatestMessage(root.id, "user");
+    const assignedPrompt = normalizeSubagentMcpPolicy(input.prompt, {
+      projectMode: parent.mode === "project" && Boolean(parent.cwd),
+      userExplicitlyForbidsMcp: isExplicitMcpProhibition(latestRootUserMessage?.content ?? "")
+    });
+    const normalizedInput = assignedPrompt === input.prompt ? input : { ...input, prompt: assignedPrompt };
     const delegatedForCurrentRequest = this.getCurrentRequestSubagents(root, tree);
     const depth = Math.max(0, parent.agentPath.split("/").filter(Boolean).length - 1);
     if (depth >= this.#config.multiAgent.maxDepth) {
@@ -3395,7 +3407,7 @@ export class DesktopBackend {
     if (delegatedForCurrentRequest.length >= this.#config.multiAgent.maxSubagentsPerRoot) {
       throw new Error(`Maximum child-agent count (${this.#config.multiAgent.maxSubagentsPerRoot}) reached for this user request.`);
     }
-    const duplicate = delegatedForCurrentRequest.find((item) => isOverlappingSubagentAssignment(input, item));
+    const duplicate = delegatedForCurrentRequest.find((item) => isOverlappingSubagentAssignment(normalizedInput, item));
     if (duplicate) {
       return { threadId: duplicate.id, agentPath: duplicate.agentPath, status: duplicate.status, reused: true };
     }
@@ -3431,7 +3443,7 @@ export class DesktopBackend {
       agentPath = `${parent.agentPath}/${role}-${suffix}`;
     }
     const thread = this.#db.createThread({
-      title: `${input.role}: ${input.prompt.slice(0, 40)}`,
+      title: `${input.role}: ${assignedPrompt.slice(0, 40)}`,
       mode: parent.mode,
       workspaceKind: parent.workspaceKind,
       cwd: parent.cwd,
@@ -3441,7 +3453,7 @@ export class DesktopBackend {
       rootThreadId: parent.rootThreadId,
       agentPath,
       agentRole: input.role,
-      lastTaskMessage: input.prompt,
+      lastTaskMessage: assignedPrompt,
       gpaStateJson: parent.gpaStateJson ?? JSON.stringify({ fullAccess: true }),
       multiAgentMode: parent.multiAgentMode,
       status: queued ? "idle" : "running"
@@ -3458,7 +3470,7 @@ export class DesktopBackend {
     }
     await this.sendMessage(
       thread.id,
-      buildChildAgentPrompt(parent, thread, input.prompt, parentMessages.map((message) => `${message.role}: ${message.content}`).join("\n").slice(-12_000)),
+      buildChildAgentPrompt(parent, thread, assignedPrompt, parentMessages.map((message) => `${message.role}: ${message.content}`).join("\n").slice(-12_000)),
       [],
       undefined,
       !queued

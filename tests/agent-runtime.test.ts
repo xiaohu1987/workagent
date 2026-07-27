@@ -90,6 +90,9 @@ import {
   retargetStaleBrowserObservationToolCall,
   formatAvailableTools,
   extractSelectedMcpServerIds,
+  isExplicitMcpRequest,
+  validateProjectMcpPriority,
+  buildProjectWorkspacePriorityPrompt,
   isAgentToolEnabled,
   prioritizeUserInputToolCall,
   MAX_REPEATED_TASK_FAILURES,
@@ -248,6 +251,74 @@ describe("selected MCP server parsing", () => {
   it("preserves the explicit MCP server ids carried by a composer message", () => {
     expect(extractSelectedMcpServerIds("[Selected MCP server]\nid: internal-search\nSearch")).toEqual(["internal-search"]);
     expect(extractSelectedMcpServerIds("ordinary message")).toEqual([]);
+  });
+});
+
+describe("project workspace MCP priority", () => {
+  const baseInput = {
+    toolName: "mcp.call",
+    projectMode: true,
+    projectCwd: "D:\\workspace\\current-project",
+    explicitlySelectedMcp: false,
+    explicitlyRequestedMcp: false,
+    localWorkspaceInspectedBeforeDecision: false
+  };
+
+  it("blocks repository MCP before the model has seen a successful local inspection", () => {
+    const result = validateProjectMcpPriority(baseInput);
+
+    expect(result.allowed).toBe(false);
+    expect(result.message).toContain("fs.read_directory");
+    expect(result.message).toContain("current project");
+  });
+
+  it("allows MCP on a later decision after local workspace evidence", () => {
+    expect(validateProjectMcpPriority({
+      ...baseInput,
+      localWorkspaceInspectedBeforeDecision: true
+    })).toEqual({ allowed: true });
+  });
+
+  it("allows an explicitly selected or naturally requested MCP lookup", () => {
+    expect(validateProjectMcpPriority({
+      ...baseInput,
+      explicitlySelectedMcp: true
+    })).toEqual({ allowed: true });
+    expect(isExplicitMcpRequest("请使用 MCP 查询对应仓库里的实现")).toBe(true);
+    expect(isExplicitMcpRequest("查询 MCP 里的项目实现")).toBe(true);
+    expect(validateProjectMcpPriority({
+      ...baseInput,
+      explicitlyRequestedMcp: true
+    })).toEqual({ allowed: true });
+  });
+
+  it("does not mistake a complaint about MCP routing for an explicit MCP request", () => {
+    expect(isExplicitMcpRequest("为什么项目级聊天总是从MCP去找代码")).toBe(false);
+    expect(isExplicitMcpRequest("项目级聊天总是使用 MCP，根本没看当前项目")).toBe(false);
+    expect(isExplicitMcpRequest("不要使用 MCP，先看当前项目")).toBe(false);
+  });
+
+  it("does not constrain ordinary chats or project records without a cwd", () => {
+    expect(validateProjectMcpPriority({ ...baseInput, projectMode: false })).toEqual({ allowed: true });
+    expect(validateProjectMcpPriority({ ...baseInput, projectCwd: null })).toEqual({ allowed: true });
+  });
+
+  it("adds the authoritative cwd and local-first directive only for project workspaces", () => {
+    const projectPrompt = buildProjectWorkspacePriorityPrompt({
+      mode: "project",
+      cwd: "E:\\dev\\api",
+      localWorkspaceFirst: true
+    });
+
+    expect(projectPrompt).toContain("E:\\\\dev\\\\api");
+    expect(projectPrompt).toContain("authoritative source");
+    expect(projectPrompt).toContain("before calling mcp.call");
+    expect(projectPrompt).toContain("MCP available as a fallback");
+    expect(buildProjectWorkspacePriorityPrompt({
+      mode: "chat",
+      cwd: null,
+      localWorkspaceFirst: false
+    })).toBeNull();
   });
 });
 

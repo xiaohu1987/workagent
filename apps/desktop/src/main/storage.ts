@@ -1298,6 +1298,13 @@ export class DatabaseService {
       .map(mapMessageRow);
   }
 
+  public getMessage(threadId: string, messageId: string): MessageRecord | null {
+    const row = this.#db
+      .prepare("SELECT * FROM messages WHERE thread_id = ? AND id = ?")
+      .get(threadId, messageId);
+    return row ? mapMessageRow(row) : null;
+  }
+
   public listRecentMessages(threadId: string, limit: number): MessageRecord[] {
     const cappedLimit = Math.max(1, Math.floor(limit));
     return this.#db
@@ -1575,7 +1582,16 @@ export class DatabaseService {
     thread: TokenUsage;
     turnRunId: string | null;
   } {
-    const turns = this.listTurnRuns(threadId);
+    const thread = this.getThread(threadId);
+    const turns = (this.#db
+      .prepare(
+        `SELECT turn.*
+         FROM turn_runs AS turn
+         JOIN threads AS thread ON thread.id = turn.thread_id
+         WHERE thread.root_thread_id = ?
+         ORDER BY turn.started_at ASC, turn.rowid ASC`
+      )
+      .all(thread.rootThreadId) as any[]).map(mapTurnRunRow);
     const latest = turns.length > 0 ? turns[turns.length - 1] : null;
     const turnUsage = latest
       ? parseTokenUsageJson(latest.usageJson) ?? finalizeTokenUsage({
