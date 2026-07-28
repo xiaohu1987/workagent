@@ -556,6 +556,9 @@ function registerIpc(): void {
     return config;
   });
   ipcMain.handle("config:save", (_event, config) => backend.saveConfig(config));
+  ipcMain.handle("config:set-reasoning-effort", (_event, reasoningEffort) =>
+    backend.setGlobalReasoningEffort(reasoningEffort)
+  );
   ipcMain.handle("databases:list", () => backend.listDatabaseSources());
   ipcMain.handle("databases:credential-connection-ids", () => backend.listDatabaseCredentialConnectionIds());
   ipcMain.handle("databases:test", async (_event, payload?: { connection?: unknown; password?: string }) => {

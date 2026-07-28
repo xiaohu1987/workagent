@@ -6,6 +6,7 @@ import type {
   ModelGenerationContext,
   VideoGenerationPlan
 } from "./types";
+import { isConfigurableGptReasoningModel, isGptReasoningEffort } from "@shared-types";
 import {
   extractVisibleStreamText as extractVisibleStreamTextGpt,
   imageGenerationProtocolForModel as imageGenerationProtocolForModelGpt,
@@ -43,11 +44,12 @@ export const gptCompat: ModelCompat = {
   },
 
   normalizeRequestParams(
-    _ctx: ModelCompatContext,
+    { input }: ModelCompatContext,
     base: Record<string, unknown>
   ): Record<string, unknown> {
-    // GPT baseline: the provider-built request is already correct.
-    return base;
+    return isConfigurableGptReasoningModel(input.model) && isGptReasoningEffort(input.reasoningEffort)
+      ? { ...base, reasoning_effort: input.reasoningEffort }
+      : base;
   },
 
   extractVisibleStreamText(accumulated: string): string {

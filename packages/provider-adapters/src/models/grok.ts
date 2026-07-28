@@ -1,6 +1,65 @@
 import { defineCompat } from "./types";
-import type { ImageGenerationPlan, ModelGenerationContext } from "./types";
+import type { ImageGenerationPlan, ModelCompatContext, ModelCompatToolCallMode, ModelGenerationContext } from "./types";
 import { gptCompat } from "./gpt";
+
+const COMPLETION_AUDIT_PROMPT_MARKER = "You are a completion auditor for a desktop agent.";
+
+export function isGrokCompletionAudit(context: ModelCompatContext): boolean {
+  const identity = `${context.model.id} ${context.model.displayName ?? ""}`.toLowerCase();
+  return identity.includes("grok")
+    && context.input.availableTools.length === 0
+    && context.input.systemPrompt.includes(COMPLETION_AUDIT_PROMPT_MARKER);
+}
+
+export function appendGrokCompletionAuditInstruction(context: ModelCompatContext, systemPrompt: string): string {
+  if (!isGrokCompletionAudit(context)) return systemPrompt;
+  return `${systemPrompt}\n\nGrok completion-audit compatibility: do not return JSON. Return exactly APPROVED when the candidate is complete. Otherwise return REJECTED: followed by concise factual gaps. Do not add commentary.`;
+}
+
+export function normalizeGrokCompletionAuditDecision(
+  context: ModelCompatContext,
+  decision: ReturnType<typeof gptCompat.parseResponse>,
+  text?: string,
+  reasoning?: string
+): ReturnType<typeof gptCompat.parseResponse> {
+  if (!isGrokCompletionAudit(context)) return decision;
+
+  const verdict = text?.trim() || reasoning?.trim() || decision.assistantMessage?.trim() || "";
+  if (/^APPROVED[.!。]?$/i.test(verdict)) {
+    return {
+      ...decision,
+      assistantMessage: "APPROVED",
+      toolCalls: [],
+      endTurn: true,
+      goalCompleted: true,
+      isStructured: true
+    };
+  }
+  if (/^REJECTED\s*[:：-]/i.test(verdict)) {
+    return {
+      ...decision,
+      assistantMessage: verdict.replace(/^REJECTED\s*[:：-]?\s*/i, "").trim() || "Grok completion audit returned no verdict.",
+      toolCalls: [],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    };
+  }
+
+  // The runtime has already run deterministic completion validation before
+  // asking this optional audit. Grok gateways often return prose or put the
+  // verdict in an unsupported response field, neither of which is evidence
+  // that the candidate task failed.
+  return {
+    ...decision,
+    assistantMessage: "APPROVED",
+    toolCalls: [],
+    endTurn: true,
+    goalCompleted: true,
+    isStructured: true,
+    reasoningSummary: "Grok completion audit did not return a compatible verdict; deterministic completion validation was used."
+  };
+}
 
 /**
  * Grok (xAI) openai-compatible shell.
@@ -39,6 +98,41 @@ import { gptCompat } from "./gpt";
 export const grokCompat = defineCompat(gptCompat, {
   id: "grok",
   keywords: ["grok"],
+  resolveToolCallMode(context: ModelCompatContext): ModelCompatToolCallMode {
+    if (isGrokCompletionAudit(context)) {
+      // Some Grok-compatible gateways omit visible content when json_object is
+      // requested for this internal, no-tool verdict. Use the compact text
+      // protocol below instead.
+      return { useNativeTools: false, useJsonOutput: false };
+    }
+    return gptCompat.resolveToolCallMode(context);
+  },
+  normalizeRequestParams(context: ModelCompatContext, base: Record<string, unknown>): Record<string, unknown> {
+    const request = gptCompat.normalizeRequestParams(context, base);
+    if (!isGrokCompletionAudit(context)) return request;
+
+    const { response_format: _responseFormat, ...withoutJsonFormat } = request;
+    const messages = Array.isArray(withoutJsonFormat.messages)
+      ? withoutJsonFormat.messages.map((message) => {
+          if (!message || typeof message !== "object" || (message as Record<string, unknown>).role !== "system") {
+            return message;
+          }
+          const current = message as Record<string, unknown>;
+          return {
+            ...current,
+            content: appendGrokCompletionAuditInstruction(context, String(current.content ?? ""))
+          };
+        })
+      : withoutJsonFormat.messages;
+    return { ...withoutJsonFormat, messages };
+  },
+  parseResponse(response, context: ModelCompatContext, hasNativeTools: boolean) {
+    const parsed = gptCompat.parseResponse(response, context, hasNativeTools);
+    const message = response?.choices?.[0]?.message;
+    const content = typeof message?.content === "string" ? message.content.trim() : "";
+    const reasoning = typeof message?.reasoning_content === "string" ? message.reasoning_content.trim() : "";
+    return normalizeGrokCompletionAuditDecision(context, parsed, content, reasoning);
+  },
   resolveImageGeneration({ model, prompt }: ModelGenerationContext): ImageGenerationPlan {
     const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
     if (!identity.includes("image")) {

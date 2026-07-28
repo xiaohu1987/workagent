@@ -19,6 +19,7 @@ import type {
   GitSnapshot,
   GpaStage,
   GpaState,
+  GptReasoningEffort,
   KnowledgeBaseRecord,
   KnowledgeChunkRecord,
   KnowledgeBaseSummary,
@@ -28,6 +29,7 @@ import type {
   MessageAttachment,
   McpServerConfig,
   ModelProfile,
+  ReasoningEffort,
   PluginRecord,
   ProviderDefinition,
   ProjectPluginBinding,
@@ -47,7 +49,7 @@ import type {
   UserInputPrompt
 } from "@shared-types";
 import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy } from "./subagent-assignment";
-import { normalizeResponseTone, normalizeRuntimeTimeouts } from "@shared-types";
+import { isGptReasoningEffort, normalizeResponseTone, normalizeRuntimeTimeouts, withGptReasoningCapabilities } from "@shared-types";
 import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@agent-runtime";
 import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
@@ -303,6 +305,7 @@ export class DesktopBackend {
         claimNextQueuedMessage: async (threadId) => this.#db.claimNextQueuedMessage(threadId),
         completeQueuedMessage: async (id) => this.#db.completeQueuedMessage(id),
         createMessage: async (input) => this.#db.createMessage(input),
+        createQueuedUserMessage: async (queueItemId, input) => this.#db.createQueuedUserMessage(queueItemId, input),
         startTurn: async (input) => this.#db.startTurn(input),
         finishTurn: async (turnRunId, patch) => this.#db.finishTurn(turnRunId, patch),
         recordToolCall: async (input) => this.#db.recordToolCall(input),
@@ -1548,6 +1551,22 @@ export class DesktopBackend {
     return this.#config;
   }
 
+  public async setGlobalReasoningEffort(reasoningEffort: GptReasoningEffort): Promise<GptReasoningEffort> {
+    if (!isGptReasoningEffort(reasoningEffort)) {
+      throw new Error("不支持的 GPT 推理强度。");
+    }
+    const previous = this.#config.reasoningEffort;
+    this.#config.reasoningEffort = reasoningEffort;
+    try {
+      await saveConfig(this.#layout.configFile, this.#config);
+    } catch (error) {
+      this.#config.reasoningEffort = previous;
+      throw error;
+    }
+    await this.#logs.append("config.reasoning_effort_updated", { reasoningEffort });
+    return reasoningEffort;
+  }
+
   public async getApplicationBackgrounds(): Promise<ApplicationBackgroundCollectionPayload | null> {
     const appearanceDir = path.join(this.#layout.root, "appearance");
     try {
@@ -1757,6 +1776,7 @@ export class DesktopBackend {
     this.#config.defaultModel = normalized.defaultModel;
     this.#config.defaultProvider = normalized.defaultProvider;
     this.#config.responseTone = normalized.responseTone;
+    this.#config.reasoningEffort = normalized.reasoningEffort;
     this.#config.providers = [...normalized.providers];
     this.#config.models = [...normalized.models];
     this.#config.routing = { ...normalized.routing };
@@ -3386,7 +3406,7 @@ export class DesktopBackend {
 
   private async spawnChildAgent(
     parentThreadId: string,
-    input: { prompt: string; role: string; modelId?: string; providerId?: string; contextFork?: "none" | "all" | "recent"; reasoningEffort?: "low" | "medium" | "high"; serviceTier?: string; systemOverride?: boolean }
+    input: { prompt: string; role: string; modelId?: string; providerId?: string; contextFork?: "none" | "all" | "recent"; reasoningEffort?: ReasoningEffort; serviceTier?: string; systemOverride?: boolean }
   ): Promise<{ threadId: string; agentPath: string; status: ThreadRecord["status"]; reused?: boolean; queued?: boolean }> {
     const parent = this.#db.getThread(parentThreadId);
     if (parent.multiAgentMode === "disabled" && !input.systemOverride) {
@@ -3698,7 +3718,7 @@ export class DesktopBackend {
     return blocks.join("\n\n");
   }
 
-  private async webSearch(threadId: string, query: string): Promise<Array<{ title: string; url: string; snippet: string }>> {
+  private async webSearch(_threadId: string, query: string): Promise<Array<{ title: string; url: string; snippet: string }>> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
       return [];
@@ -3724,10 +3744,9 @@ export class DesktopBackend {
 
     for (const provider of providers) {
       try {
-        // A search is visible in the workspace as well as being parsed for the agent.
-        const page = threadId
-          ? (await this.openBrowserTab(threadId, provider.url)).page
-          : await this.loadBrowserPage(provider.url);
+        // Web search is background retrieval. Only explicit browser.* tools may
+        // create a thread tab or depend on the visible Browser workspace.
+        const page = await this.loadBrowserPage(provider.url);
         const $ = cheerio.load(page.html);
         const results = $(provider.selector)
           .toArray()
@@ -3767,12 +3786,9 @@ export class DesktopBackend {
     return [];
   }
 
-  private async openPage(threadId: string, url: string): Promise<{ title: string; url: string; text: string }> {
-    if (threadId) {
-      const opened = await this.openBrowserTab(threadId, url);
-      return opened.page;
-    }
-
+  private async openPage(_threadId: string, url: string): Promise<{ title: string; url: string; text: string }> {
+    // web_search.open_page extracts text without surfacing a Browser tab. This
+    // keeps ordinary research silent and avoids a webview-attachment prompt.
     const page = await this.loadBrowserPage(url);
     return { title: page.title, url: page.url, text: page.text };
   }
@@ -3862,7 +3878,7 @@ export class DesktopBackend {
         } satisfies RuntimeEvent);
       }
     }
-    if (routedEvent.type !== "assistant.delta") {
+    if (routedEvent.type !== "assistant.draft.updated") {
       await this.#logs.append("runtime.event", { event: sanitizeRuntimeEventForLog(routedEvent) }, routedEvent.threadId);
     }
     if (subject?.parentThreadId && (routedEvent.type === "thread.updated" || routedEvent.type === "queue.updated")) {
@@ -4127,7 +4143,7 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
   const models = config.models.filter((model) =>
     providers.some((provider) => provider.id === model.providerId)
   );
-  const nextModels = (models.length ? models : fallback.models).map((model) => ({
+  const nextModels = (models.length ? models : fallback.models).map((model) => withGptReasoningCapabilities({
     ...model,
     role:
       model.role === "image" || model.role === "video" || model.role === "reasoning"
@@ -4165,6 +4181,7 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     defaultProvider,
     defaultModel,
     responseTone: normalizeResponseTone(config.responseTone),
+    reasoningEffort: isGptReasoningEffort(config.reasoningEffort) ? config.reasoningEffort : "medium",
     providers,
     models: nextModels,
     multimodal: {

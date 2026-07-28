@@ -48,6 +48,8 @@ declare global {
       }>;
       getUsageAnalytics: (input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) =>
         Promise<import("@shared-types").UsageAnalyticsSummary>;
+      setGlobalReasoningEffort: (reasoningEffort: import("@shared-types").GptReasoningEffort) =>
+        Promise<import("@shared-types").GptReasoningEffort>;
       searchThreads: (query: string) => Promise<Array<{ thread: ThreadRecord; snippet: string | null; score: number }>>;
       setThreadPinned: (payload: { threadId: string; isPinned: boolean }) => Promise<ThreadRecord>;
       renameThread: (payload: { threadId: string; title: string }) => Promise<ThreadRecord>;

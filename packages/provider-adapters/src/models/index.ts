@@ -19,7 +19,12 @@ export type {
 } from "./types";
 export { gptCompat } from "./gpt";
 export { deepseekCompat } from "./deepseek";
-export { grokCompat } from "./grok";
+export {
+  grokCompat,
+  isGrokCompletionAudit,
+  appendGrokCompletionAuditInstruction,
+  normalizeGrokCompletionAuditDecision
+} from "./grok";
 export { glmCompat } from "./glm";
 export { qwenCompat } from "./qwen";
 export { senseNovaCompat } from "./sensenova";

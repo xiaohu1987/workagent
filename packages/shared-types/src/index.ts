@@ -43,6 +43,14 @@ export type ApprovalResolutionMode = "once" | "session" | "remember";
 export type InteractionResolutionSource = "user" | "timeout";
 export type SkillScope = "repo" | "user" | "system" | "admin";
 export type KnowledgeScope = "global" | "project" | "imported";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type GptReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
+export const GPT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const satisfies readonly GptReasoningEffort[];
+
+export function isGptReasoningEffort(value: unknown): value is GptReasoningEffort {
+  return typeof value === "string" && (GPT_REASONING_EFFORTS as readonly string[]).includes(value);
+}
 
 export interface QuickNoteRecord {
   id: string;
@@ -99,7 +107,7 @@ export interface MultiAgentSettings {
   defaultContextFork?: "none" | "all" | "recent";
   defaultModelId?: string;
   defaultProviderId?: string;
-  defaultReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  defaultReasoningEffort?: ReasoningEffort;
 }
 
 /** Long-lived, redacted experience distilled from completed root tasks. */
@@ -472,6 +480,7 @@ export interface QueuedMessageRecord {
   content: string;
   displayContent: string;
   attachments: MessageAttachment[];
+  userMessageId: string | null;
   status: "queued" | "dispatching";
   createdAt: string;
 }
@@ -743,9 +752,9 @@ export interface ModelProfile {
   agentCapabilityReason?: string;
   supportsReasoningSummary: boolean;
   /** Provider-supported reasoning effort values. Omitted keeps the provider default. */
-  supportedReasoningEfforts?: Array<"none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">;
+  supportedReasoningEfforts?: ReasoningEffort[];
   /** Default reasoning effort for this model when it is selected. */
-  defaultReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  defaultReasoningEffort?: ReasoningEffort;
   defaultTemperature?: number;
   defaultMaxOutputTokens?: number;
 }
@@ -793,12 +802,45 @@ export const DEFAULT_RUNTIME_TIMEOUTS: RuntimeTimeoutSettings = {
   videoPollIntervalMs: 5_000
 };
 
-export type ResponseTone = "standard" | "cute_lolita" | "mature_lady";
+export type ResponseTone = "friendly" | "concise";
 
-export const DEFAULT_RESPONSE_TONE: ResponseTone = "standard";
+export const DEFAULT_RESPONSE_TONE: ResponseTone = "concise";
 
 export function normalizeResponseTone(value: unknown): ResponseTone {
-  return value === "cute_lolita" || value === "mature_lady" ? value : DEFAULT_RESPONSE_TONE;
+  if (value === "friendly" || value === "cute_lolita" || value === "mature_lady") {
+    return "friendly";
+  }
+  return DEFAULT_RESPONSE_TONE;
+}
+
+/** GPT-5.4 and newer reasoning models expose the four user-facing effort levels. */
+export function isConfigurableGptReasoningModel(
+  model: Pick<ModelProfile, "id" | "role">
+): boolean {
+  if (model.role !== "reasoning") return false;
+  const version = /\bgpt-(\d+)(?:\.(\d+))?/i.exec(model.id);
+  if (!version) return false;
+  const major = Number(version[1]);
+  const minor = Number(version[2] ?? 0);
+  return major > 5 || (major === 5 && minor >= 4);
+}
+
+export function withGptReasoningCapabilities<T extends ModelProfile>(model: T): T {
+  if (!isConfigurableGptReasoningModel(model)) return model;
+  return {
+    ...model,
+    supportedReasoningEfforts: [...GPT_REASONING_EFFORTS],
+    defaultReasoningEffort: isGptReasoningEffort(model.defaultReasoningEffort)
+      ? model.defaultReasoningEffort
+      : "medium"
+  };
+}
+
+export function resolveModelReasoningEffort(
+  model: Pick<ModelProfile, "id" | "role" | "defaultReasoningEffort">,
+  globalGptEffort: GptReasoningEffort
+): ReasoningEffort | undefined {
+  return isConfigurableGptReasoningModel(model) ? globalGptEffort : model.defaultReasoningEffort;
 }
 
 export function normalizeRuntimeTimeouts(value?: Partial<RuntimeTimeoutSettings> | null): RuntimeTimeoutSettings {
@@ -824,6 +866,7 @@ export interface AppConfig {
   defaultModel: string;
   defaultProvider: string;
   responseTone: ResponseTone;
+  reasoningEffort: GptReasoningEffort;
   providers: ProviderDefinition[];
   models: ModelProfile[];
   routing: {
@@ -960,7 +1003,7 @@ export interface ProviderTurnInput {
   availableTools: ToolSpecDefinition[];
   model: ModelProfile;
   provider: ProviderDefinition;
-  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  reasoningEffort?: ReasoningEffort;
   /** Use the JSON decision envelope instead of provider-native function calls. */
   forceTextToolProtocol?: boolean;
   stream?: boolean;
@@ -968,11 +1011,13 @@ export interface ProviderTurnInput {
   abortSignal?: AbortSignal;
 }
 
+export type AssistantDraftPhase = "generating" | "validating" | "auditing" | "retrying";
+
 export interface RuntimeEvent {
   type:
     | "thread.updated"
     | "message.created"
-    | "assistant.delta"
+    | "assistant.draft.updated"
     | "assistant.completed"
     | "assistant.execution_output"
     | "agent.retrying"

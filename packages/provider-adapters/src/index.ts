@@ -20,6 +20,7 @@ import type {
   ModelCompatContext
 } from "./models";
 import { resolveModelCompat } from "./models";
+import { appendGrokCompletionAuditInstruction, normalizeGrokCompletionAuditDecision } from "./models";
 
 export {
   resolveModelCompat,
@@ -734,6 +735,7 @@ class AnthropicProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    const compatContext: ModelCompatContext = { model: input.model, input };
     const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
       ? input.availableTools.map((tool) => ({
           name: nativeToolName(tool.name),
@@ -744,7 +746,7 @@ class AnthropicProvider implements ProviderAdapter {
     const reasoningEffort = input.reasoningEffort ?? input.model.defaultReasoningEffort;
     const request: Record<string, unknown> = {
       model: input.model.id,
-      system: input.systemPrompt,
+      system: appendGrokCompletionAuditInstruction(compatContext, input.systemPrompt),
       max_tokens: input.model.defaultMaxOutputTokens ?? 2048,
       messages: await buildAnthropicMessages(input),
       ...(nativeTools ? {
@@ -804,9 +806,10 @@ function parseAnthropicResponse(
       ? nativeTextDecision(text)
       : parseDecisionFromText(text);
   const withUsage = withTokenUsage(decision, response?.usage);
-  return reasoning && !withUsage.reasoningSummary
+  const withReasoning = reasoning && !withUsage.reasoningSummary
     ? { ...withUsage, reasoningSummary: reasoning }
     : withUsage;
+  return normalizeGrokCompletionAuditDecision({ model: input.model, input }, withReasoning, text, reasoning);
 }
 
 async function consumeAnthropicStream(
@@ -815,6 +818,7 @@ async function consumeAnthropicStream(
   hasNativeTools: boolean
 ): Promise<ProviderTurnDecision> {
   let text = "";
+  let visibleText = "";
   let reasoning = "";
   let stopReason: string | undefined;
   let usage: Record<string, unknown> | undefined;
@@ -842,7 +846,12 @@ async function consumeAnthropicStream(
         const delta = event.delta;
         if (delta?.type === "text_delta" && typeof delta.text === "string") {
           text += delta.text;
-          await input.onTextDelta?.(delta.text);
+          const nextVisibleText = extractVisibleStreamText(text);
+          if (nextVisibleText.startsWith(visibleText)) {
+            const visibleDelta = nextVisibleText.slice(visibleText.length);
+            if (visibleDelta) await input.onTextDelta?.(visibleDelta);
+          }
+          visibleText = nextVisibleText;
         } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
           reasoning += delta.thinking;
         } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
@@ -881,7 +890,8 @@ async function consumeAnthropicStream(
       ? nativeTextDecision(text)
       : parseDecisionFromText(text);
   const withUsage = withTokenUsage(decision, usage);
-  return reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
+  const withReasoning = reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
+  return normalizeGrokCompletionAuditDecision({ model: input.model, input }, withReasoning, text, reasoning);
 }
 
 function throwForAnthropicStopReason(stopReason: string): void {
@@ -1394,6 +1404,7 @@ function parseResponsesResponse(response: any, input: ProviderTurnInput): Provid
 
 async function consumeResponsesStream(stream: AsyncIterable<any>, input: ProviderTurnInput): Promise<ProviderTurnDecision> {
   let text = "";
+  let visibleText = "";
   let reasoning = "";
   let terminalResponse: any;
   const calls = new Map<number, { id?: string; name?: string; arguments: string }>();
@@ -1401,7 +1412,12 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
   for await (const event of stream) {
     if (event?.type === "response.output_text.delta" && typeof event.delta === "string") {
       text += event.delta;
-      await input.onTextDelta?.(event.delta);
+      const nextVisibleText = extractVisibleStreamText(text);
+      if (nextVisibleText.startsWith(visibleText)) {
+        const visibleDelta = nextVisibleText.slice(visibleText.length);
+        if (visibleDelta) await input.onTextDelta?.(visibleDelta);
+      }
+      visibleText = nextVisibleText;
       continue;
     }
     if (event?.type === "response.reasoning_summary_text.delta" && typeof event.delta === "string") {

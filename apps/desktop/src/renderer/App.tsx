@@ -24,6 +24,7 @@ import yaml from "highlight.js/lib/languages/yaml";
 import "./timeline.css";
 import type {
   AppConfig,
+  AssistantDraftPhase,
   ApprovalRequest,
   ArtifactRecord,
   ContextCompactionRecord,
@@ -34,6 +35,7 @@ import type {
   GitActionResult,
   GitFileChange,
   GitSnapshot,
+  GptReasoningEffort,
   KnowledgeBaseSummary,
   KnowledgeDocumentRecord,
   KnowledgeImportSource,
@@ -63,7 +65,7 @@ import type {
   ToolCallRecord,
   UserInputPrompt
 } from "@shared-types";
-import { DEFAULT_RESPONSE_TONE, DEFAULT_RUNTIME_TIMEOUTS, createEmptyTokenUsage } from "@shared-types";
+import { DEFAULT_RESPONSE_TONE, DEFAULT_RUNTIME_TIMEOUTS, GPT_REASONING_EFFORTS, createEmptyTokenUsage, isConfigurableGptReasoningModel, withGptReasoningCapabilities } from "@shared-types";
 import {
   canDeleteThread,
   getComposerPrimaryActionState,
@@ -120,8 +122,6 @@ type UserSkillGenerationDialog = {
   name: string;
 };
 type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
-const BROWSER_WORKSPACE_RECOVERY_QUESTION_ID = "browser_workspace_recovery";
-
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("c", c);
 hljs.registerLanguage("csharp", csharp);
@@ -509,9 +509,8 @@ const RESPONSE_TONE_OPTIONS: Array<{
   label: string;
   description: string;
 }> = [
-  { value: "standard", label: "标准", description: "自然、清晰、专业" },
-  { value: "cute_lolita", label: "可爱萝莉", description: "活泼、软萌、轻快" },
-  { value: "mature_lady", label: "成熟御姐", description: "从容、温和、有分寸" }
+  { value: "friendly", label: "亲和", description: "自然、温和、清晰" },
+  { value: "concise", label: "简约", description: "直接、精炼、聚焦结果" }
 ];
 
 type FileChangeAction = "created" | "modified" | "deleted";
@@ -535,12 +534,15 @@ type ConversationTurnItem = {
   files: FileChangeSummaryItem[];
 };
 
-type StreamingAssistant = {
+export type AssistantDraft = {
+  draftId: string;
+  sequence: number;
   threadId: string;
   turnRunId: string;
   content: string;
+  phase: AssistantDraftPhase;
+  startedAt: string;
   completed: boolean;
-  presentation: "draft" | "continuing" | "committed";
   messageId?: string;
 };
 
@@ -781,8 +783,8 @@ export function App() {
     Record<string, Record<string, TerminalSessionState>>
   >({});
   const terminalOutputFramesRef = useRef<Record<string, { data: string; frame: number }>>({});
-  const streamingAssistantFramesRef = useRef<
-    Record<string, { threadId: string; content: string; frame: number }>
+  const assistantDraftFramesRef = useRef<
+    Record<string, { draft: AssistantDraft; frame: number }>
   >({});
   const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
   const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
@@ -812,7 +814,7 @@ export function App() {
   const pluginToggleQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pluginEnabledStateRef = useRef<Map<string, boolean>>(new Map());
   const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
-  const [streamingAssistants, setStreamingAssistants] = useState<Record<string, StreamingAssistant>>({});
+  const [assistantDrafts, setAssistantDrafts] = useState<Record<string, AssistantDraft>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null);
   const [composerSubmission, setComposerSubmission] = useState<ComposerSubmission | null>(null);
@@ -951,6 +953,7 @@ export function App() {
   const [multimodalPickerSelected, setMultimodalPickerSelected] = useState<string[]>([]);
   const [composerProviderId, setComposerProviderId] = useState("");
   const [composerModelId, setComposerModelId] = useState("");
+  const [isUpdatingReasoningEffort, setIsUpdatingReasoningEffort] = useState(false);
   const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSourceAttachment[]>([]);
   const [knowledgeUrlInput, setKnowledgeUrlInput] = useState("");
   const [isKnowledgeUrlEditorOpen, setIsKnowledgeUrlEditorOpen] = useState(false);
@@ -1527,10 +1530,10 @@ export function App() {
       window.cancelAnimationFrame(pending.frame);
     }
     terminalOutputFramesRef.current = {};
-    for (const pending of Object.values(streamingAssistantFramesRef.current)) {
+    for (const pending of Object.values(assistantDraftFramesRef.current)) {
       window.cancelAnimationFrame(pending.frame);
     }
-    streamingAssistantFramesRef.current = {};
+    assistantDraftFramesRef.current = {};
   }, []);
 
   useEffect(() => {
@@ -1934,62 +1937,40 @@ export function App() {
     };
   }
 
-  function flushStreamingAssistant(turnRunId: string) {
-    const pending = streamingAssistantFramesRef.current[turnRunId];
+  function flushAssistantDraft(draftId: string) {
+    const pending = assistantDraftFramesRef.current[draftId];
     if (!pending) return;
 
     window.cancelAnimationFrame(pending.frame);
-    delete streamingAssistantFramesRef.current[turnRunId];
-    setStreamingAssistants((current) => ({
-      ...current,
-      [turnRunId]: {
-        ...current[turnRunId],
-        threadId: pending.threadId,
-        turnRunId,
-        content: pending.content,
-        completed: false,
-        presentation: "draft"
-      }
-    }));
+    delete assistantDraftFramesRef.current[draftId];
+    setAssistantDrafts((current) => reconcileAssistantDraftUpdate(current, pending.draft));
   }
 
-  function discardQueuedStreamingAssistant(turnRunId: string) {
-    const pending = streamingAssistantFramesRef.current[turnRunId];
+  function discardQueuedAssistantDraft(draftId: string) {
+    const pending = assistantDraftFramesRef.current[draftId];
     if (!pending) return;
     window.cancelAnimationFrame(pending.frame);
-    delete streamingAssistantFramesRef.current[turnRunId];
+    delete assistantDraftFramesRef.current[draftId];
   }
 
-  function discardQueuedStreamingAssistantsForThread(threadId: string) {
-    for (const [turnRunId, pending] of Object.entries(streamingAssistantFramesRef.current)) {
-      if (pending.threadId === threadId) {
-        discardQueuedStreamingAssistant(turnRunId);
+  function discardQueuedAssistantDraftsForThread(threadId: string) {
+    for (const [draftId, pending] of Object.entries(assistantDraftFramesRef.current)) {
+      if (pending.draft.threadId === threadId) {
+        discardQueuedAssistantDraft(draftId);
       }
     }
   }
 
-  function queueStreamingAssistant(threadId: string, turnRunId: string, content: string) {
-    const pending = streamingAssistantFramesRef.current[turnRunId];
+  function queueAssistantDraft(draft: AssistantDraft) {
+    const pending = assistantDraftFramesRef.current[draft.draftId];
     if (pending) {
-      pending.content = content;
+      pending.draft = draft;
       return;
     }
 
-    // A rejected provisional reply remains as a compact execution indicator.
-    // The next model attempt should replace that indicator, not revive stale text.
-    setStreamingAssistants((current) => {
-      const active = current[turnRunId];
-      if (!active || active.presentation !== "continuing") return current;
-      return {
-        ...current,
-        [turnRunId]: { ...active, content: "", completed: false, presentation: "draft" }
-      };
-    });
-
-    streamingAssistantFramesRef.current[turnRunId] = {
-      threadId,
-      content,
-      frame: window.requestAnimationFrame(() => flushStreamingAssistant(turnRunId))
+    assistantDraftFramesRef.current[draft.draftId] = {
+      draft,
+      frame: window.requestAnimationFrame(() => flushAssistantDraft(draft.draftId))
     };
   }
 
@@ -2224,8 +2205,10 @@ export function App() {
         payload?: {
           gpa?: GpaState;
           turnRunId?: string;
+          draftId?: string;
+          sequence?: number;
+          phase?: AssistantDraftPhase;
           discarded?: boolean;
-          nextState?: "continuing" | "discarded";
           delta?: string;
           content?: string;
           title?: string;
@@ -2249,6 +2232,7 @@ export function App() {
           childThread?: ThreadRecord;
           pluginChanged?: { pluginId: string; enabled: boolean };
           modelId?: string;
+          providerId?: string;
           agentCapability?: ModelProfile["agentCapability"];
           agentCapabilityCheckedAt?: string;
           agentCapabilityReason?: string;
@@ -2535,18 +2519,30 @@ export function App() {
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
-      if (typed.type === "assistant.delta" && typed.threadId && typed.payload?.turnRunId) {
+      if (typed.type === "assistant.draft.updated" && typed.threadId && typed.payload?.turnRunId && typed.payload?.draftId) {
         const threadId = typed.threadId;
         const payload = typed.payload;
         const turnRunId = payload.turnRunId as string;
+        const draftId = payload.draftId as string;
+        const phase = isAssistantDraftPhase(payload.phase) ? payload.phase : "generating";
         if (suppressRuntimeProgressRef.current[threadId]) {
-          discardQueuedStreamingAssistant(turnRunId);
+          discardQueuedAssistantDraft(draftId);
           return;
         }
-        queueStreamingAssistant(threadId, turnRunId, payload.content ?? "");
-        appendRuntimeStatus(threadId, "正在生成回复", typed.createdAt);
+        queueAssistantDraft({
+          draftId,
+          sequence: typeof payload.sequence === "number" ? payload.sequence : 0,
+          threadId,
+          turnRunId,
+          content: typeof payload.content === "string" ? payload.content : "",
+          phase,
+          startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
+          completed: false
+        });
+        const statusLabel = getAssistantDraftPhaseLabel(phase);
+        appendRuntimeStatus(threadId, statusLabel, typed.createdAt);
         if (notificationThreadId) {
-          updateThreadNotification(notificationThreadId, "正在生成回复。", typed.createdAt);
+          updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
         }
         setRuntimeProgress({ threadId, phase: "generating", runtimeObserved: true });
         return;
@@ -2554,13 +2550,6 @@ export function App() {
       if (typed.type === "assistant.execution_output" && typed.threadId && typed.payload?.content) {
         if (suppressRuntimeProgressRef.current[typed.threadId]) {
           return;
-        }
-        const turnRunId = typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : null;
-        if (turnRunId) {
-          // Internal recovery output may be malformed decision JSON. It is not
-          // user-facing content. Preserve the stream shell so it transitions
-          // into the existing execution indicator instead of visibly vanishing.
-          discardQueuedStreamingAssistant(turnRunId);
         }
         appendRuntimeStatus(typed.threadId, "正在校验模型输出", typed.createdAt);
         if (notificationThreadId) {
@@ -2574,10 +2563,11 @@ export function App() {
           return;
         }
         const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
-        const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 5;
-        appendRuntimeStatus(typed.threadId, `模型响应超时，正在重试 (${attempt}/${maxAttempts})`, typed.createdAt);
+        const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 0;
+        const attemptLabel = maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : `（第 ${attempt} 次）`;
+        appendRuntimeStatus(typed.threadId, `模型响应超时，正在自动重试${attemptLabel}`, typed.createdAt);
         if (notificationThreadId) {
-          updateThreadNotification(notificationThreadId, `模型响应超时，正在重试 (${attempt}/${maxAttempts})。`, typed.createdAt);
+          updateThreadNotification(notificationThreadId, `模型响应超时，正在自动重试${attemptLabel}。`, typed.createdAt);
         }
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
@@ -2587,10 +2577,23 @@ export function App() {
           return;
         }
         const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
-        const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 5;
-        appendRuntimeStatus(typed.threadId, `模型请求受限(429)，正在重试 (${attempt}/${maxAttempts})`, typed.createdAt);
+        const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 0;
+        const attemptLabel = maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : `（第 ${attempt} 次）`;
+        appendRuntimeStatus(typed.threadId, `模型请求受限(429)，正在自动重试${attemptLabel}`, typed.createdAt);
         if (notificationThreadId) {
-          updateThreadNotification(notificationThreadId, `模型请求受限，正在重试 (${attempt}/${maxAttempts})。`, typed.createdAt);
+          updateThreadNotification(notificationThreadId, `模型请求受限，正在自动重试${attemptLabel}。`, typed.createdAt);
+        }
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "network_error") {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
+        const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
+        appendRuntimeStatus(typed.threadId, `网络连接中断，正在自动重试（第 ${attempt} 次）`, typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, `网络连接中断，正在自动重试（第 ${attempt} 次）。`, typed.createdAt);
         }
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
@@ -2604,6 +2607,32 @@ export function App() {
           updateThreadNotification(notificationThreadId, "已确认继续，正在再次重试。", typed.createdAt);
         }
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && (
+        typed.payload?.reason === "completion_validation" || typed.payload?.reason === "completion_audit"
+      )) {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
+        const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
+        const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 0;
+        const attemptLabel = maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : "";
+        appendRuntimeStatus(typed.threadId, `发现最终结果缺少执行证据，正在继续完成${attemptLabel}`, typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, `正在补齐执行步骤${attemptLabel}`, typed.createdAt);
+        }
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "browser_workspace_silent_fallback") {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          appendRuntimeStatus(typed.threadId, "浏览器工作区不可用，正在改用静默网页读取", typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, "正在改用静默网页读取。", typed.createdAt);
+          }
+          setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        }
         return;
       }
       if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "function_call_protocol_compatibility") {
@@ -2700,9 +2729,11 @@ export function App() {
           return null;
         });
         if (status !== "running" && status !== "waiting") {
-          discardQueuedStreamingAssistantsForThread(runtimeThreadId);
-          setStreamingAssistants((current) => {
-            const remaining = Object.entries(current).filter(([, entry]) => entry.threadId !== runtimeThreadId);
+          discardQueuedAssistantDraftsForThread(runtimeThreadId);
+          setAssistantDrafts((current) => {
+            const remaining = Object.entries(current).filter(([, entry]) =>
+              entry.threadId !== runtimeThreadId || (entry.completed && Boolean(entry.messageId))
+            );
             return remaining.length === Object.keys(current).length
               ? current
               : Object.fromEntries(remaining);
@@ -2722,51 +2753,22 @@ export function App() {
         }
       }
       if (typed.type === "assistant.completed" && typed.payload?.turnRunId) {
-        const { turnRunId, messageId, discarded } = typed.payload;
+        const { turnRunId, draftId, messageId, discarded } = typed.payload;
         const suppressed = !!typed.threadId && suppressRuntimeProgressRef.current[typed.threadId];
-        const nextState = typed.payload.nextState === "continuing" ? "continuing" : "discarded";
-        const queuedDraftContent = streamingAssistantFramesRef.current[turnRunId]?.content;
-        if (discarded === true || suppressed) {
-          discardQueuedStreamingAssistant(turnRunId);
-        } else {
-          flushStreamingAssistant(turnRunId);
+        if (typeof draftId === "string") {
+          if (discarded === true || suppressed) {
+            discardQueuedAssistantDraft(draftId);
+          } else {
+            flushAssistantDraft(draftId);
+          }
         }
-        setStreamingAssistants((current) => {
-          if (suppressed || (discarded === true && nextState === "discarded")) {
-            if (!current[turnRunId]) return current;
-            const next = { ...current };
-            delete next[turnRunId];
-            return next;
-          }
-          if (discarded === true && typed.threadId) {
-            const active = current[turnRunId];
-            return {
-              ...current,
-              [turnRunId]: {
-                threadId: typed.threadId,
-                turnRunId,
-                content: preserveStreamingDraftContent(active?.content, queuedDraftContent),
-                completed: false,
-                presentation: "continuing",
-                ...(active?.messageId ? { messageId: active.messageId } : {})
-              }
-            };
-          }
-          const active = current[turnRunId];
-          if (!active) {
-            return current;
-          }
-
-          return {
-            ...current,
-            [turnRunId]: {
-              ...active,
-              completed: true,
-              presentation: "committed",
-              messageId: typeof messageId === "string" ? messageId : undefined
-            }
-          };
-        });
+        setAssistantDrafts((current) => reconcileAssistantDraftCompletion(current, {
+          turnRunId: String(turnRunId),
+          draftId: typeof draftId === "string" ? draftId : undefined,
+          messageId,
+          discarded: discarded === true,
+          suppressed
+        }));
       }
       if (typed.type === "turn.usage" && typed.threadId) {
         if (currentSelectedThreadId && notificationThreadId === currentSelectedThreadId) {
@@ -3279,25 +3281,16 @@ export function App() {
     () => new Set(snapshot?.queuedSubagentIds ?? []),
     [snapshot?.queuedSubagentIds]
   );
-  const activeStreamingAssistant = useMemo(() => {
-    if (!isThreadExecutionInProgress(activeSnapshotThreadStatus)) {
-      return null;
-    }
-    return Object.values(streamingAssistants)
-      .filter((entry) => {
-        if (entry.threadId !== activeSnapshotThreadId) return false;
-        const persisted = entry.messageId
-          ? visibleMessages.some((message) => message.id === entry.messageId)
-          : visibleMessages.some(
-              (message) => message.role === "assistant" && message.turnRunId === entry.turnRunId
-            );
-        return !persisted && getStreamingAssistantDisplayContent(entry).trim().length > 0;
-      })
-      .sort((left, right) => left.turnRunId.localeCompare(right.turnRunId))
-      .at(-1) ?? null;
-  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, streamingAssistants, visibleMessages]);
-  const activeStreamingContent = activeStreamingAssistant
-    ? getStreamingAssistantDisplayContent(activeStreamingAssistant)
+  const activeAssistantDraft = useMemo(() => {
+    return selectActiveAssistantDraft(
+      Object.values(assistantDrafts),
+      activeSnapshotThreadId,
+      activeSnapshotThreadStatus,
+      visibleMessages
+    );
+  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, assistantDrafts, visibleMessages]);
+  const activeDraftContent = activeAssistantDraft
+    ? getAssistantDraftDisplayContent(activeAssistantDraft)
     : "";
   const composerPrimaryAction = getComposerPrimaryActionState(
     selectedThreadStatus,
@@ -3355,9 +3348,42 @@ export function App() {
     )?.toolCall ?? null,
     [activeRuntimeActivity?.entries]
   );
+  const deferredRuntimeToolGroup = useMemo(() => {
+    if (!isTaskProcessing || !latestRootRuntimeTool) {
+      return null;
+    }
+    const group = timelineEntries.find(
+      (entry): entry is Extract<TimelineEntry, { kind: "tool-group" }> =>
+        entry.kind === "tool-group" && entry.toolCalls.some((toolCall) => toolCall.id === latestRootRuntimeTool.id)
+    );
+    if (!group) return null;
+
+    const groupCompletedAt = Math.max(...group.toolCalls.map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt)));
+    const hasReplacementReply = visibleMessages.some((message) =>
+      message.role === "assistant" &&
+      !isInternalAgentProtocolMessage(message.content) &&
+      Date.parse(message.createdAt) > groupCompletedAt
+    );
+    return hasReplacementReply ? null : group.toolCalls;
+  }, [isTaskProcessing, latestRootRuntimeTool, timelineEntries, visibleMessages]);
+  const completedDeferredRuntimeToolGroup = deferredRuntimeToolGroup &&
+    !getToolActivityPresentation(deferredRuntimeToolGroup).runningCall
+    ? deferredRuntimeToolGroup
+    : null;
   const activeSubagents = useMemo(
     () => getActiveSubagents(currentSubagents, queuedSubagentIds),
     [currentSubagents, queuedSubagentIds]
+  );
+  const hasLiveRuntimeTool = Boolean(
+    (activeToolCall?.threadId === activeSnapshotThreadId) ||
+    (latestRootRuntimeTool && (
+      latestRootRuntimeTool.status === "pending" || latestRootRuntimeTool.status === "running"
+    ))
+  );
+  const shouldRenderRuntimeTailPanel = Boolean(
+    showRuntimeActivityPanel &&
+    !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id)) &&
+    (!activeAssistantDraft || hasLiveRuntimeTool || activeSubagents.length > 0)
   );
   const subagentWaitLabel = getSubagentWaitLabel(currentSubagents, queuedSubagentIds);
   const isWaitingForSubagents = Boolean(
@@ -3372,7 +3398,7 @@ export function App() {
         ? subagentWaitLabel
         : activeToolCall?.threadId === activeSnapshotThreadId
         ? getToolProcessingLabel(activeToolCall.toolName, activeToolCall.argumentsJson)
-        : activeStreamingAssistant
+        : activeAssistantDraft
           ? "正在生成回复"
           : isPreparingRuntime
             ? "正在理解任务"
@@ -3381,7 +3407,7 @@ export function App() {
               : "正在请求模型决策",
     [
       activeSnapshotThreadId,
-      activeStreamingAssistant,
+      activeAssistantDraft,
       activeToolCall,
       isWaitingForSubagents,
       isPreparingRuntime,
@@ -3438,6 +3464,9 @@ export function App() {
     () => composerModels.find((model) => model.id === composerModelId) ?? null,
     [composerModelId, composerModels]
   );
+  const showReasoningEffortPicker = selectedComposerModel
+    ? isConfigurableGptReasoningModel(selectedComposerModel)
+    : false;
   const composerSupportsMultimodalInput = selectedComposerModel?.supportsMultimodalInput ?? false;
   const multimodalInputFallbackReady = useMemo(() => {
     const input = config?.multimodal?.input;
@@ -3712,17 +3741,17 @@ export function App() {
       return;
     }
 
-    setStreamingAssistants((current) => {
+    setAssistantDrafts((current) => {
       let changed = false;
       const next = { ...current };
 
-      for (const [turnRunId, entry] of Object.entries(current)) {
+      for (const [draftId, entry] of Object.entries(current)) {
         if (entry.threadId !== snapshot.thread.id) {
           continue;
         }
 
-        if (!shouldKeepStreamingAssistant(entry, snapshot.messages, snapshot.thread.status)) {
-          delete next[turnRunId];
+        if (!shouldKeepAssistantDraft(entry, snapshot.messages, snapshot.thread.status)) {
+          delete next[draftId];
           changed = true;
         }
       }
@@ -3788,7 +3817,7 @@ export function App() {
   }, [
     activeSnapshotThreadId,
     activeSnapshotThreadStatus,
-    activeStreamingAssistant?.content,
+    activeAssistantDraft?.content,
     latestVisibleMessageId,
     showRuntimeActivityPanel,
     showWelcome,
@@ -4038,6 +4067,39 @@ export function App() {
       return {
         ...current,
         messages: [...current.messages, optimisticMessage]
+      };
+    });
+    return optimisticMessage;
+  }
+
+  function replaceConversationTailWithOptimisticUserMessage(
+    threadId: string,
+    messageId: string,
+    content: string,
+    attachments: MessageAttachment[]
+  ): MessageRecord {
+    const optimisticMessage: MessageRecord = {
+      id: `optimistic-${globalThis.crypto.randomUUID()}`,
+      threadId,
+      turnRunId: null,
+      role: "user",
+      content,
+      metadataJson: attachments.length > 0 ? JSON.stringify({ attachments }) : null,
+      createdAt: new Date().toISOString()
+    };
+
+    // The main process rewinds everything from the edited message onward. Do
+    // the same locally before that transaction completes, so an old answer
+    // cannot sit below the replacement message during the handoff.
+    pendingUserMessagesRef.current[threadId] = [optimisticMessage];
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      return {
+        ...current,
+        messages: replaceConversationMessagesFromEdit(current.messages, messageId, optimisticMessage),
+        queuedMessages: [],
+        approvals: [],
+        prompts: []
       };
     });
     return optimisticMessage;
@@ -4388,12 +4450,12 @@ export function App() {
       delete pendingUserMessagesRef.current[threadId];
       delete snapshotCursorByThreadRef.current[threadId];
       delete suppressRuntimeProgressRef.current[threadId];
-      discardQueuedStreamingAssistantsForThread(threadId);
+      discardQueuedAssistantDraftsForThread(threadId);
       gpaSameSessionAutoResumeRef.current.delete(threadId);
       gpaPlanResumeDismissedRef.current.delete(threadId);
       gpaPlanResumeAttemptRef.current.delete(threadId);
       gpaPlanResumeRetryRequiredRef.current.delete(threadId);
-      setStreamingAssistants((current) =>
+      setAssistantDrafts((current) =>
         Object.fromEntries(Object.entries(current).filter(([, entry]) => entry.threadId !== threadId))
       );
       setRuntimeActivities((current) => {
@@ -4680,15 +4742,44 @@ export function App() {
     const messageId = editingMessage.id;
     if (!threadId) return;
 
-    // Message replacement starts a new queued turn. Close the inline editor
-    // immediately instead of holding it open while the main process dispatches.
+    const previousSnapshot = snapshot?.thread.id === threadId ? snapshot : null;
+    const previousPendingMessages = pendingUserMessagesRef.current[threadId];
+    const originalMessage = previousSnapshot?.messages.find((message) => message.id === messageId);
+    const attachments = originalMessage ? getMessageAttachments(originalMessage) : [];
+
+    // Match normal sending: provide the new message and a visible execution
+    // state before the main process finishes truncating a potentially long
+    // conversation history.
     setEditingUserMessage(null);
     delete snapshotCursorByThreadRef.current[threadId];
+    const optimisticMessage = replaceConversationTailWithOptimisticUserMessage(
+      threadId,
+      messageId,
+      content,
+      attachments
+    );
+    suppressRuntimeProgressRef.current[threadId] = false;
+    startRuntimeActivity(threadId);
+    setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
     try {
       await window.codexh.replaceMessage({ threadId, messageId, content });
-      await refreshSnapshot(threadId);
+      clearAutoScrollReleaseTimer();
+      shouldAutoScrollRef.current = true;
+      window.setTimeout(() => {
+        void refreshSnapshot(threadId);
+      }, 120);
     } catch (error) {
+      removeOptimisticUserMessage(threadId, optimisticMessage.id);
+      if (previousPendingMessages?.length) {
+        pendingUserMessagesRef.current[threadId] = previousPendingMessages;
+      } else {
+        delete pendingUserMessagesRef.current[threadId];
+      }
+      setSnapshot((current) => current?.thread.id === threadId && previousSnapshot ? previousSnapshot : current);
+      setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+      clearRuntimeActivity(threadId);
       setEditingUserMessage((current) => current ?? editingMessage);
+      void refreshSnapshot(threadId);
       showNotice("更新消息失败。", {
         message: error instanceof Error ? error.message : "请稍后重试。"
       });
@@ -4858,7 +4949,7 @@ export function App() {
 
     // Block late tool/retry/delta events from flipping the UI back to "执行中".
     suppressRuntimeProgressRef.current[threadId] = true;
-    discardQueuedStreamingAssistantsForThread(threadId);
+    discardQueuedAssistantDraftsForThread(threadId);
 
     // Switch the control back immediately. The subsequent refresh reconciles
     // the optimistic state with the persisted runtime state.
@@ -4883,11 +4974,11 @@ export function App() {
     );
     setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
     setActiveToolCall((current) => current?.threadId === threadId ? null : current);
-    setStreamingAssistants((current) => {
+    setAssistantDrafts((current) => {
       const next = { ...current };
-      for (const [turnRunId, assistant] of Object.entries(next)) {
-        if (assistant.threadId === threadId) {
-          delete next[turnRunId];
+      for (const [draftId, draft] of Object.entries(next)) {
+        if (draft.threadId === threadId) {
+          delete next[draftId];
         }
       }
       return next;
@@ -5085,12 +5176,6 @@ export function App() {
   }
 
   async function answerPendingPrompt(prompt: UserInputPrompt, answers: Record<string, string>) {
-    if (answers[BROWSER_WORKSPACE_RECOVERY_QUESTION_ID] === "retry") {
-      setRightWorkspaceTab("browser");
-      setRightWorkspaceExpandedTab("browser");
-      setIsRightWorkspaceOpen(true);
-      reregisterBrowserWebviews(prompt.threadId);
-    }
     setResolvingPromptId(prompt.id);
     setSnapshot((current) => {
       if (!current || !current.prompts.some((item) => item.id === prompt.id)) {
@@ -6734,6 +6819,25 @@ export function App() {
     void updateComposerSelection(providerId, modelId);
   }
 
+  async function updateGlobalReasoningEffort(reasoningEffort: GptReasoningEffort) {
+    if (!config || isUpdatingReasoningEffort) return;
+    const previous = config.reasoningEffort;
+    setIsUpdatingReasoningEffort(true);
+    setConfig((current) => current ? { ...current, reasoningEffort } : current);
+    setConfigDraft((current) => current ? { ...current, reasoningEffort } : current);
+    try {
+      await window.codexh.setGlobalReasoningEffort(reasoningEffort);
+    } catch (error) {
+      setConfig((current) => current ? { ...current, reasoningEffort: previous } : current);
+      setConfigDraft((current) => current ? { ...current, reasoningEffort: previous } : current);
+      showNotice("推理强度保存失败。", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setIsUpdatingReasoningEffort(false);
+    }
+  }
+
   function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing) {
       return;
@@ -7662,9 +7766,14 @@ export function App() {
                     entry.id !== entryTurn.userEntryId &&
                     entry.id !== entryTurn.summaryEntryId
                   );
+                  const isCurrentToolGroup = Boolean(
+                    deferredRuntimeToolGroup &&
+                    entry.kind === "tool-group" &&
+                    entry.toolCalls.some((toolCall) => deferredRuntimeToolGroup.some((tool) => tool.id === toolCall.id))
+                  );
                   return (
                   <Fragment key={entry.id}>
-                    {!isHiddenByTurnCollapse && (entry.kind === "message" ? (
+                    {!isHiddenByTurnCollapse && !isCurrentToolGroup && (entry.kind === "message" ? (
                       <TranscriptMessage
                         message={entry.message}
                         assistantLabel={activeAssistantLabel}
@@ -7747,29 +7856,41 @@ export function App() {
                     onConfirm={() => void confirmGpaPlanResumeRetry()}
                   />
                 ) : null}
-                {activeStreamingAssistant && activeStreamingContent ? (
-                  <StreamingAssistantMessage
-                    key={`streaming-${activeStreamingAssistant.turnRunId}`}
-                    assistantLabel={activeAssistantLabel}
-                    content={activeStreamingContent}
-                    turnRunId={activeStreamingAssistant.turnRunId}
-                  />
-                ) : null}
-                {showRuntimeActivityPanel && !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id)) ? (
-                  <RuntimeActivityPanel
-                    key={activeSnapshotThreadId ?? "runtime-activity"}
-                    label={taskProcessingLabel}
-                    entries={activeRuntimeActivity?.entries ?? []}
-                    preferLabel={isWaitingForSubagents}
-                    activeSubagents={activeSubagents}
-                    queuedSubagentIds={queuedSubagentIds}
-                    runtimeActivities={runtimeActivities}
-                    onInterruptSubagent={(agent) => {
-                      if (!selectedThreadId) return;
-                      void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
-                        .then(() => refreshSnapshot(selectedThreadId));
-                    }}
-                  />
+                {(completedDeferredRuntimeToolGroup || activeAssistantDraft || shouldRenderRuntimeTailPanel) ? (
+                  <div className="runtime-tail">
+                    {completedDeferredRuntimeToolGroup ? (
+                      <ToolActivityGroup toolCalls={completedDeferredRuntimeToolGroup} />
+                    ) : null}
+                    {activeAssistantDraft ? (
+                      <AssistantDraftMessage
+                        key={`draft-${activeAssistantDraft.draftId}`}
+                        assistantLabel={activeAssistantLabel}
+                        content={activeDraftContent}
+                        draftId={activeAssistantDraft.draftId}
+                        phase={activeAssistantDraft.phase}
+                        startedAt={activeAssistantDraft.startedAt}
+                        completed={activeAssistantDraft.completed}
+                      />
+                    ) : null}
+                    {shouldRenderRuntimeTailPanel ? (
+                      <RuntimeActivityPanel
+                        key={activeSnapshotThreadId ?? "runtime-activity"}
+                        label={taskProcessingLabel}
+                        entries={activeRuntimeActivity?.entries ?? []}
+                        deferredToolCalls={completedDeferredRuntimeToolGroup ? [] : deferredRuntimeToolGroup ?? []}
+                        preferLabel={isWaitingForSubagents}
+                        hideCurrentStatus={Boolean(activeAssistantDraft)}
+                        activeSubagents={activeSubagents}
+                        queuedSubagentIds={queuedSubagentIds}
+                        runtimeActivities={runtimeActivities}
+                        onInterruptSubagent={(agent) => {
+                          if (!selectedThreadId) return;
+                          void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
+                            .then(() => refreshSnapshot(selectedThreadId));
+                        }}
+                      />
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
             )}
@@ -7994,6 +8115,13 @@ export function App() {
                     onSelectModel={handleComposerModelChange}
                     disabled={composerProviders.length === 0}
                   />
+                  {showReasoningEffortPicker ? (
+                    <ReasoningEffortPicker
+                      value={config?.reasoningEffort ?? "medium"}
+                      onChange={(value) => void updateGlobalReasoningEffort(value)}
+                      disabled={isUpdatingReasoningEffort || isActiveThreadExecuting || isPreparingRuntime}
+                    />
+                  ) : null}
                   <ContextUsageControl
                     usage={contextUsage}
                     open={isContextReportOpen}
@@ -9058,14 +9186,14 @@ export function App() {
                         <div className="provider-detail-grid timeout-settings-grid">
                           <label className="settings-field"><span>模型决策超时</span><input type="number" step="1" value={configDraft.timeouts.modelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("modelDecisionMs", event.target.value)} /></label>
                           <label className="settings-field"><span>恢复请求超时</span><input type="number" step="1" value={configDraft.timeouts.recoveryModelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("recoveryModelDecisionMs", event.target.value)} /></label>
-                          <label className="settings-field"><span>模型超时重试次数</span><input type="number" step="1" value={configDraft.timeouts.modelTimeoutRetries} onChange={(event) => updateTimeoutDraft("modelTimeoutRetries", event.target.value)} /></label>
+                          <label className="settings-field"><span>超时恢复窗口</span><input type="number" step="1" value={configDraft.timeouts.modelTimeoutRetries} onChange={(event) => updateTimeoutDraft("modelTimeoutRetries", event.target.value)} /></label>
                           <label className="settings-field"><span>非终端工具超时</span><input type="number" step="1" value={configDraft.timeouts.toolExecutionMs / 1_000} onChange={(event) => updateTimeoutDraft("toolExecutionMs", event.target.value)} /></label>
                           <label className="settings-field"><span>多模态意图分类超时</span><input type="number" step="1" value={configDraft.timeouts.multimodalIntentClassifyMs / 1_000} onChange={(event) => updateTimeoutDraft("multimodalIntentClassifyMs", event.target.value)} /></label>
                           <label className="settings-field"><span>模型连接测试超时</span><input type="number" step="1" value={configDraft.timeouts.modelTestMs / 1_000} onChange={(event) => updateTimeoutDraft("modelTestMs", event.target.value)} /></label>
                           <label className="settings-field"><span>视频生成总超时</span><input type="number" step="1" value={configDraft.timeouts.videoGenerationMs / 1_000} onChange={(event) => updateTimeoutDraft("videoGenerationMs", event.target.value)} /></label>
                           <label className="settings-field"><span>视频状态轮询间隔</span><input type="number" step="1" value={configDraft.timeouts.videoPollIntervalMs / 1_000} onChange={(event) => updateTimeoutDraft("videoPollIntervalMs", event.target.value)} /></label>
                         </div>
-                        <span className="timeout-settings-note">“模型超时重试次数”控制模型响应超时；终端命令会在持续无输出 5 分钟后进入诊断，下载等持续输出的任务会继续运行。</span>
+                        <span className="timeout-settings-note">“超时恢复窗口”控制连续超时多少次后压缩上下文并延长下一次等待；模型、429 和临时网络错误会持续自动恢复，直到你手动停止。</span>
                       </div>
                       <div className="settings-save-row">
                         <span className="subtle-inline">图片生成与视频下载没有固定超时，只会在任务被取消时中断。</span>
@@ -13587,6 +13715,86 @@ function ComposerSelect({
   );
 }
 
+const GPT_REASONING_EFFORT_LABELS: Record<GptReasoningEffort, string> = {
+  low: "轻度",
+  medium: "中",
+  high: "高",
+  xhigh: "极高"
+};
+
+function ReasoningEffortPicker({
+  value,
+  onChange,
+  disabled
+}: {
+  value: GptReasoningEffort;
+  onChange: (value: GptReasoningEffort) => void;
+  disabled: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuPresence = useMotionPresence(isOpen ? true : null, 140);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (disabled && isOpen) setIsOpen(false);
+  }, [disabled, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setIsOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
+  return (
+    <div ref={rootRef} className={`reasoning-effort-picker ${isOpen ? "open" : ""}`}>
+      <button
+        type="button"
+        className="reasoning-effort-trigger"
+        onClick={() => !disabled && setIsOpen((current) => !current)}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+        aria-label={`推理强度：${GPT_REASONING_EFFORT_LABELS[value]}`}
+        title="推理强度"
+        disabled={disabled}
+      >
+        <span>推理 · {GPT_REASONING_EFFORT_LABELS[value]}</span>
+        <span className="composer-select-chevron" aria-hidden="true"><IconChevronDown /></span>
+      </button>
+      {menuPresence.value ? (
+        <div className="reasoning-effort-menu" data-motion={menuPresence.phase} role="listbox" aria-label="推理强度">
+          <div className="reasoning-effort-title">推理强度</div>
+          {GPT_REASONING_EFFORTS.map((effort) => (
+            <button
+              key={effort}
+              type="button"
+              className={`reasoning-effort-option ${effort === value ? "selected" : ""}`}
+              onClick={() => {
+                onChange(effort);
+                setIsOpen(false);
+              }}
+              role="option"
+              aria-selected={effort === value}
+            >
+              <span>{GPT_REASONING_EFFORT_LABELS[effort]}</span>
+              {effort === value ? <span className="reasoning-effort-check" aria-hidden="true">✓</span> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 type ComposerModelGroup = {
   providerId: string;
   providerLabel: string;
@@ -14161,6 +14369,8 @@ export function buildTimelineEntries(
     createdAt: contextCompaction.createdAt,
     compaction: contextCompaction
   }] : [];
+  // Tool groups with commentary metadata share the preamble timestamp. Put
+  // messages first so stable sorting yields "message -> tools" for each step.
   const sortedEntries = [...messageEntries, ...toolEntries, ...fileSummaryEntries, ...promptEntries, ...contextCompactionEntries].sort(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
   );
@@ -14224,51 +14434,61 @@ export function getDefaultCollapsedConversationTurnIds(
 function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[], messages: MessageRecord[]): TimelineEntry[] {
   const callsById = new Map(toolCalls.map((toolCall) => [toolCall.id, toolCall]));
   const assignedCallIds = new Set<string>();
-  const entries: TimelineEntry[] = [];
+  const groups = new Map<string, { createdAt: string; toolCalls: ToolCallRecord[] }>();
 
-  // New commentary messages explicitly identify the tool batch they introduce.
-  // That preserves the Codex-style "commentary -> tools -> commentary" rhythm.
+  const addToGroup = (groupId: string, createdAt: string, calls: ToolCallRecord[]) => {
+    if (calls.length === 0) return;
+    const group = groups.get(groupId) ?? { createdAt, toolCalls: [] };
+    group.toolCalls.push(...calls);
+    groups.set(groupId, group);
+    for (const toolCall of calls) assignedCallIds.add(toolCall.id);
+  };
+
+  const visibleMessagesByTurn = new Map<string, MessageRecord[]>();
   for (const message of messages) {
+    if (
+      message.role === "tool" ||
+      !message.turnRunId ||
+      !message.content.trim() ||
+      getMessageDisplayKind(message) === "tool_batch" ||
+      isPatchAssistantMessage(message.content) ||
+      (message.role === "assistant" && isInternalAgentProtocolMessage(message.content))
+    ) continue;
+    visibleMessagesByTurn.set(message.turnRunId, [
+      ...(visibleMessagesByTurn.get(message.turnRunId) ?? []),
+      message
+    ]);
+  }
+
+  // Visible commentary explicitly identifies its first tool batch. Later
+  // tool-only decisions remain in the same visible-message interval and are
+  // merged into this group by the fallback pass below.
+  for (const message of messages) {
+    if (getMessageDisplayKind(message) === "tool_batch" || !message.content.trim()) continue;
     const toolCallIds = getCommentaryToolCallIds(message);
     const groupedToolCalls = toolCallIds
       .map((toolCallId) => callsById.get(toolCallId))
       .filter((toolCall): toolCall is ToolCallRecord => !!toolCall && !assignedCallIds.has(toolCall.id));
-    if (groupedToolCalls.length === 0) continue;
-
-    for (const toolCall of groupedToolCalls) assignedCallIds.add(toolCall.id);
-    entries.push(createToolGroupTimelineEntry(`commentary-${message.id}`, groupedToolCalls));
+    addToGroup(`message-${message.id}`, message.createdAt, groupedToolCalls);
   }
 
-  // Older messages predate commentary metadata. Infer their batches from the
-  // latest assistant text in the same turn so historical threads also read in
-  // chronological segments instead of one large turn-wide tool block.
-  const fallbackMessagesByTurn = new Map<string, MessageRecord[]>();
-  for (const message of messages) {
-    if (
-      message.role !== "assistant" ||
-      !message.turnRunId ||
-      isPatchAssistantMessage(message.content) ||
-      isInternalAgentProtocolMessage(message.content)
-    ) continue;
-    fallbackMessagesByTurn.set(message.turnRunId, [...(fallbackMessagesByTurn.get(message.turnRunId) ?? []), message]);
-  }
-  const fallbackGroups = new Map<string, { createdAt: string; toolCalls: ToolCallRecord[] }>();
+  // Group every remaining call by the nearest preceding visible message. Hidden
+  // tool-batch anchors are intentionally ignored: they are model protocol
+  // details, not conversation boundaries.
   for (const toolCall of toolCalls) {
     if (assignedCallIds.has(toolCall.id)) continue;
-    const precedingMessage = [...(fallbackMessagesByTurn.get(toolCall.turnRunId) ?? [])]
-      .filter((message) => Date.parse(message.createdAt) <= Date.parse(toolCall.startedAt))
+    const callStartedAt = Date.parse(toolCall.startedAt);
+    const precedingMessage = [...(visibleMessagesByTurn.get(toolCall.turnRunId) ?? [])]
+      .filter((message) => Date.parse(message.createdAt) <= callStartedAt)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
     const groupId = precedingMessage ? `message-${precedingMessage.id}` : toolCall.turnRunId || `legacy-${toolCall.id}`;
-    const createdAt = toolCall.startedAt;
-    const group = fallbackGroups.get(groupId) ?? { createdAt, toolCalls: [] };
-    group.toolCalls.push(toolCall);
-    fallbackGroups.set(groupId, group);
+    const createdAt = precedingMessage?.createdAt ?? toolCall.startedAt;
+    addToGroup(groupId, createdAt, [toolCall]);
   }
 
-  for (const [groupId, group] of fallbackGroups) {
-    entries.push(createToolGroupTimelineEntry(groupId, group.toolCalls, group.createdAt));
-  }
-  return entries;
+  return [...groups.entries()].map(([groupId, group]) =>
+    createToolGroupTimelineEntry(groupId, group.toolCalls, group.createdAt)
+  );
 }
 
 function createToolGroupTimelineEntry(
@@ -14282,7 +14502,7 @@ function createToolGroupTimelineEntry(
   return {
     kind: "tool-group",
     id: `tool-group-${groupId}`,
-    createdAt: sortedToolCalls[0]?.startedAt ?? fallbackCreatedAt ?? new Date().toISOString(),
+    createdAt: fallbackCreatedAt ?? sortedToolCalls[0]?.startedAt ?? new Date().toISOString(),
     toolCalls: sortedToolCalls
   };
 }
@@ -15402,7 +15622,9 @@ function ComposerSubmissionStatus({ submission }: { submission: ComposerSubmissi
 function RuntimeActivityPanel({
   label,
   entries,
+  deferredToolCalls,
   preferLabel = false,
+  hideCurrentStatus = false,
   activeSubagents,
   queuedSubagentIds,
   runtimeActivities,
@@ -15410,7 +15632,9 @@ function RuntimeActivityPanel({
 }: {
   label: string;
   entries: RuntimeActivityEntry[];
+  deferredToolCalls: ToolCallRecord[];
   preferLabel?: boolean;
+  hideCurrentStatus?: boolean;
   activeSubagents: ThreadRecord[];
   queuedSubagentIds: Set<string>;
   runtimeActivities: Record<string, RuntimeActivity>;
@@ -15422,28 +15646,43 @@ function RuntimeActivityPanel({
       entry.kind === "tool" && (entry.toolCall.status === "pending" || entry.toolCall.status === "running")
   )?.toolCall ?? null;
   const displayLabel = preferLabel ? label : latestStatus?.label ?? label;
+  const runningToolLabel = runningToolCall
+    ? getConciseToolActivityLabel([runningToolCall], runningToolCall)
+    : null;
+  const runningToolDetail = runningToolLabel && !preferLabel && latestStatus?.label && latestStatus.label !== runningToolLabel
+    ? latestStatus.label
+    : null;
   const runningCommand = displayLabel.startsWith("正在运行 ")
     ? displayLabel.slice("正在运行 ".length)
     : null;
 
-  const currentStatus = (
-    <div className="runtime-activity-current">
+  const currentStatusContent = <>
       {runningToolCall ? (
         <span className="runtime-activity-current-icon" aria-hidden>
           <ToolActivityIcon toolName={runningToolCall.toolName} />
         </span>
       ) : null}
-      {runningCommand ? (
+      {runningToolLabel ? <strong>{runningToolLabel}</strong> : runningCommand ? (
         <span className="runtime-activity-command">
           <span>正在运行</span>
           <code title={runningCommand}>{runningCommand}</code>
         </span>
       ) : <strong>{displayLabel}</strong>}
-    </div>
-  );
+      {runningToolDetail ? <span className="runtime-activity-current-detail">{runningToolDetail}</span> : null}
+    </>;
+  const currentStatus = <div className="runtime-activity-current">{currentStatusContent}</div>;
+  const liveToolCalls = deferredToolCalls.length > 0
+    ? deferredToolCalls
+    : runningToolCall
+      ? [runningToolCall]
+      : [];
   return (
     <section className="runtime-activity-panel" aria-live="polite">
-      {currentStatus}
+      {liveToolCalls.length > 0
+        ? <ToolActivityGroup toolCalls={liveToolCalls} />
+        : hideCurrentStatus
+          ? null
+          : currentStatus}
       {activeSubagents.length > 0 ? (
         <ActiveSubagentLines
           agents={activeSubagents}
@@ -15741,10 +15980,12 @@ const ToolActivityGroup = memo(function ToolActivityGroup({
   const toolPresentation = getToolActivityPresentation(toolCalls);
   const { runningCall } = toolPresentation;
   const isRunning = Boolean(runningCall);
-  const [expanded, setExpanded] = useState(false);
+  const groupRef = useRef<HTMLDetailsElement>(null);
   const wasRunningRef = useRef(isRunning);
   const status = toolPresentation.status;
-  const conciseLabel = getConciseToolActivityLabel(toolCalls, runningCall);
+  const conciseLabel = runningCall
+    ? getToolProcessingLabel(runningCall.toolName, runningCall.argumentsJson)
+    : getConciseToolActivityLabel(toolCalls);
 
   useEffect(() => {
     if (isRunning) {
@@ -15753,17 +15994,14 @@ const ToolActivityGroup = memo(function ToolActivityGroup({
     }
     if (wasRunningRef.current) {
       wasRunningRef.current = false;
-      setExpanded(false);
+      groupRef.current?.removeAttribute("open");
     }
-  }, [isRunning]);
+  }, [isRunning, runningCall?.id]);
 
   return (
-    <section className={`tool-activity-group ${status} ${expanded ? "is-expanded" : ""}`} aria-live="polite">
-      <button
-        type="button"
+    <details ref={groupRef} className={`tool-activity-group ${status}`}>
+      <summary
         className="tool-activity-summary"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((current) => !current)}
         aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}，${toolCalls.length} 项`}
       >
         <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={toolCalls[0]?.toolName ?? ""} /></span>
@@ -15771,13 +16009,13 @@ const ToolActivityGroup = memo(function ToolActivityGroup({
         <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}</span>
         <span className="tool-activity-summary-count">{toolCalls.length} 项</span>
         <span className="tool-activity-chevron" aria-hidden />
-      </button>
+      </summary>
       <div className="tool-activity-details-shell">
         <div className="tool-activity-details">
           {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact />)}
         </div>
       </div>
-    </section>
+    </details>
   );
 }, (previous, next) => areToolActivityGroupsEqual(previous.toolCalls, next.toolCalls));
 
@@ -15808,15 +16046,15 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
     : null;
   const output = getTimelineOutput(result);
   const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
-  const target = isFileWriteTool(toolCall.toolName) ? getFileWriteTarget(input) : command;
+  const target = getToolActivityTarget(toolCall.toolName, input, command);
 
   if (compact) {
     return (
       <details className={`tool-activity-row compact ${status}`}>
-        <summary className="tool-activity-compact-summary">
+        <summary className={`tool-activity-compact-summary${target ? "" : " without-target"}`}>
           <span className="tool-activity-row-icon" aria-hidden><ToolActivityIcon toolName={toolCall.toolName} /></span>
           <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
-          <code title={target}>{target}</code>
+          {target ? <code title={target}>{target}</code> : null}
           <span className="tool-activity-compact-status">{isRunning ? "执行中" : blocked ? "已拦截" : failed ? "失败" : "完成"}</span>
           {duration !== null ? <time>{formatDuration(duration)}</time> : null}
         </summary>
@@ -16318,26 +16556,40 @@ type TranscriptMessageProps = {
   isGpaPlanMessage?: boolean;
 };
 
-type StreamingAssistantMessageProps = {
+type AssistantDraftMessageProps = {
   assistantLabel: string;
   content: string;
-  turnRunId: string;
+  draftId: string;
+  phase: AssistantDraftPhase;
+  startedAt: string;
+  completed: boolean;
 };
 
-const StreamingAssistantMessage = memo(function StreamingAssistantMessage({
+const AssistantDraftMessage = memo(function AssistantDraftMessage({
   assistantLabel,
   content,
-  turnRunId
-}: StreamingAssistantMessageProps) {
+  draftId,
+  phase,
+  startedAt,
+  completed
+}: AssistantDraftMessageProps) {
+  const elapsedMs = useElapsedClock(startedAt, !completed);
+  const stateLabel = completed
+    ? "正在发布回复"
+    : phase === "generating" && !content
+    ? `模型正在生成 · 已等待 ${formatElapsedClock(elapsedMs)}`
+    : getAssistantDraftPhaseLabel(phase);
   return (
-    <article className="message-card assistant streaming-assistant" aria-live="polite" aria-busy="true">
+    <article className={`message-card assistant streaming-assistant is-provisional phase-${phase}`} aria-live="polite" aria-busy={!completed}>
       <div className="message-header">
         <span className="message-author assistant">{assistantLabel}</span>
-        <span className="streaming-assistant-state">正在回复</span>
+        <span className="streaming-assistant-state">{stateLabel}</span>
       </div>
       <div className="message-flat-body streaming-assistant-body">
-        {renderStreamingAssistant(content, `streaming-${turnRunId}`)}
-        <span className="streaming-caret" aria-hidden />
+        {content
+          ? <div className="streaming-assistant-plain-body" data-draft-id={draftId}>{content}</div>
+          : <span className="assistant-draft-waiting" aria-hidden><i /><i /><i /></span>}
+        {content && phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
       </div>
     </article>
   );
@@ -17038,71 +17290,6 @@ function parseStructuredEventBlocks(content: string): ChatEventBlock[] | null {
   return parseLabeledEventBlocks(content);
 }
 
-function renderStreamingAssistant(content: string, keyPrefix: string): ReactNode {
-  const eventBlocks = parseStreamingEventBlocks(content);
-  if (!eventBlocks || eventBlocks.length === 0) {
-    return renderMarkdownDocument(content, keyPrefix, "event-final-markdown");
-  }
-  return <div className="message-event-stream">{eventBlocks.map((block, index) =>
-    renderEventBlock(block, `${keyPrefix}-${block.type}-${index}`)
-  )}</div>;
-}
-
-function parseStreamingEventBlocks(content: string): ChatEventBlock[] | null {
-  const normalized = content.replace(/\r\n/g, "\n").trim();
-  if (!normalized) return [];
-
-  const openPattern = /<event\b([^>]*)>/gi;
-  const closePattern = /<\/event\s*>/gi;
-  const blocks: ChatEventBlock[] = [];
-  let sawEvent = false;
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = openPattern.exec(normalized)) !== null) {
-    sawEvent = true;
-    const before = normalized.slice(cursor, match.index).trim();
-    if (before) blocks.push({ type: "commentary", content: before });
-
-    const attributes = parseEventAttributes(match[1] ?? "");
-    const type = normalizeEventType(attributes.type) ?? "commentary";
-    const contentStart = match.index + match[0].length;
-    closePattern.lastIndex = contentStart;
-    const closingTag = closePattern.exec(normalized);
-    const contentEnd = closingTag?.index ?? normalized.length;
-    blocks.push({
-      type,
-      content: normalized.slice(contentStart, contentEnd).trim(),
-      title: attributes.title,
-      name: attributes.name,
-      status: attributes.status,
-      path: attributes.path,
-      action: attributes.action,
-      startLine: parseNumericAttribute(attributes.start_line),
-      durationMs: parseNumericAttribute(attributes.duration_ms),
-      exitCode: parseNumericAttribute(attributes.exit_code),
-      ok: parseBooleanAttribute(attributes.ok)
-    });
-
-    if (!closingTag) return blocks;
-    cursor = closingTag.index + closingTag[0].length;
-    openPattern.lastIndex = cursor;
-  }
-
-  if (!sawEvent) {
-    const incompleteTagAt = normalized.search(/<event\b[^>]*$/i);
-    return incompleteTagAt >= 0
-      ? (normalized.slice(0, incompleteTagAt).trim() ? [{ type: "commentary", content: normalized.slice(0, incompleteTagAt).trim() }] : [])
-      : null;
-  }
-
-  const after = normalized.slice(cursor).trim();
-  const incompleteTagAt = after.search(/<event\b[^>]*$/i);
-  const visibleAfter = (incompleteTagAt >= 0 ? after.slice(0, incompleteTagAt) : after).trim();
-  if (visibleAfter) blocks.push({ type: "commentary", content: visibleAfter });
-  return blocks;
-}
-
 function parseXmlEventBlocks(content: string): ChatEventBlock[] | null {
   const normalized = content.replace(/\r\n/g, "\n").trim();
   if (!normalized) {
@@ -17602,7 +17789,7 @@ function looksLikeStructuredOutput(content: string) {
   return /^([A-Z]:\\|\/|@@|\+\+\+|---|\$ |\> )/.test(trimmed);
 }
 
-function filterTranscriptMessages(messages: MessageRecord[], threadStatus?: ThreadRecord["status"] | null) {
+export function filterTranscriptMessages(messages: MessageRecord[], threadStatus?: ThreadRecord["status"] | null) {
   if (messages.length === 0) {
     return messages;
   }
@@ -17654,11 +17841,14 @@ function filterTranscriptMessages(messages: MessageRecord[], threadStatus?: Thre
     }
 
     const fingerprint = message.content.replace(/\s+/g, " ").trim();
-    if (!fingerprint || visibleAssistantMessages.has(`${message.turnRunId}:${fingerprint}`)) {
+    const toolCallIds = getCommentaryToolCallIds(message);
+    const associationKey = toolCallIds.length > 0 ? `:${toolCallIds.join(",")}` : "";
+    const messageKey = `${message.turnRunId}:${fingerprint}${associationKey}`;
+    if (!fingerprint || visibleAssistantMessages.has(messageKey)) {
       return !fingerprint;
     }
 
-    visibleAssistantMessages.add(`${message.turnRunId}:${fingerprint}`);
+    visibleAssistantMessages.add(messageKey);
     return true;
   });
 }
@@ -18419,6 +18609,7 @@ function cloneConfig(config: AppConfig): AppConfig {
     defaultModel: config.defaultModel,
     defaultProvider: config.defaultProvider,
     responseTone: config.responseTone ?? DEFAULT_RESPONSE_TONE,
+    reasoningEffort: config.reasoningEffort ?? "medium",
     providers: config.providers.map((provider) => ({
       ...provider,
       headers: provider.headers ? { ...provider.headers } : undefined
@@ -18602,7 +18793,7 @@ function normalizeDraftConfig(config: AppConfig): AppConfig {
     next.providers.some((provider) => provider.id === model.providerId)
   );
 
-  next.models = next.models.map((model) => ({
+  next.models = next.models.map((model) => withGptReasoningCapabilities({
     ...model,
     role:
       model.role === "image" || model.role === "video" || model.role === "reasoning"
@@ -18843,7 +19034,7 @@ function createModelProfile(providerId: string, modelId: string, displayName: st
   const normalizedId = modelId.trim();
   const normalizedDisplayName = displayName.trim() || normalizedId;
 
-  return {
+  return withGptReasoningCapabilities({
     id: normalizedId,
     providerId,
     displayName: normalizedDisplayName,
@@ -18859,7 +19050,7 @@ function createModelProfile(providerId: string, modelId: string, displayName: st
     supportsReasoningSummary: true,
     defaultTemperature: 0.2,
     defaultMaxOutputTokens: 4_096
-  };
+  });
 }
 
 function buildConfigToSave(
@@ -18996,6 +19187,16 @@ export function reconcilePendingUserMessages(
   });
 }
 
+export function replaceConversationMessagesFromEdit(
+  messages: MessageRecord[],
+  messageId: string,
+  replacement: MessageRecord
+): MessageRecord[] {
+  const messageIndex = messages.findIndex((message) => message.id === messageId);
+  if (messageIndex < 0) return [...messages, replacement];
+  return [...messages.slice(0, messageIndex), replacement];
+}
+
 export function createOptimisticThreadSnapshot(thread: ThreadRecord): RuntimeThreadSnapshot {
   return {
     snapshotMode: "full",
@@ -19017,34 +19218,110 @@ export function createOptimisticThreadSnapshot(thread: ThreadRecord): RuntimeThr
   };
 }
 
-export function shouldKeepStreamingAssistant(
-  entry: { turnRunId: string; completed: boolean; messageId?: string },
+export function isAssistantDraftPhase(value: unknown): value is AssistantDraftPhase {
+  return value === "generating" || value === "validating" || value === "auditing" || value === "retrying";
+}
+
+export function getAssistantDraftPhaseLabel(phase: AssistantDraftPhase): string {
+  switch (phase) {
+    case "validating": return "正在检查回复";
+    case "auditing": return "正在确认回复完整性";
+    case "retrying": return "正在补充回复";
+    default: return "正在起草回复";
+  }
+}
+
+export function reconcileAssistantDraftUpdate(
+  current: Record<string, AssistantDraft>,
+  draft: AssistantDraft
+): Record<string, AssistantDraft> {
+  const existing = current[draft.draftId];
+  if (existing?.completed) return current;
+  const latestForThread = Object.values(current)
+    .filter((entry) => entry.threadId === draft.threadId)
+    .sort((left, right) => right.sequence - left.sequence)[0];
+  if (latestForThread && latestForThread.draftId !== draft.draftId && latestForThread.sequence > draft.sequence) {
+    return current;
+  }
+  const next = Object.fromEntries(
+    Object.entries(current).filter(([, entry]) => entry.threadId !== draft.threadId || entry.draftId === draft.draftId)
+  );
+  next[draft.draftId] = { ...existing, ...draft, completed: false };
+  return next;
+}
+
+export function shouldKeepAssistantDraft(
+  entry: { completed: boolean; messageId?: string },
   persistedMessages: MessageRecord[],
   threadStatus: ThreadRecord["status"] | null | undefined
 ): boolean {
-  if (!isThreadExecutionInProgress(threadStatus)) {
-    return false;
-  }
-
   const persisted = entry.messageId
     ? persistedMessages.some((message) => message.id === entry.messageId)
-    : persistedMessages.some(
-        (message) => message.role === "assistant" && message.turnRunId === entry.turnRunId
-      );
-  return !(entry.completed && persisted);
+    : false;
+  if (entry.completed) return !persisted && Boolean(entry.messageId);
+  return isThreadExecutionInProgress(threadStatus);
 }
 
-export function preserveStreamingDraftContent(
-  activeContent: string | undefined,
-  queuedContent: string | undefined
-): string {
-  return queuedContent ?? activeContent ?? "";
+export function reconcileAssistantDraftCompletion(
+  current: Record<string, AssistantDraft>,
+  input: {
+    turnRunId: string;
+    draftId?: string;
+    messageId?: unknown;
+    discarded: boolean;
+    suppressed: boolean;
+  }
+): Record<string, AssistantDraft> {
+  const draftId = input.draftId ?? Object.values(current)
+    .filter((entry) => entry.turnRunId === input.turnRunId)
+    .sort((left, right) => right.sequence - left.sequence)[0]?.draftId;
+  if (!draftId) return current;
+  if (input.discarded || input.suppressed) {
+    if (!current[draftId]) return current;
+    const next = { ...current };
+    delete next[draftId];
+    return next;
+  }
+  const active = current[draftId];
+  if (!active) return current;
+  return {
+    ...current,
+    [draftId]: {
+      ...active,
+      completed: true,
+      messageId: typeof input.messageId === "string" ? input.messageId : undefined
+    }
+  };
 }
 
-export function getStreamingAssistantDisplayContent(entry: Pick<StreamingAssistant, "content" | "presentation">): string {
-  if (entry.presentation === "continuing") return "";
+export function selectActiveAssistantDraft(
+  entries: AssistantDraft[],
+  threadId: string | null,
+  threadStatus: ThreadRecord["status"] | null | undefined,
+  persistedMessages: MessageRecord[]
+): AssistantDraft | null {
+  if (!threadId) return null;
+  return entries
+    .filter((entry) =>
+      entry.threadId === threadId &&
+      shouldKeepAssistantDraft(entry, persistedMessages, threadStatus)
+    )
+    .sort((left, right) => left.sequence - right.sequence)
+    .at(-1) ?? null;
+}
+
+export function getAssistantDraftDisplayContent(entry: Pick<AssistantDraft, "content">): string {
   if (isPatchAssistantMessage(entry.content) || isInternalAgentProtocolMessage(entry.content)) return "";
   return stripAssistantToolMarkup(entry.content);
+}
+
+export function getToolActivityTarget(
+  toolName: string,
+  input: Record<string, unknown>,
+  command: string
+): string {
+  if (isFileWriteTool(toolName)) return getFileWriteTarget(input);
+  return command === toolName ? "" : command;
 }
 
 function normalizeUserMessageForReconciliation(content: string): string {

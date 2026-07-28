@@ -51,3 +51,23 @@ describe("DatabaseService.aggregateSkillUsageStats", () => {
     ]);
   });
 });
+
+describe("DatabaseService.recordToolCall", () => {
+  it("preserves a runtime-assigned id for message-to-tool correlation", async () => {
+    const database = await createDatabase();
+    const record = database.recordToolCall({
+      id: "runtime-tool-id",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "fs.read_file",
+      argumentsJson: JSON.stringify({ path: "src/App.tsx" }),
+      resultJson: null,
+      status: "running",
+      riskLevel: "low",
+      approvalMode: "auto"
+    });
+
+    expect(record.id).toBe("runtime-tool-id");
+    expect(database.listToolCalls("thread-1")[0]?.id).toBe("runtime-tool-id");
+  });
+});

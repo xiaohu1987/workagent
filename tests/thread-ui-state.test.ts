@@ -20,16 +20,21 @@ import {
   isSubagentWaitTool,
   getToolActivityPresentation,
   getToolActivitySummary,
+  getToolActivityTarget,
   getSidebarUpdateReminder,
   shouldShowRuntimeActivityPanel,
+  filterTranscriptMessages,
   isFileWriteTool,
   isInternalAgentProtocolMessage,
   isPatchAssistantMessage,
-  getStreamingAssistantDisplayContent,
+  getAssistantDraftDisplayContent,
   mergeSnapshotRecords,
-  preserveStreamingDraftContent,
   reconcilePendingUserMessages,
-  shouldKeepStreamingAssistant
+  reconcileAssistantDraftCompletion,
+  reconcileAssistantDraftUpdate,
+  replaceConversationMessagesFromEdit,
+  selectActiveAssistantDraft,
+  shouldKeepAssistantDraft
 } from "../apps/desktop/src/renderer/App";
 import type { MessageRecord, ThreadRecord, ToolCallRecord } from "../packages/shared-types/src";
 
@@ -51,6 +56,24 @@ function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
 }
 
 describe("thread UI state helpers", () => {
+  it("replaces the edited message and removes its stale conversation tail locally", () => {
+    const messages: MessageRecord[] = [
+      { id: "user-1", threadId: "thread-1", turnRunId: "turn-1", role: "user", content: "old", metadataJson: null, createdAt: "2026-07-28T00:00:00.000Z" },
+      { id: "assistant-1", threadId: "thread-1", turnRunId: "turn-1", role: "assistant", content: "old answer", metadataJson: null, createdAt: "2026-07-28T00:00:01.000Z" }
+    ];
+    const replacement: MessageRecord = {
+      id: "optimistic-replacement",
+      threadId: "thread-1",
+      turnRunId: null,
+      role: "user",
+      content: "edited",
+      metadataJson: null,
+      createdAt: "2026-07-28T00:00:02.000Z"
+    };
+
+    expect(replaceConversationMessagesFromEdit(messages, "user-1", replacement)).toEqual([replacement]);
+  });
+
   it("hides incomplete agent decision JSON from the chat transcript", () => {
     expect(isInternalAgentProtocolMessage('{"assistant_message": "正在检查服务')).toBe(true);
     expect(isInternalAgentProtocolMessage("普通的助手回复")).toBe(false);
@@ -165,6 +188,14 @@ describe("tool processing labels", () => {
         patch: "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"
       }))
     ).toBe("正在修改 src/App.tsx");
+  });
+});
+
+describe("tool activity targets", () => {
+  it("hides a fallback tool name that would duplicate the activity label", () => {
+    expect(getToolActivityTarget("skills.load", {}, "skills.load")).toBe("");
+    expect(getToolActivityTarget("shell.exec", { command: "pnpm test" }, "pnpm test")).toBe("pnpm test");
+    expect(getToolActivityTarget("fs.write_file", { path: "src/App.tsx" }, "src/App.tsx")).toBe("src/App.tsx");
   });
 });
 
@@ -329,7 +360,7 @@ describe("tool timeline grouping", () => {
     ]);
   });
 
-  it("interleaves persisted commentary before its tool group and final answer", () => {
+  it("interleaves each progress message before its tool group and keeps the final answer last", () => {
     const commentary: MessageRecord = {
       id: "commentary-1",
       threadId: "thread-1",
@@ -367,6 +398,56 @@ describe("tool timeline grouping", () => {
     expect(entries[0]).toMatchObject({ kind: "message", message: { id: "commentary-1" } });
     expect(entries[2]).toMatchObject({ kind: "message", message: { id: "commentary-2" } });
     expect(entries[4]).toMatchObject({ kind: "message", message: { id: "final-1" } });
+  });
+
+  it("anchors legacy tools after the nearest preceding message", () => {
+    const message = (id: string, createdAt: string): MessageRecord => ({
+      id,
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: id,
+      metadataJson: null,
+      createdAt
+    });
+    const entries = buildTimelineEntries(
+      [
+        message("progress-1", "2026-07-15T00:00:01.000Z"),
+        message("progress-2", "2026-07-15T00:00:03.000Z"),
+        message("progress-3", "2026-07-15T00:00:05.000Z")
+      ],
+      [
+        makeToolCall({ id: "legacy-tool-1", startedAt: "2026-07-15T00:00:01.100Z", completedAt: "2026-07-15T00:00:02.000Z" }),
+        makeToolCall({ id: "legacy-tool-2", startedAt: "2026-07-15T00:00:03.100Z", completedAt: "2026-07-15T00:00:04.000Z" }),
+        makeToolCall({ id: "legacy-tool-3", startedAt: "2026-07-15T00:00:05.100Z", completedAt: "2026-07-15T00:00:06.000Z" })
+      ],
+      []
+    );
+
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "message", "tool-group", "message", "tool-group", "message", "tool-group"
+    ]);
+    expect(entries.filter((entry) => entry.kind === "tool-group").map((entry) => entry.toolCalls[0]?.id))
+      .toEqual(["legacy-tool-1", "legacy-tool-2", "legacy-tool-3"]);
+  });
+
+  it("keeps identical progress text when each message belongs to a different tool batch", () => {
+    const progress = (id: string, toolCallId: string, createdAt: string): MessageRecord => ({
+      id,
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: "我继续核对相关资料。",
+      metadataJson: JSON.stringify({ displayKind: "commentary", toolCallIds: [toolCallId] }),
+      createdAt
+    });
+
+    const visible = filterTranscriptMessages([
+      progress("progress-1", "tool-1", "2026-07-15T00:00:01.000Z"),
+      progress("progress-2", "tool-2", "2026-07-15T00:00:03.000Z")
+    ], "running");
+
+    expect(visible.map((message) => message.id)).toEqual(["progress-1", "progress-2"]);
   });
 
   it("keeps a context compaction notice in chronological transcript order", () => {
@@ -427,7 +508,7 @@ describe("tool timeline grouping", () => {
     expect(toolGroups.find((entry) => entry.id === "tool-group-legacy-legacy")?.toolCalls).toHaveLength(1);
   });
 
-  it("keeps tool-only model decisions as separate hidden-anchor segments", () => {
+  it("merges hidden tool-only decisions within the same visible-message interval", () => {
     const firstAnchor: MessageRecord = {
       id: "batch-1",
       threadId: "thread-1",
@@ -454,10 +535,47 @@ describe("tool timeline grouping", () => {
       []
     );
 
-    expect(entries.map((entry) => entry.kind)).toEqual(["tool-group", "tool-group"]);
+    expect(entries.map((entry) => entry.kind)).toEqual(["tool-group"]);
     expect(entries.map((entry) => entry.kind === "tool-group" ? entry.toolCalls.map((call) => call.id) : [])).toEqual([
-      ["tool-1", "tool-2"],
-      ["tool-3"]
+      ["tool-1", "tool-2", "tool-3"]
+    ]);
+  });
+
+  it("shows every completed and running tool call between two visible messages in one group", () => {
+    const progress: MessageRecord = {
+      id: "progress-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: "I am checking the current page.",
+      metadataJson: JSON.stringify({ displayKind: "commentary", toolCallIds: ["tool-1"] }),
+      createdAt: "2026-07-15T00:00:00.000Z"
+    };
+    const hiddenBatch: MessageRecord = {
+      ...progress,
+      id: "hidden-batch",
+      content: "",
+      metadataJson: JSON.stringify({ displayKind: "tool_batch", toolCallIds: ["tool-2"] }),
+      createdAt: "2026-07-15T00:00:02.000Z"
+    };
+    const entries = buildTimelineEntries(
+      [progress, hiddenBatch],
+      [
+        makeToolCall({ id: "tool-1", status: "completed", startedAt: "2026-07-15T00:00:01.000Z", completedAt: "2026-07-15T00:00:01.500Z" }),
+        makeToolCall({ id: "tool-2", status: "completed", startedAt: "2026-07-15T00:00:03.000Z", completedAt: "2026-07-15T00:00:03.500Z" }),
+        makeToolCall({ id: "tool-3", status: "running", startedAt: "2026-07-15T00:00:04.000Z", completedAt: null })
+      ],
+      [],
+      undefined,
+      "running"
+    );
+
+    const group = entries.find((entry) => entry.kind === "tool-group");
+    expect(group?.kind).toBe("tool-group");
+    expect(group?.kind === "tool-group" ? group.toolCalls.map((call) => [call.id, call.status]) : []).toEqual([
+      ["tool-1", "completed"],
+      ["tool-2", "completed"],
+      ["tool-3", "running"]
     ]);
   });
 
@@ -591,7 +709,7 @@ describe("subagent waiting status", () => {
   });
 });
 
-describe("streaming assistant lifecycle", () => {
+describe("assistant draft lifecycle", () => {
   const persistedFailure: MessageRecord = {
     id: "failure-message",
     threadId: "thread-1",
@@ -603,51 +721,171 @@ describe("streaming assistant lifecycle", () => {
   };
 
   it("removes an uncommitted draft when its thread reaches a terminal state", () => {
-    expect(shouldKeepStreamingAssistant(
-      { turnRunId: "failed-turn", completed: false },
+    expect(shouldKeepAssistantDraft(
+      { completed: false },
       [persistedFailure],
       "failed"
     )).toBe(false);
   });
 
   it("keeps only an unfinished draft while its thread is still executing", () => {
-    expect(shouldKeepStreamingAssistant(
-      { turnRunId: "active-turn", completed: false },
+    expect(shouldKeepAssistantDraft(
+      { completed: false },
       [],
       "running"
     )).toBe(true);
-    expect(shouldKeepStreamingAssistant(
-      { turnRunId: "failed-turn", completed: true, messageId: persistedFailure.id },
+    expect(shouldKeepAssistantDraft(
+      { completed: true, messageId: persistedFailure.id },
       [persistedFailure],
       "running"
     )).toBe(false);
   });
 
-  it("preserves the latest draft while the runtime continues processing", () => {
-    expect(preserveStreamingDraftContent("rendered draft", "queued draft")).toBe("queued draft");
-    expect(preserveStreamingDraftContent("rendered draft", undefined)).toBe("rendered draft");
+  it("shows an unfinished draft even when the same turn already has progress messages", () => {
+    const commentary: MessageRecord = {
+      ...persistedFailure,
+      id: "progress-message",
+      turnRunId: "active-turn",
+      content: "我先核对资料。",
+      metadataJson: JSON.stringify({ displayKind: "commentary", toolCallIds: ["tool-1"] })
+    };
+    const draft = {
+      draftId: "draft-1",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "这是正在逐字生成的结论",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: false,
+    };
+
+    expect(selectActiveAssistantDraft([draft], "thread-1", "running", [commentary])).toEqual(draft);
+  });
+
+  it("shows an empty draft immediately so a buffered provider still has a heartbeat", () => {
+    const draft = {
+      draftId: "draft-empty",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: false
+    };
+
+    expect(selectActiveAssistantDraft([draft], "thread-1", "running", [])).toEqual(draft);
+  });
+
+  it("ignores late updates from an older model request in the same turn", () => {
+    const newer = {
+      draftId: "draft-2",
+      sequence: 2,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "新的候选",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:29.000Z",
+      completed: false
+    };
+    const older = { ...newer, draftId: "draft-1", sequence: 1, content: "迟到的旧候选" };
+
+    expect(reconcileAssistantDraftUpdate({ [newer.draftId]: newer }, older)).toEqual({ [newer.draftId]: newer });
+  });
+
+  it("replaces an older same-thread draft when the next model request starts", () => {
+    const older = {
+      draftId: "draft-1",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "上一轮无效候选",
+      phase: "retrying" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: false
+    };
+    const newer = {
+      ...older,
+      draftId: "draft-2",
+      sequence: 2,
+      content: "",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:29.000Z"
+    };
+
+    expect(reconcileAssistantDraftUpdate({ [older.draftId]: older }, newer)).toEqual({
+      [newer.draftId]: newer
+    });
+  });
+
+  it("removes a streamed draft as soon as runtime marks it discarded", () => {
+    const draft = {
+      draftId: "draft-1",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "不会成为最终回复的候选内容",
+      phase: "auditing" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: false,
+    };
+
+    expect(reconcileAssistantDraftCompletion({ "draft-1": draft }, {
+      turnRunId: "active-turn",
+      draftId: "draft-1",
+      discarded: true,
+      suppressed: false
+    })).toEqual({});
+  });
+
+  it("keeps a committed draft until its exact persisted message arrives", () => {
+    expect(shouldKeepAssistantDraft(
+      { completed: true, messageId: "final-message" },
+      [],
+      "completed"
+    )).toBe(true);
+    expect(shouldKeepAssistantDraft(
+      { completed: true, messageId: "final-message" },
+      [{ ...persistedFailure, id: "final-message" }],
+      "completed"
+    )).toBe(false);
+  });
+
+  it("marks the exact draft committed and retains its content until persistence catches up", () => {
+    const draft = {
+      draftId: "draft-final",
+      sequence: 3,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "完整的最终答复",
+      phase: "auditing" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: false
+    };
+
+    const reconciled = reconcileAssistantDraftCompletion({ [draft.draftId]: draft }, {
+      turnRunId: draft.turnRunId,
+      draftId: draft.draftId,
+      messageId: "message-final",
+      discarded: false,
+      suppressed: false
+    });
+
+    expect(reconciled[draft.draftId]).toMatchObject({
+      content: draft.content,
+      completed: true,
+      messageId: "message-final"
+    });
   });
 
   it("renders only active user-visible streaming text", () => {
-    expect(getStreamingAssistantDisplayContent({
-      content: "第一段回复\n\n第二段正在生成",
-      presentation: "draft"
-    })).toBe("第一段回复\n\n第二段正在生成");
-    expect(getStreamingAssistantDisplayContent({
-      content: "已经落库",
-      presentation: "committed"
-    })).toBe("已经落库");
-    expect(getStreamingAssistantDisplayContent({
-      content: "已放弃的中间回复",
-      presentation: "continuing"
-    })).toBe("");
-    expect(getStreamingAssistantDisplayContent({
-      content: '{"assistant_message":"内部协议",',
-      presentation: "draft"
-    })).toBe("");
-    expect(getStreamingAssistantDisplayContent({
-      content: "正文\n<tool_calls>[{\"name\":\"fs.read_file\"}]</tool_calls>",
-      presentation: "draft"
+    expect(getAssistantDraftDisplayContent({ content: "第一段回复\n\n第二段正在生成" }))
+      .toBe("第一段回复\n\n第二段正在生成");
+    expect(getAssistantDraftDisplayContent({ content: "audit candidate" })).toBe("audit candidate");
+    expect(getAssistantDraftDisplayContent({ content: '{"assistant_message":"内部协议",' })).toBe("");
+    expect(getAssistantDraftDisplayContent({
+      content: "正文\n<tool_calls>[{\"name\":\"fs.read_file\"}]</tool_calls>"
     })).toBe("正文\n");
   });
 

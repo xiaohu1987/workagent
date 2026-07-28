@@ -15,6 +15,8 @@ const api = {
   saveApplicationBackgroundSettings: (settings: unknown) =>
     ipcRenderer.invoke("appearance:background:save-settings", settings),
   clearApplicationBackground: () => ipcRenderer.invoke("appearance:background:clear"),
+  setGlobalReasoningEffort: (reasoningEffort: import("@shared-types").GptReasoningEffort) =>
+    ipcRenderer.invoke("config:set-reasoning-effort", reasoningEffort),
   listThreads: () => ipcRenderer.invoke("threads:list"),
   getThreadTokenUsage: (threadId: string) => ipcRenderer.invoke("threads:token-usage", threadId),
   getUsageAnalytics: (input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) =>

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
-import { normalizeResponseTone, normalizeRuntimeTimeouts, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson } from "@shared-types";
+import { isGptReasoningEffort, normalizeResponseTone, normalizeRuntimeTimeouts, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
 import type {
   AppConfig,
   ApprovalResolutionMode,
@@ -258,7 +258,8 @@ export function defaultConfig(): AppConfig {
   return {
     defaultModel: "mock-codexh",
     defaultProvider: "mock",
-    responseTone: "standard",
+    responseTone: "concise",
+    reasoningEffort: "medium",
     providers,
     models,
     routing: {},
@@ -390,6 +391,7 @@ function readModalityDefaults(
 export async function loadConfig(configFile: string): Promise<AppConfig> {
   const raw = await fs.readFile(configFile, 'utf8');
   const parsed = TOML.parse(raw) as any;
+  const needsReasoningEffortMigration = !isGptReasoningEffort(parsed.reasoningEffort);
   const providers = Object.entries(parsed.providers ?? {}).map(([id, value]) => ({
     id,
     ...(value as Record<string, unknown>)
@@ -400,11 +402,11 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       entry.role === 'image' || entry.role === 'video' || entry.role === 'reasoning'
         ? entry.role
         : undefined;
-    return {
+    return withGptReasoningCapabilities({
       id,
       ...entry,
       role
-    };
+    } as ModelProfile);
   }) as ModelProfile[];
 
   const image = readModalityDefaults(parsed.multimodal?.image, 'image', models);
@@ -415,6 +417,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     defaultModel: parsed.defaultModel ?? 'mock-codexh',
     defaultProvider: parsed.defaultProvider ?? 'mock',
     responseTone: normalizeResponseTone(parsed.responseTone),
+    reasoningEffort: isGptReasoningEffort(parsed.reasoningEffort) ? parsed.reasoningEffort : 'medium',
     providers,
     models,
     routing: parsed.routing ?? {},
@@ -446,6 +449,9 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     })) satisfies McpServerConfig[],
     databaseConnections: normalizeDatabaseConnections(parsed.databaseConnections)
   };
+  if (needsReasoningEffortMigration) {
+    await saveConfig(configFile, config);
+  }
   return config;
 }
 
@@ -454,6 +460,7 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     defaultModel: config.defaultModel,
     defaultProvider: config.defaultProvider,
     responseTone: normalizeResponseTone(config.responseTone),
+    reasoningEffort: isGptReasoningEffort(config.reasoningEffort) ? config.reasoningEffort : "medium",
     routing: config.routing,
     multimodal: config.multimodal,
     desktop: config.desktop,
@@ -593,6 +600,7 @@ export class DatabaseService {
         content TEXT NOT NULL,
         display_content TEXT NOT NULL,
         attachments_json TEXT NOT NULL,
+        user_message_id TEXT,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
@@ -891,6 +899,7 @@ export class DatabaseService {
     this.ensureColumn("user_input_prompts", "default_answers_json", "TEXT");
     this.ensureColumn("user_input_prompts", "resolution_source", "TEXT");
     this.ensureColumn("turn_runs", "usage_json", "TEXT");
+    this.ensureColumn("queued_messages", "user_message_id", "TEXT");
     this.ensureColumn("error_solutions", "model_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("error_solutions", "memory_kind", "TEXT NOT NULL DEFAULT 'recovered'");
     this.ensureColumn("error_solutions", "scope_mode", "TEXT NOT NULL DEFAULT 'model'");
@@ -1161,6 +1170,54 @@ export class DatabaseService {
   }
 
   public recoverInterruptedThreads(): void {
+    // Older builds could persist the user message while leaving its queue item
+    // in dispatching. Link that in-flight item before making it claimable again
+    // so restart recovery can continue without inserting the user message twice.
+    this.#db
+      .prepare(
+        `UPDATE queued_messages AS queue
+         SET user_message_id = (
+           SELECT message.id
+           FROM messages AS message
+           WHERE message.thread_id = queue.thread_id
+             AND message.role = 'user'
+             AND message.content = queue.content
+             AND message.created_at >= queue.created_at
+           ORDER BY message.created_at ASC, message.rowid ASC
+           LIMIT 1
+         )
+         WHERE queue.status = 'dispatching'
+           AND queue.user_message_id IS NULL
+           AND EXISTS (
+             SELECT 1
+             FROM messages AS message
+             WHERE message.thread_id = queue.thread_id
+               AND message.role = 'user'
+               AND message.content = queue.content
+               AND message.created_at >= queue.created_at
+           )`
+      )
+      .run();
+    // Remove only the extra user rows produced by retries of that same durable
+    // queue item. Separate queued submissions keep separate queue ids and are
+    // deliberately not compared or deduplicated by text.
+    this.#db
+      .prepare(
+        `DELETE FROM messages
+         WHERE id IN (
+           SELECT duplicate.id
+           FROM queued_messages AS queue
+           JOIN messages AS canonical ON canonical.id = queue.user_message_id
+           JOIN messages AS duplicate
+             ON duplicate.thread_id = queue.thread_id
+            AND duplicate.role = 'user'
+            AND duplicate.content = queue.content
+            AND duplicate.created_at >= queue.created_at
+            AND duplicate.id <> canonical.id
+           WHERE queue.status = 'dispatching'
+         )`
+      )
+      .run();
     this.#db.prepare("UPDATE queued_messages SET status = 'queued' WHERE status = 'dispatching'").run();
     const runningThreadIds = this.#db
       .prepare("SELECT id FROM threads WHERE status IN ('running', 'waiting')")
@@ -1348,10 +1405,13 @@ export class DatabaseService {
     return row ? mapMessageRow(row) : null;
   }
 
-  public enqueueQueuedMessage(input: Omit<QueuedMessageRecord, "id" | "status" | "createdAt">): QueuedMessageRecord {
+  public enqueueQueuedMessage(
+    input: Omit<QueuedMessageRecord, "id" | "userMessageId" | "status" | "createdAt">
+  ): QueuedMessageRecord {
     const record: QueuedMessageRecord = {
       ...input,
       id: randomUUID(),
+      userMessageId: null,
       status: "queued",
       createdAt: nowIso()
     };
@@ -1460,6 +1520,40 @@ export class DatabaseService {
 
   public completeQueuedMessage(id: string): void {
     this.#db.prepare("DELETE FROM queued_messages WHERE id = ?").run(id);
+  }
+
+  public createQueuedUserMessage(
+    queueItemId: string,
+    input: Omit<MessageRecord, "id" | "createdAt">
+  ): { message: MessageRecord; created: boolean } {
+    this.#db.exec("BEGIN");
+    try {
+      const queue = this.#db
+        .prepare("SELECT user_message_id FROM queued_messages WHERE id = ?")
+        .get(queueItemId) as { user_message_id: string | null } | undefined;
+      if (!queue) {
+        throw new Error(`Queued message ${queueItemId} no longer exists.`);
+      }
+      if (queue.user_message_id) {
+        const existing = this.#db
+          .prepare("SELECT * FROM messages WHERE id = ?")
+          .get(queue.user_message_id);
+        if (existing) {
+          this.#db.exec("COMMIT");
+          return { message: mapMessageRow(existing), created: false };
+        }
+      }
+
+      const message = this.createMessage(input);
+      this.#db
+        .prepare("UPDATE queued_messages SET user_message_id = ? WHERE id = ?")
+        .run(message.id, queueItemId);
+      this.#db.exec("COMMIT");
+      return { message, created: true };
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   public cancelQueuedMessages(threadId: string): string[] {
@@ -1662,10 +1756,13 @@ export class DatabaseService {
     };
   }
 
-  public recordToolCall(input: Omit<ToolCallRecord, "id" | "startedAt" | "completedAt">): ToolCallRecord {
+  public recordToolCall(
+    input: Omit<ToolCallRecord, "id" | "startedAt" | "completedAt"> & { id?: string }
+  ): ToolCallRecord {
+    const { id, ...recordInput } = input;
     const record: ToolCallRecord = {
-      ...input,
-      id: randomUUID(),
+      ...recordInput,
+      id: id ?? randomUUID(),
       startedAt: nowIso(),
       completedAt: null
     };
@@ -3374,6 +3471,7 @@ function mapQueuedMessageRow(row: any): QueuedMessageRecord {
     content: row.content,
     displayContent: row.display_content,
     attachments,
+    userMessageId: row.user_message_id ?? null,
     status: row.status === "dispatching" ? "dispatching" : "queued",
     createdAt: row.created_at
   };

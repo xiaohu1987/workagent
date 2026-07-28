@@ -125,6 +125,119 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.anthropicConstructor.mockReset();
   });
 
+  it("sends the selected reasoning_effort for GPT-5.4+ Chat Completions only", async () => {
+    mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "Done." }, finish_reason: "stop" }] });
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiKey: "secret" };
+    const baseModel: ModelProfile = {
+      id: "gpt-5.6-terra", providerId: provider.id, displayName: "GPT 5.6 Terra", contextWindow: 500_000,
+      supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: true,
+      supportsJsonOutput: true, supportsMultimodalInput: true, supportsReasoningSummary: true, role: "reasoning"
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
+      model: baseModel, provider, reasoningEffort: "xhigh", stream: false
+    });
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0]).toMatchObject({ reasoning_effort: "xhigh" });
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
+      model: { ...baseModel, id: "gpt-4.1-mini" }, provider, reasoningEffort: "xhigh", stream: false
+    });
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("uses Grok's plain-text completion-audit compatibility protocol", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "APPROVED" } }]
+    });
+    const provider: ProviderDefinition = { id: "grok-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "grok-4.5-latest", providerId: "grok-gateway", displayName: "Grok 4.5 Latest", contextWindow: 128_000,
+      supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: true,
+      supportsJsonOutput: true, supportsMultimodalInput: false, supportsReasoningSummary: true
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "You are a completion auditor for a desktop agent. Return a JSON decision.",
+      transcript: [{ role: "user", content: "Audit the candidate." }],
+      availableTools: [],
+      model,
+      provider,
+      stream: false
+    });
+
+    const request = mocks.chatCreate.mock.calls[0]?.[0];
+    expect(request).not.toHaveProperty("response_format");
+    expect(request.messages[0].content).toContain("Grok completion-audit compatibility");
+    expect(decision).toMatchObject({
+      assistantMessage: "APPROVED",
+      toolCalls: [],
+      endTurn: true,
+      goalCompleted: true,
+      isStructured: true
+    });
+  });
+
+  it("falls back to deterministic completion validation when Grok omits an audit verdict", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "I reviewed the candidate." } }]
+    });
+    const provider: ProviderDefinition = { id: "grok-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "grok-4.5-latest", providerId: "grok-gateway", displayName: "Grok 4.5 Latest", contextWindow: 128_000,
+      supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: true,
+      supportsJsonOutput: true, supportsMultimodalInput: false, supportsReasoningSummary: true
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "You are a completion auditor for a desktop agent. Return a JSON decision.",
+      transcript: [{ role: "user", content: "Audit the candidate." }],
+      availableTools: [],
+      model,
+      provider,
+      stream: false
+    });
+
+    expect(decision).toMatchObject({
+      assistantMessage: "APPROVED",
+      endTurn: true,
+      goalCompleted: true,
+      isStructured: true
+    });
+    expect(decision.reasoningSummary).toContain("deterministic completion validation");
+  });
+
+  it("uses the same Grok completion-audit compatibility when the gateway speaks Anthropic", async () => {
+    mocks.anthropicCreate.mockResolvedValue({
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "I reviewed the candidate." }]
+    });
+    const provider: ProviderDefinition = { id: "grok-anthropic-gateway", type: "anthropic", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "grok-4.5-latest", providerId: provider.id, displayName: "Grok 4.5 Latest", contextWindow: 128_000,
+      supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: true,
+      supportsJsonOutput: true, supportsMultimodalInput: false, supportsReasoningSummary: true
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "You are a completion auditor for a desktop agent. Return a JSON decision.",
+      transcript: [{ role: "user", content: "Audit the candidate." }],
+      availableTools: [],
+      model,
+      provider,
+      stream: false
+    });
+
+    expect(mocks.anthropicCreate.mock.calls[0]?.[0].system).toContain("Grok completion-audit compatibility");
+    expect(decision).toMatchObject({
+      assistantMessage: "APPROVED",
+      endTurn: true,
+      goalCompleted: true,
+      isStructured: true
+    });
+  });
+
   it("routes GPT Image models through the Image API request shape", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       model: "gpt-image-2",
@@ -1020,6 +1133,29 @@ describe("native provider tool protocols", () => {
     expect(deltas).toEqual(["Hello"]);
   });
 
+  it("decodes only assistant_message from an Anthropic JSON decision stream", async () => {
+    async function* events() {
+      yield { type: "message_start", message: { usage: { input_tokens: 2 } } };
+      yield { type: "content_block_start", index: 0, content_block: { type: "text" } };
+      yield { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: '{"assistant_message":"Draft ' } };
+      yield { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: 'summary","tool_calls":[],"end_turn":true,"goal_completed":true}' } };
+      yield { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 8 } };
+      yield { type: "message_stop" };
+    }
+    mocks.anthropicCreate.mockResolvedValue(events());
+    const provider: ProviderDefinition = { id: "provider", type: "anthropic", apiKey: "secret" };
+    const deltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON.", transcript: [{ role: "user", content: "Summarize." }], availableTools: [],
+      model: { ...model, supportsStreaming: true }, provider, stream: true,
+      onTextDelta: (delta) => { deltas.push(delta); }
+    });
+
+    expect(deltas.join("")).toBe("Draft summary");
+    expect(decision).toMatchObject({ assistantMessage: "Draft summary", endTurn: true, goalCompleted: true });
+  });
+
   it("maps the Anthropic parallel tool setting and parses Responses function calls", async () => {
     mocks.anthropicCreate.mockResolvedValue({ content: [{ type: "text", text: "Done." }], usage: { output_tokens: 1 } });
     const anthropicProvider: ProviderDefinition = { id: "provider", type: "anthropic", apiKey: "secret" };
@@ -1050,6 +1186,22 @@ describe("native provider tool protocols", () => {
     expect(decision).toMatchObject({ toolCalls: [{ id: "response-call", name: tool.name, arguments: { path: "." } }] });
   });
 
+  it("sends the selected GPT reasoning effort through the Responses request", async () => {
+    mocks.responsesCreate.mockResolvedValue({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }] });
+    const provider: ProviderDefinition = {
+      id: "openai", type: "openai-compatible", transport: "responses", apiKey: "secret"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
+      model: { ...model, id: "gpt-5.6-terra", providerId: provider.id, role: "reasoning" },
+      provider, reasoningEffort: "high", stream: false
+    });
+
+    expect(mocks.responsesCreate.mock.calls.at(-1)?.[0]).toMatchObject({
+      reasoning: { effort: "high", summary: "concise" }
+    });
+  });
+
   it("streams Responses text and function arguments without exposing tool JSON", async () => {
     async function* events() {
       yield { type: "response.output_text.delta", delta: "Inspecting" };
@@ -1078,6 +1230,26 @@ describe("native provider tool protocols", () => {
       toolCalls: [{ id: "response-stream-call", name: tool.name, arguments: { path: "." } }],
       outputTokens: 6
     });
+  });
+
+  it("decodes only assistant_message from a Responses JSON decision stream", async () => {
+    async function* events() {
+      yield { type: "response.output_text.delta", delta: '{"assistant_message":"Draft ' };
+      yield { type: "response.output_text.delta", delta: 'summary","tool_calls":[],"end_turn":true,"goal_completed":true}' };
+      yield { type: "response.completed", response: { status: "completed", usage: { input_tokens: 4, output_tokens: 8 } } };
+    }
+    mocks.responsesCreate.mockResolvedValue(events());
+    const provider: ProviderDefinition = { id: "openai", type: "openai-compatible", transport: "responses", apiKey: "secret" };
+    const deltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON.", transcript: [{ role: "user", content: "Summarize." }], availableTools: [],
+      model: { ...model, providerId: provider.id, supportsStreaming: true }, provider, stream: true,
+      onTextDelta: (delta) => { deltas.push(delta); }
+    });
+
+    expect(deltas.join("")).toBe("Draft summary");
+    expect(decision).toMatchObject({ assistantMessage: "Draft summary", endTurn: true, goalCompleted: true });
   });
 
   it("falls back to Chat Completions only when the Responses endpoint is unsupported", async () => {

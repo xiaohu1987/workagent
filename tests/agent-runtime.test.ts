@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SkillMetadata } from "@shared-types";
+import type { ModelProfile, SkillMetadata } from "@shared-types";
 import { DEFAULT_RUNTIME_TIMEOUTS, normalizeRuntimeTimeouts } from "@shared-types";
 import {
   createToolCallFingerprint,
@@ -15,8 +15,7 @@ import {
   buildBrowserTestChoiceQuestion,
   buildAgentProtocolRecoveryQuestion,
   resolveBrowserTestChoice,
-  buildBrowserWorkspaceRecoveryQuestion,
-  resolveBrowserWorkspaceRecoveryChoice,
+  buildSilentBrowserFallbackInstruction,
   isBrowserWorkspaceUnavailableError,
   isBrowserTestToolCall,
   classifySuccessfulToolEvidence,
@@ -25,8 +24,11 @@ import {
   validateManagedWriteCompletion,
   buildManagedWriteCompletionRecoveryInstruction,
   validateStandardCompletion,
-  resolveStandardCompletionAuditAction,
+  buildStandardCompletionAuditSystemPrompt,
   buildStandardCompletionAuditInstruction,
+  buildStandardCompletionAuditRecoveryInstruction,
+  resolveStandardCompletionAuditResult,
+  resolveStandardCompletionAuditDisposition,
   buildStandardCompletionRecoveryInstruction,
   isDeferredExecutionPayload,
   isProjectFileMutationRequest,
@@ -76,6 +78,7 @@ import {
   MODEL_RATE_LIMIT_BASE_DELAY_MS,
   buildModelRateLimitRecoveryQuestion,
   MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
+  MAX_STANDARD_COMPLETION_RECOVERIES,
   MAX_MODEL_TOOL_RESULT_CHARACTERS,
   MAX_MCP_TOOL_RESULT_CHARACTERS,
   MAX_REPOSITORY_COMPLETION_REJECTIONS,
@@ -423,27 +426,24 @@ describe("commentary messages", () => {
     ])).toBe("我先一边核对相关资料，一边检查现有实现，把关键信息确认清楚后再继续。");
   });
 
-  it("applies the selected tone to fallback progress without exposing tool details", () => {
+  it("keeps friendly fallback progress natural without adding a stock greeting", () => {
     const call = [{ id: "read-1", name: "fs.read_file", arguments: { path: "src/secret.ts" } }];
-    const cuteProgress = buildToolBatchProgressMessage(call, "cute_lolita");
-    const matureProgress = buildToolBatchProgressMessage(call, "mature_lady");
+    const friendlyProgress = buildToolBatchProgressMessage(call, "friendly");
 
-    expect(cuteProgress).toMatch(/^(好哒！|没问题呀，|这就来啦！)/);
-    expect(cuteProgress).toMatch(/呀～$/);
-    expect(matureProgress).toMatch(/^(交给姐姐就好。|别急，姐姐来把这一步拿稳：|这一步听姐姐的：)/);
-    expect(cuteProgress).not.toContain("secret.ts");
+    expect(friendlyProgress).toBe("我先把相关代码读一遍，弄清楚现在的实现和前后关系。");
+    expect(friendlyProgress).not.toContain("secret.ts");
   });
 
-  it("makes model-authored progress visibly match the selected tone without double styling", () => {
+  it("removes generic openings from model-authored progress without changing its substance", () => {
     const neutral = "我先检查现有实现，再继续修改。";
-    const cute = applyResponseToneToProgressMessage(neutral, "cute_lolita");
-    const mature = applyResponseToneToProgressMessage(neutral, "mature_lady");
+    const friendly = applyResponseToneToProgressMessage(neutral, "friendly");
 
-    expect(cute).not.toBe(neutral);
-    expect(mature).not.toBe(neutral);
-    expect(cute).not.toBe(mature);
-    expect(applyResponseToneToProgressMessage(cute, "cute_lolita")).toBe(cute);
-    expect(applyResponseToneToProgressMessage(mature, "mature_lady")).toBe(mature);
+    expect(friendly).toBe(neutral);
+    expect(applyResponseToneToProgressMessage("好的，我先检查现有实现。", "friendly")).toBe("我先检查现有实现。");
+    expect(applyResponseToneToProgressMessage("我先帮你处理一下。刚才的命令被环境限制拦住了。", "friendly"))
+      .toBe("刚才的命令被环境限制拦住了。");
+    expect(applyResponseToneToProgressMessage("我先帮你处理一下。", "friendly")).toBe("");
+    expect(applyResponseToneToProgressMessage(neutral, "concise")).toBe(neutral);
   });
 
   it("keeps raw commands out of conversational progress", () => {
@@ -488,15 +488,14 @@ describe("commentary messages", () => {
 });
 
 describe("response tone prompt", () => {
-  it("defines distinct styles without changing execution standards", () => {
-    expect(buildResponseTonePrompt("standard")).toContain("natural, clear, professional");
-    expect(buildResponseTonePrompt("cute_lolita")).toContain("bright, sweet, playful");
-    expect(buildResponseTonePrompt("mature_lady")).toContain("composed, confident, warm");
-    expect(buildResponseTonePrompt("cute_lolita")).toContain("must be obvious");
-    expect(buildResponseTonePrompt("mature_lady")).toContain("unmistakable Chinese 御姐 voice");
-    expect(buildResponseTonePrompt("mature_lady")).toContain("姐姐-style self-reference");
-    expect(buildResponseTonePrompt("cute_lolita")).toContain("technical precision");
-    expect(buildResponseTonePrompt("mature_lady")).toContain("user overrides this preset");
+  it("defines friendly and concise styles without changing execution standards", () => {
+    expect(buildResponseTonePrompt("friendly")).toContain("natural, warm, clear");
+    expect(buildResponseTonePrompt("concise")).toContain("directly and economically");
+    expect(buildResponseTonePrompt("friendly")).toContain("technical precision");
+    expect(buildResponseTonePrompt("friendly")).toContain("Never use generic openers");
+    expect(buildResponseTonePrompt("friendly")).toContain("every 1-3 execution steps");
+    expect(buildResponseTonePrompt("friendly")).toContain("not before every tool batch");
+    expect(buildResponseTonePrompt("concise")).toContain("user overrides this preset");
   });
 });
 
@@ -521,6 +520,10 @@ describe("premature completion recovery", () => {
 });
 
 describe("standard completion validation", () => {
+  it("keeps retrying incomplete final answers instead of using the two-attempt protocol limit", () => {
+    expect(MAX_STANDARD_COMPLETION_RECOVERIES).toBeGreaterThan(MAX_AGENT_PROTOCOL_FAILURES);
+  });
+
   it("recognizes direct project mutation requests without classifying diagnostic questions", () => {
     expect(isProjectFileMutationRequest("修改一下程序 ，换一个语音源 你这个太生硬了")).toBe(true);
     expect(isProjectFileMutationRequest("Please fix the login bug")).toBe(true);
@@ -593,33 +596,48 @@ describe("standard completion validation", () => {
     expect(result.reasons).toContain("The model did not declare the original goal complete.");
   });
 
-  it("requires a completion audit before validating a terminal decision", () => {
-    expect(resolveStandardCompletionAuditAction({
-      auditPending: false,
-      toolCallCount: 0,
-      endTurn: true
-    })).toBe("request_audit");
-    expect(resolveStandardCompletionAuditAction({
-      auditPending: true,
-      toolCallCount: 0,
-      endTurn: true
-    })).toBe("validate_completion");
+  it("accepts only an explicit no-tool completion-audit approval", () => {
+    expect(resolveStandardCompletionAuditResult({
+      assistantMessage: "APPROVED",
+      toolCalls: [],
+      endTurn: true,
+      goalCompleted: true
+    })).toEqual({ accepted: true, gaps: [] });
+    expect(resolveStandardCompletionAuditResult({
+      assistantMessage: "Load a test skill first.",
+      toolCalls: [{ id: "skill-1", name: "skills.load", arguments: { skill_id: "test" } }],
+      endTurn: false,
+      goalCompleted: false
+    })).toEqual({ accepted: false, gaps: ["Load a test skill first."] });
   });
 
-  it("requires a fresh completion audit after the audit continues with tools", () => {
-    expect(resolveStandardCompletionAuditAction({
-      auditPending: true,
-      toolCallCount: 1,
-      endTurn: false
-    })).toBe("continue_work");
-    expect(resolveStandardCompletionAuditAction({
-      auditPending: false,
-      toolCallCount: 1,
-      endTurn: false
-    })).toBe("none");
+  it("cannot let an unavailable or repeatedly rejecting audit block a valid candidate forever", () => {
+    expect(resolveStandardCompletionAuditDisposition({
+      outcome: "unavailable",
+      attempt: 1
+    })).toBe("accept_candidate");
+    expect(resolveStandardCompletionAuditDisposition({
+      outcome: "rejected",
+      attempt: MAX_STANDARD_COMPLETION_RECOVERIES - 1
+    })).toBe("retry");
+    expect(resolveStandardCompletionAuditDisposition({
+      outcome: "rejected",
+      attempt: MAX_STANDARD_COMPLETION_RECOVERIES
+    })).toBe("accept_candidate");
   });
 
-  it("builds an audit that compares the original task with delivery evidence", () => {
+  it("requires concrete execution instead of another intention after an audit rejection", () => {
+    const instruction = buildStandardCompletionAuditRecoveryInstruction([
+      "The page was not opened and no score was reported."
+    ]);
+
+    expect(instruction).toContain("Do not state an intention to inspect, open, search, call, or verify anything.");
+    expect(instruction).toContain("make the concrete tool call");
+    expect(instruction).toContain("Do not substitute a plan");
+  });
+
+  it("builds a no-tool audit that compares the original task with delivery evidence", () => {
+    const systemPrompt = buildStandardCompletionAuditSystemPrompt({ displayName: "Audit Model" } as ModelProfile);
     const instruction = buildStandardCompletionAuditInstruction({
       originalRequest: "修改登录页并运行测试",
       candidateSummary: "已经处理完成。",
@@ -634,8 +652,11 @@ describe("standard completion validation", () => {
     expect(instruction).toContain("修改登录页并运行测试");
     expect(instruction).toContain("D:\\project\\Login.tsx");
     expect(instruction).toContain("test-1: shell.exec (verification)");
-    expect(instruction).toContain("If any part of the original request is incomplete");
-    expect(instruction).toContain("call the next concrete tool needed to finish it now");
+    expect(instruction).toContain("Do not write a replacement answer");
+    expect(systemPrompt).toContain("no tools, no Skills, no MCP access");
+    expect(systemPrompt).toContain("assistant_message exactly APPROVED");
+    expect(buildStandardCompletionAuditRecoveryInstruction(["Expected results are missing."]))
+      .toContain("Expected results are missing.");
   });
 
   it("rejects a test-case request when the response contains only an introduction", () => {
@@ -779,7 +800,7 @@ describe("Agent decision protocol recovery", () => {
 });
 
 describe("model rate limit retries", () => {
-  it("defaults to five automatic 429 retries before asking the user", () => {
+  it("uses five attempts as the 429 recovery window", () => {
     expect(MAX_MODEL_RATE_LIMIT_RETRIES).toBe(5);
   });
 
@@ -806,7 +827,7 @@ describe("model rate limit retries", () => {
     expect(resolveModelRateLimitDelayMs(new Error("429"), 3)).toBe(MODEL_RATE_LIMIT_BASE_DELAY_MS * 4);
   });
 
-  it("offers another five retries after the automatic budget is exhausted", () => {
+  it("retains the legacy recovery prompt shape for callers that explicitly need it", () => {
     const question = buildModelRateLimitRecoveryQuestion("429 Rate limit reached");
 
     expect(question).toMatchObject({
@@ -832,13 +853,13 @@ describe("model rate limit retries", () => {
 });
 
 describe("model decision timeout retries", () => {
-  it("defaults to five automatic timeout retries before stopping", () => {
+  it("uses five attempts as the default timeout recovery window", () => {
     expect(MAX_MODEL_TIMEOUT_RETRIES).toBe(5);
   });
 });
 
 describe("network error retries", () => {
-  it("defaults to three automatic retries before stopping", () => {
+  it("uses three attempts as the default network recovery window", () => {
     expect(MAX_NETWORK_ERROR_RETRIES).toBe(3);
   });
 
@@ -2287,13 +2308,12 @@ describe("GPA plan validation", () => {
 });
 
 describe("browser workspace recovery", () => {
-  it("recommends opening the Browser workspace when it is unavailable", () => {
-    const question = buildBrowserWorkspaceRecoveryQuestion();
+  it("falls back to silent page loading instead of requesting the Browser workspace", () => {
+    const instruction = buildSilentBrowserFallbackInstruction("browser_tool");
 
-    expect(question.options.find((option) => option.id === "retry")?.recommended).toBe(true);
-    expect(question.options.find((option) => option.id === "skip")?.recommended).toBe(false);
-    expect(resolveBrowserWorkspaceRecoveryChoice({ [question.id]: "retry" })).toBe("retry");
-    expect(resolveBrowserWorkspaceRecoveryChoice({ [question.id]: "skip" })).toBe("skip");
+    expect(instruction).toContain("Do not ask the user to open the Browser workspace");
+    expect(instruction).toContain("web_search.open_page");
+    expect(instruction).toContain("silently");
   });
 
   it("recognizes the Browser workspace readiness error without catching other browser failures", () => {

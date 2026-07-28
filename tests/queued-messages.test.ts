@@ -36,6 +36,105 @@ describe("queued messages", () => {
     expect(db.listQueuedMessages("thread-1").map((item) => item.id)).toEqual([first.id]);
   });
 
+  it("reuses the persisted user message when an in-flight queue item is recovered", async () => {
+    const db = await createDatabase();
+    const thread = db.createThread({
+      title: "restart recovery",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock",
+      providerId: "mock"
+    });
+    const queued = db.enqueueQueuedMessage({
+      threadId: thread.id,
+      content: "same submission",
+      displayContent: "same submission",
+      attachments: []
+    });
+    expect(db.claimNextQueuedMessage(thread.id)?.id).toBe(queued.id);
+
+    const first = db.createQueuedUserMessage(queued.id, {
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: queued.content,
+      metadataJson: null
+    });
+    expect(first.created).toBe(true);
+
+    db.recoverInterruptedThreads();
+    expect(db.claimNextQueuedMessage(thread.id)?.id).toBe(queued.id);
+    const recovered = db.createQueuedUserMessage(queued.id, {
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: queued.content,
+      metadataJson: null
+    });
+
+    expect(recovered.created).toBe(false);
+    expect(recovered.message.id).toBe(first.message.id);
+    expect(db.listMessages(thread.id).filter((message) => message.role === "user")).toHaveLength(1);
+  });
+
+  it("backfills legacy in-flight queue items without conflating separate identical submissions", async () => {
+    const db = await createDatabase();
+    const thread = db.createThread({
+      title: "legacy restart recovery",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock",
+      providerId: "mock"
+    });
+    const firstQueue = db.enqueueQueuedMessage({
+      threadId: thread.id,
+      content: "repeatable text",
+      displayContent: "repeatable text",
+      attachments: []
+    });
+    db.claimNextQueuedMessage(thread.id);
+    const legacyMessage = db.createMessage({
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: firstQueue.content,
+      metadataJson: null
+    });
+    db.createMessage({
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: firstQueue.content,
+      metadataJson: null
+    });
+
+    db.recoverInterruptedThreads();
+    expect(db.listQueuedMessages(thread.id)[0]?.userMessageId).toBe(legacyMessage.id);
+    expect(db.listMessages(thread.id).filter((message) => message.role === "user")).toEqual([legacyMessage]);
+    db.completeQueuedMessage(firstQueue.id);
+
+    const secondQueue = db.enqueueQueuedMessage({
+      threadId: thread.id,
+      content: "repeatable text",
+      displayContent: "repeatable text",
+      attachments: []
+    });
+    db.claimNextQueuedMessage(thread.id);
+    const second = db.createQueuedUserMessage(secondQueue.id, {
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: secondQueue.content,
+      metadataJson: null
+    });
+
+    expect(second.created).toBe(true);
+    expect(second.message.id).not.toBe(legacyMessage.id);
+    expect(db.listMessages(thread.id).filter((message) => message.role === "user")).toHaveLength(2);
+  });
+
   it("keeps a newly enqueued message claimable after an interrupted dispatch", async () => {
     const db = await createDatabase();
     const thread = db.createThread({

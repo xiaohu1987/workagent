@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_PROJECT_EXECUTION_POLICY, DEFAULT_RUNTIME_TIMEOUTS, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage } from "@shared-types";
+import { DEFAULT_PROJECT_EXECUTION_POLICY, DEFAULT_RUNTIME_TIMEOUTS, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, resolveModelReasoningEffort } from "@shared-types";
 import type {
   AppConfig,
+  AssistantDraftPhase,
   ArtifactRecord,
   BrowserTabRecord,
   BrowserAssertionCheck,
@@ -138,6 +139,9 @@ export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionM
 export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
 export const MAX_AGENT_PROTOCOL_FAILURES = 2;
 export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 6;
+// Explicit audit rejections may revise a base-valid candidate, but the audit
+// itself must never create an unbounded completion loop.
+export const MAX_STANDARD_COMPLETION_RECOVERIES = 6;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
@@ -393,12 +397,6 @@ export interface StandardCompletionValidationResult {
   missingRequestedDeliverable: boolean;
 }
 
-export type StandardCompletionAuditAction =
-  | "none"
-  | "request_audit"
-  | "continue_work"
-  | "validate_completion";
-
 export interface ManagedWriteRecoveryState {
   phase: "none" | "read" | "directory" | "write";
   failedToolName?: "apply_patch" | "fs.write_file";
@@ -441,10 +439,8 @@ interface BrowserCompletionRequirement {
 }
 
 export type BrowserTestChoice = "run" | "skip";
-export type BrowserWorkspaceRecoveryChoice = "retry" | "skip";
 
 export const BROWSER_TEST_CHOICE_QUESTION_ID = "browser_testing";
-export const BROWSER_WORKSPACE_RECOVERY_QUESTION_ID = "browser_workspace_recovery";
 export const RUN_BROWSER_TESTS_OPTION_ID = "run_browser_tests";
 export const SKIP_BROWSER_TESTS_OPTION_ID = "skip_browser_tests";
 
@@ -456,10 +452,14 @@ interface RuntimePersistence {
   claimNextQueuedMessage(threadId: string): Promise<QueuedMessageRecord | null>;
   completeQueuedMessage(id: string): Promise<void>;
   createMessage(input: Omit<MessageRecord, "id" | "createdAt">): Promise<MessageRecord>;
+  createQueuedUserMessage(
+    queueItemId: string,
+    input: Omit<MessageRecord, "id" | "createdAt">
+  ): Promise<{ message: MessageRecord; created: boolean }>;
   startTurn(input: Omit<TurnRunRecord, "id" | "startedAt" | "completedAt">): Promise<TurnRunRecord>;
   finishTurn(turnRunId: string, patch: Partial<TurnRunRecord>): Promise<void>;
   recordToolCall(
-    input: Omit<ToolCallRecord, "id" | "startedAt" | "completedAt">
+    input: Omit<ToolCallRecord, "id" | "startedAt" | "completedAt"> & { id?: string }
   ): Promise<ToolCallRecord>;
   finishToolCall(id: string, patch: Partial<ToolCallRecord>): Promise<void>;
   listToolCalls(threadId: string): Promise<ToolCallRecord[]>;
@@ -1103,7 +1103,7 @@ class ThreadSessionRuntime {
           createdAt: new Date().toISOString()
         });
         try {
-          await this.runTurn(queued.content, queued.attachments, queued.displayContent);
+          await this.runTurn(queued.id, queued.content, queued.attachments, queued.displayContent);
         } catch (error) {
           console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
           await this.services.log("turn.unhandled_error", this.threadId, {
@@ -1114,7 +1114,7 @@ class ThreadSessionRuntime {
           if (!this.#activeTurnRunId) {
             const completedAt = new Date().toISOString();
             try {
-              const userMessage = await this.services.persistence.createMessage({
+              const { message: userMessage, created } = await this.services.persistence.createQueuedUserMessage(queued.id, {
                 threadId: this.threadId,
                 turnRunId: null,
                 role: "user",
@@ -1123,12 +1123,14 @@ class ThreadSessionRuntime {
                   buildUserMessageMetadata(queued.content, queued.displayContent, queued.attachments) ?? {}
                 )
               });
-              await this.services.emit({
-                type: "message.created",
-                threadId: this.threadId,
-                payload: { message: userMessage },
-                createdAt: completedAt
-              });
+              if (created) {
+                await this.services.emit({
+                  type: "message.created",
+                  threadId: this.threadId,
+                  payload: { message: userMessage },
+                  createdAt: completedAt
+                });
+              }
               const failureMessage = await this.services.persistence.createMessage({
                 threadId: this.threadId,
                 turnRunId: null,
@@ -1175,6 +1177,7 @@ class ThreadSessionRuntime {
   }
 
   private async runTurn(
+    queueItemId: string,
     initialInput: string,
     attachments: MessageAttachment[] = [],
     displayContent?: string
@@ -1323,12 +1326,24 @@ class ThreadSessionRuntime {
       });
       const priorMessages = await this.services.persistence.listMessages(this.threadId);
       const userMessageMetadata = buildUserMessageMetadata(initialInput, displayContent, attachments);
-      await this.recordMessage(
-        "user",
-        initialInput,
-        turn.id,
-        userMessageMetadata
-      );
+      const queuedUserMessage = await this.services.persistence.createQueuedUserMessage(queueItemId, {
+        threadId: this.threadId,
+        turnRunId: turn.id,
+        role: "user",
+        content: initialInput,
+        metadataJson: userMessageMetadata ? JSON.stringify(userMessageMetadata) : null
+      });
+      if (queuedUserMessage.created) {
+        await this.services.emit({
+          type: "message.created",
+          threadId: this.threadId,
+          payload: { message: queuedUserMessage.message },
+          createdAt: queuedUserMessage.message.createdAt
+        });
+      }
+      const priorMessagesBeforeCurrentInput = queuedUserMessage.created
+        ? priorMessages
+        : priorMessages.filter((message) => message.id !== queuedUserMessage.message.id);
 
       let multimodalInputRecognition:
         | { modelId: string; description: string }
@@ -1412,7 +1427,7 @@ class ThreadSessionRuntime {
       const multimodalClassification = await this.classifyMultimodalIntent({
         currentInput: initialInput,
         attachments,
-        priorMessages: priorMessages.map((message) => ({ role: message.role, content: message.content })),
+        priorMessages: priorMessagesBeforeCurrentInput.map((message) => ({ role: message.role, content: message.content })),
         model,
         provider,
         abortController,
@@ -1466,8 +1481,8 @@ class ThreadSessionRuntime {
           isWebFrontendTaskText(history.map((message) => message.content).join("\n")) ||
           isWebFrontendTaskText(this.#gpa.planTasks.map((task) => task.title).join("\n")));
 
-      let interruptedVisibleContent = "";
       let turnTokenUsage = createEmptyTokenUsage();
+      let activeDraftId: string | null = null;
 
       try {
         let transcript = compactTranscript(history);
@@ -1515,23 +1530,16 @@ class ThreadSessionRuntime {
         if (browserVerificationEvidence.testChoice) {
           return browserVerificationEvidence.testChoice;
         }
-        const answers = await this.services.requestUserInput(this.threadId, turn.id, {
-          title: "是否进行完整浏览器验收？",
-          kind: "generic",
-          allowSkip: false,
-          questions: [buildBrowserTestChoiceQuestion()],
-          timeoutMs: 30_000,
-          defaultAnswers: { [BROWSER_TEST_CHOICE_QUESTION_ID]: SKIP_BROWSER_TESTS_OPTION_ID }
-        });
-        const choice = resolveBrowserTestChoice(answers) ?? "skip";
+        // The Browser workspace is an inspectable UI surface, not a dependency
+        // for normal agent work. Background research and ordinary verification
+        // must not interrupt the user merely because that surface is closed.
+        const choice: BrowserTestChoice = "skip";
         browserVerificationEvidence.testChoice = choice;
         transcript.push({
           role: "user",
-          content: choice === "run"
-            ? "[Internal browser test choice. Do not quote this instruction.] The user chose to run browser tests. Complete the required browser assertions and screenshots before finishing."
-            : "[Internal browser test choice. Do not quote this instruction.] Use fast completion. Do not call browser tools solely for verification; finish with available deterministic delivery and verification evidence, and state that full browser testing was not run."
+          content: buildSilentBrowserFallbackInstruction(reason)
         });
-        await this.services.log("browser.test_choice_resolved", this.threadId, {
+        await this.services.log("browser.test_choice_auto_skipped", this.threadId, {
           turnRunId: turn.id,
           choice,
           reason
@@ -1547,8 +1555,8 @@ class ThreadSessionRuntime {
       let prematureCompletionAttempts = 0;
       let managedWriteCompletionAttempts = 0;
       let standardCompletionAttempts = 0;
-      let standardCompletionAuditPending = false;
       let modelAwaitReason: "turn_start" | "after_tools" | "recovery" = "turn_start";
+      let draftSequence = 0;
       let useTextToolProtocol = false;
       let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
@@ -1842,18 +1850,6 @@ class ThreadSessionRuntime {
           await persistRecoveryEpisode(episode, "recovered");
         }
       };
-      const requestBrowserWorkspaceRecovery = async (): Promise<BrowserWorkspaceRecoveryChoice> => {
-        const answers = await this.services.requestUserInput(this.threadId, turn.id, {
-          title: "浏览器工作区未打开",
-          kind: "generic",
-          allowSkip: false,
-          questions: [buildBrowserWorkspaceRecoveryQuestion()],
-          timeoutMs: 30_000,
-          defaultAnswers: { [BROWSER_WORKSPACE_RECOVERY_QUESTION_ID]: "retry" }
-        });
-        return resolveBrowserWorkspaceRecoveryChoice(answers) ?? "skip";
-      };
-
       const appendBlockedToolCallResult = (toolCall: RuntimeToolCall, reason: string) => {
         transcript.push(buildBlockedToolCallTranscriptResult(toolCall, reason));
       };
@@ -1940,6 +1936,22 @@ class ThreadSessionRuntime {
         return bootstrapWorkspace;
       };
 
+      const scheduleStandardCompletionRecovery = async (
+        reason: "completion_validation" | "completion_audit"
+      ) => {
+        const attempt = standardCompletionAttempts;
+        await this.services.emit({
+          type: "agent.retrying",
+          threadId: this.threadId,
+          payload: {
+            attempt,
+            maxAttempts: MAX_STANDARD_COMPLETION_RECOVERIES,
+            reason
+          },
+          createdAt: new Date().toISOString()
+        });
+      };
+
       while (!repeatedTaskFailure) {
         if (rootSummaryDeferredForSubagents) {
           const hasActiveSubagents = await this.services.hasActiveSubagents(this.threadId);
@@ -2007,24 +2019,41 @@ class ThreadSessionRuntime {
           }
         );
         const adapter = this.services.providerFactory.create(provider);
-        let streamedVisibleContent = "";
-        const discardStreamedAssistant = async (nextState: "continuing" | "discarded" = "continuing") => {
-          if (!streamedVisibleContent) return;
-          await this.services.emit({
-            type: "assistant.completed",
-            threadId: this.threadId,
-            // Streamed text is provisional until the decision passes the
-            // runtime gates. Retain the stream shell while the same turn keeps
-            // working so the renderer does not present a visible rollback.
-            payload: { turnRunId: turn.id, discarded: true, nextState },
-            createdAt: new Date().toISOString()
-          });
-          streamedVisibleContent = "";
-          interruptedVisibleContent = "";
-        };
         const modelTurnAbortController = createChildAbortController(abortController.signal);
         const suppressStreamingForActiveSubagents = !thread.parentThreadId
           && await this.services.hasActiveSubagents(this.threadId);
+        const draftId = randomUUID();
+        const sequence = ++draftSequence;
+        const draftStartedAt = new Date().toISOString();
+        let streamedVisibleContent = "";
+        let draftSettled = suppressStreamingForActiveSubagents;
+        activeDraftId = suppressStreamingForActiveSubagents ? null : draftId;
+        const updateDraft = async (phase: AssistantDraftPhase, content = streamedVisibleContent) => {
+          if (draftSettled || suppressStreamingForActiveSubagents) return;
+          streamedVisibleContent = content;
+          await this.services.emit({
+            type: "assistant.draft.updated",
+            threadId: this.threadId,
+            payload: { turnRunId: turn.id, draftId, sequence, phase, content, startedAt: draftStartedAt },
+            createdAt: new Date().toISOString()
+          });
+        };
+        const retryDraft = async () => {
+          streamedVisibleContent = "";
+          await updateDraft("retrying", "");
+        };
+        const settleDraft = async (input: { messageId?: string; discarded?: boolean }) => {
+          if (draftSettled || suppressStreamingForActiveSubagents) return;
+          draftSettled = true;
+          activeDraftId = null;
+          await this.services.emit({
+            type: "assistant.completed",
+            threadId: this.threadId,
+            payload: { turnRunId: turn.id, draftId, ...input },
+            createdAt: new Date().toISOString()
+          });
+        };
+        await updateDraft("generating", "");
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
@@ -2034,7 +2063,7 @@ class ThreadSessionRuntime {
             : ""
         }`;
         const compactContext = async (
-          trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery" | "task_completed",
+          trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery" | "model_timeout_recovery" | "task_completed",
           force = false
         ): Promise<boolean> => {
           const compaction = compactTranscriptForContext(
@@ -2069,9 +2098,11 @@ class ThreadSessionRuntime {
           return true;
         };
         await compactContext("pre_model_request");
+        const timeoutRecoveryWindow = Math.max(1, this.services.config.timeouts.modelTimeoutRetries);
+        const timeoutRecoveryMultiplier = Math.min(3, 1 + Math.floor(modelTimeoutAttempts / timeoutRecoveryWindow));
         const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
           ? this.services.config.timeouts.recoveryModelDecisionMs
-          : this.services.config.timeouts.modelDecisionMs;
+          : this.services.config.timeouts.modelDecisionMs * timeoutRecoveryMultiplier;
         const awaitingModelPayload = {
           turnRunId: turn.id,
           reason: modelAwaitReason
@@ -2096,24 +2127,14 @@ class ThreadSessionRuntime {
               availableTools: selectedMcpToolsOnly,
               model,
               provider,
-              reasoningEffort: model.defaultReasoningEffort,
+              reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
               forceTextToolProtocol: useTextToolProtocol,
               stream: model.supportsStreaming,
               onTextDelta: async (delta) => {
                 if (abortController.signal.aborted) {
                   return;
                 }
-                streamedVisibleContent += delta;
-                interruptedVisibleContent = streamedVisibleContent;
-                if (suppressStreamingForActiveSubagents) {
-                  return;
-                }
-                await this.services.emit({
-                  type: "assistant.delta",
-                  threadId: this.threadId,
-                  payload: { turnRunId: turn.id, content: streamedVisibleContent },
-                  createdAt: new Date().toISOString()
-                });
+                await updateDraft("generating", `${streamedVisibleContent}${delta}`);
               },
               abortSignal: modelTurnAbortController.signal
             }),
@@ -2122,6 +2143,7 @@ class ThreadSessionRuntime {
             () => modelTurnAbortController.abort()
           );
         } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
           if (
             !abortController.signal.aborted &&
             functionCallProtocolRecoveryAttempts === 0 &&
@@ -2146,6 +2168,7 @@ class ThreadSessionRuntime {
               },
               createdAt: new Date().toISOString()
             });
+            await retryDraft();
             continue;
           }
           if (
@@ -2171,72 +2194,35 @@ class ThreadSessionRuntime {
               },
               createdAt: new Date().toISOString()
             });
+            await retryDraft();
             continue;
           }
           if (!abortController.signal.aborted && isModelRateLimitError(error)) {
             modelRateLimitAttempts += 1;
             const errorMessage = error instanceof Error ? error.message : String(error);
             const delayMs = resolveModelRateLimitDelayMs(error, modelRateLimitAttempts);
-            const retrying = modelRateLimitAttempts <= MAX_MODEL_RATE_LIMIT_RETRIES;
             await this.services.log("provider.rate_limit", this.threadId, {
               turnRunId: turn.id,
               attempt: modelRateLimitAttempts,
-              maxRetries: MAX_MODEL_RATE_LIMIT_RETRIES,
+              retryWindow: MAX_MODEL_RATE_LIMIT_RETRIES,
               delayMs,
-              retrying,
+              retrying: true,
               error: errorMessage
             });
-
-            if (retrying) {
-              await this.services.emit({
-                type: "agent.retrying",
-                threadId: this.threadId,
-                payload: {
-                  attempt: modelRateLimitAttempts,
-                  maxAttempts: MAX_MODEL_RATE_LIMIT_RETRIES,
-                  reason: "model_rate_limit",
-                  delayMs
-                },
-                createdAt: new Date().toISOString()
-              });
-              await sleepWithAbort(delayMs, abortController.signal);
-              continue;
-            }
-
-            const answers = await this.services.requestUserInput(this.threadId, turn.id, {
-              title: "模型请求过于频繁",
-              kind: "generic",
-              allowSkip: false,
-              questions: [buildModelRateLimitRecoveryQuestion(errorMessage)],
-              timeoutMs: MODEL_RATE_LIMIT_RECOVERY_TIMEOUT_MS,
-              defaultAnswers: { [MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID]: "continue" }
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: modelRateLimitAttempts,
+                maxAttempts: 0,
+                reason: "model_rate_limit",
+                delayMs
+              },
+              createdAt: new Date().toISOString()
             });
-            if (answers[MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID] === "continue") {
-              modelRateLimitAttempts = 0;
-              await this.services.log("provider.rate_limit_retry_continued", this.threadId, {
-                turnRunId: turn.id,
-                nextBatchLimit: MAX_MODEL_RATE_LIMIT_RETRIES
-              });
-              await this.services.emit({
-                type: "agent.retrying",
-                threadId: this.threadId,
-                payload: {
-                  attempt: 0,
-                  maxAttempts: MAX_MODEL_RATE_LIMIT_RETRIES,
-                  reason: "model_rate_limit_continued"
-                },
-                createdAt: new Date().toISOString()
-              });
-              await sleepWithAbort(
-                resolveModelRateLimitDelayMs(error, MAX_MODEL_RATE_LIMIT_RETRIES),
-                abortController.signal
-              );
-              continue;
-            }
-
-            throw new Error(
-              `Model rate limit persisted after ${MAX_MODEL_RATE_LIMIT_RETRIES} retries: ${errorMessage}`
-            );
+            await retryDraft();
+            await sleepWithAbort(delayMs, abortController.signal);
+            continue;
           }
           if (!abortController.signal.aborted && isNetworkError(error)) {
             // Network faults (ECONNRESET, socket hang up, fetch failed, stream
@@ -2244,27 +2230,23 @@ class ThreadSessionRuntime {
             // a model decision. Unlike ModelDecisionTimeoutError these never
             // carry a partial result, so discard whatever was streamed so far
             // and retry with exponential back-off.
-            await discardStreamedAssistant();
+            await retryDraft();
             networkErrorAttempts += 1;
-            const retrying = networkErrorAttempts <= MAX_NETWORK_ERROR_RETRIES;
             const delayMs = resolveNetworkErrorDelayMs(networkErrorAttempts);
             await this.services.log("provider.network_error", this.threadId, {
               turnRunId: turn.id,
               attempt: networkErrorAttempts,
-              maxRetries: MAX_NETWORK_ERROR_RETRIES,
+              retryWindow: MAX_NETWORK_ERROR_RETRIES,
               delayMs,
-              retrying,
+              retrying: true,
               error: errorMessage
             });
-            if (!retrying) {
-              throw error;
-            }
             await this.services.emit({
               type: "agent.retrying",
               threadId: this.threadId,
               payload: {
                 attempt: networkErrorAttempts,
-                maxAttempts: MAX_NETWORK_ERROR_RETRIES,
+                maxAttempts: 0,
                 reason: "network_error",
                 delayMs
               },
@@ -2277,23 +2259,25 @@ class ThreadSessionRuntime {
             throw error;
           }
 
-          // Timeouts use their own retry budget. Do not fold them into agent
-          // protocol failures, or a 2-strike protocol limit will abort before
-          // the configured modelTimeoutRetries can finish.
+          // A timeout is a transient service failure. Keep the task running
+          // until the user explicitly stops it; each configured retry window
+          // compacts the transcript and increases the next decision timeout.
           modelTimeoutAttempts += 1;
-          const maxTimeoutRetries = this.services.config.timeouts.modelTimeoutRetries;
-          const retrying = modelTimeoutAttempts <= maxTimeoutRetries;
+          const timeoutRecoveryWindow = Math.max(1, this.services.config.timeouts.modelTimeoutRetries);
+          const recoveryCycle = Math.ceil(modelTimeoutAttempts / timeoutRecoveryWindow);
+          const escalated = modelTimeoutAttempts % timeoutRecoveryWindow === 0;
           await this.services.log("provider.turn_timeout", this.threadId, {
             turnRunId: turn.id,
             timeoutMs: decisionTimeoutMs,
             attempt: modelTimeoutAttempts,
-            maxRetries: maxTimeoutRetries,
-            retrying,
+            retryWindow: timeoutRecoveryWindow,
+            recoveryCycle,
+            retrying: true,
             reason: "The model did not return an Agent decision before the response timeout."
           });
 
-          if (!retrying) {
-            throw error;
+          if (escalated) {
+            await compactContext("model_timeout_recovery", true);
           }
 
           await this.services.emit({
@@ -2301,8 +2285,9 @@ class ThreadSessionRuntime {
             threadId: this.threadId,
             payload: {
               attempt: modelTimeoutAttempts,
-              maxAttempts: maxTimeoutRetries,
-              reason: "model_timeout"
+              maxAttempts: 0,
+              reason: "model_timeout",
+              delayMs: Math.min(5_000, 1_000 * Math.min(modelTimeoutAttempts, 5))
             },
             createdAt: new Date().toISOString()
           });
@@ -2310,8 +2295,11 @@ class ThreadSessionRuntime {
             role: "user",
             content:
               "The previous model request timed out. Continue from the existing verified context now. " +
-              "Return the required structured decision without repeating completed work."
+              "Return the required structured decision without repeating completed work." +
+              (escalated ? " The context was compacted and the next request has a longer timeout." : "")
           });
+          await retryDraft();
+          await sleepWithAbort(Math.min(5_000, 1_000 * Math.min(modelTimeoutAttempts, 5)), abortController.signal);
           continue;
         }
         modelTimeoutAttempts = 0;
@@ -2321,6 +2309,9 @@ class ThreadSessionRuntime {
         if (abortController.signal.aborted) {
           throw new Error("Turn interrupted.");
         }
+
+        const returnedVisibleContent = decision.assistantMessage?.trim() ?? streamedVisibleContent;
+        await updateDraft("validating", returnedVisibleContent);
 
         const stepUsage = decision.usage ?? (typeof decision.outputTokens === "number"
           ? finalizeTokenUsage({ outputTokens: decision.outputTokens, outputContentTokens: decision.outputTokens })
@@ -2345,7 +2336,7 @@ class ThreadSessionRuntime {
 
         if (decision.requestTextToolProtocol && !useTextToolProtocol) {
           useTextToolProtocol = true;
-          await discardStreamedAssistant();
+          await retryDraft();
           await this.services.log("provider.native_tool_text_fallback", this.threadId, {
             turnRunId: turn.id,
             modelId: model.id,
@@ -2451,6 +2442,7 @@ class ThreadSessionRuntime {
           decision.toolCalls = [];
           decision.endTurn = false;
           decision.goalCompleted = false;
+          await retryDraft();
           continue;
         }
 
@@ -2483,6 +2475,7 @@ class ThreadSessionRuntime {
               containsProjectWrite,
               finalizationToolBatches: gpaFinalizationToolBatches
             });
+            await retryDraft();
             continue;
           }
         }
@@ -2511,6 +2504,7 @@ class ThreadSessionRuntime {
               .filter((item) => item.kinds.length > 0)
               .map((item) => item.toolCallId)
           });
+          await retryDraft();
           continue;
         }
 
@@ -2600,7 +2594,7 @@ class ThreadSessionRuntime {
         }
 
         if (!decision.isStructured) {
-          await discardStreamedAssistant();
+          await retryDraft();
           if (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") {
             gpaAnalysisValidationAttempts += 1;
             await this.services.log("gpa.analysis_output_invalid", this.threadId, {
@@ -2642,6 +2636,7 @@ class ThreadSessionRuntime {
             "The decision did not execute a tool and did not complete the task."
           );
           if (!bootstrapWorkspace) {
+            await retryDraft();
             continue;
           }
           decision = {
@@ -2663,6 +2658,7 @@ class ThreadSessionRuntime {
             "The ACT stage was ended before any tool was executed."
           );
           if (!bootstrapWorkspace) {
+            await retryDraft();
             continue;
           }
           decision = {
@@ -2772,19 +2768,13 @@ class ThreadSessionRuntime {
               count: browserTestToolCallCount
             });
             if (decision.toolCalls.length === 0) {
+              await retryDraft();
               continue;
             }
           }
         }
 
         if (decision.toolCalls.length > 0) {
-          if (this.#gpa.stage === "off" && standardCompletionAuditPending) {
-            standardCompletionAuditPending = false;
-            await this.services.log("turn.standard_completion_audit_continued", this.threadId, {
-              turnRunId: turn.id,
-              toolNames: decision.toolCalls.map((toolCall) => toolCall.name)
-            });
-          }
           prematureCompletionAttempts = 0;
           if (decision.toolCalls[0]?.name !== "fs.read_directory" || executionRecoveryAttempts < 2) {
             executionRecoveryAttempts = 0;
@@ -2815,6 +2805,7 @@ class ThreadSessionRuntime {
             decision.assistantMessage = undefined;
             decision.endTurn = false;
             decision.goalCompleted = false;
+            await retryDraft();
             continue;
           }
           if (block.action === "force_accept") {
@@ -2831,7 +2822,6 @@ class ThreadSessionRuntime {
           decision.toolCalls.length === 0 &&
           decision.endTurn &&
           assistantMessage &&
-          standardCompletionAuditPending &&
           isProgressOnlyAssistantMessage(assistantMessage)
         ) {
           progressOnlyCompletionAttempts += 1;
@@ -2850,7 +2840,7 @@ class ThreadSessionRuntime {
             role: "user",
             content: buildProgressOnlyCompletionRecoveryInstruction(progressOnlyCompletionAttempts)
           });
-          await discardStreamedAssistant();
+          await retryDraft();
           decision.assistantMessage = undefined;
           decision.endTurn = false;
           decision.goalCompleted = false;
@@ -2862,36 +2852,6 @@ class ThreadSessionRuntime {
           decision.toolCalls.length === 0 &&
           decision.endTurn
         ) {
-          const auditAction = resolveStandardCompletionAuditAction({
-            auditPending: standardCompletionAuditPending,
-            toolCallCount: decision.toolCalls.length,
-            endTurn: decision.endTurn
-          });
-          if (auditAction === "request_audit") {
-            standardCompletionAuditPending = true;
-            await this.services.log("turn.standard_completion_audit_requested", this.threadId, {
-              turnRunId: turn.id,
-              originalRequestPreview: initialInput.slice(0, 500),
-              candidateSummaryPreview: (assistantMessage ?? "").slice(0, 500),
-              deliveredPaths: [...managedWriteCompletion.deliveredPaths],
-              successfulEvidenceCount: successfulToolEvidence.length
-            });
-            transcript.push({
-              role: "user",
-              content: buildStandardCompletionAuditInstruction({
-                originalRequest: initialInput,
-                candidateSummary: assistantMessage ?? "",
-                deliveredPaths: [...managedWriteCompletion.deliveredPaths],
-                successfulEvidence: successfulToolEvidence
-              })
-            });
-            await discardStreamedAssistant();
-            decision.assistantMessage = undefined;
-            decision.endTurn = false;
-            decision.goalCompleted = false;
-            continue;
-          }
-
           const standardCompletion = validateStandardCompletion({
             decision,
             originalRequest: initialInput,
@@ -2900,7 +2860,6 @@ class ThreadSessionRuntime {
             successfulEvidence: successfulToolEvidence
           });
           if (!standardCompletion.valid) {
-            standardCompletionAuditPending = false;
             standardCompletionAttempts += 1;
             await this.services.log("turn.standard_completion_rejected", this.threadId, {
               turnRunId: turn.id,
@@ -2910,27 +2869,138 @@ class ThreadSessionRuntime {
               missingVerification: standardCompletion.missingVerification,
               missingRequestedDeliverable: standardCompletion.missingRequestedDeliverable
             });
-            if (standardCompletionAttempts >= MAX_AGENT_PROTOCOL_FAILURES) {
+            if (standardCompletionAttempts >= MAX_STANDARD_COMPLETION_RECOVERIES) {
               throw new Error(
-                `Standard completion validation failed repeatedly: ${standardCompletion.reasons.join(" ")}`
+                `Standard completion validation exhausted: ${standardCompletion.reasons.join(" ")}`
               );
             }
+            await scheduleStandardCompletionRecovery("completion_validation");
             transcript.push({
               role: "user",
               content: buildStandardCompletionRecoveryInstruction(standardCompletion)
             });
-            await discardStreamedAssistant();
+            await retryDraft();
             decision.assistantMessage = undefined;
             decision.endTurn = false;
             decision.goalCompleted = false;
             continue;
           }
-          standardCompletionAuditPending = false;
-          await this.services.log("turn.standard_completion_audit_accepted", this.threadId, {
+
+          await this.services.log("turn.standard_completion_audit_requested", this.threadId, {
             turnRunId: turn.id,
+            originalRequestPreview: initialInput.slice(0, 500),
+            candidateSummaryPreview: (assistantMessage ?? "").slice(0, 500),
             deliveredPaths: [...managedWriteCompletion.deliveredPaths],
             successfulEvidenceCount: successfulToolEvidence.length
           });
+          await updateDraft("auditing", assistantMessage ?? streamedVisibleContent);
+
+          let auditDecision: ProviderTurnDecision | null = null;
+          try {
+            const auditAbortController = createChildAbortController(abortController.signal);
+            auditDecision = await waitForAbortOrTimeout(
+              adapter.runTurn({
+                systemPrompt: buildStandardCompletionAuditSystemPrompt(model),
+                transcript: [{
+                  role: "user",
+                  content: buildStandardCompletionAuditInstruction({
+                    originalRequest: initialInput,
+                    candidateSummary: assistantMessage ?? "",
+                    deliveredPaths: [...managedWriteCompletion.deliveredPaths],
+                    successfulEvidence: successfulToolEvidence
+                  })
+                }],
+                availableTools: [],
+                model,
+                provider,
+                reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
+                stream: false,
+                abortSignal: auditAbortController.signal
+              }),
+              abortController.signal,
+              this.services.config.timeouts.recoveryModelDecisionMs,
+              () => auditAbortController.abort()
+            );
+          } catch (error) {
+            if (abortController.signal.aborted) {
+              throw error;
+            }
+            const reason = error instanceof Error ? error.message : String(error);
+            await this.services.log("turn.standard_completion_audit_unavailable", this.threadId, {
+              turnRunId: turn.id,
+              reason
+            });
+            await this.services.log("turn.standard_completion_audit_bypassed", this.threadId, {
+              turnRunId: turn.id,
+              reason: "audit_unavailable",
+              detail: reason
+            });
+            const disposition = resolveStandardCompletionAuditDisposition({
+              outcome: "unavailable",
+              attempt: standardCompletionAttempts + 1
+            });
+            if (disposition !== "accept_candidate") {
+              await retryDraft();
+            }
+          }
+
+          if (auditDecision) {
+            const auditUsage = auditDecision.usage ?? (typeof auditDecision.outputTokens === "number"
+              ? finalizeTokenUsage({ outputTokens: auditDecision.outputTokens, outputContentTokens: auditDecision.outputTokens })
+              : null);
+            if (auditUsage) {
+              turnTokenUsage = addTokenUsage(turnTokenUsage, auditUsage);
+              await this.services.persistence.finishTurn(turn.id, {
+                promptTokens: turnTokenUsage.inputTokens,
+                completionTokens: turnTokenUsage.outputTokens,
+                usageJson: JSON.stringify(turnTokenUsage)
+              });
+              await this.services.emit({
+                type: "turn.usage",
+                threadId: this.threadId,
+                payload: { turnRunId: turn.id, usage: turnTokenUsage },
+                createdAt: new Date().toISOString()
+              });
+            }
+
+            const auditResult = resolveStandardCompletionAuditResult(auditDecision);
+            if (!auditResult.accepted) {
+              standardCompletionAttempts += 1;
+              await this.services.log("turn.standard_completion_audit_rejected", this.threadId, {
+                turnRunId: turn.id,
+                attempt: standardCompletionAttempts,
+                gaps: auditResult.gaps
+              });
+              const disposition = resolveStandardCompletionAuditDisposition({
+                outcome: "rejected",
+                attempt: standardCompletionAttempts
+              });
+              if (disposition === "retry") {
+                await scheduleStandardCompletionRecovery("completion_audit");
+                transcript.push({
+                  role: "user",
+                  content: buildStandardCompletionAuditRecoveryInstruction(auditResult.gaps)
+                });
+                await retryDraft();
+                decision.assistantMessage = undefined;
+                decision.endTurn = false;
+                decision.goalCompleted = false;
+                continue;
+              }
+              await this.services.log("turn.standard_completion_audit_bypassed", this.threadId, {
+                turnRunId: turn.id,
+                reason: "recovery_limit",
+                attempt: standardCompletionAttempts,
+                gaps: auditResult.gaps
+              });
+            } else {
+              await this.services.log("turn.standard_completion_audit_accepted", this.threadId, {
+                turnRunId: turn.id,
+                deliveredPaths: [...managedWriteCompletion.deliveredPaths],
+                successfulEvidenceCount: successfulToolEvidence.length
+              });
+            }
+          }
         }
 
         if (
@@ -2972,6 +3042,7 @@ class ThreadSessionRuntime {
               decision.assistantMessage = undefined;
               decision.endTurn = false;
               decision.goalCompleted = false;
+              await retryDraft();
               continue;
             }
           } else if (managedWriteValidation.attempted) {
@@ -3009,6 +3080,7 @@ class ThreadSessionRuntime {
               turnRunId: turn.id,
               skillId: verificationSkill.id
             });
+            await retryDraft();
             continue;
           }
           const completionValidation = validateActCompletion({
@@ -3099,6 +3171,7 @@ class ThreadSessionRuntime {
                 await this.services.log("turn.completion_evidence_retry_continued", this.threadId, {
                   turnRunId: turn.id
                 });
+                await retryDraft();
                 continue;
               }
               repeatedTaskFailure = {
@@ -3106,9 +3179,11 @@ class ThreadSessionRuntime {
                 attempts: prematureCompletionAttempts,
                 lastError: completionValidation.reasons.join(" ")
               };
+              await settleDraft({ discarded: true });
               break;
             }
             transcript.push({ role: "user", content: recoveryInstruction });
+            await retryDraft();
             continue;
           }
           await this.services.log("turn.completion_evidence_accepted", this.threadId, {
@@ -3183,13 +3258,14 @@ class ThreadSessionRuntime {
                   ? "Your previous PLAN response was not shown because it violated the PLAN task ID contract. Rewrite the complete user-visible PLAN now. Every atomic task heading must use exactly `### T1: Task title`, then T2, T3, and so on without gaps or duplicates. Start at T1. Reference those IDs inline in all other sections and do not create additional numbered task lists. Include acceptance criteria. Do not call tools."
                   : "Your previous GOAL response was not shown because it was empty. Return a complete, user-visible GOAL analysis with the objective, acceptance criteria, constraints, and any needed clarification. Do not call tools."
             });
+            await retryDraft();
             continue;
           }
         }
         const deferredExecutionPayload =
           Boolean(decision.assistantMessage) && isDeferredExecutionPayload(decision.assistantMessage ?? "");
         if (deferredExecutionPayload && assistantMessage) {
-          await discardStreamedAssistant();
+          await retryDraft();
           await this.services.emit({
             type: "assistant.execution_output",
             threadId: this.threadId,
@@ -3218,6 +3294,7 @@ class ThreadSessionRuntime {
             });
             decision.endTurn = false;
             decision.goalCompleted = false;
+            await retryDraft();
             continue;
           }
         }
@@ -3248,7 +3325,7 @@ class ThreadSessionRuntime {
         if (terminalDisposition === "wait_for_subagents") {
           // Completing a parent task is a runtime-owned state transition. A
           // model final response cannot override live delegated work.
-          await discardStreamedAssistant();
+          await retryDraft();
           rootSummaryDeferredForSubagents = true;
           await this.services.log("turn.completion_deferred_for_subagents", this.threadId, {
             turnRunId: turn.id,
@@ -3269,10 +3346,20 @@ class ThreadSessionRuntime {
           // Child work is still active, and the root is still performing
           // coordination. Reserve the only visible report for the terminal
           // decision so the main chat cannot receive a partial second report.
-          await discardStreamedAssistant();
+          await retryDraft();
           decision.assistantMessage = undefined;
         }
 
+        // Provider tool-call IDs belong to the upstream conversation protocol.
+        // Allocate separate stable record IDs once, then use them for both the
+        // visible commentary association and persisted ToolCall records.
+        const persistedToolCallIds = new Map(
+          decision.toolCalls.map((toolCall) => [toolCall, randomUUID()] as const)
+        );
+        const persistedToolCalls = decision.toolCalls.map((toolCall) => ({
+          ...toolCall,
+          id: persistedToolCallIds.get(toolCall)!
+        }));
         let recordedToolBatchAnchor = false;
         if (
           decision.assistantMessage &&
@@ -3284,40 +3371,43 @@ class ThreadSessionRuntime {
             decision.assistantMessage,
             this.services.config.responseTone
           );
-          const commentaryKey = createCommentaryMessageKey(tonedCommentary, decision.toolCalls);
-          if (!visibleCommentaryMessages.has(commentaryKey)) {
-            visibleCommentaryMessages.add(commentaryKey);
-            const commentaryMessage = await this.recordMessage(
-              "assistant",
-              tonedCommentary,
-              turn.id,
-              buildCommentaryMessageMetadata(decision.toolCalls)
-            );
-            recordedToolBatchAnchor = true;
-            transcript.push({ role: "assistant", content: commentaryMessage.content });
-            if (streamedVisibleContent) {
-              await this.services.emit({
-                type: "assistant.completed",
-                threadId: this.threadId,
-                payload: { turnRunId: turn.id, messageId: commentaryMessage.id },
-                createdAt: new Date().toISOString()
-              });
+          if (tonedCommentary) {
+            const commentaryKey = normalizeAssistantMessageForDeduplication(tonedCommentary);
+            if (!visibleCommentaryMessages.has(commentaryKey)) {
+              visibleCommentaryMessages.add(commentaryKey);
+              const commentaryMessage = await this.recordMessage(
+                "assistant",
+                tonedCommentary,
+                turn.id,
+                buildCommentaryMessageMetadata(persistedToolCalls)
+              );
+              recordedToolBatchAnchor = true;
+              transcript.push({ role: "assistant", content: commentaryMessage.content });
+              await settleDraft({ messageId: commentaryMessage.id });
+            } else {
+              await retryDraft();
             }
+          } else {
+            await retryDraft();
           }
           decision.assistantMessage = undefined;
         } else if (decision.assistantMessage && decision.toolCalls.length > 0 && !preservesGpaAnalysis) {
-          await discardStreamedAssistant();
+          await retryDraft();
           decision.assistantMessage = undefined;
         }
 
         if (decision.toolCalls.length > 0 && !recordedToolBatchAnchor) {
-          const fallbackCommentary = buildToolBatchProgressMessage(decision.toolCalls, this.services.config.responseTone);
-          await this.recordMessage(
+          const fallbackCommentary = buildToolBatchProgressMessage(
+            decision.toolCalls,
+            this.services.config.responseTone
+          );
+          const fallbackMessage = await this.recordMessage(
             "assistant",
             fallbackCommentary,
             turn.id,
-            buildCommentaryMessageMetadata(decision.toolCalls)
+            buildCommentaryMessageMetadata(persistedToolCalls)
           );
+          await settleDraft({ messageId: fallbackMessage.id });
         }
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
@@ -3348,14 +3438,7 @@ class ThreadSessionRuntime {
               });
             }
             transcript.push({ role: "assistant", content: assistantMessage.content });
-            if (streamedVisibleContent) {
-              await this.services.emit({
-                type: "assistant.completed",
-                threadId: this.threadId,
-                payload: { turnRunId: turn.id, messageId: assistantMessage.id },
-                createdAt: new Date().toISOString()
-              });
-            }
+            await settleDraft({ messageId: assistantMessage.id });
           }
         }
 
@@ -3377,6 +3460,7 @@ class ThreadSessionRuntime {
             status: terminalDisposition === "awaiting_user_confirmation" ? "idle" : "completed",
             updatedAt: new Date().toISOString()
           });
+          await settleDraft({ discarded: true });
           break;
         }
 
@@ -3675,6 +3759,7 @@ class ThreadSessionRuntime {
             continue;
           }
           const toolRecord = await this.services.persistence.recordToolCall({
+            id: persistedToolCallIds.get(rawToolCall),
             threadId: this.threadId,
             turnRunId: turn.id,
             toolName: toolCall.name,
@@ -4391,18 +4476,20 @@ class ThreadSessionRuntime {
             }
           } else {
             if (isBrowserWorkspaceUnavailableError(toolCall.name, result.content)) {
-              const recoveryChoice = await requestBrowserWorkspaceRecovery();
-              browserVerificationEvidence.testChoice = recoveryChoice === "retry" ? "run" : "skip";
-              await this.services.log("browser.workspace_unavailable", this.threadId, {
+              browserVerificationEvidence.testChoice = "skip";
+              await this.services.log("browser.workspace_unavailable_silent_fallback", this.threadId, {
                 turnRunId: turn.id,
-                toolName: toolCall.name,
-                recoveryChoice
+                toolName: toolCall.name
+              });
+              await this.services.emit({
+                type: "agent.retrying",
+                threadId: this.threadId,
+                payload: { attempt: 1, maxAttempts: 1, reason: "browser_workspace_silent_fallback" },
+                createdAt: new Date().toISOString()
               });
               transcript.push({
                 role: "user",
-                content: recoveryChoice === "retry"
-                  ? "The user opened the Browser workspace. Retry the required browser verification using the current browser state."
-                  : "The Browser workspace is unavailable and the user chose to skip browser verification. Do not call browser tools again; continue with available file, build, or test evidence."
+                content: buildSilentBrowserFallbackInstruction("browser_tool")
               });
               continue;
             }
@@ -4558,6 +4645,15 @@ class ThreadSessionRuntime {
         }
       }
     } catch (error) {
+      if (activeDraftId) {
+        await this.services.emit({
+          type: "assistant.completed",
+          threadId: this.threadId,
+          payload: { turnRunId: turn.id, draftId: activeDraftId, discarded: true },
+          createdAt: new Date().toISOString()
+        });
+        activeDraftId = null;
+      }
       if (abortController.signal.aborted) {
         const completedAt = new Date().toISOString();
         await this.services.persistence.finishTurn(turn.id, {
@@ -4570,14 +4666,6 @@ class ThreadSessionRuntime {
           updatedAt: completedAt
         });
         await this.#clearGpaAfterExecution(true);
-        if (interruptedVisibleContent) {
-          await this.services.emit({
-            type: "assistant.completed",
-            threadId: this.threadId,
-            payload: { turnRunId: turn.id, discarded: true },
-            createdAt: completedAt
-          });
-        }
         await this.services.emit({
           type: "thread.updated",
           threadId: this.threadId,
@@ -5331,7 +5419,7 @@ export function buildCommentaryMessageMetadata(toolCalls: RuntimeToolCall[]): Re
   };
 }
 
-export function buildToolBatchProgressMessage(toolCalls: RuntimeToolCall[], tone: ResponseTone = "standard"): string {
+export function buildToolBatchProgressMessage(toolCalls: RuntimeToolCall[], tone: ResponseTone = "concise"): string {
   if (toolCalls.length === 0) return applyResponseToneToProgressMessage("我继续把剩下的内容处理完，再回来说明结果。", tone);
   if (toolCalls.length > 1) {
     const kinds = new Set(toolCalls.map((toolCall) => getToolProgressKind(canonicalizeToolName(toolCall.name))));
@@ -5345,46 +5433,12 @@ export function buildToolBatchProgressMessage(toolCalls: RuntimeToolCall[], tone
   return applyResponseToneToProgressMessage(describeToolProgress(toolCalls[0]), tone);
 }
 
-export function applyResponseToneToProgressMessage(message: string, tone: ResponseTone): string {
-  if (tone === "cute_lolita") {
-    if (/^(?:好哒|没问题呀|这就来啦)[！!，,]/.test(message) || /[呀啦呢～][。！？!?]?$/.test(message)) {
-      return message;
-    }
-    const playful = message
-      .replace(/^我先/, "我这就先")
-      .replace(/^我来/, "我这就来")
-      .replace(/^我继续/, "我这就继续")
-      .replace(/。$/, "呀～");
-    return selectResponseToneVariant(message, [
-      `好哒！${playful}`,
-      `没问题呀，${playful}`,
-      `这就来啦！${playful}`
-    ]);
-  }
-  if (tone === "mature_lady") {
-    if (/^(?:交给姐姐就好|别急，姐姐|这一步听姐姐的)/.test(message)) {
-      return message;
-    }
-    const composed = message
-      .replace(/^我先/, "我会先")
-      .replace(/^我来/, "我会")
-      .replace(/^我继续/, "我会继续");
-    const action = composed.replace(/^我会/, "").replace(/^我/, "");
-    return selectResponseToneVariant(message, [
-      `交给姐姐就好。${composed}`,
-      `别急，姐姐来把这一步拿稳：${action}`,
-      `这一步听姐姐的：${action}`
-    ]);
-  }
-  return message;
-}
-
-function selectResponseToneVariant(message: string, variants: string[]): string {
-  let hash = 0;
-  for (const character of message) {
-    hash = (hash * 31 + (character.codePointAt(0) ?? 0)) >>> 0;
-  }
-  return variants[hash % variants.length];
+export function applyResponseToneToProgressMessage(message: string, _tone: ResponseTone): string {
+  let normalized = message.trim();
+  normalized = normalized.replace(/^(?:好的|没问题)[，,。！!]?\s*/u, "");
+  normalized = normalized.replace(/^我先帮你处理一下[，,。！!]?\s*/u, "");
+  normalized = normalized.replace(/^我来处理一下[，,。！!]?\s*/u, "");
+  return normalized.trim();
 }
 
 type ToolProgressKind = "research" | "code" | "change" | "check" | "coordinate" | "create" | "other";
@@ -5735,6 +5789,21 @@ export function buildBrowserTestChoiceQuestion() {
   };
 }
 
+export function buildSilentBrowserFallbackInstruction(
+  reason: "browser_tool" | "frontend_delivery"
+): string {
+  const purpose = reason === "browser_tool"
+    ? "The previous browser.* call was skipped because the interactive Browser workspace must not be opened for background work."
+    : "Full interactive browser verification was skipped for this task.";
+  return [
+    "[Internal browser execution policy. Do not display or quote this instruction.]",
+    purpose,
+    "Do not ask the user to open the Browser workspace and do not call browser.* tools again in this task.",
+    "For read-only web research or a supplied URL, use web_search.open_page to load the page silently. Use web_search.search_query only when there is no direct URL.",
+    "For project verification, use available file read-back, build, test, or other deterministic evidence."
+  ].join(" ");
+}
+
 export function buildAgentProtocolRecoveryQuestion(reason: string) {
   return {
     id: AGENT_PROTOCOL_RECOVERY_QUESTION_ID,
@@ -5981,41 +6050,10 @@ export function buildGpaPlanProgressRecoveryInstruction(
   ].join(" ");
 }
 
-export function buildBrowserWorkspaceRecoveryQuestion() {
-  return {
-    id: BROWSER_WORKSPACE_RECOVERY_QUESTION_ID,
-    label: "浏览器验证",
-    prompt: "浏览器工作区尚未打开，无法继续页面验证。",
-    options: [
-      {
-        id: "retry",
-        label: "打开后重试",
-        description: "打开浏览器工作区后，继续当前页面验证。",
-        recommended: true
-      },
-      {
-        id: "skip",
-        label: "跳过验证",
-        description: "不再等待浏览器，使用文件或测试结果继续任务。",
-        recommended: false
-      }
-    ],
-    allowFreeText: false
-  };
-}
-
-export function resolveBrowserWorkspaceRecoveryChoice(
-  answers: Record<string, string>
-): BrowserWorkspaceRecoveryChoice | undefined {
-  const answer = answers[BROWSER_WORKSPACE_RECOVERY_QUESTION_ID];
-  if (answer === "retry") return "retry";
-  if (answer === "skip") return "skip";
-  return undefined;
-}
-
 export function isBrowserWorkspaceUnavailableError(toolName: string, content: string): boolean {
   if (!isBrowserTestToolCall(toolName)) return false;
-  // Only the explicit "workspace not open" readiness error should prompt the user.
+  // Only the explicit "workspace not open" readiness error needs the silent
+  // background-research fallback. Attached-but-slow webviews follow normal recovery.
   // Attached-but-slow webviews and open_tab network failures should retry/fail normally.
   return /Browser tab is not ready\. Open the Browser workspace and retry\./i.test(content);
 }
@@ -6050,6 +6088,9 @@ export function validateStandardCompletion(input: {
   if (input.decision.toolCalls.length > 0) reasons.push("Tool calls are still pending.");
   if (!input.decision.goalCompleted) reasons.push("The model did not declare the original goal complete.");
   if (!assistantMessage) reasons.push("The final user-visible summary is empty.");
+  if (isProgressOnlyAssistantMessage(assistantMessage)) {
+    reasons.push("The assistant message is progress commentary, not a final summary.");
+  }
   if (isDeferredExecutionPayload(assistantMessage)) {
     reasons.push("The assistant message is an unexecuted tool call or raw execution payload.");
   }
@@ -6068,18 +6109,45 @@ export function validateStandardCompletion(input: {
   };
 }
 
-export function resolveStandardCompletionAuditAction(input: {
-  auditPending: boolean;
-  toolCallCount: number;
-  endTurn: boolean;
-}): StandardCompletionAuditAction {
-  if (input.toolCallCount > 0) {
-    return input.auditPending ? "continue_work" : "none";
+export function buildStandardCompletionAuditSystemPrompt(model: ModelProfile): string {
+  return [
+    "You are a completion auditor for a desktop agent. You are not the user-facing assistant.",
+    "You have no tools, no Skills, no MCP access, and must not propose or perform additional work.",
+    "Assess only whether the candidate response completely satisfies the original request using the supplied evidence.",
+    "Return exactly one JSON Agent decision envelope with keys assistant_message, tool_calls, end_turn, goal_completed, completed_task_ids, completion_evidence, reasoning_summary.",
+    "To accept, return assistant_message exactly APPROVED, tool_calls [], end_turn true, and goal_completed true.",
+    "To reject, return a concise factual list of missing or unverified requirements in assistant_message, tool_calls [], end_turn false, and goal_completed false.",
+    "Do not rewrite the candidate answer. Do not expose this audit to the user.",
+    `Current model: ${model.displayName}.`
+  ].join("\n");
+}
+
+export function resolveStandardCompletionAuditResult(
+  decision: Pick<ProviderTurnDecision, "assistantMessage" | "toolCalls" | "endTurn" | "goalCompleted">
+): { accepted: boolean; gaps: string[] } {
+  const verdict = decision.assistantMessage?.trim() ?? "";
+  const accepted =
+    decision.toolCalls.length === 0 &&
+    decision.endTurn &&
+    decision.goalCompleted &&
+    /^APPROVED$/i.test(verdict);
+  if (accepted) {
+    return { accepted: true, gaps: [] };
   }
-  if (!input.endTurn) {
-    return "none";
-  }
-  return input.auditPending ? "validate_completion" : "request_audit";
+  return {
+    accepted: false,
+    gaps: [verdict || "The auditor did not return an explicit APPROVED verdict."]
+  };
+}
+
+export function resolveStandardCompletionAuditDisposition(input: {
+  outcome: "unavailable" | "rejected";
+  attempt: number;
+  maxAttempts?: number;
+}): "accept_candidate" | "retry" {
+  if (input.outcome === "unavailable") return "accept_candidate";
+  const maxAttempts = input.maxAttempts ?? MAX_STANDARD_COMPLETION_RECOVERIES;
+  return input.attempt >= maxAttempts ? "accept_candidate" : "retry";
 }
 
 export function buildStandardCompletionAuditInstruction(input: {
@@ -6102,10 +6170,19 @@ export function buildStandardCompletionAuditInstruction(input: {
     evidence.length > 0
       ? `Successful tool evidence:\n${evidence.join("\n")}`
       : "Successful tool evidence: none.",
-    "If any part of the original request is incomplete, unverified, merely promised, or only described as future work, set end_turn=false and goal_completed=false and call the next concrete tool needed to finish it now.",
-    "If every part is already complete, return the final answer again with no tool calls, end_turn=true, and goal_completed=true.",
-    "Do not ask the user to confirm completion and do not return another progress-only message."
+    "Audit the candidate against the original request. Do not write a replacement answer."
   ].join("\n\n");
+}
+
+export function buildStandardCompletionAuditRecoveryInstruction(gaps: string[]): string {
+  return [
+    "[Internal completion audit result. Do not display or quote this instruction to the user.]",
+    "The previous candidate response was not finalized because the independent completion audit found these gaps:",
+    ...gaps.map((gap) => `- ${gap}`),
+    "Continue the original task now. Do not state an intention to inspect, open, search, call, or verify anything.",
+    "For every gap requiring external facts or current state, make the concrete tool call that obtains the evidence before writing another final answer.",
+    "Do not substitute a plan, assumption, or progress update for the missing tool result. Produce a replacement final answer only after the gaps are closed."
+  ].join("\n");
 }
 
 export function requiresStructuredTestCaseDeliverable(request: string): boolean {
@@ -7055,31 +7132,28 @@ export function buildResponseTonePrompt(tone: ResponseTone): string {
   const shared = [
     "Apply this tone only to user-visible assistant messages, including short progress updates and the final answer.",
     "Keep factual accuracy, technical precision, safety boundaries, tool decisions, and task completion standards unchanged.",
-    "Use the user's current language. A direct tone request from the user overrides this preset."
+    "Use the user's current language. A direct tone request from the user overrides this preset.",
+    "Treat progress messages as low-ceremony preambles, not as a narration of every tool call.",
+    "Before the first tool call, acknowledge the specific request in one sentence and give a 1-2 sentence plan.",
+    "After work begins, update about every 1-3 execution steps, not before every tool batch. Each update must add an outcome or impact learned so far and the next 1-3 actions; include an open question only when one exists.",
+    "If nothing material changed, omit assistant_message. Never repeat the same acknowledgement, plan, sentence opening, or status wording within a turn.",
+    "Keep most progress updates to 1-2 sentences. Use a longer update only at a real milestone, and avoid headings, status labels, or log-style prose."
   ];
-  if (tone === "cute_lolita") {
+  if (tone === "friendly") {
     return [
-      "## Response Tone: Cute Lolita",
-      "Write with a bright, sweet, playful, and friendly voice. The difference from Standard must be obvious in every prose reply, even in a one-sentence progress update; do not merely swap one or two neutral words.",
-      "In Chinese, give each short progress update at least one natural cute marker, such as 好哒、这就来、呀、啦、呢 or ～. Vary the wording and sentence rhythm so it feels lively rather than repetitive.",
-      "Final answers should remain concise and useful, but should also carry clearly warm, lively phrasing rather than reverting to a neutral professional voice.",
-      "Do not pretend to be a child, claim an age, become flirtatious, overuse symbols, or sacrifice clarity for cuteness.",
-      ...shared
-    ].join("\n");
-  }
-  if (tone === "mature_lady") {
-    return [
-      "## Response Tone: Mature Lady",
-      "Write with an unmistakable Chinese 御姐 voice: mature, composed, confident, warm, polished, and slightly commanding. This is a characterful big-sister tone, not merely a neutral professional or generally mature tone.",
-      "The difference from Standard must be obvious in every prose reply, even in a one-sentence progress update. Use natural 姐姐-style self-reference and assured phrasing such as 交给姐姐就好、别急，姐姐来处理、这一步听姐姐的 when it fits, and vary the wording rather than repeating one catchphrase.",
-      "Final answers should retain that 御姐 presence: lead decisively, make judgment calls plainly, and speak with calm control and a touch of commanding warmth instead of reverting to a neutral professional voice.",
-      "Do not become sexual, demeaning, melodramatic, or excessively formal. Never sacrifice clarity or technical precision for the persona.",
+      "## Response Tone: Friendly",
+      "Write in a natural, warm, clear, and approachable voice. Be helpful and considerate without using a persona, forced catchphrases, or excessive pleasantries.",
+      "Keep progress updates short and conversational. Mention only the new finding or immediate next action; do not restate an earlier plan.",
+      "Never use generic openers such as 好的, 我先帮你处理一下, or 我来处理一下. If a tool-only decision has no material update, omit assistant_message instead of inventing filler.",
+      "Final answers should be clear, practical, and considerate.",
       ...shared
     ].join("\n");
   }
   return [
-    "## Response Tone: Standard",
-    "Write in a natural, clear, professional, and approachable voice. Prefer direct wording without sounding stiff or mechanical.",
+    "## Response Tone: Concise",
+    "Write directly and economically. Prefer short, clear sentences and lead with the outcome or next action.",
+    "Avoid unnecessary greetings, restating the request, filler, or decorative wording while preserving essential context and accuracy.",
+    "For progress updates, mention only new information or the immediate next action. If there is no material update, omit assistant_message.",
     ...shared
   ].join("\n");
 }
