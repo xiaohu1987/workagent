@@ -118,7 +118,7 @@ describe("thread UI state helpers", () => {
     });
   });
 
-  it("switches the composer primary action to interrupt while a thread is executing", () => {
+  it("only shows interrupt for an empty composer while a thread is executing", () => {
     expect(getComposerPrimaryActionState("running", "")).toEqual({
       kind: "interrupt",
       title: "停止执行",
@@ -127,9 +127,9 @@ describe("thread UI state helpers", () => {
     });
 
     expect(getComposerPrimaryActionState("waiting", "继续")).toEqual({
-      kind: "interrupt",
-      title: "停止执行",
-      ariaLabel: "停止执行",
+      kind: "send",
+      title: "发送",
+      ariaLabel: "发送",
       disabled: false
     });
   });
@@ -333,6 +333,11 @@ describe("tool timeline grouping", () => {
         metadataJson: JSON.stringify({ displayKind: "commentary", toolCallIds: [] })
       },
       makeMessage("assistant-1", "assistant", "2026-07-15T00:00:01.000Z"),
+      {
+        ...makeMessage("guidance-1", "user", "2026-07-15T00:00:01.500Z"),
+        turnRunId: "turn-user-1",
+        metadataJson: JSON.stringify({ displayKind: "guidance" })
+      },
       makeMessage("user-2", "user", "2026-07-15T00:00:02.000Z"),
       makeMessage("assistant-2", "assistant", "2026-07-15T00:00:03.000Z"),
       makeMessage("user-3", "user", "2026-07-15T00:00:04.000Z")
@@ -343,7 +348,9 @@ describe("tool timeline grouping", () => {
         id: "message-user-1",
         userEntryId: "message-user-1",
         summaryEntryId: "message-assistant-1",
-        entryIds: ["message-user-1", "message-progress-1", "message-assistant-1"]
+        entryIds: ["message-user-1", "message-progress-1", "message-assistant-1", "message-guidance-1"],
+        startedAt: "2026-07-15T00:00:00.000Z",
+        completedAt: "2026-07-15T00:00:01.500Z"
       }),
       expect.objectContaining({
         id: "message-user-2",

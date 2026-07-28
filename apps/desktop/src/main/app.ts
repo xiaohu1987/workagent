@@ -1052,10 +1052,11 @@ export class DesktopBackend {
     if (!guidance) {
       throw new Error("Guidance cannot be empty.");
     }
-    if (this.#runtime.guideActiveTurn(threadId, guidance)) {
+    const activeTurnRunId = this.#runtime.guideActiveTurn(threadId, guidance);
+    if (activeTurnRunId) {
       const message = this.#db.createMessage({
         threadId,
-        turnRunId: null,
+        turnRunId: activeTurnRunId,
         role: "user",
         content: guidance,
         metadataJson: JSON.stringify({ displayKind: "guidance" })

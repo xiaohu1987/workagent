@@ -14468,7 +14468,8 @@ export function buildConversationTurnSections(entries: TimelineEntry[]): Convers
   };
 
   for (const entry of entries) {
-    if (entry.kind === "message" && entry.message.role === "user") {
+    const isGuidance = entry.kind === "message" && getMessageDisplayKind(entry.message) === "guidance";
+    if (entry.kind === "message" && entry.message.role === "user" && (!isGuidance || !current)) {
       finishCurrent();
       current = {
         id: entry.id,

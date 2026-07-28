@@ -779,13 +779,13 @@ class ThreadSessionRuntime {
     this.#queue.push(input);
   }
 
-  public guideActiveTurn(content: string): boolean {
+  public guideActiveTurn(content: string): string | null {
     const guidance = content.trim();
     if (!guidance || !this.#activeTurnRunId || !this.#acceptingGuidance || this.#stopping) {
-      return false;
+      return null;
     }
     this.#pendingGuidance.push(guidance);
-    return true;
+    return this.#activeTurnRunId;
   }
 
   public interrupt(): boolean {
@@ -6857,8 +6857,8 @@ export class AgentRuntimeService {
     this.ensureThread(threadId).submit({ type: "queue_wakeup" });
   }
 
-  public guideActiveTurn(threadId: string, content: string): boolean {
-    return this.#sessions.get(threadId)?.guideActiveTurn(content) ?? false;
+  public guideActiveTurn(threadId: string, content: string): string | null {
+    return this.#sessions.get(threadId)?.guideActiveTurn(content) ?? null;
   }
 
   public interrupt(threadId: string): boolean {
