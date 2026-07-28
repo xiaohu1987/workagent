@@ -3386,6 +3386,14 @@ class ThreadSessionRuntime {
               await settleDraft({ messageId: commentaryMessage.id });
             } else {
               await retryDraft();
+              await this.recordMessage(
+                "assistant",
+                "",
+                turn.id,
+                buildToolBatchMessageMetadata(persistedToolCalls)
+              );
+              recordedToolBatchAnchor = true;
+              await settleDraft({ discarded: true });
             }
           } else {
             await retryDraft();
@@ -3401,13 +3409,25 @@ class ThreadSessionRuntime {
             decision.toolCalls,
             this.services.config.responseTone
           );
-          const fallbackMessage = await this.recordMessage(
-            "assistant",
-            fallbackCommentary,
-            turn.id,
-            buildCommentaryMessageMetadata(persistedToolCalls)
-          );
-          await settleDraft({ messageId: fallbackMessage.id });
+          const fallbackKey = normalizeAssistantMessageForDeduplication(fallbackCommentary);
+          if (visibleCommentaryMessages.has(fallbackKey)) {
+            await this.recordMessage(
+              "assistant",
+              "",
+              turn.id,
+              buildToolBatchMessageMetadata(persistedToolCalls)
+            );
+            await settleDraft({ discarded: true });
+          } else {
+            visibleCommentaryMessages.add(fallbackKey);
+            const fallbackMessage = await this.recordMessage(
+              "assistant",
+              fallbackCommentary,
+              turn.id,
+              buildCommentaryMessageMetadata(persistedToolCalls)
+            );
+            await settleDraft({ messageId: fallbackMessage.id });
+          }
         }
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {

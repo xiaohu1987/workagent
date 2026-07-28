@@ -1149,6 +1149,7 @@
 
 .streaming-assistant-plain-body {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   color: transparent;
   background-image: linear-gradient(
     100deg,
@@ -1164,6 +1165,33 @@
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: runtime-activity-text-sweep 2.6s ease-in-out infinite;
+}
+
+.assistant-draft-scroll {
+  max-height: 6.6em;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(143, 153, 167, 0.38) transparent;
+}
+
+.assistant-draft-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.assistant-draft-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.assistant-draft-scroll::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: rgba(143, 153, 167, 0.34);
+}
+
+.assistant-draft-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(173, 183, 197, 0.5);
 }
 
 .assistant-draft-waiting {

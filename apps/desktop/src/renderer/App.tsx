@@ -16573,12 +16573,21 @@ const AssistantDraftMessage = memo(function AssistantDraftMessage({
   startedAt,
   completed
 }: AssistantDraftMessageProps) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followsLatestRef = useRef(true);
   const elapsedMs = useElapsedClock(startedAt, !completed);
   const stateLabel = completed
     ? "正在发布回复"
     : phase === "generating" && !content
     ? `模型正在生成 · 已等待 ${formatElapsedClock(elapsedMs)}`
     : getAssistantDraftPhaseLabel(phase);
+
+  useLayoutEffect(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement || !followsLatestRef.current) return;
+    scrollElement.scrollTop = scrollElement.scrollHeight;
+  }, [content]);
+
   return (
     <article className={`message-card assistant streaming-assistant is-provisional phase-${phase}`} aria-live="polite" aria-busy={!completed}>
       <div className="message-header">
@@ -16587,9 +16596,20 @@ const AssistantDraftMessage = memo(function AssistantDraftMessage({
       </div>
       <div className="message-flat-body streaming-assistant-body">
         {content
-          ? <div className="streaming-assistant-plain-body" data-draft-id={draftId}>{content}</div>
+          ? (
+            <div
+              className="assistant-draft-scroll"
+              ref={scrollRef}
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                followsLatestRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 4;
+              }}
+            >
+              <span className="streaming-assistant-plain-body" data-draft-id={draftId}>{content}</span>
+              {phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
+            </div>
+          )
           : <span className="assistant-draft-waiting" aria-hidden><i /><i /><i /></span>}
-        {content && phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
       </div>
     </article>
   );
@@ -17841,9 +17861,10 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
     }
 
     const fingerprint = message.content.replace(/\s+/g, " ").trim();
-    const toolCallIds = getCommentaryToolCallIds(message);
-    const associationKey = toolCallIds.length > 0 ? `:${toolCallIds.join(",")}` : "";
-    const messageKey = `${message.turnRunId}:${fingerprint}${associationKey}`;
+    const displayKind = getMessageDisplayKind(message);
+    const messageKey = displayKind === "commentary"
+      ? `${message.turnRunId}:commentary:${fingerprint}`
+      : `${message.turnRunId}:message:${fingerprint}`;
     if (!fingerprint || visibleAssistantMessages.has(messageKey)) {
       return !fingerprint;
     }

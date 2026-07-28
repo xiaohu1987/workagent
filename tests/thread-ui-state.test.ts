@@ -431,7 +431,7 @@ describe("tool timeline grouping", () => {
       .toEqual(["legacy-tool-1", "legacy-tool-2", "legacy-tool-3"]);
   });
 
-  it("keeps identical progress text when each message belongs to a different tool batch", () => {
+  it("merges identical progress text and its later tool batches into one timeline segment", () => {
     const progress = (id: string, toolCallId: string, createdAt: string): MessageRecord => ({
       id,
       threadId: "thread-1",
@@ -447,7 +447,18 @@ describe("tool timeline grouping", () => {
       progress("progress-2", "tool-2", "2026-07-15T00:00:03.000Z")
     ], "running");
 
-    expect(visible.map((message) => message.id)).toEqual(["progress-1", "progress-2"]);
+    expect(visible.map((message) => message.id)).toEqual(["progress-1"]);
+
+    const entries = buildTimelineEntries(visible, [
+      makeToolCall({ id: "tool-1", toolName: "browser.navigate", startedAt: "2026-07-15T00:00:02.000Z" }),
+      makeToolCall({ id: "tool-2", toolName: "browser.navigate", startedAt: "2026-07-15T00:00:04.000Z" })
+    ], []);
+
+    expect(entries.map((entry) => entry.kind)).toEqual(["message", "tool-group"]);
+    expect(entries[1]).toMatchObject({
+      kind: "tool-group",
+      toolCalls: [{ id: "tool-1" }, { id: "tool-2" }]
+    });
   });
 
   it("keeps a context compaction notice in chronological transcript order", () => {
