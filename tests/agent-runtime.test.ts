@@ -67,6 +67,7 @@ import {
   NETWORK_ERROR_MAX_DELAY_MS,
   isToolArgsTruncated,
   buildFunctionCallCompatibilityTranscript,
+  buildActiveTurnGuidanceInstruction,
   buildBlockedToolCallTranscriptResult,
   clearReusableObservationFingerprints,
   isReusableSuccessfulToolCall,
@@ -139,6 +140,17 @@ describe("user message context persistence", () => {
     const metadata = buildUserMessageMetadata(initialInput, "Inspect this folder", []);
 
     expect(metadata).toEqual({ displayContent: "Inspect this folder" });
+  });
+});
+
+describe("active turn guidance", () => {
+  it("preserves all live guidance as the latest remaining-work instruction", () => {
+    expect(buildActiveTurnGuidanceInstruction(["Use the existing API.", "Run tests before finishing."])).toBe([
+      "[Live user guidance]",
+      "Apply this as the latest instruction to the remaining work. Do not repeat completed actions or undo changes unless explicitly requested.",
+      "1. Use the existing API.",
+      "2. Run tests before finishing."
+    ].join("\n"));
   });
 });
 

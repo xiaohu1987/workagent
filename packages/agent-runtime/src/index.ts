@@ -333,6 +333,14 @@ type Submission =
   | { type: "user_input_response"; promptId: string; answers: Record<string, string> }
   | { type: "shutdown" };
 
+export function buildActiveTurnGuidanceInstruction(guidance: string[]): string {
+  return [
+    "[Live user guidance]",
+    "Apply this as the latest instruction to the remaining work. Do not repeat completed actions or undo changes unless explicitly requested.",
+    ...guidance.map((item, index) => `${index + 1}. ${item}`)
+  ].join("\n");
+}
+
 type KnowledgeSourceReference = {
   knowledgeBaseId: string;
   knowledgeBaseName: string;
@@ -741,8 +749,10 @@ function waitForAbortOrTimeout<T>(
 
 class ThreadSessionRuntime {
   readonly #queue = new AsyncQueue<Submission>();
+  readonly #pendingGuidance: string[] = [];
   #abortController: AbortController | null = null;
   #activeTurnRunId: string | null = null;
+  #acceptingGuidance = false;
   #running = false;
   #stopping = false;
   #busy = false;
@@ -767,6 +777,15 @@ class ThreadSessionRuntime {
 
   public submit(input: Submission): void {
     this.#queue.push(input);
+  }
+
+  public guideActiveTurn(content: string): boolean {
+    const guidance = content.trim();
+    if (!guidance || !this.#activeTurnRunId || !this.#acceptingGuidance || this.#stopping) {
+      return false;
+    }
+    this.#pendingGuidance.push(guidance);
+    return true;
   }
 
   public interrupt(): boolean {
@@ -1313,6 +1332,7 @@ class ThreadSessionRuntime {
     };
     this.#abortController = abortController;
     this.#activeTurnRunId = turn.id;
+    this.#acceptingGuidance = true;
     try {
       const runningThread = await this.services.persistence.updateThread(this.threadId, {
         status: "running",
@@ -1952,6 +1972,20 @@ class ThreadSessionRuntime {
         });
       };
 
+      const applyPendingGuidance = async (): Promise<boolean> => {
+        const guidance = this.#pendingGuidance.splice(0);
+        if (guidance.length === 0) return false;
+        transcript.push({
+          role: "user",
+          content: buildActiveTurnGuidanceInstruction(guidance)
+        });
+        await this.services.log("turn.guidance_applied", this.threadId, {
+          turnRunId: turn.id,
+          guidanceCount: guidance.length
+        });
+        return true;
+      };
+
       while (!repeatedTaskFailure) {
         if (rootSummaryDeferredForSubagents) {
           const hasActiveSubagents = await this.services.hasActiveSubagents(this.threadId);
@@ -1998,6 +2032,8 @@ class ThreadSessionRuntime {
             });
           }
         }
+
+        await applyPendingGuidance();
 
         const prompt = buildRuntimePrompt(
           model,
@@ -2332,6 +2368,14 @@ class ThreadSessionRuntime {
             },
             createdAt: new Date().toISOString()
           });
+        }
+
+        // A guide received while the provider was deciding invalidates that
+        // stale decision before it can start tool work. The next loop reads
+        // the guide as the latest user instruction.
+        if (await applyPendingGuidance()) {
+          await retryDraft();
+          continue;
         }
 
         if (decision.requestTextToolProtocol && !useTextToolProtocol) {
@@ -3428,6 +3472,16 @@ class ThreadSessionRuntime {
             );
             await settleDraft({ messageId: fallbackMessage.id });
           }
+        }
+
+        if (decision.toolCalls.length === 0 && decision.endTurn) {
+          if (await applyPendingGuidance()) {
+            await retryDraft();
+            continue;
+          }
+          // From here onward this decision is being committed. New guidance
+          // falls back to the normal queue instead of leaking into a later turn.
+          this.#acceptingGuidance = false;
         }
 
         if (decision.assistantMessage && !isPatchPayload(decision.assistantMessage)) {
@@ -4791,6 +4845,8 @@ class ThreadSessionRuntime {
         }
       }
       this.#activeTurnRunId = null;
+      this.#acceptingGuidance = false;
+      this.#pendingGuidance.length = 0;
       if (this.#abortController === abortController) {
         this.#abortController = null;
       }
@@ -6799,6 +6855,10 @@ export class AgentRuntimeService {
 
   public wakeQueuedMessages(threadId: string): void {
     this.ensureThread(threadId).submit({ type: "queue_wakeup" });
+  }
+
+  public guideActiveTurn(threadId: string, content: string): boolean {
+    return this.#sessions.get(threadId)?.guideActiveTurn(content) ?? false;
   }
 
   public interrupt(threadId: string): boolean {

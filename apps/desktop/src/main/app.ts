@@ -1047,6 +1047,33 @@ export class DesktopBackend {
     this.refreshSkillsInBackground(thread.cwd);
   }
 
+  public async guideActiveThread(threadId: string, content: string): Promise<{ accepted: boolean }> {
+    const guidance = content.trim();
+    if (!guidance) {
+      throw new Error("Guidance cannot be empty.");
+    }
+    if (this.#runtime.guideActiveTurn(threadId, guidance)) {
+      const message = this.#db.createMessage({
+        threadId,
+        turnRunId: null,
+        role: "user",
+        content: guidance,
+        metadataJson: JSON.stringify({ displayKind: "guidance" })
+      });
+      await this.emit({
+        type: "message.created",
+        threadId,
+        payload: { message },
+        createdAt: new Date().toISOString()
+      });
+      return { accepted: true };
+    }
+    // A completed turn has no remaining model decision to guide. Preserve the
+    // request by routing it through the established FIFO message path.
+    await this.sendMessage(threadId, guidance);
+    return { accepted: false };
+  }
+
   public async setThreadMultiAgentMode(threadId: string, mode: ThreadRecord["multiAgentMode"]): Promise<ThreadRecord> {
     const nextMode = mode === "disabled" ? "disabled" : "proactive";
     const updated = this.#db.updateThread(threadId, { multiAgentMode: nextMode });

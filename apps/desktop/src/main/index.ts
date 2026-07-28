@@ -430,6 +430,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)
   );
+  ipcMain.handle("threads:guide", (_event, payload: { threadId: string; content: string }) =>
+    backend.guideActiveThread(payload.threadId, payload.content)
+  );
   ipcMain.handle("threads:replace-message", (_event, payload: { threadId: string; messageId: string; content: string }) =>
     backend.replaceMessage(payload.threadId, payload.messageId, payload.content)
   );

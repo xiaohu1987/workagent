@@ -800,6 +800,8 @@ export function App() {
   const [isProjectFilesLoading, setIsProjectFilesLoading] = useState(false);
   const selectedThreadIdRef = useRef<string | null>(null);
   const pendingUserMessagesRef = useRef<Record<string, MessageRecord[]>>({});
+  // Bridges the gap between submitting a turn and receiving its runtime status.
+  const pendingRuntimeStartsRef = useRef<Set<string>>(new Set());
   const pendingOneShotSkillRemovalsRef = useRef<Record<string, string[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
   const snapshotRefreshInFlightRef = useRef<Record<string, Promise<void>>>({});
@@ -2728,6 +2730,9 @@ export function App() {
           }
           return null;
         });
+        if (status !== "idle") {
+          pendingRuntimeStartsRef.current.delete(runtimeThreadId);
+        }
         if (status !== "running" && status !== "waiting") {
           discardQueuedAssistantDraftsForThread(runtimeThreadId);
           setAssistantDrafts((current) => {
@@ -3306,12 +3311,11 @@ export function App() {
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
-  // Active-task submissions are steering updates. The runtime consumes them at
-  // the next safe decision boundary, so they belong in the transcript instead
-  // of flashing as a separate pending task in the composer.
-  const displayedQueuedMessages = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime
-    ? []
-    : queuedMessages;
+  // Active-task submissions stay in the queue until the runtime reaches the
+  // next safe decision boundary instead of appearing as already sent messages.
+  // Queued items must remain available while the current turn runs so they
+  // can be reviewed, guided, or removed before dispatch.
+  const displayedQueuedMessages = queuedMessages;
   // A model may be deciding between tool calls. Keep the same live heartbeat
   // until the runtime explicitly completes the turn, rather than freezing the
   // elapsed timer at the last completed tool call.
@@ -4571,15 +4575,19 @@ export function App() {
       ?? (options?.internal && (forcedContent ?? inputContent).trim().startsWith("[internal:")
         ? "继续"
         : forcedContent ?? inputContent);
-    const queueingBehindActiveTask = isThreadExecutionInProgress(selectedThreadStatus) || isPreparingRuntime;
+    const queueingBehindActiveTask =
+      isThreadExecutionInProgress(selectedThreadStatus) ||
+      isPreparingRuntime ||
+      pendingRuntimeStartsRef.current.has(threadId);
     let startedLocalRuntime = false;
-    const optimisticMessage = !options?.internal
+    const optimisticMessage = !options?.internal && !queueingBehindActiveTask
       ? appendOptimisticUserMessage(threadId, displayContent)
       : null;
     // Start the under-message heartbeat immediately so send never looks like a
     // silent no-op while attachments/skills/runtime wake are still in flight.
     if (!options?.internal && !queueingBehindActiveTask) {
       suppressRuntimeProgressRef.current[threadId] = false;
+      pendingRuntimeStartsRef.current.add(threadId);
       startRuntimeActivity(threadId);
       setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
       startedLocalRuntime = true;
@@ -4621,6 +4629,7 @@ export function App() {
         setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
       }
       if (startedLocalRuntime) {
+        pendingRuntimeStartsRef.current.delete(threadId);
         clearRuntimeActivity(threadId);
         setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
       }
@@ -4645,6 +4654,7 @@ export function App() {
       setInput((current) => current.trim() ? current : inputContent);
       setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
       if (startedLocalRuntime) {
+        pendingRuntimeStartsRef.current.delete(threadId);
         clearRuntimeActivity(threadId);
         setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
       }
@@ -4678,6 +4688,7 @@ export function App() {
         setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
       }
       setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
+      pendingRuntimeStartsRef.current.delete(threadId);
       clearRuntimeActivity(threadId);
       showNotice("发送消息失败", { message: error instanceof Error ? error.message : String(error) });
       return;
@@ -5142,6 +5153,68 @@ export function App() {
       showNotice("删除排队消息失败", { message: error instanceof Error ? error.message : String(error) });
     } finally {
       setDeletingQueuedMessageId((current) => current === id ? null : current);
+    }
+  }
+
+  async function guideActiveTask(content: string) {
+    const threadId = selectedThreadId;
+    if (!threadId) return;
+    try {
+      const result = await window.codexh.guideActiveThread({ threadId, content });
+      if (result.accepted) {
+        showNotice("已引导当前任务", {
+          tone: "success",
+          message: "引导指令会在下一次模型决策前生效。"
+        });
+      } else {
+        showNotice("当前任务已结束", {
+          message: "该消息已按普通消息加入队列。"
+        });
+        await refreshSnapshot(threadId);
+      }
+    } catch (error) {
+      showNotice("发送引导失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function guideQueuedMessage(message: QueuedMessageRecord) {
+    const threadId = selectedThreadId;
+    if (!threadId) return;
+    setDeletingQueuedMessageId(message.id);
+    let removedFromQueue = false;
+    try {
+      // Remove the queued copy first so the instruction cannot run twice.
+      await window.codexh.deleteQueuedMessage({ threadId, id: message.id });
+      removedFromQueue = true;
+      const result = await window.codexh.guideActiveThread({ threadId, content: message.content });
+      if (result.accepted) {
+        showNotice("已引导当前任务", {
+          tone: "success",
+          message: "该排队消息已作为引导指令生效。"
+        });
+      } else {
+        showNotice("当前任务已结束", {
+          message: "该消息已按普通消息加入队列。"
+        });
+      }
+      await refreshSnapshot(threadId);
+    } catch (error) {
+      if (removedFromQueue) {
+        try {
+          await window.codexh.sendMessage({
+            threadId,
+            content: message.content,
+            displayContent: message.displayContent,
+            attachments: message.attachments
+          });
+          await refreshSnapshot(threadId);
+        } catch {
+          // Keep the original error: the primary action is what the user needs to retry.
+        }
+      }
+      showNotice("引导排队消息失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setDeletingQueuedMessageId((current) => current === message.id ? null : current);
     }
   }
 
@@ -6851,7 +6924,9 @@ export function App() {
       !event.altKey
     ) {
       event.preventDefault();
-      void handleComposerPrimaryAction();
+      // Enter always submits the composer. While a task is running this
+      // becomes a queued message; stopping work remains an explicit click.
+      void sendMessage();
     }
   }
 
@@ -7925,7 +8000,7 @@ export function App() {
                   hasProject={!!selectedProjectCwd}
                   deletingId={deletingQueuedMessageId}
                   onDelete={(id) => void deleteQueuedMessage(id)}
-                  onSteer={(content) => void sendMessage(content)}
+                  onSteer={(message) => void guideQueuedMessage(message)}
                 />
               </div>
             ) : null}
@@ -15719,11 +15794,8 @@ function QueuedMessageList({
   hasProject: boolean;
   deletingId: string | null;
   onDelete: (id: string) => void;
-  onSteer: (content: string) => void;
+  onSteer: (message: QueuedMessageRecord) => void;
 }) {
-  const [isSteering, setIsSteering] = useState(false);
-  const [steeringDraft, setSteeringDraft] = useState("");
-  const steeringPresence = useMotionPresence(isSteering ? true : null, 160);
   const visible = messages.filter(
     (message) =>
       !message.content.trimStart().startsWith("[internal:") &&
@@ -15732,13 +15804,6 @@ function QueuedMessageList({
   if (visible.length === 0) {
     return null;
   }
-  const submitSteering = () => {
-    const content = steeringDraft.trim();
-    if (!content) return;
-    onSteer(content);
-    setSteeringDraft("");
-    setIsSteering(false);
-  };
   return (
     <section className={`composer-queue ${hasProject ? "has-project" : ""}`} aria-label="排队消息">
       {visible.map((message, index) => (
@@ -15749,12 +15814,13 @@ function QueuedMessageList({
           {message.attachments.length > 0 ? <span className="composer-queue-attachments">{message.attachments.length} 个附件</span> : null}
           <button
             type="button"
-            className={`composer-queue-steer ${isSteering ? "is-active" : ""}`}
+            className="composer-queue-steer"
             title="引导当前任务"
             aria-label="引导当前任务"
-            onClick={() => setIsSteering(true)}
+            disabled={deletingId === message.id}
+            onClick={() => onSteer(message)}
           >
-            <IconCompose />
+            <IconGuide />
           </button>
           <button
             type="button"
@@ -15768,29 +15834,6 @@ function QueuedMessageList({
           </button>
         </div>
       ))}
-      {steeringPresence.value ? (
-        <div className="composer-queue-steer-editor" data-motion={steeringPresence.phase}>
-          <input
-            autoFocus
-            value={steeringDraft}
-            placeholder="补充要求，任务会在下一步继续执行"
-            onChange={(event) => setSteeringDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                submitSteering();
-              }
-              if (event.key === "Escape") {
-                setIsSteering(false);
-                setSteeringDraft("");
-              }
-            }}
-          />
-          <button type="button" title="发送引导" aria-label="发送引导" disabled={!steeringDraft.trim()} onClick={submitSteering}>
-            <IconArrowUp />
-          </button>
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -19549,6 +19592,18 @@ function IconCompose() {
     <SvgIcon>
       <path d="M12 20h8" />
       <path d="m16.5 3.5 4 4-11 11-5 1 1-5z" />
+    </SvgIcon>
+  );
+}
+
+function IconGuide() {
+  return (
+    <SvgIcon>
+      <circle cx="6" cy="5" r="2" />
+      <circle cx="18" cy="5" r="2" />
+      <circle cx="18" cy="19" r="2" />
+      <path d="M6 7v10a2 2 0 0 0 2 2h8" />
+      <path d="M8 5h8" />
     </SvgIcon>
   );
 }
