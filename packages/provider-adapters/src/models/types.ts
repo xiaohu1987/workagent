@@ -81,7 +81,7 @@ export interface VideoGenerationPlan {
  * Hooks cover the dimensions agreed with the user:
  *  - chat request params  -> {@link normalizeRequestParams}
  *  - chat tool call mode  -> {@link resolveToolCallMode}
- *  - chat response/stream -> {@link extractVisibleStreamText} + {@link parseResponse}
+ *  - chat response/stream -> {@link extractVisibleStreamText} + {@link parseResponse} + {@link normalizeDecision}
  *  - image generation     -> {@link resolveImageGeneration}
  *  - video generation     -> {@link resolveVideoGeneration}
  *
@@ -125,6 +125,15 @@ export interface ModelCompat {
     response: any,
     ctx: ModelCompatContext,
     hasNativeTools: boolean
+  ): ProviderTurnDecision;
+
+  /**
+   * Apply model-specific compatibility fixes after either the streaming or
+   * non-streaming response has been converted to a provider decision.
+   */
+  normalizeDecision(
+    decision: ProviderTurnDecision,
+    ctx: ModelCompatContext
   ): ProviderTurnDecision;
 
   /**

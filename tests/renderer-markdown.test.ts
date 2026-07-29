@@ -98,6 +98,12 @@ describe("parseMarkdownBlocks", () => {
     expect(highlighted).toContain("&lt;script&gt;");
   });
 
+  it("keeps unlabeled code escaped without running automatic language detection", () => {
+    expect(highlightMarkdownCode('<script>alert("x")</script>')).toBe(
+      "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"
+    );
+  });
+
   it("does not interpret an HTTP image URL as a Windows local path", () => {
     const url = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png";
 

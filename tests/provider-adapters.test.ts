@@ -125,6 +125,392 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.anthropicConstructor.mockReset();
   });
 
+  it("keeps Chinese replies stable for Qwen and DeepSeek after English tool context", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "cn-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    for (const modelId of ["qwen-plus", "deepseek-chat"]) {
+      await new ProviderFactory().create(provider).runTurn({
+        systemPrompt: "Complete the requested task.",
+        transcript: [
+          { role: "user", content: "请继续处理刚才的问题" },
+          { role: "tool", content: "English tool output" },
+          { role: "user", content: "continue" }
+        ],
+        availableTools: [],
+        model: {
+          id: modelId,
+          providerId: provider.id,
+          displayName: modelId,
+          contextWindow: 128_000,
+          supportsStreaming: false,
+          supportsToolCalling: true,
+          supportsParallelToolCalls: true,
+          supportsJsonOutput: true,
+          supportsMultimodalInput: false,
+          supportsReasoningSummary: false
+        },
+        provider
+      });
+
+      expect(mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content).toContain("[Chinese output compatibility]");
+    }
+  });
+
+  it("does not override an explicit non-Chinese language request for Qwen", async () => {
+    mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "OK" } }] });
+    const provider: ProviderDefinition = { id: "qwen-gateway", type: "openai-compatible", apiKey: "secret" };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer the user.",
+      transcript: [{ role: "user", content: "请用英文回答" }],
+      availableTools: [],
+      model: {
+        id: "qwen-plus",
+        providerId: provider.id,
+        displayName: "Qwen Plus",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: false,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: false,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider
+    });
+
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content).not.toContain("[Chinese output compatibility]");
+  });
+
+  it("normalizes Qwen's path/content apply_patch calls using a verified file path", async () => {
+    const verifiedPath = "E:\\repo\\src\\Product.Domain\\Domain\\Service\\Common\\TokenService.cs";
+    const guessedPath = "E:\\repo\\src\\Product.Domain\\Domain\\Domain\\Service\\Common\\TokenService.cs";
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "qwen-write",
+            type: "function",
+            function: {
+              name: nativeToolName("apply_patch"),
+              arguments: JSON.stringify({ path: guessedPath, content: "updated source" })
+            }
+          }]
+        }
+      }]
+    });
+    const provider: ProviderDefinition = { id: "qwen-gateway", type: "openai-compatible", apiKey: "secret" };
+    const availableTools = [
+      {
+        name: "apply_patch",
+        description: "Apply a patch.",
+        inputSchema: { type: "object", properties: { patch: { type: "string" } }, required: ["patch"] },
+        riskLevel: "medium" as const
+      },
+      {
+        name: "fs.write_file",
+        description: "Write a file.",
+        inputSchema: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"]
+        },
+        riskLevel: "medium" as const
+      }
+    ];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the tools.",
+      transcript: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "verified-read", name: "fs.read_file", arguments: { path: verifiedPath } }]
+        },
+        {
+          role: "tool",
+          content: "fs.read_file\nsource",
+          toolCallId: "verified-read",
+          toolResultOk: true
+        },
+        { role: "user", content: "Update it." }
+      ],
+      availableTools,
+      model: {
+        id: "qwen-plus",
+        providerId: provider.id,
+        displayName: "Qwen Plus",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider
+    });
+
+    expect(mocks.chatCreate.mock.calls[0]?.[0].messages[0].content).toContain("[Qwen file-tool compatibility]");
+    expect(decision.toolCalls).toEqual([{
+      id: "qwen-write",
+      name: "fs.write_file",
+      arguments: { path: verifiedPath, content: "updated source" }
+    }]);
+  });
+
+  it("corrects an existing-file path inside a Qwen update patch", async () => {
+    const verifiedPath = "src/Product.Domain/Domain/Service/Common/TokenService.cs";
+    const guessedPath = "src/Product.Domain/Domain/Domain/Service/Common/TokenService.cs";
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "qwen-patch",
+            type: "function",
+            function: {
+              name: nativeToolName("apply_patch"),
+              arguments: JSON.stringify({
+                patch: `*** Begin Patch\n*** Update File: ${guessedPath}\n@@\n-old\n+new\n*** End Patch`
+              })
+            }
+          }]
+        }
+      }]
+    });
+    const provider: ProviderDefinition = { id: "qwen-gateway", type: "openai-compatible", apiKey: "secret" };
+    const patchTool = {
+      name: "apply_patch",
+      description: "Apply a patch.",
+      inputSchema: { type: "object", properties: { patch: { type: "string" } }, required: ["patch"] },
+      riskLevel: "medium" as const
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the tools.",
+      transcript: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "verified-read", name: "fs.read_file", arguments: { path: verifiedPath } }]
+        },
+        {
+          role: "tool",
+          content: "fs.read_file\nsource",
+          toolCallId: "verified-read",
+          toolResultOk: true
+        }
+      ],
+      availableTools: [patchTool],
+      model: {
+        id: "qwen-plus",
+        providerId: provider.id,
+        displayName: "Qwen Plus",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider
+    });
+
+    expect(decision.toolCalls[0]).toMatchObject({
+      id: "qwen-patch",
+      name: "apply_patch"
+    });
+    expect(decision.toolCalls[0]?.arguments.patch).toContain(`*** Update File: ${verifiedPath}`);
+    expect(decision.toolCalls[0]?.arguments.patch).not.toContain(guessedPath);
+  });
+
+  it("corrects Qwen file paths in streamed native calls", async () => {
+    const verifiedPath = "E:\\repo\\src\\Product.Domain\\Domain\\Service\\Common\\TokenService.cs";
+    const guessedPath = "E:\\repo\\src\\Product\\Domain\\Service\\Common\\TokenService.cs";
+    async function* streamToolCall() {
+      yield {
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: "qwen-read",
+              function: {
+                name: nativeToolName("fs.read_file"),
+                arguments: JSON.stringify({ path: guessedPath })
+              }
+            }]
+          }
+        }]
+      };
+      yield { choices: [{ finish_reason: "tool_calls", delta: {} }] };
+    }
+    mocks.chatCreate.mockResolvedValue(streamToolCall());
+    const provider: ProviderDefinition = { id: "qwen-gateway", type: "openai-compatible", apiKey: "secret" };
+    const fileTool = {
+      name: "fs.read_file",
+      description: "Read a file.",
+      inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      riskLevel: "low" as const
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the tools.",
+      transcript: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "verified-read", name: "fs.read_file", arguments: { path: verifiedPath } }]
+        },
+        {
+          role: "tool",
+          content: "fs.read_file\nsource",
+          toolCallId: "verified-read",
+          toolResultOk: true
+        }
+      ],
+      availableTools: [fileTool],
+      model: {
+        id: "qwen-plus",
+        providerId: provider.id,
+        displayName: "Qwen Plus",
+        contextWindow: 128_000,
+        supportsStreaming: true,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider,
+      stream: true
+    });
+
+    expect(decision.toolCalls).toMatchObject([{
+      id: "qwen-read",
+      name: "fs.read_file",
+      arguments: { path: verifiedPath }
+    }]);
+  });
+
+  it("does not redirect a distinct Qwen path that only shares a file name", async () => {
+    const verifiedPath = "E:\\repo\\src\\v1\\config.ts";
+    const requestedPath = "E:\\repo\\src\\v2\\config.ts";
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "qwen-read-v2",
+            type: "function",
+            function: {
+              name: nativeToolName("fs.read_file"),
+              arguments: JSON.stringify({ path: requestedPath })
+            }
+          }]
+        }
+      }]
+    });
+    const provider: ProviderDefinition = { id: "qwen-gateway", type: "openai-compatible", apiKey: "secret" };
+    const fileTool = {
+      name: "fs.read_file",
+      description: "Read a file.",
+      inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      riskLevel: "low" as const
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the tools.",
+      transcript: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "verified-v1", name: "fs.read_file", arguments: { path: verifiedPath } }]
+        },
+        {
+          role: "tool",
+          content: "fs.read_file\nsource",
+          toolCallId: "verified-v1",
+          toolResultOk: true
+        }
+      ],
+      availableTools: [fileTool],
+      model: {
+        id: "qwen-plus",
+        providerId: provider.id,
+        displayName: "Qwen Plus",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider
+    });
+
+    expect(decision.toolCalls).toMatchObject([{
+      id: "qwen-read-v2",
+      name: "fs.read_file",
+      arguments: { path: requestedPath }
+    }]);
+  });
+
+  it("leaves GPT file tool arguments unchanged", async () => {
+    const guessedPath = "E:\\repo\\src\\Product.Domain\\Domain\\Domain\\Service\\Common\\TokenService.cs";
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "gpt-write",
+            type: "function",
+            function: {
+              name: nativeToolName("apply_patch"),
+              arguments: JSON.stringify({ path: guessedPath, content: "updated source" })
+            }
+          }]
+        }
+      }]
+    });
+    const provider: ProviderDefinition = { id: "gpt-gateway", type: "openai-compatible", apiKey: "secret" };
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the tools.",
+      transcript: [{ role: "user", content: "Update it." }],
+      availableTools: [{
+        name: "apply_patch",
+        description: "Apply a patch.",
+        inputSchema: { type: "object", properties: { patch: { type: "string" } }, required: ["patch"] },
+        riskLevel: "medium"
+      }],
+      model: {
+        id: "gpt-5.6-terra",
+        providerId: provider.id,
+        displayName: "GPT 5.6 Terra",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider
+    });
+
+    expect(mocks.chatCreate.mock.calls[0]?.[0].messages[0].content).not.toContain("[Qwen file-tool compatibility]");
+    expect(decision.toolCalls).toEqual([{
+      id: "gpt-write",
+      name: "apply_patch",
+      arguments: { path: guessedPath, content: "updated source" }
+    }]);
+  });
+
   it("sends the selected reasoning_effort for GPT-5.4+ Chat Completions only", async () => {
     mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "Done." }, finish_reason: "stop" }] });
     const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiKey: "secret" };

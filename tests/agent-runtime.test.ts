@@ -30,6 +30,8 @@ import {
   resolveStandardCompletionAuditResult,
   resolveStandardCompletionAuditDisposition,
   buildStandardCompletionRecoveryInstruction,
+  buildStandardCompletionTextToolFallbackInstruction,
+  shouldSwitchStandardCompletionToTextToolProtocol,
   isDeferredExecutionPayload,
   isProjectFileMutationRequest,
   createManagedWriteRecoveryState,
@@ -80,6 +82,7 @@ import {
   buildModelRateLimitRecoveryQuestion,
   MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
   MAX_STANDARD_COMPLETION_RECOVERIES,
+  STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
   MAX_MODEL_TOOL_RESULT_CHARACTERS,
   MAX_MCP_TOOL_RESULT_CHARACTERS,
   MAX_REPOSITORY_COMPLETION_REJECTIONS,
@@ -568,6 +571,38 @@ describe("standard completion validation", () => {
     expect(result.missingVerification).toBe(true);
     expect(result.reasons).toContain("The assistant message is an unexecuted tool call or raw execution payload.");
     expect(buildStandardCompletionRecoveryInstruction(result)).toContain("apply_patch");
+  });
+
+  it("switches repeated evidence-free completions to the text tool protocol", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "The requested change is complete.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(shouldSwitchStandardCompletionToTextToolProtocol({
+      attempt: STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS - 1,
+      alreadyUsingTextToolProtocol: false,
+      result
+    })).toBe(false);
+    expect(shouldSwitchStandardCompletionToTextToolProtocol({
+      attempt: STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
+      alreadyUsingTextToolProtocol: false,
+      result
+    })).toBe(true);
+    expect(shouldSwitchStandardCompletionToTextToolProtocol({
+      attempt: STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
+      alreadyUsingTextToolProtocol: true,
+      result
+    })).toBe(false);
+    expect(buildStandardCompletionTextToolFallbackInstruction(result)).toContain("exactly one apply_patch or fs.write_file");
+    expect(buildStandardCompletionTextToolFallbackInstruction(result)).toContain("end_turn and goal_completed to false");
   });
 
   it("accepts a file-change completion only after delivery and post-delivery verification", () => {

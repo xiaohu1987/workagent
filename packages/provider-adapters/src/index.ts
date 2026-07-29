@@ -229,9 +229,9 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       if (!isAsyncIterable(streamResponse)) {
         const fallbackDecision = compat.parseResponse(streamResponse, ctx, Boolean(nativeTools));
         const fallbackReasoning = compat.extractReasoningFromMessage(streamResponse?.choices?.[0]?.message);
-        return fallbackReasoning
+        return compat.normalizeDecision(fallbackReasoning
           ? { ...fallbackDecision, reasoningSummary: fallbackReasoning }
-          : fallbackDecision;
+          : fallbackDecision, ctx);
       }
       const stream = streamResponse;
       let text = "";
@@ -303,18 +303,18 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           }];
         });
       if (nativeCalls.length > 0) {
-        return applyReasoning(withTokenUsage({
+        return compat.normalizeDecision(applyReasoning(withTokenUsage({
           assistantMessage: text.trim() || undefined,
           toolCalls: nativeCalls,
           endTurn: false,
           goalCompleted: false,
           isStructured: true
-        }, streamUsage));
+        }, streamUsage)), ctx);
       }
-      return applyReasoning(withTokenUsage(
+      return compat.normalizeDecision(applyReasoning(withTokenUsage(
         nativeTools ? nativeTextDecision(text.trim()) : parseDecisionFromText(text.trim()),
         streamUsage
-      ));
+      )), ctx);
     }
 
     const response = await this.#client.chat.completions.create(request as any, {
@@ -325,9 +325,9 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
     if (finishReason === "content_filter") throw new ProviderStreamIncompleteError("content_filter");
     const nonStreamDecision = compat.parseResponse(response, ctx, Boolean(nativeTools));
     const nonStreamReasoning = compat.extractReasoningFromMessage(response?.choices?.[0]?.message);
-    return nonStreamReasoning
+    return compat.normalizeDecision(nonStreamReasoning
       ? { ...nonStreamDecision, reasoningSummary: nonStreamReasoning }
-      : nonStreamDecision;
+      : nonStreamDecision, ctx);
   }
 
   public async generateImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {

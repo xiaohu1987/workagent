@@ -694,6 +694,9 @@ const MIN_CHAT_WIDTH = 380;
 const HISTORY_THREADS_PREVIEW_COUNT = 10;
 const HISTORY_STANDALONE_GROUP_KEY = "__standalone__";
 const HISTORY_COLLAPSED_GROUPS_STORAGE_KEY = "codexh.history-collapsed-groups";
+const ASSISTANT_FINAL_MESSAGE_FADE_DURATION_MS = 240;
+const THREAD_SNAPSHOT_CACHE_LIMIT = 8;
+const MAX_HIGHLIGHTED_CODE_BLOCK_LENGTH = 16_000;
 
 function getStoredPanelWidth(key: string, fallback: number, minimum: number, maximum: number): number {
   try {
@@ -813,10 +816,14 @@ export function App() {
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
   const snapshotCursorByThreadRef = useRef<Record<string, RuntimeThreadSnapshotCursor>>({});
+  const snapshotCacheByThreadRef = useRef<Map<string, RuntimeThreadSnapshot>>(new Map());
+  const threadTokenUsageRefreshTimerRef = useRef<number | null>(null);
   const pluginToggleQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pluginEnabledStateRef = useRef<Map<string, boolean>>(new Map());
   const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
   const [assistantDrafts, setAssistantDrafts] = useState<Record<string, AssistantDraft>>({});
+  const [finalizingAssistantMessageIds, setFinalizingAssistantMessageIds] = useState<Set<string>>(() => new Set());
+  const finalMessageFadeTimersRef = useRef<Record<string, number>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null);
   const [composerSubmission, setComposerSubmission] = useState<ComposerSubmission | null>(null);
@@ -1536,6 +1543,14 @@ export function App() {
       window.cancelAnimationFrame(pending.frame);
     }
     assistantDraftFramesRef.current = {};
+    for (const timer of Object.values(finalMessageFadeTimersRef.current)) {
+      window.clearTimeout(timer);
+    }
+    finalMessageFadeTimersRef.current = {};
+    if (threadTokenUsageRefreshTimerRef.current !== null) {
+      window.clearTimeout(threadTokenUsageRefreshTimerRef.current);
+      threadTokenUsageRefreshTimerRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -1796,6 +1811,29 @@ export function App() {
     select();
   }
 
+  function cacheThreadSnapshot(nextSnapshot: RuntimeThreadSnapshot) {
+    const cache = snapshotCacheByThreadRef.current;
+    cache.delete(nextSnapshot.thread.id);
+    cache.set(nextSnapshot.thread.id, nextSnapshot);
+    while (cache.size > THREAD_SNAPSHOT_CACHE_LIMIT) {
+      const oldestThreadId = cache.keys().next().value;
+      if (!oldestThreadId) break;
+      cache.delete(oldestThreadId);
+      delete snapshotCursorByThreadRef.current[oldestThreadId];
+    }
+  }
+
+  function restoreCachedThreadSnapshot(threadId: string): boolean {
+    const cached = snapshotCacheByThreadRef.current.get(threadId);
+    if (!cached) return false;
+    cacheThreadSnapshot(cached);
+    snapshotThreadIdRef.current = threadId;
+    setSnapshot(cached);
+    setBrowserTabsByThread((current) => ({ ...current, [threadId]: cached.browserTabs }));
+    setIsThreadSwitching(false);
+    return true;
+  }
+
   const currentTerminalTabs = selectedThreadId ? terminalTabsByThread[selectedThreadId] ?? [] : [];
   const activeTerminalSessionId = selectedThreadId
     ? activeTerminalTabByThread[selectedThreadId] ?? currentTerminalTabs[0]?.id ?? null
@@ -1962,6 +2000,26 @@ export function App() {
       }
     }
   }
+
+  const fadeInFinalAssistantMessage = useCallback((messageId: string) => {
+    setFinalizingAssistantMessageIds((current) => {
+      if (current.has(messageId)) return current;
+      const next = new Set(current);
+      next.add(messageId);
+      return next;
+    });
+    const previousTimer = finalMessageFadeTimersRef.current[messageId];
+    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+    finalMessageFadeTimersRef.current[messageId] = window.setTimeout(() => {
+      delete finalMessageFadeTimersRef.current[messageId];
+      setFinalizingAssistantMessageIds((current) => {
+        if (!current.has(messageId)) return current;
+        const next = new Set(current);
+        next.delete(messageId);
+        return next;
+      });
+    }, ASSISTANT_FINAL_MESSAGE_FADE_DURATION_MS);
+  }, []);
 
   function queueAssistantDraft(draft: AssistantDraft) {
     const pending = assistantDraftFramesRef.current[draft.draftId];
@@ -2173,6 +2231,22 @@ export function App() {
     }
   }
 
+  function scheduleThreadTokenUsageRefresh(threadId: string) {
+    if (selectedThreadIdRef.current !== threadId) return;
+    if (threadTokenUsageRefreshTimerRef.current !== null) {
+      window.clearTimeout(threadTokenUsageRefreshTimerRef.current);
+    }
+    threadTokenUsageRefreshTimerRef.current = window.setTimeout(() => {
+      threadTokenUsageRefreshTimerRef.current = null;
+      if (selectedThreadIdRef.current !== threadId) return;
+      void window.codexh.getThreadTokenUsage(threadId)
+        .then((usage) => {
+          if (selectedThreadIdRef.current === threadId) setThreadTokenUsage(usage);
+        })
+        .catch(() => undefined);
+    }, 180);
+  }
+
   useEffect(() => {
     const dispose = window.codexh.onBrowserReregisterRequest(({ threadId, tabId }) => {
       reregisterBrowserWebviews(threadId, tabId);
@@ -2192,7 +2266,7 @@ export function App() {
         runtimeRefreshTimer = null;
         const snapshotThreadId = shouldRefreshSelectedSnapshot ? selectedThreadIdRef.current : null;
         shouldRefreshSelectedSnapshot = false;
-        void refreshThreads();
+        void refreshThreads({ refreshSelectedSnapshot: false });
         if (snapshotThreadId) {
           void refreshSnapshot(snapshotThreadId);
         }
@@ -2753,7 +2827,7 @@ export function App() {
           }
           if (runtimeThreadId === currentSelectedThreadId) {
             setGitRefreshRevision((current) => current + 1);
-            void window.codexh.getThreadTokenUsage(runtimeThreadId).then(setThreadTokenUsage).catch(() => undefined);
+            scheduleThreadTokenUsageRefresh(runtimeThreadId);
           }
         }
       }
@@ -2777,13 +2851,7 @@ export function App() {
       }
       if (typed.type === "turn.usage" && typed.threadId) {
         if (currentSelectedThreadId && notificationThreadId === currentSelectedThreadId) {
-          void window.codexh.getThreadTokenUsage(currentSelectedThreadId)
-            .then((usage) => {
-              if (selectedThreadIdRef.current === currentSelectedThreadId) {
-                setThreadTokenUsage(usage);
-              }
-            })
-            .catch(() => undefined);
+          scheduleThreadTokenUsageRefresh(currentSelectedThreadId);
         }
       }
       if (!isPluginStateUpdate && (
@@ -3745,6 +3813,13 @@ export function App() {
       return;
     }
 
+    for (const draft of Object.values(assistantDrafts)) {
+      if (!draft.completed || !draft.messageId || draft.threadId !== snapshot.thread.id) continue;
+      if (snapshot.messages.some((message) => message.id === draft.messageId && message.role === "assistant")) {
+        fadeInFinalAssistantMessage(draft.messageId);
+      }
+    }
+
     setAssistantDrafts((current) => {
       let changed = false;
       const next = { ...current };
@@ -3762,7 +3837,7 @@ export function App() {
 
       return changed ? next : current;
     });
-  }, [snapshot]);
+  }, [assistantDrafts, fadeInFinalAssistantMessage, snapshot]);
 
   useEffect(() => {
     if (!showWelcome) {
@@ -3887,7 +3962,7 @@ export function App() {
     await Promise.all([refreshThreads(), refreshSkills(), refreshPlugins(), refreshConfig(), refreshMcpServers()]);
   }
 
-  async function refreshThreads() {
+  async function refreshThreads(options?: { refreshSelectedSnapshot?: boolean }) {
     const nextThreads = (await window.codexh.listThreads()) as ThreadRecord[];
     setThreads(nextThreads);
     syncThreadNotificationsFromThreads(nextThreads);
@@ -3902,16 +3977,29 @@ export function App() {
           ? currentSelectedThreadId
         : nextThreads[0]?.id ?? null;
 
-    if (targetThreadId !== currentSelectedThreadId) {
-      selectThreadId(targetThreadId);
+    if (targetThreadId === currentSelectedThreadId) {
+      if (options?.refreshSelectedSnapshot !== false) {
+        await refreshSnapshot(targetThreadId);
+      }
+      return;
     }
 
-    await refreshSnapshot(targetThreadId);
+    selectThreadId(targetThreadId);
+    if (targetThreadId) {
+      if (restoreCachedThreadSnapshot(targetThreadId)) {
+        if (options?.refreshSelectedSnapshot !== false) {
+          void refreshSnapshot(targetThreadId);
+        }
+      } else {
+        await refreshSnapshot(targetThreadId);
+      }
+    }
   }
 
   async function refreshSnapshot(threadId: string | null) {
     if (!threadId) {
       snapshotCursorByThreadRef.current = {};
+      snapshotCacheByThreadRef.current.clear();
       setSnapshot(null);
       return;
     }
@@ -3945,11 +4033,11 @@ export function App() {
     const requestId = (snapshotRequestIdsRef.current[threadId] ?? 0) + 1;
     snapshotRequestIdsRef.current[threadId] = requestId;
     try {
-      const cursor = snapshotThreadIdRef.current === threadId
+      const cursor = snapshotCacheByThreadRef.current.has(threadId)
         ? snapshotCursorByThreadRef.current[threadId]
         : undefined;
       const next = (await window.codexh.getThreadSnapshot(threadId, cursor)) as RuntimeThreadSnapshot;
-      if (snapshotRequestIdsRef.current[threadId] !== requestId || selectedThreadIdRef.current !== threadId) {
+      if (snapshotRequestIdsRef.current[threadId] !== requestId) {
         return;
       }
       if (next.snapshotCursor) {
@@ -3963,35 +4051,37 @@ export function App() {
         delete pendingUserMessagesRef.current[threadId];
       }
       const nextMessages = remaining.length > 0 ? [...next.messages, ...remaining] : next.messages;
-      setSnapshot((current) => {
-        if (!current || current.thread.id !== threadId) {
-          return { ...next, messages: nextMessages };
-        }
-        const messages = next.snapshotMode === "delta"
-          ? mergeSnapshotRecords(
-              current.messages.filter((message) =>
-                !message.id.startsWith("optimistic-") || remaining.some((item) => item.id === message.id)
-              ),
-              nextMessages,
-              (message) => message.createdAt
-            )
-          : nextMessages;
-        const toolCalls = next.snapshotMode === "delta"
-          ? mergeSnapshotRecords(current.toolCalls, next.toolCalls, (toolCall) => toolCall.startedAt)
-          : next.toolCalls;
-        const artifacts = next.snapshotMode === "delta"
-          ? mergeSnapshotRecords(current.artifacts, next.artifacts, (artifact) => artifact.createdAt, "descending")
-          : next.artifacts;
-        return {
-          ...next,
-          messages: reuseEquivalentRecordArray(current.messages, messages),
-          toolCalls: reuseEquivalentRecordArray(current.toolCalls, toolCalls),
-          artifacts: reuseEquivalentRecordArray(current.artifacts, artifacts),
-          queuedMessages: reuseEquivalentRecordArray(current.queuedMessages, next.queuedMessages),
-          approvals: reuseEquivalentRecordArray(current.approvals, next.approvals),
-          prompts: reuseEquivalentRecordArray(current.prompts, next.prompts)
-        };
-      });
+      const cached = snapshotCacheByThreadRef.current.get(threadId);
+      const base = cached ?? (snapshotThreadIdRef.current === threadId ? snapshot : null);
+      const messages = next.snapshotMode === "delta" && base
+        ? mergeSnapshotRecords(
+            base.messages.filter((message) =>
+              !message.id.startsWith("optimistic-") || remaining.some((item) => item.id === message.id)
+            ),
+            nextMessages,
+            (message) => message.createdAt
+          )
+        : nextMessages;
+      const toolCalls = next.snapshotMode === "delta" && base
+        ? mergeSnapshotRecords(base.toolCalls, next.toolCalls, (toolCall) => toolCall.startedAt)
+        : next.toolCalls;
+      const artifacts = next.snapshotMode === "delta" && base
+        ? mergeSnapshotRecords(base.artifacts, next.artifacts, (artifact) => artifact.createdAt, "descending")
+        : next.artifacts;
+      const mergedSnapshot: RuntimeThreadSnapshot = {
+        ...next,
+        messages: base ? reuseEquivalentRecordArray(base.messages, messages) : messages,
+        toolCalls: base ? reuseEquivalentRecordArray(base.toolCalls, toolCalls) : toolCalls,
+        artifacts: base ? reuseEquivalentRecordArray(base.artifacts, artifacts) : artifacts,
+        queuedMessages: base ? reuseEquivalentRecordArray(base.queuedMessages, next.queuedMessages) : next.queuedMessages,
+        approvals: base ? reuseEquivalentRecordArray(base.approvals, next.approvals) : next.approvals,
+        prompts: base ? reuseEquivalentRecordArray(base.prompts, next.prompts) : next.prompts
+      };
+      cacheThreadSnapshot(mergedSnapshot);
+      if (selectedThreadIdRef.current === threadId) {
+        snapshotThreadIdRef.current = threadId;
+        setSnapshot(mergedSnapshot);
+      }
       if (selectedThreadIdRef.current === threadId) {
         setIsThreadSwitching(false);
       }
@@ -4147,7 +4237,9 @@ export function App() {
   function seedOptimisticThreadSnapshot(thread: ThreadRecord) {
     snapshotThreadIdRef.current = thread.id;
     delete snapshotCursorByThreadRef.current[thread.id];
-    setSnapshot(createOptimisticThreadSnapshot(thread));
+    const nextSnapshot = createOptimisticThreadSnapshot(thread);
+    cacheThreadSnapshot(nextSnapshot);
+    setSnapshot(nextSnapshot);
     setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
     setIsThreadSwitching(false);
   }
@@ -4165,7 +4257,12 @@ export function App() {
     }
 
     selectThreadId(threadId);
-    await refreshSnapshot(threadId);
+    if (restoreCachedThreadSnapshot(threadId)) {
+      // Paint the previous transcript first, then verify it incrementally.
+      void refreshSnapshot(threadId);
+    } else {
+      await refreshSnapshot(threadId);
+    }
     // Switching chats must never auto-start GPA. Same-session incomplete plans only
     // restore the GPA chip/timeline; the user continues explicitly via GPA or send.
     await softRestoreSameSessionGpaPlan(threadId);
@@ -4419,6 +4516,8 @@ export function App() {
     setDeletingThreadId(thread.id);
     try {
       await window.codexh.deleteThread(thread.id);
+      snapshotCacheByThreadRef.current.delete(thread.id);
+      delete snapshotCursorByThreadRef.current[thread.id];
       setHistoryThreadDeleteConfirmation(null);
       await refreshThreads();
       showNotice("任务已删除。", { tone: "success" });
@@ -4453,6 +4552,7 @@ export function App() {
       await window.codexh.clearThreadConversation(threadId);
       delete pendingUserMessagesRef.current[threadId];
       delete snapshotCursorByThreadRef.current[threadId];
+      snapshotCacheByThreadRef.current.delete(threadId);
       delete suppressRuntimeProgressRef.current[threadId];
       discardQueuedAssistantDraftsForThread(threadId);
       gpaSameSessionAutoResumeRef.current.delete(threadId);
@@ -4763,6 +4863,7 @@ export function App() {
     // conversation history.
     setEditingUserMessage(null);
     delete snapshotCursorByThreadRef.current[threadId];
+    snapshotCacheByThreadRef.current.delete(threadId);
     const optimisticMessage = replaceConversationTailWithOptimisticUserMessage(
       threadId,
       messageId,
@@ -7854,6 +7955,7 @@ export function App() {
                         assistantLabel={activeAssistantLabel}
                         userMessageActions={transcriptUserMessageActions}
                         isGpaPlanMessage={entry.message.id === gpaPlanMessageId}
+                        isFinalizingFromDraft={finalizingAssistantMessageIds.has(entry.message.id)}
                       />
                     ) : entry.kind === "file-summary" ? (
                       <FileChangeSummary
@@ -16598,6 +16700,7 @@ type TranscriptMessageProps = {
   assistantLabel: string;
   userMessageActions: UserMessageActions;
   isGpaPlanMessage?: boolean;
+  isFinalizingFromDraft?: boolean;
 };
 
 type AssistantDraftMessageProps = {
@@ -16663,7 +16766,8 @@ const TranscriptMessage = memo(function TranscriptMessage({
   message,
   assistantLabel,
   userMessageActions,
-  isGpaPlanMessage = false
+  isGpaPlanMessage = false,
+  isFinalizingFromDraft = false
 }: TranscriptMessageProps) {
   const gpaTaskProgress = getGpaTaskProgress(message);
   if (gpaTaskProgress) {
@@ -16676,7 +16780,10 @@ const TranscriptMessage = memo(function TranscriptMessage({
 
   if (message.role === "user") {
     return (
-      <article id={`transcript-message-${message.id}`} className="message-card user">
+      <article
+        id={`transcript-message-${message.id}`}
+        className={`message-card user${message.id.startsWith("optimistic-") ? " is-sending" : ""}`}
+      >
         {renderMessageContent(message, displayContent, userMessageActions)}
       </article>
     );
@@ -16685,7 +16792,7 @@ const TranscriptMessage = memo(function TranscriptMessage({
   return (
     <article
       id={`transcript-message-${message.id}`}
-      className={`message-card ${message.role}${getMessageDisplayKind(message) === "commentary" ? " commentary" : ""}`}
+      className={`message-card ${message.role}${getMessageDisplayKind(message) === "commentary" ? " commentary" : ""}${isFinalizingFromDraft ? " is-finalizing-from-draft" : ""}`}
     >
       <div className="message-header">
         <span className={`message-author ${message.role}`}>{renderRole(message.role, assistantLabel)}</span>
@@ -16704,7 +16811,11 @@ function areTranscriptMessagePropsEqual(
   previous: Readonly<TranscriptMessageProps>,
   next: Readonly<TranscriptMessageProps>
 ): boolean {
-  if (previous.assistantLabel !== next.assistantLabel || previous.isGpaPlanMessage !== next.isGpaPlanMessage) {
+  if (
+    previous.assistantLabel !== next.assistantLabel ||
+    previous.isGpaPlanMessage !== next.isGpaPlanMessage ||
+    previous.isFinalizingFromDraft !== next.isFinalizingFromDraft
+  ) {
     return false;
   }
   const previousMessage = previous.message;
@@ -18090,6 +18201,11 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
         </blockquote>
       );
     case "code":
+      // Auto-detection repeatedly parses every registered language. During the
+      // draft-to-final handoff that can stall the renderer for large replies.
+      const highlightedLanguage = block.content.length <= MAX_HIGHLIGHTED_CODE_BLOCK_LENGTH
+        ? block.language
+        : undefined;
       return (
         <div key={key} className="markdown-code-block">
           <CopyTextButton content={block.content} />
@@ -18100,7 +18216,7 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
                 <li key={`${key}-line-${lineIndex}`}>
                   <code
                     className="hljs"
-                    dangerouslySetInnerHTML={{ __html: highlightMarkdownCode(line, block.language) }}
+                    dangerouslySetInnerHTML={{ __html: highlightMarkdownCode(line, highlightedLanguage) }}
                   />
                 </li>
               ))}
@@ -18194,7 +18310,7 @@ export function highlightMarkdownCode(content: string, language?: string): strin
   if (resolvedLanguage && hljs.getLanguage(resolvedLanguage)) {
     return hljs.highlight(content, { language: resolvedLanguage, ignoreIllegals: true }).value;
   }
-  return hljs.highlightAuto(content).value;
+  return escapeHtml(content);
 }
 
 function CopyTextButton({ content }: { content: string }) {

@@ -1,6 +1,7 @@
 import { defineCompat } from "./types";
 import type { ModelCompatContext } from "./types";
 import { gptCompat } from "./gpt";
+import { preserveChineseOutputLanguage } from "./output-language";
 
 /**
  * DeepSeek openai-compatible shell.
@@ -85,7 +86,7 @@ export const deepseekCompat = defineCompat(gptCompat, {
     if (typeof currentMax !== "number" || currentMax < 8192) {
       next = { ...next, max_tokens: 8192 };
     }
-    return next;
+    return preserveChineseOutputLanguage(ctx, next);
   },
   extractVisibleStreamText(accumulated: string): string {
     // Only apply the GPT envelope extractor when the buffer really is a

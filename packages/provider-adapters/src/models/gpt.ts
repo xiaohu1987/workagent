@@ -60,6 +60,10 @@ export const gptCompat: ModelCompat = {
     return parseOpenAiCompatibleResponseGpt(response, hasNativeTools, ctx.input);
   },
 
+  normalizeDecision(decision) {
+    return decision;
+  },
+
   extractReasoningFromDelta(delta: any): string {
     // openai-compatible reasoning convention: deepseek-reasoner, qwen-qwq,
     // and glm-thinking all stream chain-of-thought via delta.reasoning_content.

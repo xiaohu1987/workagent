@@ -142,6 +142,7 @@ export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 6;
 // Explicit audit rejections may revise a base-valid candidate, but the audit
 // itself must never create an unbounded completion loop.
 export const MAX_STANDARD_COMPLETION_RECOVERIES = 6;
+export const STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS = 2;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
@@ -2891,6 +2892,43 @@ class ThreadSessionRuntime {
           continue;
         }
 
+        const deferredExecutionPayload =
+          Boolean(decision.assistantMessage) && isDeferredExecutionPayload(decision.assistantMessage ?? "");
+        if (deferredExecutionPayload && assistantMessage) {
+          await retryDraft();
+          await this.services.emit({
+            type: "assistant.execution_output",
+            threadId: this.threadId,
+            payload: {
+              turnRunId: turn.id,
+              title: "待整理的模型执行输出",
+              content: assistantMessage
+            },
+            createdAt: new Date().toISOString()
+          });
+          await this.services.log("assistant.execution_output_deferred", this.threadId, {
+            turnRunId: turn.id,
+            contentLength: assistantMessage.length,
+            hasToolCalls: decision.toolCalls.length > 0,
+            endTurn: decision.endTurn
+          });
+          decision.assistantMessage = undefined;
+
+          if (decision.toolCalls.length === 0 && decision.endTurn) {
+            transcript.push({
+              role: "user",
+              content:
+                "The previous response was raw execution output and was hidden from the user. " +
+                "Use the verified tool results to produce a concise user-facing final answer now. " +
+                "Do not repeat tool payloads, JSON results, or internal execution text."
+            });
+            decision.endTurn = false;
+            decision.goalCompleted = false;
+            await retryDraft();
+            continue;
+          }
+        }
+
         if (
           this.#gpa.stage === "off" &&
           decision.toolCalls.length === 0 &&
@@ -2913,6 +2951,36 @@ class ThreadSessionRuntime {
               missingVerification: standardCompletion.missingVerification,
               missingRequestedDeliverable: standardCompletion.missingRequestedDeliverable
             });
+            if (shouldSwitchStandardCompletionToTextToolProtocol({
+              attempt: standardCompletionAttempts,
+              alreadyUsingTextToolProtocol: useTextToolProtocol,
+              result: standardCompletion
+            })) {
+              useTextToolProtocol = true;
+              standardCompletionAttempts = 0;
+              await this.services.log("turn.standard_completion_text_tool_fallback", this.threadId, {
+                turnRunId: turn.id,
+                modelId: model.id,
+                modelName: model.displayName,
+                providerId: provider.id,
+                reasons: standardCompletion.reasons
+              });
+              await this.services.emit({
+                type: "agent.retrying",
+                threadId: this.threadId,
+                payload: { attempt: 1, maxAttempts: 1, reason: "standard_completion_text_tool_fallback" },
+                createdAt: new Date().toISOString()
+              });
+              transcript.push({
+                role: "user",
+                content: buildStandardCompletionTextToolFallbackInstruction(standardCompletion)
+              });
+              await retryDraft();
+              decision.assistantMessage = undefined;
+              decision.endTurn = false;
+              decision.goalCompleted = false;
+              continue;
+            }
             if (standardCompletionAttempts >= MAX_STANDARD_COMPLETION_RECOVERIES) {
               throw new Error(
                 `Standard completion validation exhausted: ${standardCompletion.reasons.join(" ")}`
@@ -3306,43 +3374,6 @@ class ThreadSessionRuntime {
             continue;
           }
         }
-        const deferredExecutionPayload =
-          Boolean(decision.assistantMessage) && isDeferredExecutionPayload(decision.assistantMessage ?? "");
-        if (deferredExecutionPayload && assistantMessage) {
-          await retryDraft();
-          await this.services.emit({
-            type: "assistant.execution_output",
-            threadId: this.threadId,
-            payload: {
-              turnRunId: turn.id,
-              title: "待整理的模型执行输出",
-              content: assistantMessage
-            },
-            createdAt: new Date().toISOString()
-          });
-          await this.services.log("assistant.execution_output_deferred", this.threadId, {
-            turnRunId: turn.id,
-            contentLength: assistantMessage.length,
-            hasToolCalls: decision.toolCalls.length > 0,
-            endTurn: decision.endTurn
-          });
-          decision.assistantMessage = undefined;
-
-          if (decision.toolCalls.length === 0 && decision.endTurn) {
-            transcript.push({
-              role: "user",
-              content:
-                "The previous response was raw execution output and was hidden from the user. " +
-                "Use the verified tool results to produce a concise user-facing final answer now. " +
-                "Do not repeat tool payloads, JSON results, or internal execution text."
-            });
-            decision.endTurn = false;
-            decision.goalCompleted = false;
-            await retryDraft();
-            continue;
-          }
-        }
-
         const preservesGpaAnalysis =
           (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") &&
           decision.toolCalls.length === 1 &&
@@ -6313,6 +6344,32 @@ export function buildStandardCompletionRecoveryInstruction(
       : []),
     "Do not return a bare tool name or progress promise.",
     "Only end the turn with goal_completed true after the original request is delivered and verified."
+  ].join(" ");
+}
+
+export function shouldSwitchStandardCompletionToTextToolProtocol(input: {
+  attempt: number;
+  alreadyUsingTextToolProtocol: boolean;
+  result: StandardCompletionValidationResult;
+}): boolean {
+  return !input.alreadyUsingTextToolProtocol &&
+    input.attempt >= STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS &&
+    (input.result.missingDelivery || input.result.missingVerification);
+}
+
+export function buildStandardCompletionTextToolFallbackInstruction(
+  result: StandardCompletionValidationResult
+): string {
+  const requiredAction = result.missingDelivery
+    ? "Your next decision must contain exactly one apply_patch or fs.write_file call that performs the requested file change."
+    : "Your next decision must contain exactly one targeted fs.read_file, shell.exec, or other listed verification tool call.";
+  return [
+    "[Internal tool-call compatibility recovery. Do not display or quote this instruction to the user.]",
+    `The model repeatedly claimed completion without executable evidence: ${result.reasons.join(" ")}`,
+    "Native tool calling is now disabled for this turn. Return exactly one JSON decision envelope using the tool_calls array with complete arguments.",
+    requiredAction,
+    "Set end_turn and goal_completed to false. Do not return a final answer, progress report, bare tool name, patch text, or source code in assistant_message.",
+    "After the tool result arrives, continue the original task and obtain post-delivery verification before completing."
   ].join(" ");
 }
 

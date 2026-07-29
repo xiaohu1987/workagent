@@ -12058,6 +12058,51 @@ select:focus {
   height: 7px;
 }
 
+.message-user-content:not(.is-editing):has(.message-attachment-gallery) {
+  width: max-content;
+  max-width: min(520px, 72%);
+}
+
+.message-user-content:not(.is-editing):has(.message-attachment-gallery) .message-user-bubble {
+  width: max-content;
+  max-width: 100%;
+  padding: 6px;
+  gap: 0;
+  border-color: rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+}
+
+.message-user-content:not(.is-editing):has(.message-attachment-gallery) .message-user-text {
+  padding: 7px 9px 9px;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.message-user-content:not(.is-editing) .message-attachment-gallery {
+  align-self: flex-end;
+  width: auto;
+  max-width: 100%;
+  margin-top: 0;
+}
+
+.message-user-content:not(.is-editing) .message-attachment-gallery:not(.image-grid) .message-image-attachment {
+  width: min(240px, 100%);
+  max-width: 240px;
+}
+
+.message-user-content:not(.is-editing) .message-image-attachment {
+  max-height: 180px;
+  border-color: rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  background: rgba(10, 11, 14, 0.72);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
+}
+
+.message-user-content:not(.is-editing) .message-image-attachment img {
+  max-height: 180px;
+  background: transparent;
+}
+
 .message-user-bubble {
   position: relative;
   display: flex;
@@ -13592,6 +13637,11 @@ select:focus {
 
   .message-user-content {
     max-width: 88%;
+  }
+
+  .message-user-content:not(.is-editing):has(.message-attachment-gallery) {
+    width: max-content;
+    max-width: 94%;
   }
 
   .message-user-bubble {
