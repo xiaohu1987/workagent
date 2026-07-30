@@ -1020,7 +1020,10 @@ export class DesktopBackend {
     // MCP refresh) never delays visible message submission.
     void this.initializeDeferredServices();
     const thread = this.#db.getThread(threadId);
-    const isFirstThreadMessage = this.#db.listMessages(threadId).length === 0 && this.#db.listQueuedMessages(threadId).length === 0;
+    // Use COUNT instead of loading every message row just to test emptiness —
+    // listMessages materializes hundreds of large content/metadata rows
+    // synchronously on the main process for long conversations.
+    const isFirstThreadMessage = this.#db.countMessages(threadId) === 0 && this.#db.listQueuedMessages(threadId).length === 0;
     if (isFirstThreadMessage) {
       const updated = this.#db.updateThread(threadId, {
         title: buildThreadTitleFromFirstMessage(displayContent || content)
@@ -1844,6 +1847,7 @@ export class DesktopBackend {
     };
     this.#config.desktop = { ...normalized.desktop };
     this.#config.timeouts = { ...normalized.timeouts };
+    const previousMcpServers = this.#config.mcpServers;
     this.#config.mcpServers = normalized.mcpServers.map((server) => ({
       ...server,
       source: "config",
@@ -1863,8 +1867,14 @@ export class DesktopBackend {
       modelTimeoutRetries: this.#config.timeouts.modelTimeoutRetries,
       effective: "immediate"
     });
+    const selectionCache = new Map<string, Pick<ThreadRecord, "providerId" | "modelId">>();
     for (const thread of this.#db.listThreads()) {
-      const selection = resolveThreadModelSelection(this.#config, thread.providerId, thread.modelId);
+      const cacheKey = `${thread.providerId ?? ""}::${thread.modelId ?? ""}`;
+      let selection = selectionCache.get(cacheKey);
+      if (!selection) {
+        selection = resolveThreadModelSelection(this.#config, thread.providerId, thread.modelId);
+        selectionCache.set(cacheKey, selection);
+      }
       if (selection.providerId === thread.providerId && selection.modelId === thread.modelId) {
         continue;
       }
@@ -1877,8 +1887,14 @@ export class DesktopBackend {
         createdAt: new Date().toISOString()
       });
     }
-    await this.refreshMcpConfiguration();
-    await this.#mcp.refresh();
+    // Only rebuild MCP state when server definitions actually changed. Saving
+    // unrelated settings (timeouts, tone, multi-agent, ...) must not respawn MCP
+    // child processes — that blocked the IPC handler for seconds on Windows.
+    if (!areMcpServerConfigsEqual(previousMcpServers, this.#config.mcpServers)) {
+      await this.refreshMcpConfiguration(
+        mcpConnectionSettingsChanged(previousMcpServers, this.#config.mcpServers)
+      );
+    }
   }
 
   public async updateThreadModelSelection(
@@ -4362,6 +4378,52 @@ function resolveThreadModelSelection(
     providerId: normalized.defaultProvider,
     modelId: normalized.defaultModel
   };
+}
+
+/** Fields that affect the MCP manager's stored config (not necessarily the connection). */
+function mcpServerConfigShape(server: McpServerConfig): string {
+  return JSON.stringify({
+    id: server.id,
+    name: server.name ?? null,
+    command: server.command ?? null,
+    args: server.args ?? [],
+    env: server.env ?? {},
+    cwd: server.cwd ?? null,
+    url: server.url ?? null,
+    transport: server.transport ?? null,
+    auth: server.auth ?? null,
+    enabled: server.enabled !== false,
+    defaultToolsApprovalMode: server.defaultToolsApprovalMode ?? "prompt",
+    tools: server.tools ?? {}
+  });
+}
+
+function areMcpServerConfigsEqual(a: McpServerConfig[], b: McpServerConfig[]): boolean {
+  if (a.length !== b.length) return false;
+  const shapeOf = (list: McpServerConfig[]) =>
+    list.map((server) => ({ id: server.id, shape: mcpServerConfigShape(server) }))
+      .sort((x, y) => x.id.localeCompare(y.id));
+  return JSON.stringify(shapeOf(a)) === JSON.stringify(shapeOf(b));
+}
+
+/**
+ * Mirrors the fields McpManager's connectionFingerprint uses (plus `enabled`).
+ * When none of these change, existing connections stay valid and refresh() is a no-op.
+ */
+function mcpConnectionSettingsChanged(a: McpServerConfig[], b: McpServerConfig[]): boolean {
+  const connShape = (server: McpServerConfig) => JSON.stringify({
+    command: server.command ?? null,
+    args: server.args ?? [],
+    env: server.env ?? {},
+    cwd: server.cwd ?? null,
+    url: server.url ?? null,
+    transport: server.transport ?? null,
+    auth: server.auth ?? null,
+    enabled: server.enabled !== false
+  });
+  const previous = new Map(a.map((server) => [server.id, connShape(server)]));
+  if (previous.size !== b.length) return true;
+  return b.some((server) => previous.get(server.id) !== connShape(server));
 }
 
 export interface KnowledgeImportSummary {

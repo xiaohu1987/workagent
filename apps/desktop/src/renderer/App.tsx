@@ -1,4 +1,4 @@
-import { Fragment, createElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, createElement, memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
@@ -1834,9 +1834,14 @@ export function App() {
     if (!cached) return false;
     cacheThreadSnapshot(cached);
     snapshotThreadIdRef.current = threadId;
-    setSnapshot(cached);
-    setBrowserTabsByThread((current) => ({ ...current, [threadId]: cached.browserTabs }));
-    setIsThreadSwitching(false);
+    // Mount the cached transcript as a transition: the selection highlight and
+    // sidebar stay responsive while React renders the (potentially large)
+    // message list, and the render can be interrupted by a newer switch.
+    startTransition(() => {
+      setSnapshot(cached);
+      setBrowserTabsByThread((current) => ({ ...current, [threadId]: cached.browserTabs }));
+      setIsThreadSwitching(false);
+    });
     return true;
   }
 
@@ -3406,8 +3411,26 @@ export function App() {
   const showRuntimeActivityPanel = shouldShowRuntimeActivityPanel(
     isTaskProcessing
   );
-  const collapsedTurnIds = activeSnapshotThreadId ? collapsedConversationTurns[activeSnapshotThreadId] ?? new Set<string>() : new Set<string>();
   const latestConversationTurn = conversationTurnSections.at(-1) ?? null;
+  // Apply the default collapse synchronously on the very first render of a
+  // thread. Previously the default was written by the effect below, so the
+  // first paint after switching rendered EVERY turn expanded — full markdown
+  // parsing plus per-line hljs highlighting for the whole history — and only
+  // then collapsed. That first paint was the visible switch jank.
+  const collapsedTurnIds = useMemo(() => {
+    if (!activeSnapshotThreadId) return new Set<string>();
+    const stored = collapsedConversationTurns[activeSnapshotThreadId];
+    if (stored !== undefined || initializedConversationTurnsByThreadRef.current[activeSnapshotThreadId]) {
+      return stored ?? new Set<string>();
+    }
+    return new Set(
+      getDefaultCollapsedConversationTurnIds(
+        conversationTurnSections,
+        latestConversationTurn?.id ?? null,
+        isTaskProcessing
+      )
+    );
+  }, [activeSnapshotThreadId, collapsedConversationTurns, conversationTurnSections, latestConversationTurn?.id, isTaskProcessing]);
   useEffect(() => {
     if (!activeSnapshotThreadId) return;
     const initializedTurnIds = initializedConversationTurnsByThreadRef.current[activeSnapshotThreadId] ?? new Set<string>();
@@ -4096,10 +4119,13 @@ export function App() {
       cacheThreadSnapshot(mergedSnapshot);
       if (selectedThreadIdRef.current === threadId) {
         snapshotThreadIdRef.current = threadId;
-        setSnapshot(mergedSnapshot);
-      }
-      if (selectedThreadIdRef.current === threadId) {
-        setIsThreadSwitching(false);
+        // The merged snapshot can carry hundreds of messages; commit it as a
+        // transition so urgent interactions (clicks, another switch) are not
+        // blocked behind the transcript render.
+        startTransition(() => {
+          setSnapshot(mergedSnapshot);
+          setIsThreadSwitching(false);
+        });
       }
       setThreads((current) => current.map((thread) =>
         thread.id === next.thread.id ? next.thread : thread
@@ -4170,14 +4196,22 @@ export function App() {
       ...(pendingUserMessagesRef.current[threadId] ?? []),
       optimisticMessage
     ];
-    setSnapshot((current) => {
-      if (!current || current.thread.id !== threadId) {
-        return current;
-      }
-      return {
-        ...current,
-        messages: [...current.messages, optimisticMessage]
-      };
+    // The snapshot append forces the whole timeline derivation chain
+    // (visibleMessages -> timelineEntries -> turn sections -> ...) to recompute
+    // synchronously for long conversations. Mark it as a transition so the
+    // same-batch lightweight states (submission status, "正在理解任务"
+    // heartbeat) paint FIRST — the send click must never appear frozen while
+    // the message bubble render catches up.
+    startTransition(() => {
+      setSnapshot((current) => {
+        if (!current || current.thread.id !== threadId) {
+          return current;
+        }
+        return {
+          ...current,
+          messages: [...current.messages, optimisticMessage]
+        };
+      });
     });
     return optimisticMessage;
   }
@@ -5877,9 +5911,14 @@ export function App() {
         tone: "success"
       });
     }
-    await refreshConfig(preferredProviderId);
-    await refreshThreads();
-    await refreshMcpServers();
+    // Refresh in parallel, and skip the full conversation snapshot reload —
+    // saving settings never changes message contents, and the snapshot reload
+    // is the most expensive step for long conversations.
+    await Promise.all([
+      refreshConfig(preferredProviderId),
+      refreshThreads({ refreshSelectedSnapshot: false }),
+      refreshMcpServers()
+    ]);
   }
 
   function updateMcpServerDraft(id: string, patch: Partial<McpServerConfig>) {
@@ -18313,7 +18352,41 @@ function isOutcomeTranscriptMessage(message: MessageRecord) {
   return eventBlocks.some((block) => block.type !== "commentary");
 }
 
+// LRU cache for rendered markdown documents. Rendering a message is pure
+// (content -> element): parseMarkdownBlocks plus per-line hljs highlighting
+// are the dominant CPU cost when a long conversation mounts. Cached elements
+// are immutable descriptions, so sharing them across threads/mounts is safe —
+// component state (e.g. CopyTextButton) is scoped by React to each mount
+// position, not to the element object.
+const MARKDOWN_RENDER_CACHE_LIMIT = 300;
+const markdownRenderCache = new Map<string, ReactNode>();
+
 function renderMarkdownDocument(content: string, keyPrefix: string, className: string) {
+  if (!content) {
+    return null;
+  }
+  const cacheKey = `${className}${content}`;
+  const cached = markdownRenderCache.get(cacheKey);
+  if (cached !== undefined) {
+    // Refresh recency (LRU).
+    markdownRenderCache.delete(cacheKey);
+    markdownRenderCache.set(cacheKey, cached);
+    return cached;
+  }
+  // Block keys inside the cached subtree only need to be unique among their
+  // siblings, so a fixed prefix is safe for shared cached elements.
+  const rendered = renderMarkdownDocumentUncached(content, `mdc-${content.length}`, className);
+  markdownRenderCache.set(cacheKey, rendered);
+  if (markdownRenderCache.size > MARKDOWN_RENDER_CACHE_LIMIT) {
+    const oldestKey = markdownRenderCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      markdownRenderCache.delete(oldestKey);
+    }
+  }
+  return rendered;
+}
+
+function renderMarkdownDocumentUncached(content: string, keyPrefix: string, className: string) {
   const blocks = parseMarkdownBlocks(content);
   if (blocks.length === 0) {
     return null;

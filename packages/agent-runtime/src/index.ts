@@ -89,8 +89,11 @@ import {
   buildMultimodalInputRecognizeTranscript,
   buildMultimodalIntentClassifySystemPrompt,
   buildMultimodalIntentClassifyTranscript,
+  detectMultimodalIntent,
+  detectRequestedImageCount,
   hasRecognizableMultimodalAttachments,
   parseMultimodalIntentClassification,
+  stripThinkTags,
   type MultimodalIntentClassification
 } from "./multimodal-intent";
 import type { GpaStage, GpaState } from "@shared-types";
@@ -122,6 +125,8 @@ export {
 } from "./gpa-plan-file";
 export {
   detectMultimodalIntent,
+  detectRequestedImageCount,
+  stripThinkTags,
   parseMultimodalIntentClassification,
   buildMultimodalIntentClassifySystemPrompt,
   buildMultimodalIntentClassifyTranscript,
@@ -5082,6 +5087,25 @@ class ThreadSessionRuntime {
     turnId: string;
   }): Promise<MultimodalIntentClassification> {
     const fallback: MultimodalIntentClassification = { intent: "none", prompt: "", count: 1, parseOk: false };
+    // Rule-based fast path: explicit phrasing ("给我生成一张美女图片",
+    // "generate an image", ...) routes directly. This is deterministic,
+    // instant (skips a model round-trip), and immune to reasoning-style
+    // models whose <think> blocks otherwise poison the JSON classification
+    // output and silently drop image requests into the chat path.
+    const ruleIntent = detectMultimodalIntent(input.currentInput, input.attachments);
+    if (ruleIntent) {
+      const count = ruleIntent === "image" ? detectRequestedImageCount(input.currentInput) : 1;
+      await this.services.log("multimodal.intent_classify", this.threadId, {
+        turnRunId: input.turnId,
+        intent: ruleIntent,
+        count,
+        parseOk: true,
+        viaModel: false,
+        viaRule: true,
+        promptPreview: input.currentInput.trim().slice(0, 200)
+      });
+      return { intent: ruleIntent, prompt: input.currentInput.trim(), count, parseOk: true };
+    }
     try {
       const adapter = this.services.providerFactory.create(input.provider);
       const classifyAbort = createChildAbortController(input.abortController.signal);
@@ -5108,7 +5132,9 @@ class ThreadSessionRuntime {
         typeof decision.assistantMessage === "string" && decision.assistantMessage.trim()
           ? decision.assistantMessage
           : "";
-      const classification = parseMultimodalIntentClassification(raw);
+      // Reasoning-style models may wrap the JSON in a <think> block (or emit
+      // only an unterminated think block); strip it before parsing.
+      const classification = parseMultimodalIntentClassification(stripThinkTags(raw));
       await this.services.log("multimodal.intent_classify", this.threadId, {
         turnRunId: input.turnId,
         intent: classification.intent,

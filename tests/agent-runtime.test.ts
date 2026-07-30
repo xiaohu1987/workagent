@@ -120,6 +120,9 @@ import {
   shouldApplyToolExecutionTimeout,
   buildGpaPlanSequenceRecoveryInstruction,
   parseMultimodalIntentClassification,
+  detectMultimodalIntent,
+  detectRequestedImageCount,
+  stripThinkTags,
   buildMultimodalIntentClassifySystemPrompt,
   buildMultimodalIntentClassifyTranscript,
   applyMultimodalInputRecognitionToTranscript,
@@ -2665,6 +2668,41 @@ describe("multimodal intent classification", () => {
     expect(parseMultimodalIntentClassification(
       '{"intent":"video","prompt":"短片","count":3}'
     )).toMatchObject({ intent: "video", count: 1 });
+  });
+
+  it("strips <think> blocks from reasoning-model classification output", () => {
+    expect(stripThinkTags('<think>Let me think about this...</think>{"intent":"image","prompt":"美女图片"}'))
+      .toBe('{"intent":"image","prompt":"美女图片"}');
+    // Unterminated trailing think block (model rambled until token limit).
+    expect(stripThinkTags('<think>The user is asking me to generate a picture...'))
+      .toBe("");
+    expect(stripThinkTags("plain text without think tags")).toBe("plain text without think tags");
+    // After stripping, the JSON parses correctly.
+    expect(
+      parseMultimodalIntentClassification(
+        stripThinkTags('<think>I should classify this.</think>{"intent":"image","prompt":"一只猫"}')
+      )
+    ).toEqual({ intent: "image", prompt: "一只猫", count: 1, parseOk: true });
+  });
+
+  it("rule fast-path routes explicit generation phrasing to image/video", () => {
+    // The exact phrasing from the reported incident.
+    expect(detectMultimodalIntent("给我生成一张美女图片")).toBe("image");
+    expect(detectMultimodalIntent("帮我画一只猫")).toBe("image");
+    expect(detectMultimodalIntent("generate an image of a sunset")).toBe("image");
+    expect(detectMultimodalIntent("帮我生成一个视频")).toBe("video");
+    expect(detectMultimodalIntent("create a video of waves")).toBe("video");
+    // Ordinary chat must NOT route.
+    expect(detectMultimodalIntent("今天星期几")).toBeNull();
+    expect(detectMultimodalIntent("这张图的代码怎么实现")).toBeNull();
+  });
+
+  it("extracts requested image counts from phrasing for the rule path", () => {
+    expect(detectRequestedImageCount("给我生成一张美女图片")).toBe(1);
+    expect(detectRequestedImageCount("生成三张不同风格的图")).toBe(3);
+    expect(detectRequestedImageCount("画两张猫")).toBe(2);
+    expect(detectRequestedImageCount("generate 4 images of cities")).toBe(4);
+    expect(detectRequestedImageCount("帮我画一只猫")).toBe(1);
   });
 });
 

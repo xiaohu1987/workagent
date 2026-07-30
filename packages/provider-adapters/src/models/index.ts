@@ -6,6 +6,9 @@ import { grokCompat } from "./grok";
 import { glmCompat } from "./glm";
 import { qwenCompat } from "./qwen";
 import { senseNovaCompat } from "./sensenova";
+import { kimiCompat } from "./kimi";
+import { agnesCompat } from "./agnes";
+import { geminiCompat } from "./gemini";
 
 export type {
   ModelCompat,
@@ -28,6 +31,9 @@ export {
 export { glmCompat } from "./glm";
 export { qwenCompat } from "./qwen";
 export { senseNovaCompat } from "./sensenova";
+export { kimiCompat } from "./kimi";
+export { agnesCompat } from "./agnes";
+export { geminiCompat } from "./gemini";
 
 /**
  * Ordered registry. Non-GPT shells are listed first so a model whose id
@@ -40,6 +46,9 @@ const registry: readonly ModelCompat[] = [
   glmCompat,
   qwenCompat,
   senseNovaCompat,
+  kimiCompat,
+  agnesCompat,
+  geminiCompat,
   gptCompat
 ];
 
@@ -54,6 +63,9 @@ const registry: readonly ModelCompat[] = [
  *  - "glm-4.5"            -> glmCompat
  *  - "qwen-max"           -> qwenCompat
  *  - "SenseNova-5"        -> senseNovaCompat
+ *  - "kimi-k2" / "moonshot-v1-8k" -> kimiCompat
+ *  - "agnes-2.0-flash" / "agnes-video-v2.0" -> agnesCompat
+ *  - "gemini-2.5-flash" / "imagen-3.0" -> geminiCompat
  *  - "gpt-4o" / "o3-mini" -> gptCompat
  *  - "my-custom-model"    -> gptCompat (default)
  */

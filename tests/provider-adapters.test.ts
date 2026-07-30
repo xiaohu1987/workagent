@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, ProviderFactory, ProviderStreamIncompleteError, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, ProviderFactory, ProviderStreamIncompleteError, resolveModelCompat, stripThinkBlocks, stripThinkBlocksFromStream, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -157,6 +157,402 @@ describe("OpenAiCompatibleProvider", () => {
 
       expect(mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content).toContain("[Chinese output compatibility]");
     }
+  });
+
+  it("routes kimi/moonshot model ids to the kimi compat shell", () => {
+    expect(resolveModelCompat({ id: "kimi-k2-0711-preview", displayName: "Kimi K2" }).id).toBe("kimi");
+    expect(resolveModelCompat({ id: "moonshot-v1-8k", displayName: "Moonshot v1" }).id).toBe("kimi");
+    expect(resolveModelCompat({ id: "kimi-thinking-preview", displayName: "" }).id).toBe("kimi");
+    expect(resolveModelCompat({ id: "my-custom-model", displayName: "" }).id).toBe("gpt");
+  });
+
+  it("strips sampling params and raises the max_tokens floor for Kimi thinking models", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      model: {
+        id: "kimi-thinking-preview",
+        providerId: provider.id,
+        displayName: "Kimi Thinking",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: false,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.6,
+        defaultMaxOutputTokens: 4096
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    // Thinking models reject sampling fields and response_format (HTTP 400);
+    // the compat strips them before dispatch.
+    expect(request).not.toHaveProperty("temperature");
+    expect(request).not.toHaveProperty("top_p");
+    expect(request).not.toHaveProperty("response_format");
+    // Small output caps are raised to 8192 to avoid mid-stream truncation.
+    expect(request.max_tokens).toBe(8192);
+  });
+
+  it("keeps Kimi k2 non-envelope stream content visible", () => {
+    const compat = resolveModelCompat({ id: "kimi-k2-0711-preview", displayName: "Kimi K2" });
+    // Native-tool-call mode: content is natural language / code, not a decision
+    // envelope, so buffers starting with `{` must stream through verbatim.
+    expect(compat.extractVisibleStreamText('{"key": "value"}')).toBe('{"key": "value"}');
+    expect(compat.extractVisibleStreamText("```json\n{\"a\":1}\n```")).toBe("```json\n{\"a\":1}\n```");
+    // A real decision envelope still routes through the GPT envelope extractor.
+    const envelope = '{"assistant_message":"你好","tool_calls":[],"end_turn":true}';
+    expect(compat.extractVisibleStreamText(envelope)).toBe("你好");
+  });
+
+  it("keeps Chinese replies stable for Kimi after English tool context", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [
+        { role: "user", content: "请继续处理刚才的问题" },
+        { role: "tool", content: "English tool output" },
+        { role: "user", content: "continue" }
+      ],
+      availableTools: [],
+      model: {
+        id: "kimi-k2-0711-preview",
+        providerId: provider.id,
+        displayName: "Kimi K2",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider
+    });
+
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content).toContain("[Chinese output compatibility]");
+  });
+
+  it("routes agnes model ids to the agnes compat shell", () => {
+    expect(resolveModelCompat({ id: "agnes-2.0-flash", displayName: "Agnes 2.0 Flash" }).id).toBe("agnes");
+    expect(resolveModelCompat({ id: "agnes-image-2.1-flash", displayName: "" }).id).toBe("agnes");
+    expect(resolveModelCompat({ id: "agnes-video-v2.0", displayName: "" }).id).toBe("agnes");
+  });
+
+  it("injects chat_template_kwargs thinking and raises max_tokens for Agnes when effort is set", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "agnes-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      reasoningEffort: "high",
+      model: {
+        id: "agnes-2.0-flash",
+        providerId: provider.id,
+        displayName: "Agnes 2.0 Flash",
+        contextWindow: 256_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: true,
+        supportsReasoningSummary: true,
+        defaultMaxOutputTokens: 4096
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    // Thinking mode is enabled via the Agnes chat_template_kwargs extension.
+    expect(request.chat_template_kwargs).toEqual({ enable_thinking: true });
+    // Small output caps are raised to 8192 to avoid mid-stream truncation.
+    expect(request.max_tokens).toBe(8192);
+  });
+
+  it("leaves Agnes thinking mode off when no reasoning effort is set", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "agnes-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      model: {
+        id: "agnes-2.0-flash",
+        providerId: provider.id,
+        displayName: "Agnes 2.0 Flash",
+        contextWindow: 256_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: true,
+        supportsReasoningSummary: true
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request).not.toHaveProperty("chat_template_kwargs");
+  });
+
+  it("routes Agnes image generation without a top-level response_format", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      created: 1_755_000_000,
+      model: "agnes-image-2.1-flash",
+      data: [{ b64_json: Buffer.from("agnes-image").toString("base64") }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "agnes-gateway", type: "openai-compatible", baseUrl: "https://apihub.agnes-ai.com/v1", apiKey: "secret"
+    });
+    const result = await adapter.generateImage!({
+      model: {
+        id: "agnes-image-2.1-flash", providerId: "agnes-gateway", displayName: "Agnes Image 2.1", contextWindow: 128_000,
+        supportsStreaming: false, supportsToolCalling: false, supportsParallelToolCalls: false, supportsJsonOutput: false,
+        supportsMultimodalInput: true, supportsReasoningSummary: false
+      },
+      prompt: "a panda riding a bicycle"
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("https://apihub.agnes-ai.com/v1/images/generations", expect.objectContaining({ method: "POST" }));
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    // The Agnes gateway rejects a top-level response_format (HTTP 400); base64
+    // output is requested via return_base64 and size uses the tier value.
+    expect(body).toEqual({ model: "agnes-image-2.1-flash", prompt: "a panda riding a bicycle", size: "1K", return_base64: true });
+    expect(body).not.toHaveProperty("response_format");
+    expect(result).toMatchObject({ protocol: "agnes-images", responseModel: "agnes-image-2.1-flash" });
+  });
+
+  it("creates, polls and downloads an Agnes async video generation result", async () => {
+    const bytes = new Uint8Array([9, 8, 7, 6]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/videos") ) {
+        return new Response(JSON.stringify({ id: "task_123", task_id: "task_123", video_id: "vid_123", status: "queued" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.endsWith("/videos/task_123")) {
+        return new Response(
+          JSON.stringify({ status: "completed", progress: 100, metadata: { url: "https://cdn.agnes-ai.com/video.mp4" } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://cdn.agnes-ai.com/video.mp4") {
+        return new Response(bytes, { status: 200, headers: { "Content-Type": "video/mp4" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: TimerHandler) => {
+      if (typeof handler === "function") {
+        handler();
+      }
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+
+    try {
+      const adapter = new ProviderFactory().create({
+        id: "agnes-gateway", type: "openai-compatible", baseUrl: "https://apihub.agnes-ai.com/v1", apiKey: "secret"
+      });
+      const result = await adapter.generateVideo!({
+        model: {
+          id: "agnes-video-v2.0", providerId: "agnes-gateway", displayName: "Agnes Video v2.0", contextWindow: 128_000,
+          supportsStreaming: false, supportsToolCalling: false, supportsParallelToolCalls: false, supportsJsonOutput: false,
+          supportsMultimodalInput: false, supportsVideoGeneration: true, role: "video", supportsReasoningSummary: false
+        },
+        prompt: "waves crashing on a beach"
+      });
+
+      expect(Array.from(result.data)).toEqual(Array.from(bytes));
+      expect(fetchMock.mock.calls[0]?.[0]).toBe("https://apihub.agnes-ai.com/v1/videos");
+      const createInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+      // Documented standard settings: 121 frames @ 24fps with the 8n+1 rule.
+      expect(JSON.parse(String(createInit.body))).toEqual({
+        model: "agnes-video-v2.0",
+        prompt: "waves crashing on a beach",
+        width: 1152,
+        height: 768,
+        num_frames: 121,
+        frame_rate: 24
+      });
+      // Polls the legacy GET /v1/videos/{task_id} endpoint and resolves the
+      // final MP4 URL from the metadata.url branch.
+      expect(fetchMock.mock.calls[1]?.[0]).toBe("https://apihub.agnes-ai.com/v1/videos/task_123");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("routes gemini/imagen model ids to the gemini compat shell", () => {
+    expect(resolveModelCompat({ id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash" }).id).toBe("gemini");
+    expect(resolveModelCompat({ id: "gemini-2.5-flash-image", displayName: "" }).id).toBe("gemini");
+    expect(resolveModelCompat({ id: "imagen-3.0-generate-002", displayName: "" }).id).toBe("gemini");
+  });
+
+  it("passes reasoning_effort through for Gemini and raises the max_tokens floor", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "google-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      reasoningEffort: "high",
+      model: {
+        id: "gemini-2.5-flash",
+        providerId: provider.id,
+        displayName: "Gemini 2.5 Flash",
+        contextWindow: 1_000_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: true,
+        supportsReasoningSummary: true,
+        defaultMaxOutputTokens: 4096
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    // The GPT baseline only injects reasoning_effort for GPT reasoning models;
+    // the Gemini shell must pass it through explicitly.
+    expect(request.reasoning_effort).toBe("high");
+    // Small output caps are raised to 8192 to avoid mid-stream truncation.
+    expect(request.max_tokens).toBe(8192);
+  });
+
+  it("maps xhigh to high and keeps none for Gemini thinking control", () => {
+    const compat = resolveModelCompat({ id: "gemini-2.5-flash", displayName: "" });
+    const ctx = (reasoningEffort?: string) => ({
+      model: { id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash" },
+      input: { reasoningEffort, transcript: [{ role: "user", content: "hi" }] }
+    });
+    const base = { model: "gemini-2.5-flash", messages: [] };
+    expect(compat.normalizeRequestParams(ctx("xhigh") as never, { ...base })).toMatchObject({ reasoning_effort: "high" });
+    expect(compat.normalizeRequestParams(ctx("none") as never, { ...base })).toMatchObject({ reasoning_effort: "none" });
+    expect(compat.normalizeRequestParams(ctx("minimal") as never, { ...base })).toMatchObject({ reasoning_effort: "minimal" });
+    expect(compat.normalizeRequestParams(ctx(undefined) as never, { ...base })).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("generates Gemini images via the documented images/generations parameter set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      created: 1_755_000_000,
+      model: "gemini-2.5-flash-image",
+      data: [{ b64_json: Buffer.from("gemini-image").toString("base64") }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "google-gateway", type: "openai-compatible", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiKey: "secret"
+    });
+    const result = await adapter.generateImage!({
+      model: {
+        id: "gemini-2.5-flash-image", providerId: "google-gateway", displayName: "Gemini 2.5 Flash Image", contextWindow: 128_000,
+        supportsStreaming: false, supportsToolCalling: false, supportsParallelToolCalls: false, supportsJsonOutput: false,
+        supportsMultimodalInput: true, supportsReasoningSummary: false
+      },
+      prompt: "a lighthouse at dawn"
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://generativelanguage.googleapis.com/v1beta/openai/images/generations",
+      expect.objectContaining({ method: "POST" })
+    );
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    // Documented parameter set only: prompt/model/n/response_format — no size.
+    expect(body).toEqual({ model: "gemini-2.5-flash-image", prompt: "a lighthouse at dawn", n: 1, response_format: "b64_json" });
+    expect(result).toMatchObject({ protocol: "gemini-images", responseModel: "gemini-2.5-flash-image" });
+    expect(Buffer.from(result.data).toString()).toBe("gemini-image");
+  });
+
+  it("fails loudly when a chat-only Gemini model is used for image generation", async () => {
+    const fetchMock = vi.fn();
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "google-gateway", type: "openai-compatible", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiKey: "secret"
+    });
+
+    await expect(adapter.generateImage!({
+      model: {
+        id: "gemini-2.5-pro", providerId: "google-gateway", displayName: "Gemini 2.5 Pro", contextWindow: 1_000_000,
+        supportsStreaming: true, supportsToolCalling: true, supportsParallelToolCalls: true, supportsJsonOutput: true,
+        supportsMultimodalInput: true, supportsReasoningSummary: true
+      },
+      prompt: "a cat"
+    })).rejects.toThrow("不是图片生成模型");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  describe("reasoning <think> block compatibility", () => {
+    it("strips think blocks before parsing decisions", () => {
+      // Reasoning-style models wrap or precede the envelope with a think block.
+      const decision = parseDecisionFromText(
+        '<think>The user wants an image. I should call the tool.</think>{"assistant_message":"好的，正在生成","tool_calls":[],"end_turn":true,"goal_completed":true}'
+      );
+      expect(decision.assistantMessage).toBe("好的，正在生成");
+      expect(decision.isStructured).toBe(true);
+
+      // Plain-text reply preceded by reasoning.
+      const plain = parseDecisionFromText("<think>hmm</think>这是正文回复。");
+      expect(plain.assistantMessage).toBe("这是正文回复。");
+
+      // Only reasoning, no reply (token limit hit): no leaked think markup.
+      const onlyThink = parseDecisionFromText("<think>The user is asking me to generate a picture...");
+      expect(onlyThink.assistantMessage).not.toContain("<think>");
+      expect(onlyThink.assistantMessage).not.toContain("generate a picture");
+    });
+
+    it("suppresses think blocks in visible stream text", () => {
+      // Thinking in progress: nothing visible yet.
+      expect(extractVisibleStreamText("<think>Let me think")).toBe("");
+      // Closed think block followed by plain reply: only the reply streams.
+      expect(extractVisibleStreamText("<think>done</think>你好，这是回复")).toBe("你好，这是回复");
+      // Closed think block followed by a decision envelope: envelope extraction.
+      expect(extractVisibleStreamText('<think>done</think>{"assistant_message":"好","tool_calls":[]}')).toBe("好");
+      // No think content: untouched.
+      expect(extractVisibleStreamText("普通正文")).toBe("普通正文");
+    });
+
+    it("strips think blocks from pass-through stream text in compat shells", () => {
+      for (const id of ["deepseek-chat", "kimi-k2-0711-preview", "agnes-2.0-flash"]) {
+        const compat = resolveModelCompat({ id, displayName: "" });
+        // Pass-through branch (no envelope) must still hide reasoning.
+        expect(compat.extractVisibleStreamText("<think>reasoning</think>正文内容")).toBe("正文内容");
+        expect(compat.extractVisibleStreamText("<think>still thinking")).toBe("");
+      }
+    });
+
+    it("stripThinkBlocks handles closed and unterminated blocks", () => {
+      expect(stripThinkBlocks("<think>a</think>tail")).toBe("tail");
+      expect(stripThinkBlocks("pre<think>a</think>tail")).toBe("pretail");
+      expect(stripThinkBlocks("<think>unterminated")).toBe("");
+      expect(stripThinkBlocks("no think here")).toBe("no think here");
+      expect(stripThinkBlocksFromStream("<think>in progress")).toBe("");
+      expect(stripThinkBlocksFromStream("visible<think>in progress")).toBe("visible");
+    });
   });
 
   it("does not override an explicit non-Chinese language request for Qwen", async () => {
@@ -691,6 +1087,94 @@ describe("OpenAiCompatibleProvider", () => {
       model: "grok-imagine-image", prompt: "a cat in a library", n: 1
     });
     expect(result.protocol).toBe("grok-images");
+  });
+
+  it("keeps the default URL response for Grok images (b64_json breaks gateway relays with 502)", async () => {
+    // response_format: "b64_json" makes OpenAI-compatible relays proxy a large
+    // inline-base64 body and commonly fails with HTTP 502. The compat must
+    // keep the default URL response and download bytes in a second hop.
+    const bytes = new Uint8Array([5, 6, 7, 8]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/images/generations")) {
+        return new Response(JSON.stringify({
+          data: [{ url: "https://img.x.ai/tmp/cat.jpg" }]
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "https://img.x.ai/tmp/cat.jpg") {
+        return new Response(bytes, { status: 200, headers: { "Content-Type": "image/jpeg" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "xai", type: "openai-compatible", baseUrl: "https://api.x.ai/v1", apiKey: "secret"
+    });
+    const result = await adapter.generateImage!({
+      model: {
+        id: "grok-imagine-image-quality", providerId: "xai", displayName: "Grok Imagine", contextWindow: 128_000,
+        supportsStreaming: false, supportsToolCalling: false, supportsParallelToolCalls: false, supportsJsonOutput: false,
+        supportsMultimodalInput: true, supportsReasoningSummary: false
+      },
+      prompt: "a red panda"
+    });
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body).not.toHaveProperty("response_format");
+    // Second hop downloads the bytes from the temporary URL.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(Array.from(result.data)).toEqual(Array.from(bytes));
+    expect(result.mimeType).toBe("image/jpeg");
+  });
+
+  it("fails loudly when a non-image Grok model is used for image generation", async () => {
+    const fetchMock = vi.fn();
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "xai", type: "openai-compatible", baseUrl: "https://api.x.ai/v1", apiKey: "secret"
+    });
+
+    // grok-4 is a chat model; delegating it to the OpenAI SDK images path
+    // would let gateways silently remap the request to another vendor's
+    // image model. The compat must refuse instead.
+    await expect(adapter.generateImage!({
+      model: {
+        id: "grok-4", providerId: "xai", displayName: "Grok 4", contextWindow: 128_000,
+        supportsStreaming: true, supportsToolCalling: true, supportsParallelToolCalls: true, supportsJsonOutput: true,
+        supportsMultimodalInput: true, supportsReasoningSummary: true
+      },
+      prompt: "a cat"
+    })).rejects.toThrow("不是图片生成模型");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("treats a URL-shaped image result field as a download URL, not base64", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/images/generations")) {
+        return new Response(JSON.stringify({ result: "https://cdn.example/image.png" }), {
+          status: 200, headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url === "https://cdn.example/image.png") {
+        return new Response(bytes, { status: 200, headers: { "Content-Type": "image/png" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const adapter = new ProviderFactory({ fetch: fetchMock }).create({
+      id: "gateway", type: "openai-compatible", baseUrl: "https://gateway.example/v1", apiKey: "secret"
+    });
+    const result = await adapter.generateImage!({
+      model: {
+        id: "grok-imagine-image", providerId: "gateway", displayName: "Grok Imagine Image", contextWindow: 128_000,
+        supportsStreaming: false, supportsToolCalling: false, supportsParallelToolCalls: false, supportsJsonOutput: false,
+        supportsMultimodalInput: true, supportsReasoningSummary: false
+      },
+      prompt: "a dog"
+    });
+
+    // The URL in `result` must be downloaded, not base64-decoded into garbage.
+    expect(Array.from(result.data)).toEqual(Array.from(bytes));
+    expect(result.mimeType).toBe("image/png");
   });
 
   it("recognizes image model families from their configured model names", () => {

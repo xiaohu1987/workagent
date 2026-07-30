@@ -136,14 +136,26 @@ export const grokCompat = defineCompat(gptCompat, {
   resolveImageGeneration({ model, prompt }: ModelGenerationContext): ImageGenerationPlan {
     const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
     if (!identity.includes("image")) {
-      // Non-image grok models (grok-3, grok-4, ...) are not image generators.
-      // Delegate to the GPT baseline rather than forcing the grok-images
-      // protocol onto a chat model.
-      return gptCompat.resolveImageGeneration({ model, prompt });
+      // Non-image grok models (grok-3, grok-4, ...) are NOT image generators.
+      // Fail loudly instead of delegating to the GPT baseline: the baseline's
+      // OpenAI SDK path sends size/response_format, which xAI rejects with
+      // HTTP 400 — and OpenAI-compatible gateways in between often silently
+      // remap such requests to their own default image model (DALL-E, Flux,
+      // ...), returning an image that was never drawn by Grok.
+      throw new Error(
+        `模型「${model.displayName || model.id}」不是图片生成模型，无法用于生成图片。` +
+        `请到「设置 → 多模态」将默认图片模型切换为 Grok 的图片模型（如 grok-imagine-image-quality）后再试。`
+      );
     }
     // xAI image generation: POST /images/generations with model/prompt/n.
     // size/quality/style are NOT supported by xAI and are intentionally
-    // omitted (sending them triggers HTTP 400). Output is JPG.
+    // omitted (sending them triggers HTTP 400).
+    // NOTE: do NOT add response_format: "b64_json" here. Although xAI
+    // documents it, OpenAI-compatible gateway relays often fail proxying the
+    // large inline-base64 response body (upstream timeout / payload limits),
+    // surfacing as HTTP 502. The default short-lived URL response proxies
+    // fine because the gateway only forwards JSON and the client downloads
+    // the image bytes directly from the CDN.
     return {
       protocol: "grok-images",
       endpoint: "/images/generations",

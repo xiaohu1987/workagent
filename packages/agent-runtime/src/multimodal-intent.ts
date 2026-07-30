@@ -1,3 +1,4 @@
+import { stripThinkBlocks } from "@provider-adapters";
 import { modelJsonCandidates, tryParseModelJson } from "@shared-types";
 import type { MessageAttachment, MessageRole } from "@shared-types";
 
@@ -198,7 +199,22 @@ export function hasRecognizableMultimodalAttachments(attachments: MessageAttachm
   return attachments.some((attachment) => attachment.kind === "image" || attachment.kind === "file");
 }
 
-/** @deprecated Prefer model-based classification. Kept for debug/tests only. */
+/**
+ * Strip <think>...</think> reasoning blocks that reasoning-style models embed
+ * directly in message content. Delegates to the provider-adapter baseline so
+ * the classification path and the chat parse/stream paths share one
+ * implementation. Handles unterminated trailing blocks as well.
+ */
+export function stripThinkTags(text: string): string {
+  return stripThinkBlocks(text).trim();
+}
+
+/**
+ * Rule-based fast path for explicit image/video phrasing. Runs BEFORE the
+ * model-based classification: it is deterministic, instant (saves a model
+ * round-trip), and immune to reasoning-style models whose <think> blocks
+ * otherwise poison the JSON classification output.
+ */
 export function detectMultimodalIntent(
   input: string,
   attachments: MessageAttachment[] = []
@@ -211,4 +227,23 @@ export function detectMultimodalIntent(
     return "image";
   }
   return null;
+}
+
+/**
+ * Best-effort extraction of a requested image count from Chinese/English
+ * phrasing ("三张图", "2 images", ...), clamped to the 1–4 range the
+ * generation pipeline supports. Defaults to 1.
+ */
+export function detectRequestedImageCount(input: string): number {
+  const text = input.trim();
+  const digitMatch = text.match(/([1-4])\s*(?:张|幅|个|条|份|images?|pictures?|photos?)/i);
+  if (digitMatch) {
+    return Number(digitMatch[1]);
+  }
+  const cnMatch = text.match(/([一两三四])\s*(?:张|幅|个|条|份)/);
+  if (cnMatch) {
+    const map: Record<string, number> = { 一: 1, 两: 2, 三: 3, 四: 4 };
+    return map[cnMatch[1]] ?? 1;
+  }
+  return 1;
 }

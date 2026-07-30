@@ -40,6 +40,8 @@ export type ImageGenerationProtocol =
   | "gpt-image-api"
   | "gpt-responses"
   | "grok-images"
+  | "agnes-images"
+  | "gemini-images"
   | "openai-compatible";
 
 /**

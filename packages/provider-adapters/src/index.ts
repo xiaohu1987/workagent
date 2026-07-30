@@ -29,7 +29,10 @@ export {
   grokCompat,
   glmCompat,
   qwenCompat,
-  senseNovaCompat
+  senseNovaCompat,
+  kimiCompat,
+  agnesCompat,
+  geminiCompat
 } from "./models";
 export type {
   ModelCompat,
@@ -659,18 +662,20 @@ export function parseOpenAiCompatibleResponse(
       arguments: parseNativeToolArguments(call.function.arguments)
     }];
   }) ?? [];
+  // Strip <think> reasoning blocks once here so every downstream path
+  // (native tool calls, native text, decision parsing) sees clean content.
+  const content = stripThinkBlocks(message?.content?.trim() || "").trim();
   if (nativeCalls.length > 0) {
     return withTokenUsage({
-      assistantMessage: message?.content?.trim() || undefined,
+      assistantMessage: content || undefined,
       toolCalls: nativeCalls,
       endTurn: false,
       goalCompleted: false,
       isStructured: true
     }, response.usage);
   }
-  const text = message?.content?.trim() || "";
   return withTokenUsage(
-    hasNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
+    hasNativeTools ? nativeTextDecision(content) : parseDecisionFromText(content),
     response.usage
   );
 }
@@ -1116,6 +1121,15 @@ function extractGeneratedVideoPayload(payload: Record<string, unknown>): { url?:
     return extractGeneratedVideoPayload(data as Record<string, unknown>);
   }
 
+  // Agnes-style completion payloads carry the MP4 URL in `metadata.url`.
+  const metadata = payload.metadata;
+  if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+    const nested = extractGeneratedVideoPayload(metadata as Record<string, unknown>);
+    if (nested) {
+      return nested;
+    }
+  }
+
   return null;
 }
 
@@ -1132,6 +1146,12 @@ function extractGeneratedImagePayload(payload: Record<string, unknown>): { url?:
 
   const result = readString(payload.result);
   if (result) {
+    // Some gateways return the image as a URL inside `result` rather than
+    // base64; decoding a URL as base64 would yield corrupted bytes that
+    // surface as a broken/wrong image artifact downstream.
+    if (/^https?:\/\//i.test(result)) {
+      return { url: result, mimeType: readString(payload.output_format) ?? undefined };
+    }
     return { b64: result, mimeType: readString(payload.output_format) ?? "image/png" };
   }
 
@@ -1620,10 +1640,44 @@ function mergeAdjacentProviderMessages(messages: any[], contentKey: "content" | 
   return merged;
 }
 
+/**
+ * Strip <think>...</think> reasoning blocks that reasoning-style models embed
+ * directly in content (DeepSeek-R1-class models behind gateways, QwQ, relay
+ * mappings that merge reasoning into content). Handles unterminated trailing
+ * blocks (model hit the token limit mid-thought). Shared baseline behavior:
+ * every compat shell inherits it through the baseline parse/extract hooks.
+ */
+export function stripThinkBlocks(text: string): string {
+  return text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
+}
+
+/**
+ * Streaming variant of stripThinkBlocks. While a <think> block is still open
+ * the buffered reasoning yields nothing visible (only pre-think text, which
+ * is normally empty since reasoning comes first); once closed, the remainder
+ * is surfaced. Compat shells that pass native-tool-call content through
+ * verbatim should run it through this helper first.
+ */
+export function stripThinkBlocksFromStream(text: string): string {
+  const thinkStart = text.search(/<think>/i);
+  if (thinkStart === -1) {
+    return text;
+  }
+  const thinkEnd = text.search(/<\/think>/i);
+  if (thinkEnd === -1 || thinkEnd < thinkStart) {
+    return text.slice(0, thinkStart);
+  }
+  return text.slice(0, thinkStart) + text.slice(thinkEnd + "</think>".length);
+}
+
 export function parseDecisionFromText(text: string): ProviderTurnDecision {
-  const taggedToolCalls = tryParseTaggedToolCalls(text);
+  // Reasoning-style models may wrap or precede the payload with a <think>
+  // block; strip it before any protocol parsing so neither the envelope
+  // extractor nor the visible-text fallback ever surfaces reasoning.
+  const content = stripThinkBlocks(text);
+  const taggedToolCalls = tryParseTaggedToolCalls(content);
   if (taggedToolCalls) {
-    const assistantMessage = stripTaggedToolCalls(text).trim();
+    const assistantMessage = stripTaggedToolCalls(content).trim();
     return {
       assistantMessage: assistantMessage || undefined,
       toolCalls: taggedToolCalls.map((call) => ({
@@ -1636,7 +1690,7 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
     };
   }
 
-  const embeddedUserInput = tryParseStandaloneRequestUserInput(text);
+  const embeddedUserInput = tryParseStandaloneRequestUserInput(content);
   if (embeddedUserInput) {
     return {
       assistantMessage: embeddedUserInput.cleanedContent || undefined,
@@ -1654,7 +1708,7 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
     };
   }
 
-  const parsed = tryParseJsonDecision(text);
+  const parsed = tryParseJsonDecision(content);
   if (parsed) {
     return {
       assistantMessage: typeof parsed.assistant_message === "string" ? parsed.assistant_message : undefined,
@@ -1683,7 +1737,7 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
   }
 
   return {
-    assistantMessage: text || "模型未返回结构化结果。",
+    assistantMessage: content.trim() || "模型未返回结构化结果。",
     toolCalls: [],
     endTurn: false,
     goalCompleted: false,
@@ -1743,7 +1797,10 @@ function parseCompletionEvidence(
 }
 
 export function extractVisibleStreamText(text: string): string {
-  const match = text.match(/"assistant_message"\s*:\s*"((?:\\.|[^"\\])*)/s);
+  // Reasoning-style models stream <think> blocks inline: suppress them (while
+  // open, nothing is visible; once closed, only the remainder is evaluated).
+  const visible = stripThinkBlocksFromStream(text);
+  const match = visible.match(/"assistant_message"\s*:\s*"((?:\\.|[^"\\])*)/s);
   if (match?.[1]) {
     try {
       return JSON.parse(`"${match[1]}"`);
@@ -1756,10 +1813,10 @@ export function extractVisibleStreamText(text: string): string {
     }
   }
 
-  const trimmed = text.trimStart();
+  const trimmed = visible.trimStart();
   // Suppress structured protocol payloads until their assistant_message can be decoded.
   if (trimmed.startsWith("{") || trimmed.startsWith("<")) return "";
-  return text;
+  return visible;
 }
 
 function parseClarification(value: unknown): ProviderTurnDecision["clarification"] | undefined {
