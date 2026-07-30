@@ -66,6 +66,7 @@ import type {
   UserInputPrompt
 } from "@shared-types";
 import { DEFAULT_RESPONSE_TONE, DEFAULT_RUNTIME_TIMEOUTS, GPT_REASONING_EFFORTS, createEmptyTokenUsage, isConfigurableGptReasoningModel, withGptReasoningCapabilities } from "@shared-types";
+import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../packages/provider-adapters/src/models/media-protocol";
 import {
   canDeleteThread,
   getComposerPrimaryActionState,
@@ -9075,6 +9076,7 @@ export function App() {
                                   options={PROVIDER_TYPE_OPTIONS}
                                   placeholder="选择接口协议"
                                 />
+                                <small className="settings-field-hint">仅决定聊天与推理模型的请求格式；图片/视频模型始终使用模型自身的生成协议，且要求供应商为 OpenAI 兼容接口</small>
                               </label>
 
                               <label className="settings-field">
@@ -9128,12 +9130,27 @@ export function App() {
 
                               <div className="provider-model-box">
                                 {settingsProviderModels.length > 0 ? (
-                                  settingsProviderModels.map((model) => (
+                                  settingsProviderModels.map((model) => {
+                                    const isMediaModel = model.role === "image" || model.role === "video";
+                                    const mediaUnsupported = isMediaModel && !providerSupportsMediaGeneration(settingsProvider.type);
+                                    return (
                                     <div key={model.id} className="provider-model-row">
                                       <div className="provider-model-copy">
                                         <strong>{model.id}</strong>
                                         {model.displayName !== model.id ? <span>{model.displayName}</span> : null}
-                                        {modelTestResults[getModelProfileKey(settingsProvider.id, model.id)] ? (
+                                        {isMediaModel ? (
+                                          <span
+                                            className={`model-media-tag ${model.role === "image" ? "is-image" : "is-video"}${mediaUnsupported ? " is-unsupported" : ""}`}
+                                            title={mediaUnsupported
+                                              ? "当前供应商的接口协议没有图片/视频生成实现，请改用 OpenAI 兼容接口的供应商。"
+                                              : "图片/视频模型不走上方接口协议，按模型自身的生成协议调用。"}
+                                          >
+                                            {mediaUnsupported
+                                              ? `当前协议不支持${model.role === "image" ? "图片" : "视频"}生成`
+                                              : `${model.role === "image" ? "图片模型" : "视频模型"} · ${IMAGE_GENERATION_PROTOCOL_LABELS[imageGenerationProtocolForModel(model)]}`}
+                                          </span>
+                                        ) : null}
+                                        {!isMediaModel && modelTestResults[getModelProfileKey(settingsProvider.id, model.id)] ? (
                                           <span className="model-test-result">
                                             延迟 {formatLatency(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].latencyMs)}
                                             <i aria-hidden="true">·</i>
@@ -9142,6 +9159,7 @@ export function App() {
                                             {formatTokensPerSecond(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].tokensPerSecond)}
                                           </span>
                                         ) : null}
+                                        {!isMediaModel ? (
                                         <span
                                           className={`model-agent-capability ${model.agentCapability ?? "unknown"}`}
                                           title={
@@ -9158,8 +9176,10 @@ export function App() {
                                               ? "仅聊天"
                                               : "未验证 Agent"}
                                         </span>
+                                        ) : null}
                                       </div>
                                       <div className="provider-model-actions">
+                                        {!isMediaModel ? (
                                         <label className="model-context-window-field" title="模型上下文窗口，单位为 tokens">
                                           <span>上下文</span>
                                           <input
@@ -9172,6 +9192,7 @@ export function App() {
                                             })}
                                           />
                                         </label>
+                                        ) : null}
                                         <label className="model-capability-toggle" title="启用后，此模型可以接收文件、文件夹和图片附件。">
                                           <input
                                             type="checkbox"
@@ -9182,7 +9203,7 @@ export function App() {
                                           />
                                           <span>支持多模态</span>
                                         </label>
-                                        {(() => {
+                                        {!isMediaModel ? (() => {
                                           const isTesting = testingModelKey === getModelProfileKey(settingsProvider.id, model.id);
                                           return (
                                             <button
@@ -9197,7 +9218,7 @@ export function App() {
                                               </span>
                                             </button>
                                           );
-                                        })()}
+                                        })() : null}
                                         <button
                                           className="settings-icon-button"
                                           onClick={() => removeModel(settingsProvider.id, model.id)}
@@ -9207,7 +9228,8 @@ export function App() {
                                         </button>
                                       </div>
                                     </div>
-                                  ))
+                                    );
+                                  })
                                 ) : (
                                   <div className="provider-empty-state">
                                     当前供应商还没有模型，先在下方添加一个模型即可。
@@ -9326,6 +9348,7 @@ export function App() {
                                   : configDraft.defaultProvider === model.providerId &&
                                     configDraft.defaultModel === model.id;
                                 const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
+                                const mediaUnsupported = Boolean(kind) && !providerSupportsMediaGeneration(provider?.type ?? "");
                                 return (
                                   <div key={modelKey(model.providerId, model.id)} className="provider-model-row multimodal-list-row">
                                     <div className="provider-model-copy multimodal-list-main">
@@ -9335,11 +9358,16 @@ export function App() {
                                       {isDefault ? <em className="mm-tag is-default">默认</em> : null}
                                       {model.supportsMultimodalInput ? <em className="mm-tag is-mm">多模态</em> : null}
                                       {model.supportsVideoGeneration ? <em className="mm-tag is-video">视频</em> : null}
+                                      {mediaUnsupported ? (
+                                        <em className="mm-tag is-unsupported" title="该供应商的接口协议没有图片/视频生成实现，请改用 OpenAI 兼容接口的供应商。">协议不支持</em>
+                                      ) : null}
                                     </div>
                                     <div className="provider-model-actions">
                                       {!isDefault ? (
                                         <button
                                           className="settings-mini-button"
+                                          disabled={mediaUnsupported}
+                                          title={mediaUnsupported ? "该供应商协议不支持媒体生成，无法设为默认" : undefined}
                                           onClick={() => kind
                                             ? setMultimodalDefault(kind, model.providerId, model.id)
                                             : setReasoningDefault(model.providerId, model.id)}

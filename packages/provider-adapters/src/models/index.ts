@@ -34,6 +34,11 @@ export { senseNovaCompat } from "./sensenova";
 export { kimiCompat } from "./kimi";
 export { agnesCompat } from "./agnes";
 export { geminiCompat } from "./gemini";
+export {
+  imageGenerationProtocolForModel,
+  providerSupportsMediaGeneration,
+  IMAGE_GENERATION_PROTOCOL_LABELS
+} from "./media-protocol";
 
 /**
  * Ordered registry. Non-GPT shells are listed first so a model whose id

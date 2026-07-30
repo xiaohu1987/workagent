@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, ProviderFactory, ProviderStreamIncompleteError, resolveModelCompat, stripThinkBlocks, stripThinkBlocksFromStream, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderStreamIncompleteError, resolveModelCompat, stripThinkBlocks, stripThinkBlocksFromStream, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -1181,6 +1181,15 @@ describe("OpenAiCompatibleProvider", () => {
     expect(imageGenerationProtocolForModel({ id: "gpt-image-2", displayName: "GPT Image 2" })).toBe("gpt-image-api");
     expect(imageGenerationProtocolForModel({ id: "gpt-5.6", displayName: "GPT-5.6" })).toBe("gpt-responses");
     expect(imageGenerationProtocolForModel({ id: "grok-imagine-image", displayName: "Grok Imagine Image" })).toBe("grok-images");
+  });
+
+  it("flags which provider protocols implement media generation", () => {
+    for (const type of ["openai-compatible", "openrouter", "ollama", "vllm", "gateway"]) {
+      expect(providerSupportsMediaGeneration(type)).toBe(true);
+    }
+    for (const type of ["anthropic", "gemini", "mock", "unknown-protocol"]) {
+      expect(providerSupportsMediaGeneration(type)).toBe(false);
+    }
   });
 
   it("uses chat completions for openai-compatible providers", async () => {

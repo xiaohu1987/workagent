@@ -6317,6 +6317,36 @@ select:focus {
 .model-agent-capability.verified { color: #78d69c !important; }
 .model-agent-capability.unsupported { color: #efad81 !important; }
 
+.model-media-tag {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 3px;
+  padding: 1px 8px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 11px;
+}
+.model-media-tag.is-image {
+  border-color: rgba(113, 171, 255, 0.36);
+  color: #9ec5ff;
+  background: rgba(74, 139, 217, 0.14);
+}
+.model-media-tag.is-video {
+  border-color: rgba(176, 134, 255, 0.36);
+  color: #c4a8ff;
+  background: rgba(148, 108, 230, 0.14);
+}
+.model-media-tag.is-unsupported {
+  border-color: rgba(239, 173, 129, 0.42);
+  color: #efad81;
+  background: rgba(239, 173, 129, 0.12);
+}
+.mm-tag.is-unsupported {
+  border-color: rgba(239, 173, 129, 0.42);
+  color: #efad81;
+  background: rgba(239, 173, 129, 0.12);
+}
+
 .update-settings-panel {
   gap: 16px;
 }
@@ -16126,8 +16156,7 @@ body.panel-resizing {
   padding: 0 8px;
 }
 .general-subagent-settings-grid .settings-field .composer-select { flex: 1 1 140px; min-width: 0; }
-.general-subagent-settings-grid .settings-field-hint {
-  flex: 1 1 100%;
+.settings-field-hint {
   color: var(--text-faint);
   font-size: 11px;
   font-weight: 400;
@@ -16135,6 +16164,7 @@ body.panel-resizing {
   letter-spacing: 0;
   text-transform: none;
 }
+.general-subagent-settings-grid .settings-field-hint { flex: 1 1 100%; }
 .general-permission-field .memory-switch { flex: 0 0 auto; min-height: 36px; }
 
 .memory-list-heading {

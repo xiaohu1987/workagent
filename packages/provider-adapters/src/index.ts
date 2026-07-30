@@ -1040,13 +1040,7 @@ function normalizeProviderBaseUrl(baseUrl: string | undefined): string | null {
   return baseUrl.trim().replace(/\/$/, "");
 }
 
-export function imageGenerationProtocolForModel(model: Pick<ModelProfile, "id" | "displayName">): ImageGenerationProtocol {
-  const identity = `${model.id} ${model.displayName}`.toLowerCase();
-  if (/\bgpt-image(?:[-_]|\b)/.test(identity)) return "gpt-image-api";
-  if (/\bgpt-5(?:[._-]|\b)/.test(identity)) return "gpt-responses";
-  if (/\bgrok(?:[-_][a-z0-9]+)*[-_]imagine[-_]image\b/.test(identity)) return "grok-images";
-  return "openai-compatible";
-}
+export { imageGenerationProtocolForModel, providerSupportsMediaGeneration, IMAGE_GENERATION_PROTOCOL_LABELS } from "./models/media-protocol";
 
 async function readJsonResponse(response: Response, label: string): Promise<Record<string, unknown>> {
   const text = await response.text();
