@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { DatabaseService } from "../apps/desktop/src/main/storage";
+import { DatabaseService, defaultConfig, loadConfig, saveConfig } from "../apps/desktop/src/main/storage";
 
 const databases: DatabaseService[] = [];
 const directories: string[] = [];
@@ -295,5 +295,28 @@ describe("multi-agent thread storage", () => {
       gpaStateJson: JSON.stringify({ fullAccess: true }),
       multiAgentMode: "proactive"
     });
+  });
+
+  it("keeps saved multi-agent settings instead of reverting to defaults", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-multi-agent-config-test-"));
+    directories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    const config = defaultConfig();
+    config.multiAgent = {
+      defaultMode: "disabled",
+      maxConcurrentSubagents: 6,
+      maxSubagentsPerRoot: 3,
+      maxDepth: 2,
+      childWritePolicy: "read-only",
+      defaultContextFork: "recent",
+      defaultModelId: "mock-codexh",
+      defaultProviderId: "mock",
+      defaultReasoningEffort: "high"
+    };
+
+    await saveConfig(configFile, config);
+    const loaded = await loadConfig(configFile);
+
+    expect(loaded.multiAgent).toEqual(config.multiAgent);
   });
 });

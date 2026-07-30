@@ -47,7 +47,7 @@ function normalizeMultiAgentSettings(value?: Partial<MultiAgentSettings> | null)
     return Math.min(maximum, Math.max(minimum, numeric));
   };
   return {
-    defaultMode: "proactive",
+    defaultMode: source.defaultMode === "disabled" ? "disabled" : "proactive",
     // This is the total Codex-style worker budget, including the root agent.
     maxConcurrentSubagents: clamp(source.maxConcurrentSubagents, 4, 2, 8),
     maxSubagentsPerRoot: clamp(source.maxSubagentsPerRoot, 8, 1, 16),

@@ -1847,6 +1847,9 @@ export class DesktopBackend {
     };
     this.#config.desktop = { ...normalized.desktop };
     this.#config.timeouts = { ...normalized.timeouts };
+    this.#config.multiAgent = { ...normalized.multiAgent };
+    this.#config.selfImprovement = { ...normalized.selfImprovement };
+    this.#config.projectExecutionPolicies = normalized.projectExecutionPolicies;
     const previousMcpServers = this.#config.mcpServers;
     this.#config.mcpServers = normalized.mcpServers.map((server) => ({
       ...server,
@@ -4270,7 +4273,7 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     timeouts: normalizeRuntimeTimeouts(config.timeouts),
     multiAgent: {
-      defaultMode: "proactive",
+      defaultMode: config.multiAgent?.defaultMode === "disabled" ? "disabled" : "proactive",
       maxConcurrentSubagents: Math.min(8, Math.max(2, Math.round(config.multiAgent?.maxConcurrentSubagents ?? fallback.multiAgent.maxConcurrentSubagents))),
       maxSubagentsPerRoot: Math.min(16, Math.max(1, Math.round(config.multiAgent?.maxSubagentsPerRoot ?? fallback.multiAgent.maxSubagentsPerRoot))),
       maxDepth: Math.min(6, Math.max(1, Math.round(config.multiAgent?.maxDepth ?? fallback.multiAgent.maxDepth))),
