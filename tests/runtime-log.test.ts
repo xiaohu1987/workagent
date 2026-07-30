@@ -71,4 +71,24 @@ describe("RuntimeLogWriter", () => {
     expect((await fs.stat(path.join(logsDir, "runtime.jsonl"))).size).toBeLessThanOrEqual(1024);
     expect((await fs.stat(path.join(sessionsDir, "thread-1.jsonl"))).size).toBeLessThanOrEqual(1024);
   });
+
+  it("reports disk usage and clears all files in the log directory", async () => {
+    const logsDir = await makeTempDir();
+    const writer = new RuntimeLogWriter(logsDir);
+    await writer.append("runtime.event", { message: "before clear" }, "thread-1");
+    await fs.writeFile(path.join(logsDir, "legacy.log"), "legacy output", "utf8");
+
+    const before = await writer.getStats();
+    expect(before.fileCount).toBe(3);
+    expect(before.bytes).toBeGreaterThan(0);
+
+    await writer.append("runtime.event", { message: "queued before clear" }, "thread-2");
+    const cleared = await writer.clear();
+    expect(cleared.fileCount).toBe(4);
+    expect(cleared.bytes).toBeGreaterThanOrEqual(before.bytes);
+    expect(await writer.getStats()).toEqual({ bytes: 0, fileCount: 0 });
+
+    await writer.append("runtime.event", { message: "after clear" }, "thread-3");
+    expect((await writer.getStats()).fileCount).toBe(2);
+  });
 });

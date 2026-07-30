@@ -110,6 +110,14 @@ type ApplicationBackgroundMetadata = {
   settings: unknown;
 };
 
+async function getFileSize(filePath: string): Promise<number> {
+  const stats = await fs.stat(filePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  return stats?.size ?? 0;
+}
+
 type LegacyApplicationBackgroundMetadata = {
   version: 1;
   mimeType: string;
@@ -1727,6 +1735,28 @@ export class DesktopBackend {
     return { cacheDir: this.#layout.cacheDir, logsDir: this.#layout.logsDir };
   }
 
+  public async getRuntimeLogStats() {
+    const runtime = await this.#logs.getStats();
+    const sqliteWalBytes = await getFileSize(`${this.#layout.dbFile}-wal`);
+    return {
+      bytes: runtime.bytes + sqliteWalBytes,
+      fileCount: runtime.fileCount + (sqliteWalBytes > 0 ? 1 : 0)
+    };
+  }
+
+  public async clearRuntimeLogs() {
+    const sqliteWalFile = `${this.#layout.dbFile}-wal`;
+    const sqliteWalBytesBefore = await getFileSize(sqliteWalFile);
+    const runtime = await this.#logs.clear();
+    this.#db.checkpointWriteAheadLog();
+    const sqliteWalBytesAfter = await getFileSize(sqliteWalFile);
+    const sqliteWalBytesCleared = Math.max(0, sqliteWalBytesBefore - sqliteWalBytesAfter);
+    return {
+      bytes: runtime.bytes + sqliteWalBytesCleared,
+      fileCount: runtime.fileCount + (sqliteWalBytesCleared > 0 ? 1 : 0)
+    };
+  }
+
   public appendRuntimeLog(kind: string, payload: Record<string, unknown>): Promise<void> {
     return this.#logs.append(kind, payload);
   }
@@ -3050,6 +3080,10 @@ export class DesktopBackend {
 
   public clearErrorSolutions(modelId?: string | null): number {
     return this.#db.clearErrorSolutions(modelId);
+  }
+
+  public clearSelfImprovementMemories(): number {
+    return this.#db.clearSelfImprovementMemories();
   }
 
   public listSelfImprovementMemories(input: { projectId?: string | null; limit?: number; all?: boolean } = {}) {

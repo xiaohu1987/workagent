@@ -558,6 +558,10 @@ export class DatabaseService {
     this.#db.close();
   }
 
+  public checkpointWriteAheadLog(): void {
+    this.#db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  }
+
   private bootstrap(): void {
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS threads (
@@ -2376,6 +2380,23 @@ export class DatabaseService {
     this.#db.exec("DELETE FROM error_solution_fts;");
     this.#db.exec("DELETE FROM error_solutions;");
     return count;
+  }
+
+  public clearSelfImprovementMemories(): number {
+    const selfImprovementRow = this.#db.prepare("SELECT COUNT(*) AS count FROM self_improvement_memories").get() as { count?: number } | undefined;
+    const selfImprovement = Number(selfImprovementRow?.count ?? 0);
+    this.#db.exec("BEGIN IMMEDIATE;");
+    try {
+      this.#db.exec(`
+        DELETE FROM self_improvement_memory_fts;
+        DELETE FROM self_improvement_memories;
+      `);
+      this.#db.exec("COMMIT;");
+    } catch (error) {
+      this.#db.exec("ROLLBACK;");
+      throw error;
+    }
+    return selfImprovement;
   }
 
   public upsertSelfImprovementMemory(

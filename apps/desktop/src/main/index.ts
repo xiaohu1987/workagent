@@ -337,6 +337,8 @@ function registerIpc(): void {
     backend.saveApplicationBackgroundSettings(settings)
   );
   ipcMain.handle("appearance:background:clear", () => backend.clearApplicationBackgrounds());
+  ipcMain.handle("logs:stats", () => backend.getRuntimeLogStats());
+  ipcMain.handle("logs:clear", () => backend.clearRuntimeLogs());
   ipcMain.handle("threads:list", () => backend.listThreads());
   ipcMain.handle("threads:token-usage", (_event, threadId: string) => backend.getThreadTokenUsage(threadId));
   ipcMain.handle("usage-analytics:get", (_event, input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) =>
@@ -597,6 +599,7 @@ function registerIpc(): void {
   );
   ipcMain.handle("error-solutions:delete", (_event, id: string) => backend.deleteErrorSolution(id));
   ipcMain.handle("error-solutions:clear", (_event, modelId?: string | null) => backend.clearErrorSolutions(modelId));
+  ipcMain.handle("self-improvement:clear", () => backend.clearSelfImprovementMemories());
   ipcMain.handle("self-improvement:list", (_event, input?: { projectId?: string | null; limit?: number; all?: boolean }) =>
     backend.listSelfImprovementMemories(input ?? {})
   );

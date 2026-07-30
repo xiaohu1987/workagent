@@ -1284,6 +1284,54 @@ pre {
   font-size: 12px;
 }
 
+.log-cleanup-button {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.log-cleanup-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.log-cleanup-settings .section-copy-with-action > div {
+  min-width: 0;
+}
+
+.log-cleanup-status {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-height: 28px;
+  padding-top: 2px;
+}
+
+.log-cleanup-status span,
+.log-cleanup-status em {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.log-cleanup-status strong {
+  color: var(--text-main);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+@media (max-width: 620px) {
+  .log-cleanup-settings .section-copy-with-action {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .log-cleanup-status {
+    flex-wrap: wrap;
+  }
+}
+
 .settings-field {
   display: grid;
   gap: 8px;
@@ -16118,6 +16166,10 @@ body.panel-resizing {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.memory-toolbar-actions {
+  flex-wrap: wrap;
 }
 
 .memory-filter-field {

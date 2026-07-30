@@ -978,6 +978,12 @@ export function App() {
   const [errorSolutionModelFilter, setErrorSolutionModelFilter] = useState<string>("all");
   const [isClearErrorSolutionsConfirmOpen, setIsClearErrorSolutionsConfirmOpen] = useState(false);
   const [isClearingErrorSolutions, setIsClearingErrorSolutions] = useState(false);
+  const [isClearSelfImprovementConfirmOpen, setIsClearSelfImprovementConfirmOpen] = useState(false);
+  const [isClearingSelfImprovement, setIsClearingSelfImprovement] = useState(false);
+  const [runtimeLogStats, setRuntimeLogStats] = useState<{ bytes: number; fileCount: number } | null>(null);
+  const [isRuntimeLogStatsLoading, setIsRuntimeLogStatsLoading] = useState(false);
+  const [isClearLogsConfirmOpen, setIsClearLogsConfirmOpen] = useState(false);
+  const [isClearingLogs, setIsClearingLogs] = useState(false);
   const [expandedErrorSolutionIds, setExpandedErrorSolutionIds] = useState<Set<string>>(() => new Set());
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<Record<string, KnowledgeDocumentRecord[]>>({});
   const [knowledgeBusyId, setKnowledgeBusyId] = useState<string | null>(null);
@@ -3031,7 +3037,7 @@ export function App() {
   }, [filePreviewPath, selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
       return;
     }
 
@@ -3077,6 +3083,16 @@ export function App() {
           return;
         }
 
+        if (isClearSelfImprovementConfirmOpen && !isClearingSelfImprovement) {
+          setIsClearSelfImprovementConfirmOpen(false);
+          return;
+        }
+
+        if (isClearLogsConfirmOpen && !isClearingLogs) {
+          setIsClearLogsConfirmOpen(false);
+          return;
+        }
+
         if (historyThreadDeleteConfirmation && !deletingThreadId) {
           setHistoryThreadDeleteConfirmation(null);
           return;
@@ -3103,7 +3119,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isHelpOpen, isProjectCreateOpen, isQuickNotesOpen, isSettingsOpen, notice, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
+  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isQuickNotesOpen, isSettingsOpen, notice, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
 
   useEffect(() => {
     if (!notice || isNoticeHovered) {
@@ -5629,6 +5645,22 @@ export function App() {
     }
   }
 
+  async function confirmClearSelfImprovementMemories() {
+    if (isClearingSelfImprovement) return;
+    setIsClearingSelfImprovement(true);
+    try {
+      const cleared = await window.codexh.clearSelfImprovementMemories();
+      setSelfImprovementMemories([]);
+      setSelfImprovementMemoryPage(0);
+      setIsClearSelfImprovementConfirmOpen(false);
+      showNotice(cleared > 0 ? `已清空 ${cleared} 条记忆` : "记忆已清空", { tone: "success" });
+    } catch (error) {
+      showNotice("清空记忆失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsClearingSelfImprovement(false);
+    }
+  }
+
   function toggleErrorSolutionExpanded(id: string) {
     setExpandedErrorSolutionIds((current) => {
       const next = new Set(current);
@@ -7083,6 +7115,44 @@ export function App() {
     if (isSettingsOpen && settingsTab === "usage") void refreshUsageStatistics();
   }, [isSettingsOpen, settingsTab, usageStatisticsRangeDays, usageStatisticsGranularity]);
 
+  async function refreshRuntimeLogStats() {
+    setIsRuntimeLogStatsLoading(true);
+    try {
+      setRuntimeLogStats(await window.codexh.getRuntimeLogStats());
+    } catch (error) {
+      showNotice("读取日志占用失败。", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setIsRuntimeLogStatsLoading(false);
+    }
+  }
+
+  async function confirmClearRuntimeLogs() {
+    if (isClearingLogs) return;
+    setIsClearingLogs(true);
+    try {
+      const cleared = await window.codexh.clearRuntimeLogs();
+      setRuntimeLogStats({ bytes: 0, fileCount: 0 });
+      setIsClearLogsConfirmOpen(false);
+      showNotice(cleared.bytes > 0 ? "日志已清理。" : "当前没有可清理的日志。", {
+        message: cleared.bytes > 0 ? `已释放 ${formatStorageBytes(cleared.bytes)} 磁盘空间。` : undefined,
+        tone: "success"
+      });
+      await refreshRuntimeLogStats();
+    } catch (error) {
+      showNotice("清理日志失败。", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setIsClearingLogs(false);
+    }
+  }
+
+  useEffect(() => {
+    if (isSettingsOpen && settingsTab === "timeouts") void refreshRuntimeLogStats();
+  }, [isSettingsOpen, settingsTab]);
+
   const historySearchPresence = useMotionPresence(isHistorySearchOpen ? true : null);
   const settingsPresence = useMotionPresence(isSettingsOpen ? true : null, 220);
   const projectCreatePresence = useMotionPresence(isProjectCreateOpen ? true : null);
@@ -7100,6 +7170,8 @@ export function App() {
   const visibleManagedRemoval = managedRemoval ?? managedRemovalPresence.value;
   const clearChatConfirmPresence = useMotionPresence(isClearChatConfirmOpen ? true : null);
   const clearErrorSolutionsConfirmPresence = useMotionPresence(isClearErrorSolutionsConfirmOpen ? true : null);
+  const clearSelfImprovementConfirmPresence = useMotionPresence(isClearSelfImprovementConfirmOpen ? true : null);
+  const clearLogsConfirmPresence = useMotionPresence(isClearLogsConfirmOpen ? true : null);
   const fetchedModelsPresence = useMotionPresence(showFetchedModels ? true : null);
   const multimodalPickerPresence = useMotionPresence(multimodalPickerRole);
   const visibleMultimodalPickerRole = multimodalPickerRole ?? multimodalPickerPresence.value;
@@ -9376,6 +9448,28 @@ export function App() {
                         <span className="subtle-inline">图片生成与视频下载没有固定超时，只会在任务被取消时中断。</span>
                         <button className="button warm" onClick={() => void saveConfigDraft()}>保存</button>
                       </div>
+                      <div className="config-block log-cleanup-settings">
+                        <div className="section-copy section-copy-with-action">
+                          <div>
+                            <strong>日志与存储</strong>
+                            <span>清理应用运行日志，并安全回收 SQLite WAL 事务日志；聊天、项目和知识库数据不会被删除。</span>
+                          </div>
+                          <button
+                            className="button ghost log-cleanup-button"
+                            type="button"
+                            disabled={isRuntimeLogStatsLoading || isClearingLogs || runtimeLogStats?.bytes === 0}
+                            onClick={() => setIsClearLogsConfirmOpen(true)}
+                          >
+                            <IconTrash />
+                            <span>{isClearingLogs ? "清理中" : "清理日志"}</span>
+                          </button>
+                        </div>
+                        <div className="log-cleanup-status" aria-live="polite">
+                          <span>当前占用</span>
+                          <strong>{isRuntimeLogStatsLoading && !runtimeLogStats ? "统计中..." : formatStorageBytes(runtimeLogStats?.bytes ?? 0)}</strong>
+                          {runtimeLogStats ? <em>{runtimeLogStats.fileCount} 个日志文件</em> : null}
+                        </div>
+                      </div>
                     </>
                   ) : <div className="config-block"><div className="detail-empty">正在加载超时配置...</div></div>}
                 </div>
@@ -9651,6 +9745,7 @@ export function App() {
                         <div className="memory-toolbar-actions">
                           <span className="memory-count-pill">{selfImprovementMemories.length} 条记录</span>
                           <button className="button ghost" type="button" onClick={() => void refreshSelfImprovementNow()} disabled={isRefreshingSelfImprovementMemories}><IconRefresh /><span>{isRefreshingSelfImprovementMemories ? "处理中" : "立即提炼"}</span></button>
+                          <button className="button ghost" type="button" onClick={() => setIsClearSelfImprovementConfirmOpen(true)} disabled={selfImprovementMemories.length === 0 || isClearingSelfImprovement}><IconTrash /><span>清空记忆</span></button>
                           <button className="button ghost" type="button" onClick={() => void saveConfigDraft()}><span>保存设置</span></button>
                         </div>
                       </div>
@@ -11023,6 +11118,58 @@ export function App() {
         </div>
       ) : null}
 
+      {clearLogsConfirmPresence.value ? (
+        <div
+          className="project-sheet-overlay motion-overlay"
+          data-motion={clearLogsConfirmPresence.phase}
+        >
+          <div
+            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="clear-logs-confirm-title"
+          >
+            <div className="project-sheet-header delete-confirm-header">
+              <button
+                className="project-sheet-close"
+                type="button"
+                onClick={() => setIsClearLogsConfirmOpen(false)}
+                title="关闭"
+                aria-label="关闭"
+                disabled={isClearingLogs}
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
+              <strong id="clear-logs-confirm-title">清理日志？</strong>
+              <p>
+                将删除约 {formatStorageBytes(runtimeLogStats?.bytes ?? 0)} 的应用运行日志并回收 SQLite WAL。
+                此操作不会删除聊天、项目文件或知识库数据。
+              </p>
+            </div>
+            <div className="project-sheet-actions">
+              <button
+                className="button ghost"
+                type="button"
+                disabled={isClearingLogs}
+                onClick={() => setIsClearLogsConfirmOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                className="button clear-chat-danger"
+                type="button"
+                disabled={isClearingLogs}
+                onClick={() => void confirmClearRuntimeLogs()}
+              >
+                {isClearingLogs ? "正在清理..." : "确认清理"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {clearChatConfirmPresence.value ? (
         <div
           className="project-sheet-overlay motion-overlay"
@@ -11072,6 +11219,55 @@ export function App() {
         </div>
       ) : null}
 
+      {clearSelfImprovementConfirmPresence.value ? (
+        <div
+          className="project-sheet-overlay motion-overlay"
+          data-motion={clearSelfImprovementConfirmPresence.phase}
+        >
+          <div
+            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="clear-self-improvement-confirm-title"
+          >
+            <div className="project-sheet-header delete-confirm-header">
+              <button
+                className="project-sheet-close"
+                type="button"
+                onClick={() => setIsClearSelfImprovementConfirmOpen(false)}
+                title="关闭"
+                aria-label="关闭"
+                disabled={isClearingSelfImprovement}
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
+              <strong id="clear-self-improvement-confirm-title">清空全部记忆？</strong>
+              <p>将删除全部 {selfImprovementMemories.length} 条任务经验，且无法恢复。错误记忆、聊天、项目和知识库不会受到影响。</p>
+            </div>
+            <div className="project-sheet-actions">
+              <button
+                className="button ghost"
+                type="button"
+                disabled={isClearingSelfImprovement}
+                onClick={() => setIsClearSelfImprovementConfirmOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                className="button clear-chat-danger"
+                type="button"
+                disabled={isClearingSelfImprovement}
+                onClick={() => void confirmClearSelfImprovementMemories()}
+              >
+                {isClearingSelfImprovement ? "正在清空..." : "确认清空"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {clearErrorSolutionsConfirmPresence.value ? (
         <div
           className="project-sheet-overlay motion-overlay"
@@ -11097,11 +11293,11 @@ export function App() {
             </div>
             <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
               <strong id="clear-error-solutions-confirm-title">
-                {errorSolutionModelFilter === "all" ? "清空全部记忆？" : "清空当前模型记忆？"}
+                {errorSolutionModelFilter === "all" ? "清空全部错误记忆？" : "清空当前模型错误记忆？"}
               </strong>
               <p>
                 {errorSolutionModelFilter === "all"
-                  ? `将删除全部 ${errorSolutions.length} 条错误恢复经验，且无法恢复。之后 Agent 遇到同类失败时需要重新学习。`
+                  ? `将删除全部 ${errorSolutions.length} 条错误记忆，且无法恢复。任务经验和其他数据不会受到影响。`
                   : `将删除模型“${resolveErrorSolutionModelLabel(errorSolutionModelFilter)}”的 ${errorSolutions.length} 条记忆，其他模型的记忆会保留。`}
               </p>
             </div>
@@ -18078,6 +18274,11 @@ function getGpaTaskProgress(message: MessageRecord): GpaTaskProgress | null {
 function formatUpdateDownloadSize(receivedBytes?: number, totalBytes?: number): string {
   const received = formatByteSize(receivedBytes ?? 0);
   return totalBytes && totalBytes > 0 ? `${received} / ${formatByteSize(totalBytes)}` : `${received} 已下载`;
+}
+
+function formatStorageBytes(bytes: number): string {
+  if (bytes < 1024 * 1024 * 1024) return formatByteSize(bytes);
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function formatByteSize(bytes: number): string {

@@ -15,6 +15,8 @@ const api = {
   saveApplicationBackgroundSettings: (settings: unknown) =>
     ipcRenderer.invoke("appearance:background:save-settings", settings),
   clearApplicationBackground: () => ipcRenderer.invoke("appearance:background:clear"),
+  getRuntimeLogStats: () => ipcRenderer.invoke("logs:stats"),
+  clearRuntimeLogs: () => ipcRenderer.invoke("logs:clear"),
   setGlobalReasoningEffort: (reasoningEffort: import("@shared-types").GptReasoningEffort) =>
     ipcRenderer.invoke("config:set-reasoning-effort", reasoningEffort),
   listThreads: () => ipcRenderer.invoke("threads:list"),
@@ -188,6 +190,7 @@ const api = {
     ipcRenderer.invoke("error-solutions:list", input),
   deleteErrorSolution: (id: string) => ipcRenderer.invoke("error-solutions:delete", id),
   clearErrorSolutions: (modelId?: string | null) => ipcRenderer.invoke("error-solutions:clear", modelId),
+  clearSelfImprovementMemories: () => ipcRenderer.invoke("self-improvement:clear"),
   listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean }) =>
     ipcRenderer.invoke("self-improvement:list", input),
   deleteSelfImprovementMemory: (id: string) => ipcRenderer.invoke("self-improvement:delete", id),

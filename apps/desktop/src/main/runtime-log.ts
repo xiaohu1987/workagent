@@ -9,6 +9,11 @@ export interface RuntimeLogLimits {
   sessionBytes: number;
 }
 
+export interface RuntimeLogStats {
+  bytes: number;
+  fileCount: number;
+}
+
 export class RuntimeLogWriter {
   #tail: Promise<void> = Promise.resolve();
   readonly #limits: RuntimeLogLimits;
@@ -64,6 +69,56 @@ export class RuntimeLogWriter {
       });
     return this.#tail;
   }
+
+  public getStats(): Promise<RuntimeLogStats> {
+    const operation = this.#tail.then(() => summarizeDirectory(this.logsDir));
+    this.#tail = operation.then(
+      () => undefined,
+      (error) => console.error("[runtime-log] Failed to inspect log files", error)
+    );
+    return operation;
+  }
+
+  public clear(): Promise<RuntimeLogStats> {
+    const operation = this.#tail.then(async () => {
+      const stats = await summarizeDirectory(this.logsDir);
+      const entries = await fs.readdir(this.logsDir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      await Promise.all(entries.map((entry) =>
+        fs.rm(path.join(this.logsDir, entry.name), { recursive: true, force: true })
+      ));
+      await fs.mkdir(path.join(this.logsDir, "sessions"), { recursive: true });
+      return stats;
+    });
+    this.#tail = operation.then(
+      () => undefined,
+      (error) => console.error("[runtime-log] Failed to clear log files", error)
+    );
+    return operation;
+  }
+}
+
+async function summarizeDirectory(directory: string): Promise<RuntimeLogStats> {
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const totals = await Promise.all(entries.map(async (entry) => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return summarizeDirectory(target);
+    if (!entry.isFile()) return { bytes: 0, fileCount: 0 };
+    const stats = await fs.stat(target);
+    return { bytes: stats.size, fileCount: 1 };
+  }));
+  return totals.reduce<RuntimeLogStats>(
+    (summary, current) => ({
+      bytes: summary.bytes + current.bytes,
+      fileCount: summary.fileCount + current.fileCount
+    }),
+    { bytes: 0, fileCount: 0 }
+  );
 }
 
 async function trimJsonlFile(filePath: string, maximumBytes: number): Promise<void> {

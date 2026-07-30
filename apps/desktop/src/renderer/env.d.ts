@@ -40,6 +40,8 @@ declare global {
       }) => Promise<void>;
       saveApplicationBackgroundSettings: (settings: unknown) => Promise<void>;
       clearApplicationBackground: () => Promise<void>;
+      getRuntimeLogStats: () => Promise<{ bytes: number; fileCount: number }>;
+      clearRuntimeLogs: () => Promise<{ bytes: number; fileCount: number }>;
       listThreads: () => Promise<any[]>;
       getThreadTokenUsage: (threadId: string) => Promise<{
         turn: import("@shared-types").TokenUsage;
@@ -216,6 +218,7 @@ declare global {
       listErrorSolutions: (input?: { limit?: number; modelId?: string | null }) => Promise<any[]>;
       deleteErrorSolution: (id: string) => Promise<void>;
       clearErrorSolutions: (modelId?: string | null) => Promise<number>;
+      clearSelfImprovementMemories: () => Promise<number>;
       listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean }) => Promise<any[]>;
       deleteSelfImprovementMemory: (id: string) => Promise<void>;
       refreshSelfImprovementMemories: () => Promise<{ processed: number; pruned: number }>;
