@@ -8971,30 +8971,37 @@ export function App() {
                             options={subagentDefaultModelOptions}
                             placeholder="选择默认模型"
                           />
+                          <small className="settings-field-hint">不指定时，子智能体沿用创建它的主任务所用模型</small>
                         </label>
                         <label className="settings-field">
                           <span>总并发（含主智能体）</span>
                           <input type="number" min="2" max="8" value={configDraft.multiAgent.maxConcurrentSubagents} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxConcurrentSubagents: Number(event.target.value) || 4 } } : current)} />
+                          <small className="settings-field-hint">2–8 · 同时运行的智能体总数（含主智能体），超出的子任务排队</small>
                         </label>
                         <label className="settings-field">
                           <span>每次任务上限</span>
                           <input type="number" min="1" max="16" value={configDraft.multiAgent.maxSubagentsPerRoot} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxSubagentsPerRoot: Number(event.target.value) || 8 } } : current)} />
+                          <small className="settings-field-hint">1–16 · 单个主任务最多可委派的子智能体总数</small>
                         </label>
                         <label className="settings-field">
                           <span>最大层级</span>
                           <input type="number" min="1" max="6" value={configDraft.multiAgent.maxDepth} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxDepth: Number(event.target.value) || 3 } } : current)} />
+                          <small className="settings-field-hint">1–6 · 允许主 → 子 → 孙嵌套委派的最大深度</small>
                         </label>
                         <label className="settings-field">
                           <span>默认上下文</span>
                           <ComposerSelect className="form-select" ariaLabel="子智能体默认上下文" value={configDraft.multiAgent.defaultContextFork ?? "all"} onChange={(value) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, defaultContextFork: value === "none" || value === "recent" ? value : "all" } } : current)} options={[{ value: "all", label: "全部上下文" }, { value: "recent", label: "最近 6 条" }, { value: "none", label: "不继承" }]} placeholder="选择上下文" />
+                          <small className="settings-field-hint">创建时从父任务继承的对话历史量，越少越省 token</small>
                         </label>
                         <label className="settings-field">
                           <span>默认推理强度</span>
                           <ComposerSelect className="form-select" ariaLabel="子智能体默认推理强度" value={configDraft.multiAgent.defaultReasoningEffort ?? "medium"} onChange={(value) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, defaultReasoningEffort: value === "low" || value === "high" ? value : "medium" } } : current)} options={[{ value: "low", label: "低" }, { value: "medium", label: "中" }, { value: "high", label: "高" }]} placeholder="选择推理强度" />
+                          <small className="settings-field-hint">越高推理越深入，但更慢、成本更高</small>
                         </label>
                         <div className="settings-field general-permission-field">
                           <span>执行权限</span>
                           <label className="memory-switch"><input type="checkbox" checked={configDraft.multiAgent.childWritePolicy !== "read-only"} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, childWritePolicy: event.target.checked ? "inherit" : "read-only" } } : current)} /> <span>继承父任务权限</span></label>
+                          <small className="settings-field-hint">取消勾选后子智能体为只读，只能分析、不能修改工作区</small>
                         </div>
                       </div>
                       <div className="settings-save-row"><span className="subtle-inline">更改仅影响后续创建的子智能体。</span><button className="button warm" type="button" onClick={() => void saveConfigDraft()}>保存</button></div>
