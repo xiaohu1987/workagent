@@ -1,0 +1,445 @@
+.fc-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.fc-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.fc-required {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #ff5c5c;
+}
+
+.fc-control {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease);
+}
+
+.fc-control::placeholder {
+  color: var(--text-faint);
+}
+
+.fc-control:hover:not(:disabled):not(:focus) {
+  border-color: var(--border-strong);
+}
+
+.fc-control:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(66, 165, 255, 0.18);
+}
+
+.fc-control:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.fc-control[aria-invalid="true"] {
+  border-color: rgba(255, 92, 92, 0.65);
+}
+
+.fc-control[aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 2px rgba(255, 92, 92, 0.16);
+}
+
+.fc-textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.fc-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.fc-error {
+  color: #ff8f8f;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.fc-help {
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Password */
+
+.fc-password {
+  position: relative;
+}
+
+.fc-password .fc-control {
+  padding-right: 38px;
+}
+
+.fc-password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease);
+}
+
+.fc-password-toggle:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.fc-password-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.fc-password-toggle svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+/* Select */
+
+.fc-select {
+  position: relative;
+}
+
+.fc-select .fc-control {
+  padding-right: 30px;
+  appearance: none;
+  cursor: pointer;
+}
+
+.fc-select-caret {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  pointer-events: none;
+  stroke: var(--text-muted);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  transform: translateY(-50%);
+}
+
+/* Radio / Checkbox */
+
+.fc-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.fc-choice {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.fc-choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.fc-choice-box {
+  display: grid;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  background: rgba(255, 255, 255, 0.03);
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
+}
+
+.fc-choice-radio {
+  border-radius: 50%;
+}
+
+.fc-choice-checkbox {
+  border-radius: 5px;
+}
+
+.fc-choice-checkbox svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  opacity: 0;
+  stroke: #ffffff;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.6;
+  transform: scale(0.6);
+  transition:
+    opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+.fc-choice-radio::after {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--blue);
+  content: "";
+  opacity: 0;
+  transform: scale(0.5);
+  transition:
+    opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+.fc-choice input:checked + .fc-choice-radio {
+  border-color: var(--blue);
+}
+
+.fc-choice input:checked + .fc-choice-radio::after {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.fc-choice input:checked + .fc-choice-checkbox {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+
+.fc-choice input:checked + .fc-choice-checkbox svg {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.fc-choice input:focus-visible + .fc-choice-box {
+  box-shadow: 0 0 0 2px rgba(66, 165, 255, 0.18);
+}
+
+.fc-choice input:disabled ~ .fc-choice-label,
+.fc-choice input:disabled + .fc-choice-box {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.fc-choice-label {
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* Switch */
+
+.fc-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
+}
+
+.fc-switch-knob {
+  position: absolute;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition:
+    transform var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease);
+}
+
+.fc-switch.is-on {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+
+.fc-switch.is-on .fc-switch-knob {
+  background: #ffffff;
+  transform: translateX(16px);
+}
+
+.fc-switch:focus-visible {
+  box-shadow: 0 0 0 2px rgba(66, 165, 255, 0.18);
+  outline: none;
+}
+
+.fc-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* KeyValue editor */
+
+.fc-kv {
+  display: grid;
+  gap: 8px;
+}
+
+.fc-kv-rows {
+  display: grid;
+  gap: 6px;
+}
+
+.fc-kv-row {
+  display: grid;
+  align-items: center;
+  gap: 6px;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) 28px;
+}
+
+.fc-kv-remove {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
+}
+
+.fc-kv-remove:hover:not(:disabled) {
+  border-color: rgba(255, 92, 92, 0.4);
+  color: #ff8f8f;
+  background: rgba(255, 92, 92, 0.1);
+}
+
+.fc-kv-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.fc-kv-remove svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+.fc-kv-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 28px;
+  padding: 0 10px;
+  gap: 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease);
+}
+
+.fc-kv-add:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: rgba(66, 165, 255, 0.06);
+}
+
+.fc-kv-add:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.fc-kv-add svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+/* Date / Time */
+
+.fc-control[type="date"],
+.fc-control[type="time"] {
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fc-control,
+  .fc-choice-box,
+  .fc-choice-checkbox svg,
+  .fc-choice-radio::after,
+  .fc-switch,
+  .fc-switch-knob,
+  .fc-password-toggle,
+  .fc-kv-add,
+  .fc-kv-remove {
+    transition: none;
+  }
+}

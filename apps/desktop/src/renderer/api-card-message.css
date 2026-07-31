@@ -1,0 +1,435 @@
+.api-card {
+  width: 100%;
+  margin: 16px 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-card);
+}
+
+.api-card-header {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 8px 8px 12px;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.api-card-heading {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 2px;
+}
+
+.api-card-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-card-description {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-card-method {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.api-card-method.is-get {
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 15%, transparent);
+}
+
+.api-card-method.is-post {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+}
+
+.api-card-method.is-put {
+  color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 16%, transparent);
+}
+
+.api-card-method.is-patch {
+  color: var(--violet, #b86cff);
+  background: color-mix(in srgb, var(--violet, #b86cff) 15%, transparent);
+}
+
+.api-card-method.is-delete {
+  color: #ff5c5c;
+  background: rgba(255, 92, 92, 0.13);
+}
+
+.api-card-collapse {
+  display: grid;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
+}
+
+.api-card-collapse:hover {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--surface-card-hover);
+}
+
+.api-card-collapse svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  transition: transform var(--motion-fast) var(--motion-ease);
+}
+
+.api-card-collapse svg.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.api-card-body {
+  display: grid;
+  padding: 12px;
+  gap: 14px;
+  animation: api-card-fade-in var(--motion-base) var(--motion-ease) both;
+}
+
+.api-card-endpoint {
+  overflow: hidden;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.02);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-card-auth {
+  display: grid;
+  padding: 10px 12px;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--orange) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--orange) 7%, transparent);
+}
+
+.api-card-auth-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--orange);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.api-card-auth-title svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.api-card-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.api-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.api-card-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 16px;
+  gap: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+.api-card-button.is-primary {
+  border-color: var(--blue);
+  color: #ffffff;
+  background: var(--blue);
+}
+
+.api-card-button.is-primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+  transform: translateY(-1px);
+}
+
+.api-card-button.is-ghost {
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.api-card-button.is-ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.api-card-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.api-card-button:focus-visible {
+  outline: 2px solid rgba(66, 165, 255, 0.6);
+  outline-offset: 2px;
+}
+
+.api-card-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: api-card-spin 0.7s linear infinite;
+}
+
+.api-card-call-error {
+  padding: 9px 11px;
+  border: 1px solid rgba(255, 92, 92, 0.35);
+  border-radius: 8px;
+  color: #ff9d9d;
+  background: rgba(255, 92, 92, 0.08);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  animation: api-card-fade-in var(--motion-base) var(--motion-ease) both;
+}
+
+.api-card-result {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  animation: api-card-fade-in var(--motion-base) var(--motion-ease) both;
+}
+
+.api-card-result-meta {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.api-card-status {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.api-card-status.is-success {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+}
+
+.api-card-status.is-client-error {
+  color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 16%, transparent);
+}
+
+.api-card-status.is-server-error {
+  color: #ff5c5c;
+  background: rgba(255, 92, 92, 0.13);
+}
+
+.api-card-result-duration {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.api-card-result-truncated {
+  color: var(--orange);
+  font-size: 11px;
+}
+
+.api-card-result-body {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.api-card-result-empty {
+  padding: 14px 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+.api-card-result-details {
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.api-card-result-details summary {
+  width: fit-content;
+  padding: 7px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.api-card-result-details summary:hover {
+  color: var(--text);
+}
+
+.api-card-result-details pre {
+  max-height: 220px;
+  margin: 0 12px 10px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: rgba(0, 0, 0, 0.22);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.api-card-error {
+  display: grid;
+  margin: 16px 0;
+  padding: 11px 12px;
+  gap: 9px;
+  border: 1px solid rgba(255, 92, 92, 0.3);
+  border-radius: 8px;
+  background: rgba(255, 92, 92, 0.07);
+}
+
+.api-card-error-header {
+  display: grid;
+  gap: 3px;
+}
+
+.api-card-error-header strong {
+  color: #ffb3b3;
+  font-size: 13px;
+}
+
+.api-card-error-header span {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.api-card-error details {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.api-card-error summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.api-card-error pre {
+  max-height: 220px;
+  margin: 8px 0 0;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: rgba(0, 0, 0, 0.24);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+@keyframes api-card-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-distance, 8px));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes api-card-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .api-card-body,
+  .api-card-result,
+  .api-card-call-error {
+    animation: none;
+  }
+
+  .api-card-spinner {
+    animation-duration: 1.4s;
+  }
+
+  .api-card-button,
+  .api-card-collapse,
+  .api-card-collapse svg {
+    transition: none;
+  }
+}

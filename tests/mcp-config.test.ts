@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseMcpJsonConfig, serializeMcpJsonConfig } from "../apps/desktop/src/renderer/App";
+import { parseMcpJsonConfig, serializeMcpJsonConfig } from "../apps/desktop/src/renderer/lib/config-utils";
 
 describe("MCP JSON configuration", () => {
   it("accepts keyed service definitions using type and isActive", () => {

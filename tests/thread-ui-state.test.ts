@@ -21,7 +21,6 @@ import {
   getToolActivityPresentation,
   getToolActivitySummary,
   getToolActivityTarget,
-  getSidebarUpdateReminder,
   shouldShowRuntimeActivityPanel,
   filterTranscriptMessages,
   isFileWriteTool,
@@ -35,7 +34,8 @@ import {
   replaceConversationMessagesFromEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft
-} from "../apps/desktop/src/renderer/App";
+} from "../apps/desktop/src/renderer/lib/conversation-utils";
+import { getSidebarUpdateReminder } from "../apps/desktop/src/renderer/App";
 import type { MessageRecord, ThreadRecord, ToolCallRecord } from "../packages/shared-types/src";
 
 function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {

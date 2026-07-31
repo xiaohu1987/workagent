@@ -19,6 +19,7 @@ import {
   type SystemNotificationRequest
 } from "./notification-policy";
 import { UpdateService } from "./update-service";
+import { executeHttpRequest, type HttpProxyRequestPayload } from "./http-proxy";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -432,6 +433,7 @@ function registerIpc(): void {
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)
   );
+  ipcMain.handle("http:request", (_event, payload: HttpProxyRequestPayload) => executeHttpRequest(payload));
   ipcMain.handle("threads:guide", (_event, payload: { threadId: string; content: string }) =>
     backend.guideActiveThread(payload.threadId, payload.content)
   );

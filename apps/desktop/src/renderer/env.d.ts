@@ -94,6 +94,23 @@ declare global {
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
       getThreadSnapshot: (threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[] }) => Promise<void>;
+      requestHttp: (payload: {
+        method: string;
+        url: string;
+        headers?: Record<string, string>;
+        body?: string;
+      }) => Promise<
+        | {
+            ok: true;
+            status: number;
+            statusText: string;
+            headers: Record<string, string>;
+            bodyText: string;
+            truncated: boolean;
+            durationMs: number;
+          }
+        | { ok: false; error: string }
+      >;
       guideActiveThread: (payload: { threadId: string; content: string }) => Promise<{ accepted: boolean }>;
       replaceMessage: (payload: { threadId: string; messageId: string; content: string }) => Promise<void>;
       deleteQueuedMessage: (payload: { threadId: string; id: string }) => Promise<void>;

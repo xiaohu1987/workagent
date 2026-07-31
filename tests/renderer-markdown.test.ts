@@ -6,18 +6,18 @@ import {
   buildFileSnapshotDiffPreview,
   getFileSnapshotDiffMarker,
   getProjectFileChangeKinds,
+  resolveProjectFilePath
+} from "../apps/desktop/src/renderer/lib/project-files";
+import {
   buildContextUsage,
   buildPlanTimelineItems,
   getActivePlanTimelineItem,
   getGpaPlanMessageId,
-  extractMessageMediaReferences,
   formatComposerAttachments,
-  highlightMarkdownCode,
-  isGeneratedUserSkill,
-  retainPersistentComposerContexts,
-  parseMarkdownBlocks,
-  resolveProjectFilePath
-} from "../apps/desktop/src/renderer/App";
+  retainPersistentComposerContexts
+} from "../apps/desktop/src/renderer/lib/conversation-utils";
+import { extractMessageMediaReferences, isGeneratedUserSkill } from "../apps/desktop/src/renderer/App";
+import { highlightMarkdownCode, parseMarkdownBlocks } from "../apps/desktop/src/renderer/markdown";
 import { ECHARTS_CONFIG_MAX_BYTES, parseEChartsConfig } from "../apps/desktop/src/renderer/EChartsMessageChart";
 
 describe("parseMarkdownBlocks", () => {
