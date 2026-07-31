@@ -7824,6 +7824,17 @@ select:focus {
   margin: -2px 0 12px;
 }
 
+/* + 菜单"接口卡片"子菜单搜索框 */
+.composer-add-menu-search {
+  padding: 2px 2px 6px;
+}
+
+.composer-add-menu-search-input {
+  width: 100%;
+  min-height: 30px;
+  font-size: 12px;
+}
+
 .composer-attachment-chip {
   display: inline-flex;
   align-items: center;
@@ -16572,6 +16583,94 @@ body.panel-resizing {
   color: rgba(255, 255, 255, 0.48);
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* API 卡片收藏页签 */
+.api-favorites-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.api-favorites-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.api-favorites-search {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.api-favorites-list {
+  display: grid;
+  gap: 10px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.api-favorites-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-card);
+}
+
+.api-favorites-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.api-favorites-card-head .api-card-method {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.api-favorites-card-copy {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 3px;
+}
+
+.api-favorites-card-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-favorites-card-url {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-favorites-card-meta {
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.api-favorites-rename-input {
+  max-width: 320px;
+}
+
+.api-favorites-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.api-favorites-card-actions .button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 @media (max-width: 900px) {

@@ -24,6 +24,11 @@ import {
   TextInput,
   TimeInput
 } from "./form-controls";
+import {
+  addApiCardFavorite,
+  removeApiCardFavoriteByConfig,
+  useIsApiCardFavorited
+} from "./api-card-favorites";
 import "./api-card-message.css";
 
 type ApiCardResult = {
@@ -200,6 +205,7 @@ export function ApiCardMessage({ configText }: { configText: string }) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ApiCardResult | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  const favorited = useIsApiCardFavorited(config);
 
   useEffect(() => {
     if (!config) return;
@@ -279,15 +285,34 @@ export function ApiCardMessage({ configText }: { configText: string }) {
   };
 
   return (
-    <div className="api-card">
+    <div className={`api-card${collapsed ? " is-collapsed" : ""}`}>
       <div className="api-card-header">
+        <span className="api-card-title" title={config.title}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M3 12h18M12 3c2.5 2.6 3.9 5.7 3.9 9s-1.4 6.4-3.9 9c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z" />
+          </svg>
+          {config.title}
+        </span>
         <span className={methodBadgeClass(config.method)}>{config.method}</span>
-        <div className="api-card-heading">
-          <span className="api-card-title" title={config.title}>
-            {config.title}
-          </span>
-          {config.description ? <span className="api-card-description">{config.description}</span> : null}
-        </div>
+        <button
+          type="button"
+          className={`api-card-favorite${favorited ? " is-active" : ""}`}
+          title={favorited ? "取消收藏" : "收藏此卡片,下次从输入框 + 菜单快速唤出"}
+          aria-label={favorited ? "取消收藏" : "收藏卡片"}
+          aria-pressed={favorited}
+          onClick={() => {
+            if (favorited) {
+              removeApiCardFavoriteByConfig(config);
+            } else {
+              addApiCardFavorite(config);
+            }
+          }}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
+          </svg>
+        </button>
         <button
           type="button"
           className="api-card-collapse"
@@ -295,13 +320,14 @@ export function ApiCardMessage({ configText }: { configText: string }) {
           aria-expanded={!collapsed}
           onClick={() => setCollapsed((current) => !current)}
         >
-          <svg viewBox="0 0 24 24" aria-hidden="true" className={collapsed ? "is-collapsed" : ""}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 9l6 6 6-6" />
           </svg>
         </button>
       </div>
       {collapsed ? null : (
         <div className="api-card-body">
+          {config.description ? <p className="api-card-description">{config.description}</p> : null}
           <div className="api-card-endpoint" title={config.url}>
             {config.url}
           </div>

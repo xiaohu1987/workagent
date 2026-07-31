@@ -1250,6 +1250,26 @@ export class DesktopBackend {
     }
   }
 
+  #apiCardFavoritesFile(): string {
+    return path.join(path.dirname(this.#layout.configFile), "api-card-favorites.json");
+  }
+
+  public async loadApiCardFavorites(): Promise<unknown[]> {
+    try {
+      const raw = await fs.readFile(this.#apiCardFavoritesFile(), "utf8");
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  public async saveApiCardFavorites(favorites: unknown[]): Promise<void> {
+    const file = this.#apiCardFavoritesFile();
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify(favorites, null, 2), "utf8");
+  }
+
   public async interruptThread(threadId: string): Promise<void> {
     const thread = this.#db.getThread(threadId);
     const descendants = this.#db.listAgentTree(thread.rootThreadId)

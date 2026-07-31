@@ -174,6 +174,13 @@ import {
   formatCacheHitRate,
   formatTokenCount
 } from "./workspace/usage-stats";
+import { ApiCardFavoritesPanel } from "./workspace/api-card-favorites";
+import {
+  filterApiCardFavorites,
+  subscribeApiCardFavoriteNotices,
+  useApiCardFavorites,
+  type ApiCardFavorite
+} from "./api-card-favorites";
 import {
   EMPTY_NOTIFICATION_CENTER_STATE,
   findActiveNotification,
@@ -267,7 +274,7 @@ import {
   type ChatBackgroundSurfaces
 } from "./chat-background";
 
-type SettingsTab = "general" | "appearance" | "usage" | "knowledge" | "memory" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
+type SettingsTab = "general" | "appearance" | "usage" | "knowledge" | "memory" | "apiFavorites" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
 type ChatBackgroundImage = {
   id: string;
   fileName: string;
@@ -461,6 +468,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "memory", label: "记忆", hint: "查看和清理错误解决方案记忆" },
+  { id: "apiFavorites", label: "接口卡片", hint: "管理收藏的 API 卡片,从 + 菜单快速唤出" },
   { id: "capabilities", label: "能力中心", hint: "管理独立 Skill、用户技能和插件" },
   { id: "appearance", label: "应用背景", hint: "导入图片，并调整背景与各模块透明度" },
   { id: "usage", label: "统计", hint: "查看模型调用、Token 和缓存趋势" },
@@ -471,7 +479,7 @@ const SETTINGS_MENU_GROUPS: Array<{ id: string; label: string; hint: string; tab
   { id: "general", label: "通用设置", hint: "超时、重试和子智能体", tabs: ["timeouts"], icon: IconGear },
   { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"], icon: IconGlobe },
   { id: "connections", label: "连接", hint: "MCP 与数据库", tabs: ["mcp", "database"], icon: IconMcp },
-  { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory"], icon: IconKnowledge },
+  { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory", "apiFavorites"], icon: IconKnowledge },
   { id: "capabilities", label: "能力中心", hint: "技能与插件", tabs: ["capabilities"], icon: IconSkills },
   { id: "application", label: "应用", hint: "外观、统计与更新", tabs: ["appearance", "usage", "update"], icon: IconSinglePanel }
 ];
@@ -688,6 +696,23 @@ export function App() {
   const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
   const [completedTurnTimers, setCompletedTurnTimers] = useState<Record<string, { startedAt: string; completedAt: string }>>({});
   const [input, setInput] = useState("");
+  const apiCardFavorites = useApiCardFavorites();
+  // + 菜单"接口卡片"子菜单搜索
+  const [apiCardMenuQuery, setApiCardMenuQuery] = useState("");
+  const apiCardMenuMatches = useMemo(
+    () => filterApiCardFavorites(apiCardFavorites, apiCardMenuQuery).slice(0, 20),
+    [apiCardFavorites, apiCardMenuQuery]
+  );
+  // 收藏/取消收藏时弹出全局提醒
+  useEffect(() => {
+    return subscribeApiCardFavoriteNotices((notice) => {
+      if (notice.action === "added") {
+        showNotice("已收藏接口卡片", { tone: "success", message: `「${notice.name}」已加入收藏,在输入框输入 / 可快速唤出。` });
+      } else {
+        showNotice("已取消收藏", { tone: "success", message: `「${notice.name}」已从收藏中移除。` });
+      }
+    });
+  }, []);
   const [isQuickNotesOpen, setIsQuickNotesOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [quickNotes, setQuickNotes] = useState<Array<{ id: string; title: string; content: string; updatedAt: string }>>([]);
@@ -738,7 +763,8 @@ export function App() {
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
-  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "plugins" | "skills" | "mcp" | "database">("root");
+  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp" | "database" | "apiCards">("root");
+  const [skillsMenuQuery, setSkillsMenuQuery] = useState("");
   const [composerAddSubmenuAnchor, setComposerAddSubmenuAnchor] = useState<HTMLElement | null>(null);
   const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
   const gpaAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -2634,7 +2660,12 @@ export function App() {
           }
         }
       }
-      if (typed.type === "message.created" && typed.threadId && typed.payload?.message?.role === "user") {
+      if (
+        typed.type === "message.created" &&
+        typed.threadId &&
+        typed.payload?.message?.role === "user" &&
+        getMessageDisplayKind(typed.payload.message) !== "api-card"
+      ) {
         const runtimeThreadId = typed.threadId;
         if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
           appendRuntimeStatus(runtimeThreadId, "正在理解任务", typed.createdAt);
@@ -3171,6 +3202,14 @@ export function App() {
       }),
     [enabledPluginIds, skills]
   );
+  const filteredComposerSkills = useMemo(() => {
+    const keyword = skillsMenuQuery.trim().toLocaleLowerCase();
+    if (!keyword) return visibleComposerSkills;
+    return visibleComposerSkills.filter((skill) =>
+      (skill.displayName ?? skill.name).toLocaleLowerCase().includes(keyword) ||
+      (skill.shortDescription ?? skill.description ?? "").toLocaleLowerCase().includes(keyword)
+    );
+  }, [visibleComposerSkills, skillsMenuQuery]);
   useEffect(() => {
     if (!selectedThreadId) return;
     for (const plugin of plugins) {
@@ -5972,7 +6011,7 @@ export function App() {
     }, 160);
   }
 
-  function openComposerAddSubmenu(view: "plugins" | "skills" | "mcp" | "database", target: HTMLElement) {
+  function openComposerAddSubmenu(view: "skills" | "mcp" | "database" | "apiCards", target: HTMLElement) {
     clearComposerAddMenuCloseTimer();
     setComposerAddSubmenuAnchor(target);
     setComposerAddMenuView(view);
@@ -6958,6 +6997,18 @@ export function App() {
       // becomes a queued message; stopping work remains an explicit click.
       void sendMessage();
     }
+  }
+
+  /** 选中的收藏卡片作为真实用户消息发给模型,由模型回复中的 api-card 块渲染卡片,保留完整对话上下文 */
+  async function sendApiCardFavoriteToChat(favorite: ApiCardFavorite) {
+    const content = [
+      `我要调用接口卡片「${favorite.name}」。请严格按照下面的配置,在回复中原样输出一个完整的 \`\`\`api-card 代码块(不要增删或修改任何字段),让我可以直接填写参数并调用:`,
+      "",
+      "```api-card",
+      JSON.stringify(favorite.config, null, 2),
+      "```"
+    ].join("\n");
+    await sendMessage(content, undefined, { displayContent: `调用接口卡片「${favorite.name}」` });
   }
 
   function submitTerminalInput() {
@@ -9657,6 +9708,16 @@ export function App() {
                 </div>
               ) : null}
 
+              {settingsTab === "apiFavorites" ? (
+                <div className="settings-section api-favorites-settings-section">
+                  <ApiCardFavoritesPanel
+                    onInsert={(favorite) => {
+                      setIsSettingsOpen(false);
+                      void sendApiCardFavoriteToChat(favorite);
+                    }}
+                  />
+                </div>
+              ) : null}
               {settingsTab === "memory" ? (
                 <div className="settings-section memory-settings-section">
                   <div className="config-block memory-management-panel">
@@ -11671,20 +11732,20 @@ export function App() {
                     </button>
                     <div
                       className="composer-add-menu-item-with-submenu"
-                      onMouseEnter={(event) => openComposerAddSubmenu("plugins", event.currentTarget)}
+                      onMouseEnter={(event) => openComposerAddSubmenu("apiCards", event.currentTarget)}
                     >
                     <button
                       type="button"
                       className="gpa-popover-item composer-add-menu-parent"
                       role="menuitem"
                       aria-haspopup="menu"
-                      aria-expanded={composerAddMenuView === "plugins"}
-                      onFocus={(event) => openComposerAddSubmenu("plugins", event.currentTarget)}
+                      aria-expanded={composerAddMenuView === "apiCards"}
+                      onFocus={(event) => openComposerAddSubmenu("apiCards", event.currentTarget)}
                     >
-                      <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
+                      <span className="gpa-popover-item-icon" aria-hidden><IconGlobe /></span>
                       <span className="gpa-popover-item-copy">
-                        <span className="gpa-popover-item-title">插件</span>
-                        <span className="gpa-popover-item-hint">启用当前聊天可用的能力包</span>
+                        <span className="gpa-popover-item-title">接口卡片</span>
+                        <span className="gpa-popover-item-hint">调用收藏的 API 卡片</span>
                       </span>
                       <IconChevronRight />
                     </button>
@@ -11813,31 +11874,23 @@ export function App() {
                   onMouseLeave={scheduleComposerAddMenuClose}
                 >
                   <div className="composer-add-menu-submenu-title">
-                    {composerAddMenuView === "plugins" ? "插件" : composerAddMenuView === "skills" ? "Skills" : composerAddMenuView === "mcp" ? "MCP 服务" : "数据库"}
+                    {composerAddMenuView === "skills" ? "Skills" : composerAddMenuView === "mcp" ? "MCP 服务" : composerAddMenuView === "apiCards" ? "接口卡片" : "数据库"}
                   </div>
                   <div className="composer-add-menu-list">
-                    {composerAddMenuView === "plugins" ? (
-                      plugins.length > 0 ? plugins.map((plugin) => {
-                        const enabled = enabledPluginIds.has(plugin.id);
-                        return (
-                          <button
-                            key={plugin.id}
-                            className={`gpa-popover-item ${enabled ? "is-active" : ""}`}
-                            role="menuitemcheckbox"
-                            aria-checked={enabled}
-                            onClick={() => void setThreadPluginEnabled(plugin.id, !enabled)}
-                          >
-                            <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
-                            <span className="gpa-popover-item-copy">
-                              <span className="gpa-popover-item-title">{plugin.name}</span>
-                              <span className="gpa-popover-item-hint">{plugin.version} · {selectedThread?.mode === "project" ? "项目" : "当前聊天"}</span>
-                            </span>
-                            {enabled ? <span className="gpa-popover-item-check">已启用</span> : null}
-                          </button>
-                        );
-                      }) : <span className="composer-add-menu-empty">没有已安装的插件</span>
-                    ) : composerAddMenuView === "skills" ? (
-                      visibleComposerSkills.length > 0 ? visibleComposerSkills.map((skill) => {
+                    {composerAddMenuView === "skills" ? (
+                      <>
+                        <div className="composer-add-menu-search">
+                          <input
+                            className="form-input composer-add-menu-search-input"
+                            type="text"
+                            placeholder="搜索 Skills"
+                            aria-label="搜索 Skills"
+                            value={skillsMenuQuery}
+                            autoFocus
+                            onChange={(event) => setSkillsMenuQuery(event.target.value)}
+                          />
+                        </div>
+                        {filteredComposerSkills.length > 0 ? filteredComposerSkills.map((skill) => {
                         const isUserSkill = isGeneratedUserSkill(skill);
                         return (
                           <button
@@ -11853,6 +11906,7 @@ export function App() {
                               });
                               setGpaMenuOpen(false);
                               setGpaMenuPos(null);
+                              setSkillsMenuQuery("");
                             }}
                           >
                             <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
@@ -11862,7 +11916,12 @@ export function App() {
                             </span>
                           </button>
                         );
-                      }) : <span className="composer-add-menu-empty">没有可用的 Skills</span>
+                        }) : (
+                        <span className="composer-add-menu-empty">
+                          {visibleComposerSkills.length === 0 ? "没有可用的 Skills" : "没有匹配的 Skills"}
+                        </span>
+                      )}
+                      </>
                     ) : composerAddMenuView === "mcp" ? (
                       <>
                         {(config?.mcpServers ?? []).filter((server) => server.enabled).map((server) => (
@@ -11889,6 +11948,46 @@ export function App() {
                           </button>
                         ))}
                         {(config?.mcpServers ?? []).filter((server) => server.enabled).length === 0 ? <span className="composer-add-menu-empty">没有已启用的 MCP 服务</span> : null}
+                      </>
+                    ) : composerAddMenuView === "apiCards" ? (
+                      <>
+                        <div className="composer-add-menu-search">
+                          <input
+                            className="form-input composer-add-menu-search-input"
+                            type="text"
+                            placeholder="搜索名称或 URL"
+                            aria-label="搜索收藏的接口卡片"
+                            value={apiCardMenuQuery}
+                            autoFocus
+                            onChange={(event) => setApiCardMenuQuery(event.target.value)}
+                          />
+                        </div>
+                        {apiCardMenuMatches.length > 0 ? apiCardMenuMatches.map((favorite) => (
+                          <button
+                            key={favorite.id}
+                            className="gpa-popover-item"
+                            role="menuitem"
+                            onClick={() => {
+                              setGpaMenuOpen(false);
+                              setGpaMenuPos(null);
+                              setComposerAddMenuView("root");
+                              setApiCardMenuQuery("");
+                              void sendApiCardFavoriteToChat(favorite);
+                            }}
+                          >
+                            <span className={`api-card-method is-${favorite.config.method.toLowerCase()}`}>
+                              {favorite.config.method}
+                            </span>
+                            <span className="gpa-popover-item-copy">
+                              <span className="gpa-popover-item-title">{favorite.name}</span>
+                              <span className="gpa-popover-item-hint">{favorite.config.url}</span>
+                            </span>
+                          </button>
+                        )) : (
+                          <span className="composer-add-menu-empty">
+                            {apiCardFavorites.length === 0 ? "还没有收藏的接口卡片,点击卡片右上角星标即可收藏" : "没有匹配的收藏卡片"}
+                          </span>
+                        )}
                       </>
                     ) : (
                       <>

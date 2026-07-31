@@ -1,3 +1,7 @@
+:root {
+  --fc-accent: var(--fc-accent);
+}
+
 .fc-field {
   display: grid;
   min-width: 0;
@@ -50,8 +54,8 @@
 }
 
 .fc-control:focus {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 2px rgba(66, 165, 255, 0.18);
+  border-color: var(--fc-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fc-accent) 22%, transparent);
 }
 
 .fc-control:disabled {
@@ -231,7 +235,7 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--blue);
+  background: var(--fc-accent);
   content: "";
   opacity: 0;
   transform: scale(0.5);
@@ -241,7 +245,7 @@
 }
 
 .fc-choice input:checked + .fc-choice-radio {
-  border-color: var(--blue);
+  border-color: var(--fc-accent);
 }
 
 .fc-choice input:checked + .fc-choice-radio::after {
@@ -250,8 +254,8 @@
 }
 
 .fc-choice input:checked + .fc-choice-checkbox {
-  border-color: var(--blue);
-  background: var(--blue);
+  border-color: var(--fc-accent);
+  background: var(--fc-accent);
 }
 
 .fc-choice input:checked + .fc-choice-checkbox svg {
@@ -260,7 +264,7 @@
 }
 
 .fc-choice input:focus-visible + .fc-choice-box {
-  box-shadow: 0 0 0 2px rgba(66, 165, 255, 0.18);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fc-accent) 22%, transparent);
 }
 
 .fc-choice input:disabled ~ .fc-choice-label,
@@ -307,8 +311,8 @@
 }
 
 .fc-switch.is-on {
-  border-color: var(--blue);
-  background: var(--blue);
+  border-color: var(--fc-accent);
+  background: var(--fc-accent);
 }
 
 .fc-switch.is-on .fc-switch-knob {
@@ -317,7 +321,7 @@
 }
 
 .fc-switch:focus-visible {
-  box-shadow: 0 0 0 2px rgba(66, 165, 255, 0.18);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fc-accent) 22%, transparent);
   outline: none;
 }
 
@@ -404,9 +408,9 @@
 }
 
 .fc-kv-add:hover:not(:disabled) {
-  border-color: var(--blue);
-  color: var(--blue);
-  background: rgba(66, 165, 255, 0.06);
+  border-color: var(--fc-accent);
+  color: var(--fc-accent);
+  background: color-mix(in srgb, var(--fc-accent) 6%, transparent);
 }
 
 .fc-kv-add:disabled {

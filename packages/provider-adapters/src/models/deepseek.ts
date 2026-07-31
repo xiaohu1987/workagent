@@ -1,4 +1,4 @@
-import { stripThinkBlocksFromStream } from "../index";
+import { stripThinkBlocks, stripThinkBlocksFromStream } from "../index";
 import { defineCompat } from "./types";
 import type { ModelCompatContext } from "./types";
 import { gptCompat } from "./gpt";
@@ -34,6 +34,15 @@ import { preserveChineseOutputLanguage } from "./output-language";
  *    looks like an envelope (`"assistant_message"` substring); otherwise it
  *    returns the accumulated text verbatim so code/JSON content streams
  *    through.
+ *  - `normalizeDecision`: deepseek-v4-flash / reasoner variants were
+ *    observed finishing a turn in ~3s with an empty assistant_message and
+ *    no tool calls. The runtime then has nothing visible to validate, which
+ *    surfaced as GPA PLAN silently falling back to a synthetic single-task
+ *    plan. Recovery here: when the whole reply landed in reasoning_content,
+ *    promote it to the visible message; when the response is truly empty,
+ *    convert the decision to a retryable unstructured one so the runtime
+ *    re-samples with an explicit correction instead of accepting a blank
+ *    end-of-turn.
  *
  * Inherited from GPT baseline (verified matching DeepSeek docs):
  *  - `extractReasoningFromDelta`/`extractReasoningFromMessage`: DeepSeek
@@ -98,5 +107,29 @@ export const deepseekCompat = defineCompat(gptCompat, {
       return gptCompat.extractVisibleStreamText(accumulated);
     }
     return stripThinkBlocksFromStream(accumulated);
+  },
+  normalizeDecision(decision) {
+    const hasMessage = Boolean(decision.assistantMessage?.trim());
+    if (hasMessage || decision.toolCalls.length > 0) {
+      return decision;
+    }
+    // The turn produced no visible text and no tool calls.
+    const reasoning = stripThinkBlocks(decision.reasoningSummary ?? "").trim();
+    if (reasoning) {
+      // The reply landed entirely in reasoning_content: promote it so
+      // GOAL/PLAN can parse the analysis and chat threads show the answer
+      // instead of a blank end-of-turn.
+      return { ...decision, assistantMessage: reasoning };
+    }
+    // Truly empty response: mark the decision unstructured and keep the turn
+    // open so the runtime re-samples with an explicit correction instead of
+    // accepting a blank end-of-turn.
+    return {
+      ...decision,
+      assistantMessage: undefined,
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: false
+    };
   }
 });

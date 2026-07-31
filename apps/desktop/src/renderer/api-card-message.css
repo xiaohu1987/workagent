@@ -1,48 +1,59 @@
 .api-card {
-  width: 100%;
-  margin: 16px 0;
+  --api-card-accent: #664aed;
+  --fc-accent: var(--api-card-accent);
+  width: min(100%, 660px);
+  min-width: 0;
+  margin: 8px 0;
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--api-card-accent) 45%, transparent);
+  border-radius: 8px;
   background: var(--surface-card);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
 }
 
 .api-card-header {
   display: flex;
   align-items: center;
-  min-height: 44px;
-  padding: 8px 8px 8px 12px;
+  min-height: 42px;
+  padding: 0 8px 0 12px;
   gap: 10px;
   border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--api-card-accent) 10%, transparent);
 }
 
-.api-card-heading {
-  display: grid;
-  min-width: 0;
-  flex: 1 1 auto;
-  gap: 2px;
+.api-card.is-collapsed .api-card-header {
+  border-bottom-color: transparent;
 }
 
 .api-card-title {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 7px;
   overflow: hidden;
   color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.api-card-description {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.api-card-title svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: var(--api-card-accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
 }
 
 .api-card-method {
   flex: 0 0 auto;
   padding: 2px 8px;
+  border: 1px solid transparent;
   border-radius: 999px;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -51,26 +62,31 @@
 }
 
 .api-card-method.is-get {
-  color: var(--blue);
-  background: color-mix(in srgb, var(--blue) 15%, transparent);
+  border-color: color-mix(in srgb, var(--api-card-accent) 55%, transparent);
+  color: color-mix(in srgb, var(--api-card-accent) 70%, #ffffff);
+  background: color-mix(in srgb, var(--api-card-accent) 16%, transparent);
 }
 
 .api-card-method.is-post {
+  border-color: color-mix(in srgb, var(--green) 35%, transparent);
   color: var(--green);
-  background: color-mix(in srgb, var(--green) 15%, transparent);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
 }
 
 .api-card-method.is-put {
+  border-color: color-mix(in srgb, var(--orange) 35%, transparent);
   color: var(--orange);
-  background: color-mix(in srgb, var(--orange) 16%, transparent);
+  background: color-mix(in srgb, var(--orange) 14%, transparent);
 }
 
 .api-card-method.is-patch {
+  border-color: rgba(184, 108, 255, 0.35);
   color: var(--violet, #b86cff);
-  background: color-mix(in srgb, var(--violet, #b86cff) 15%, transparent);
+  background: rgba(184, 108, 255, 0.14);
 }
 
 .api-card-method.is-delete {
+  border-color: rgba(255, 92, 92, 0.35);
   color: #ff5c5c;
   background: rgba(255, 92, 92, 0.13);
 }
@@ -82,52 +98,109 @@
   height: 28px;
   padding: 0;
   place-items: center;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: var(--text-muted);
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-soft);
   background: transparent;
   cursor: pointer;
   transition:
     color var(--motion-fast) var(--motion-ease),
-    background var(--motion-fast) var(--motion-ease),
-    border-color var(--motion-fast) var(--motion-ease);
+    background var(--motion-fast) var(--motion-ease);
 }
 
-.api-card-collapse:hover {
-  border-color: var(--border);
+.api-card-collapse:hover,
+.api-card-collapse:focus-visible {
   color: var(--text);
-  background: var(--surface-card-hover);
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
 }
 
 .api-card-collapse svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.8;
-  transition: transform var(--motion-fast) var(--motion-ease);
+  transition: transform 140ms ease;
 }
 
-.api-card-collapse svg.is-collapsed {
+.api-card.is-collapsed .api-card-collapse svg {
   transform: rotate(-90deg);
+}
+
+.api-card-favorite {
+  display: grid;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-soft);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+.api-card-favorite:hover,
+.api-card-favorite:focus-visible {
+  color: var(--api-card-accent, #664aed);
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+}
+
+.api-card-favorite:active {
+  transform: scale(0.88);
+}
+
+.api-card-favorite svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+  transition: fill var(--motion-fast) var(--motion-ease);
+}
+
+.api-card-favorite.is-active {
+  color: var(--api-card-accent, #664aed);
+}
+
+.api-card-favorite.is-active svg {
+  fill: currentColor;
 }
 
 .api-card-body {
   display: grid;
-  padding: 12px;
-  gap: 14px;
+  padding: 14px 16px 16px;
+  gap: 12px;
   animation: api-card-fade-in var(--motion-base) var(--motion-ease) both;
+}
+
+.api-card-description {
+  margin: -2px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .api-card-endpoint {
   overflow: hidden;
-  padding: 7px 10px;
+  padding: 7px 9px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 5px;
   color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(0, 0, 0, 0.18);
   font-family: var(--font-mono);
   font-size: 11.5px;
   text-overflow: ellipsis;
@@ -138,7 +211,7 @@
   display: grid;
   padding: 10px 12px;
   gap: 8px;
-  border: 1px solid color-mix(in srgb, var(--orange) 35%, transparent);
+  border: 1px solid color-mix(in srgb, var(--orange) 30%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--orange) 7%, transparent);
 }
@@ -169,6 +242,7 @@
 
 .api-card-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
 }
@@ -177,51 +251,52 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 32px;
-  padding: 0 16px;
+  min-height: 30px;
+  padding: 0 12px;
   gap: 7px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   cursor: pointer;
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   transition:
     background var(--motion-fast) var(--motion-ease),
     border-color var(--motion-fast) var(--motion-ease),
     color var(--motion-fast) var(--motion-ease),
-    transform var(--motion-fast) var(--motion-ease);
+    filter var(--motion-fast) var(--motion-ease);
 }
 
 .api-card-button.is-primary {
-  border-color: var(--blue);
+  border-color: color-mix(in srgb, var(--api-card-accent) 80%, transparent);
   color: #ffffff;
-  background: var(--blue);
+  background: var(--api-card-accent);
 }
 
 .api-card-button.is-primary:hover:not(:disabled) {
-  filter: brightness(1.12);
-  transform: translateY(-1px);
+  border-color: var(--api-card-accent);
+  background: color-mix(in srgb, var(--api-card-accent) 88%, #ffffff);
+  filter: none;
 }
 
 .api-card-button.is-ghost {
-  color: var(--text-soft);
-  background: rgba(255, 255, 255, 0.03);
+  border-color: transparent;
+  color: var(--text-muted);
+  background: transparent;
 }
 
 .api-card-button.is-ghost:hover:not(:disabled) {
-  border-color: var(--border-strong);
   color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .api-card-button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 0.45;
 }
 
 .api-card-button:focus-visible {
-  outline: 2px solid rgba(66, 165, 255, 0.6);
+  outline: 2px solid color-mix(in srgb, var(--api-card-accent) 70%, transparent);
   outline-offset: 2px;
 }
 
@@ -237,10 +312,10 @@
 .api-card-call-error {
   padding: 9px 11px;
   border: 1px solid rgba(255, 92, 92, 0.35);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #ff9d9d;
   background: rgba(255, 92, 92, 0.08);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
   animation: api-card-fade-in var(--motion-base) var(--motion-ease) both;
@@ -257,14 +332,16 @@
 .api-card-result-meta {
   display: flex;
   align-items: center;
-  padding: 7px 10px;
+  min-height: 34px;
+  padding: 0 10px;
   gap: 10px;
   border-bottom: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .api-card-status {
   padding: 1px 8px;
+  border: 1px solid transparent;
   border-radius: 999px;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -272,16 +349,19 @@
 }
 
 .api-card-status.is-success {
+  border-color: color-mix(in srgb, var(--green) 35%, transparent);
   color: var(--green);
-  background: color-mix(in srgb, var(--green) 15%, transparent);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
 }
 
 .api-card-status.is-client-error {
+  border-color: color-mix(in srgb, var(--orange) 35%, transparent);
   color: var(--orange);
-  background: color-mix(in srgb, var(--orange) 16%, transparent);
+  background: color-mix(in srgb, var(--orange) 14%, transparent);
 }
 
 .api-card-status.is-server-error {
+  border-color: rgba(255, 92, 92, 0.35);
   color: #ff5c5c;
   background: rgba(255, 92, 92, 0.13);
 }
@@ -293,6 +373,7 @@
 }
 
 .api-card-result-truncated {
+  margin-left: auto;
   color: var(--orange);
   font-size: 11px;
 }
@@ -303,6 +384,7 @@
   overflow: auto;
   padding: 10px 12px;
   color: var(--text-soft);
+  background: rgba(0, 0, 0, 0.14);
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
@@ -339,7 +421,7 @@
   margin: 0 12px 10px;
   overflow: auto;
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: 5px;
   color: var(--text-muted);
   background: rgba(0, 0, 0, 0.22);
   font-family: var(--font-mono);
@@ -351,12 +433,14 @@
 
 .api-card-error {
   display: grid;
-  margin: 16px 0;
+  width: min(100%, 660px);
+  margin: 8px 0;
   padding: 11px 12px;
   gap: 9px;
   border: 1px solid rgba(255, 92, 92, 0.3);
   border-radius: 8px;
   background: rgba(255, 92, 92, 0.07);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
 }
 
 .api-card-error-header {
@@ -390,7 +474,7 @@
   margin: 8px 0 0;
   overflow: auto;
   padding: 9px;
-  border-radius: 6px;
+  border-radius: 5px;
   color: var(--text-muted);
   background: rgba(0, 0, 0, 0.24);
   font-family: var(--font-mono);
@@ -429,7 +513,9 @@
 
   .api-card-button,
   .api-card-collapse,
-  .api-card-collapse svg {
+  .api-card-collapse svg,
+  .api-card-favorite,
+  .api-card-favorite svg {
     transition: none;
   }
 }

@@ -94,6 +94,8 @@ const api = {
     ipcRenderer.invoke("attachments:preview-local", payload),
   rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) =>
     ipcRenderer.invoke("threads:reject-multimodal", payload),
+  loadApiCardFavorites: () => ipcRenderer.invoke("api-card-favorites:load"),
+  saveApiCardFavorites: (favorites: unknown[]) => ipcRenderer.invoke("api-card-favorites:save", favorites),
   interruptThread: (threadId: string) => ipcRenderer.invoke("threads:interrupt", threadId),
   listSubagents: (threadId: string) => ipcRenderer.invoke("multi-agents:list", threadId),
   interruptAgent: (payload: { threadId: string; agent: string }) =>

@@ -123,6 +123,8 @@ declare global {
       }>;
       previewLocalImage: (payload: { absolutePath: string }) => Promise<string>;
       rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) => Promise<void>;
+      loadApiCardFavorites: () => Promise<unknown[]>;
+      saveApiCardFavorites: (favorites: unknown[]) => Promise<void>;
       interruptThread: (threadId: string) => Promise<void>;
       listSubagents: (threadId: string) => Promise<ThreadRecord[]>;
       interruptAgent: (payload: { threadId: string; agent: string }) => Promise<any>;

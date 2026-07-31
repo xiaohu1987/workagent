@@ -458,6 +458,10 @@ function registerIpc(): void {
   ipcMain.handle("threads:reject-multimodal", (_event, payload: { threadId: string; content: string }) =>
     backend.rejectUnsupportedMultimodalInput(payload.threadId, payload.content)
   );
+  ipcMain.handle("api-card-favorites:load", () => backend.loadApiCardFavorites());
+  ipcMain.handle("api-card-favorites:save", (_event, favorites: unknown[]) =>
+    backend.saveApiCardFavorites(Array.isArray(favorites) ? favorites : [])
+  );
   ipcMain.handle("threads:interrupt", (_event, threadId: string) => backend.interruptThread(threadId));
   ipcMain.handle("multi-agents:list", (_event, threadId: string) => backend.listSubagents(threadId));
   ipcMain.handle("multi-agents:interrupt", (_event, payload: { threadId: string; agent: string }) =>

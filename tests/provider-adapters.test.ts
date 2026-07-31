@@ -545,6 +545,87 @@ describe("OpenAiCompatibleProvider", () => {
       }
     });
 
+    it("deepseek compat promotes reasoning_content when the reply is empty", () => {
+      const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "" });
+      // Observed incident: the model ends the turn with an empty
+      // assistant_message and no tool calls, while the whole reply sits in
+      // reasoning_content. GPA PLAN then has nothing to parse.
+      const decision = compat.normalizeDecision(
+        {
+          toolCalls: [],
+          endTurn: true,
+          goalCompleted: false,
+          isStructured: true,
+          reasoningSummary: "### T1: 搭建页面骨架\n\n验收标准：页面可打开运行。"
+        },
+        {} as never
+      );
+      expect(decision.assistantMessage).toBe("### T1: 搭建页面骨架\n\n验收标准：页面可打开运行。");
+      expect(decision.endTurn).toBe(true);
+      expect(decision.isStructured).toBe(true);
+    });
+
+    it("deepseek compat converts a truly empty end-of-turn into a retryable decision", () => {
+      const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "" });
+      const decision = compat.normalizeDecision(
+        {
+          assistantMessage: "   ",
+          toolCalls: [],
+          endTurn: true,
+          goalCompleted: true,
+          isStructured: true
+        },
+        {} as never
+      );
+      // No visible text and no reasoning: keep the turn open and mark the
+      // decision unstructured so the runtime re-samples with a correction.
+      expect(decision.assistantMessage).toBeUndefined();
+      expect(decision.endTurn).toBe(false);
+      expect(decision.goalCompleted).toBe(false);
+      expect(decision.isStructured).toBe(false);
+    });
+
+    it("deepseek compat leaves non-empty decisions untouched", () => {
+      const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "" });
+      const withMessage = compat.normalizeDecision(
+        {
+          assistantMessage: "正常回复",
+          toolCalls: [],
+          endTurn: true,
+          goalCompleted: false,
+          isStructured: true,
+          reasoningSummary: "一些推理"
+        },
+        {} as never
+      );
+      expect(withMessage.assistantMessage).toBe("正常回复");
+
+      const withToolCalls = compat.normalizeDecision(
+        {
+          toolCalls: [{ id: "call-1", name: "fs.read_directory", arguments: { path: "." } }],
+          endTurn: false,
+          goalCompleted: false,
+          isStructured: true,
+          reasoningSummary: "一些推理"
+        },
+        {} as never
+      );
+      expect(withToolCalls.assistantMessage).toBeUndefined();
+      expect(withToolCalls.toolCalls).toHaveLength(1);
+    });
+
+    it("other shells do not inherit the deepseek empty-reply recovery", () => {
+      const compat = resolveModelCompat({ id: "gpt-5.2", displayName: "" });
+      const empty = {
+        toolCalls: [] as never[],
+        endTurn: true,
+        goalCompleted: false,
+        isStructured: true,
+        reasoningSummary: "推理内容"
+      };
+      expect(compat.normalizeDecision(empty, {} as never)).toEqual(empty);
+    });
+
     it("stripThinkBlocks handles closed and unterminated blocks", () => {
       expect(stripThinkBlocks("<think>a</think>tail")).toBe("tail");
       expect(stripThinkBlocks("pre<think>a</think>tail")).toBe("pretail");
