@@ -7,6 +7,7 @@ import { glmCompat } from "./glm";
 import { qwenCompat } from "./qwen";
 import { senseNovaCompat } from "./sensenova";
 import { kimiCompat } from "./kimi";
+import { hunyuanCompat } from "./hunyuan";
 import { agnesCompat } from "./agnes";
 import { geminiCompat } from "./gemini";
 
@@ -32,6 +33,7 @@ export { glmCompat } from "./glm";
 export { qwenCompat } from "./qwen";
 export { senseNovaCompat } from "./sensenova";
 export { kimiCompat } from "./kimi";
+export { hunyuanCompat } from "./hunyuan";
 export { agnesCompat } from "./agnes";
 export { geminiCompat } from "./gemini";
 export {
@@ -52,6 +54,7 @@ const registry: readonly ModelCompat[] = [
   qwenCompat,
   senseNovaCompat,
   kimiCompat,
+  hunyuanCompat,
   agnesCompat,
   geminiCompat,
   gptCompat
@@ -69,6 +72,7 @@ const registry: readonly ModelCompat[] = [
  *  - "qwen-max"           -> qwenCompat
  *  - "SenseNova-5"        -> senseNovaCompat
  *  - "kimi-k2" / "moonshot-v1-8k" -> kimiCompat
+ *  - "hunyuan-turbos" / "hy3"     -> hunyuanCompat
  *  - "agnes-2.0-flash" / "agnes-video-v2.0" -> agnesCompat
  *  - "gemini-2.5-flash" / "imagen-3.0" -> geminiCompat
  *  - "gpt-4o" / "o3-mini" -> gptCompat

@@ -16,6 +16,7 @@ type UpdateState = {
 
 type RendererSkillLabEvent = import("@shared-types").SkillLabEvent;
 type RendererNotificationNavigationTarget = import("@shared-types").NotificationNavigationTarget;
+type RendererPendingResumeThread = import("@shared-types").PendingResumeThread;
 
 declare global {
   interface Window {
@@ -126,6 +127,9 @@ declare global {
       loadApiCardFavorites: () => Promise<unknown[]>;
       saveApiCardFavorites: (favorites: unknown[]) => Promise<void>;
       interruptThread: (threadId: string) => Promise<void>;
+      listPendingResume: () => Promise<RendererPendingResumeThread[]>;
+      dismissPendingResume: (threadId: string) => Promise<void>;
+      resumePendingResume: (threadId: string) => Promise<void>;
       listSubagents: (threadId: string) => Promise<ThreadRecord[]>;
       interruptAgent: (payload: { threadId: string; agent: string }) => Promise<any>;
       updateThreadModelSelection: (payload: {

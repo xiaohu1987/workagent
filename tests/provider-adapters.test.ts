@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderStreamIncompleteError, resolveModelCompat, stripThinkBlocks, stripThinkBlocksFromStream, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderStreamIncompleteError, resolveModelCompat, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -203,6 +203,331 @@ describe("OpenAiCompatibleProvider", () => {
     expect(request.max_tokens).toBe(8192);
   });
 
+  it("strips parallel_tool_calls and clamps temperature for non-thinking Kimi models", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [{
+        name: "fs.read_directory",
+        description: "List a directory.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        riskLevel: "low"
+      }],
+      model: {
+        id: "kimi-k2-0711-preview",
+        providerId: provider.id,
+        displayName: "Kimi K2",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false,
+        defaultTemperature: 1.6,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    // Moonshot's schema has no parallel_tool_calls field; sending it (even
+    // false) fails validation with "400 Invalid request parameters".
+    expect(request).toHaveProperty("tools");
+    expect(request).not.toHaveProperty("parallel_tool_calls");
+    // Moonshot only accepts temperature within [0, 1]; out-of-range profile
+    // defaults are clamped instead of failing the turn with HTTP 400.
+    expect(request.temperature).toBe(1);
+    expect(request.max_tokens).toBe(8192);
+  });
+
+  it("keeps in-range temperature for non-thinking Kimi models", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      model: {
+        id: "kimi-k2-0711-preview",
+        providerId: provider.id,
+        displayName: "Kimi K2",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false,
+        defaultTemperature: 0.6,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request.temperature).toBe(0.6);
+  });
+
+  it("caps the tools array at 50 for Kimi models", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+    const manyTools = Array.from({ length: 55 }, (_, index) => ({
+      name: `fs.tool_${index}`,
+      description: "Read a file",
+      inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      riskLevel: "low" as const
+    }));
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: manyTools,
+      model: {
+        id: "kimi-k3",
+        providerId: provider.id,
+        displayName: "Kimi K3",
+        contextWindow: 500_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: true,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    // The gateway rejects more than 50 tools with "400 Invalid request
+    // parameters" (code 11133); the compat truncates the tail instead.
+    expect(Array.isArray(request.tools)).toBe(true);
+    expect((request.tools as unknown[]).length).toBe(50);
+  });
+
+  it("repairs interrupted tool-call pairing and null assistant content for Kimi", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [
+        { role: "user", content: "找文件" },
+        { role: "assistant", content: "", toolCalls: [{ id: "call-1", name: "fs.read_directory", arguments: { path: "C:\\" } }] },
+        // Streamed commentary recorded between the tool_calls message and its
+        // result; the gateway rejects this interleaving (code 11133).
+        { role: "assistant", content: "我来执行工具。" },
+        { role: "tool", content: "fs.read_directory\nfile.txt", toolCallId: "call-1" }
+      ],
+      availableTools: [],
+      model: {
+        id: "kimi-k3",
+        providerId: provider.id,
+        displayName: "Kimi K3",
+        contextWindow: 500_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: true,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const messages = request.messages as Array<Record<string, unknown>>;
+    // [0] is the system message prepended by the provider.
+    expect(messages[1]).toMatchObject({ role: "user", content: "找文件" });
+    expect(messages[2].role).toBe("assistant");
+    // null content is rejected by the gateway; it must become "".
+    expect(messages[2].content).toBe("");
+    expect(Array.isArray(messages[2].tool_calls)).toBe(true);
+    // The tool result must immediately follow its tool_calls message.
+    expect(messages[3]).toMatchObject({ role: "tool", tool_call_id: "call-1" });
+    // Commentary moves after the tool block.
+    expect(messages[4]).toMatchObject({ role: "assistant", content: "我来执行工具。" });
+  });
+
+  it("coalesces consecutive Kimi assistant progress messages", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [
+        { role: "assistant", content: "first progress" },
+        { role: "assistant", content: "second progress" },
+        { role: "assistant", content: "third progress" },
+        { role: "user", content: "continue" },
+        { role: "assistant", content: "final progress" }
+      ],
+      availableTools: [],
+      model: {
+        id: "kimi-k3",
+        providerId: provider.id,
+        displayName: "Kimi K3",
+        contextWindow: 500_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: true,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const messages = request.messages as Array<Record<string, unknown>>;
+    expect(messages.map((message) => message.role)).toEqual(["system", "assistant", "user", "assistant"]);
+    expect(messages[1].content).toBe("first progress\n\nsecond progress\n\nthird progress");
+  });
+
+  it("synthesizes placeholder results for tool calls whose results were lost", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [
+        { role: "user", content: "找文件" },
+        // Turn was interrupted before the tool result was recorded.
+        { role: "assistant", content: "", toolCalls: [{ id: "call-lost", name: "fs.read_directory", arguments: { path: "C:\\" } }] },
+        { role: "user", content: "继续" }
+      ],
+      availableTools: [],
+      model: {
+        id: "kimi-k3",
+        providerId: provider.id,
+        displayName: "Kimi K3",
+        contextWindow: 500_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: true,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const messages = request.messages as Array<Record<string, unknown>>;
+    // An unfulfilled tool_calls message is rejected by the gateway; a
+    // placeholder result is synthesized immediately after it.
+    expect(messages[2].role).toBe("assistant");
+    expect(messages[3]).toMatchObject({ role: "tool", tool_call_id: "call-lost" });
+    expect(String(messages[3].content)).toContain("unavailable");
+    expect(messages[4]).toMatchObject({ role: "user", content: "继续" });
+  });
+
+  it("demotes orphan tool results to user messages for Kimi", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [
+        { role: "user", content: "找文件" },
+        { role: "assistant", content: "", toolCalls: [{ id: "call-1", name: "fs.read_directory", arguments: { path: "C:\\" } }] },
+        { role: "tool", content: "本轮结果", toolCallId: "call-1" },
+        // Result from an earlier interrupted turn; its tool_calls message is
+        // gone, so as a bare tool message it fails gateway validation.
+        { role: "tool", content: "上一轮的孤儿结果", toolCallId: "call-orphan" }
+      ],
+      availableTools: [],
+      model: {
+        id: "kimi-k3",
+        providerId: provider.id,
+        displayName: "Kimi K3",
+        contextWindow: 500_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: true,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const messages = request.messages as Array<Record<string, unknown>>;
+    // The valid pair stays intact…
+    expect(messages[2].role).toBe("assistant");
+    expect(messages[3]).toMatchObject({ role: "tool", tool_call_id: "call-1" });
+    // …and the orphan is demoted to a user message that preserves its content.
+    expect(messages[4].role).toBe("user");
+    expect(String(messages[4].content)).toContain("call-orphan");
+    expect(String(messages[4].content)).toContain("上一轮的孤儿结果");
+  });
+
+  it("enriches provider API errors with request diagnostics", async () => {
+    const apiError = Object.assign(new Error("400 Invalid request parameters"), {
+      status: 400,
+      error: { code: 11133, param: null, type: "invalid_request_error" }
+    });
+    mocks.chatCreate.mockRejectedValue(apiError);
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await expect(
+      new ProviderFactory().create(provider).runTurn({
+        systemPrompt: "Complete the requested task.",
+        transcript: [{ role: "user", content: "Hello" }],
+        availableTools: [{
+          name: "fs.read_directory",
+          description: "List a directory.",
+          inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+          riskLevel: "low"
+        }],
+        model: {
+          id: "kimi-k3",
+          providerId: provider.id,
+          displayName: "Kimi K3",
+          contextWindow: 500_000,
+          supportsStreaming: false,
+          supportsToolCalling: true,
+          supportsParallelToolCalls: false,
+          supportsJsonOutput: true,
+          supportsMultimodalInput: true,
+          supportsReasoningSummary: true,
+          defaultTemperature: 0.2,
+          defaultMaxOutputTokens: 8192
+        },
+        provider
+      })
+    ).rejects.toThrow(/400 Invalid request parameters \[provider-request model=kimi-k3 tools=1 messages=2\(system,user\) bytes=\d+ upstream\(code=11133 type=invalid_request_error\) dump=/);
+  });
+
   it("keeps Kimi k2 non-envelope stream content visible", () => {
     const compat = resolveModelCompat({ id: "kimi-k2-0711-preview", displayName: "Kimi K2" });
     // Native-tool-call mode: content is natural language / code, not a decision
@@ -244,6 +569,74 @@ describe("OpenAiCompatibleProvider", () => {
     });
 
     expect(mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content).toContain("[Chinese output compatibility]");
+  });
+
+  it("routes hunyuan model ids to the hunyuan compat shell", () => {
+    expect(resolveModelCompat({ id: "hy3", displayName: "hy3" }).id).toBe("hunyuan");
+    expect(resolveModelCompat({ id: "hunyuan-turbos", displayName: "Hunyuan TurboS" }).id).toBe("hunyuan");
+    expect(resolveModelCompat({ id: "hunyuan-lite", displayName: "" }).id).toBe("hunyuan");
+    expect(resolveModelCompat({ id: "custom-01", displayName: "混元3" }).id).toBe("hunyuan");
+    expect(resolveModelCompat({ id: "my-custom-model", displayName: "" }).id).toBe("gpt");
+  });
+
+  it("keeps Chinese replies stable for Hunyuan after English tool context", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "codespaces-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [
+        { role: "user", content: "请继续处理刚才的问题" },
+        { role: "tool", content: "English tool output" },
+        { role: "user", content: "continue" }
+      ],
+      availableTools: [],
+      model: {
+        id: "hy3",
+        providerId: provider.id,
+        displayName: "hy3",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider
+    });
+
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content).toContain("[Chinese output compatibility]");
+  });
+
+  it("does not force Chinese on Hunyuan when the user asks for English", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"Done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "codespaces-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "用英文回答：这个文件是做什么的？" }],
+      availableTools: [],
+      model: {
+        id: "hy3",
+        providerId: provider.id,
+        displayName: "hy3",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false
+      },
+      provider
+    });
+
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content).not.toContain("[Chinese output compatibility]");
   });
 
   it("routes agnes model ids to the agnes compat shell", () => {
@@ -525,24 +918,53 @@ describe("OpenAiCompatibleProvider", () => {
       expect(onlyThink.assistantMessage).not.toContain("generate a picture");
     });
 
-    it("suppresses think blocks in visible stream text", () => {
-      // Thinking in progress: nothing visible yet.
-      expect(extractVisibleStreamText("<think>Let me think")).toBe("");
-      // Closed think block followed by plain reply: only the reply streams.
-      expect(extractVisibleStreamText("<think>done</think>你好，这是回复")).toBe("你好，这是回复");
-      // Closed think block followed by a decision envelope: envelope extraction.
-      expect(extractVisibleStreamText('<think>done</think>{"assistant_message":"好","tool_calls":[]}')).toBe("好");
+    it("surfaces think blocks in the visible stream draft", () => {
+      // Thinking in progress: the partial reasoning streams into the draft.
+      expect(extractVisibleStreamText("<think>Let me think")).toBe("Let me think");
+      // Closed think block followed by plain reply: reasoning + reply stream.
+      expect(extractVisibleStreamText("<think>done</think>你好，这是回复")).toBe("done你好，这是回复");
+      // Closed think block followed by a decision envelope: reasoning + decoded message.
+      expect(extractVisibleStreamText('<think>done</think>{"assistant_message":"好","tool_calls":[]}')).toBe("done\n\n好");
       // No think content: untouched.
       expect(extractVisibleStreamText("普通正文")).toBe("普通正文");
     });
 
-    it("strips think blocks from pass-through stream text in compat shells", () => {
+    it("surfaces think blocks in pass-through stream text in compat shells", () => {
       for (const id of ["deepseek-chat", "kimi-k2-0711-preview", "agnes-2.0-flash"]) {
         const compat = resolveModelCompat({ id, displayName: "" });
-        // Pass-through branch (no envelope) must still hide reasoning.
-        expect(compat.extractVisibleStreamText("<think>reasoning</think>正文内容")).toBe("正文内容");
-        expect(compat.extractVisibleStreamText("<think>still thinking")).toBe("");
+        // Pass-through branch (no envelope) shows the think process, tags hidden.
+        expect(compat.extractVisibleStreamText("<think>reasoning</think>正文内容")).toBe("reasoning正文内容");
+        expect(compat.extractVisibleStreamText("<think>still thinking")).toBe("still thinking");
       }
+    });
+
+    it("surfaceThinkBlocksInStream hides tags and holds back partial tag fragments", () => {
+      // Partial close tag must not leak raw markup into the draft.
+      expect(surfaceThinkBlocksInStream("<think>reason</thi")).toBe("reason");
+      // A fragment that can still grow into a think tag is held back.
+      expect(surfaceThinkBlocksInStream("abc<thi")).toBe("abc");
+      expect(surfaceThinkBlocksInStream("abc<")).toBe("abc");
+      // Unrelated markup passes through untouched.
+      expect(surfaceThinkBlocksInStream("abc<div")).toBe("abc<div");
+      // Multiple blocks: both bodies surface with the reply in between.
+      expect(surfaceThinkBlocksInStream("<think>a</think>mid<think>b</think>tail")).toBe("amidbtail");
+      // Hash-suffixed relay variants behave the same.
+      expect(surfaceThinkBlocksInStream("<think:6124c78e>推理</think:6124c78e>正文")).toBe("推理正文");
+    });
+
+    it("hunyuan releases the visible stream after hash-suffixed think blocks", () => {
+      const compat = resolveModelCompat({ id: "hy3", displayName: "hy3" });
+      // Regression: <think:hash> never matched the literal <think> pattern, so
+      // the envelope extractor suppressed the buffer forever — the turn looked
+      // stuck in "thinking" and no reply ever appeared.
+      expect(compat.id).toBe("hunyuan");
+      expect(compat.extractVisibleStreamText("<think:6124c78e>正在推理")).toBe("正在推理");
+      expect(compat.extractVisibleStreamText('<think:6124c78e>推理完毕</think:6124c78e>{"assistant_message":"查到了","tool_calls":[]}')).toBe("推理完毕\n\n查到了");
+      const decision = parseDecisionFromText(
+        '<think:6124c78e>The user asked about a large file.</think:6124c78e>{"assistant_message":"这个文件是 NVIDIA 的着色器缓存。","tool_calls":[],"end_turn":true,"goal_completed":true}'
+      );
+      expect(decision.assistantMessage).toBe("这个文件是 NVIDIA 的着色器缓存。");
+      expect(decision.isStructured).toBe(true);
     });
 
     it("deepseek compat promotes reasoning_content when the reply is empty", () => {
@@ -633,6 +1055,24 @@ describe("OpenAiCompatibleProvider", () => {
       expect(stripThinkBlocks("no think here")).toBe("no think here");
       expect(stripThinkBlocksFromStream("<think>in progress")).toBe("");
       expect(stripThinkBlocksFromStream("visible<think>in progress")).toBe("visible");
+    });
+
+    it("stripThinkBlocks handles hash-suffixed think tags (Hunyuan relays)", () => {
+      // Hunyuan gateways wrap reasoning in <think:hash>…</think:hash>; the
+      // literal <think> pattern never closes those, which leaked tags into
+      // output and suppressed the visible stream indefinitely.
+      expect(stripThinkBlocks("<think:6124c78e>reasoning</think:6124c78e>tail")).toBe("tail");
+      expect(stripThinkBlocks("pre<think:6124c78e>reasoning</think:6124c78e>tail")).toBe("pretail");
+      expect(stripThinkBlocks("<think:6124c78e>unterminated")).toBe("");
+      expect(stripThinkBlocks("<think:6124c78e>a</think:6124c78e>{\"assistant_message\":\"好\"}")).toBe("{\"assistant_message\":\"好\"}");
+      // while the block is open, nothing is visible; once closed, the remainder surfaces
+      expect(stripThinkBlocksFromStream("<think:6124c78e>in progress")).toBe("");
+      expect(stripThinkBlocksFromStream("<think:6124c78e>done</think:6124c78e>你好")).toBe("你好");
+      expect(extractVisibleStreamText("<think:6124c78e>still thinking")).toBe("still thinking");
+      expect(extractVisibleStreamText("<think:6124c78e>done</think:6124c78e>你好，这是回复")).toBe("done你好，这是回复");
+      expect(extractVisibleStreamText('<think:6124c78e>done</think:6124c78e>{"assistant_message":"好","tool_calls":[]}')).toBe("done\n\n好");
+      // lookalike tags must not be treated as think blocks
+      expect(stripThinkBlocks("<thinking>not a think block</thinking>")).toBe("<thinking>not a think block</thinking>");
     });
   });
 

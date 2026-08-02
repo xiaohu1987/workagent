@@ -29,6 +29,7 @@ import type {
   MessageAttachment,
   McpServerConfig,
   ModelProfile,
+  PendingResumeThread,
   ReasoningEffort,
   PluginRecord,
   ProviderDefinition,
@@ -273,7 +274,19 @@ export class DesktopBackend {
     this.#config = await loadConfig(this.#layout.configFile);
     this.#databases = new DatabaseRuntime((connection) => this.#databaseCredentials.read<string>(connection.credentialRef));
     this.#db = new DatabaseService(this.#layout.dbFile);
+    // Capture threads that were still running when the previous process died
+    // (crash / kill) before recovery flips them to interrupted, so the UI can
+    // offer to resume them just like the graceful-shutdown path does.
+    const staleRunningRootThreadIds = new Set(
+      this.#db
+        .listThreads(true)
+        .filter((thread) => thread.status === "running" || thread.status === "waiting")
+        .map((thread) => thread.rootThreadId)
+    );
     this.#db.recoverInterruptedThreads();
+    if (staleRunningRootThreadIds.size > 0) {
+      await this.addPendingResumeMarkers([...staleRunningRootThreadIds]);
+    }
     this.removePersistedBrowserErrorTabs();
     this.#mcp = new McpManager([], undefined, {
       resolveBearerToken: (config) => {
@@ -1268,6 +1281,138 @@ export class DesktopBackend {
     const file = this.#apiCardFavoritesFile();
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, JSON.stringify(favorites, null, 2), "utf8");
+  }
+
+  public hasActiveThreads(): boolean {
+    if (!this.#db) return false;
+    return this.#db
+      .listThreads(true)
+      .some((thread) => thread.status === "running" || thread.status === "waiting");
+  }
+
+  public async interruptActiveThreads(): Promise<void> {
+    if (!this.#db) return;
+    const rootThreadIds = new Set(
+      this.#db
+        .listThreads(true)
+        .filter((thread) => thread.status === "running" || thread.status === "waiting")
+        .map((thread) => thread.rootThreadId)
+    );
+    await this.#logs.append("app.shutdown_interrupt", {
+      activeRootThreadIds: [...rootThreadIds]
+    });
+    // Record before interrupting: if the quit fallback timeout kills the
+    // process mid-shutdown, next launch can still offer to resume.
+    await this.addPendingResumeMarkers([...rootThreadIds]);
+    await Promise.allSettled([...rootThreadIds].map((rootThreadId) => this.interruptThread(rootThreadId)));
+  }
+
+  #pendingResumeFile(): string {
+    return path.join(path.dirname(this.#layout.configFile), "pending-resume.json");
+  }
+
+  private async readPendingResumeMarkers(): Promise<Array<{ threadId: string; interruptedAt: string }>> {
+    try {
+      const raw = await fs.readFile(this.#pendingResumeFile(), "utf8");
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (entry): entry is { threadId: string; interruptedAt: string } =>
+          !!entry &&
+          typeof entry === "object" &&
+          typeof (entry as { threadId?: unknown }).threadId === "string" &&
+          typeof (entry as { interruptedAt?: unknown }).interruptedAt === "string"
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  private async writePendingResumeMarkers(markers: Array<{ threadId: string; interruptedAt: string }>): Promise<void> {
+    const file = this.#pendingResumeFile();
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify(markers, null, 2), "utf8");
+  }
+
+  private async addPendingResumeMarkers(threadIds: string[]): Promise<void> {
+    const uniqueIds = [...new Set(threadIds)];
+    if (uniqueIds.length === 0) return;
+    const existing = await this.readPendingResumeMarkers();
+    const interruptedAt = new Date().toISOString();
+    const next = [
+      ...existing.filter((marker) => !uniqueIds.includes(marker.threadId)),
+      ...uniqueIds.map((threadId) => ({ threadId, interruptedAt }))
+    ];
+    await this.writePendingResumeMarkers(next);
+  }
+
+  public async listPendingResume(): Promise<PendingResumeThread[]> {
+    if (!this.#db) return [];
+    const markers = await this.readPendingResumeMarkers();
+    if (markers.length === 0) return [];
+    const threadsById = new Map(this.#db.listThreads().map((thread) => [thread.id, thread]));
+    const kept: typeof markers = [];
+    const result: PendingResumeThread[] = [];
+    for (const marker of markers) {
+      const thread = threadsById.get(marker.threadId);
+      const lastUserMessage = thread ? this.#db.getLastUserMessage(marker.threadId) : null;
+      // Prune entries that can no longer be resumed: thread deleted, already
+      // running again, or nothing left to continue with.
+      if (!thread || thread.status === "running" || thread.status === "waiting" || !lastUserMessage?.content.trim()) {
+        continue;
+      }
+      kept.push(marker);
+      result.push({
+        threadId: thread.id,
+        title: thread.title,
+        interruptedAt: marker.interruptedAt,
+        lastUserMessage: lastUserMessage.content
+      });
+    }
+    if (kept.length !== markers.length) {
+      await this.writePendingResumeMarkers(kept);
+    }
+    return result;
+  }
+
+  public async dismissPendingResume(threadId: string): Promise<void> {
+    const markers = await this.readPendingResumeMarkers();
+    await this.writePendingResumeMarkers(markers.filter((marker) => marker.threadId !== threadId));
+  }
+
+  public async resumePendingResume(threadId: string): Promise<void> {
+    if (!this.#db) return;
+    const markers = await this.readPendingResumeMarkers();
+    if (!markers.some((marker) => marker.threadId === threadId)) return;
+    await this.dismissPendingResume(threadId);
+    const thread = this.#db.getThread(threadId);
+    if (thread.status === "running" || thread.status === "waiting") return;
+    const lastUserMessage = this.#db.getLastUserMessage(threadId);
+    if (!lastUserMessage?.content.trim()) return;
+    const { attachments, displayContent } = parseEditableMessageMetadata(lastUserMessage.metadataJson);
+    // Re-dispatch the interrupted message itself instead of sending a copy.
+    // Pre-linking user_message_id makes dispatch reuse the persisted message
+    // (no duplicate bubble, no duplicated prompt in the model context).
+    // A hard process exit can leave the original dispatching queue item in
+    // storage. Startup recovery makes it claimable again, so reuse it instead
+    // of enqueueing the same user message a second time.
+    const queued = this.#db
+      .listQueuedMessages(threadId)
+      .find((item) => item.userMessageId === lastUserMessage.id) ??
+      this.#db.enqueueQueuedMessage({
+        threadId,
+        content: lastUserMessage.content,
+        displayContent: displayContent ?? lastUserMessage.content,
+        attachments,
+        userMessageId: lastUserMessage.id
+      });
+    void this.emit({
+      type: "queue.updated",
+      threadId,
+      payload: { queueItemId: queued.id, action: "queued" },
+      createdAt: new Date().toISOString()
+    }).catch(() => undefined);
+    this.#runtime.wakeQueuedMessages(threadId, { resumed: true });
   }
 
   public async interruptThread(threadId: string): Promise<void> {

@@ -37,6 +37,14 @@ export function IconSidebar() {
   );
 }
 
+export function IconBolt() {
+  return (
+    <SvgIcon>
+      <path d="M13 2 3.8 13.6h6.4L9 22l9.4-11.6h-6.6L13 2z" />
+    </SvgIcon>
+  );
+}
+
 export function IconChevronLeft() {
   return (
     <SvgIcon>

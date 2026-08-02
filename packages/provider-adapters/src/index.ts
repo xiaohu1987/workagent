@@ -2,7 +2,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import * as cheerio from "cheerio";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { finalizeTokenUsage, modelJsonCandidates, tryParseModelJson } from "@shared-types";
 import type {
   MessageAttachment,
@@ -31,6 +33,7 @@ export {
   qwenCompat,
   senseNovaCompat,
   kimiCompat,
+  hunyuanCompat,
   agnesCompat,
   geminiCompat
 } from "./models";
@@ -178,6 +181,65 @@ class MockProvider implements ProviderAdapter {
   }
 }
 
+/**
+ * Appends request-shape diagnostics to a failed chat-completions call so the
+ * exact trigger (tool count, message shape, upstream error code) survives in
+ * logs, and dumps the full payload to ~/.codexh/logs for offline analysis.
+ * The upstream message is kept intact at the front, so downstream matchers
+ * (context-overflow detection, retry classification) keep working.
+ */
+function enrichProviderRequestError(
+  error: unknown,
+  request: Record<string, unknown>,
+  modelId: string
+): unknown {
+  if (!(error instanceof Error)) {
+    return error;
+  }
+  const tools = Array.isArray(request.tools) ? request.tools.length : 0;
+  const messages = Array.isArray(request.messages)
+    ? (request.messages as Array<{ role?: unknown }>)
+    : [];
+  const roleSummary = messages.map((message) => String(message.role ?? "?")).join(",");
+  let bytes = -1;
+  try {
+    bytes = JSON.stringify(request).length;
+  } catch {
+    // Non-serializable payloads still get the rest of the diagnostics.
+  }
+
+  const candidate = error as {
+    status?: unknown;
+    code?: unknown;
+    param?: unknown;
+    type?: unknown;
+    error?: { code?: unknown; param?: unknown; type?: unknown };
+  };
+  const upstreamParts: string[] = [];
+  const upstreamCode = candidate.error?.code ?? candidate.code;
+  const upstreamParam = candidate.error?.param ?? candidate.param;
+  const upstreamType = candidate.error?.type ?? candidate.type;
+  if (upstreamCode != null) upstreamParts.push(`code=${String(upstreamCode)}`);
+  if (upstreamParam != null) upstreamParts.push(`param=${String(upstreamParam)}`);
+  if (upstreamType != null) upstreamParts.push(`type=${String(upstreamType)}`);
+  const upstreamNote = upstreamParts.length > 0 ? ` upstream(${upstreamParts.join(" ")})` : "";
+
+  let dumpNote = "";
+  try {
+    const dir = join(homedir(), ".codexh", "logs");
+    const file = join(dir, `provider-request-error-${Date.now()}.json`);
+    void mkdir(dir, { recursive: true })
+      .then(() => writeFile(file, JSON.stringify(request, null, 2), "utf8"))
+      .catch(() => undefined);
+    dumpNote = ` dump=${file}`;
+  } catch {
+    // Dumping is best-effort; never mask the original error.
+  }
+
+  error.message = `${error.message} [provider-request model=${modelId} tools=${tools} messages=${messages.length}(${roleSummary}) bytes=${bytes}${upstreamNote}${dumpNote}]`;
+  return error;
+}
+
 class OpenAiCompatibleProvider implements ProviderAdapter {
   readonly #client: OpenAI;
   readonly #fetch: ProviderFetch;
@@ -219,16 +281,22 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
     const request = compat.normalizeRequestParams(ctx, baseRequest);
 
     if (input.stream && input.model.supportsStreaming) {
-      const streamResponse = await this.#client.chat.completions.create(
-        {
-          ...request,
-          stream: true,
-          // OpenAI and most compatible gateways only attach usage on the final
-          // chunk when this flag is set.
-          stream_options: { include_usage: true }
-        },
-        { signal: input.abortSignal }
-      ) as any;
+      const streamRequest = {
+        ...request,
+        stream: true,
+        // OpenAI and most compatible gateways only attach usage on the final
+        // chunk when this flag is set.
+        stream_options: { include_usage: true }
+      };
+      let streamResponse: any;
+      try {
+        streamResponse = await this.#client.chat.completions.create(
+          streamRequest,
+          { signal: input.abortSignal }
+        ) as any;
+      } catch (error) {
+        throw enrichProviderRequestError(error, streamRequest, input.model.id);
+      }
       if (!isAsyncIterable(streamResponse)) {
         const fallbackDecision = compat.parseResponse(streamResponse, ctx, Boolean(nativeTools));
         const fallbackReasoning = compat.extractReasoningFromMessage(streamResponse?.choices?.[0]?.message);
@@ -306,8 +374,10 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           }];
         });
       if (nativeCalls.length > 0) {
+        // Strip inline <think> reasoning from the persisted message; the
+        // reasoning already streamed into the draft via extractVisibleStreamText.
         return compat.normalizeDecision(applyReasoning(withTokenUsage({
-          assistantMessage: text.trim() || undefined,
+          assistantMessage: stripThinkBlocks(text).trim() || undefined,
           toolCalls: nativeCalls,
           endTurn: false,
           goalCompleted: false,
@@ -320,9 +390,14 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       )), ctx);
     }
 
-    const response = await this.#client.chat.completions.create(request as any, {
-      signal: input.abortSignal
-    });
+    let response: any;
+    try {
+      response = await this.#client.chat.completions.create(request as any, {
+        signal: input.abortSignal
+      });
+    } catch (error) {
+      throw enrichProviderRequestError(error, request, input.model.id);
+    }
     const finishReason = response?.choices?.[0]?.finish_reason;
     if (finishReason === "length") throw new ProviderStreamIncompleteError("length");
     if (finishReason === "content_filter") throw new ProviderStreamIncompleteError("content_filter");
@@ -687,7 +762,9 @@ function objectToolArguments(value: unknown): Record<string, unknown> {
 }
 
 function nativeTextDecision(text: string): ProviderTurnDecision {
-  if (!text) {
+  // Inline <think> reasoning is draft-only; never persist it in the message.
+  const cleaned = stripThinkBlocks(text).trim();
+  if (!cleaned) {
     return {
       assistantMessage: "The model returned neither a native tool call nor a final response.",
       toolCalls: [],
@@ -696,9 +773,9 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
       isStructured: false
     };
   }
-  if (isBareToolInvocationText(text)) {
+  if (isBareToolInvocationText(cleaned)) {
     return {
-      assistantMessage: text,
+      assistantMessage: cleaned,
       toolCalls: [],
       endTurn: false,
       goalCompleted: false,
@@ -706,12 +783,12 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
       requestTextToolProtocol: true
     };
   }
-  const structuredDecision = parseDecisionFromText(text);
+  const structuredDecision = parseDecisionFromText(cleaned);
   if (structuredDecision.isStructured) {
     return structuredDecision;
   }
   return {
-    assistantMessage: text,
+    assistantMessage: cleaned,
     toolCalls: [],
     endTurn: true,
     goalCompleted: true,
@@ -1635,6 +1712,18 @@ function mergeAdjacentProviderMessages(messages: any[], contentKey: "content" | 
 }
 
 /**
+ * <think> tag patterns. Besides the plain form, gateways emit suffixed
+ * variants — Hunyuan relays wrap reasoning in <think:6124c78e>…</think:6124c78e>
+ * (a per-session hash). A literal <think> match never closes there, which both
+ * leaks the tags into output and suppresses the visible stream forever
+ * ("卡在思考里出不来结果"). `\b[^>]*` accepts any suffix while still rejecting
+ * lookalikes such as <thinking>.
+ */
+const THINK_OPEN_TAG = /<think\b[^>]*>/i;
+const THINK_CLOSE_TAG = /<\/think\b[^>]*>/i;
+const THINK_BLOCK = /<think\b[^>]*>[\s\S]*?(?:<\/think\b[^>]*>|$)/gi;
+
+/**
  * Strip <think>...</think> reasoning blocks that reasoning-style models embed
  * directly in content (DeepSeek-R1-class models behind gateways, QwQ, relay
  * mappings that merge reasoning into content). Handles unterminated trailing
@@ -1642,7 +1731,7 @@ function mergeAdjacentProviderMessages(messages: any[], contentKey: "content" | 
  * every compat shell inherits it through the baseline parse/extract hooks.
  */
 export function stripThinkBlocks(text: string): string {
-  return text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
+  return text.replace(THINK_BLOCK, "");
 }
 
 /**
@@ -1653,15 +1742,70 @@ export function stripThinkBlocks(text: string): string {
  * verbatim should run it through this helper first.
  */
 export function stripThinkBlocksFromStream(text: string): string {
-  const thinkStart = text.search(/<think>/i);
+  const thinkStart = text.search(THINK_OPEN_TAG);
   if (thinkStart === -1) {
     return text;
   }
-  const thinkEnd = text.search(/<\/think>/i);
-  if (thinkEnd === -1 || thinkEnd < thinkStart) {
+  const closeMatch = THINK_CLOSE_TAG.exec(text);
+  if (!closeMatch || closeMatch.index < thinkStart) {
     return text.slice(0, thinkStart);
   }
-  return text.slice(0, thinkStart) + text.slice(thinkEnd + "</think>".length);
+  return text.slice(0, thinkStart) + text.slice(closeMatch.index + closeMatch[0].length);
+}
+
+/**
+ * Split a streaming buffer into surfaced reasoning (<think> bodies with the
+ * tags hidden, including the partial body while the block is still open) and
+ * the remainder that follows the last closed block. The draft shows the
+ * reasoning so users can watch the think process; final parsing still runs
+ * stripThinkBlocks, so the persisted message only contains the reply.
+ */
+function splitSurfacedThinkStream(text: string): { reasoning: string; rest: string } {
+  let reasoning = "";
+  let rest = text;
+  for (;;) {
+    const openMatch = THINK_OPEN_TAG.exec(rest);
+    if (!openMatch) {
+      return { reasoning, rest };
+    }
+    reasoning += rest.slice(0, openMatch.index);
+    const afterOpen = rest.slice(openMatch.index + openMatch[0].length);
+    const closeMatch = THINK_CLOSE_TAG.exec(afterOpen);
+    if (!closeMatch) {
+      return { reasoning: reasoning + afterOpen, rest: "" };
+    }
+    reasoning += afterOpen.slice(0, closeMatch.index);
+    rest = afterOpen.slice(closeMatch.index + closeMatch[0].length);
+  }
+}
+
+/**
+ * Hide a trailing fragment that can still grow into a <think> / </think>
+ * tag ("<", "</th", "<think:61" …). Emitting it would leak raw markup into
+ * the draft and break the prefix-monotonicity the stream delta loop relies
+ * on; holding it back only ever appends once the fragment resolves.
+ */
+function dropTrailingPartialThinkTag(visible: string): string {
+  const match = /<\/?[a-z0-9:-]*$/i.exec(visible);
+  if (!match || match[0] === "") {
+    return visible;
+  }
+  const core = match[0].replace(/^<\/?/, "").toLowerCase();
+  return "think".startsWith(core) || core.startsWith("think")
+    ? visible.slice(0, match.index)
+    : visible;
+}
+
+/**
+ * Streaming-draft variant of stripThinkBlocksFromStream: surface the <think>
+ * reasoning content in the draft (tags hidden) so the user can watch the
+ * think process while it streams, instead of showing nothing until the
+ * block closes. Final parsing still strips the blocks, so the persisted
+ * message only contains the reply.
+ */
+export function surfaceThinkBlocksInStream(text: string): string {
+  const { reasoning, rest } = splitSurfacedThinkStream(text);
+  return dropTrailingPartialThinkTag(reasoning + rest);
 }
 
 export function parseDecisionFromText(text: string): ProviderTurnDecision {
@@ -1791,26 +1935,30 @@ function parseCompletionEvidence(
 }
 
 export function extractVisibleStreamText(text: string): string {
-  // Reasoning-style models stream <think> blocks inline: suppress them (while
-  // open, nothing is visible; once closed, only the remainder is evaluated).
-  const visible = stripThinkBlocksFromStream(text);
-  const match = visible.match(/"assistant_message"\s*:\s*"((?:\\.|[^"\\])*)/s);
+  // Reasoning-style models stream <think> blocks inline: surface the
+  // reasoning in the draft so users can watch the think process, while
+  // structured protocol payloads stay suppressed until they can be decoded.
+  const { reasoning, rest } = splitSurfacedThinkStream(text);
+  const match = rest.match(/"assistant_message"\s*:\s*"((?:\\.|[^"\\])*)/s);
   if (match?.[1]) {
+    let decoded: string;
     try {
-      return JSON.parse(`"${match[1]}"`);
+      decoded = JSON.parse(`"${match[1]}"`);
     } catch {
-      return match[1]
+      decoded = match[1]
         .replace(/\\n/g, "\n")
         .replace(/\\t/g, "\t")
         .replace(/\\"/g, "\"")
         .replace(/\\\\/g, "\\");
     }
+    return reasoning ? `${reasoning}\n\n${decoded}` : decoded;
   }
 
-  const trimmed = visible.trimStart();
-  // Suppress structured protocol payloads until their assistant_message can be decoded.
-  if (trimmed.startsWith("{") || trimmed.startsWith("<")) return "";
-  return visible;
+  const trimmed = rest.trimStart();
+  // Suppress structured protocol payloads until their assistant_message can
+  // be decoded; surfaced reasoning stays visible in the draft.
+  if (trimmed.startsWith("{") || trimmed.startsWith("<")) return reasoning;
+  return dropTrailingPartialThinkTag(reasoning + rest);
 }
 
 function parseClarification(value: unknown): ProviderTurnDecision["clarification"] | undefined {

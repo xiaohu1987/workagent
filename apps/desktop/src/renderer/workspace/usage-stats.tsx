@@ -145,3 +145,8 @@ export function formatCacheHitRate(rate: number): string {
   if (!Number.isFinite(rate) || rate <= 0) return "0%";
   return `${Math.round(rate * 1000) / 10}%`;
 }
+
+export function formatTokenCountExact(tokens: number): string {
+  if (!Number.isFinite(tokens)) return "0";
+  return Math.round(tokens).toLocaleString("en-US");
+}

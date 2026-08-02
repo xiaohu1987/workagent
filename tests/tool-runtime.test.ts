@@ -802,6 +802,112 @@ describe("ToolRuntime", () => {
     }
   });
 
+  it("accepts a patch wrapped in a markdown code fence", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const runtime = new ToolRuntime();
+    const context = {
+      cwd: root,
+      requestApproval: vi.fn().mockResolvedValue(true)
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const result = await runtime.execute(
+        {
+          id: "fenced-patch",
+          name: "apply_patch",
+          arguments: {
+            patch: "```diff\n*** Begin Patch\n*** Add File: fenced.html\n+<h1>Fenced</h1>\n*** End Patch\n```"
+          }
+        },
+        context
+      );
+
+      expect(result.ok).toBe(true);
+      await expect(fs.readFile(path.join(root, "fenced.html"), "utf8")).resolves.toBe("<h1>Fenced</h1>\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs header variants and a missing End Patch terminator", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const runtime = new ToolRuntime();
+    const context = {
+      cwd: root,
+      requestApproval: vi.fn().mockResolvedValue(true)
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const result = await runtime.execute(
+        {
+          id: "loose-patch",
+          name: "apply_patch",
+          arguments: {
+            patch: "***Begin Patch\n***Add File：loose.txt\n+loose\n"
+          }
+        },
+        context
+      );
+
+      expect(result.ok).toBe(true);
+      await expect(fs.readFile(path.join(root, "loose.txt"), "utf8")).resolves.toBe("loose\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prefixes Add File content lines that miss the + marker", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const runtime = new ToolRuntime();
+    const context = {
+      cwd: root,
+      requestApproval: vi.fn().mockResolvedValue(true)
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const result = await runtime.execute(
+        {
+          id: "raw-add-patch",
+          name: "apply_patch",
+          arguments: {
+            patch: "*** Begin Patch\n*** Add File: raw.txt\nfirst line\n\nthird line\n*** End Patch"
+          }
+        },
+        context
+      );
+
+      expect(result.ok).toBe(true);
+      await expect(fs.readFile(path.join(root, "raw.txt"), "utf8")).resolves.toBe("first line\n\nthird line\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("converts a unified update diff into a canonical patch", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const filePath = path.join(root, "note.txt");
+    await fs.writeFile(filePath, "before\n", "utf8");
+    const runtime = new ToolRuntime();
+
+    try {
+      const result = await runtime.execute(
+        {
+          id: "unified-update",
+          name: "apply_patch",
+          arguments: {
+            patch: "--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-before\n+after\n"
+          }
+        },
+        { cwd: root, requestApproval: vi.fn().mockResolvedValue(true) } as unknown as ToolRuntimeContext
+      );
+
+      expect(result.ok).toBe(true);
+      await expect(fs.readFile(filePath, "utf8")).resolves.toBe("after\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("accepts project-internal absolute paths in canonical patches", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
     const filePath = path.join(root, "index.html");

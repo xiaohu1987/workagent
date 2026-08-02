@@ -42,6 +42,7 @@ if (process.platform === "win32") {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let shutdownTasksPromise: Promise<void> | null = null;
 let rendererServer: http.Server | null = null;
 let pendingTrayNotificationClick: (() => void) | null = null;
 const backend = new DesktopBackend();
@@ -463,6 +464,9 @@ function registerIpc(): void {
     backend.saveApiCardFavorites(Array.isArray(favorites) ? favorites : [])
   );
   ipcMain.handle("threads:interrupt", (_event, threadId: string) => backend.interruptThread(threadId));
+  ipcMain.handle("threads:pending-resume:list", () => backend.listPendingResume());
+  ipcMain.handle("threads:pending-resume:dismiss", (_event, threadId: string) => backend.dismissPendingResume(threadId));
+  ipcMain.handle("threads:pending-resume:resume", (_event, threadId: string) => backend.resumePendingResume(threadId));
   ipcMain.handle("multi-agents:list", (_event, threadId: string) => backend.listSubagents(threadId));
   ipcMain.handle("multi-agents:interrupt", (_event, payload: { threadId: string; agent: string }) =>
     backend.interruptAgent(payload.threadId, payload.agent)
@@ -779,8 +783,38 @@ app.whenReady().then(() => {
   });
 });
 
-app.on("before-quit", () => {
+function stopActiveThreadsBeforeQuit(): Promise<void> {
+  if (!shutdownTasksPromise) {
+    shutdownTasksPromise = (async () => {
+      try {
+        await backend.interruptActiveThreads();
+      } catch (error) {
+        console.error("[shutdown] Failed to interrupt active threads", error);
+      }
+    })();
+  }
+  return shutdownTasksPromise;
+}
+
+app.on("before-quit", (event) => {
   isQuitting = true;
+  try {
+    if (shutdownTasksPromise || !backend.hasActiveThreads()) {
+      return;
+    }
+  } catch {
+    return;
+  }
+  // Abort in-flight model runs before the process exits. Interrupting persists
+  // the turn as interrupted, so the elapsed clock freezes instead of resuming
+  // from the stale startedAt on the next launch.
+  event.preventDefault();
+  void Promise.race([
+    stopActiveThreadsBeforeQuit(),
+    new Promise<void>((resolve) => setTimeout(resolve, 10_000))
+  ]).finally(() => {
+    app.quit();
+  });
 });
 
 app.on("window-all-closed", () => {

@@ -1,5 +1,5 @@
 import { isGptReasoningEffort } from "@shared-types";
-import { stripThinkBlocksFromStream } from "../index";
+import { surfaceThinkBlocksInStream } from "../index";
 import { defineCompat } from "./types";
 import type {
   ImageGenerationPlan,
@@ -105,7 +105,9 @@ export const agnesCompat = defineCompat(gptCompat, {
     if (accumulated.includes('"assistant_message"')) {
       return gptCompat.extractVisibleStreamText(accumulated);
     }
-    return stripThinkBlocksFromStream(accumulated);
+    // Surface inline <think> reasoning in the streaming draft so users can
+    // watch the think process; final parsing still strips it.
+    return surfaceThinkBlocksInStream(accumulated);
   },
   resolveImageGeneration({ model, prompt }: ModelGenerationContext): ImageGenerationPlan {
     return {

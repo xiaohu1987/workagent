@@ -334,7 +334,7 @@ export function buildFunctionCallCompatibilityTranscript(
 }
 
 type Submission =
-  | { type: "queue_wakeup" }
+  | { type: "queue_wakeup"; resumed?: boolean }
   | { type: "approval_response"; requestId: string; approved: boolean }
   | { type: "user_input_response"; promptId: string; answers: Record<string, string> }
   | { type: "shutdown" };
@@ -1108,14 +1108,15 @@ class ThreadSessionRuntime {
         continue;
       }
       if (submission.type === "queue_wakeup") {
-        await this.drainQueuedMessages();
+        await this.drainQueuedMessages(submission.resumed === true);
       }
     }
   }
 
-  private async drainQueuedMessages(): Promise<void> {
+  private async drainQueuedMessages(resumeFirst = false): Promise<void> {
     this.#busy = true;
     try {
+      let skipMultimodalIntentClassification = resumeFirst;
       while (!this.#activeTurnRunId && !this.#stopping) {
         const queued = await this.services.persistence.claimNextQueuedMessage(this.threadId);
         if (!queued) {
@@ -1128,7 +1129,9 @@ class ThreadSessionRuntime {
           createdAt: new Date().toISOString()
         });
         try {
-          await this.runTurn(queued.id, queued.content, queued.attachments, queued.displayContent);
+          const isResumedTurn = skipMultimodalIntentClassification;
+          skipMultimodalIntentClassification = false;
+          await this.runTurn(queued.id, queued.content, queued.attachments, queued.displayContent, isResumedTurn);
         } catch (error) {
           console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
           await this.services.log("turn.unhandled_error", this.threadId, {
@@ -1205,7 +1208,8 @@ class ThreadSessionRuntime {
     queueItemId: string,
     initialInput: string,
     attachments: MessageAttachment[] = [],
-    displayContent?: string
+    displayContent?: string,
+    skipMultimodalIntentClassification = false
   ): Promise<void> {
     const thread = await this.services.persistence.getThread(this.threadId);
     const gpa = await this.#ensureGpa();
@@ -1450,15 +1454,25 @@ class ThreadSessionRuntime {
         };
       }
 
-      const multimodalClassification = await this.classifyMultimodalIntent({
-        currentInput: initialInput,
-        attachments,
-        priorMessages: priorMessagesBeforeCurrentInput.map((message) => ({ role: message.role, content: message.content })),
-        model,
-        provider,
-        abortController,
-        turnId: turn.id
-      });
+      const resumedRuleIntent = skipMultimodalIntentClassification
+        ? detectMultimodalIntent(initialInput, attachments)
+        : null;
+      const multimodalClassification = skipMultimodalIntentClassification
+        ? {
+            intent: resumedRuleIntent ?? "none",
+            prompt: resumedRuleIntent ? initialInput.trim() : "",
+            count: resumedRuleIntent === "image" ? detectRequestedImageCount(initialInput) : 1,
+            parseOk: true
+          }
+        : await this.classifyMultimodalIntent({
+            currentInput: initialInput,
+            attachments,
+            priorMessages: priorMessagesBeforeCurrentInput.map((message) => ({ role: message.role, content: message.content })),
+            model,
+            provider,
+            abortController,
+            turnId: turn.id
+          });
       if (multimodalClassification.intent === "image" || multimodalClassification.intent === "video") {
         await this.runMultimodalIntentTurn({
           intent: multimodalClassification.intent,
@@ -6936,8 +6950,8 @@ export class AgentRuntimeService {
     return runtime;
   }
 
-  public wakeQueuedMessages(threadId: string): void {
-    this.ensureThread(threadId).submit({ type: "queue_wakeup" });
+  public wakeQueuedMessages(threadId: string, options?: { resumed?: boolean }): void {
+    this.ensureThread(threadId).submit({ type: "queue_wakeup", resumed: options?.resumed === true });
   }
 
   public guideActiveTurn(threadId: string, content: string): string | null {

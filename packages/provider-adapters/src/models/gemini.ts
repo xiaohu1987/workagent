@@ -1,5 +1,5 @@
 import { isGptReasoningEffort } from "@shared-types";
-import { stripThinkBlocksFromStream } from "../index";
+import { surfaceThinkBlocksInStream } from "../index";
 import { defineCompat } from "./types";
 import type {
   ImageGenerationPlan,
@@ -100,13 +100,13 @@ export const geminiCompat = defineCompat(gptCompat, {
   extractVisibleStreamText(accumulated: string): string {
     // Only apply the GPT envelope extractor when the buffer really is a
     // decision envelope; otherwise pass content through the shared think-block
-    // stripper so Gemini's native-tool-call replies (including code/JSON
-    // blocks starting with `{`) are not swallowed and relay-mapped reasoning
-    // never leaks <think> markup.
+    // surfacer so Gemini's native-tool-call replies (including code/JSON
+    // blocks starting with `{`) are not swallowed, and relay-mapped reasoning
+    // shows in the draft without leaking <think> markup.
     if (accumulated.includes('"assistant_message"')) {
       return gptCompat.extractVisibleStreamText(accumulated);
     }
-    return stripThinkBlocksFromStream(accumulated);
+    return surfaceThinkBlocksInStream(accumulated);
   },
   resolveImageGeneration({ model, prompt }: ModelGenerationContext): ImageGenerationPlan {
     const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();

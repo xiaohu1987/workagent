@@ -114,8 +114,9 @@ export interface ModelCompat {
 
   /**
    * Extract the user-visible text from an accumulated stream buffer. Used
-   * both to feed `onTextDelta` and to suppress control JSON / thinking tags
-   * (e.g. deepseek reasoning_content) until they can be decoded.
+   * both to feed `onTextDelta` and to suppress control JSON until it can be
+   * decoded. Inline <think> reasoning is surfaced (tags hidden) so users can
+   * watch the think process in the draft; final parsing still strips it.
    */
   extractVisibleStreamText(accumulated: string): string;
 

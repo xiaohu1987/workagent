@@ -1362,6 +1362,13 @@ export class DatabaseService {
       .map(mapMessageRow);
   }
 
+  public getLastUserMessage(threadId: string): MessageRecord | null {
+    const row = this.#db
+      .prepare("SELECT * FROM messages WHERE thread_id = ? AND role = 'user' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(threadId);
+    return row ? mapMessageRow(row) : null;
+  }
+
   public getMessage(threadId: string, messageId: string): MessageRecord | null {
     const row = this.#db
       .prepare("SELECT * FROM messages WHERE thread_id = ? AND id = ?")
@@ -1410,19 +1417,19 @@ export class DatabaseService {
   }
 
   public enqueueQueuedMessage(
-    input: Omit<QueuedMessageRecord, "id" | "userMessageId" | "status" | "createdAt">
+    input: Omit<QueuedMessageRecord, "id" | "userMessageId" | "status" | "createdAt"> & { userMessageId?: string | null }
   ): QueuedMessageRecord {
     const record: QueuedMessageRecord = {
       ...input,
       id: randomUUID(),
-      userMessageId: null,
+      userMessageId: input.userMessageId ?? null,
       status: "queued",
       createdAt: nowIso()
     };
     this.#db
       .prepare(
-        `INSERT INTO queued_messages (id, thread_id, content, display_content, attachments_json, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO queued_messages (id, thread_id, content, display_content, attachments_json, user_message_id, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -1430,6 +1437,7 @@ export class DatabaseService {
         record.content,
         record.displayContent,
         JSON.stringify(record.attachments),
+        record.userMessageId,
         record.status,
         record.createdAt
       );

@@ -303,12 +303,11 @@
   color: #cfe8ff;
 }
 
-.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) code {
-  padding: 1px 5px;
-  border: 1px solid rgba(143, 177, 211, 0.2);
-  border-radius: 4px;
-  color: #dcecff;
-  background: rgba(68, 79, 96, 0.62);
+.task-timeline :is(.message-markdown, .event-markdown, .event-final-markdown) code:not(.hljs) {
+  padding: 0 1px;
+  color: #8fc5ff;
+  background: transparent;
+  font-weight: 600;
 }
 
 .task-timeline .markdown-structured-list {

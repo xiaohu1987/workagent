@@ -2223,43 +2223,197 @@ function normalizeApplyPatchInput(args: Record<string, unknown>): string {
     return "";
   }
 
-  const text = value.trim();
-  const beginIndex = text.indexOf("*** Begin Patch");
-  const canonical = beginIndex >= 0 ? text.slice(beginIndex) : text;
-  if (canonical.startsWith("*** Begin Patch")) {
-    return canonical;
+  const text = unwrapPatchCodeFence(value.trim());
+  const beginMatch = /\*\*\*\s*Begin Patch/i.exec(text);
+  if (beginMatch) {
+    return ensurePatchEnvelope(text.slice(beginMatch.index));
   }
 
-  return convertUnifiedAddPatch(canonical, args.file_path);
+  const unified = convertUnifiedDiffPatch(text, args.file_path);
+  if (unified) {
+    return unified;
+  }
+
+  const markerMatch = /^\*\*\*\s*(?:Add|Update|Delete)\s+File\s*[:：]/im.exec(text);
+  if (markerMatch) {
+    return ensurePatchEnvelope(`*** Begin Patch\n${text.slice(markerMatch.index)}`);
+  }
+
+  return text;
 }
 
-function convertUnifiedAddPatch(text: string, requestedPath: unknown): string {
+/** Models frequently wrap the whole patch in a markdown code fence. */
+function unwrapPatchCodeFence(text: string): string {
+  const match = /^(?:```|~~~)[^\n]*\n([\s\S]*?)\n?(?:```|~~~)\s*$/.exec(text);
+  return match ? match[1].trim() : text;
+}
+
+const PATCH_HEADER_PATTERN = /^\*\*\*\s*(begin patch|end patch|end of patch|add file|update file|delete file|move to)\b\s*[:：]?\s*(.*)$/i;
+
+/** Tolerate header variants: missing spaces, "*** End of Patch", full-width colons. */
+function normalizePatchHeaderLine(line: string): string | null {
+  const match = PATCH_HEADER_PATTERN.exec(line.trim());
+  if (!match) {
+    return null;
+  }
+  const rest = match[2].trim();
+  switch (match[1].toLowerCase()) {
+    case "begin patch":
+      return "*** Begin Patch";
+    case "end patch":
+    case "end of patch":
+      return "*** End Patch";
+    case "add file":
+      return `*** Add File: ${rest}`;
+    case "update file":
+      return `*** Update File: ${rest}`;
+    case "delete file":
+      return `*** Delete File: ${rest}`;
+    case "move to":
+      return `*** Move to: ${rest}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Repair a loosely formatted Codex patch: normalize headers, drop stray fence
+ * lines, prefix Add File content lines that miss "+", and append a missing
+ * "*** End Patch" terminator.
+ */
+function ensurePatchEnvelope(text: string): string {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const normalized: string[] = [];
+  let inAddFile = false;
+  let inUpdateFile = false;
+  let sawEnd = false;
+
+  const closeAddFile = () => {
+    // A blank separator before the next header must not become a spurious
+    // trailing blank line in the new file.
+    while (normalized.at(-1) === "+") {
+      normalized.pop();
+    }
+    inAddFile = false;
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    const isFenceLine = /^(```|~~~)/.test(trimmed);
+    const header = normalizePatchHeaderLine(rawLine);
+    if (header) {
+      closeAddFile();
+      inUpdateFile = header.startsWith("*** Update File:");
+      normalized.push(header);
+      inAddFile = header.startsWith("*** Add File:");
+      if (header === "*** End Patch") {
+        sawEnd = true;
+      }
+      continue;
+    }
+    if (sawEnd) {
+      continue; // ignore prose trailing after "*** End Patch"
+    }
+    if (isFenceLine && !inAddFile && !inUpdateFile) {
+      continue; // stray markdown fence outside any file block
+    }
+    if (inAddFile && !rawLine.startsWith("+")) {
+      normalized.push(rawLine === "" ? "+" : `+${rawLine}`);
+      continue;
+    }
+    normalized.push(rawLine);
+  }
+
+  if (!sawEnd) {
+    closeAddFile();
+    while (normalized.length > 0 && (normalized.at(-1) === "" || /^(```|~~~)/.test(normalized.at(-1)!.trim()))) {
+      normalized.pop();
+    }
+    normalized.push("*** End Patch");
+  }
+
+  return normalized.join("\n");
+}
+
+/**
+ * Convert a single-file unified (git-style) diff into canonical Codex patch
+ * syntax. Handles add (--- /dev/null), delete (+++ /dev/null), and update.
+ * Returns null when the input is not a convertible unified diff.
+ */
+function convertUnifiedDiffPatch(text: string, requestedPath: unknown): string | null {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   const oldPath = lines.find((line) => line.startsWith("--- "))?.slice(4).trim();
   const newPath = lines.find((line) => line.startsWith("+++ "))?.slice(4).trim();
-  if (oldPath !== "/dev/null" || !newPath) {
-    return text;
+  const hunkIndex = lines.findIndex((line) => line.startsWith("@@"));
+  if (hunkIndex < 0 || (!oldPath && !newPath)) {
+    return null;
   }
 
-  const hunkIndex = lines.findIndex((line) => line.startsWith("@@"));
-  if (hunkIndex < 0) {
-    return text;
+  const hunkLines: string[] = [];
+  for (const line of lines.slice(hunkIndex)) {
+    if (line.startsWith("diff --git") || line.startsWith("--- ")) {
+      break; // only the first file of a multi-file diff is converted
+    }
+    if (line.startsWith("@@")) {
+      hunkLines.push("@@");
+      continue;
+    }
+    if (line.startsWith(" ") || line.startsWith("+") || line.startsWith("-")) {
+      hunkLines.push(line);
+      continue;
+    }
+    if (line === "") {
+      hunkLines.push(" "); // context marker stripped from a blank line
+      continue;
+    }
+    if (line.startsWith("\\")) {
+      continue; // "\ No newline at end of file"
+    }
+    break;
   }
-  const content = lines.slice(hunkIndex + 1);
-  while (content.at(-1) === "") {
-    content.pop();
+  if (hunkLines.length === 0) {
+    return null;
   }
-  if (content.some((line) => line && !line.startsWith("+"))) {
-    return text;
+
+  if (newPath === "/dev/null" && oldPath) {
+    return [
+      "*** Begin Patch",
+      `*** Delete File: ${resolvePatchRelativePath(oldPath, requestedPath)}`,
+      "*** End Patch"
+    ].join("\n");
   }
-  const pathValue = typeof requestedPath === "string" && requestedPath.trim() ? requestedPath : newPath.replace(/^[ab]\//, "");
-  const relativePath = pathValue.replace(/^[/\\]+/, "").replace(/^[^/\\]+:[/\\]+/, "");
+
+  if (oldPath === "/dev/null" && newPath) {
+    const content = hunkLines.filter((line) => line !== "@@");
+    if (content.some((line) => !line.startsWith("+") && line !== " ")) {
+      return null;
+    }
+    const addLines = content.map((line) => (line === " " ? "+" : line));
+    while (addLines.at(-1) === "+") {
+      addLines.pop();
+    }
+    return [
+      "*** Begin Patch",
+      `*** Add File: ${resolvePatchRelativePath(newPath, requestedPath)}`,
+      ...addLines,
+      "*** End Patch"
+    ].join("\n");
+  }
+
+  if (!newPath) {
+    return null;
+  }
   return [
     "*** Begin Patch",
-    `*** Add File: ${relativePath}`,
-    ...content,
+    `*** Update File: ${resolvePatchRelativePath(newPath, requestedPath)}`,
+    ...hunkLines,
     "*** End Patch"
   ].join("\n");
+}
+
+function resolvePatchRelativePath(diffPath: string, requestedPath: unknown): string {
+  const pathValue = typeof requestedPath === "string" && requestedPath.trim() ? requestedPath : diffPath.replace(/^[ab]\//, "");
+  return pathValue.replace(/^[/\\]+/, "").replace(/^[^/\\]+:[/\\]+/, "");
 }
 
 function resolveWorkspacePath(rootDir: string, targetPath: string): string {

@@ -26,6 +26,7 @@ import type {
   McpServerConfig,
   ModelProfile,
   QueuedMessageRecord,
+  PendingResumeThread,
   PluginRecord,
   ProviderDefinition,
   ProviderType,
@@ -172,7 +173,8 @@ import {
 import {
   UsageStatisticsPanel,
   formatCacheHitRate,
-  formatTokenCount
+  formatTokenCount,
+  formatTokenCountExact
 } from "./workspace/usage-stats";
 import { ApiCardFavoritesPanel } from "./workspace/api-card-favorites";
 import {
@@ -202,6 +204,7 @@ import {
   IconCheck,
   IconChecklist,
   IconChevronDown,
+  IconBolt,
   IconChevronLeft,
   IconChevronRight,
   IconClose,
@@ -273,22 +276,46 @@ import {
   type ChatBackgroundSurfaceKey,
   type ChatBackgroundSurfaces
 } from "./chat-background";
+import { ComposerAttachmentChip } from "./composer/attachment-chip";
+import {
+  HISTORY_COLLAPSED_GROUPS_STORAGE_KEY,
+  HISTORY_STANDALONE_GROUP_KEY,
+  HISTORY_THREADS_PREVIEW_COUNT,
+  normalizeHistoryGroupKey,
+  pickVisibleHistoryThreads,
+  readStoredStringSet,
+  writeStoredStringSet
+} from "./history-utils";
+import {
+  isGeneratedUserSkill,
+  type AppNotice,
+  type AppNoticeTone,
+  type CapabilityTab,
+  type ComposerSubmission,
+  type GpaPlanResumeDialogState,
+  type GpaPlanResumePreview,
+  type GpaPlanResumeRetryPrompt,
+  type HistorySearchResult,
+  type KnowledgeSourceAttachment,
+  type ManagedRemoval,
+  type McpRuntimeServer,
+  type ModelTestResult,
+  type RuntimeActivity,
+  type RuntimeActivityEntry,
+  type RuntimeProgress,
+  type SettingsTab,
+  type UserSkillGenerationDialog,
+  type WelcomeCard
+} from "./app-types";
 
-type SettingsTab = "general" | "appearance" | "usage" | "knowledge" | "memory" | "apiFavorites" | "provider" | "multimodal" | "capabilities" | "mcp" | "database" | "timeouts" | "update";
+export { isGeneratedUserSkill } from "./app-types";
+
 type ChatBackgroundImage = {
   id: string;
   fileName: string;
   mimeType: string;
   bytes: ArrayBuffer;
   url: string;
-};
-type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";
-type ManagedRemoval =
-  | { kind: "plugin"; plugin: PluginRecord }
-  | { kind: "skill"; skill: SkillMetadata };
-type UserSkillGenerationDialog = {
-  thread: ThreadRecord;
-  name: string;
 };
 type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
 const SKILL_SORT_OPTIONS = [
@@ -315,12 +342,6 @@ type UpdateState = {
   error?: string;
   isPackaged: boolean;
 };
-
-export function isGeneratedUserSkill(skill: Pick<SkillMetadata, "pluginId" | "scope" | "skillPath">): boolean {
-  return !skill.pluginId &&
-    skill.scope === "user" &&
-    /[\\/]skills[\\/]drafts[\\/]/i.test(skill.skillPath);
-}
 
 type BrowserWebviewElement = HTMLElement & {
   getWebContentsId: () => number;
@@ -356,8 +377,6 @@ type MessageBrowserSource = {
   url: string;
 };
 
-type KnowledgeSourceAttachment = KnowledgeImportSource;
-
 type TerminalWorkspaceTab = {
   id: string;
   title: string;
@@ -369,55 +388,6 @@ type TerminalSessionState = {
   shell: string;
 };
 
-type WelcomeCard = {
-  id: string;
-  title: string;
-  prompt: string;
-  accentClass: string;
-  icon: ReactNode;
-};
-
-type AppNoticeTone = "success" | "warning";
-
-type AppNotice = {
-  id: number;
-  title: string;
-  message?: string;
-  tone: AppNoticeTone;
-};
-
-type GpaPlanResumePreview = {
-  status: "awaiting_confirmation" | "in_progress" | "completed" | "abandoned";
-  sourceThreadId: string;
-  currentThreadId: string;
-  sameSession: boolean;
-  updatedAt: string;
-  tasks: Array<{ id: string; title: string; done: boolean }>;
-  body: string;
-  doneCount: number;
-  pendingCount: number;
-  pendingTasks: Array<{ id: string; title: string; done: boolean }>;
-};
-
-type GpaPlanResumeDialogState = {
-  step: "ask" | "review";
-  plan: GpaPlanResumePreview;
-  threadId: string;
-};
-
-type GpaPlanResumeRetryPrompt = {
-  plan: GpaPlanResumePreview;
-  threadId: string;
-};
-
-type ModelTestResult = {
-  latencyMs: number;
-  outputTokens: number;
-  tokensPerSecond: number;
-  agentCapability: "verified" | "unsupported";
-  agentCapabilityReason?: string;
-};
-
 const RESPONSE_TONE_OPTIONS: Array<{
   value: AppConfig["responseTone"];
   label: string;
@@ -426,39 +396,6 @@ const RESPONSE_TONE_OPTIONS: Array<{
   { value: "friendly", label: "亲和", description: "自然、温和、清晰" },
   { value: "concise", label: "简约", description: "直接、精炼、聚焦结果" }
 ];
-
-type RuntimeProgress = {
-  threadId: string;
-  phase: "preparing" | "thinking" | "generating" | "tool";
-  runtimeObserved: boolean;
-};
-
-type ComposerSubmission = {
-  content: string;
-  startedAt: string;
-};
-
-type RuntimeActivityEntry =
-  | { id: string; kind: "status"; label: string; createdAt: string }
-  | { id: string; kind: "output"; label: string; content: string; createdAt: string }
-  | { id: string; kind: "tool"; toolCall: ToolCallRecord };
-
-type RuntimeActivity = {
-  threadId: string;
-  startedAt: string;
-  entries: RuntimeActivityEntry[];
-};
-
-type McpRuntimeServer = McpServerConfig & {
-  status: { state: "idle" | "connecting" | "connected" | "error" | "disabled"; error?: string };
-  authStatus?: "not_configured" | "signed_out" | "signed_in";
-};
-
-type HistorySearchResult = {
-  thread: ThreadRecord;
-  snippet: string | null;
-  score: number;
-};
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "timeouts", label: "通用设置", hint: "模型请求、重试、视频生成和子智能体的运行设置" },
@@ -558,9 +495,6 @@ const MAX_SIDEBAR_WIDTH = 520;
 const MIN_RIGHT_WORKSPACE_WIDTH = 300;
 const MAX_RIGHT_WORKSPACE_WIDTH = 720;
 const MIN_CHAT_WIDTH = 380;
-const HISTORY_THREADS_PREVIEW_COUNT = 10;
-const HISTORY_STANDALONE_GROUP_KEY = "__standalone__";
-const HISTORY_COLLAPSED_GROUPS_STORAGE_KEY = "codexh.history-collapsed-groups";
 const ASSISTANT_FINAL_MESSAGE_FADE_DURATION_MS = 240;
 const THREAD_SNAPSHOT_CACHE_LIMIT = 8;
 
@@ -575,57 +509,6 @@ function getStoredPanelWidth(key: string, fallback: number, minimum: number, max
 
 function clampPanelWidth(value: number, minimum: number, maximum: number): number {
   return Math.round(Math.min(Math.max(value, minimum), maximum));
-}
-
-function normalizeHistoryGroupKey(cwd: string): string {
-  return cwd.replace(/\\/g, "/").toLocaleLowerCase();
-}
-
-function readStoredStringSet(key: string): Set<string> {
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return new Set();
-    return new Set(parsed.filter((item): item is string => typeof item === "string"));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeStoredStringSet(key: string, values: Set<string>): void {
-  try {
-    window.localStorage.setItem(key, JSON.stringify([...values]));
-  } catch {
-    // Ignore quota / private-mode write failures.
-  }
-}
-
-function pickVisibleHistoryThreads(
-  threads: ThreadRecord[],
-  options: { expanded: boolean; previewCount: number; selectedThreadId: string | null }
-): { visibleThreads: ThreadRecord[]; hiddenCount: number; canExpand: boolean } {
-  const canExpand = threads.length > options.previewCount;
-  if (options.expanded || !canExpand) {
-    return { visibleThreads: threads, hiddenCount: 0, canExpand };
-  }
-
-  const preview = threads.slice(0, options.previewCount);
-  const hiddenCount = threads.length - preview.length;
-  if (!options.selectedThreadId || preview.some((thread) => thread.id === options.selectedThreadId)) {
-    return { visibleThreads: preview, hiddenCount, canExpand };
-  }
-
-  const selected = threads.find((thread) => thread.id === options.selectedThreadId);
-  if (!selected) {
-    return { visibleThreads: preview, hiddenCount, canExpand };
-  }
-
-  return {
-    visibleThreads: [...preview.slice(0, Math.max(0, options.previewCount - 1)), selected],
-    hiddenCount,
-    canExpand
-  };
 }
 
 export function App() {
@@ -807,6 +690,7 @@ export function App() {
   const activeChatBackground = chatBackgroundImages[activeChatBackgroundIndex] ?? null;
   const chatBackgroundUrl = activeChatBackground?.url ?? null;
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [pendingResumeThreads, setPendingResumeThreads] = useState<PendingResumeThread[]>([]);
   const [updateConfirmDialog, setUpdateConfirmDialog] = useState<null | {
     kind: "download" | "install";
     title: string;
@@ -1531,6 +1415,16 @@ export function App() {
     return window.codexh.onUpdateState(setUpdateState);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void window.codexh.listPendingResume().then((pending) => {
+      if (!cancelled) setPendingResumeThreads(pending);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => window.codexh.onSkillLabEvent((event) => {
     const typed = event as SkillLabEvent;
     updateSkillLabNotification(typed);
@@ -1718,13 +1612,15 @@ export function App() {
     if (!cached) return false;
     cacheThreadSnapshot(cached);
     snapshotThreadIdRef.current = threadId;
+    // Hiding the switch placeholder is urgent; do not couple it to the
+    // interruptible transcript transition below (it can be starved).
+    setIsThreadSwitching(false);
     // Mount the cached transcript as a transition: the selection highlight and
     // sidebar stay responsive while React renders the (potentially large)
     // message list, and the render can be interrupted by a newer switch.
     startTransition(() => {
       setSnapshot(cached);
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: cached.browserTabs }));
-      setIsThreadSwitching(false);
     });
     return true;
   }
@@ -3356,6 +3252,12 @@ export function App() {
     )?.toolCall ?? null,
     [activeRuntimeActivity?.entries]
   );
+  const latestRuntimeStatusLabel = useMemo(
+    () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
+      (entry) => entry.kind === "status"
+    )?.label ?? null,
+    [activeRuntimeActivity?.entries]
+  );
   const deferredRuntimeToolGroup = useMemo(() => {
     if (!isTaskProcessing || !latestRootRuntimeTool) {
       return null;
@@ -3425,7 +3327,18 @@ export function App() {
   );
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
   const showWelcome = timelineEntries.length === 0;
+  const showDefaultHome = !selectedThreadId;
   const isThreadSwitchPlaceholderVisible = isThreadSwitching && selectedThreadId !== activeSnapshotThreadId;
+  const pendingResumeThread = useMemo(
+    () => pendingResumeThreads.find((entry) => entry.threadId === activeSnapshotThreadId) ?? null,
+    [pendingResumeThreads, activeSnapshotThreadId]
+  );
+  const showPendingResumeCard = Boolean(
+    pendingResumeThread &&
+    !showWelcome &&
+    activeSnapshotThreadStatus !== "running" &&
+    activeSnapshotThreadStatus !== "waiting"
+  );
   const isProjectWelcome = selectedThread?.mode === "project";
   const welcomeCards = isProjectWelcome ? WELCOME_CARDS : CHAT_WELCOME_CARDS;
   const latestVisibleMessageId = timelineEntries[timelineEntries.length - 1]?.id ?? null;
@@ -3603,6 +3516,24 @@ export function App() {
     }
     return modelLabel ?? providerLabel ?? "选择模型";
   }, [composerModelOptions, composerProviderId, composerProviders, composerModelId]);
+  const defaultHomeModelLabel = useMemo(() => {
+    if (!config) {
+      return "未配置";
+    }
+    const targetProviderId = composerProviderId ?? config.defaultProvider;
+    const targetModelId = composerModelId ?? config.defaultModel;
+    const targetModel =
+      config.models.find((model) => model.id === targetModelId && model.providerId === targetProviderId) ??
+      config.models.find((model) => model.id === targetModelId) ??
+      null;
+    const provider = composerProviders.find((item) => item.id === targetProviderId);
+    const providerLabel = provider ? getProviderDisplayName(provider) : null;
+    const resolvedModelLabel = targetModel?.displayName?.trim() || targetModel?.id || targetModelId || null;
+    if (!resolvedModelLabel) {
+      return "未配置";
+    }
+    return providerLabel ? `${providerLabel} · ${resolvedModelLabel}` : resolvedModelLabel;
+  }, [config, composerModelId, composerProviderId, composerProviders]);
   const activeAssistantLabel = useMemo(() => {
     if (!config) {
       return "Assistant";
@@ -3898,7 +3829,7 @@ export function App() {
     await Promise.all([refreshThreads(), refreshSkills(), refreshPlugins(), refreshConfig(), refreshMcpServers()]);
   }
 
-  async function refreshThreads(options?: { refreshSelectedSnapshot?: boolean }) {
+  async function refreshThreads(options?: { refreshSelectedSnapshot?: boolean; fallbackToFirst?: boolean }) {
     const nextThreads = (await window.codexh.listThreads()) as ThreadRecord[];
     setThreads(nextThreads);
     syncThreadNotificationsFromThreads(nextThreads);
@@ -3911,7 +3842,9 @@ export function App() {
         ? currentSelectedThreadId
         : currentSelectedThreadId && snapshotThreadIdRef.current === currentSelectedThreadId
           ? currentSelectedThreadId
-        : nextThreads[0]?.id ?? null;
+          : options?.fallbackToFirst === false
+            ? null
+            : nextThreads[0]?.id ?? null;
 
     if (targetThreadId === currentSelectedThreadId) {
       if (options?.refreshSelectedSnapshot !== false) {
@@ -4016,12 +3949,16 @@ export function App() {
       cacheThreadSnapshot(mergedSnapshot);
       if (selectedThreadIdRef.current === threadId) {
         snapshotThreadIdRef.current = threadId;
+        // Hiding the switch placeholder is urgent feedback. It must not wait
+        // behind the interruptible transcript transition below, otherwise a
+        // busy runtime (streaming events from another thread) can starve the
+        // transition and leave the skeleton on screen indefinitely.
+        setIsThreadSwitching(false);
         // The merged snapshot can carry hundreds of messages; commit it as a
         // transition so urgent interactions (clicks, another switch) are not
         // blocked behind the transcript render.
         startTransition(() => {
           setSnapshot(mergedSnapshot);
-          setIsThreadSwitching(false);
         });
       }
       setThreads((current) => current.map((thread) =>
@@ -4208,7 +4145,21 @@ export function App() {
       // Paint the previous transcript first, then verify it incrementally.
       void refreshSnapshot(threadId);
     } else {
+      if (isSwitchingThread) {
+        // A running thread keeps emitting drafts and progress while its next
+        // history entry is loading. Retaining that old snapshot here keeps
+        // the expensive timeline derivation alive and can starve the switch.
+        // The cache still preserves it for an instant return; detach only the
+        // mounted snapshot so the new selection and loading state can paint.
+        snapshotThreadIdRef.current = null;
+        setSnapshot(null);
+      }
       await refreshSnapshot(threadId);
+      // Safety net: never leave the switch skeleton up once the load settled,
+      // regardless of which in-flight/pending branch handled the refresh.
+      if (selectedThreadIdRef.current === threadId) {
+        setIsThreadSwitching(false);
+      }
     }
     // Switching chats must never auto-start GPA. Same-session incomplete plans only
     // restore the GPA chip/timeline; the user continues explicitly via GPA or send.
@@ -4429,6 +4380,28 @@ export function App() {
     }
   }
 
+  function removePendingResumeThread(threadId: string) {
+    setPendingResumeThreads((current) => current.filter((entry) => entry.threadId !== threadId));
+  }
+
+  async function handleResumePendingThread(threadId: string) {
+    removePendingResumeThread(threadId);
+    try {
+      await window.codexh.resumePendingResume(threadId);
+    } catch (error) {
+      showNotice("恢复任务失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function handleDismissPendingThread(threadId: string) {
+    removePendingResumeThread(threadId);
+    try {
+      await window.codexh.dismissPendingResume(threadId);
+    } catch {
+      // The card is already hidden locally; marker cleanup is best-effort.
+    }
+  }
+
   function showNotice(title: string, options?: { message?: string; tone?: AppNoticeTone }) {
     setIsNoticeHovered(false);
     setExitingNoticeId(null);
@@ -4462,11 +4435,18 @@ export function App() {
 
     setDeletingThreadId(thread.id);
     try {
+      const isSelectedThread = selectedThreadIdRef.current === thread.id;
       await window.codexh.deleteThread(thread.id);
       snapshotCacheByThreadRef.current.delete(thread.id);
       delete snapshotCursorByThreadRef.current[thread.id];
       setHistoryThreadDeleteConfirmation(null);
-      await refreshThreads();
+      if (isSelectedThread) {
+        selectThreadId(null);
+        setSnapshot(null);
+        await refreshThreads({ fallbackToFirst: false });
+      } else {
+        await refreshThreads();
+      }
       showNotice("任务已删除。", { tone: "success" });
     } catch (error) {
       showNotice("暂时无法删除任务。", {
@@ -7774,29 +7754,84 @@ export function App() {
                   aria-modal="false"
                   aria-label="本对话 Token 消耗"
                 >
-                  <header className="token-usage-panel-header">
-                    <strong>累计消耗</strong>
-                    <span>{formatTokenCount(threadTokenUsage.thread.totalTokens)} Tokens</span>
-                  </header>
-                  <div className="token-usage-panel-body">
-                    <div className="token-usage-grid">
-                      <div className="token-usage-block">
-                        <strong>输入</strong>
-                        <div><span>缓存命中</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheHitTokens)}</b></div>
-                        <div><span>未命中</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheMissTokens)}</b></div>
-                        <div><span>缓存写入</span><b>{formatTokenCount(threadTokenUsage.thread.inputCacheWriteTokens)}</b></div>
-                      </div>
-                      <div className="token-usage-block">
-                        <strong>输出</strong>
-                        <div><span>思考过程</span><b>{formatTokenCount(threadTokenUsage.thread.outputReasoningTokens)}</b></div>
-                        <div><span>回复内容</span><b>{formatTokenCount(threadTokenUsage.thread.outputContentTokens)}</b></div>
-                      </div>
-                      <div className="token-usage-rate">
-                        <span>缓存命中率</span>
-                        <strong>{formatCacheHitRate(threadTokenUsage.thread.cacheHitRate)}</strong>
-                      </div>
-                    </div>
-                  </div>
+                  {(() => {
+                    const usage = threadTokenUsage.thread;
+                    const inputBreakdownTotal =
+                      usage.inputCacheHitTokens + usage.inputCacheMissTokens + usage.inputCacheWriteTokens;
+                    const segmentWidth = (value: number): string =>
+                      inputBreakdownTotal > 0
+                        ? `${Math.min(100, Math.max(0, (value / inputBreakdownTotal) * 100))}%`
+                        : "0%";
+                    return (
+                      <>
+                        <header className="token-usage-panel-header">
+                          <strong>Token 消耗明细</strong>
+                          <span>总计 <b>{formatTokenCountExact(usage.totalTokens)}</b></span>
+                        </header>
+                        <div className="token-usage-panel-body">
+                          <div className="token-usage-section">
+                            <div className="token-usage-row section-head">
+                              <span className="token-usage-marker input" aria-hidden />
+                              <span className="token-usage-name">输入</span>
+                              <b>{formatTokenCountExact(usage.inputTokens)}</b>
+                            </div>
+                            <div className="token-usage-row">
+                              <span className="token-usage-marker hit" aria-hidden />
+                              <span className="token-usage-name">缓存命中</span>
+                              <b>{formatTokenCountExact(usage.inputCacheHitTokens)}</b>
+                            </div>
+                            <div className="token-usage-row">
+                              <span className="token-usage-marker miss" aria-hidden />
+                              <span className="token-usage-name">缓存未命中</span>
+                              <b>{formatTokenCountExact(usage.inputCacheMissTokens)}</b>
+                            </div>
+                            <div className="token-usage-row">
+                              <span className="token-usage-marker write" aria-hidden />
+                              <span className="token-usage-name">缓存写入</span>
+                              <b>{formatTokenCountExact(usage.inputCacheWriteTokens)}</b>
+                            </div>
+                          </div>
+                          <div className="token-usage-section">
+                            <div className="token-usage-row section-head">
+                              <span className="token-usage-marker output" aria-hidden />
+                              <span className="token-usage-name">输出</span>
+                              <b>{formatTokenCountExact(usage.outputTokens)}</b>
+                            </div>
+                            <div className="token-usage-row">
+                              <span className="token-usage-marker none" aria-hidden />
+                              <span className="token-usage-name">思考过程</span>
+                              <b>{formatTokenCountExact(usage.outputReasoningTokens)}</b>
+                            </div>
+                            <div className="token-usage-row">
+                              <span className="token-usage-marker none" aria-hidden />
+                              <span className="token-usage-name">回复内容</span>
+                              <b>{formatTokenCountExact(usage.outputContentTokens)}</b>
+                            </div>
+                          </div>
+                          <div className="token-usage-rate">
+                            <span className="token-usage-rate-label">
+                              <span className="token-usage-rate-icon" aria-hidden><IconBolt /></span>
+                              缓存命中率
+                            </span>
+                            <strong>{formatCacheHitRate(usage.cacheHitRate)}</strong>
+                          </div>
+                          <div
+                            className="token-usage-bar"
+                            aria-label={`输入构成：命中 ${segmentWidth(usage.inputCacheHitTokens)}，写入 ${segmentWidth(usage.inputCacheWriteTokens)}，未命中 ${segmentWidth(usage.inputCacheMissTokens)}`}
+                          >
+                            <span className="token-usage-bar-segment hit" style={{ width: segmentWidth(usage.inputCacheHitTokens) }} />
+                            <span className="token-usage-bar-segment write" style={{ width: segmentWidth(usage.inputCacheWriteTokens) }} />
+                            <span className="token-usage-bar-segment miss" style={{ width: segmentWidth(usage.inputCacheMissTokens) }} />
+                          </div>
+                          <div className="token-usage-legend" aria-hidden>
+                            <span><i className="token-usage-marker hit" />命中</span>
+                            <span><i className="token-usage-marker write" />写入</span>
+                            <span><i className="token-usage-marker miss" />未命中</span>
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               ) : null}
             </div>
@@ -7923,6 +7958,38 @@ export function App() {
               <div className="welcome-empty-state">
                 {composerSubmission ? (
                   <ComposerSubmissionStatus submission={composerSubmission} />
+                ) : showDefaultHome ? (
+                  <section className="welcome-panel chat default-home-panel" aria-label="开始">
+                    <div className="welcome-intro">
+                      <span className="welcome-eyebrow">CODEXH CHAT</span>
+                      <h1>开始你的下一个<span>任务</span></h1>
+                      <p>选择一个快捷操作，或直接在下方输入框描述你的目标。</p>
+                    </div>
+                    <div className="welcome-card-grid default-home-grid">
+                      <button
+                        type="button"
+                        className="welcome-card orange default-home-card"
+                        onClick={() => void createThread("chat")}
+                      >
+                        <span className="welcome-card-icon" aria-hidden><IconCompose /></span>
+                        <strong>新建任务</strong>
+                        <span className="welcome-card-action">开始一次新的对话</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="welcome-card blue default-home-card"
+                        onClick={() => void createThread("project")}
+                      >
+                        <span className="welcome-card-icon" aria-hidden><IconFolder /></span>
+                        <strong>新建项目</strong>
+                        <span className="welcome-card-action">在项目文件夹中工作</span>
+                      </button>
+                    </div>
+                    <div className="default-home-model">
+                      <span className="default-home-model-label">当前默认模型</span>
+                      <strong className="default-home-model-value">{defaultHomeModelLabel}</strong>
+                    </div>
+                  </section>
                 ) : (
                   <section className={`welcome-panel ${isProjectWelcome ? "project" : "chat"}`} aria-label="开始新任务">
                     <div className="welcome-intro">
@@ -8067,6 +8134,7 @@ export function App() {
                         phase={activeAssistantDraft.phase}
                         startedAt={activeAssistantDraft.startedAt}
                         completed={activeAssistantDraft.completed}
+                        statusLabel={latestRuntimeStatusLabel}
                       />
                     ) : null}
                     {shouldRenderRuntimeTailPanel ? (
@@ -8088,6 +8156,13 @@ export function App() {
                       />
                     ) : null}
                   </div>
+                ) : null}
+                {showPendingResumeCard && pendingResumeThread ? (
+                  <PendingResumeCard
+                    pending={pendingResumeThread}
+                    onResume={() => void handleResumePendingThread(pendingResumeThread.threadId)}
+                    onDismiss={() => void handleDismissPendingThread(pendingResumeThread.threadId)}
+                  />
                 ) : null}
               </div>
             )}
@@ -12152,91 +12227,6 @@ function toggleWorkspaceSection(
   onExpandedTabChange(tab);
 }
 
-function ComposerAttachmentChip({
-  attachment,
-  removing,
-  onRemove
-}: {
-  attachment: ComposerAttachment;
-  removing?: boolean;
-  onRemove: () => void;
-}) {
-  const [preview, setPreview] = useState<MessageMediaPreview | null>(null);
-  const previewPresence = useMotionPresence(preview);
-  const visiblePreview = preview ?? previewPresence.value;
-  const detail =
-    attachment.kind === "code"
-      ? `${attachment.path} · ${attachment.content.split(/\r?\n/).length} 行`
-      : attachment.kind === "skill" || attachment.kind === "mcp" || attachment.kind === "database"
-        ? attachment.description
-        : attachment.kind === "folder"
-          ? "文件夹"
-          : attachment.kind === "image"
-            ? "图片"
-            : "文件";
-  const icon =
-    attachment.kind === "folder" ? <IconFolder />
-      : attachment.kind === "code" ? <IconCode />
-        : attachment.kind === "image" ? <IconImage />
-          : attachment.kind === "skill" ? <IconSkills />
-          : attachment.kind === "mcp" || attachment.kind === "database" ? <IconMcp />
-              : <IconFile />;
-
-  async function previewImage() {
-    if (attachment.kind !== "image") return;
-    const source = attachment.previewUrl
-      ?? (attachment.path
-        ? await window.codexh.previewLocalImage({ absolutePath: attachment.path }).catch(() => null)
-        : null);
-    if (!source) return;
-    setPreview({
-      source,
-      name: attachment.label,
-      kind: "image",
-      ...(attachment.path ? { localPath: attachment.path } : {})
-    });
-  }
-
-  return (
-    <div
-      className={`composer-attachment-chip ${attachment.kind} ${removing ? "is-removing" : ""}`}
-      title={attachment.kind === "code" ? attachment.content : attachment.kind === "skill" || attachment.kind === "mcp" || attachment.kind === "database" ? attachment.description : attachment.path}
-    >
-      {attachment.kind === "image" ? (
-        <button
-          className="composer-attachment-preview"
-          type="button"
-          title={`查看原图：${attachment.label}`}
-          aria-label={`查看原图：${attachment.label}`}
-          onClick={() => void previewImage()}
-        >
-          <span className="composer-attachment-icon" aria-hidden="true">{icon}</span>
-          {attachment.previewUrl ? <img className="composer-attachment-thumbnail" src={attachment.previewUrl} alt="" /> : null}
-          <span className="composer-attachment-copy">
-            <strong><span>{attachment.label}</span></strong>
-            <small>{detail}</small>
-          </span>
-        </button>
-      ) : (
-        <>
-          <span className="composer-attachment-icon" aria-hidden="true">{icon}</span>
-          <span className="composer-attachment-copy">
-            <strong>
-              <span>{attachment.label}</span>
-              {attachment.kind === "skill" ? <em className="composer-attachment-kind">Skill</em> : null}
-            </strong>
-            <small>{detail}</small>
-          </span>
-        </>
-      )}
-      <button className="composer-attachment-remove" type="button" title="移除" aria-label={`移除 ${attachment.label}`} onClick={onRemove}>
-        <IconClose />
-      </button>
-      {visiblePreview ? <MessageMediaLightbox preview={visiblePreview} motionPhase={previewPresence.phase} onClose={() => setPreview(null)} /> : null}
-    </div>
-  );
-}
-
 function LegacyTerminalWorkspace({
   tabs,
   activeSessionId,
@@ -13732,6 +13722,31 @@ function getSubagentRuntimeHistory(activity: RuntimeActivity | undefined): Array
   }));
 }
 
+function PendingResumeCard({
+  pending,
+  onResume,
+  onDismiss
+}: {
+  pending: PendingResumeThread;
+  onResume: () => void;
+  onDismiss: () => void;
+}) {
+  const preview = pending.lastUserMessage.trim();
+  return (
+    <section className="pending-resume-card" aria-label="恢复已停止的任务">
+      <div className="pending-resume-card-body">
+        <strong className="pending-resume-card-title">之前的任务已停止</strong>
+        <span className="pending-resume-card-text">上次退出程序时该任务被中断，是否继续执行？</span>
+        {preview ? <p className="pending-resume-card-preview" title={preview}>{preview}</p> : null}
+      </div>
+      <div className="pending-resume-card-actions">
+        <button type="button" className="pending-resume-card-primary" onClick={onResume}>继续任务</button>
+        <button type="button" className="pending-resume-card-dismiss" onClick={onDismiss}>忽略</button>
+      </div>
+    </section>
+  );
+}
+
 function TurnElapsedBanner({
   startedAt,
   completedAt,
@@ -14581,6 +14596,10 @@ type AssistantDraftMessageProps = {
   phase: AssistantDraftPhase;
   startedAt: string;
   completed: boolean;
+  /** Latest runtime status (e.g. retry reason). Shown instead of the generic
+   *  phase label while the draft is in a waiting phase, so users can see why
+   *  the draft is stalled (e.g. "模型响应超时，正在自动重试（第 2 次）"). */
+  statusLabel?: string | null;
 };
 
 const AssistantDraftMessage = memo(function AssistantDraftMessage({
@@ -14589,7 +14608,8 @@ const AssistantDraftMessage = memo(function AssistantDraftMessage({
   draftId,
   phase,
   startedAt,
-  completed
+  completed,
+  statusLabel
 }: AssistantDraftMessageProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
@@ -14598,7 +14618,7 @@ const AssistantDraftMessage = memo(function AssistantDraftMessage({
     ? "正在发布回复"
     : phase === "generating" && !content
     ? `模型正在生成 · 已等待 ${formatElapsedClock(elapsedMs)}`
-    : getAssistantDraftPhaseLabel(phase);
+    : statusLabel ?? getAssistantDraftPhaseLabel(phase);
 
   useLayoutEffect(() => {
     const scrollElement = scrollRef.current;

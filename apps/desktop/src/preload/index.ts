@@ -97,6 +97,9 @@ const api = {
   loadApiCardFavorites: () => ipcRenderer.invoke("api-card-favorites:load"),
   saveApiCardFavorites: (favorites: unknown[]) => ipcRenderer.invoke("api-card-favorites:save", favorites),
   interruptThread: (threadId: string) => ipcRenderer.invoke("threads:interrupt", threadId),
+  listPendingResume: () => ipcRenderer.invoke("threads:pending-resume:list"),
+  dismissPendingResume: (threadId: string) => ipcRenderer.invoke("threads:pending-resume:dismiss", threadId),
+  resumePendingResume: (threadId: string) => ipcRenderer.invoke("threads:pending-resume:resume", threadId),
   listSubagents: (threadId: string) => ipcRenderer.invoke("multi-agents:list", threadId),
   interruptAgent: (payload: { threadId: string; agent: string }) =>
     ipcRenderer.invoke("multi-agents:interrupt", payload),

@@ -1088,6 +1088,13 @@ export interface NotificationNavigationTarget {
   anchorId?: string;
 }
 
+export interface PendingResumeThread {
+  threadId: string;
+  title: string;
+  interruptedAt: string;
+  lastUserMessage: string;
+}
+
 export interface ContextCompactionRecord {
   turnRunId: string;
   contextWindow: number;

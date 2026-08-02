@@ -1,4 +1,4 @@
-import { stripThinkBlocks, stripThinkBlocksFromStream } from "../index";
+import { stripThinkBlocks, surfaceThinkBlocksInStream } from "../index";
 import { defineCompat } from "./types";
 import type { ModelCompatContext } from "./types";
 import { gptCompat } from "./gpt";
@@ -106,7 +106,9 @@ export const deepseekCompat = defineCompat(gptCompat, {
     if (accumulated.includes('"assistant_message"')) {
       return gptCompat.extractVisibleStreamText(accumulated);
     }
-    return stripThinkBlocksFromStream(accumulated);
+    // Surface inline <think> reasoning in the streaming draft so users can
+    // watch the think process; final parsing still strips it.
+    return surfaceThinkBlocksInStream(accumulated);
   },
   normalizeDecision(decision) {
     const hasMessage = Boolean(decision.assistantMessage?.trim());
