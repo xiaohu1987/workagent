@@ -11,7 +11,7 @@ import {
   serializeApiCardFavorite,
   API_CARD_FAVORITES_STORAGE_KEY
 } from "../apps/desktop/src/renderer/api-card-favorites";
-import type { ApiCardConfig } from "../apps/desktop/src/renderer/api-card";
+import type { ApiCardConfig } from "../apps/desktop/src/renderer/cards/api-card";
 
 function makeConfig(overrides: Partial<ApiCardConfig> = {}): ApiCardConfig {
   return {

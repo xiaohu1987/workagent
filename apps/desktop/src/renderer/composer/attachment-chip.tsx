@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ComposerAttachment } from "../lib/conversation-utils";
-import { useMotionPresence } from "../motion-presence";
+import { useMotionPresence } from "../core/motion-presence";
 import { IconClose, IconCode, IconFile, IconFolder, IconImage, IconMcp, IconSkills } from "../icons";
 import { MessageMediaLightbox, type MessageMediaPreview } from "../markdown";
 

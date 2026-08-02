@@ -8,7 +8,7 @@ import {
   parseApiCardConfig,
   substituteTemplate,
   type ApiCardConfig
-} from "../apps/desktop/src/renderer/api-card";
+} from "../apps/desktop/src/renderer/cards/api-card";
 import { parseMarkdownBlocks } from "../apps/desktop/src/renderer/markdown";
 
 const baseConfig: ApiCardConfig = {

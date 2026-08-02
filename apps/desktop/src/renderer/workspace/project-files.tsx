@@ -1,5 +1,5 @@
 import type { ToolCallRecord } from "@shared-types";
-import { useMotionPresence } from "../motion-presence";
+import { useMotionPresence } from "../core/motion-presence";
 import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { IconChevronRight, IconSearch, IconCompose, IconCopy, IconFolder, IconFile, IconEye, IconSpinner } from "../icons";

@@ -18,7 +18,7 @@ import {
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { extractMessageMediaReferences, isGeneratedUserSkill } from "../apps/desktop/src/renderer/App";
 import { highlightMarkdownCode, parseMarkdownBlocks } from "../apps/desktop/src/renderer/markdown";
-import { ECHARTS_CONFIG_MAX_BYTES, parseEChartsConfig } from "../apps/desktop/src/renderer/EChartsMessageChart";
+import { ECHARTS_CONFIG_MAX_BYTES, parseEChartsConfig } from "../apps/desktop/src/renderer/charts/echarts-message-chart";
 
 describe("parseMarkdownBlocks", () => {
   it("recognizes user skills generated from chat drafts", () => {

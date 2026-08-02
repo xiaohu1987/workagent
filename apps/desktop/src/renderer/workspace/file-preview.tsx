@@ -1,4 +1,4 @@
-import { useMotionPresence } from "../motion-presence";
+import { useMotionPresence } from "../core/motion-presence";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { IconCompose, IconCheck, IconFile, IconSpinner, IconClose } from "../icons";

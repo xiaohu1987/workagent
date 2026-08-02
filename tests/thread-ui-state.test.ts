@@ -7,7 +7,7 @@ import {
   isThreadExecutionInProgress,
   shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
-} from "../apps/desktop/src/renderer/thread-ui-state";
+} from "../apps/desktop/src/renderer/core/thread-ui-state";
 import {
   buildTimelineEntries,
   buildConversationTurnSections,

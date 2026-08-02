@@ -23,12 +23,12 @@ import {
   TextArea,
   TextInput,
   TimeInput
-} from "./form-controls";
+} from "../form-controls";
 import {
   addApiCardFavorite,
   removeApiCardFavoriteByConfig,
   useIsApiCardFavorited
-} from "./api-card-favorites";
+} from "../api-card-favorites";
 import "./api-card-message.css";
 
 type ApiCardResult = {

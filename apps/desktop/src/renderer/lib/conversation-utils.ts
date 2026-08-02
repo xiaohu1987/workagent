@@ -1,5 +1,5 @@
 import type { ArtifactRecord, AssistantDraftPhase, ContextCompactionRecord, GpaStage, GpaState, MessageAttachment, MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, UserInputPrompt } from "@shared-types";
-import { isThreadExecutionInProgress } from "../thread-ui-state";
+import { isThreadExecutionInProgress } from "../core/thread-ui-state";
 import { FileSnapshot } from "./project-files";
 
 export type ComposerAttachment =

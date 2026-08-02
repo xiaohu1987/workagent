@@ -3,7 +3,7 @@ import {
   reduceMotionPresence,
   resolveMotionPresenceDuration,
   type MotionPresenceState
-} from "../apps/desktop/src/renderer/motion-presence";
+} from "../apps/desktop/src/renderer/core/motion-presence";
 
 describe("motion presence state", () => {
   it("enters from an unmounted state and settles", () => {

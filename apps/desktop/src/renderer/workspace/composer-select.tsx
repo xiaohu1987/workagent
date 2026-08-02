@@ -1,4 +1,4 @@
-import { useMotionPresence } from "../motion-presence";
+import { useMotionPresence } from "../core/motion-presence";
 import { useEffect, useRef, useState } from "react";
 import { IconChevronDown } from "../icons";
 

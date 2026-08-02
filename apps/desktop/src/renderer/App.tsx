@@ -1,6 +1,5 @@
 import { Fragment, createElement, memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent } from "react";
 import "./timeline.css";
 import type {
   AppConfig,
@@ -8,41 +7,26 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   ContextCompactionRecord,
-  DatabasePermission,
-  DatabaseConnectionConfig,
   GpaStage,
   GpaState,
   GitActionResult,
   GitFileChange,
   GitSnapshot,
   GptReasoningEffort,
-  KnowledgeBaseSummary,
-  KnowledgeDocumentRecord,
-  KnowledgeImportSource,
-  KnowledgeScope,
   MessageAttachment,
   MultiAgentMode,
   MessageRecord,
-  McpServerConfig,
   ModelProfile,
   QueuedMessageRecord,
   PendingResumeThread,
   PluginRecord,
-  ProviderDefinition,
   ProviderType,
   RuntimeEvent,
   RuntimeThreadSnapshotCursor,
-  ErrorSolutionRecord,
-  SelfImprovementMemoryRecord,
   RuntimeThreadSnapshot,
-  SkillLabEvent,
-  SkillLabProgress,
   SkillMetadata,
   SkillUsageStats,
   ThreadRecord,
-  TokenUsage,
-  UsageAnalyticsGranularity,
-  UsageAnalyticsSummary,
   ToolCallRecord,
   UserInputPrompt
 } from "@shared-types";
@@ -52,20 +36,15 @@ import {
   canDeleteThread,
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
-  getHistoryItemAffordance,
   isThreadExecutionInProgress,
   shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
-} from "./thread-ui-state";
-import { useMotionPresence } from "./motion-presence";
+} from "./core/thread-ui-state";
+import { useMotionPresence } from "./core/motion-presence";
 import {
   PROVIDER_TYPE_OPTIONS,
   buildConfigToSave,
   cloneConfig,
-  createAvailableMcpId,
-  createEmptyProvider,
-  createModelProfile,
-  getModelProfileKey,
   getModelsForProvider,
   getProviderDisplayName,
   getReasoningModelsForProvider,
@@ -75,9 +54,7 @@ import {
   normalizeDraftConfig,
   normalizeProviderProtocol,
   parseMcpEnvironment,
-  parseMcpJsonConfig,
   resolveSelectionFromConfig,
-  resolveSettingsProviderId,
   serializeMcpJsonConfig
 } from "./lib/config-utils";
 import {
@@ -90,9 +67,7 @@ import {
   ComposerBinaryAttachment,
   ContextUsage,
   ConversationTurnItem,
-  FileChangeAction,
   FileChangeSummaryItem,
-  SelectedMessageContext,
   TimelineEntry,
   buildContextUsage,
   buildConversationTurnSections,
@@ -113,7 +88,6 @@ import {
   getGeneratedFileDescription,
   getGpaPlanMessageId,
   getMessageDisplayKind,
-  getSelectedMessageContexts,
   getSubagentWaitLabel,
   getThreadDeleteFailureMessage,
   getToolActivityKind,
@@ -127,7 +101,6 @@ import {
   isSubagentWaitTool,
   mergeSnapshotRecords,
   parseMessageEventBlocks,
-  parseTimelineJson,
   reconcileAssistantDraftCompletion,
   reconcileAssistantDraftUpdate,
   reconcilePendingUserMessages,
@@ -147,7 +120,6 @@ import {
 } from "./workspace/composer-select";
 import {
   FilePreviewDialog,
-  PreviewCacheEntry,
   renderCodePreviewLine
 } from "./workspace/file-preview";
 import {
@@ -157,25 +129,24 @@ import {
   MEMORY_LIST_PAGE_SIZE,
   MemoryPagination,
   getMemoryLastPageIndex,
-  sortMemoryRecordsNewestFirst
 } from "./workspace/memory-pagination";
 import {
   PanelResizeHandle,
   ResizePane,
   WorkspaceAccordionSection,
-  WorkspaceContextMenu,
   WorkspaceEmptyState,
   WorkspaceSubtabStrip
 } from "./workspace/panels";
 import {
   ProjectFilesWorkspace
 } from "./workspace/project-files";
+import { ProjectCreateSheet } from "./workspace/project-create-sheet";
+import { GpaPlanResumeSheet } from "./workspace/gpa-plan-resume-sheet";
+import { ConfirmationSheet } from "./workspace/confirmation-sheet";
 import {
-  UsageStatisticsPanel,
-  formatCacheHitRate,
-  formatTokenCount,
-  formatTokenCountExact
+  UsageStatisticsPanel
 } from "./workspace/usage-stats";
+import { TokenUsagePopover } from "./workspace/token-usage-popover";
 import { ApiCardFavoritesPanel } from "./workspace/api-card-favorites";
 import {
   filterApiCardFavorites,
@@ -184,29 +155,21 @@ import {
   type ApiCardFavorite
 } from "./api-card-favorites";
 import {
-  EMPTY_NOTIFICATION_CENTER_STATE,
   findActiveNotification,
   isFinishedNotification,
-  reduceNotificationCenter,
   resolveRuntimeNotificationThreadId,
-  resolveThreadStatusTransition,
   sortNotificationItems,
-  type NotificationCenterAction,
-  type NotificationCenterItem,
-  type NotificationCenterState
-} from "./notification-center";
+  type NotificationCenterItem
+} from "./core/notification-center";
 import {
   IconArrowDown,
   IconArrowUp,
   IconBell,
-  IconBuild,
   IconChart,
   IconCheck,
   IconChecklist,
   IconChevronDown,
-  IconBolt,
   IconChevronLeft,
-  IconChevronRight,
   IconClose,
   IconCode,
   IconCodexMark,
@@ -215,31 +178,20 @@ import {
   IconCopy,
   IconDownload,
   IconEraser,
-  IconExplore,
   IconEye,
-  IconFile,
   IconFileChanges,
-  IconFix,
   IconFolder,
-  IconGear,
-  IconGlobe,
   IconGpa,
   IconGuide,
   IconHelpCircle,
-  IconImage,
   IconKnowledge,
-  IconMcp,
-  IconNotebook,
   IconNotificationStatus,
   IconPin,
   IconPlus,
   IconRefresh,
-  IconRename,
-  IconReview,
   IconSearch,
   IconShield,
   IconSidebar,
-  IconSinglePanel,
   IconSkills,
   IconSpinner,
   IconSplitPanel,
@@ -262,108 +214,128 @@ import {
   type MessageMediaPreview
 } from "./markdown";
 import {
-  getChatBackgroundTransform,
   getChatBackgroundSurfaceStyleVars,
-  loadChatBackgroundBlob,
-  normalizeChatBackgroundSettings,
-  readChatBackgroundSettings,
-  removeChatBackgroundBlob,
-  writeChatBackgroundSettings,
-  isChatBackgroundRotationActive,
   CHAT_BACKGROUND_SURFACE_OPTIONS,
-  DEFAULT_CHAT_BACKGROUND_SURFACES,
-  type ChatBackgroundSettings,
-  type ChatBackgroundSurfaceKey,
-  type ChatBackgroundSurfaces
 } from "./chat-background";
-import { ComposerAttachmentChip } from "./composer/attachment-chip";
+import { SettingsUsagePage } from "./settings/usage-page";
+import { SettingsUpdatePage } from "./settings/update-page";
+import { SettingsDialog } from "./settings/settings-dialog";
+import { McpCreateSheet } from "./settings/mcp-create-sheet";
+import { UserSkillGenerationDialog as UserSkillGenerationDialogView } from "./settings/user-skill-generation-dialog";
+import { FetchedModelsDialog } from "./settings/fetched-models-dialog";
+import { MultimodalPickerDialog } from "./settings/multimodal-picker-dialog";
+import { AppearanceSettingsPage } from "./settings/pages/application/appearance-page";
+import { MultimodalSettingsPage } from "./settings/pages/models/multimodal-page";
+import { ProviderSettingsPage } from "./settings/pages/models/provider-page";
+import { ApiFavoritesPage } from "./settings/pages/knowledge/api-favorites-page";
+import { KnowledgePage } from "./settings/pages/knowledge/knowledge-page";
+import { MemoryPage } from "./settings/pages/knowledge/memory-page";
+import { RuntimeTimeoutsPage } from "./settings/pages/general/runtime-timeouts-page";
+import { ResponseTonePage } from "./settings/pages/general/response-tone-page";
+import { RuntimeOverviewPage } from "./settings/pages/general/runtime-overview-page";
+import { DatabasePage } from "./settings/pages/connections/database-page";
+import { McpPage } from "./settings/pages/connections/mcp-page";
+import { CapabilitiesPage } from "./settings/pages/capabilities/capabilities-page";
+import { SkillsPage } from "./settings/pages/capabilities/skills-page";
+import { PluginsPage } from "./settings/pages/capabilities/plugins-page";
+import { UserSkillsPage } from "./settings/pages/capabilities/user-skills-page";
+import { SkillLabPage } from "./settings/pages/capabilities/skill-lab-page";
+import { TerminalPanel } from "./workspace/terminal-panel";
+import { TerminalWorkspace, type TerminalWorkspaceTab } from "./workspace/terminal-workspace";
+import { useTerminalSessions } from "./hooks/use-terminal-sessions";
+import { useQuickNotes } from "./hooks/use-quick-notes";
+import { useHistorySearch } from "./hooks/use-history-search";
+import { useChatBackground } from "./hooks/use-chat-background";
+import { useAppUpdate } from "./hooks/use-app-update";
+import { useFetchedProviderModels } from "./hooks/use-fetched-provider-models";
+import { useMultimodalSettings } from "./hooks/use-multimodal-settings";
+import { useProviderModelTesting } from "./hooks/use-provider-model-testing";
+import { useProviderDraftEditor } from "./hooks/use-provider-draft-editor";
+import { useKnowledgeImport } from "./hooks/use-knowledge-import";
+import { useDatabaseConnections } from "./hooks/use-database-connections";
+import { useMcpServerActions } from "./hooks/use-mcp-server-actions";
+import { useMcpDraftEditor } from "./hooks/use-mcp-draft-editor";
+import { useRuntimeLogMaintenance } from "./hooks/use-runtime-log-maintenance";
+import { useUsageAnalytics } from "./hooks/use-usage-analytics";
+import { useKnowledgeBases } from "./hooks/use-knowledge-bases";
+import { useUserSkillGeneration } from "./hooks/use-user-skill-generation";
+import { useSelfImprovementMemories } from "./hooks/use-self-improvement-memories";
+import { useErrorSolutions } from "./hooks/use-error-solutions";
+import { useSettingsDialogState } from "./hooks/use-settings-dialog-state";
+import { useSkillLab } from "./hooks/use-skill-lab";
+import { useNotificationUiState } from "./hooks/use-notification-ui-state";
+import { useThreadNotifications } from "./hooks/use-thread-notifications";
+import { useAppNotice } from "./hooks/use-app-notice";
+import { useProjectFilePreview } from "./hooks/use-project-file-preview";
+import { DATABASE_PERMISSION_OPTIONS, getSkillSortLabel, RESPONSE_TONE_OPTIONS, SKILL_SORT_OPTIONS } from "./settings/settings-options";
+import { reregisterBrowserWebviews } from "./workspace/browser-workspace";
+import { RightWorkspacePanel, type RightWorkspaceTab } from "./workspace/right-workspace";
+import { NotificationCenter } from "./workspace/notification-center";
+import { HelpSheet } from "./workspace/help-sheet";
+import { QuickNotesSheet } from "./workspace/quick-notes-sheet";
+import { HistorySearchDialog } from "./history/history-search-dialog";
+import { HistorySidebar } from "./history/history-sidebar";
+import { ChatWelcome } from "./chat/chat-welcome";
+import { CHAT_WELCOME_CARDS, PROJECT_WELCOME_CARDS } from "./chat/welcome-cards";
+import { ComposerAttachments } from "./composer/composer-attachments";
+import { ComposerAddMenu } from "./composer/composer-add-menu";
+import { AppBackgroundLayer } from "./workspace/app-background-layer";
+import { WorkspaceControls } from "./workspace/workspace-controls";
+import { ComposerModelPicker, ContextCompactionNotice, ContextUsageControl, FloatingSideMenu, ReasoningEffortPicker, type ComposerModelGroup } from "./composer/model-controls";
+import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, TurnElapsedBanner } from "./cards/runtime-cards";
+import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
+import { FileChangeSummary, buildConversationTurnItems, ConversationTurnRail } from "./timeline/conversation-rail";
+import { DirectoryReadGroup } from "./timeline/directory-read-group";
+import { ApprovalCard, AssistantDraftMessage, getConciseToolActivityLabel, getMessageAttachments, reuseEquivalentRecordArray, ToolActivityGroup, ToolActivityIcon, TranscriptMessage, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
+export { extractMessageMediaReferences } from "./timeline/transcript";
 import {
   HISTORY_COLLAPSED_GROUPS_STORAGE_KEY,
-  HISTORY_STANDALONE_GROUP_KEY,
-  HISTORY_THREADS_PREVIEW_COUNT,
   normalizeHistoryGroupKey,
-  pickVisibleHistoryThreads,
   readStoredStringSet,
   writeStoredStringSet
-} from "./history-utils";
+} from "./history/history-utils";
 import {
   isGeneratedUserSkill,
   type AppNotice,
   type AppNoticeTone,
-  type CapabilityTab,
   type ComposerSubmission,
   type GpaPlanResumeDialogState,
   type GpaPlanResumePreview,
   type GpaPlanResumeRetryPrompt,
-  type HistorySearchResult,
-  type KnowledgeSourceAttachment,
   type ManagedRemoval,
   type McpRuntimeServer,
-  type ModelTestResult,
   type RuntimeActivity,
   type RuntimeActivityEntry,
   type RuntimeProgress,
-  type SettingsTab,
-  type UserSkillGenerationDialog,
-  type WelcomeCard
-} from "./app-types";
+} from "./core/app-types";
+import {
+  formatKnowledgeBytes,
+  formatKnowledgeScope,
+  formatKnowledgeStatus,
+  formatLatency,
+  formatNotificationElapsed,
+  formatRelativeTime,
+  formatTokensPerSecond,
+  getErrorSolutionRecallStatus,
+  getNotificationStatusLabel,
+  gpaModeLabel
+} from "./core/app-formatters";
+import {
+  formatFileChangeAction,
+  formatStorageBytes,
+  formatUpdateDownloadSize,
+  formatUpdatePhase,
+  getFileChangeActionClass,
+  getFileParentPath,
+  getGpaTaskProgress,
+  getSidebarUpdateReminder,
+  getWorkspaceLabel,
+  knowledgeSourceKey,
+  readFileAsDataUrl
+} from "./core/app-helpers";
 
-export { isGeneratedUserSkill } from "./app-types";
-
-type ChatBackgroundImage = {
-  id: string;
-  fileName: string;
-  mimeType: string;
-  bytes: ArrayBuffer;
-  url: string;
-};
-type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
-const SKILL_SORT_OPTIONS = [
-  { value: "name", label: "\u540d\u79f0" },
-  { value: "calls", label: "\u8c03\u7528\u6b21\u6570" },
-  { value: "success", label: "\u6210\u529f\u7387" }
-] as const;
-
-function getSkillSortLabel(value: "name" | "calls" | "success"): string {
-  return SKILL_SORT_OPTIONS.find((option) => option.value === value)?.label ?? SKILL_SORT_OPTIONS[0].label;
-}
-type UpdateState = {
-  phase: "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installing" | "error";
-  currentVersion: string;
-  remoteVersion?: string;
-  changelog?: string;
-  downloadUrl?: string;
-  insecureTransport?: boolean;
-  missingSha256?: boolean;
-  progress?: number;
-  receivedBytes?: number;
-  totalBytes?: number;
-  downloadedInstaller?: string;
-  error?: string;
-  isPackaged: boolean;
-};
-
-type BrowserWebviewElement = HTMLElement & {
-  getWebContentsId: () => number;
-};
-
-const browserWebviewRegistrars = new Map<string, () => boolean>();
-
-function browserWebviewRegistrarKey(threadId: string, tabId: string): string {
-  return `${threadId}:${tabId}`;
-}
-
-function reregisterBrowserWebviews(threadId: string, tabId?: string): void {
-  if (tabId) {
-    browserWebviewRegistrars.get(browserWebviewRegistrarKey(threadId, tabId))?.();
-    return;
-  }
-  for (const [key, register] of browserWebviewRegistrars) {
-    if (key.startsWith(`${threadId}:`)) {
-      register();
-    }
-  }
-}
+export { isGeneratedUserSkill } from "./core/app-types";
+export { getSidebarUpdateReminder } from "./core/app-helpers";
 
 type MessageKnowledgeSource = {
   knowledgeBaseId: string;
@@ -377,118 +349,11 @@ type MessageBrowserSource = {
   url: string;
 };
 
-type TerminalWorkspaceTab = {
-  id: string;
-  title: string;
-};
-
 type TerminalSessionState = {
   output: string;
   cwd: string;
   shell: string;
 };
-
-const RESPONSE_TONE_OPTIONS: Array<{
-  value: AppConfig["responseTone"];
-  label: string;
-  description: string;
-}> = [
-  { value: "friendly", label: "亲和", description: "自然、温和、清晰" },
-  { value: "concise", label: "简约", description: "直接、精炼、聚焦结果" }
-];
-
-const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
-  { id: "timeouts", label: "通用设置", hint: "模型请求、重试、视频生成和子智能体的运行设置" },
-  { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
-  { id: "multimodal", label: "多模态", hint: "配置默认多模态识别、生图与视频模型" },
-  { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
-  { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
-  { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
-  { id: "memory", label: "记忆", hint: "查看和清理错误解决方案记忆" },
-  { id: "apiFavorites", label: "接口卡片", hint: "管理收藏的 API 卡片,从 + 菜单快速唤出" },
-  { id: "capabilities", label: "能力中心", hint: "管理独立 Skill、用户技能和插件" },
-  { id: "appearance", label: "应用背景", hint: "导入图片，并调整背景与各模块透明度" },
-  { id: "usage", label: "统计", hint: "查看模型调用、Token 和缓存趋势" },
-  { id: "update", label: "更新", hint: "检查、下载和安装 CodeXH 更新" }
-];
-
-const SETTINGS_MENU_GROUPS: Array<{ id: string; label: string; hint: string; tabs: SettingsTab[]; icon: () => ReactNode }> = [
-  { id: "general", label: "通用设置", hint: "超时、重试和子智能体", tabs: ["timeouts"], icon: IconGear },
-  { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"], icon: IconGlobe },
-  { id: "connections", label: "连接", hint: "MCP 与数据库", tabs: ["mcp", "database"], icon: IconMcp },
-  { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory", "apiFavorites"], icon: IconKnowledge },
-  { id: "capabilities", label: "能力中心", hint: "技能与插件", tabs: ["capabilities"], icon: IconSkills },
-  { id: "application", label: "应用", hint: "外观、统计与更新", tabs: ["appearance", "usage", "update"], icon: IconSinglePanel }
-];
-
-const DATABASE_PERMISSION_OPTIONS: Array<{ value: DatabasePermission; label: string }> = [
-  { value: "query", label: "查询" },
-  { value: "insert", label: "新增" },
-  { value: "update", label: "更新" },
-  { value: "delete", label: "删除" }
-];
-
-const WELCOME_CARDS: WelcomeCard[] = [
-  {
-    id: "explore",
-    title: "探索并理解代码",
-    prompt: "请先帮我梳理这个项目的结构、关键模块和启动方式。",
-    accentClass: "blue",
-    icon: <IconExplore />
-  },
-  {
-    id: "build",
-    title: "构建新功能、应用或工具",
-    prompt: "请根据当前项目结构继续实现新功能，并给出关键修改点。",
-    accentClass: "violet",
-    icon: <IconBuild />
-  },
-  {
-    id: "review",
-    title: "审查代码并提出修改建议",
-    prompt: "请审查当前项目代码，优先指出问题、风险和建议修复方案。",
-    accentClass: "green",
-    icon: <IconReview />
-  },
-  {
-    id: "fix",
-    title: "修复问题和失败",
-    prompt: "请帮我定位当前项目的问题，并直接修复启动或运行失败的原因。",
-    accentClass: "orange",
-    icon: <IconFix />
-  }
-];
-
-const CHAT_WELCOME_CARDS: WelcomeCard[] = [
-  {
-    id: "analyze",
-    title: "分析一个问题",
-    prompt: "请帮我拆解这个问题，梳理关键事实、判断依据和下一步。",
-    accentClass: "blue",
-    icon: <IconExplore />
-  },
-  {
-    id: "write",
-    title: "起草一段内容",
-    prompt: "请根据我的目标起草一份清晰、可直接使用的内容。",
-    accentClass: "violet",
-    icon: <IconBuild />
-  },
-  {
-    id: "translate",
-    title: "翻译与润色",
-    prompt: "请翻译并润色下面的内容，保留原意并让表达自然准确。",
-    accentClass: "green",
-    icon: <IconReview />
-  },
-  {
-    id: "learn",
-    title: "解释一个概念",
-    prompt: "请用清晰的例子解释这个概念，并指出容易混淆的地方。",
-    accentClass: "orange",
-    icon: <IconFix />
-  }
-];
 
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
@@ -528,13 +393,20 @@ export function App() {
   const [resizingPane, setResizingPane] = useState<ResizePane | null>(null);
   const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("files");
   const [rightWorkspaceExpandedTab, setRightWorkspaceExpandedTab] = useState<RightWorkspaceTab | null>("files");
-  const [terminalTabsByThread, setTerminalTabsByThread] = useState<Record<string, TerminalWorkspaceTab[]>>({});
-  const [activeTerminalTabByThread, setActiveTerminalTabByThread] = useState<Record<string, string>>({});
-  const [terminalInputsByThread, setTerminalInputsByThread] = useState<Record<string, Record<string, string>>>({});
-  const [terminalSessionsByThread, setTerminalSessionsByThread] = useState<
-    Record<string, Record<string, TerminalSessionState>>
-  >({});
-  const terminalOutputFramesRef = useRef<Record<string, { data: string; frame: number }>>({});
+  const {
+    tabs: currentTerminalTabs,
+    activeSessionId: activeTerminalSessionId,
+    activeSession: activeTerminalSession,
+    input: activeTerminalInput,
+    ensureTab: ensureTerminalTab,
+    setInput: setActiveTerminalInput,
+    selectTab: selectTerminalTab,
+    addTab: addTerminalTab,
+    closeTab: closeTerminalTab,
+    queueOutput: queueTerminalOutput,
+    updateSession: updateTerminalSessionState,
+    clearThread: clearTerminalThread
+  } = useTerminalSessions(selectedThreadId);
   const assistantDraftFramesRef = useRef<
     Record<string, { draft: AssistantDraft; frame: number }>
   >({});
@@ -544,11 +416,18 @@ export function App() {
   const [gitActionBusy, setGitActionBusy] = useState(false);
   const [gitActionMessage, setGitActionMessage] = useState<string | null>(null);
   const [gitRefreshRevision, setGitRefreshRevision] = useState(0);
-  const [selectedProjectFileByThread, setSelectedProjectFileByThread] = useState<Record<string, string | null>>({});
-  const [filePreviewPath, setFilePreviewPath] = useState<string | null>(null);
-  const [projectFilePreviewsByThread, setProjectFilePreviewsByThread] = useState<
-    Record<string, Record<string, PreviewCacheEntry | null>>
-  >({});
+  const {
+    selectedProjectFileByThread,
+    filePreviewPath,
+    setFilePreviewPath,
+    projectFilePreviewsByThread,
+    selectProjectFile,
+    openProjectPreview,
+    closeProjectPreview,
+    saveProjectPreview,
+    reconcileSelectedFile,
+    clearSelectedFile
+  } = useProjectFilePreview({ selectedThreadId, onSaved: () => setGitRefreshRevision((current) => current + 1) });
   const [isProjectFilesLoading, setIsProjectFilesLoading] = useState(false);
   const selectedThreadIdRef = useRef<string | null>(null);
   const pendingUserMessagesRef = useRef<Record<string, MessageRecord[]>>({});
@@ -587,6 +466,7 @@ export function App() {
     [apiCardFavorites, apiCardMenuQuery]
   );
   // 收藏/取消收藏时弹出全局提醒
+  const { notice, isNoticeHovered, setIsNoticeHovered, exitingNoticeId, showNotice, dismissNotice } = useAppNotice();
   useEffect(() => {
     return subscribeApiCardFavoriteNotices((notice) => {
       if (notice.action === "added") {
@@ -596,24 +476,43 @@ export function App() {
       }
     });
   }, []);
-  const [isQuickNotesOpen, setIsQuickNotesOpen] = useState(false);
+  const quickNotesState = useQuickNotes(showNotice);
+  const {
+    isOpen: isQuickNotesOpen,
+    setIsOpen: setIsQuickNotesOpen,
+    notes: quickNotes,
+    selectedId: selectedQuickNoteId,
+    title: quickNoteTitle,
+    content: quickNoteContent,
+    saving: quickNoteSaving,
+    status: quickNoteStatus,
+    renamingId: renamingQuickNoteId,
+    setRenamingId: setRenamingQuickNoteId,
+    renameDraft: quickNoteRenameDraft,
+    setRenameDraft: setQuickNoteRenameDraft,
+    listMenu: quickNoteListMenu,
+    setListMenu: setQuickNoteListMenu,
+    deleteConfirm: quickNoteDeleteConfirm,
+    setDeleteConfirm: setQuickNoteDeleteConfirm,
+    open: openQuickNotes,
+    select: selectQuickNote,
+    create: createQuickNote,
+    changeContent: changeQuickNoteContent,
+    save: saveQuickNote,
+    rename: renameQuickNote,
+    remove: deleteQuickNote
+  } = quickNotesState;
   const [isHelpOpen, setIsHelpOpen] = useState(false);
-  const [quickNotes, setQuickNotes] = useState<Array<{ id: string; title: string; content: string; updatedAt: string }>>([]);
-  const [selectedQuickNoteId, setSelectedQuickNoteId] = useState<string | null>(null);
-  const [quickNoteTitle, setQuickNoteTitle] = useState("");
-  const [quickNoteContent, setQuickNoteContent] = useState("");
-  const [quickNoteSaving, setQuickNoteSaving] = useState(false);
-  const [quickNoteStatus, setQuickNoteStatus] = useState("尚未保存");
-  const [renamingQuickNoteId, setRenamingQuickNoteId] = useState<string | null>(null);
-  const [quickNoteRenameDraft, setQuickNoteRenameDraft] = useState("");
-  const [quickNoteListMenu, setQuickNoteListMenu] = useState<{ x: number; y: number; note: { id: string; title: string; content: string } } | null>(null);
-  const [quickNoteDeleteConfirm, setQuickNoteDeleteConfirm] = useState<{ id: string; title: string } | null>(null);
-  const quickNoteContentRef = useRef("");
-  const [isHistorySearchOpen, setIsHistorySearchOpen] = useState(false);
-  const [historySearchQuery, setHistorySearchQuery] = useState("");
-  const [historySearchResults, setHistorySearchResults] = useState<HistorySearchResult[]>([]);
-  const [isHistorySearchLoading, setIsHistorySearchLoading] = useState(false);
-  const [historyContextMenu, setHistoryContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
+  const historySearch = useHistorySearch(showNotice);
+  const {
+    isOpen: isHistorySearchOpen,
+    setIsOpen: setIsHistorySearchOpen,
+    query: historySearchQuery,
+    setQuery: setHistorySearchQuery,
+    results: historySearchResults,
+    loading: isHistorySearchLoading,
+    open: openHistorySearch
+  } = historySearch;
   const [collapsedHistoryGroups, setCollapsedHistoryGroups] = useState<Set<string>>(() =>
     readStoredStringSet(HISTORY_COLLAPSED_GROUPS_STORAGE_KEY)
   );
@@ -667,132 +566,201 @@ export function App() {
   const gpaConfirmationPendingStageRef = useRef<Exclude<GpaStage, "off" | "act"> | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
-  const [chatBackgroundSettings, setChatBackgroundSettings] = useState<ChatBackgroundSettings>(() =>
-    readChatBackgroundSettings()
-  );
-  const [chatBackgroundImages, setChatBackgroundImages] = useState<ChatBackgroundImage[]>([]);
-  const [activeChatBackgroundIndex, setActiveChatBackgroundIndex] = useState(0);
-  const [chatBackgroundRotationEpoch, setChatBackgroundRotationEpoch] = useState(0);
-  const [isChatBackgroundDragging, setIsChatBackgroundDragging] = useState(false);
-  const chatBackgroundInputRef = useRef<HTMLInputElement | null>(null);
-  const chatBackgroundHydratedRef = useRef(false);
-  const chatBackgroundUrlsRef = useRef<Set<string>>(new Set());
-  const chatBackgroundImagesRef = useRef<ChatBackgroundImage[]>([]);
-  const chatBackgroundDragRef = useRef<null | {
-    pointerId: number;
-    startX: number;
-    startY: number;
-    positionX: number;
-    positionY: number;
-    width: number;
-    height: number;
-  }>(null);
-  const activeChatBackground = chatBackgroundImages[activeChatBackgroundIndex] ?? null;
-  const chatBackgroundUrl = activeChatBackground?.url ?? null;
-  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const providerDraftEditor = useProviderDraftEditor({ configDraft, setConfigDraft, showNotice });
+  const {
+    settingsProviderId,
+    setSettingsProviderId,
+    providerSecretDrafts,
+    setProviderSecretDrafts,
+    newModelId,
+    setNewModelId,
+    newModelDisplayName,
+    setNewModelDisplayName,
+    settingsProvider,
+    settingsProviderModels,
+    reset: resetProviderDraft,
+    updateProviderDraft,
+    addCustomProvider,
+    removeProvider,
+    addModelToProvider,
+    updateModelDraft,
+    removeModel
+  } = providerDraftEditor;
+  const databaseConnections = useDatabaseConnections({
+    config,
+    setConfig,
+    configDraft,
+    setConfigDraft,
+    providerSecretDrafts,
+    saveConfigDraft,
+    showNotice
+  });
+  const {
+    passwordDrafts: databasePasswordDrafts,
+    setPasswordDrafts: setDatabasePasswordDrafts,
+    savedCredentialIds: savedDatabaseCredentialIds,
+    setSavedCredentialIds: setSavedDatabaseCredentialIds,
+    editingId: editingDatabaseConnectionId,
+    setEditingId: setEditingDatabaseConnectionId,
+    testingId: testingDatabaseConnectionId,
+    savingCredentialId: savingDatabaseCredentialId,
+    changingEnabledId: changingDatabaseEnabledId,
+    catalogs: databaseCatalogs,
+    updateDraft: updateDatabaseDraft,
+    setEnabled: setDatabaseConnectionEnabled,
+    add: addDatabaseConnection,
+    remove: removeDatabaseConnection,
+    test: testDatabaseConnection,
+    save: saveDatabaseConnection
+  } = databaseConnections;
+  const mcpDraftEditor = useMcpDraftEditor({ configDraft, setConfigDraft, showNotice });
+  const {
+    editingServerId: editingMcpServerId,
+    setEditingServerId: setEditingMcpServerId,
+    isCreateOpen: isMcpCreateOpen,
+    createMode: mcpCreateMode,
+    setCreateMode: setMcpCreateMode,
+    createDraft: mcpCreateDraft,
+    setCreateDraft: setMcpCreateDraft,
+    createError: mcpCreateError,
+    setCreateError: setMcpCreateError,
+    jsonDraft: mcpJsonDraft,
+    setJsonDraft: setMcpJsonDraft,
+    jsonError: mcpJsonError,
+    setJsonError: setMcpJsonError,
+    updateServerDraft: updateMcpServerDraft,
+    addServer: addMcpServer,
+    closeCreateSheet: closeMcpCreateSheet,
+    confirmCreate: confirmMcpCreate,
+    removeServer: removeMcpServer
+  } = mcpDraftEditor;
+  const runtimeLogMaintenance = useRuntimeLogMaintenance(formatStorageBytes, showNotice);
+  const {
+    stats: runtimeLogStats,
+    isLoading: isRuntimeLogStatsLoading,
+    isClearConfirmOpen: isClearLogsConfirmOpen,
+    setIsClearConfirmOpen: setIsClearLogsConfirmOpen,
+    isClearing: isClearingLogs,
+    refresh: refreshRuntimeLogStats,
+    confirmClear: confirmClearRuntimeLogs
+  } = runtimeLogMaintenance;
+  const usageAnalytics = useUsageAnalytics(showNotice);
+  const {
+    rangeDays: usageStatisticsRangeDays,
+    setRangeDays: setUsageStatisticsRangeDays,
+    granularity: usageStatisticsGranularity,
+    setGranularity: setUsageStatisticsGranularity,
+    summary: usageStatistics,
+    isLoading: isUsageStatisticsLoading,
+    refresh: refreshUsageStatistics
+  } = usageAnalytics;
+  const knowledgeBaseState = useKnowledgeBases(selectedThreadId, refreshSnapshot, showNotice);
+  const {
+    bases: knowledgeBases,
+    documents: knowledgeDocuments,
+    busyId: knowledgeBusyId,
+    refreshBases: refreshKnowledgeBases,
+    toggleDocuments: toggleKnowledgeDocuments,
+    refreshBase: refreshKnowledgeBase,
+    deleteBase: deleteKnowledgeBase
+  } = knowledgeBaseState;
+  const userSkillGeneration = useUserSkillGeneration(refreshUserSkills, refreshSkills, showNotice);
+  const {
+    dialog: userSkillGenerationDialog,
+    setDialog: setUserSkillGenerationDialog,
+    isGenerating: isGeneratingUserSkill,
+    open: openUserSkillGenerationDialog,
+    generate: generateUserSkill
+  } = userSkillGeneration;
+  const selfImprovementMemoryState = useSelfImprovementMemories(showNotice);
+  const {
+    memories: selfImprovementMemories,
+    isRefreshing: isRefreshingSelfImprovementMemories,
+    page: selfImprovementMemoryPage,
+    setPage: setSelfImprovementMemoryPage,
+    isClearConfirmOpen: isClearSelfImprovementConfirmOpen,
+    setIsClearConfirmOpen: setIsClearSelfImprovementConfirmOpen,
+    isClearing: isClearingSelfImprovement,
+    refresh: refreshSelfImprovementMemories,
+    refreshNow: refreshSelfImprovementNow,
+    remove: deleteSelfImprovementMemory,
+    confirmClear: confirmClearSelfImprovementMemories
+  } = selfImprovementMemoryState;
+  const errorSolutionState = useErrorSolutions(config, showNotice);
+  const {
+    solutions: errorSolutions,
+    page: errorSolutionPage,
+    setPage: setErrorSolutionPage,
+    busyId: errorSolutionBusyId,
+    modelFilter: errorSolutionModelFilter,
+    setModelFilter: setErrorSolutionModelFilter,
+    isClearConfirmOpen: isClearErrorSolutionsConfirmOpen,
+    setIsClearConfirmOpen: setIsClearErrorSolutionsConfirmOpen,
+    isClearing: isClearingErrorSolutions,
+    expandedIds: expandedErrorSolutionIds,
+    refresh: refreshErrorSolutions,
+    remove: deleteErrorSolution,
+    confirmClear: confirmClearErrorSolutions,
+    toggle: toggleErrorSolutionExpanded
+  } = errorSolutionState;
+  const {
+    testResults: mcpTestResults,
+    testingServerId: testingMcpServerId,
+    authBusyId: mcpAuthBusyId,
+    testServer: testMcpServer,
+    login: loginMcpServer,
+    logout: logoutMcpServer,
+    refreshToolDirectory: refreshMcpToolDirectory
+  } = useMcpServerActions(refreshMcpServers, showNotice);
+  const chatBackground = useChatBackground({ appShellRef, showNotice });
+  const {
+    images: chatBackgroundImages,
+    activeImageIndex: activeChatBackgroundIndex,
+    setActiveImageIndex: setActiveChatBackgroundIndex,
+    settings: chatBackgroundSettings,
+    inputRef: chatBackgroundInputRef,
+    imageUrl: chatBackgroundUrl,
+    isDragging: isChatBackgroundDragging,
+    importFiles: importChatBackgroundFiles,
+    moveImage: moveChatBackgroundImage,
+    removeImage: removeChatBackgroundImage,
+    updateSettings: updateChatBackgroundSettings,
+    updateSurface: updateChatBackgroundSurface,
+    beginDrag: beginChatBackgroundDrag,
+    moveDrag: moveChatBackground,
+    endDrag: endChatBackgroundDrag,
+    resetSurfaces: resetChatBackgroundSurfaces,
+    clear: clearChatBackground
+  } = chatBackground;
+  const appUpdate = useAppUpdate(showNotice);
+  const {
+    state: updateState,
+    confirmDialog: updateConfirmDialog,
+    setConfirmDialog: setUpdateConfirmDialog,
+    check: checkForUpdates,
+    download: downloadAvailableUpdate,
+    install: installDownloadedUpdate,
+    confirm: confirmUpdateDialog
+  } = appUpdate;
   const [pendingResumeThreads, setPendingResumeThreads] = useState<PendingResumeThread[]>([]);
-  const [updateConfirmDialog, setUpdateConfirmDialog] = useState<null | {
-    kind: "download" | "install";
-    title: string;
-    message: string;
-    details: string[];
-  }>(null);
   const [mcpRuntimeServers, setMcpRuntimeServers] = useState<McpRuntimeServer[]>([]);
-  const [editingMcpServerId, setEditingMcpServerId] = useState<string | null>(null);
-  const [testingMcpServerId, setTestingMcpServerId] = useState<string | null>(null);
-  const [isMcpCreateOpen, setIsMcpCreateOpen] = useState(false);
-  const [mcpCreateMode, setMcpCreateMode] = useState<"form" | "json">("form");
-  const [mcpCreateDraft, setMcpCreateDraft] = useState<McpServerConfig | null>(null);
-  const [mcpCreateError, setMcpCreateError] = useState<string | null>(null);
-  const [mcpJsonDraft, setMcpJsonDraft] = useState("");
-  const [mcpJsonError, setMcpJsonError] = useState<string | null>(null);
-  const [databasePasswordDrafts, setDatabasePasswordDrafts] = useState<Record<string, string>>({});
-  const [savedDatabaseCredentialIds, setSavedDatabaseCredentialIds] = useState<Set<string>>(() => new Set());
-  const [editingDatabaseConnectionId, setEditingDatabaseConnectionId] = useState<string | null>(null);
-  const [testingDatabaseConnectionId, setTestingDatabaseConnectionId] = useState<string | null>(null);
-  const [savingDatabaseCredentialId, setSavingDatabaseCredentialId] = useState<string | null>(null);
-  const [changingDatabaseEnabledId, setChangingDatabaseEnabledId] = useState<string | null>(null);
-  const [databaseCatalogs, setDatabaseCatalogs] = useState<Record<string, string[]>>({});
-  const [mcpTestResults, setMcpTestResults] = useState<Record<string, { tools: Array<{ name: string; description: string }>; resources: Array<{ uri: string; name: string }>; resourceTemplates: Array<{ uriTemplate: string; name: string }>; prompts: Array<{ name: string; description: string }> }>>({});
-  const [mcpAuthBusyId, setMcpAuthBusyId] = useState<string | null>(null);
-  const [settingsProviderId, setSettingsProviderId] = useState<string | null>(null);
-  const [providerSecretDrafts, setProviderSecretDrafts] = useState<Record<string, string>>({});
-  const [newModelId, setNewModelId] = useState("");
-  const [newModelDisplayName, setNewModelDisplayName] = useState("");
-  const [isFetchingModels, setIsFetchingModels] = useState(false);
-  const [testingModelKey, setTestingModelKey] = useState<string | null>(null);
-  const [modelTestResults, setModelTestResults] = useState<Record<string, ModelTestResult>>({});
-  const [fetchedModels, setFetchedModels] = useState<{ id: string; displayName?: string; contextWindow?: number }[]>([]);
-  const [showFetchedModels, setShowFetchedModels] = useState(false);
-  const [selectedFetchedModelIds, setSelectedFetchedModelIds] = useState<string[]>([]);
-  const [fetchedModelsTarget, setFetchedModelsTarget] = useState<"provider">("provider");
-  const [multimodalPickerRole, setMultimodalPickerRole] = useState<"reasoning" | "image" | "video" | "input" | null>(null);
-  const [multimodalPickerSelected, setMultimodalPickerSelected] = useState<string[]>([]);
   const [composerProviderId, setComposerProviderId] = useState("");
   const [composerModelId, setComposerModelId] = useState("");
   const [isUpdatingReasoningEffort, setIsUpdatingReasoningEffort] = useState(false);
-  const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSourceAttachment[]>([]);
-  const [knowledgeUrlInput, setKnowledgeUrlInput] = useState("");
-  const [isKnowledgeUrlEditorOpen, setIsKnowledgeUrlEditorOpen] = useState(false);
-  const [knowledgeName, setKnowledgeName] = useState("Imported Knowledge");
-  const [knowledgeScope, setKnowledgeScope] = useState<KnowledgeScope>("global");
-  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([]);
-  const [selfImprovementMemories, setSelfImprovementMemories] = useState<SelfImprovementMemoryRecord[]>([]);
-  const [isRefreshingSelfImprovementMemories, setIsRefreshingSelfImprovementMemories] = useState(false);
-  const [selfImprovementMemoryPage, setSelfImprovementMemoryPage] = useState(0);
-  const [errorSolutions, setErrorSolutions] = useState<ErrorSolutionRecord[]>([]);
-  const [errorSolutionPage, setErrorSolutionPage] = useState(0);
-  const [errorSolutionBusyId, setErrorSolutionBusyId] = useState<string | null>(null);
-  const [errorSolutionModelFilter, setErrorSolutionModelFilter] = useState<string>("all");
-  const [isClearErrorSolutionsConfirmOpen, setIsClearErrorSolutionsConfirmOpen] = useState(false);
-  const [isClearingErrorSolutions, setIsClearingErrorSolutions] = useState(false);
-  const [isClearSelfImprovementConfirmOpen, setIsClearSelfImprovementConfirmOpen] = useState(false);
-  const [isClearingSelfImprovement, setIsClearingSelfImprovement] = useState(false);
-  const [runtimeLogStats, setRuntimeLogStats] = useState<{ bytes: number; fileCount: number } | null>(null);
-  const [isRuntimeLogStatsLoading, setIsRuntimeLogStatsLoading] = useState(false);
-  const [isClearLogsConfirmOpen, setIsClearLogsConfirmOpen] = useState(false);
-  const [isClearingLogs, setIsClearingLogs] = useState(false);
-  const [expandedErrorSolutionIds, setExpandedErrorSolutionIds] = useState<Set<string>>(() => new Set());
-  const [knowledgeDocuments, setKnowledgeDocuments] = useState<Record<string, KnowledgeDocumentRecord[]>>({});
-  const [knowledgeBusyId, setKnowledgeBusyId] = useState<string | null>(null);
-  const [isKnowledgeImporting, setIsKnowledgeImporting] = useState(false);
   const [userSkills, setUserSkills] = useState<SkillMetadata[]>([]);
-  const [isGeneratingUserSkill, setIsGeneratingUserSkill] = useState(false);
-  const [userSkillGenerationDialog, setUserSkillGenerationDialog] = useState<UserSkillGenerationDialog | null>(null);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [usageStatisticsRangeDays, setUsageStatisticsRangeDays] = useState<number | null>(7);
-  const [usageStatisticsGranularity, setUsageStatisticsGranularity] = useState<UsageAnalyticsGranularity>("day");
-  const [usageStatistics, setUsageStatistics] = useState<UsageAnalyticsSummary | null>(null);
-  const [isUsageStatisticsLoading, setIsUsageStatisticsLoading] = useState(false);
+  const {
+    isSettingsOpen,
+    setIsSettingsOpen,
+    settingsTab,
+    setSettingsTab,
+    capabilityTab,
+    setCapabilityTab
+  } = useSettingsDialogState();
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
   const [resolvingPromptId, setResolvingPromptId] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
-  const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>("skills");
-  const [skillLabMode, setSkillLabMode] = useState<"create" | "optimize">("create");
-  const [skillLabTargetSkillId, setSkillLabTargetSkillId] = useState("");
-  const [skillLabModelSelection, setSkillLabModelSelection] = useState("");
-  const [skillLabLastRunMode, setSkillLabLastRunMode] = useState<"create" | "optimize">("create");
-  const [skillLabPrompt, setSkillLabPrompt] = useState("");
-  const [skillLabName, setSkillLabName] = useState("");
-  const [skillLabIterations, setSkillLabIterations] = useState(5);
-  const [skillLabTotalIterations, setSkillLabTotalIterations] = useState(5);
-  const [skillLabJobId, setSkillLabJobId] = useState<string | null>(null);
-  const [skillLabProgress, setSkillLabProgress] = useState<SkillLabProgress[]>([]);
-  const [skillLabStatus, setSkillLabStatus] = useState<"idle" | "clarifying" | "running" | "completed" | "failed" | "cancelled">("idle");
-  const [skillLabError, setSkillLabError] = useState<string | null>(null);
-  const [skillLabResult, setSkillLabResult] = useState<SkillMetadata | null>(null);
-  const [skillLabApproval, setSkillLabApproval] = useState<Extract<SkillLabEvent, { type: "skill-lab.approval" }> | null>(null);
-  const [skillLabClarification, setSkillLabClarification] = useState<(Extract<SkillLabEvent, { type: "skill-lab.clarification" }> & { answers: Record<string, string>; custom: Record<string, boolean> }) | null>(null);
-  const [skillLabActivityLog, setSkillLabActivityLog] = useState<Array<{ id: string; phase: string; summary: string; state: "running" | "tested" }>>([]);
-  const [skillLabStartedAt, setSkillLabStartedAt] = useState<number | null>(null);
-  const [skillLabElapsedSeconds, setSkillLabElapsedSeconds] = useState(0);
-  const skillLabJobIdRef = useRef<string | null>(null);
-  const skillLabOptimizationTargetRef = useRef<string | null>(null);
-  const skillLabNotificationTitleRef = useRef("技能实验室");
-  const isSkillLabBusy = skillLabStatus === "clarifying" || skillLabStatus === "running";
   const skillLabModelOptions = (config?.models ?? [])
     .filter((model) => model.role === "reasoning" && model.supportsToolCalling && model.agentCapability !== "unsupported")
     .map((model) => {
@@ -803,24 +771,76 @@ export function App() {
       } : null;
     })
     .filter((option): option is ComposerSelectOption => option !== null);
-  const [notificationCenterState, setNotificationCenterState] = useState<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
-  const notificationCenterStateRef = useRef<NotificationCenterState>(EMPTY_NOTIFICATION_CENTER_STATE);
-  const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
-  const [isTokenUsagePanelOpen, setIsTokenUsagePanelOpen] = useState(false);
-  const [threadTokenUsage, setThreadTokenUsage] = useState<{
-    turn: TokenUsage;
-    thread: TokenUsage;
-    turnRunId: string | null;
-  }>({ turn: createEmptyTokenUsage(), thread: createEmptyTokenUsage(), turnRunId: null });
-  const [highlightedNotificationTarget, setHighlightedNotificationTarget] = useState<string | null>(null);
-  const [notificationNow, setNotificationNow] = useState(() => Date.now());
-  const notificationCenterRef = useRef<HTMLDivElement | null>(null);
-  const notificationButtonRef = useRef<HTMLButtonElement | null>(null);
-  const tokenUsagePanelRef = useRef<HTMLDivElement | null>(null);
-  const tokenUsageButtonRef = useRef<HTMLButtonElement | null>(null);
-  const [notice, setNotice] = useState<AppNotice | null>(null);
-  const [isNoticeHovered, setIsNoticeHovered] = useState(false);
-  const [exitingNoticeId, setExitingNoticeId] = useState<number | null>(null);
+  const {
+    skillLabMode,
+    setSkillLabMode,
+    skillLabTargetSkillId,
+    setSkillLabTargetSkillId,
+    skillLabModelSelection,
+    setSkillLabModelSelection,
+    skillLabLastRunMode,
+    skillLabPrompt,
+    setSkillLabPrompt,
+    skillLabName,
+    setSkillLabName,
+    skillLabIterations,
+    setSkillLabIterations,
+    skillLabTotalIterations,
+    skillLabProgress,
+    skillLabStatus,
+    skillLabError,
+    skillLabResult,
+    skillLabApproval,
+    skillLabClarification,
+    setSkillLabClarification,
+    skillLabActivityLog,
+    skillLabElapsedSeconds,
+    isSkillLabBusy,
+    startSkillLab,
+    cancelSkillLab,
+    resolveSkillLabApproval,
+    submitSkillLabClarification
+  } = useSkillLab({
+    userSkills,
+    modelOptions: skillLabModelOptions,
+    refreshSkills,
+    refreshUserSkills,
+    onEvent: (event) => updateSkillLabNotification(event),
+    onStartNotification: (jobId, title, totalIterations) => startSkillLabNotification(jobId, title, totalIterations)
+  });
+  const {
+    notificationCenterState,
+    notificationCenterStateRef,
+    isNotificationCenterOpen,
+    setIsNotificationCenterOpen,
+    isTokenUsagePanelOpen,
+    setIsTokenUsagePanelOpen,
+    threadTokenUsage,
+    setThreadTokenUsage,
+    highlightedNotificationTarget,
+    setHighlightedNotificationTarget,
+    notificationNow,
+    setNotificationNow,
+    notificationCenterRef,
+    notificationButtonRef,
+    tokenUsagePanelRef,
+    tokenUsageButtonRef,
+    dispatchNotificationCenter
+  } = useNotificationUiState();
+  const {
+    updateThreadNotification,
+    setThreadNotificationAttention,
+    resumeThreadNotification,
+    applyThreadStatusNotification,
+    syncThreadNotifications: syncThreadNotificationsFromThreads,
+    updateSkillLabNotification,
+    startSkillLabNotification
+  } = useThreadNotifications({
+    threadsRef,
+    threadStatusRef,
+    notificationStateRef: notificationCenterStateRef,
+    dispatch: dispatchNotificationCenter
+  });
   const [isTranscriptAtLatest, setIsTranscriptAtLatest] = useState(true);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [historyThreadDeleteConfirmation, setHistoryThreadDeleteConfirmation] = useState<ThreadRecord | null>(null);
@@ -838,481 +858,11 @@ export function App() {
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollReleaseTimerRef = useRef<number | null>(null);
 
-  function dispatchNotificationCenter(action: NotificationCenterAction) {
-    setNotificationCenterState((current) => {
-      const next = reduceNotificationCenter(current, action);
-      notificationCenterStateRef.current = next;
-      return next;
-    });
-  }
-
-  function getNotificationThreadTitle(threadId: string, fallback?: string): string {
-    return fallback?.trim() || threadsRef.current.find((thread) => thread.id === threadId)?.title || "后台任务";
-  }
-
-  function updateThreadNotification(threadId: string, detail: string, updatedAt?: string) {
-    const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", threadId);
-    if (!active || active.status === "attention") return;
-    dispatchNotificationCenter({
-      type: "update",
-      source: "thread",
-      targetId: threadId,
-      updatedAt: updatedAt ?? new Date().toISOString(),
-      patch: { detail, status: "running", unread: false }
-    });
-  }
-
-  function setThreadNotificationAttention(
-    threadId: string,
-    detail: string,
-    kind: "approval" | "input" | "gpa",
-    anchorId?: string,
-    updatedAt?: string
-  ) {
-    const timestamp = updatedAt ?? new Date().toISOString();
-    const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", threadId);
-    if (!active) {
-      dispatchNotificationCenter({
-        type: "start",
-        item: {
-          id: `thread:${threadId}:${timestamp}`,
-          source: "thread",
-          targetId: threadId,
-          title: getNotificationThreadTitle(threadId),
-          detail,
-          status: "attention",
-          createdAt: timestamp,
-          updatedAt: timestamp,
-          startedAt: timestamp,
-          unread: true,
-          attentionKind: kind,
-          anchorId
-        }
-      });
-      return;
-    }
-    dispatchNotificationCenter({
-      type: "update",
-      source: "thread",
-      targetId: threadId,
-      updatedAt: timestamp,
-      patch: { detail, status: "attention", unread: true, attentionKind: kind, anchorId }
-    });
-  }
-
-  function resumeThreadNotification(threadId: string, detail: string, updatedAt?: string) {
-    if (!findActiveNotification(notificationCenterStateRef.current.items, "thread", threadId)) return;
-    dispatchNotificationCenter({
-      type: "update",
-      source: "thread",
-      targetId: threadId,
-      updatedAt: updatedAt ?? new Date().toISOString(),
-      patch: {
-        detail,
-        status: "running",
-        unread: false,
-        attentionKind: undefined,
-        anchorId: undefined
-      }
-    });
-  }
-
-  function applyThreadStatusNotification(event: RuntimeEvent) {
-    if (event.type !== "thread.updated" || !event.threadId) return;
-    const thread = event.payload.thread as ThreadRecord | undefined;
-    if (!thread) return;
-    const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", event.threadId);
-    const previousStatus = threadStatusRef.current.get(event.threadId);
-    const transition = resolveThreadStatusTransition({
-      previousStatus,
-      nextStatus: thread.status,
-      hasActive: !!active,
-      pluginChanged: !!event.payload.pluginChanged,
-      isSubagent: !!thread.parentThreadId
-    });
-    threadStatusRef.current.set(event.threadId, thread.status);
-    if (!transition) return;
-    const timestamp = thread.updatedAt || event.createdAt;
-    const title = getNotificationThreadTitle(event.threadId, thread.title);
-
-    if (transition === "start") {
-      const waiting = thread.status === "waiting";
-      dispatchNotificationCenter({
-        type: "start",
-        item: {
-          id: `thread:${event.threadId}:${timestamp}`,
-          source: "thread",
-          targetId: event.threadId,
-          title,
-          detail: waiting ? "任务正在等待你的处理。" : "正在理解任务并准备执行。",
-          status: waiting ? "attention" : "running",
-          createdAt: timestamp,
-          updatedAt: timestamp,
-          startedAt: timestamp,
-          unread: waiting
-        }
-      });
-      return;
-    }
-
-    if (transition === "running") {
-      resumeThreadNotification(event.threadId, active?.detail || "任务正在运行。", timestamp);
-      return;
-    }
-
-    if (transition === "attention") {
-      if (active?.status !== "attention") {
-        setThreadNotificationAttention(event.threadId, "任务正在等待你的处理。", "input", undefined, timestamp);
-      }
-      return;
-    }
-
-    dispatchNotificationCenter({
-      type: "finish",
-      source: "thread",
-      targetId: event.threadId,
-      updatedAt: timestamp,
-      status: transition,
-      title,
-      detail: transition === "completed"
-        ? "任务已完成，可以查看结果。"
-        : transition === "failed"
-          ? "任务执行失败，请打开任务查看详情。"
-          : "任务已停止。",
-      unread: transition !== "cancelled"
-    });
-  }
-
-  function syncThreadNotificationsFromThreads(nextThreads: ThreadRecord[]) {
-    const timestamp = new Date().toISOString();
-    const rootThreads = nextThreads.filter((thread) => !thread.parentThreadId);
-    const byId = new Map(rootThreads.map((thread) => [thread.id, thread]));
-
-    for (const thread of rootThreads) {
-      threadStatusRef.current.set(thread.id, thread.status);
-      const active = findActiveNotification(notificationCenterStateRef.current.items, "thread", thread.id);
-      if (thread.status === "running" || thread.status === "waiting") {
-        if (active) {
-          if (thread.status === "waiting" && active.status !== "attention") {
-            setThreadNotificationAttention(
-              thread.id,
-              active.detail || "任务正在等待你的处理。",
-              active.attentionKind ?? "input",
-              active.anchorId,
-              timestamp
-            );
-          } else if (thread.status === "running" && active.status === "attention") {
-            // Keep approval / input / GPA attention until the corresponding event resumes it.
-            if (!active.attentionKind) {
-              resumeThreadNotification(thread.id, active.detail || "任务正在运行。", timestamp);
-            }
-          }
-          continue;
-        }
-        const waiting = thread.status === "waiting";
-        dispatchNotificationCenter({
-          type: "start",
-          item: {
-            id: `thread:${thread.id}:${timestamp}`,
-            source: "thread",
-            targetId: thread.id,
-            title: getNotificationThreadTitle(thread.id, thread.title),
-            detail: waiting ? "任务正在等待你的处理。" : "任务正在运行。",
-            status: waiting ? "attention" : "running",
-            createdAt: timestamp,
-            updatedAt: timestamp,
-            startedAt: timestamp,
-            unread: waiting
-          }
-        });
-        continue;
-      }
-
-      if (!active) continue;
-      const finishStatus = thread.status === "completed"
-        ? "completed"
-        : thread.status === "failed"
-          ? "failed"
-          : "cancelled";
-      dispatchNotificationCenter({
-        type: "finish",
-        source: "thread",
-        targetId: thread.id,
-        updatedAt: timestamp,
-        status: finishStatus,
-        title: getNotificationThreadTitle(thread.id, thread.title),
-        detail: finishStatus === "completed"
-          ? "任务已完成，可以查看结果。"
-          : finishStatus === "failed"
-            ? "任务执行失败，请打开任务查看详情。"
-            : "任务已停止。",
-        unread: finishStatus !== "cancelled"
-      });
-    }
-
-    for (const item of notificationCenterStateRef.current.items) {
-      if (item.source !== "thread" || (item.status !== "running" && item.status !== "attention")) continue;
-      if (byId.has(item.targetId)) continue;
-      dispatchNotificationCenter({
-        type: "finish",
-        source: "thread",
-        targetId: item.targetId,
-        updatedAt: timestamp,
-        status: "cancelled",
-        detail: "任务已停止。",
-        unread: false
-      });
-    }
-  }
-
-  function updateSkillLabNotification(event: SkillLabEvent) {
-    const active = findActiveNotification(notificationCenterStateRef.current.items, "skill-lab", event.jobId);
-    const base = {
-      id: `skill-lab:${event.jobId}`,
-      source: "skill-lab" as const,
-      targetId: event.jobId,
-      title: skillLabNotificationTitleRef.current,
-      createdAt: event.createdAt,
-      updatedAt: event.createdAt,
-      startedAt: event.createdAt
-    };
-
-    if (event.type === "skill-lab.progress") {
-      const completed = event.state === "tested" ? event.iteration : Math.max(0, event.iteration - 1);
-      const progress = {
-        current: Math.min(event.totalIterations, completed),
-        total: event.totalIterations,
-        percent: event.totalIterations > 0
-          ? Math.round((Math.min(event.totalIterations, completed) / event.totalIterations) * 100)
-          : 0
-      };
-      dispatchNotificationCenter({
-        type: "start",
-        item: {
-          ...base,
-          detail: `${event.phase} · ${event.summary}`,
-          status: "running",
-          unread: false,
-          progress,
-          attentionKind: undefined,
-          anchorId: undefined
-        }
-      });
-      return;
-    }
-
-    if (event.type === "skill-lab.approval" || event.type === "skill-lab.clarification") {
-      dispatchNotificationCenter({
-        type: "start",
-        item: {
-          ...base,
-          detail: event.type === "skill-lab.approval" ? event.description : event.summary,
-          status: "attention",
-          unread: true,
-          attentionKind: event.type === "skill-lab.approval" ? "approval" : "input"
-        }
-      });
-      return;
-    }
-
-    const status = event.type === "skill-lab.completed"
-      ? "completed"
-      : event.type === "skill-lab.failed"
-        ? "failed"
-        : "cancelled";
-    const detail = event.type === "skill-lab.completed"
-      ? `${event.skill.displayName ?? event.skill.name} 已生成并通过测试。`
-      : event.type === "skill-lab.failed"
-        ? event.error
-        : "技能实验室任务已取消。";
-    const title = event.type === "skill-lab.completed"
-      ? `技能实验室 · ${event.skill.displayName ?? event.skill.name}`
-      : base.title;
-    if (active) {
-      dispatchNotificationCenter({
-        type: "finish",
-        source: "skill-lab",
-        targetId: event.jobId,
-        updatedAt: event.createdAt,
-        status,
-        detail,
-        title,
-        unread: status !== "cancelled",
-        progress: status === "completed" && active.progress
-          ? { ...active.progress, current: active.progress.total, percent: 100 }
-          : active.progress
-      });
-    } else {
-      dispatchNotificationCenter({
-        type: "start",
-        item: { ...base, title, detail, status, unread: status !== "cancelled" }
-      });
-    }
-  }
-
   useEffect(() => {
     void refreshAll();
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      const persisted = await window.codexh.getApplicationBackgrounds();
-      if (persisted) {
-        if (!active) return;
-        const restoredSettings = normalizeChatBackgroundSettings(persisted.settings);
-        setChatBackgroundSettings(normalizeChatBackgroundSettings({
-          ...restoredSettings,
-          fileName: restoredSettings.fileName ?? persisted.items[0]?.fileName ?? null
-        }));
-        const images = persisted.items.map((item) => {
-          const url = URL.createObjectURL(new Blob([item.bytes], { type: item.mimeType }));
-          chatBackgroundUrlsRef.current.add(url);
-          return { ...item, url };
-        });
-        setChatBackgroundImages(images);
-        setActiveChatBackgroundIndex(0);
-        return;
-      }
-
-      const legacyBlob = await loadChatBackgroundBlob();
-      if (!legacyBlob) return;
-      const legacySettings = readChatBackgroundSettings();
-      const bytes = await legacyBlob.arrayBuffer();
-      const id = globalThis.crypto.randomUUID();
-      await window.codexh.saveApplicationBackgrounds({
-        items: [{ id, bytes, mimeType: legacyBlob.type, fileName: legacySettings.fileName ?? "background" }],
-        settings: legacySettings
-      });
-      await removeChatBackgroundBlob();
-      if (!active) return;
-      const url = URL.createObjectURL(legacyBlob);
-      chatBackgroundUrlsRef.current.add(url);
-      setChatBackgroundImages([{ id, bytes, mimeType: legacyBlob.type, fileName: legacySettings.fileName ?? "background", url }]);
-      setActiveChatBackgroundIndex(0);
-    })()
-      .catch(() => {
-        if (active) {
-          showNotice("应用背景加载失败", { message: "本地背景图存储暂时不可用。", tone: "warning" });
-        }
-      })
-      .finally(() => {
-        chatBackgroundHydratedRef.current = true;
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    writeChatBackgroundSettings(chatBackgroundSettings);
-    if (!chatBackgroundHydratedRef.current) return;
-    const timeout = window.setTimeout(() => {
-      void window.codexh.saveApplicationBackgroundSettings(chatBackgroundSettings).catch(() => undefined);
-    }, 250);
-    return () => window.clearTimeout(timeout);
-  }, [chatBackgroundSettings]);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    const active = Boolean(chatBackgroundUrl && chatBackgroundSettings.enabled);
-    const vars = getChatBackgroundSurfaceStyleVars(chatBackgroundSettings.surfaces);
-    if (active) {
-      for (const [key, value] of Object.entries(vars)) {
-        root.style.setProperty(key, value);
-      }
-      return () => {
-        for (const key of Object.keys(vars)) {
-          root.style.removeProperty(key);
-        }
-      };
-    }
-    for (const key of Object.keys(vars)) {
-      root.style.removeProperty(key);
-    }
-    return undefined;
-  }, [chatBackgroundUrl, chatBackgroundSettings.enabled, chatBackgroundSettings.surfaces]);
-
-  useEffect(() => {
-    const shell = appShellRef.current;
-    if (!shell) return;
-
-    const reset = () => {
-      shell.style.setProperty("--app-background-parallax-x", "0px");
-      shell.style.setProperty("--app-background-parallax-y", "0px");
-      shell.style.setProperty("--app-background-parallax-back-x", "0px");
-      shell.style.setProperty("--app-background-parallax-back-y", "0px");
-      shell.style.setProperty("--app-background-parallax-front-x", "0px");
-      shell.style.setProperty("--app-background-parallax-front-y", "0px");
-    };
-    if (!chatBackgroundUrl || !chatBackgroundSettings.enabled || !chatBackgroundSettings.parallaxEnabled) {
-      reset();
-      return;
-    }
-
-    let animationFrame = 0;
-    let targetX = 0;
-    let targetY = 0;
-    const paint = () => {
-      animationFrame = 0;
-      shell.style.setProperty("--app-background-parallax-x", `${targetX.toFixed(2)}px`);
-      shell.style.setProperty("--app-background-parallax-y", `${targetY.toFixed(2)}px`);
-      shell.style.setProperty("--app-background-parallax-back-x", `${(targetX * 0.42).toFixed(2)}px`);
-      shell.style.setProperty("--app-background-parallax-back-y", `${(targetY * 0.42).toFixed(2)}px`);
-      shell.style.setProperty("--app-background-parallax-front-x", `${(targetX * 1.5).toFixed(2)}px`);
-      shell.style.setProperty("--app-background-parallax-front-y", `${(targetY * 1.5).toFixed(2)}px`);
-    };
-    const handlePointerMove = (event: PointerEvent) => {
-      targetX = ((event.clientX / Math.max(1, window.innerWidth)) - 0.5) * 14;
-      targetY = ((event.clientY / Math.max(1, window.innerHeight)) - 0.5) * 14;
-      if (!animationFrame) animationFrame = window.requestAnimationFrame(paint);
-    };
-    const handlePointerLeave = () => {
-      targetX = 0;
-      targetY = 0;
-      if (!animationFrame) animationFrame = window.requestAnimationFrame(paint);
-    };
-    window.addEventListener("pointermove", handlePointerMove, { passive: true });
-    window.addEventListener("blur", handlePointerLeave);
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("blur", handlePointerLeave);
-      if (animationFrame) window.cancelAnimationFrame(animationFrame);
-      reset();
-    };
-  }, [chatBackgroundUrl, chatBackgroundSettings.enabled, chatBackgroundSettings.parallaxEnabled]);
-
   useEffect(() => () => {
-    for (const url of chatBackgroundUrlsRef.current) URL.revokeObjectURL(url);
-    chatBackgroundUrlsRef.current.clear();
-  }, []);
-
-  useEffect(() => {
-    chatBackgroundImagesRef.current = chatBackgroundImages;
-    setActiveChatBackgroundIndex((current) => Math.min(current, Math.max(0, chatBackgroundImages.length - 1)));
-  }, [chatBackgroundImages]);
-
-  useEffect(() => {
-    if (!isChatBackgroundRotationActive(chatBackgroundSettings, chatBackgroundImages.length)) return;
-    const interval = window.setInterval(() => {
-      setActiveChatBackgroundIndex((current) => (current + 1) % chatBackgroundImages.length);
-    }, chatBackgroundSettings.rotationIntervalSeconds * 1_000);
-    return () => window.clearInterval(interval);
-  }, [chatBackgroundImages.length, chatBackgroundRotationEpoch, chatBackgroundSettings]);
-
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (!document.hidden) setChatBackgroundRotationEpoch((current) => current + 1);
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, []);
-
-  useEffect(() => () => {
-    for (const pending of Object.values(terminalOutputFramesRef.current)) {
-      window.cancelAnimationFrame(pending.frame);
-    }
-    terminalOutputFramesRef.current = {};
     for (const pending of Object.values(assistantDraftFramesRef.current)) {
       window.cancelAnimationFrame(pending.frame);
     }
@@ -1411,11 +961,6 @@ export function App() {
   }, [selectedThreadId]);
 
   useEffect(() => {
-    void window.codexh.getUpdateState().then(setUpdateState).catch(() => undefined);
-    return window.codexh.onUpdateState(setUpdateState);
-  }, []);
-
-  useEffect(() => {
     let cancelled = false;
     void window.codexh.listPendingResume().then((pending) => {
       if (!cancelled) setPendingResumeThreads(pending);
@@ -1424,104 +969,6 @@ export function App() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => window.codexh.onSkillLabEvent((event) => {
-    const typed = event as SkillLabEvent;
-    updateSkillLabNotification(typed);
-    if (skillLabJobIdRef.current && "jobId" in typed && typed.jobId !== skillLabJobIdRef.current) return;
-    if (typed.type === "skill-lab.clarification") {
-      setSkillLabStatus("clarifying");
-      setSkillLabClarification({
-        ...typed,
-        answers: Object.fromEntries(typed.questions.map((question) => [question.id, ""])),
-        custom: Object.fromEntries(typed.questions.map((question) => [question.id, false]))
-      });
-    } else if (typed.type === "skill-lab.progress") {
-      setSkillLabStatus("running");
-      setSkillLabClarification(null);
-      setSkillLabActivityLog((current) => [...current.slice(-7), {
-        id: `${typed.iteration}-${typed.state}-${Date.now()}`,
-        phase: typed.phase,
-        summary: typed.summary,
-        state: typed.state
-      }]);
-      setSkillLabTotalIterations(typed.totalIterations);
-      setSkillLabProgress((current) => {
-        const next = current.filter((item) => item.iteration !== typed.iteration);
-        next.push({
-          iteration: typed.iteration,
-          totalIterations: typed.totalIterations,
-          phase: typed.phase,
-          summary: typed.summary,
-          state: typed.state
-        });
-        return next.sort((left, right) => left.iteration - right.iteration);
-      });
-    } else if (typed.type === "skill-lab.approval") {
-      setSkillLabApproval(typed);
-    } else if (typed.type === "skill-lab.completed") {
-      setSkillLabStatus("completed");
-      setSkillLabResult(typed.skill);
-      if (skillLabOptimizationTargetRef.current) setSkillLabTargetSkillId(typed.skill.id);
-      skillLabOptimizationTargetRef.current = null;
-      setSkillLabJobId(null);
-      skillLabJobIdRef.current = null;
-      setSkillLabApproval(null);
-      setSkillLabClarification(null);
-      setSkillLabStartedAt(null);
-      void Promise.all([refreshSkills(), refreshUserSkills()]);
-    } else if (typed.type === "skill-lab.failed") {
-      setSkillLabStatus("failed");
-      setSkillLabError(typed.error);
-      setSkillLabJobId(null);
-      skillLabJobIdRef.current = null;
-      setSkillLabApproval(null);
-      setSkillLabClarification(null);
-      setSkillLabStartedAt(null);
-      skillLabOptimizationTargetRef.current = null;
-    } else if (typed.type === "skill-lab.cancelled") {
-      setSkillLabStatus("cancelled");
-      setSkillLabJobId(null);
-      skillLabJobIdRef.current = null;
-      setSkillLabApproval(null);
-      setSkillLabClarification(null);
-      setSkillLabStartedAt(null);
-      skillLabOptimizationTargetRef.current = null;
-    }
-  }), []);
-
-  useEffect(() => {
-    if (!skillLabStartedAt || !isSkillLabBusy) return;
-    const updateElapsed = () => setSkillLabElapsedSeconds(Math.max(0, Math.floor((Date.now() - skillLabStartedAt) / 1000)));
-    updateElapsed();
-    const timer = window.setInterval(updateElapsed, 1000);
-    return () => window.clearInterval(timer);
-  }, [isSkillLabBusy, skillLabStartedAt]);
-
-  useEffect(() => {
-    if (!isHistorySearchOpen) return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      setIsHistorySearchLoading(true);
-      void window.codexh.searchThreads(historySearchQuery).then((results) => {
-        if (!cancelled) setHistorySearchResults(results as HistorySearchResult[]);
-      }).catch((error) => {
-        if (!cancelled) showNotice("搜索历史对话失败", { message: error instanceof Error ? error.message : String(error) });
-      }).finally(() => {
-        if (!cancelled) setIsHistorySearchLoading(false);
-      });
-    }, 100);
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [historySearchQuery, isHistorySearchOpen]);
-
-  useEffect(() => {
-    if (!isHistorySearchOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setIsHistorySearchOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isHistorySearchOpen]);
 
   useEffect(() => {
     // Do not carry a collapsed/hidden state into a new app session.
@@ -1625,18 +1072,6 @@ export function App() {
     return true;
   }
 
-  const currentTerminalTabs = selectedThreadId ? terminalTabsByThread[selectedThreadId] ?? [] : [];
-  const activeTerminalSessionId = selectedThreadId
-    ? activeTerminalTabByThread[selectedThreadId] ?? currentTerminalTabs[0]?.id ?? null
-    : null;
-  const activeTerminalSession =
-    selectedThreadId && activeTerminalSessionId
-      ? terminalSessionsByThread[selectedThreadId]?.[activeTerminalSessionId] ?? null
-      : null;
-  const activeTerminalInput =
-    selectedThreadId && activeTerminalSessionId
-      ? terminalInputsByThread[selectedThreadId]?.[activeTerminalSessionId] ?? ""
-      : "";
   const selectedProjectFile = selectedThreadId ? selectedProjectFileByThread[selectedThreadId] ?? null : null;
   const filePreviewPresence = useMotionPresence(filePreviewPath, 180);
   const visibleFilePreviewPath = filePreviewPath ?? filePreviewPresence.value;
@@ -1645,128 +1080,6 @@ export function App() {
       ? projectFilePreviewsByThread[selectedThreadId]?.[visibleFilePreviewPath] ?? null
       : null;
   const projectToolCalls = snapshot?.thread.id === selectedThreadId ? snapshot.toolCalls : [];
-
-  function ensureThreadTerminalTabs(threadId: string) {
-    ensureThreadTerminalTab(threadId, "default");
-  }
-
-  function ensureThreadTerminalTab(threadId: string, sessionId: string) {
-    setTerminalTabsByThread((current) => {
-      if (current[threadId]?.some((tab) => tab.id === sessionId)) {
-        return current;
-      }
-      return {
-        ...current,
-        [threadId]: [
-          ...(current[threadId] ?? []),
-          { id: sessionId, title: sessionId === "default" ? "终端" : `终端 ${(current[threadId]?.length ?? 0) + 1}` }
-        ]
-      };
-    });
-    setActiveTerminalTabByThread((current) => (
-      current[threadId]
-        ? current
-        : {
-            ...current,
-            [threadId]: sessionId
-          }
-    ));
-  }
-
-  function setActiveTerminalInput(value: string) {
-    if (!selectedThreadId || !activeTerminalSessionId) {
-      return;
-    }
-    setTerminalInputsByThread((current) => ({
-      ...current,
-      [selectedThreadId]: {
-        ...(current[selectedThreadId] ?? {}),
-        [activeTerminalSessionId]: value
-      }
-    }));
-  }
-
-  function selectTerminalTab(sessionId: string) {
-    if (!selectedThreadId) return;
-    setActiveTerminalTabByThread((current) => ({
-      ...current,
-      [selectedThreadId]: sessionId
-    }));
-  }
-
-  function addTerminalTab() {
-    if (!selectedThreadId) return;
-    const newId = globalThis.crypto.randomUUID();
-    const nextTitle = `终端 ${currentTerminalTabs.length + 1}`;
-    setTerminalTabsByThread((current) => ({
-      ...current,
-      [selectedThreadId]: [...(current[selectedThreadId] ?? []), { id: newId, title: nextTitle }]
-    }));
-    setActiveTerminalTabByThread((current) => ({
-      ...current,
-      [selectedThreadId]: newId
-    }));
-  }
-
-  function closeTerminalTab(sessionId: string) {
-    if (!selectedThreadId) return;
-    const remaining = currentTerminalTabs.filter((tab) => tab.id !== sessionId);
-    setTerminalTabsByThread((current) => ({
-      ...current,
-      [selectedThreadId]: remaining
-    }));
-    setActiveTerminalTabByThread((current) => ({
-      ...current,
-      [selectedThreadId]: remaining[remaining.length - 1]?.id ?? ""
-    }));
-    setTerminalInputsByThread((current) => {
-      const nextSessions = { ...(current[selectedThreadId] ?? {}) };
-      delete nextSessions[sessionId];
-      return { ...current, [selectedThreadId]: nextSessions };
-    });
-    setTerminalSessionsByThread((current) => {
-      const nextSessions = { ...(current[selectedThreadId] ?? {}) };
-      delete nextSessions[sessionId];
-      return { ...current, [selectedThreadId]: nextSessions };
-    });
-    void window.codexh.closeTerminal({ threadId: selectedThreadId, sessionId });
-  }
-
-  function updateTerminalSessionState(
-    threadId: string,
-    sessionId: string,
-    updater: (current: TerminalSessionState | null) => TerminalSessionState
-  ) {
-    setTerminalSessionsByThread((current) => ({
-      ...current,
-      [threadId]: {
-        ...(current[threadId] ?? {}),
-        [sessionId]: updater(current[threadId]?.[sessionId] ?? null)
-      }
-    }));
-  }
-
-  function queueTerminalOutput(threadId: string, sessionId: string, data: string) {
-    const key = `${threadId}:${sessionId}`;
-    const pending = terminalOutputFramesRef.current[key];
-    if (pending) {
-      pending.data = `${pending.data}${data}`.slice(-80_000);
-      return;
-    }
-    terminalOutputFramesRef.current[key] = {
-      data: data.slice(-80_000),
-      frame: window.requestAnimationFrame(() => {
-        const buffered = terminalOutputFramesRef.current[key];
-        delete terminalOutputFramesRef.current[key];
-        if (!buffered) return;
-        updateTerminalSessionState(threadId, sessionId, (current) => ({
-          output: `${current?.output ?? ""}${buffered.data}`.slice(-80_000),
-          cwd: current?.cwd ?? "",
-          shell: current?.shell ?? "PowerShell"
-        }));
-      })
-    };
-  }
 
   function flushAssistantDraft(draftId: string) {
     const pending = assistantDraftFramesRef.current[draftId];
@@ -1825,49 +1138,11 @@ export function App() {
     };
   }
 
-  function selectProjectFile(path: string) {
-    if (!selectedThreadId) {
-      return;
-    }
-    setSelectedProjectFileByThread((current) => ({
-      ...current,
-      [selectedThreadId]: path
-    }));
-  }
-
-  function openProjectPreview(path: string) {
-    if (!selectedThreadId) {
-      return;
-    }
-    selectProjectFile(path);
-    setFilePreviewPath(path);
-  }
-
-  function closeProjectPreview() {
-    setFilePreviewPath(null);
-  }
-
-  async function saveProjectPreview(content: string): Promise<void> {
-    if (!selectedThreadId || !filePreviewPath) {
-      throw new Error("No project file is open.");
-    }
-    const path = filePreviewPath;
-    await window.codexh.writeProjectFile({ threadId: selectedThreadId, path, content });
-    setProjectFilePreviewsByThread((current) => ({
-      ...current,
-      [selectedThreadId]: {
-        ...(current[selectedThreadId] ?? {}),
-        [path]: { content, truncated: false, binary: false }
-      }
-    }));
-    setGitRefreshRevision((current) => current + 1);
-  }
-
   useEffect(() => {
     if (!selectedThreadId) {
       return;
     }
-    ensureThreadTerminalTabs(selectedThreadId);
+    ensureTerminalTab(selectedThreadId);
     setGpaComposerSelected(false);
   }, [selectedThreadId]);
 
@@ -2120,7 +1395,7 @@ export function App() {
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
       if (typed.type === "terminal.output" && typed.threadId) {
         const sessionId = typeof typed.payload?.sessionId === "string" ? typed.payload.sessionId : "default";
-        ensureThreadTerminalTab(typed.threadId, sessionId);
+        ensureTerminalTab(typed.threadId, sessionId);
         queueTerminalOutput(typed.threadId, sessionId, typed.payload?.data ?? "");
         return;
       }
@@ -2560,7 +1835,7 @@ export function App() {
         typed.type === "message.created" &&
         typed.threadId &&
         typed.payload?.message?.role === "user" &&
-        getMessageDisplayKind(typed.payload.message) !== "api-card"
+        getMessageDisplayKind(typed.payload.message as MessageRecord) !== "api-card"
       ) {
         const runtimeThreadId = typed.threadId;
         if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
@@ -2720,24 +1995,11 @@ export function App() {
         return;
       }
       setProjectFiles(entries);
-      setSelectedProjectFileByThread((current) => {
-        const existing = current[selectedThreadId];
-        const existingPath = existing?.replace(/\\/g, "/");
-        const stillValid =
-          existingPath &&
-          entries.some((entry) => entry.path.replace(/\\/g, "/") === existingPath && entry.kind === "file");
-        return {
-          ...current,
-          [selectedThreadId]: stillValid ? existingPath : null
-        };
-      });
+      reconcileSelectedFile(selectedThreadId, entries);
     }).catch(() => {
       if (!cancelled) {
         setProjectFiles([]);
-        setSelectedProjectFileByThread((current) => ({
-          ...current,
-          [selectedThreadId]: null
-        }));
+        clearSelectedFile(selectedThreadId);
       }
     }).finally(() => {
       if (!cancelled) {
@@ -2748,7 +2010,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [isRightWorkspaceOpen, rightWorkspaceTab, selectedThreadId]);
+  }, [clearSelectedFile, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThreadId]);
 
   useEffect(() => {
     if (!isRightWorkspaceOpen || rightWorkspaceTab !== "changes" || !selectedThreadId) {
@@ -2781,50 +2043,6 @@ export function App() {
       window.clearTimeout(timer);
     };
   }, [gitRefreshRevision, isRightWorkspaceOpen, rightWorkspaceTab, selectedThreadId]);
-
-  useEffect(() => {
-    if (!selectedThreadId || !filePreviewPath) {
-      return;
-    }
-
-    let cancelled = false;
-    setProjectFilePreviewsByThread((current) => ({
-      ...current,
-      [selectedThreadId]: {
-        ...(current[selectedThreadId] ?? {}),
-        [filePreviewPath]: null
-      }
-    }));
-    void window.codexh.readProjectFile({ threadId: selectedThreadId, path: filePreviewPath }).then((file) => {
-      if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
-        setProjectFilePreviewsByThread((current) => ({
-          ...current,
-          [selectedThreadId]: {
-            ...(current[selectedThreadId] ?? {}),
-            [filePreviewPath]: { content: file.content, truncated: file.truncated, binary: file.binary }
-          }
-        }));
-      }
-    }).catch((error: unknown) => {
-      if (!cancelled) {
-        setProjectFilePreviewsByThread((current) => ({
-          ...current,
-          [selectedThreadId]: {
-            ...(current[selectedThreadId] ?? {}),
-            [filePreviewPath]: {
-              content: error instanceof Error ? error.message : String(error),
-              truncated: false,
-              binary: false
-            }
-          }
-        }));
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [filePreviewPath, selectedThreadId]);
 
   useEffect(() => {
     if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
@@ -2910,28 +2128,6 @@ export function App() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isQuickNotesOpen, isSettingsOpen, notice, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
-
-  useEffect(() => {
-    if (!notice || isNoticeHovered) {
-      return;
-    }
-
-    const timer = window.setTimeout(
-      () => dismissNotice(notice.id),
-      notice.tone === "success" ? 3200 : 4200
-    );
-
-    return () => window.clearTimeout(timer);
-  }, [isNoticeHovered, notice]);
-
-  useEffect(() => {
-    if (!notice || exitingNoticeId !== notice.id) return;
-    const timer = window.setTimeout(() => {
-      setNotice((current) => (current?.id === notice.id ? null : current));
-      setExitingNoticeId((current) => current === notice.id ? null : current);
-    }, 280);
-    return () => window.clearTimeout(timer);
-  }, [exitingNoticeId, notice]);
 
   const selectedThread = useMemo(
     () => (snapshot?.thread.id === selectedThreadId ? snapshot.thread : null) ??
@@ -3081,6 +2277,30 @@ export function App() {
     [pendingPrompts, userInputPrompts]
   );
   const canImportProjectKnowledge = selectedThread?.mode === "project" && !!selectedThread.cwd;
+  const knowledgeImport = useKnowledgeImport({
+    selectedThreadId,
+    canImportProjectKnowledge,
+    refreshSnapshot,
+    refreshKnowledgeBases,
+    showNotice
+  });
+  const {
+    sources: knowledgeSources,
+    urlInput: knowledgeUrlInput,
+    setUrlInput: setKnowledgeUrlInput,
+    isUrlEditorOpen: isKnowledgeUrlEditorOpen,
+    setIsUrlEditorOpen: setIsKnowledgeUrlEditorOpen,
+    name: knowledgeName,
+    setName: setKnowledgeName,
+    scope: knowledgeScope,
+    setScope: setKnowledgeScope,
+    isImporting: isKnowledgeImporting,
+    importKnowledge,
+    chooseSources: chooseKnowledgeSources,
+    removeSource: removeKnowledgeSource,
+    addUrls: addKnowledgeUrls,
+    getSourceKey: knowledgeSourceKey
+  } = knowledgeImport;
   const workflowBindings = snapshot?.projectPlugins ?? [];
   const enabledPluginIds = useMemo(() => {
     if (selectedThread?.mode === "project") {
@@ -3340,7 +2560,7 @@ export function App() {
     activeSnapshotThreadStatus !== "waiting"
   );
   const isProjectWelcome = selectedThread?.mode === "project";
-  const welcomeCards = isProjectWelcome ? WELCOME_CARDS : CHAT_WELCOME_CARDS;
+  const welcomeCards = isProjectWelcome ? PROJECT_WELCOME_CARDS : CHAT_WELCOME_CARDS;
   const latestVisibleMessageId = timelineEntries[timelineEntries.length - 1]?.id ?? null;
   function toggleConversationTurnCollapsed(turnId: string) {
     const threadId = activeSnapshotThreadId;
@@ -3361,17 +2581,58 @@ export function App() {
     onEditCancel: cancelUserMessageEdit,
     onEditSubmit: () => void submitUserMessageEdit()
   }), [editingUserMessage, isActiveThreadExecuting, isPreparingRuntime, selectedThreadId]);
-  const settingsProvider = useMemo(() => {
-    if (!configDraft) {
-      return null;
-    }
-
-    return configDraft.providers.find((provider) => provider.id === settingsProviderId) ?? configDraft.providers[0] ?? null;
-  }, [configDraft, settingsProviderId]);
-  const settingsProviderModels = useMemo(
-    () => (configDraft && settingsProvider ? getModelsForProvider(configDraft, settingsProvider.id) : []),
-    [configDraft, settingsProvider]
-  );
+  const fetchedProviderModels = useFetchedProviderModels({
+    configDraft,
+    setConfigDraft,
+    settingsProvider,
+    providerSecretDrafts,
+    showNotice
+  });
+  const {
+    fetchedModels,
+    selectedFetchedModelIds,
+    setSelectedFetchedModelIds,
+    showFetchedModels,
+    setShowFetchedModels,
+    isFetchingModels,
+    fetchAndShowProviderModels,
+    toggleFetchedModelSelection,
+    applyFetchedModels
+  } = fetchedProviderModels;
+  const multimodalSettings = useMultimodalSettings({
+    config,
+    setConfig,
+    configDraft,
+    setConfigDraft,
+    providerSecretDrafts,
+    settingsProviderId,
+    refreshConfig,
+    showNotice
+  });
+  const {
+    pickerRole: multimodalPickerRole,
+    setPickerRole: setMultimodalPickerRole,
+    pickerSelected: multimodalPickerSelected,
+    setPickerSelected: setMultimodalPickerSelected,
+    resetPicker: resetMultimodalPicker,
+    setMultimodalDefault,
+    setReasoningDefault,
+    setMultimodalEnabled,
+    removeFromMultimodalRole,
+    applyPicker: applyMultimodalPicker,
+    clearInputDefault: clearMultimodalInputDefault
+  } = multimodalSettings;
+  const {
+    testingModelKey,
+    modelTestResults,
+    checkProviderModel
+  } = useProviderModelTesting({
+    providerSecretDrafts,
+    setConfig,
+    updateModelDraft,
+    formatLatency,
+    showNotice
+  });
   const composerProviders = useMemo(
     () =>
       config?.providers.filter((provider) => getReasoningModelsForProvider(config, provider.id).length > 0) ?? [],
@@ -3571,37 +2832,6 @@ export function App() {
       compaction: activeContextCompaction
     });
   }, [activeContextCompaction, composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.toolCalls]);
-  const settingsTitle = useMemo(() => {
-    switch (settingsTab) {
-      case "provider":
-        return "模型提供商";
-      case "multimodal":
-        return "多模态模型";
-      case "appearance":
-        return "应用背景";
-      case "usage":
-        return "统计";
-      case "capabilities":
-        return "能力中心";
-      case "mcp":
-        return "MCP 管理";
-      case "knowledge":
-        return "知识库";
-      case "memory":
-        return "记忆";
-      case "timeouts":
-        return "通用设置";
-      case "update":
-        return "应用更新";
-      default:
-        return "设置";
-    }
-  }, [settingsTab]);
-  const activeSettingsGroup = useMemo(
-    () => SETTINGS_MENU_GROUPS.find((group) => group.tabs.includes(settingsTab)) ?? SETTINGS_MENU_GROUPS[0],
-    [settingsTab]
-  );
-  const SettingsTitleIcon = activeSettingsGroup.icon;
 
   function cancelPendingAutoScrollFrame() {
     if (autoScrollFrameRef.current === null) {
@@ -3791,23 +3021,6 @@ export function App() {
   }, [activeSnapshotThreadId, activeSnapshotThreadStatus, showWelcome]);
 
   useEffect(() => {
-    if (!configDraft) {
-      setSettingsProviderId(null);
-      return;
-    }
-
-    if (settingsProviderId && configDraft.providers.some((provider) => provider.id === settingsProviderId)) {
-      return;
-    }
-
-    const nextProviderId =
-      configDraft.providers.find((provider) => getModelsForProvider(configDraft, provider.id).length > 0)?.id ??
-      configDraft.providers[0]?.id ??
-      null;
-    setSettingsProviderId(nextProviderId);
-  }, [configDraft, settingsProviderId]);
-
-  useEffect(() => {
     if (!config) {
       return;
     }
@@ -3880,7 +3093,7 @@ export function App() {
       return;
     }
 
-    let refreshPromise: Promise<void>;
+    let refreshPromise!: Promise<void>;
     refreshPromise = (async () => {
       try {
         do {
@@ -4402,17 +3615,6 @@ export function App() {
     }
   }
 
-  function showNotice(title: string, options?: { message?: string; tone?: AppNoticeTone }) {
-    setIsNoticeHovered(false);
-    setExitingNoticeId(null);
-    setNotice({
-      id: Date.now(),
-      title,
-      message: options?.message,
-      tone: options?.tone ?? "warning"
-    });
-  }
-
   function requestDeleteHistoryThread(thread: ThreadRecord) {
     const blockedMessage = getDeleteThreadBlockedMessage(thread.status, deletingThreadId);
     if (blockedMessage) {
@@ -4499,26 +3701,7 @@ export function App() {
         delete next[threadId];
         return next;
       });
-      setTerminalTabsByThread((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
-      setActiveTerminalTabByThread((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
-      setTerminalInputsByThread((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
-      setTerminalSessionsByThread((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
+      clearTerminalThread(threadId);
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: [] }));
       setActiveToolCall((current) => current?.threadId === threadId ? null : current);
       setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
@@ -4879,86 +4062,6 @@ export function App() {
     setGpaRevisionDraft("");
   }
 
-  async function openQuickNotes() {
-    setIsQuickNotesOpen(true);
-    try {
-      const notes = await window.codexh.listQuickNotes();
-      setQuickNotes(notes);
-      const first = notes[0];
-      setSelectedQuickNoteId(first?.id ?? null);
-      setQuickNoteTitle(first?.title ?? "");
-      setQuickNoteContent(first?.content ?? "");
-      quickNoteContentRef.current = first?.content ?? "";
-      setQuickNoteStatus(first ? "已同步至全局知识库" : "新建笔记后保存至全局知识库");
-    } catch (error) {
-      showNotice("无法读取随手记", { message: error instanceof Error ? error.message : "请稍后重试。" });
-    }
-  }
-
-  function selectQuickNote(note: { id: string; title: string; content: string }) {
-    setSelectedQuickNoteId(note.id);
-    setQuickNoteTitle(note.title);
-    setQuickNoteContent(note.content);
-    quickNoteContentRef.current = note.content;
-    setQuickNoteStatus("已同步至全局知识库");
-  }
-
-  async function saveQuickNote() {
-    const content = quickNoteContentRef.current;
-    if (!content.trim()) {
-      setQuickNoteStatus("请先填写笔记内容");
-      return;
-    }
-    setQuickNoteSaving(true);
-    setQuickNoteStatus("正在同步至全局知识库...");
-    try {
-      const note = await window.codexh.saveQuickNote({ id: selectedQuickNoteId ?? undefined, title: quickNoteTitle, content });
-      const notes = await window.codexh.listQuickNotes();
-      setQuickNotes(notes);
-      setSelectedQuickNoteId(note.id);
-      setQuickNoteTitle(note.title);
-      setQuickNoteContent(note.content);
-      quickNoteContentRef.current = note.content;
-      setQuickNoteStatus("已同步至全局知识库");
-      showNotice("随手记已保存", { tone: "success", message: "已同步至全局知识库。" });
-    } catch (error) {
-      setQuickNoteStatus(error instanceof Error ? error.message : "保存失败，请稍后重试。");
-    } finally {
-      setQuickNoteSaving(false);
-    }
-  }
-
-  async function renameQuickNote(note: { id: string; content: string }) {
-    const title = quickNoteRenameDraft.trim();
-    if (!title) return;
-    try {
-      const saved = await window.codexh.saveQuickNote({ id: note.id, title, content: note.content });
-      setQuickNotes(await window.codexh.listQuickNotes());
-      if (selectedQuickNoteId === saved.id) {
-        setQuickNoteTitle(saved.title);
-        setQuickNoteStatus("标题已更新并同步至全局知识库");
-      }
-      setRenamingQuickNoteId(null);
-    } catch (error) {
-      showNotice("重命名失败", { message: error instanceof Error ? error.message : "请稍后重试。" });
-    }
-  }
-
-  async function deleteQuickNote(note: { id: string }) {
-    setQuickNoteDeleteConfirm(null);
-    await window.codexh.deleteQuickNote(note.id);
-    const notes = await window.codexh.listQuickNotes();
-    setQuickNotes(notes);
-    const next = notes[0];
-    setSelectedQuickNoteId(next?.id ?? null);
-    setQuickNoteTitle(next?.title ?? "");
-    setQuickNoteContent(next?.content ?? "");
-    quickNoteContentRef.current = next?.content ?? "";
-    setQuickNoteListMenu(null);
-    setQuickNoteStatus(next ? "已同步至全局知识库" : "新建笔记后保存至全局知识库");
-    showNotice("随手记已删除", { tone: "success" });
-  }
-
   async function submitGpaRevision() {
     const revision = gpaRevisionDraft.trim();
     if (!revision) {
@@ -5246,36 +4349,6 @@ export function App() {
     }
   }
 
-  async function importKnowledge() {
-    if (knowledgeScope === "project" && !canImportProjectKnowledge) {
-      return;
-    }
-
-    if (knowledgeSources.length === 0) {
-      showNotice("请至少添加一个本地文档、URL 或浏览器页面。");
-      return;
-    }
-
-    setIsKnowledgeImporting(true);
-    try {
-      await window.codexh.importKnowledge({
-        displayName: knowledgeName.trim() || "Imported Knowledge",
-        scope: knowledgeScope,
-        sources: knowledgeSources,
-        threadId: selectedThreadId ?? undefined
-      });
-      setKnowledgeSources([]);
-      setKnowledgeUrlInput("");
-      setKnowledgeName("Imported Knowledge");
-      await Promise.all([refreshSnapshot(selectedThreadId), refreshKnowledgeBases()]);
-      showNotice("知识库已导入", { tone: "success" });
-    } catch (error) {
-      showNotice("知识库导入失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setIsKnowledgeImporting(false);
-    }
-  }
-
   async function answerPendingPrompt(prompt: UserInputPrompt, answers: Record<string, string>) {
     setResolvingPromptId(prompt.id);
     setSnapshot((current) => {
@@ -5367,386 +4440,6 @@ export function App() {
     }
   }
 
-  async function chooseKnowledgeSources(kind: "files" | "folders") {
-    const paths = kind === "files"
-      ? await window.codexh.chooseKnowledgeFiles()
-      : await window.codexh.chooseKnowledgeFolders();
-    if (paths.length === 0) return;
-
-    const existing = new Set(knowledgeSources.map(knowledgeSourceKey));
-    const additions = paths
-      .filter((sourcePath) => !existing.has(`${kind === "files" ? "file" : "folder"}:${sourcePath.toLowerCase()}`))
-      .map((sourcePath) => ({
-        path: sourcePath,
-        kind: kind === "files" ? "file" : "folder"
-      } satisfies KnowledgeSourceAttachment));
-    if (additions.length === 0) return;
-
-    const wasEmpty = knowledgeSources.length === 0;
-    setKnowledgeSources([...knowledgeSources, ...additions]);
-    if (wasEmpty) {
-      setKnowledgeName(getKnowledgeDefaultName(additions[0]));
-    }
-  }
-
-  function removeKnowledgeSource(sourcePath: string) {
-    setKnowledgeSources((current) => current.filter((source) => knowledgeSourceKey(source) !== sourcePath));
-  }
-
-  function addKnowledgeUrls(): boolean {
-    const urls = knowledgeUrlInput.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
-    if (urls.length === 0) return false;
-    const existing = new Set(knowledgeSources.map(knowledgeSourceKey));
-    const additions: KnowledgeImportSource[] = [];
-    for (const value of urls) {
-      try {
-        const url = new URL(value);
-        if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error();
-        const source: KnowledgeImportSource = { kind: "url", url: url.toString() };
-        if (!existing.has(knowledgeSourceKey(source))) {
-          existing.add(knowledgeSourceKey(source));
-          additions.push(source);
-        }
-      } catch {
-        showNotice("链接格式无效", { message: `仅支持 http/https：${value}` });
-        return false;
-      }
-    }
-    setKnowledgeSources((current) => [...current, ...additions]);
-    setKnowledgeUrlInput("");
-    if (knowledgeSources.length === 0 && additions[0]?.kind === "url") {
-      setKnowledgeName(new URL(additions[0].url).hostname);
-    }
-    return true;
-  }
-
-  async function refreshKnowledgeBases() {
-    try {
-      setKnowledgeBases((await window.codexh.listKnowledgeBases()) as KnowledgeBaseSummary[]);
-    } catch (error) {
-      showNotice("加载知识库失败", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  async function refreshErrorSolutions(modelFilter = errorSolutionModelFilter) {
-    try {
-      const modelId = modelFilter === "all" ? null : modelFilter;
-      const solutions = sortMemoryRecordsNewestFirst(
-        (await window.codexh.listErrorSolutions({ limit: 1_000, modelId })) as ErrorSolutionRecord[]
-      );
-      setErrorSolutions(solutions);
-      setErrorSolutionPage((current) => Math.min(current, getMemoryLastPageIndex(solutions.length)));
-    } catch (error) {
-      showNotice("加载错误恢复经验失败", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  async function refreshSelfImprovementMemories() {
-    try {
-      const memories = sortMemoryRecordsNewestFirst(
-        await window.codexh.listSelfImprovementMemories({ all: true, limit: 1_000 }) as SelfImprovementMemoryRecord[]
-      );
-      setSelfImprovementMemories(memories as SelfImprovementMemoryRecord[]);
-      setSelfImprovementMemoryPage((current) => Math.min(current, getMemoryLastPageIndex(memories.length)));
-    } catch (error) {
-      showNotice("加载记忆失败", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  async function refreshSelfImprovementNow() {
-    if (isRefreshingSelfImprovementMemories) return;
-    setIsRefreshingSelfImprovementMemories(true);
-    try {
-      const result = await window.codexh.refreshSelfImprovementMemories();
-      await refreshSelfImprovementMemories();
-      showNotice(
-        result.processed > 0 || result.pruned > 0
-          ? `记忆已更新：提炼 ${result.processed} 条，清理 ${result.pruned} 条`
-          : "没有可处理的记忆任务",
-        { tone: "success" }
-      );
-    } catch (error) {
-      showNotice("提炼记忆失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setIsRefreshingSelfImprovementMemories(false);
-    }
-  }
-
-  async function deleteSelfImprovementMemory(id: string) {
-    const removed = selfImprovementMemories.find((memory) => memory.id === id);
-    if (!removed) return;
-    setSelfImprovementMemories((current) => current.filter((memory) => memory.id !== id));
-    setSelfImprovementMemoryPage((current) => Math.min(
-      current,
-      getMemoryLastPageIndex(selfImprovementMemories.length - 1)
-    ));
-    try {
-      await window.codexh.deleteSelfImprovementMemory(id);
-      showNotice("记忆已删除", { tone: "success" });
-    } catch (error) {
-      setSelfImprovementMemories((current) => current.some((memory) => memory.id === id)
-        ? current
-        : sortMemoryRecordsNewestFirst([...current, removed])
-      );
-      showNotice("删除记忆失败", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  async function deleteErrorSolution(id: string) {
-    const removed = errorSolutions.find((entry) => entry.id === id);
-    if (!removed) return;
-    const wasExpanded = expandedErrorSolutionIds.has(id);
-    setErrorSolutionBusyId(id);
-    setErrorSolutions((current) => current.filter((entry) => entry.id !== id));
-    setErrorSolutionPage((current) => Math.min(
-      current,
-      getMemoryLastPageIndex(errorSolutions.length - 1)
-    ));
-    setExpandedErrorSolutionIds((current) => {
-      if (!current.has(id)) return current;
-      const next = new Set(current);
-      next.delete(id);
-      return next;
-    });
-    try {
-      await window.codexh.deleteErrorSolution(id);
-      showNotice("记忆已删除", { tone: "success" });
-    } catch (error) {
-      setErrorSolutions((current) => current.some((entry) => entry.id === id)
-        ? current
-        : sortMemoryRecordsNewestFirst([...current, removed])
-      );
-      if (wasExpanded) {
-        setExpandedErrorSolutionIds((current) => new Set(current).add(id));
-      }
-      showNotice("删除错误恢复经验失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setErrorSolutionBusyId(null);
-    }
-  }
-
-  async function confirmClearErrorSolutions() {
-    if (isClearingErrorSolutions) return;
-    setIsClearingErrorSolutions(true);
-    try {
-      const modelId = errorSolutionModelFilter === "all" ? null : errorSolutionModelFilter;
-      const cleared = await window.codexh.clearErrorSolutions(modelId);
-      setErrorSolutions((current) => modelId
-        ? current.filter((entry) => entry.modelId !== modelId)
-        : []
-      );
-      setErrorSolutionPage(0);
-      setExpandedErrorSolutionIds(new Set());
-      setIsClearErrorSolutionsConfirmOpen(false);
-      const modelLabel = modelId
-        ? (config?.models.find((entry) => entry.id === modelId)?.displayName ?? modelId)
-        : null;
-      showNotice(
-        cleared > 0
-          ? modelLabel
-            ? `已清空 ${modelLabel} 的 ${cleared} 条记忆`
-            : `已清空 ${cleared} 条记忆`
-          : "记忆已清空",
-        { tone: "success" }
-      );
-    } catch (error) {
-      showNotice("清空错误恢复经验失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setIsClearingErrorSolutions(false);
-    }
-  }
-
-  async function confirmClearSelfImprovementMemories() {
-    if (isClearingSelfImprovement) return;
-    setIsClearingSelfImprovement(true);
-    try {
-      const cleared = await window.codexh.clearSelfImprovementMemories();
-      setSelfImprovementMemories([]);
-      setSelfImprovementMemoryPage(0);
-      setIsClearSelfImprovementConfirmOpen(false);
-      showNotice(cleared > 0 ? `已清空 ${cleared} 条记忆` : "记忆已清空", { tone: "success" });
-    } catch (error) {
-      showNotice("清空记忆失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setIsClearingSelfImprovement(false);
-    }
-  }
-
-  function toggleErrorSolutionExpanded(id: string) {
-    setExpandedErrorSolutionIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  async function toggleKnowledgeDocuments(knowledgeBaseId: string) {
-    if (knowledgeDocuments[knowledgeBaseId]) {
-      setKnowledgeDocuments((current) => {
-        const next = { ...current };
-        delete next[knowledgeBaseId];
-        return next;
-      });
-      return;
-    }
-    try {
-      const documents = await window.codexh.listKnowledgeDocuments(knowledgeBaseId) as KnowledgeDocumentRecord[];
-      setKnowledgeDocuments((current) => ({ ...current, [knowledgeBaseId]: documents }));
-    } catch (error) {
-      showNotice("读取文档列表失败", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  async function refreshKnowledgeBase(knowledgeBaseId: string) {
-    setKnowledgeBusyId(knowledgeBaseId);
-    try {
-      await window.codexh.refreshKnowledgeBase(knowledgeBaseId);
-      setKnowledgeDocuments((current) => {
-        const next = { ...current };
-        delete next[knowledgeBaseId];
-        return next;
-      });
-      await refreshKnowledgeBases();
-      showNotice("知识库索引已刷新", { tone: "success" });
-    } catch (error) {
-      showNotice("刷新知识库失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setKnowledgeBusyId(null);
-    }
-  }
-
-  async function deleteKnowledgeBase(knowledgeBaseId: string) {
-    setKnowledgeBusyId(knowledgeBaseId);
-    try {
-      await window.codexh.deleteKnowledgeBase(knowledgeBaseId);
-      setKnowledgeDocuments((current) => {
-        const next = { ...current };
-        delete next[knowledgeBaseId];
-        return next;
-      });
-      await Promise.all([refreshKnowledgeBases(), refreshSnapshot(selectedThreadId)]);
-      showNotice("知识库已删除", { tone: "success" });
-    } catch (error) {
-      showNotice("删除知识库失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setKnowledgeBusyId(null);
-    }
-  }
-
-  function openUserSkillGenerationDialog(thread: ThreadRecord) {
-    if (thread.parentThreadId || thread.status === "running" || isGeneratingUserSkill) return;
-    setUserSkillGenerationDialog({ thread, name: thread.title.slice(0, 64) });
-  }
-
-  async function generateUserSkill(dialog: UserSkillGenerationDialog) {
-    const skillName = dialog.name.trim();
-    if (!skillName || dialog.thread.parentThreadId || dialog.thread.status === "running" || isGeneratingUserSkill) return;
-    setIsGeneratingUserSkill(true);
-    try {
-      const skill = await window.codexh.generateUserSkill(dialog.thread.id, skillName);
-      await Promise.all([refreshUserSkills(), refreshSkills()]);
-      setUserSkillGenerationDialog(null);
-      showNotice(`已生成用户技能：${skill.displayName ?? skill.name}`, { tone: "success" });
-    } catch (error) {
-      showNotice("生成用户技能失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setIsGeneratingUserSkill(false);
-    }
-  }
-
-  async function startSkillLab() {
-    const prompt = skillLabPrompt.trim();
-    const selectedSkillLabModel = skillLabModelOptions.find((option) => option.value === skillLabModelSelection);
-    if (
-      skillLabJobId ||
-      !selectedSkillLabModel ||
-      (skillLabMode === "create" && !prompt) ||
-      (skillLabMode === "optimize" && !skillLabTargetSkillId)
-    ) return;
-    const [providerId, modelId] = skillLabModelSelection.split("::", 2);
-    const targetSkill = userSkills.find((skill) => skill.id === skillLabTargetSkillId);
-    skillLabNotificationTitleRef.current = skillLabMode === "optimize"
-      ? `技能实验室 · ${targetSkill?.displayName ?? targetSkill?.name ?? "持续优化"}`
-      : `技能实验室 · ${skillLabName.trim() || prompt.slice(0, 24)}`;
-    setSkillLabLastRunMode(skillLabMode);
-    setSkillLabStatus("clarifying");
-    setSkillLabError(null);
-    setSkillLabResult(null);
-    setSkillLabProgress([]);
-    setSkillLabTotalIterations(skillLabIterations);
-    setSkillLabApproval(null);
-    setSkillLabClarification(null);
-    setSkillLabActivityLog([]);
-    setSkillLabStartedAt(Date.now());
-    setSkillLabElapsedSeconds(0);
-    try {
-      skillLabOptimizationTargetRef.current = skillLabMode === "optimize" ? skillLabTargetSkillId : null;
-      const jobId = await window.codexh.startSkillLab({
-        prompt,
-        requestedName: skillLabMode === "create" ? skillLabName.trim() || undefined : undefined,
-        iterations: skillLabIterations,
-        targetSkillId: skillLabMode === "optimize" ? skillLabTargetSkillId : undefined,
-        providerId,
-        modelId
-      });
-      skillLabJobIdRef.current = jobId;
-      setSkillLabJobId(jobId);
-      if (!findActiveNotification(notificationCenterStateRef.current.items, "skill-lab", jobId)) {
-        const timestamp = new Date().toISOString();
-        dispatchNotificationCenter({
-          type: "start",
-          item: {
-            id: `skill-lab:${jobId}`,
-            source: "skill-lab",
-            targetId: jobId,
-            title: skillLabNotificationTitleRef.current,
-            detail: "正在分析需求并准备生成 Skill。",
-            status: "running",
-            createdAt: timestamp,
-            updatedAt: timestamp,
-            startedAt: timestamp,
-            unread: false,
-            progress: { current: 0, total: skillLabIterations, percent: 0 }
-          }
-        });
-      }
-    } catch (error) {
-      skillLabOptimizationTargetRef.current = null;
-      setSkillLabStatus("failed");
-      setSkillLabError(error instanceof Error ? error.message : String(error));
-      setSkillLabStartedAt(null);
-    }
-  }
-
-  async function cancelSkillLab() {
-    if (!skillLabJobId) return;
-    await window.codexh.cancelSkillLab(skillLabJobId);
-  }
-
-  async function resolveSkillLabApproval(approved: boolean) {
-    if (!skillLabApproval) return;
-    const approval = skillLabApproval;
-    setSkillLabApproval(null);
-    await window.codexh.resolveSkillLabApproval({ jobId: approval.jobId, approvalId: approval.approvalId, approved });
-  }
-
-  async function submitSkillLabClarification() {
-    if (!skillLabClarification) return;
-    const clarification = skillLabClarification;
-    const missingRequired = clarification.questions.some((question) =>
-      question.required && !clarification.answers[question.id]?.trim()
-    );
-    if (missingRequired) return;
-    setSkillLabClarification(null);
-    setSkillLabStatus("running");
-    await window.codexh.resolveSkillLabClarification({
-      jobId: clarification.jobId,
-      clarificationId: clarification.clarificationId,
-      answers: clarification.answers
-    });
-  }
-
   async function confirmManagedRemoval() {
     const target = managedRemoval;
     if (!target || removingManagedItem) return;
@@ -5796,139 +4489,6 @@ export function App() {
       refreshThreads({ refreshSelectedSnapshot: false }),
       refreshMcpServers()
     ]);
-  }
-
-  function updateMcpServerDraft(id: string, patch: Partial<McpServerConfig>) {
-    setConfigDraft((current) => {
-      if (!current) return current;
-      const next = cloneConfig(current);
-      next.mcpServers = next.mcpServers.map((server) => server.id === id ? { ...server, ...patch } : server);
-      return next;
-    });
-  }
-
-  function dismissNotice(noticeId: number) {
-    setIsNoticeHovered(false);
-    setExitingNoticeId((current) => current ?? noticeId);
-  }
-
-  function addMcpServer() {
-    if (!configDraft) return;
-    const id = createAvailableMcpId(configDraft.mcpServers);
-    setMcpCreateDraft({ id, name: "", transport: "streamable_http", url: "", auth: { mode: "none" }, defaultToolsApprovalMode: "prompt", enabled: true, source: "config" });
-    setMcpCreateMode("form");
-    setMcpCreateError(null);
-    setMcpJsonDraft("");
-    setMcpJsonError(null);
-    setIsMcpCreateOpen(true);
-  }
-
-  function closeMcpCreateSheet() {
-    setIsMcpCreateOpen(false);
-    setMcpCreateDraft(null);
-    setMcpCreateError(null);
-    setMcpJsonError(null);
-  }
-
-  function confirmMcpCreate() {
-    if (!configDraft) return;
-
-    if (mcpCreateMode === "form") {
-      if (!mcpCreateDraft) return;
-      const id = mcpCreateDraft.id.trim();
-      const name = mcpCreateDraft.name.trim();
-      const isStdio = (mcpCreateDraft.transport ?? "stdio") === "stdio";
-      if (!id) return setMcpCreateError("请填写服务 ID。");
-      if (!name) return setMcpCreateError("请填写服务名称。");
-      if (configDraft.mcpServers.some((server) => server.id === id)) return setMcpCreateError(`服务 ID 已存在：${id}`);
-      if (isStdio && !mcpCreateDraft.command?.trim()) return setMcpCreateError("stdio 服务需要填写命令。");
-      if (!isStdio && !mcpCreateDraft.url?.trim()) return setMcpCreateError("SSE/HTTP 服务需要填写 URL。");
-
-      const server = { ...mcpCreateDraft, id, name };
-      setConfigDraft((current) => current ? { ...cloneConfig(current), mcpServers: [...current.mcpServers, server] } : current);
-      closeMcpCreateSheet();
-      showNotice("MCP 服务已加入草稿", { tone: "success", message: "请点击保存使配置生效。" });
-      return;
-    }
-
-    try {
-      const servers = parseMcpJsonConfig(mcpJsonDraft);
-      if (!servers.length) throw new Error("JSON 中没有可添加的 MCP 服务。");
-      const existingIds = new Set(configDraft.mcpServers.map((server) => server.id));
-      const duplicate = servers.find((server) => existingIds.has(server.id));
-      if (duplicate) throw new Error(`服务 ID 已存在：${duplicate.id}`);
-      setConfigDraft((current) => current ? { ...cloneConfig(current), mcpServers: [...current.mcpServers, ...servers] } : current);
-      closeMcpCreateSheet();
-      showNotice(`已加入 ${servers.length} 个 MCP 服务`, { tone: "success", message: "请点击保存使配置生效。" });
-    } catch (error) {
-      setMcpJsonError(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  function removeMcpServer(id: string) {
-    setConfigDraft((current) => {
-      if (!current) return current;
-      const next = cloneConfig(current);
-      next.mcpServers = next.mcpServers.filter((server) => server.id !== id);
-      return next;
-    });
-    setEditingMcpServerId((current) => current === id ? null : current);
-  }
-
-  async function testMcpServer(server: McpServerConfig) {
-    setTestingMcpServerId(server.id);
-    try {
-      const result = await window.codexh.testMcpServer(server);
-      setMcpTestResults((current) => ({
-        ...current,
-        [server.id]: { tools: result.tools, resources: result.resources, resourceTemplates: result.resourceTemplates, prompts: result.prompts }
-      }));
-      showNotice(`${server.name} 测试成功`, { tone: "success", message: `发现 ${result.tools.length} 个工具` });
-    } catch (error) {
-      showNotice(`${server.name} 连接失败`, { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setTestingMcpServerId((current) => current === server.id ? null : current);
-      await refreshMcpServers();
-    }
-  }
-
-  async function loginMcpServer(serverId: string) {
-    setMcpAuthBusyId(serverId);
-    try {
-      await window.codexh.loginMcpServer(serverId);
-      await refreshMcpServers();
-      showNotice("OAuth 登录完成", { tone: "success" });
-    } catch (error) {
-      showNotice("OAuth 登录失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setMcpAuthBusyId(null);
-    }
-  }
-
-  async function logoutMcpServer(serverId: string) {
-    setMcpAuthBusyId(serverId);
-    try {
-      await window.codexh.logoutMcpServer(serverId);
-      await refreshMcpServers();
-      showNotice("OAuth 已退出", { tone: "success" });
-    } catch (error) {
-      showNotice("OAuth 退出失败", { message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setMcpAuthBusyId(null);
-    }
-  }
-
-  async function refreshMcpToolDirectory(serverId: string) {
-    try {
-      const tools = await window.codexh.refreshMcpTools(serverId);
-      setMcpTestResults((current) => ({
-        ...current,
-        [serverId]: { ...(current[serverId] ?? { resources: [], resourceTemplates: [], prompts: [] }), tools }
-      }));
-      showNotice("MCP 工具目录已刷新", { tone: "success", message: `发现 ${tools.length} 个工具` });
-    } catch (error) {
-      showNotice("刷新 MCP 工具目录失败", { message: error instanceof Error ? error.message : String(error) });
-    }
   }
 
   function queuePrompt(text: string) {
@@ -6006,116 +4566,6 @@ export function App() {
     }, 140);
   }
 
-  function updateDatabaseDraft(id: string, patch: Partial<DatabaseConnectionConfig>) {
-    setConfigDraft((current) => current ? {
-      ...cloneConfig(current),
-      databaseConnections: current.databaseConnections.map((connection) => connection.id === id ? { ...connection, ...patch } : connection)
-    } : current);
-  }
-
-  async function setDatabaseConnectionEnabled(connection: DatabaseConnectionConfig, enabled: boolean) {
-    const persistedConnection = config?.databaseConnections.find((entry) => entry.id === connection.id);
-    if (!config || !persistedConnection) {
-      updateDatabaseDraft(connection.id, { enabled });
-      return;
-    }
-
-    const previousConfig = config;
-    const nextConfig = cloneConfig(config);
-    nextConfig.databaseConnections = nextConfig.databaseConnections.map((entry) => entry.id === connection.id ? { ...entry, enabled } : entry);
-    updateDatabaseDraft(connection.id, { enabled });
-    setConfig(nextConfig);
-    setChangingDatabaseEnabledId(connection.id);
-    try {
-      await window.codexh.saveConfig(buildConfigToSave(nextConfig, previousConfig, providerSecretDrafts));
-      showNotice(enabled ? "数据库已启用" : "数据库已停用", {
-        message: enabled ? "该数据库现在可在聊天中调用。" : "该数据库已从聊天可用数据源中移除。",
-        tone: "success"
-      });
-    } catch (error) {
-      updateDatabaseDraft(connection.id, { enabled: persistedConnection.enabled });
-      setConfig(previousConfig);
-      showNotice("数据库状态保存失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
-    } finally {
-      setChangingDatabaseEnabledId((current) => current === connection.id ? null : current);
-    }
-  }
-
-  function addDatabaseConnection() {
-    if (!configDraft) return;
-    const base = "database";
-    let index = 1;
-    while (configDraft.databaseConnections.some((connection) => connection.id === `${base}-${index}`)) index += 1;
-    const id = `${base}-${index}`;
-    setConfigDraft((current) => current ? {
-      ...cloneConfig(current),
-      databaseConnections: [...current.databaseConnections, {
-        id, name: "", engine: "postgresql", host: "", port: 5432, database: "", username: "", tlsMode: "require", credentialRef: `database:${id}`, enabled: true, permissions: ["query"], maxRows: 200
-      }]
-    } : current);
-    setEditingDatabaseConnectionId(id);
-  }
-
-  function removeDatabaseConnection(id: string) {
-    setConfigDraft((current) => current ? {
-      ...cloneConfig(current),
-      databaseConnections: current.databaseConnections.filter((connection) => connection.id !== id)
-    } : current);
-    setEditingDatabaseConnectionId((current) => current === id ? null : current);
-    setDatabasePasswordDrafts((current) => {
-      const next = { ...current };
-      delete next[id];
-      return next;
-    });
-  }
-
-  async function testDatabaseConnection(connection: DatabaseConnectionConfig) {
-    const password = databasePasswordDrafts[connection.id] ?? "";
-    setTestingDatabaseConnectionId(connection.id);
-    try {
-      const response = await window.codexh.testDatabase({ connection, password: password || undefined });
-      if (!response.ok) throw new Error(response.error);
-      const result = response.result;
-      setDatabaseCatalogs((current) => ({ ...current, [connection.id]: result.databases }));
-      showNotice(`${connection.name || connection.id} 连接成功`, { tone: "success" });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      showNotice(
-        message.startsWith("No password is available") ? "未找到已保存的数据库密码" : "数据库连接失败",
-        {
-          message: message.startsWith("No password is available") ? "请输入密码后保存，或直接在密码框中输入后测试。" : message,
-          tone: "warning"
-        }
-      );
-    } finally {
-      setTestingDatabaseConnectionId((current) => current === connection.id ? null : current);
-    }
-  }
-
-  async function saveDatabaseConnection(connection: DatabaseConnectionConfig) {
-    const password = databasePasswordDrafts[connection.id] ?? "";
-    setSavingDatabaseCredentialId(connection.id);
-    try {
-      await saveConfigDraft({ showSuccessNotice: false });
-      if (password) {
-        await window.codexh.saveDatabaseCredential({ connectionId: connection.id, password });
-        setDatabasePasswordDrafts((current) => ({ ...current, [connection.id]: "" }));
-        setSavedDatabaseCredentialIds((current) => new Set(current).add(connection.id));
-      }
-      setEditingDatabaseConnectionId(null);
-      showNotice("数据库连接已保存", {
-        message: password
-          ? "密码已加密保存，可直接测试连接或在聊天中调用该数据库。"
-          : "连接配置已保存。",
-        tone: "success"
-      });
-    } catch (error) {
-      showNotice("数据库连接保存失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
-    } finally {
-      setSavingDatabaseCredentialId((current) => current === connection.id ? null : current);
-    }
-  }
-
   function applyPluginEnabledLocally(threadId: string, pluginId: string, enabled: boolean) {
     const updateIds = (ids: string[]) => enabled
       ? [...new Set([...ids, pluginId])]
@@ -6188,201 +4638,9 @@ export function App() {
     setGpaMenuPos(null);
   }
 
-  function updateChatBackgroundSettings(
-    patch: Partial<Omit<ChatBackgroundSettings, "surfaces">> & { surfaces?: Partial<ChatBackgroundSurfaces> }
-  ) {
-    setChatBackgroundSettings((current) => normalizeChatBackgroundSettings({
-      ...current,
-      ...patch,
-      surfaces: patch.surfaces ? { ...current.surfaces, ...patch.surfaces } : current.surfaces
-    }));
-  }
-
-  function updateChatBackgroundSurface(key: ChatBackgroundSurfaceKey, value: number) {
-    updateChatBackgroundSettings({ surfaces: { [key]: value } });
-  }
-
-  function beginChatBackgroundDrag(event: ReactPointerEvent<HTMLImageElement>) {
-    if (!chatBackgroundUrl || event.button !== 0) return;
-    const bounds = event.currentTarget.parentElement?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect();
-    chatBackgroundDragRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      positionX: chatBackgroundSettings.positionX,
-      positionY: chatBackgroundSettings.positionY,
-      width: Math.max(1, bounds.width),
-      height: Math.max(1, bounds.height)
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setIsChatBackgroundDragging(true);
-  }
-
-  function moveChatBackground(event: ReactPointerEvent<HTMLImageElement>) {
-    const drag = chatBackgroundDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    updateChatBackgroundSettings({
-      positionX: drag.positionX - ((event.clientX - drag.startX) / drag.width) * 100,
-      positionY: drag.positionY - ((event.clientY - drag.startY) / drag.height) * 100
-    });
-  }
-
-  function endChatBackgroundDrag(event: ReactPointerEvent<HTMLImageElement>) {
-    const drag = chatBackgroundDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    chatBackgroundDragRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    setIsChatBackgroundDragging(false);
-  }
-
-  async function importChatBackground(file: File) {
-    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) {
-      showNotice("请选择图片文件", { message: "支持 PNG、JPEG、WebP、GIF 等常见格式。", tone: "warning" });
-      return;
-    }
-    if (file.size > 40 * 1024 * 1024) {
-      showNotice("图片过大", { message: "请选择小于 40 MB 的图片。", tone: "warning" });
-      return;
-    }
-
-    const nextUrl = URL.createObjectURL(file);
-    try {
-      const probe = new Image();
-      probe.src = nextUrl;
-      await probe.decode();
-    } catch {
-      URL.revokeObjectURL(nextUrl);
-      showNotice("图片读取失败", {
-        message: "文件格式无法解码，请换一张 PNG、JPEG 或 WebP 图片。",
-        tone: "warning"
-      });
-      return;
-    }
-
-    try {
-      const nextSettings = normalizeChatBackgroundSettings({
-        ...chatBackgroundSettings,
-        enabled: true,
-        fileName: file.name
-      });
-      const bytes = await file.arrayBuffer();
-      const nextImage: ChatBackgroundImage = {
-        id: globalThis.crypto.randomUUID(),
-        bytes,
-        mimeType: file.type,
-        fileName: file.name,
-        url: nextUrl
-      };
-      const nextImages = [...chatBackgroundImagesRef.current, nextImage];
-      await window.codexh.saveApplicationBackgrounds({
-        items: nextImages.map(({ id, bytes: imageBytes, mimeType, fileName }) => ({ id, bytes: imageBytes, mimeType, fileName })),
-        settings: nextSettings
-      });
-      chatBackgroundUrlsRef.current.add(nextUrl);
-      chatBackgroundImagesRef.current = nextImages;
-      setChatBackgroundImages(nextImages);
-      setChatBackgroundSettings(nextSettings);
-      showNotice("应用背景已更新", { message: "位置、模糊度和透明度可继续实时调整。", tone: "success" });
-    } catch (error) {
-      URL.revokeObjectURL(nextUrl);
-      showNotice("图片保存失败", {
-        message: error instanceof Error ? error.message : String(error),
-        tone: "warning"
-      });
-    }
-  }
-
-  async function importChatBackgroundFiles(files: FileList | File[]) {
-    const selectedFiles = Array.from(files);
-    if (chatBackgroundImagesRef.current.length + selectedFiles.length > 50) {
-      showNotice("图片数量过多", { message: "应用背景最多支持 50 张图片。", tone: "warning" });
-      return;
-    }
-    for (const file of selectedFiles) {
-      await importChatBackground(file);
-    }
-  }
-
-  async function removeChatBackgroundImage(id: string) {
-    const currentImages = chatBackgroundImagesRef.current;
-    const removed = currentImages.find((image) => image.id === id);
-    const nextImages = currentImages.filter((image) => image.id !== id);
-    try {
-      if (nextImages.length === 0) {
-        await window.codexh.clearApplicationBackground();
-        updateChatBackgroundSettings({ fileName: null });
-      } else {
-        await window.codexh.saveApplicationBackgrounds({
-          items: nextImages.map(({ id: imageId, bytes, mimeType, fileName }) => ({ id: imageId, bytes, mimeType, fileName })),
-          settings: chatBackgroundSettings
-        });
-      }
-      if (removed) {
-        URL.revokeObjectURL(removed.url);
-        chatBackgroundUrlsRef.current.delete(removed.url);
-      }
-      chatBackgroundImagesRef.current = nextImages;
-      setChatBackgroundImages(nextImages);
-      showNotice(nextImages.length ? "背景图片已删除" : "应用背景已清除", { tone: "success" });
-    } catch (error) {
-      showNotice("删除背景图片失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
-    }
-  }
-
-  async function moveChatBackgroundImage(sourceId: string, targetId: string) {
-    const currentImages = chatBackgroundImagesRef.current;
-    const from = currentImages.findIndex((image) => image.id === sourceId);
-    const to = currentImages.findIndex((image) => image.id === targetId);
-    if (from < 0 || to < 0 || from === to) return;
-    const nextImages = [...currentImages];
-    const [moved] = nextImages.splice(from, 1);
-    nextImages.splice(to, 0, moved);
-    try {
-      await window.codexh.saveApplicationBackgrounds({
-        items: nextImages.map(({ id, bytes, mimeType, fileName }) => ({ id, bytes, mimeType, fileName })),
-        settings: chatBackgroundSettings
-      });
-      chatBackgroundImagesRef.current = nextImages;
-      setChatBackgroundImages(nextImages);
-    } catch (error) {
-      showNotice("背景排序保存失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
-    }
-  }
-
-  async function clearChatBackground() {
-    try {
-      await window.codexh.clearApplicationBackground();
-      for (const image of chatBackgroundImagesRef.current) URL.revokeObjectURL(image.url);
-      for (const image of chatBackgroundImagesRef.current) chatBackgroundUrlsRef.current.delete(image.url);
-      chatBackgroundImagesRef.current = [];
-      setChatBackgroundImages([]);
-      updateChatBackgroundSettings({ fileName: null });
-      showNotice("应用背景已清除", { tone: "success" });
-    } catch (error) {
-      showNotice("清除背景失败", {
-        message: error instanceof Error ? error.message : String(error),
-        tone: "warning"
-      });
-    }
-  }
-
-  function resetChatBackgroundSurfaces() {
-    updateChatBackgroundSettings({ surfaces: { ...DEFAULT_CHAT_BACKGROUND_SURFACES } });
-    showNotice("模块不透明度已重置", { tone: "success" });
-  }
-
   function resetConfigDraft(nextConfig: AppConfig, preferredProviderId?: string | null) {
-    const draft = cloneConfig(nextConfig);
-    const nextProviderId = resolveSettingsProviderId(draft, preferredProviderId);
-    setConfigDraft(draft);
-    setSettingsProviderId(nextProviderId);
-    setProviderSecretDrafts({});
-    setMultimodalPickerRole(null);
-    setMultimodalPickerSelected([]);
-    setNewModelId("");
-    setNewModelDisplayName("");
+    resetProviderDraft(nextConfig, preferredProviderId);
+    resetMultimodalPicker();
   }
 
   function updateTimeoutDraft(key: keyof AppConfig["timeouts"], rawValue: string) {
@@ -6405,503 +4663,6 @@ export function App() {
       : current);
   }
 
-  function updateProviderDraft(providerId: string, patch: Partial<ProviderDefinition>) {
-    setConfigDraft((current) => {
-      if (!current) {
-        return current;
-      }
-
-      const next = cloneConfig(current);
-      next.providers = next.providers.map((provider) =>
-        provider.id === providerId
-          ? {
-              ...provider,
-              ...patch
-            }
-          : provider
-      );
-      return normalizeDraftConfig(next);
-    });
-  }
-
-  function addCustomProvider() {
-    if (!configDraft) {
-      return;
-    }
-
-    const nextProvider = createEmptyProvider(configDraft.providers);
-    const nextDraft = cloneConfig(configDraft);
-    nextDraft.providers.push(nextProvider);
-    setConfigDraft(normalizeDraftConfig(nextDraft));
-    setSettingsProviderId(nextProvider.id);
-    setNewModelId("");
-    setNewModelDisplayName("");
-  }
-
-  function removeProvider(providerId: string) {
-    if (!configDraft) {
-      return;
-    }
-
-    const remainingModels = configDraft.models.filter((model) => model.providerId !== providerId);
-    if (remainingModels.length === 0) {
-      showNotice("至少保留一个模型后，才能删除这个供应商。");
-      return;
-    }
-
-    const nextDraft = cloneConfig(configDraft);
-    nextDraft.providers = nextDraft.providers.filter((provider) => provider.id !== providerId);
-    nextDraft.models = remainingModels;
-    const normalized = normalizeDraftConfig(nextDraft);
-
-    setConfigDraft(normalized);
-    setProviderSecretDrafts((current) => {
-      const { [providerId]: _removed, ...rest } = current;
-      return rest;
-    });
-    setSettingsProviderId(normalized.providers[0]?.id ?? null);
-  }
-
-  function setProviderAsDefault(providerId: string) {
-    setConfigDraft((current) => {
-      if (!current) {
-        return current;
-      }
-
-      const providerModels = getModelsForProvider(current, providerId);
-      if (providerModels.length === 0) {
-        return current;
-      }
-
-      const next = cloneConfig(current);
-      next.defaultProvider = providerId;
-      if (!providerModels.some((model) => model.id === next.defaultModel)) {
-        next.defaultModel = providerModels[0].id;
-      }
-      return normalizeDraftConfig(next);
-    });
-  }
-
-  async function fetchAndShowProviderModels(providerId: string) {
-    if (!configDraft) {
-      return;
-    }
-    const provider = configDraft.providers.find((entry) => entry.id === providerId);
-    if (!provider) {
-      return;
-    }
-    const baseUrl = (provider.baseUrl ?? "").trim();
-    const secret = providerSecretDrafts[provider.id]?.trim();
-    const apiKey = secret || provider.apiKey || (provider.apiKeyEnv ? "" : "");
-    if (!baseUrl) {
-      showNotice("请先填写调用地址。");
-      return;
-    }
-    if (!apiKey && !provider.apiKeyEnv) {
-      showNotice("请先填写 API Key。", {
-        message: "或者在 KEY 字段使用环境变量名。"
-      });
-      return;
-    }
-    setIsFetchingModels(true);
-    setFetchedModelsTarget("provider");
-    try {
-      const list = await window.codexh.fetchProviderModels({
-        baseUrl,
-        apiKey: apiKey || undefined,
-        apiKeyEnv: provider.apiKeyEnv,
-        type: provider.type,
-        id: provider.id
-      });
-      setFetchedModels(list);
-      setSelectedFetchedModelIds([]);
-      setShowFetchedModels(true);
-    } catch (error) {
-      showNotice("获取模型失败。", {
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setIsFetchingModels(false);
-    }
-  }
-
-  function toggleFetchedModelSelection(modelId: string) {
-    setSelectedFetchedModelIds((current) =>
-      current.includes(modelId)
-        ? current.filter((id) => id !== modelId)
-        : [...current, modelId]
-    );
-  }
-
-  function applyFetchedModels() {
-    if (!configDraft) {
-      return;
-    }
-    const candidates = fetchedModels.filter((entry) =>
-      selectedFetchedModelIds.includes(entry.id)
-    );
-    if (candidates.length === 0) {
-      showNotice("没有勾选要添加的模型。");
-      return;
-    }
-
-    if (!settingsProvider) {
-      return;
-    }
-    const existing = new Set(
-      configDraft.models
-        .filter((model) => model.providerId === settingsProvider.id)
-        .map((model) => model.id)
-    );
-    const nextDraft = cloneConfig(configDraft);
-    let added = 0;
-    let skipped = 0;
-    for (const candidate of candidates) {
-      if (existing.has(candidate.id)) {
-        skipped += 1;
-        continue;
-      }
-      nextDraft.models.push({
-        ...createModelProfile(settingsProvider.id, candidate.id, candidate.displayName ?? candidate.id),
-        ...(candidate.contextWindow ? { contextWindow: candidate.contextWindow } : {})
-      });
-      existing.add(candidate.id);
-      added += 1;
-    }
-    setConfigDraft(normalizeDraftConfig(nextDraft));
-    setShowFetchedModels(false);
-    setSelectedFetchedModelIds([]);
-    setFetchedModels([]);
-    showNotice(
-      added > 0 ? `已添加 ${added} 个模型。` : "没有新增模型。",
-      skipped > 0 ? { message: `跳过 ${skipped} 个已存在模型。` } : undefined
-    );
-  }
-
-  function addModelToProvider(providerId: string) {
-    if (!configDraft) {
-      return;
-    }
-
-    const nextId = newModelId.trim();
-    if (!nextId) {
-      showNotice("请先填写模型名称。");
-      return;
-    }
-
-    if (configDraft.models.some((model) => model.providerId === providerId && model.id === nextId)) {
-      showNotice("模型名称不能重复。", {
-        message: "同一供应商下的模型 ID 必须唯一。"
-      });
-      return;
-    }
-
-    const nextDraft = cloneConfig(configDraft);
-    nextDraft.models.push(createModelProfile(providerId, nextId, newModelDisplayName));
-    setConfigDraft(normalizeDraftConfig(nextDraft));
-    setNewModelId("");
-    setNewModelDisplayName("");
-  }
-
-  function updateModelDraft(providerId: string, modelId: string, patch: Partial<ModelProfile>) {
-    setConfigDraft((current) => {
-      if (!current) {
-        return current;
-      }
-      const next = cloneConfig(current);
-      next.models = next.models.map((model) =>
-        model.providerId === providerId && model.id === modelId ? { ...model, ...patch } : model
-      );
-      return normalizeDraftConfig(next);
-    });
-  }
-
-  function setModelRole(providerId: string, modelId: string, role: "reasoning" | "image" | "video" | null) {
-    const roleLabel = role === "reasoning" ? "推理模型" : role === "image" ? "图片模型" : role === "video" ? "视频模型" : null;
-    void persistMultimodalChange((next) => {
-      const model = next.models.find((entry) => entry.providerId === providerId && entry.id === modelId);
-      if (!model) return;
-      const previousRole = model.role === "image" || model.role === "video" || model.role === "reasoning"
-        ? model.role
-        : null;
-      if (role) {
-        model.role = role;
-        if (role === "image") model.supportsImageGeneration = true;
-        if (role === "video") model.supportsVideoGeneration = true;
-      } else {
-        delete model.role;
-      }
-      if (previousRole === "image" || previousRole === "video") {
-        if (next.multimodal[previousRole].defaultProviderId === providerId &&
-          next.multimodal[previousRole].defaultModelId === modelId) {
-          delete next.multimodal[previousRole].defaultProviderId;
-          delete next.multimodal[previousRole].defaultModelId;
-        }
-      }
-      if ((role === "image" || role === "video") && !next.multimodal[role].defaultModelId) {
-        next.multimodal[role].defaultProviderId = providerId;
-        next.multimodal[role].defaultModelId = modelId;
-      }
-    }, roleLabel ? `已加入${roleLabel}` : "已从多模态列表移除");
-  }
-
-  function setMultimodalDefault(kind: "image" | "video" | "input", providerId: string, modelId: string) {
-    void persistMultimodalChange((next) => {
-      next.multimodal[kind].defaultProviderId = providerId;
-      next.multimodal[kind].defaultModelId = modelId;
-    }, `已设为默认${kind === "image" ? "图片" : kind === "video" ? "视频" : "多模态识别"}模型`);
-  }
-
-  function setReasoningDefault(providerId: string, modelId: string) {
-    void persistMultimodalChange((next) => {
-      const model = next.models.find((entry) =>
-        entry.providerId === providerId && entry.id === modelId && isReasoningModel(entry)
-      );
-      if (!model) return;
-      next.defaultProvider = providerId;
-      next.defaultModel = modelId;
-    }, "已设为默认推理模型");
-  }
-
-  function setMultimodalEnabled(kind: "image" | "video" | "input", enabled: boolean) {
-    void persistMultimodalChange((next) => {
-      next.multimodal[kind].enabled = enabled;
-    }, enabled
-      ? `已启用${kind === "image" ? "图片生成" : kind === "video" ? "视频生成" : "多模态识别回退"}`
-      : `已关闭${kind === "image" ? "图片生成" : kind === "video" ? "视频生成" : "多模态识别回退"}`);
-  }
-
-  function removeFromMultimodalRole(providerId: string, modelId: string) {
-    setModelRole(providerId, modelId, null);
-  }
-
-  function applyMultimodalPicker() {
-    if (!multimodalPickerRole || multimodalPickerSelected.length === 0) return;
-    const role = multimodalPickerRole;
-    const selected = [...multimodalPickerSelected];
-    if (role === "input") {
-      const key = selected[0];
-      if (!key) return;
-      const [providerId, ...modelIdParts] = key.split("::");
-      const modelId = modelIdParts.join("::");
-      setMultimodalPickerRole(null);
-      setMultimodalPickerSelected([]);
-      if (!providerId || !modelId) return;
-      setMultimodalDefault("input", providerId, modelId);
-      return;
-    }
-    const roleLabel = role === "reasoning" ? "推理模型" : role === "image" ? "图片模型" : "视频模型";
-    setMultimodalPickerRole(null);
-    setMultimodalPickerSelected([]);
-    void persistMultimodalChange((next) => {
-      for (const key of selected) {
-        const [providerId, ...modelIdParts] = key.split("::");
-        const modelId = modelIdParts.join("::");
-        if (!providerId || !modelId) continue;
-        const model = next.models.find((entry) => entry.providerId === providerId && entry.id === modelId);
-        if (!model) continue;
-        const previousRole = model.role === "image" || model.role === "video" || model.role === "reasoning"
-          ? model.role
-          : null;
-        model.role = role;
-        if (role === "image") model.supportsImageGeneration = true;
-        if (role === "video") model.supportsVideoGeneration = true;
-        if (previousRole === "image" || previousRole === "video") {
-          if (next.multimodal[previousRole].defaultProviderId === providerId &&
-            next.multimodal[previousRole].defaultModelId === modelId) {
-            delete next.multimodal[previousRole].defaultProviderId;
-            delete next.multimodal[previousRole].defaultModelId;
-          }
-        }
-        if ((role === "image" || role === "video") && !next.multimodal[role].defaultModelId) {
-          next.multimodal[role].defaultProviderId = providerId;
-          next.multimodal[role].defaultModelId = modelId;
-        }
-      }
-    }, `已添加 ${selected.length} 个到${roleLabel}`);
-  }
-
-  function clearMultimodalInputDefault() {
-    void persistMultimodalChange((next) => {
-      delete next.multimodal.input.defaultProviderId;
-      delete next.multimodal.input.defaultModelId;
-    }, "已清除默认多模态识别模型");
-  }
-
-  async function persistMultimodalChange(mutate: (draft: AppConfig) => void, successTitle = "多模态配置已保存") {
-    if (!config || !configDraft) return;
-    const nextDraft = cloneConfig(configDraft);
-    mutate(nextDraft);
-    const normalized = normalizeDraftConfig(nextDraft);
-    setConfigDraft(normalized);
-    try {
-      const nextConfig = buildConfigToSave(normalized, config, providerSecretDrafts);
-      await window.codexh.saveConfig(nextConfig);
-      setConfig(nextConfig);
-      showNotice(successTitle, {
-        message: "已立即生效，无需再点保存。",
-        tone: "success"
-      });
-    } catch (error) {
-      showNotice("多模态配置保存失败", {
-        message: error instanceof Error ? error.message : String(error),
-        tone: "warning"
-      });
-      await refreshConfig(settingsProviderId);
-    }
-  }
-
-  function removeModel(providerId: string, modelId: string) {
-    if (!configDraft) {
-      return;
-    }
-
-    if (configDraft.models.length <= 1) {
-      showNotice("至少保留一个模型。");
-      return;
-    }
-
-    const nextDraft = cloneConfig(configDraft);
-    nextDraft.models = nextDraft.models.filter((model) =>
-      model.providerId !== providerId || model.id !== modelId
-    );
-    setConfigDraft(normalizeDraftConfig(nextDraft));
-  }
-
-  async function checkProviderModel(provider: ProviderDefinition, model: ModelProfile) {
-    const secretDraft = providerSecretDrafts[provider.id]?.trim();
-    const hasSecret =
-      Boolean(secretDraft || provider.apiKey || provider.apiKeyEnv) ||
-      provider.type === "mock" ||
-      provider.type === "ollama";
-
-    if (!hasSecret) {
-      showNotice("请先填写 API Key。", {
-        message: "或者保留当前已保存的密钥。"
-      });
-      return;
-    }
-
-    const key = getModelProfileKey(provider.id, model.id);
-    const testProvider: ProviderDefinition = secretDraft
-      ? { ...provider, apiKey: secretDraft, apiKeyEnv: undefined }
-      : provider.type === "ollama" && !provider.apiKey && !provider.apiKeyEnv
-        ? { ...provider, apiKey: "ollama" }
-        : provider;
-    setTestingModelKey(key);
-    try {
-      const result = await window.codexh.testProviderModel({ provider: testProvider, model });
-      setModelTestResults((current) => ({ ...current, [key]: result }));
-      const capabilityPatch = {
-        agentCapability: result.agentCapability,
-        agentCapabilityCheckedAt: new Date().toISOString(),
-        agentCapabilityReason: result.agentCapabilityReason
-      };
-      updateModelDraft(provider.id, model.id, capabilityPatch);
-      try {
-        const savedModel = await window.codexh.saveModelAgentCapability({
-          providerId: provider.id,
-          modelId: model.id,
-          agentCapability: result.agentCapability,
-          agentCapabilityReason: result.agentCapabilityReason
-        });
-        setConfig((current) => current
-          ? {
-              ...current,
-              models: current.models.map((entry) =>
-                entry.id === savedModel.id && entry.providerId === savedModel.providerId ? savedModel : entry
-              )
-            }
-          : current
-        );
-      } catch (error) {
-        showNotice("模型已测试，但验证状态未保存。", {
-          message: error instanceof Error ? error.message : "请保存模型配置后再测试。",
-          tone: "warning"
-        });
-      }
-      showNotice(
-        result.agentCapability === "verified"
-          ? `${model.displayName?.trim() || model.id} 模型测试成功。`
-          : `${model.displayName?.trim() || model.id} 只适合普通聊天。`,
-        {
-          message: result.agentCapability === "verified"
-            ? `连接与 Agent 工具协议均验证通过。延迟 ${formatLatency(result.latencyMs)}。`
-            : result.agentCapabilityReason ?? "连接正常，但未通过 Agent 工具协议测试。",
-          tone: result.agentCapability === "verified" ? "success" : "warning"
-        }
-      );
-    } catch (error) {
-      showNotice("模型测试失败。", {
-        message: error instanceof Error ? error.message : "请检查模型地址、密钥和网络连接。"
-      });
-    } finally {
-      setTestingModelKey((current) => (current === key ? null : current));
-    }
-  }
-
-  async function checkForUpdates() {
-    try {
-      setUpdateState(await window.codexh.checkForUpdates());
-    } catch (error) {
-      showNotice("检查更新失败", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  async function downloadAvailableUpdate() {
-    if (!updateState) return;
-    const needsConfirm = updateState.insecureTransport === true || updateState.missingSha256 === true;
-    if (needsConfirm) {
-      const details = [
-        updateState.insecureTransport ? "更新源使用 HTTP，可能被篡改" : null,
-        updateState.missingSha256 ? "更新清单未提供 sha256，无法校验安装包完整性" : null
-      ].filter((entry): entry is string => Boolean(entry));
-      setUpdateConfirmDialog({
-        kind: "download",
-        title: "确认下载更新",
-        message: "当前更新源存在安全风险，仍要继续下载吗？",
-        details
-      });
-      return;
-    }
-    await proceedDownloadUpdate(false);
-  }
-
-  async function proceedDownloadUpdate(confirmInsecureHttp: boolean) {
-    try {
-      setUpdateConfirmDialog(null);
-      setUpdateState(await window.codexh.downloadUpdate({ confirmInsecureHttp }));
-    } catch (error) {
-      showNotice("下载更新失败", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  async function installDownloadedUpdate() {
-    setUpdateConfirmDialog({
-      kind: "install",
-      title: "确认安装更新",
-      message: "安装更新会关闭 CodeXH 并覆盖当前版本，是否继续？",
-      details: ["本地聊天、项目、知识库和日志会保留。"]
-    });
-  }
-
-  async function proceedInstallUpdate() {
-    try {
-      setUpdateConfirmDialog(null);
-      await window.codexh.installUpdate();
-    } catch (error) {
-      showNotice("暂时无法安装更新", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  async function confirmUpdateDialog() {
-    if (!updateConfirmDialog) return;
-    if (updateConfirmDialog.kind === "download") {
-      await proceedDownloadUpdate(true);
-      return;
-    }
-    await proceedInstallUpdate();
-  }
   async function updateComposerSelection(providerId: string, modelId: string) {
     setComposerProviderId(providerId);
     setComposerModelId(modelId);
@@ -7025,57 +4786,9 @@ export function App() {
     }
   }
 
-  const refreshUsageStatistics = async () => {
-    setIsUsageStatisticsLoading(true);
-    try {
-      setUsageStatistics(await window.codexh.getUsageAnalytics({
-        rangeDays: usageStatisticsRangeDays,
-        granularity: usageStatisticsGranularity
-      }));
-    } catch (error) {
-      setNotice({ id: Date.now(), tone: "error", message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setIsUsageStatisticsLoading(false);
-    }
-  };
-
   useEffect(() => {
     if (isSettingsOpen && settingsTab === "usage") void refreshUsageStatistics();
   }, [isSettingsOpen, settingsTab, usageStatisticsRangeDays, usageStatisticsGranularity]);
-
-  async function refreshRuntimeLogStats() {
-    setIsRuntimeLogStatsLoading(true);
-    try {
-      setRuntimeLogStats(await window.codexh.getRuntimeLogStats());
-    } catch (error) {
-      showNotice("读取日志占用失败。", {
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setIsRuntimeLogStatsLoading(false);
-    }
-  }
-
-  async function confirmClearRuntimeLogs() {
-    if (isClearingLogs) return;
-    setIsClearingLogs(true);
-    try {
-      const cleared = await window.codexh.clearRuntimeLogs();
-      setRuntimeLogStats({ bytes: 0, fileCount: 0 });
-      setIsClearLogsConfirmOpen(false);
-      showNotice(cleared.bytes > 0 ? "日志已清理。" : "当前没有可清理的日志。", {
-        message: cleared.bytes > 0 ? `已释放 ${formatStorageBytes(cleared.bytes)} 磁盘空间。` : undefined,
-        tone: "success"
-      });
-      await refreshRuntimeLogStats();
-    } catch (error) {
-      showNotice("清理日志失败。", {
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setIsClearingLogs(false);
-    }
-  }
 
   useEffect(() => {
     if (isSettingsOpen && settingsTab === "timeouts") void refreshRuntimeLogStats();
@@ -7105,8 +4818,6 @@ export function App() {
   const visibleMultimodalPickerRole = multimodalPickerRole ?? multimodalPickerPresence.value;
   const gpaMenuPresence = useMotionPresence(gpaMenuOpen && gpaMenuPos ? gpaMenuPos : null, 140);
   const visibleGpaMenuPos = gpaMenuPos ?? gpaMenuPresence.value;
-  const historyContextMenuPresence = useMotionPresence(historyContextMenu, 140);
-  const visibleHistoryContextMenu = historyContextMenu ?? historyContextMenuPresence.value;
   const skillsSortPresence = useMotionPresence(skillsSortOpen ? true : null, 140);
   const notificationCenterPresence = useMotionPresence(isNotificationCenterOpen ? true : null, 160);
   const tokenUsagePanelPresence = useMotionPresence(isTokenUsagePanelOpen ? true : null, 160);
@@ -7172,154 +4883,6 @@ export function App() {
     });
   }, [selectedThreadId, threads]);
 
-  function toggleHistoryGroupCollapsed(groupKey: string) {
-    setCollapsedHistoryGroups((current) => {
-      const next = new Set(current);
-      if (next.has(groupKey)) next.delete(groupKey);
-      else next.add(groupKey);
-      return next;
-    });
-  }
-
-  function toggleHistoryThreadGroupExpanded(groupKey: string) {
-    setExpandedHistoryThreadGroups((current) => {
-      const next = new Set(current);
-      if (next.has(groupKey)) next.delete(groupKey);
-      else next.add(groupKey);
-      return next;
-    });
-  }
-
-  function renderHistoryThreadGroup(
-    groupKey: string,
-    groupThreads: ThreadRecord[],
-    options?: {
-      heading?: ReactNode;
-      title?: string;
-      ariaLabel: string;
-      className?: string;
-      collapsible?: boolean;
-    }
-  ) {
-    const collapsible = options?.collapsible !== false;
-    const isCollapsed = collapsible && collapsedHistoryGroups.has(groupKey);
-    const threadsExpanded = expandedHistoryThreadGroups.has(groupKey);
-    const { visibleThreads, hiddenCount, canExpand } = pickVisibleHistoryThreads(groupThreads, {
-      expanded: threadsExpanded,
-      previewCount: HISTORY_THREADS_PREVIEW_COUNT,
-      selectedThreadId
-    });
-
-    return (
-      <section
-        key={groupKey}
-        className={`history-project-group ${options?.className ?? ""} ${isCollapsed ? "is-collapsed" : ""}`}
-        aria-label={options?.ariaLabel}
-      >
-        {options?.heading ? (
-          collapsible ? (
-            <button
-              type="button"
-              className="history-project-heading"
-              title={options.title}
-              aria-expanded={!isCollapsed}
-              onClick={() => toggleHistoryGroupCollapsed(groupKey)}
-            >
-              <span className={`history-project-disclosure ${isCollapsed ? "" : "is-expanded"}`} aria-hidden>
-                <IconChevronRight />
-              </span>
-              {options.heading}
-            </button>
-          ) : (
-            <div className="history-standalone-heading" title={options.title}>
-              {options.heading}
-            </div>
-          )
-        ) : null}
-        {!isCollapsed ? (
-          <div className="history-project-threads">
-            {visibleThreads.map(renderHistoryThread)}
-            {canExpand ? (
-              <button
-                type="button"
-                className={`history-project-more ${threadsExpanded ? "is-expanded" : ""}`}
-                aria-expanded={threadsExpanded}
-                onClick={() => toggleHistoryThreadGroupExpanded(groupKey)}
-              >
-                <span>{threadsExpanded ? "收起" : `展开更多 (${hiddenCount})`}</span>
-                <IconChevronDown />
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-      </section>
-    );
-  }
-
-  function renderHistoryThread(thread: ThreadRecord) {
-    const historyItemAffordance = getHistoryItemAffordance(thread.status);
-    const isThreadRunning = historyItemAffordance.kind === "running-indicator";
-    const isRenaming = renamingHistoryThread?.id === thread.id;
-
-    return (
-      <div
-        key={thread.id}
-        className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""} ${isThreadRunning ? "running" : ""} ${deletingThreadId === thread.id ? "is-removing" : ""}`}
-        title={isThreadRunning ? historyItemAffordance.title : undefined}
-        aria-busy={isThreadRunning}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          setHistoryContextMenu({ x: event.clientX, y: event.clientY, thread });
-        }}
-      >
-        {isRenaming ? (
-          <input
-            className="history-item-rename-input"
-            autoFocus
-            value={renamingHistoryThread.title}
-            aria-label="重命名任务"
-            onFocus={(event) => event.currentTarget.select()}
-            onChange={(event) => {
-              setRenamingHistoryThread({ id: thread.id, title: event.target.value });
-            }}
-            onBlur={(event) => {
-              void commitRenameHistoryThread(event.currentTarget.value);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                event.currentTarget.blur();
-              } else if (event.key === "Escape") {
-                event.preventDefault();
-                cancelRenameHistoryThread();
-              }
-            }}
-            onClick={(event) => event.stopPropagation()}
-          />
-        ) : (
-          <button
-            type="button"
-            className="history-item-main"
-            onClick={() => {
-              void openThread(thread.id, { scrollToLatest: true });
-            }}
-          >
-            <span className="history-item-label">{thread.title}</span>
-            {thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  const sortedNotificationItems = sortNotificationItems(notificationCenterState.items);
-  const attentionNotifications = sortedNotificationItems.filter((item) => item.status === "attention");
-  const runningNotifications = sortedNotificationItems.filter((item) => item.status === "running");
-  const finishedNotifications = sortedNotificationItems.filter(isFinishedNotification);
-  const unreadFinishedNotificationCount = finishedNotifications.filter((item) => item.unread).length;
-  const notificationBadgeCount = attentionNotifications.length + unreadFinishedNotificationCount;
-  const hasRunningNotifications = runningNotifications.length > 0;
-
   function toggleNotificationCenter() {
     if (isNotificationCenterOpen) {
       setIsNotificationCenterOpen(false);
@@ -7350,59 +4913,6 @@ export function App() {
       const prefix = item.attentionKind === "approval" ? "approval-card" : "user-input-prompt";
       document.getElementById(`${prefix}-${item.anchorId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 180);
-  }
-
-  function renderNotificationGroup(label: string, items: NotificationCenterItem[]) {
-    if (!items.length) return null;
-    return (
-      <section className="notification-center-group" aria-label={label}>
-        <div className="notification-center-group-title">{label}<span>{items.length}</span></div>
-        <div className="notification-center-list">
-          {items.map((item) => {
-            const statusLabel = getNotificationStatusLabel(item.status);
-            const elapsed = formatNotificationElapsed(item.startedAt, item.status === "running" || item.status === "attention" ? notificationNow : Date.parse(item.updatedAt));
-            const highlighted = highlightedNotificationTarget === `${item.source}:${item.targetId}`;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                className={`notification-center-item is-${item.status} ${item.unread ? "is-unread" : ""} ${highlighted ? "is-highlighted" : ""}`}
-                onClick={() => void openNotificationItem(item)}
-              >
-                <span className="notification-item-status" aria-hidden><IconNotificationStatus status={item.status} /></span>
-                <span className="notification-item-copy">
-                  <span className="notification-item-heading">
-                    <strong>{item.title}</strong>
-                    <small>{statusLabel} · {elapsed}</small>
-                  </span>
-                  <span className="notification-item-detail">{item.detail}</span>
-                  {item.status === "running" || item.status === "attention" ? (
-                    item.progress ? (
-                      <span className="notification-item-progress-wrap">
-                        <span
-                          className="notification-item-progress is-determinate"
-                          role="progressbar"
-                          aria-label={`${item.title} 进度`}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-valuenow={item.progress.percent}
-                        >
-                          <i style={{ width: `${item.progress.percent}%` }} />
-                        </span>
-                        <small>{item.progress.current}/{item.progress.total} · {item.progress.percent}%</small>
-                      </span>
-                    ) : (
-                      <span className="notification-item-progress is-indeterminate" aria-label={`${item.title} 正在运行`}><i /></span>
-                    )
-                  ) : null}
-                </span>
-                {item.unread && isFinishedNotification(item) ? <span className="notification-item-unread" aria-label="未读" /> : null}
-              </button>
-            );
-          })}
-        </div>
-      </section>
-    );
   }
 
   const skillLabCurrentProgress = skillLabProgress[skillLabProgress.length - 1] ?? null;
@@ -7453,64 +4963,7 @@ export function App() {
           : {})
       } as React.CSSProperties}
     >
-      {chatBackgroundUrl && chatBackgroundSettings.enabled ? (
-        <div className="app-background-layer" aria-hidden="true">
-          {chatBackgroundImages.map((image, index) => {
-            const isActive = index === activeChatBackgroundIndex;
-            const opacity = isActive ? chatBackgroundSettings.opacity / 100 : 0;
-            const imageStyle = {
-              objectFit: chatBackgroundSettings.fit,
-              objectPosition: "center",
-              transform: getChatBackgroundTransform(chatBackgroundSettings)
-            };
-            return (
-              <div
-                key={image.id}
-                className={`app-background-motion ${isActive ? "is-active" : ""} ${chatBackgroundSettings.motionEnabled ? "is-enabled" : ""}`}
-              >
-                {chatBackgroundSettings.depthEnabled ? (
-                  <div className="app-background-depth-backdrop">
-                    <img
-                      src={image.url}
-                      alt=""
-                      style={{
-                        ...imageStyle,
-                        filter: `blur(${chatBackgroundSettings.blur + 8}px) saturate(0.86)`,
-                        opacity: opacity * 0.34
-                      }}
-                    />
-                  </div>
-                ) : null}
-                <div className="app-background-parallax">
-                  <img
-                    src={image.url}
-                    alt=""
-                    style={{
-                      ...imageStyle,
-                      filter: `blur(${chatBackgroundSettings.blur}px)`,
-                      opacity
-                    }}
-                  />
-                </div>
-                {chatBackgroundSettings.depthEnabled ? (
-                  <div className="app-background-depth-foreground">
-                    <img
-                      src={image.url}
-                      alt=""
-                      style={{
-                        ...imageStyle,
-                        filter: `blur(${Math.max(0, chatBackgroundSettings.blur - 2)}px) saturate(1.08)`,
-                        opacity: opacity * 0.24
-                      }}
-                    />
-                  </div>
-                ) : null}
-                {chatBackgroundSettings.atmosphereEnabled && isActive ? <div className="app-background-atmosphere" /> : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
+      {chatBackgroundUrl && chatBackgroundSettings.enabled ? <AppBackgroundLayer images={chatBackgroundImages} activeIndex={activeChatBackgroundIndex} settings={chatBackgroundSettings} /> : null}
       <header className="windowbar">
         <div className="windowbar-left">
           <button
@@ -7525,200 +4978,47 @@ export function App() {
         </div>
       </header>
 
-      <aside className="sidebar">
-        <div className="sidebar-scroll">
-          <div className="sidebar-brand-row">
-            <div className="sidebar-brand">
-              <strong>Code<span className="sidebar-brand-accent">XH</span></strong>
-              <span>AI Workspace</span>
-            </div>
-            <div className="sidebar-brand-tools">
-              <button
-                className="sidebar-search sidebar-quick-notes"
-              type="button"
-              title="随手记"
-              aria-label="随手记"
-              onClick={() => void openQuickNotes()}
-            >
-              <IconNotebook />
-              </button>
-              <button
-                className="sidebar-search"
-              type="button"
-              title="搜索历史对话"
-              onClick={() => {
-                setHistorySearchQuery("");
-                setHistorySearchResults([]);
-                setIsHistorySearchOpen(true);
-              }}
-            >
-              <IconSearch />
-            </button>
-          </div>
-          </div>
-
-          <div className="sidebar-nav">
-            <button className="sidebar-nav-button" onClick={() => void createThread("chat")}>
-              <span className="sidebar-nav-icon">
-                <IconCompose />
-              </span>
-              <span>新建任务</span>
-            </button>
-            <button className="sidebar-nav-button" onClick={() => void createThread("project")}>
-              <span className="sidebar-nav-icon">
-                <IconFolder />
-              </span>
-              <span>新建项目</span>
-              <span className="sidebar-nav-plus">
-                <IconPlus />
-              </span>
-            </button>
-          </div>
-
-          <div className="sidebar-section-title">项目</div>
-
-          <div className="history-list">
-            {threads.length === 0 ? (
-              <div className="history-empty">还没有任务</div>
-            ) : (
-              <>
-                {projectHistoryGroups.map((group) => {
-                  const groupKey = normalizeHistoryGroupKey(group.cwd);
-                  return renderHistoryThreadGroup(groupKey, group.threads, {
-                    ariaLabel: `项目 ${getFileLeafName(group.cwd)}`,
-                    title: group.cwd,
-                    heading: (
-                      <>
-                        <IconFolder />
-                        <span>{getFileLeafName(group.cwd)}</span>
-                      </>
-                    )
-                  });
-                })}
-                {standaloneHistoryThreads.length > 0
-                  ? renderHistoryThreadGroup(HISTORY_STANDALONE_GROUP_KEY, standaloneHistoryThreads, {
-                      ariaLabel: "其他任务",
-                      className: "history-standalone-group",
-                      collapsible: false,
-                      heading: projectHistoryGroups.length > 0 ? "其他任务" : undefined
-                    })
-                  : null}
-              </>
-            )}
-          </div>
-          {visibleHistoryContextMenu ? (
-            <WorkspaceContextMenu
-              x={visibleHistoryContextMenu.x}
-              y={visibleHistoryContextMenu.y}
-              motionPhase={historyContextMenuPresence.phase}
-              onClose={() => setHistoryContextMenu(null)}
-              actions={[
-                ...(!visibleHistoryContextMenu.thread.parentThreadId && visibleHistoryContextMenu.thread.status !== "running"
-                  ? [{
-                      id: "extract-history-thread-skill",
-                      label: isGeneratingUserSkill ? "正在提炼技能..." : "提炼技能",
-                      icon: <IconSkills />,
-                      onSelect: () => openUserSkillGenerationDialog(visibleHistoryContextMenu.thread)
-                    }]
-                  : []),
-                {
-                  id: "rename-history-thread",
-                  label: "重命名",
-                  icon: <IconRename />,
-                  onSelect: () => beginRenameHistoryThread(visibleHistoryContextMenu.thread)
-                },
-                {
-                  id: "toggle-history-pin",
-                  label: visibleHistoryContextMenu.thread.isPinned ? "取消置顶" : "置顶任务",
-                  icon: <IconPin />,
-                  onSelect: () => void toggleThreadPinned(visibleHistoryContextMenu.thread)
-                },
-                ...(canDeleteThread(visibleHistoryContextMenu.thread.status, deletingThreadId)
-                  ? [{
-                      id: "delete-history-thread",
-                      label: "删除任务",
-                      icon: <IconTrash />,
-                      destructive: true,
-                      onSelect: () => requestDeleteHistoryThread(visibleHistoryContextMenu.thread)
-                    }]
-                  : [])
-              ]}
-            />
-          ) : null}
-        </div>
-
-        <div className="sidebar-settings">
-          <button
-            type="button"
-            className="sidebar-settings-button"
-            onClick={() => {
-              if (config) {
-                resetConfigDraft(config);
-              }
-              setSettingsTab("provider");
-              setCapabilityTab("skills");
-              setIsSettingsOpen(true);
-            }}
-          >
-            <span className="sidebar-settings-main">
-              <IconGear />
-              <span>设置</span>
-            </span>
-          </button>
-          {getSidebarUpdateReminder(updateState?.phase) ? (
-            <button
-              type="button"
-              className={`sidebar-update-reminder ${updateState?.phase}`}
-              title="打开更新设置"
-              onClick={() => {
-                if (config) {
-                  resetConfigDraft(config);
-                }
-                setSettingsTab("update");
-                setCapabilityTab("skills");
-                setIsSettingsOpen(true);
-              }}
-            >
-              <span className="sidebar-update-reminder-dot" aria-hidden="true" />
-              <span>{getSidebarUpdateReminder(updateState?.phase)}</span>
-            </button>
-          ) : null}
-          <button type="button" className="sidebar-settings-help" title="产品说明与使用指南" aria-label="产品说明与使用指南" onClick={() => setIsHelpOpen(true)}>
-            <IconHelpCircle />
-          </button>
-        </div>
-      </aside>
+      <HistorySidebar
+        threads={threads}
+        projectGroups={projectHistoryGroups}
+        standaloneThreads={standaloneHistoryThreads}
+        selectedThreadId={selectedThreadId}
+        deletingThreadId={deletingThreadId}
+        collapsedGroups={collapsedHistoryGroups}
+        setCollapsedGroups={setCollapsedHistoryGroups}
+        expandedGroups={expandedHistoryThreadGroups}
+        setExpandedGroups={setExpandedHistoryThreadGroups}
+        renamingThread={renamingHistoryThread}
+        setRenamingThread={setRenamingHistoryThread}
+        onCommitRename={commitRenameHistoryThread}
+        onCancelRename={cancelRenameHistoryThread}
+        onCreateThread={createThread}
+        onOpenThread={openThread}
+        onOpenQuickNotes={openQuickNotes}
+        onOpenSearch={openHistorySearch}
+        onOpenSettings={(tab) => { if (config) resetConfigDraft(config); setSettingsTab(tab); setCapabilityTab("skills"); setIsSettingsOpen(true); }}
+        updatePhase={updateState?.phase}
+        updateReminder={getSidebarUpdateReminder(updateState?.phase)}
+        onOpenHelp={() => setIsHelpOpen(true)}
+        isGeneratingUserSkill={isGeneratingUserSkill}
+        onGenerateUserSkill={openUserSkillGenerationDialog}
+        onTogglePinned={toggleThreadPinned}
+        onRequestDelete={requestDeleteHistoryThread}
+        onBeginRename={beginRenameHistoryThread}
+      />
 
       {historySearchPresence.value ? (
-        <div className="history-search-overlay motion-overlay" data-motion={historySearchPresence.phase}>
-          <section className="history-search-dialog" role="dialog" aria-modal="true" aria-label="搜索历史对话">
-            <div className="history-search-header">
-              <strong>搜索历史对话</strong>
-              <button className="history-search-close" type="button" onClick={() => setIsHistorySearchOpen(false)} title="关闭"><IconClose /></button>
-            </div>
-            <div className="history-search-input-wrap"><IconSearch /><input autoFocus value={historySearchQuery} onChange={(event) => setHistorySearchQuery(event.target.value)} placeholder="输入关键词，搜索标题和历史消息" /></div>
-            <div className="history-search-hint">双击结果即可快速打开该对话</div>
-            <div className="history-search-results">
-              {isHistorySearchLoading ? <div className="history-search-empty">正在搜索...</div> : null}
-              {!isHistorySearchLoading && historySearchResults.length === 0 ? <div className="history-search-empty">没有匹配的历史对话</div> : null}
-              {!isHistorySearchLoading ? historySearchResults.map((result) => (
-                <button
-                  key={result.thread.id}
-                  className={`history-search-result ${result.thread.id === selectedThreadId ? "is-current" : ""}`}
-                  type="button"
-                  onDoubleClick={() => {
-                    setIsHistorySearchOpen(false);
-                    void openThread(result.thread.id, { scrollToLatest: true });
-                  }}
-                >
-                  <span className="history-search-result-title">{result.thread.title}</span>
-                  <span className="history-search-result-meta">{result.thread.mode === "project" ? "项目对话" : "普通对话"} · {formatRelativeTime(result.thread.updatedAt)}</span>
-                  {result.snippet ? <span className="history-search-result-snippet">{result.snippet}</span> : null}
-                </button>
-              )) : null}
-            </div>
-          </section>
-        </div>
+        <HistorySearchDialog
+          motionPhase={historySearchPresence.phase}
+          selectedThreadId={selectedThreadId}
+          query={historySearchQuery}
+          setQuery={setHistorySearchQuery}
+          results={historySearchResults}
+          loading={isHistorySearchLoading}
+          onClose={() => setIsHistorySearchOpen(false)}
+          onOpenThread={(threadId) => openThread(threadId, { scrollToLatest: true })}
+          formatRelativeTime={formatRelativeTime}
+        />
       ) : null}
 
       {!isSidebarCollapsed ? (
@@ -7730,192 +5030,31 @@ export function App() {
       ) : null}
 
       <main className="workspace">
-        <div className="workspace-controls">
-            <div className="token-usage-control">
-              <button
-                ref={tokenUsageButtonRef}
-                type="button"
-                className={`token-usage-toggle ${isTokenUsagePanelOpen ? "active" : ""}`}
-                title={`累计消耗 ${formatTokenCount(threadTokenUsage.thread.totalTokens)} Tokens${selectedThreadId ? " · 实时" : ""}`}
-                aria-label={`累计消耗 ${formatTokenCount(threadTokenUsage.thread.totalTokens)} Tokens`}
-                aria-haspopup="dialog"
-                aria-expanded={isTokenUsagePanelOpen}
-                onClick={() => setIsTokenUsagePanelOpen((current) => !current)}
-              >
-                <span className="token-usage-toggle-label" aria-hidden>累计消耗</span>
-                <strong className="token-usage-toggle-value">{formatTokenCount(threadTokenUsage.thread.totalTokens)}</strong>
-                {selectedThreadId ? <em className="token-usage-toggle-live" aria-hidden>实时</em> : null}
-              </button>
-              {tokenUsagePanelPresence.value ? (
-                <div
-                  ref={tokenUsagePanelRef}
-                  className={`token-usage-panel motion-${tokenUsagePanelPresence.phase}`}
-                  role="dialog"
-                  aria-modal="false"
-                  aria-label="本对话 Token 消耗"
-                >
-                  {(() => {
-                    const usage = threadTokenUsage.thread;
-                    const inputBreakdownTotal =
-                      usage.inputCacheHitTokens + usage.inputCacheMissTokens + usage.inputCacheWriteTokens;
-                    const segmentWidth = (value: number): string =>
-                      inputBreakdownTotal > 0
-                        ? `${Math.min(100, Math.max(0, (value / inputBreakdownTotal) * 100))}%`
-                        : "0%";
-                    return (
-                      <>
-                        <header className="token-usage-panel-header">
-                          <strong>Token 消耗明细</strong>
-                          <span>总计 <b>{formatTokenCountExact(usage.totalTokens)}</b></span>
-                        </header>
-                        <div className="token-usage-panel-body">
-                          <div className="token-usage-section">
-                            <div className="token-usage-row section-head">
-                              <span className="token-usage-marker input" aria-hidden />
-                              <span className="token-usage-name">输入</span>
-                              <b>{formatTokenCountExact(usage.inputTokens)}</b>
-                            </div>
-                            <div className="token-usage-row">
-                              <span className="token-usage-marker hit" aria-hidden />
-                              <span className="token-usage-name">缓存命中</span>
-                              <b>{formatTokenCountExact(usage.inputCacheHitTokens)}</b>
-                            </div>
-                            <div className="token-usage-row">
-                              <span className="token-usage-marker miss" aria-hidden />
-                              <span className="token-usage-name">缓存未命中</span>
-                              <b>{formatTokenCountExact(usage.inputCacheMissTokens)}</b>
-                            </div>
-                            <div className="token-usage-row">
-                              <span className="token-usage-marker write" aria-hidden />
-                              <span className="token-usage-name">缓存写入</span>
-                              <b>{formatTokenCountExact(usage.inputCacheWriteTokens)}</b>
-                            </div>
-                          </div>
-                          <div className="token-usage-section">
-                            <div className="token-usage-row section-head">
-                              <span className="token-usage-marker output" aria-hidden />
-                              <span className="token-usage-name">输出</span>
-                              <b>{formatTokenCountExact(usage.outputTokens)}</b>
-                            </div>
-                            <div className="token-usage-row">
-                              <span className="token-usage-marker none" aria-hidden />
-                              <span className="token-usage-name">思考过程</span>
-                              <b>{formatTokenCountExact(usage.outputReasoningTokens)}</b>
-                            </div>
-                            <div className="token-usage-row">
-                              <span className="token-usage-marker none" aria-hidden />
-                              <span className="token-usage-name">回复内容</span>
-                              <b>{formatTokenCountExact(usage.outputContentTokens)}</b>
-                            </div>
-                          </div>
-                          <div className="token-usage-rate">
-                            <span className="token-usage-rate-label">
-                              <span className="token-usage-rate-icon" aria-hidden><IconBolt /></span>
-                              缓存命中率
-                            </span>
-                            <strong>{formatCacheHitRate(usage.cacheHitRate)}</strong>
-                          </div>
-                          <div
-                            className="token-usage-bar"
-                            aria-label={`输入构成：命中 ${segmentWidth(usage.inputCacheHitTokens)}，写入 ${segmentWidth(usage.inputCacheWriteTokens)}，未命中 ${segmentWidth(usage.inputCacheMissTokens)}`}
-                          >
-                            <span className="token-usage-bar-segment hit" style={{ width: segmentWidth(usage.inputCacheHitTokens) }} />
-                            <span className="token-usage-bar-segment write" style={{ width: segmentWidth(usage.inputCacheWriteTokens) }} />
-                            <span className="token-usage-bar-segment miss" style={{ width: segmentWidth(usage.inputCacheMissTokens) }} />
-                          </div>
-                          <div className="token-usage-legend" aria-hidden>
-                            <span><i className="token-usage-marker hit" />命中</span>
-                            <span><i className="token-usage-marker write" />写入</span>
-                            <span><i className="token-usage-marker miss" />未命中</span>
-                          </div>
-                        </div>
-                      </>
-                    );
-                  })()}
-                </div>
-              ) : null}
-            </div>
-            <div className="notification-center-control">
-              <button
-                ref={notificationButtonRef}
-                type="button"
-                className={`workspace-control-button notification-center-toggle ${isNotificationCenterOpen ? "active" : ""} ${hasRunningNotifications ? "is-running" : ""} ${attentionNotifications.length ? "has-attention" : ""}`}
-                title={`消息与进度${hasRunningNotifications ? ` · ${runningNotifications.length} 个运行中` : ""}${notificationBadgeCount ? ` · ${notificationBadgeCount} 条提醒` : ""}`}
-                aria-label={`消息与进度${notificationBadgeCount ? `，${notificationBadgeCount} 条提醒` : ""}`}
-                aria-haspopup="dialog"
-                aria-expanded={isNotificationCenterOpen}
-                onClick={toggleNotificationCenter}
-              >
-                <span className="notification-bell-glyph" aria-hidden><IconBell /></span>
-                {hasRunningNotifications ? <span className="notification-running-dot" aria-hidden /> : null}
-                {notificationBadgeCount ? <span className="notification-count-badge">{notificationBadgeCount > 9 ? "9+" : notificationBadgeCount}</span> : null}
-              </button>
-              {notificationCenterPresence.value ? (
-                <div
-                  ref={notificationCenterRef}
-                  className={`notification-center-panel motion-${notificationCenterPresence.phase}`}
-                  role="dialog"
-                  aria-modal="false"
-                  aria-label="消息与进度"
-                >
-                  <header className="notification-center-header">
-                    <div><strong>消息与进度</strong><span>{runningNotifications.length} 个运行中</span></div>
-                    <div className="notification-center-header-actions">
-                      <button
-                        type="button"
-                        disabled={!finishedNotifications.length}
-                        onClick={() => dispatchNotificationCenter({ type: "clear-finished" })}
-                      >
-                        清除已结束
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!unreadFinishedNotificationCount}
-                        onClick={() => dispatchNotificationCenter({ type: "mark-all-read" })}
-                      >
-                        全部已读
-                      </button>
-                    </div>
-                  </header>
-                  <div className="notification-center-body">
-                    {!sortedNotificationItems.length ? (
-                      <div className="notification-center-empty"><IconBell /><span>暂无后台任务或消息</span></div>
-                    ) : (
-                      <>
-                        {renderNotificationGroup("待处理", attentionNotifications)}
-                        {renderNotificationGroup("运行中", runningNotifications)}
-                        {renderNotificationGroup("最近消息", finishedNotifications)}
-                      </>
-                    )}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-            <button
-              type="button"
-              className={`workspace-control-button terminal-toggle ${isTerminalOpen ? "active" : ""}`}
-              title={isTerminalOpen ? "收起终端" : "打开终端"}
-              aria-label={isTerminalOpen ? "收起终端" : "打开终端"}
-              onClick={() => setIsTerminalOpen((current) => !current)}
-            >
-              <IconTerminal />
-            </button>
-            {!isRightWorkspaceOpen ? (
-              <button
-                type="button"
-                className="workspace-control-button"
-                title="显示右侧文件工作区"
-                aria-label="显示右侧文件工作区"
-                onClick={() => {
-                  setRightWorkspaceTab("files");
-                  setRightWorkspaceExpandedTab("files");
-                  setIsRightWorkspaceOpen(true);
-                }}
-              >
-                <IconFolder />
-              </button>
-            ) : null}
-          </div>
+        <WorkspaceControls
+          tokenUsage={threadTokenUsage.thread}
+          tokenUsageOpen={isTokenUsagePanelOpen}
+          tokenUsageMotionPhase={tokenUsagePanelPresence.value ? tokenUsagePanelPresence.phase : undefined}
+          selectedThreadId={selectedThreadId}
+          tokenUsageButtonRef={tokenUsageButtonRef}
+          tokenUsagePanelRef={tokenUsagePanelRef}
+          onToggleTokenUsage={() => setIsTokenUsagePanelOpen((current) => !current)}
+          notifications={notificationCenterState.items}
+          notificationNow={notificationNow}
+          notificationOpen={isNotificationCenterOpen}
+          notificationVisible={Boolean(notificationCenterPresence.value)}
+          notificationMotionPhase={notificationCenterPresence.phase}
+          highlightedNotificationTarget={highlightedNotificationTarget}
+          notificationButtonRef={notificationButtonRef}
+          notificationPanelRef={notificationCenterRef}
+          onToggleNotifications={toggleNotificationCenter}
+          onOpenNotification={openNotificationItem}
+          onClearFinishedNotifications={() => dispatchNotificationCenter({ type: "clear-finished" })}
+          onMarkNotificationsRead={() => dispatchNotificationCenter({ type: "mark-all-read" })}
+          terminalOpen={isTerminalOpen}
+          onToggleTerminal={() => setIsTerminalOpen((current) => !current)}
+          rightWorkspaceOpen={isRightWorkspaceOpen}
+          onOpenRightWorkspace={() => { setRightWorkspaceTab("files"); setRightWorkspaceExpandedTab("files"); setIsRightWorkspaceOpen(true); }}
+        />
         {pendingInteractionsPresence.value ? (
           <div className="pending-strip" data-motion={pendingInteractionsPresence.phase}>
             {visiblePendingApprovalCount > 0 ? (
@@ -7955,68 +5094,15 @@ export function App() {
                 <span className="thread-switch-placeholder-line medium" />
               </div>
             ) : showWelcome ? (
-              <div className="welcome-empty-state">
-                {composerSubmission ? (
-                  <ComposerSubmissionStatus submission={composerSubmission} />
-                ) : showDefaultHome ? (
-                  <section className="welcome-panel chat default-home-panel" aria-label="开始">
-                    <div className="welcome-intro">
-                      <span className="welcome-eyebrow">CODEXH CHAT</span>
-                      <h1>开始你的下一个<span>任务</span></h1>
-                      <p>选择一个快捷操作，或直接在下方输入框描述你的目标。</p>
-                    </div>
-                    <div className="welcome-card-grid default-home-grid">
-                      <button
-                        type="button"
-                        className="welcome-card orange default-home-card"
-                        onClick={() => void createThread("chat")}
-                      >
-                        <span className="welcome-card-icon" aria-hidden><IconCompose /></span>
-                        <strong>新建任务</strong>
-                        <span className="welcome-card-action">开始一次新的对话</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="welcome-card blue default-home-card"
-                        onClick={() => void createThread("project")}
-                      >
-                        <span className="welcome-card-icon" aria-hidden><IconFolder /></span>
-                        <strong>新建项目</strong>
-                        <span className="welcome-card-action">在项目文件夹中工作</span>
-                      </button>
-                    </div>
-                    <div className="default-home-model">
-                      <span className="default-home-model-label">当前默认模型</span>
-                      <strong className="default-home-model-value">{defaultHomeModelLabel}</strong>
-                    </div>
-                  </section>
-                ) : (
-                  <section className={`welcome-panel ${isProjectWelcome ? "project" : "chat"}`} aria-label="开始新任务">
-                    <div className="welcome-intro">
-                      <span className="welcome-eyebrow">{isProjectWelcome ? "PROJECT WORKSPACE" : "CODEXH CHAT"}</span>
-                      <h1>{isProjectWelcome ? <>从项目的<span>下一步</span>开始</> : <>从一个清晰的<span>问题</span>开始</>}</h1>
-                      <p>{isProjectWelcome ? "检查代码、实现功能，或直接描述需要修改的内容。" : "描述你的目标，或选择一个常用的对话起点。"}</p>
-                    </div>
-                    <div className="welcome-card-grid">
-                      {welcomeCards.map((card) => (
-                        <button
-                          key={card.id}
-                          type="button"
-                          className={`welcome-card ${card.accentClass}`}
-                          onClick={() => {
-                            setInput(card.prompt);
-                            window.setTimeout(() => composerRef.current?.focus(), 0);
-                          }}
-                        >
-                          <span className="welcome-card-icon" aria-hidden>{card.icon}</span>
-                          <strong>{card.title}</strong>
-                          <span className="welcome-card-action">填入任务</span>
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-                )}
-              </div>
+              <ChatWelcome
+                submission={composerSubmission}
+                showDefaultHome={showDefaultHome}
+                isProject={isProjectWelcome}
+                defaultModelLabel={defaultHomeModelLabel}
+                cards={welcomeCards}
+                onCreateThread={createThread}
+                onSelectPrompt={(prompt) => { setInput(prompt); window.setTimeout(() => composerRef.current?.focus(), 0); }}
+              />
             ) : (
               <div key={activeSnapshotThreadId ?? selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
                 {timelineEntries.map((entry) => {
@@ -8229,31 +5315,15 @@ export function App() {
               </div>
             ) : null}
             <div className="chat-composer">
-              {composerAttachments.length > 0 ? (
-                <div className="composer-attachments" aria-label="已添加到聊天的上下文">
-                  {composerAttachments.map((attachment) => (
-                    <ComposerAttachmentChip
-                      key={attachment.id}
-                      attachment={attachment}
-                      removing={removingComposerAttachmentId === attachment.id}
-                      onRemove={() => removeComposerAttachment(attachment.id)}
-                    />
-                  ))}
-                </div>
-              ) : null}
-              {plugins.filter((plugin) => enabledPluginIds.has(plugin.id)).length > 0 ? (
-                <div className="composer-attachments" aria-label="当前启用的插件">
-                  {plugins.filter((plugin) => enabledPluginIds.has(plugin.id)).map((plugin) => (
-                    <div key={plugin.id} className="composer-attachment-chip skill" title={`${plugin.name} · ${selectedThread?.mode === "project" ? "当前项目" : "当前聊天"}`}>
-                      <span className="composer-attachment-icon" aria-hidden><IconSkills /></span>
-                      <span className="composer-attachment-copy"><strong><span>{plugin.name}</span></strong></span>
-                      <button type="button" className="composer-attachment-remove" aria-label={`停用 ${plugin.name}`} onClick={() => void setThreadPluginEnabled(plugin.id, false)}>
-                        <IconClose />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
+              <ComposerAttachments
+                attachments={composerAttachments}
+                removingAttachmentId={removingComposerAttachmentId}
+                plugins={plugins}
+                enabledPluginIds={enabledPluginIds}
+                isProjectThread={selectedThread?.mode === "project"}
+                onRemoveAttachment={removeComposerAttachment}
+                onDisablePlugin={setThreadPluginEnabled}
+              />
               <textarea
                 ref={composerRef}
                 value={input}
@@ -8487,3088 +5557,333 @@ export function App() {
       ) : null}
 
       {settingsPresence.value ? (
-        <div
-          className="settings-overlay motion-overlay"
-          data-motion={settingsPresence.phase}
+        <SettingsDialog
+          motionPhase={settingsPresence.phase}
+          activeTab={settingsTab}
+          closeIcon={<IconClose />}
+          onClose={() => setIsSettingsOpen(false)}
+          onTabChange={setSettingsTab}
         >
-          <div className="settings-dialog">
-            <div className="settings-topbar">
-              <h2><SettingsTitleIcon /><span>{settingsTitle}</span></h2>
-              <button className="settings-close-button" onClick={() => setIsSettingsOpen(false)} title="关闭">
-                <IconClose />
-              </button>
-            </div>
-
-            <div className="settings-layout">
-              <aside className="settings-sidebar">
-                <div className="settings-tab-strip settings-tab-strip-vertical">
-                  {SETTINGS_MENU_GROUPS.map((group) => {
-                    const GroupIcon = group.icon;
-                    return (
-                      <button
-                        key={group.id}
-                        className={`settings-strip-tab ${activeSettingsGroup.id === group.id ? "active" : ""}`}
-                        onClick={() => setSettingsTab(group.tabs[0])}
-                        title={group.hint}
-                      >
-                        <GroupIcon />
-                        <span>{group.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </aside>
-
-              <div className="settings-body">
-              {activeSettingsGroup.tabs.length > 1 ? (
-                <div className="settings-subtab-bar" role="tablist" aria-label={`${activeSettingsGroup.label}分类`}>
-                  {activeSettingsGroup.tabs.map((tabId) => {
-                    const tab = SETTINGS_TABS.find((item) => item.id === tabId);
-                    if (!tab) return null;
-                    return (
-                      <button
-                        key={tab.id}
-                        type="button"
-                        role="tab"
-                        aria-selected={settingsTab === tab.id}
-                        className={settingsTab === tab.id ? "active" : ""}
-                        onClick={() => setSettingsTab(tab.id)}
-                      >
-                        {tab.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
               {settingsTab === "usage" ? (
-                <div className="settings-section usage-statistics-settings">
-                  <UsageStatisticsPanel
-                    summary={usageStatistics}
-                    providers={config?.providers ?? []}
-                    loading={isUsageStatisticsLoading}
-                    rangeDays={usageStatisticsRangeDays}
-                    granularity={usageStatisticsGranularity}
-                    onRangeChange={setUsageStatisticsRangeDays}
-                    onGranularityChange={setUsageStatisticsGranularity}
-                    onRefresh={() => void refreshUsageStatistics()}
-                  />
-                </div>
+                <SettingsUsagePage summary={usageStatistics} providers={config?.providers ?? []} loading={isUsageStatisticsLoading} rangeDays={usageStatisticsRangeDays} granularity={usageStatisticsGranularity} onRangeChange={setUsageStatisticsRangeDays} onGranularityChange={setUsageStatisticsGranularity} onRefresh={() => void refreshUsageStatistics()} />
               ) : null}
               {settingsTab === "appearance" ? (
-                <div className="settings-section chat-background-settings">
-                  <input
-                    ref={chatBackgroundInputRef}
-                    className="chat-background-file-input"
-                    type="file"
-                    multiple
-                    accept="image/png,image/jpeg,image/webp,image/gif"
-                    onChange={(event) => {
-                      const files = Array.from(event.target.files ?? []);
-                      event.currentTarget.value = "";
-                      if (files.length) void importChatBackgroundFiles(files);
-                    }}
-                  />
-
-                  <div className="chat-background-editor">
-                    <div className="chat-background-preview-column">
-                      <div
-                        className={`chat-background-preview ${chatBackgroundUrl ? "is-positionable" : ""} ${isChatBackgroundDragging ? "is-dragging" : ""}`}
-                        data-fit={chatBackgroundSettings.fit}
-                      >
-                      {chatBackgroundUrl ? (
-                        <img
-                          src={chatBackgroundUrl}
-                          alt="背景预览"
-                          draggable={false}
-                          onPointerDown={beginChatBackgroundDrag}
-                          onPointerMove={moveChatBackground}
-                          onPointerUp={endChatBackgroundDrag}
-                          onPointerCancel={endChatBackgroundDrag}
-                          style={{
-                            filter: `blur(${chatBackgroundSettings.blur}px)`,
-                            opacity: chatBackgroundSettings.enabled ? chatBackgroundSettings.opacity / 100 : 0,
-                            objectFit: chatBackgroundSettings.fit,
-                            objectPosition: "center",
-                            transform: getChatBackgroundTransform(chatBackgroundSettings)
-                          }}
-                        />
-                      ) : (
-                        <button
-                          type="button"
-                          className="chat-background-empty"
-                          onClick={() => chatBackgroundInputRef.current?.click()}
-                        >
-                          <IconImage />
-                          <span>导入背景图片</span>
-                        </button>
-                      )}
-                      {chatBackgroundUrl ? (
-                        <div className="chat-background-preview-ui" aria-hidden="true">
-                          <div className="chat-background-preview-bar">
-                            <span className="chat-background-preview-avatar" />
-                            <strong>CodeXH</strong>
-                          </div>
-                          <div className="chat-background-preview-messages">
-                            <span className="preview-bubble preview-bubble-assistant">整个应用使用同一张背景。</span>
-                            <span className="preview-bubble preview-bubble-user">界面内容保持清晰可读。</span>
-                          </div>
-                        </div>
-                      ) : null}
-                      </div>
-
-                      <section className="chat-background-library" aria-label="背景图片管理">
-                        <div className="chat-background-library-header">
-                          <div className="chat-background-control-label">
-                            <span>背景图片</span>
-                            <em>{chatBackgroundImages.length ? "拖动图片调整轮播顺序" : "导入图片后可开启动态切换"}</em>
-                          </div>
-                          <button type="button" className="chat-background-add-button" onClick={() => chatBackgroundInputRef.current?.click()}>
-                            <IconUpload />
-                            <span>{chatBackgroundImages.length ? "添加图片" : "导入图片"}</span>
-                          </button>
-                        </div>
-                        {chatBackgroundImages.length > 0 ? (
-                          <div className="chat-background-image-list">
-                            {chatBackgroundImages.map((image, index) => (
-                              <div
-                                key={image.id}
-                                className={`chat-background-image-item ${index === activeChatBackgroundIndex ? "is-active" : ""}`}
-                                draggable
-                                onDragStart={(event) => event.dataTransfer.setData("text/plain", image.id)}
-                                onDragOver={(event) => event.preventDefault()}
-                                onDrop={(event) => {
-                                  event.preventDefault();
-                                  const sourceId = event.dataTransfer.getData("text/plain");
-                                  if (sourceId) void moveChatBackgroundImage(sourceId, image.id);
-                                }}
-                              >
-                                <button type="button" className="chat-background-image-select" onClick={() => setActiveChatBackgroundIndex(index)} title={`预览 ${image.fileName}`}>
-                                  <img src={image.url} alt="" />
-                                  <span>{image.fileName}</span>
-                                </button>
-                                <button type="button" className="chat-background-image-remove" onClick={() => void removeChatBackgroundImage(image.id)} title={`删除 ${image.fileName}`} aria-label={`删除 ${image.fileName}`}>
-                                  <IconTrash />
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <button type="button" className="chat-background-library-empty" onClick={() => chatBackgroundInputRef.current?.click()}>
-                            <IconImage />
-                            <span>导入图片开始设置</span>
-                          </button>
-                        )}
-                        <div className="chat-background-rotation-row">
-                          <div>
-                            <strong>动态切换</strong>
-                            <span>{chatBackgroundImages.length < 2 ? "添加至少两张图片后可用" : "按当前排序顺序循环播放"}</span>
-                          </div>
-                          <label className="chat-background-toggle">
-                            <input
-                              type="checkbox"
-                              checked={chatBackgroundSettings.rotationEnabled}
-                              disabled={chatBackgroundImages.length < 2}
-                              onChange={(event) => updateChatBackgroundSettings({ rotationEnabled: event.target.checked })}
-                            />
-                            <span aria-hidden="true" />
-                            <em>{chatBackgroundSettings.rotationEnabled ? "开启" : "关闭"}</em>
-                          </label>
-                        </div>
-                        <label className="chat-background-rotation-interval">
-                          <span>切换间隔</span>
-                          <input
-                            type="range"
-                            min="10"
-                            max="600"
-                            step="10"
-                            value={chatBackgroundSettings.rotationIntervalSeconds}
-                            disabled={chatBackgroundImages.length < 2 || !chatBackgroundSettings.rotationEnabled}
-                            onChange={(event) => updateChatBackgroundSettings({ rotationIntervalSeconds: Number(event.target.value) })}
-                          />
-                          <output>{chatBackgroundSettings.rotationIntervalSeconds} 秒</output>
-                        </label>
-                      </section>
-
-                      <section className="chat-background-motion-panel" aria-label="背景动效">
-                        <div className="chat-background-control-label">
-                          <span>背景动效</span>
-                          <em>不使用视频模型</em>
-                        </div>
-                        <div className="chat-background-motion-settings chat-background-motion-settings-in-panel">
-                          <div className="chat-background-motion-setting">
-                            <div>
-                              <strong>缓慢镜头运动</strong>
-                              <span>自动缩放与平移单张背景</span>
-                            </div>
-                            <label className="chat-background-toggle">
-                              <input type="checkbox" checked={chatBackgroundSettings.motionEnabled} disabled={!chatBackgroundUrl} onChange={(event) => updateChatBackgroundSettings({ motionEnabled: event.target.checked })} />
-                              <span aria-hidden="true" />
-                              <em>{chatBackgroundSettings.motionEnabled ? "开启" : "关闭"}</em>
-                            </label>
-                          </div>
-                          <div className="chat-background-motion-setting">
-                            <div>
-                              <strong>鼠标视差</strong>
-                              <span>背景随鼠标轻微跟随</span>
-                            </div>
-                            <label className="chat-background-toggle">
-                              <input type="checkbox" checked={chatBackgroundSettings.parallaxEnabled} disabled={!chatBackgroundUrl} onChange={(event) => updateChatBackgroundSettings({ parallaxEnabled: event.target.checked })} />
-                              <span aria-hidden="true" />
-                              <em>{chatBackgroundSettings.parallaxEnabled ? "开启" : "关闭"}</em>
-                            </label>
-                          </div>
-                          <div className="chat-background-motion-setting">
-                            <div>
-                              <strong>空间层次</strong>
-                              <span>以远景和前景强化视差深度</span>
-                            </div>
-                            <label className="chat-background-toggle">
-                              <input type="checkbox" checked={chatBackgroundSettings.depthEnabled} disabled={!chatBackgroundUrl} onChange={(event) => updateChatBackgroundSettings({ depthEnabled: event.target.checked })} />
-                              <span aria-hidden="true" />
-                              <em>{chatBackgroundSettings.depthEnabled ? "开启" : "关闭"}</em>
-                            </label>
-                          </div>
-                          <div className="chat-background-motion-setting">
-                            <div>
-                              <strong>氛围光影</strong>
-                              <span>缓慢掠过的柔和光线</span>
-                            </div>
-                            <label className="chat-background-toggle">
-                              <input type="checkbox" checked={chatBackgroundSettings.atmosphereEnabled} disabled={!chatBackgroundUrl} onChange={(event) => updateChatBackgroundSettings({ atmosphereEnabled: event.target.checked })} />
-                              <span aria-hidden="true" />
-                              <em>{chatBackgroundSettings.atmosphereEnabled ? "开启" : "关闭"}</em>
-                            </label>
-                          </div>
-                        </div>
-                      </section>
-                    </div>
-
-                    <div className="chat-background-controls">
-                      <div className="chat-background-heading">
-                        <div>
-                          <strong>显示效果</strong>
-                          <span>{chatBackgroundUrl ? "画面显示与模块可读性" : "导入背景图片后可调整"}</span>
-                        </div>
-                        <label className="chat-background-toggle">
-                          <input
-                            type="checkbox"
-                            checked={chatBackgroundSettings.enabled}
-                            disabled={!chatBackgroundUrl}
-                            onChange={(event) => updateChatBackgroundSettings({ enabled: event.target.checked })}
-                          />
-                          <span aria-hidden="true" />
-                          <em>{!chatBackgroundUrl ? "未设置" : chatBackgroundSettings.enabled ? "已启用" : "已停用"}</em>
-                        </label>
-                      </div>
-
-                      <div className="chat-background-visual-controls">
-                      <div className="chat-background-control-group chat-background-fit-control">
-                        <div className="chat-background-control-label">
-                          <span>填充方式</span>
-                        </div>
-                        <div className="chat-background-segmented" role="group" aria-label="背景填充方式">
-                          <button
-                            type="button"
-                            className={chatBackgroundSettings.fit === "cover" ? "active" : ""}
-                            onClick={() => updateChatBackgroundSettings({ fit: "cover" })}
-                          >
-                            填满
-                          </button>
-                          <button
-                            type="button"
-                            className={chatBackgroundSettings.fit === "contain" ? "active" : ""}
-                            onClick={() => updateChatBackgroundSettings({ fit: "contain" })}
-                          >
-                            完整显示
-                          </button>
-                        </div>
-                      </div>
-
-                      <label className="chat-background-control-group">
-                        <div className="chat-background-control-label">
-                          <span>图片缩放</span>
-                          <output>{chatBackgroundSettings.zoom}%</output>
-                        </div>
-                        <input
-                          type="range"
-                          min="100"
-                          max="180"
-                          step="1"
-                          value={chatBackgroundSettings.zoom}
-                          disabled={!chatBackgroundUrl}
-                          onChange={(event) => updateChatBackgroundSettings({ zoom: Number(event.target.value) })}
-                        />
-                      </label>
-
-                      <label className="chat-background-control-group">
-                        <div className="chat-background-control-label">
-                          <span>模糊度</span>
-                          <output>{chatBackgroundSettings.blur}px</output>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="30"
-                          step="1"
-                          value={chatBackgroundSettings.blur}
-                          onChange={(event) => updateChatBackgroundSettings({ blur: Number(event.target.value) })}
-                        />
-                      </label>
-
-                      <label className="chat-background-control-group">
-                        <div className="chat-background-control-label">
-                          <span>背景图透明度</span>
-                          <output>{chatBackgroundSettings.opacity}%</output>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          step="1"
-                          value={chatBackgroundSettings.opacity}
-                          onChange={(event) => updateChatBackgroundSettings({ opacity: Number(event.target.value) })}
-                        />
-                      </label>
-                      </div>
-
-                      <div className="chat-background-control-group chat-background-surface-group">
-                        <div className="chat-background-control-label">
-                          <span>模块不透明度</span>
-                          <em>数值越高，遮罩越实</em>
-                        </div>
-                        <div className="chat-background-surface-controls">
-                          {CHAT_BACKGROUND_SURFACE_OPTIONS.map((option) => (
-                            <label key={option.key} title={option.hint}>
-                              <span>{option.label}</span>
-                              <input
-                                type="range"
-                                min="0"
-                                max="100"
-                                step="1"
-                                value={chatBackgroundSettings.surfaces[option.key]}
-                                disabled={!chatBackgroundUrl || !chatBackgroundSettings.enabled}
-                                onChange={(event) => updateChatBackgroundSurface(option.key, Number(event.target.value))}
-                              />
-                              <output>{chatBackgroundSettings.surfaces[option.key]}%</output>
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div className="chat-background-actions">
-                        <button
-                          type="button"
-                          onClick={resetChatBackgroundSurfaces}
-                          title="将模块不透明度恢复为默认值"
-                        >
-                          <IconRefresh />
-                          <span>重置</span>
-                        </button>
-                        <button type="button" className="background-action-danger" onClick={() => void clearChatBackground()} disabled={!chatBackgroundUrl} title="清除应用背景">
-                          <IconTrash />
-                          <span>清除</span>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                <AppearanceSettingsPage
+                  inputRef={chatBackgroundInputRef}
+                  images={chatBackgroundImages}
+                  activeImageIndex={activeChatBackgroundIndex}
+                  imageUrl={chatBackgroundUrl}
+                  settings={chatBackgroundSettings}
+                  isDragging={isChatBackgroundDragging}
+                  onImportFiles={importChatBackgroundFiles}
+                  onSelectImage={setActiveChatBackgroundIndex}
+                  onMoveImage={moveChatBackgroundImage}
+                  onRemoveImage={removeChatBackgroundImage}
+                  onUpdateSettings={updateChatBackgroundSettings}
+                  onUpdateSurface={updateChatBackgroundSurface}
+                  onBeginDrag={beginChatBackgroundDrag}
+                  onMoveDrag={moveChatBackground}
+                  onEndDrag={endChatBackgroundDrag}
+                  onResetSurfaces={resetChatBackgroundSurfaces}
+                  onClear={clearChatBackground}
+                />
               ) : null}
 
               {settingsTab === "timeouts" ? (
-                <div className="settings-section">
-                  <div className="general-overview">
-                    <div className="general-overview-heading">
-                      <strong><IconChart />运行概览</strong>
-                      <span className="general-overview-status"><i aria-hidden />本地服务正常</span>
-                    </div>
-                    <div className="general-overview-stats">
-                      <article className="general-overview-stat">
-                        <span className="general-overview-icon blue"><IconChecklist /></span>
-                        <div><span>会话</span><strong>{threads.length}</strong></div>
-                      </article>
-                      <article className="general-overview-stat">
-                        <span className="general-overview-icon green"><IconSkills /></span>
-                        <div><span>技能</span><strong>{skills.length}</strong></div>
-                      </article>
-                      <article className="general-overview-stat">
-                        <span className="general-overview-icon amber"><IconGlobe /></span>
-                        <div><span>供应商</span><strong>{config?.providers.length ?? 0}</strong></div>
-                      </article>
-                      <article className="general-overview-stat">
-                        <span className="general-overview-icon cyan"><IconChart /></span>
-                        <div><span>模型</span><strong>{config?.models.length ?? 0}</strong></div>
-                      </article>
-                    </div>
-                  </div>
-
-                  <div className="config-block general-defaults-panel">
-                    <div className="section-copy">
-                      <strong><IconGear />当前默认配置</strong>
-                      <span>全局执行与桌面服务状态</span>
-                    </div>
-                    <div className="general-defaults-grid">
-                      <div className="general-default-item">
-                        <span><IconGlobe />默认供应商</span>
-                        <strong title={config?.defaultProvider ?? "未配置"}>
-                          {(() => {
-                            const provider = config?.providers.find((entry) => entry.id === config.defaultProvider);
-                            return provider ? getProviderDisplayName(provider) : config?.defaultProvider ?? "未配置";
-                          })()}
-                        </strong>
-                      </div>
-                      <div className="general-default-item">
-                        <span><IconChart />默认模型</span>
-                        <strong title={config?.defaultModel ?? "未配置"}>{config?.defaultModel ?? "未配置"}</strong>
-                      </div>
-                      <div className="general-default-item">
-                        <span><IconChecklist />审批模式</span>
-                        <strong>{config?.desktop.approvals ?? "prompt"}</strong>
-                      </div>
-                      <div className="general-default-item">
-                        <span><IconGlobe />内置浏览器</span>
-                        <strong className={config?.desktop.inAppBrowser ? "is-online" : "is-offline"}><i aria-hidden />{config?.desktop.inAppBrowser ? "已启用" : "已关闭"}</strong>
-                      </div>
-                    </div>
-                  </div>
-
-                  {configDraft ? (
-                    <div className="config-block general-subagent-settings">
-                      <div className="section-copy">
-                        <strong><IconSkills />子智能体</strong>
-                        <span>子任务共享当前工作区并沿用审批策略；模型未指定时跟随创建它的主任务。</span>
-                      </div>
-                      <div className="general-subagent-settings-grid">
-                        <label className="settings-field">
-                          <span>默认模型</span>
-                          <ComposerSelect
-                            className="form-select"
-                            ariaLabel="子智能体默认模型"
-                            value={subagentDefaultModelValue}
-                            onChange={(value) => setConfigDraft((current) => {
-                              if (!current) return current;
-                              if (value === "__inherit__") {
-                                return { ...current, multiAgent: { ...current.multiAgent, defaultModelId: undefined, defaultProviderId: undefined } };
-                              }
-                              const model = current.models.find((item) => modelKey(item.providerId, item.id) === value);
-                              return model ? { ...current, multiAgent: { ...current.multiAgent, defaultModelId: model.id, defaultProviderId: model.providerId } } : current;
-                            })}
-                            options={subagentDefaultModelOptions}
-                            placeholder="选择默认模型"
-                          />
-                          <small className="settings-field-hint">不指定时，子智能体沿用创建它的主任务所用模型</small>
-                        </label>
-                        <label className="settings-field">
-                          <span>总并发（含主智能体）</span>
-                          <input type="number" min="2" max="8" value={configDraft.multiAgent.maxConcurrentSubagents} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxConcurrentSubagents: Number(event.target.value) || 4 } } : current)} />
-                          <small className="settings-field-hint">2–8 · 同时运行的智能体总数（含主智能体），超出的子任务排队</small>
-                        </label>
-                        <label className="settings-field">
-                          <span>每次任务上限</span>
-                          <input type="number" min="1" max="16" value={configDraft.multiAgent.maxSubagentsPerRoot} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxSubagentsPerRoot: Number(event.target.value) || 8 } } : current)} />
-                          <small className="settings-field-hint">1–16 · 单个主任务最多可委派的子智能体总数</small>
-                        </label>
-                        <label className="settings-field">
-                          <span>最大层级</span>
-                          <input type="number" min="1" max="6" value={configDraft.multiAgent.maxDepth} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, maxDepth: Number(event.target.value) || 3 } } : current)} />
-                          <small className="settings-field-hint">1–6 · 允许主 → 子 → 孙嵌套委派的最大深度</small>
-                        </label>
-                        <label className="settings-field">
-                          <span>默认上下文</span>
-                          <ComposerSelect className="form-select" ariaLabel="子智能体默认上下文" value={configDraft.multiAgent.defaultContextFork ?? "all"} onChange={(value) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, defaultContextFork: value === "none" || value === "recent" ? value : "all" } } : current)} options={[{ value: "all", label: "全部上下文" }, { value: "recent", label: "最近 6 条" }, { value: "none", label: "不继承" }]} placeholder="选择上下文" />
-                          <small className="settings-field-hint">创建时从父任务继承的对话历史量，越少越省 token</small>
-                        </label>
-                        <label className="settings-field">
-                          <span>默认推理强度</span>
-                          <ComposerSelect className="form-select" ariaLabel="子智能体默认推理强度" value={configDraft.multiAgent.defaultReasoningEffort ?? "medium"} onChange={(value) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, defaultReasoningEffort: value === "low" || value === "high" ? value : "medium" } } : current)} options={[{ value: "low", label: "低" }, { value: "medium", label: "中" }, { value: "high", label: "高" }]} placeholder="选择推理强度" />
-                          <small className="settings-field-hint">越高推理越深入，但更慢、成本更高</small>
-                        </label>
-                        <div className="settings-field general-permission-field">
-                          <span>执行权限</span>
-                          <label className="memory-switch"><input type="checkbox" checked={configDraft.multiAgent.childWritePolicy !== "read-only"} onChange={(event) => setConfigDraft((current) => current ? { ...current, multiAgent: { ...current.multiAgent, childWritePolicy: event.target.checked ? "inherit" : "read-only" } } : current)} /> <span>继承父任务权限</span></label>
-                          <small className="settings-field-hint">取消勾选后子智能体为只读，只能分析、不能修改工作区</small>
-                        </div>
-                      </div>
-                      <div className="settings-save-row"><span className="subtle-inline">更改仅影响后续创建的子智能体。</span><button className="button warm" type="button" onClick={() => void saveConfigDraft()}>保存</button></div>
-                    </div>
-                  ) : null}
-                </div>
+                <RuntimeOverviewPage config={config} configDraft={configDraft} threadCount={threads.length} skillCount={skills.length} subagentDefaultModelValue={subagentDefaultModelValue} subagentDefaultModelOptions={subagentDefaultModelOptions} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 
-              {settingsTab === "provider" ? (
-                <div className="settings-section provider-settings-section">
-                  {configDraft ? (
-                    <div className="provider-settings-layout">
-                      <aside className="provider-list-panel">
-                        <div className="provider-list-header">
-                          <strong className="provider-list-title">提供商</strong>
-                          <button className="settings-add-provider" onClick={addCustomProvider}>
-                            + 自定义
-                          </button>
-                        </div>
-                        <div className="provider-list-scroll">
-                          {configDraft.providers.map((provider) => (
-                            <div key={provider.id} className="provider-list-card-row">
-                              <button
-                                className={`provider-list-card ${settingsProvider?.id === provider.id ? "selected" : ""}`}
-                                onClick={() => {
-                                  setSettingsProviderId(provider.id);
-                                  setNewModelId("");
-                                  setNewModelDisplayName("");
-                                }}
-                              >
-                                <strong>{getProviderDisplayName(provider)}</strong>
-                              </button>
-                              <button
-                                className="provider-remove-button"
-                                onClick={() => removeProvider(provider.id)}
-                                title="删除供应商"
-                              >
-                                <IconClose />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      </aside>
+    {settingsTab === "provider" ? (
+      <ProviderSettingsPage
+        configDraft={configDraft} config={config} settingsProvider={settingsProvider} settingsProviderModels={settingsProviderModels}
+        providerSecretDrafts={providerSecretDrafts} setProviderSecretDrafts={setProviderSecretDrafts} isFetchingModels={isFetchingModels}
+        newModelId={newModelId} newModelDisplayName={newModelDisplayName} modelTestResults={modelTestResults} testingModelKey={testingModelKey}
+        onSetProviderId={setSettingsProviderId} onSetNewModelId={setNewModelId} onSetNewModelDisplayName={setNewModelDisplayName}
+        onAddCustomProvider={addCustomProvider} onRemoveProvider={removeProvider} onUpdateProvider={updateProviderDraft} onFetchModels={fetchAndShowProviderModels}
+        onUpdateModel={updateModelDraft} onCheckModel={checkProviderModel} onRemoveModel={removeModel} onAddModel={addModelToProvider} onSave={saveConfigDraft}
+        onRefresh={refreshConfig} onShowNotice={showNotice} formatLatency={formatLatency} formatTokensPerSecond={formatTokensPerSecond}
+      />
+    ) : null}
 
-                      <section className="provider-detail-panel">
-                        {settingsProvider ? (
-                          <>
-                            <div className="provider-detail-grid">
-                              <label className="settings-field full">
-                                <span>供应商</span>
-                                <input
-                                  value={settingsProvider.name ?? ""}
-                                  onChange={(event) =>
-                                    updateProviderDraft(settingsProvider.id, { name: event.target.value })
-                                  }
-                                  placeholder="例如 OpenAI / 英伟达 / 企业网关"
-                                />
-                              </label>
-
-                              <label className="settings-field full">
-                                <span>接口协议</span>
-                                <ComposerSelect
-                                  className="form-select provider-type-select"
-                                  ariaLabel="接口协议"
-                                  value={normalizeProviderProtocol(settingsProvider.type)}
-                                  onChange={(type) =>
-                                    updateProviderDraft(settingsProvider.id, {
-                                      type: type as ProviderType
-                                    })
-                                  }
-                                  options={PROVIDER_TYPE_OPTIONS}
-                                  placeholder="选择接口协议"
-                                />
-                                <small className="settings-field-hint">仅决定聊天与推理模型的请求格式；图片/视频模型始终使用模型自身的生成协议，且要求供应商为 OpenAI 兼容接口</small>
-                              </label>
-
-                              <label className="settings-field">
-                                <span>调用 URL</span>
-                                <input
-                                  value={settingsProvider.baseUrl ?? ""}
-                                  onChange={(event) =>
-                                    updateProviderDraft(settingsProvider.id, { baseUrl: event.target.value })
-                                  }
-                                  placeholder="https://api.example.com/v1"
-                                />
-                              </label>
-
-                              <label className="settings-field">
-                                <div className="provider-secret-row">
-                                  <span>Key</span>
-                                  {hasStoredSecret(settingsProvider) ? (
-                                    <em className="secret-badge">已检测到已保存密钥</em>
-                                  ) : null}
-                                </div>
-                                <input
-                                  type="password"
-                                  autoComplete="off"
-                                  value={providerSecretDrafts[settingsProvider.id] ?? ""}
-                                  onChange={(event) =>
-                                    setProviderSecretDrafts((current) => ({
-                                      ...current,
-                                      [settingsProvider.id]: event.target.value
-                                    }))
-                                  }
-                                  placeholder="输入 API Key，留空则保留当前值"
-                                />
-                              </label>
-                            </div>
-
-                            <div className="provider-model-section">
-                              <div className="section-copy section-copy-with-action">
-                                <div>
-                                  <strong>模型列表</strong>
-                                  <span>保存后，聊天窗口会按这里的供应商和模型列表进行筛选。</span>
-                                </div>
-                                <button
-                                  className="model-fetch-button"
-                                  onClick={() => void fetchAndShowProviderModels(settingsProvider.id)}
-                                  disabled={isFetchingModels || !settingsProvider.baseUrl?.trim()}
-                                  title="从供应商接口拉取所有可用模型"
-                                >
-                                  {isFetchingModels ? "获取中…" : "获取模型"}
-                                </button>
-                              </div>
-
-                              <div className="provider-model-box">
-                                {settingsProviderModels.length > 0 ? (
-                                  settingsProviderModels.map((model) => {
-                                    const isMediaModel = model.role === "image" || model.role === "video";
-                                    const mediaUnsupported = isMediaModel && !providerSupportsMediaGeneration(settingsProvider.type);
-                                    return (
-                                    <div key={model.id} className="provider-model-row">
-                                      <div className="provider-model-copy">
-                                        <strong>{model.id}</strong>
-                                        {model.displayName !== model.id ? <span>{model.displayName}</span> : null}
-                                        {isMediaModel ? (
-                                          <span
-                                            className={`model-media-tag ${model.role === "image" ? "is-image" : "is-video"}${mediaUnsupported ? " is-unsupported" : ""}`}
-                                            title={mediaUnsupported
-                                              ? "当前供应商的接口协议没有图片/视频生成实现，请改用 OpenAI 兼容接口的供应商。"
-                                              : "图片/视频模型不走上方接口协议，按模型自身的生成协议调用。"}
-                                          >
-                                            {mediaUnsupported
-                                              ? `当前协议不支持${model.role === "image" ? "图片" : "视频"}生成`
-                                              : `${model.role === "image" ? "图片模型" : "视频模型"} · ${IMAGE_GENERATION_PROTOCOL_LABELS[imageGenerationProtocolForModel(model)]}`}
-                                          </span>
-                                        ) : null}
-                                        {!isMediaModel && modelTestResults[getModelProfileKey(settingsProvider.id, model.id)] ? (
-                                          <span className="model-test-result">
-                                            延迟 {formatLatency(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].latencyMs)}
-                                            <i aria-hidden="true">·</i>
-                                            输出 {modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].outputTokens} Tokens
-                                            <i aria-hidden="true">·</i>
-                                            {formatTokensPerSecond(modelTestResults[getModelProfileKey(settingsProvider.id, model.id)].tokensPerSecond)}
-                                          </span>
-                                        ) : null}
-                                        {!isMediaModel ? (
-                                        <span
-                                          className={`model-agent-capability ${model.agentCapability ?? "unknown"}`}
-                                          title={
-                                            model.agentCapability === "verified"
-                                              ? "已验证连接、原生工具调用、工具结果回传和最终回复。"
-                                              : model.agentCapability === "unsupported"
-                                                ? model.agentCapabilityReason ?? "该模型不适合 Agent 工具调用。"
-                                                : "请先运行模型测试，验证 Agent 工具协议。"
-                                          }
-                                        >
-                                          {model.agentCapability === "verified"
-                                            ? "Agent 已验证"
-                                            : model.agentCapability === "unsupported"
-                                              ? "仅聊天"
-                                              : "未验证 Agent"}
-                                        </span>
-                                        ) : null}
-                                      </div>
-                                      <div className="provider-model-actions">
-                                        {!isMediaModel ? (
-                                        <label className="model-context-window-field" title="模型上下文窗口，单位为 tokens">
-                                          <span>上下文</span>
-                                          <input
-                                            type="number"
-                                            min={1_024}
-                                            step={1_024}
-                                            value={model.contextWindow}
-                                            onChange={(event) => updateModelDraft(settingsProvider.id, model.id, {
-                                              contextWindow: Math.max(1_024, Math.floor(Number(event.target.value) || 128_000))
-                                            })}
-                                          />
-                                        </label>
-                                        ) : null}
-                                        <label className="model-capability-toggle" title="启用后，此模型可以接收文件、文件夹和图片附件。">
-                                          <input
-                                            type="checkbox"
-                                            checked={model.supportsMultimodalInput}
-                                            onChange={(event) =>
-                                              updateModelDraft(settingsProvider.id, model.id, { supportsMultimodalInput: event.target.checked })
-                                            }
-                                          />
-                                          <span>支持多模态</span>
-                                        </label>
-                                        {!isMediaModel ? (() => {
-                                          const isTesting = testingModelKey === getModelProfileKey(settingsProvider.id, model.id);
-                                          return (
-                                            <button
-                                              className={`settings-mini-button model-test-button${isTesting ? " is-testing" : ""}`}
-                                              onClick={() => void checkProviderModel(settingsProvider, model)}
-                                              disabled={isTesting}
-                                              aria-busy={isTesting}
-                                            >
-                                              <span className="model-test-label">
-                                                {isTesting ? "测试中" : "测试"}
-                                                {isTesting ? <i aria-hidden="true" /> : null}
-                                              </span>
-                                            </button>
-                                          );
-                                        })() : null}
-                                        <button
-                                          className="settings-icon-button"
-                                          onClick={() => removeModel(settingsProvider.id, model.id)}
-                                          title="删除模型"
-                                        >
-                                          <IconClose />
-                                        </button>
-                                      </div>
-                                    </div>
-                                    );
-                                  })
-                                ) : (
-                                  <div className="provider-empty-state">
-                                    当前供应商还没有模型，先在下方添加一个模型即可。
-                                  </div>
-                                )}
-
-                                <div className="model-add-row">
-                                  <input
-                                    value={newModelId}
-                                    onChange={(event) => setNewModelId(event.target.value)}
-                                    placeholder="模型名称"
-                                  />
-                                  <input
-                                    value={newModelDisplayName}
-                                    onChange={(event) => setNewModelDisplayName(event.target.value)}
-                                    placeholder="显示名称（可选）"
-                                  />
-                                  <button
-                                    className="model-add-button"
-                                    onClick={() => addModelToProvider(settingsProvider.id)}
-                                    title="添加模型"
-                                  >
-                                    <IconPlus />
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="settings-save-row">
-                              <span className="subtle-inline">
-                                当前默认：{(() => {
-                                  const provider = configDraft.providers.find((entry) => entry.id === configDraft.defaultProvider);
-                                  return provider ? getProviderDisplayName(provider) : configDraft.defaultProvider;
-                                })()} / {configDraft.defaultModel}
-                              </span>
-                              <button className="button warm" onClick={() => void saveConfigDraft()}>
-                                保存
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <div className="provider-empty-state">还没有可编辑的供应商。</div>
-                        )}
-                      </section>
-                    </div>
-                  ) : (
-                    <div className="config-block">
-                      <div className="detail-empty">正在加载模型配置…</div>
-                      <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-                        <button
-                          className="button ghost"
-                          onClick={() => void refreshConfig()}
-                        >
-                          重试加载
-                        </button>
-                        <button
-                          className="button ghost"
-                          onClick={() => {
-                            console.log("[renderer] current config", config);
-                            console.log("[renderer] current configDraft", configDraft);
-                            showNotice(`config=${config ? "ok" : "null"}, configDraft=${configDraft ? "ok" : "null"}`);
-                          }}
-                        >
-                          检查状态
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : null}
-
-              {settingsTab === "multimodal" ? (
-                <div className="settings-section multimodal-settings-section">
-                  {configDraft ? (
-                    <>
-                      {(["reasoning", "image", "video"] as const).map((role) => {
-                        const models = configDraft.models.filter((model) =>
-                          role === "reasoning" ? isReasoningModel(model) : model.role === role
-                        );
-                        const kind = role === "reasoning" ? null : role;
-                        const title = role === "reasoning" ? "推理模型" : role === "image" ? "图片模型" : "视频模型";
-                        const hint = role === "reasoning"
-                          ? "手动添加后会出现在聊天下拉；可设置默认模型或随时移除。"
-                          : `从统一模型库中分配${role === "image" ? "图片" : "视频"}生成模型。`;
-                        const panel = (
-                          <div key={role} className={`config-block multimodal-model-panel is-${role}`}>
-                            <div className="section-copy section-copy-with-action">
-                              <div>
-                                <strong>{title}</strong>
-                                <span>{hint}</span>
-                              </div>
-                              <button className="model-add-button" onClick={() => {
-                                setMultimodalPickerRole(role);
-                                setMultimodalPickerSelected([]);
-                              }} title={`添加${title}`}><IconPlus /></button>
-                            </div>
-                            {kind ? (
-                              <div className="multimodal-toggle-row">
-                                <span>启用{kind === "image" ? "图片" : "视频"}生成</span>
-                                <label className="model-capability-toggle">
-                                  <input type="checkbox" checked={configDraft.multimodal[kind].enabled} onChange={(event) => setMultimodalEnabled(kind, event.target.checked)} />
-                                  <span>{configDraft.multimodal[kind].enabled ? "已启用" : "已关闭"}</span>
-                                </label>
-                              </div>
-                            ) : null}
-                            {kind && !configDraft.multimodal[kind].enabled ? (
-                              <div className="multimodal-empty-tip">
-                                {kind === "image" ? "图片" : "视频"}生成已关闭。开启后，Agent 才会在识别到相关意图时调用默认模型。
-                              </div>
-                            ) : null}
-                            <div className={`provider-model-box multimodal-compact-list${!kind || configDraft.multimodal[kind].enabled ? "" : " is-disabled"}`}>
-                              {models.length > 0 ? models.map((model) => {
-                                const isDefault = kind
-                                  ? configDraft.multimodal[kind].defaultProviderId === model.providerId &&
-                                    configDraft.multimodal[kind].defaultModelId === model.id
-                                  : configDraft.defaultProvider === model.providerId &&
-                                    configDraft.defaultModel === model.id;
-                                const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
-                                const mediaUnsupported = Boolean(kind) && !providerSupportsMediaGeneration(provider?.type ?? "");
-                                return (
-                                  <div key={modelKey(model.providerId, model.id)} className="provider-model-row multimodal-list-row">
-                                    <div className="provider-model-copy multimodal-list-main">
-                                      <strong>{model.displayName}</strong>
-                                      <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : model.providerId}</span>
-                                      {role === "reasoning" ? <em className="mm-tag is-chat">聊天下拉</em> : null}
-                                      {isDefault ? <em className="mm-tag is-default">默认</em> : null}
-                                      {model.supportsMultimodalInput ? <em className="mm-tag is-mm">多模态</em> : null}
-                                      {model.supportsVideoGeneration ? <em className="mm-tag is-video">视频</em> : null}
-                                      {mediaUnsupported ? (
-                                        <em className="mm-tag is-unsupported" title="该供应商的接口协议没有图片/视频生成实现，请改用 OpenAI 兼容接口的供应商。">协议不支持</em>
-                                      ) : null}
-                                    </div>
-                                    <div className="provider-model-actions">
-                                      {!isDefault ? (
-                                        <button
-                                          className="settings-mini-button"
-                                          disabled={mediaUnsupported}
-                                          title={mediaUnsupported ? "该供应商协议不支持媒体生成，无法设为默认" : undefined}
-                                          onClick={() => kind
-                                            ? setMultimodalDefault(kind, model.providerId, model.id)
-                                            : setReasoningDefault(model.providerId, model.id)}
-                                        >
-                                          设为默认
-                                        </button>
-                                      ) : null}
-                                      <button className="settings-mini-button" onClick={() => removeFromMultimodalRole(model.providerId, model.id)}>移除</button>
-                                    </div>
-                                  </div>
-                                );
-                              }) : (
-                                <div className="provider-empty-state">
-                                  {role === "reasoning"
-                                    ? "尚未添加推理模型。点击 + 从模型库加入，加入后才会出现在聊天下拉。"
-                                    : `尚未添加${title}。请先在供应商设置中添加模型，再点 + 加入，并指定默认模型。`}
-                                </div>
-                              )}
-                            </div>
-                            {kind && models.length > 0 && !configDraft.multimodal[kind].defaultModelId ? (
-                              <div className="multimodal-empty-tip">
-                                请选择一个默认{kind === "image" ? "图片" : "视频"}模型，否则对话中无法自动生成。
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                        if (role !== "reasoning") return panel;
-                        return (
-                          <Fragment key="reasoning-with-input">
-                            {panel}
-                            <div className="config-block multimodal-model-panel is-input">
-                              <div className="section-copy section-copy-with-action">
-                                <div>
-                                  <strong>默认多模态识别模型</strong>
-                                  <span>当聊天所选模型不支持多模态输入时，先用此模型识别图片/文件，再把文字结果交给当前模型处理。</span>
-                                </div>
-                                <button
-                                  className="model-add-button"
-                                  type="button"
-                                  onClick={() => {
-                                    setMultimodalPickerRole("input");
-                                    setMultimodalPickerSelected(
-                                      configDraft.multimodal.input.defaultProviderId && configDraft.multimodal.input.defaultModelId
-                                        ? [modelKey(configDraft.multimodal.input.defaultProviderId, configDraft.multimodal.input.defaultModelId)]
-                                        : []
-                                    );
-                                  }}
-                                  title="选择多模态识别模型"
-                                >
-                                  <IconPlus />
-                                </button>
-                              </div>
-                              <div className="multimodal-toggle-row">
-                                <span>启用识别回退</span>
-                                <label className="model-capability-toggle">
-                                  <input
-                                    type="checkbox"
-                                    checked={configDraft.multimodal.input.enabled}
-                                    onChange={(event) => setMultimodalEnabled("input", event.target.checked)}
-                                  />
-                                  <span>{configDraft.multimodal.input.enabled ? "已启用" : "已关闭"}</span>
-                                </label>
-                              </div>
-                              {!configDraft.multimodal.input.enabled ? (
-                                <div className="multimodal-empty-tip">
-                                  识别回退已关闭。关闭后，非多模态聊天模型无法处理图片或文件附件。
-                                </div>
-                              ) : null}
-                              <div className={`provider-model-box multimodal-compact-list${configDraft.multimodal.input.enabled ? "" : " is-disabled"}`}>
-                                {(() => {
-                                  const selected = configDraft.models.find(
-                                    (model) =>
-                                      model.supportsMultimodalInput &&
-                                      model.providerId === configDraft.multimodal.input.defaultProviderId &&
-                                      model.id === configDraft.multimodal.input.defaultModelId
-                                  );
-                                  if (!selected) {
-                                    return (
-                                      <div className="provider-empty-state">
-                                        尚未选择识别模型。点击 + 从支持多模态的模型中选一个。
-                                      </div>
-                                    );
-                                  }
-                                  const provider = configDraft.providers.find((entry) => entry.id === selected.providerId);
-                                  return (
-                                    <div className="provider-model-row multimodal-list-row">
-                                      <div className="provider-model-copy multimodal-list-main">
-                                        <strong>{selected.displayName}</strong>
-                                        <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : selected.providerId}</span>
-                                        <em className="mm-tag is-default">默认</em>
-                                        <em className="mm-tag is-mm">多模态</em>
-                                      </div>
-                                      <div className="provider-model-actions">
-                                        <button className="settings-mini-button" type="button" onClick={clearMultimodalInputDefault}>
-                                          清除
-                                        </button>
-                                      </div>
-                                    </div>
-                                  );
-                                })()}
-                              </div>
-                            </div>
-                          </Fragment>
-                        );
-                      })}
-
-                      <div className="settings-save-row">
-                        <span className="subtle-inline">
-                          操作即保存 · 默认推理：{configDraft.defaultModel ?? "未设置"}
-                          {" · "}
-                          默认识别：{configDraft.multimodal.input.defaultModelId ?? "未设置"}
-                          {" · "}
-                          默认图片：{configDraft.multimodal.image.defaultModelId ?? "未设置"}
-                          {" · "}
-                          默认视频：{configDraft.multimodal.video.defaultModelId ?? "未设置"}
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="config-block">
-                      <div className="detail-empty">正在加载模型配置…</div>
-                    </div>
-                  )}
-                </div>
-              ) : null}
+    {settingsTab === "multimodal" ? (
+      <MultimodalSettingsPage
+        configDraft={configDraft}
+        setPickerRole={setMultimodalPickerRole}
+        setPickerSelected={setMultimodalPickerSelected}
+        setMultimodalEnabled={setMultimodalEnabled}
+        setMultimodalDefault={setMultimodalDefault}
+        setReasoningDefault={setReasoningDefault}
+        removeFromMultimodalRole={removeFromMultimodalRole}
+        clearMultimodalInputDefault={clearMultimodalInputDefault}
+      />
+    ) : null}
 
               {settingsTab === "timeouts" ? (
-                <div className="settings-section">
-                  {configDraft ? (
-                    <>
-                      <div className="config-block">
-                        <div className="section-copy section-copy-with-action">
-                          <div>
-                            <strong>模型与媒体超时</strong>
-                            <span>单位为秒。保存后立即写入运行时；已经发出的单次请求沿用原超时，下一次重试读取新配置。</span>
-                          </div>
-                          <button className="button ghost" type="button" onClick={resetTimeoutDraft}>恢复默认</button>
-                        </div>
-                        <div className="provider-detail-grid timeout-settings-grid">
-                          <label className="settings-field"><span>模型决策超时</span><input type="number" step="1" value={configDraft.timeouts.modelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("modelDecisionMs", event.target.value)} /></label>
-                          <label className="settings-field"><span>恢复请求超时</span><input type="number" step="1" value={configDraft.timeouts.recoveryModelDecisionMs / 1_000} onChange={(event) => updateTimeoutDraft("recoveryModelDecisionMs", event.target.value)} /></label>
-                          <label className="settings-field"><span>超时恢复窗口</span><input type="number" step="1" value={configDraft.timeouts.modelTimeoutRetries} onChange={(event) => updateTimeoutDraft("modelTimeoutRetries", event.target.value)} /></label>
-                          <label className="settings-field"><span>非终端工具超时</span><input type="number" step="1" value={configDraft.timeouts.toolExecutionMs / 1_000} onChange={(event) => updateTimeoutDraft("toolExecutionMs", event.target.value)} /></label>
-                          <label className="settings-field"><span>多模态意图分类超时</span><input type="number" step="1" value={configDraft.timeouts.multimodalIntentClassifyMs / 1_000} onChange={(event) => updateTimeoutDraft("multimodalIntentClassifyMs", event.target.value)} /></label>
-                          <label className="settings-field"><span>模型连接测试超时</span><input type="number" step="1" value={configDraft.timeouts.modelTestMs / 1_000} onChange={(event) => updateTimeoutDraft("modelTestMs", event.target.value)} /></label>
-                          <label className="settings-field"><span>视频生成总超时</span><input type="number" step="1" value={configDraft.timeouts.videoGenerationMs / 1_000} onChange={(event) => updateTimeoutDraft("videoGenerationMs", event.target.value)} /></label>
-                          <label className="settings-field"><span>视频状态轮询间隔</span><input type="number" step="1" value={configDraft.timeouts.videoPollIntervalMs / 1_000} onChange={(event) => updateTimeoutDraft("videoPollIntervalMs", event.target.value)} /></label>
-                        </div>
-                        <span className="timeout-settings-note">“超时恢复窗口”控制连续超时多少次后压缩上下文并延长下一次等待；模型、429 和临时网络错误会持续自动恢复，直到你手动停止。</span>
-                      </div>
-                      <div className="settings-save-row">
-                        <span className="subtle-inline">图片生成与视频下载没有固定超时，只会在任务被取消时中断。</span>
-                        <button className="button warm" onClick={() => void saveConfigDraft()}>保存</button>
-                      </div>
-                      <div className="config-block log-cleanup-settings">
-                        <div className="section-copy section-copy-with-action">
-                          <div>
-                            <strong>日志与存储</strong>
-                            <span>清理应用运行日志，并安全回收 SQLite WAL 事务日志；聊天、项目和知识库数据不会被删除。</span>
-                          </div>
-                          <button
-                            className="button ghost log-cleanup-button"
-                            type="button"
-                            disabled={isRuntimeLogStatsLoading || isClearingLogs || runtimeLogStats?.bytes === 0}
-                            onClick={() => setIsClearLogsConfirmOpen(true)}
-                          >
-                            <IconTrash />
-                            <span>{isClearingLogs ? "清理中" : "清理日志"}</span>
-                          </button>
-                        </div>
-                        <div className="log-cleanup-status" aria-live="polite">
-                          <span>当前占用</span>
-                          <strong>{isRuntimeLogStatsLoading && !runtimeLogStats ? "统计中..." : formatStorageBytes(runtimeLogStats?.bytes ?? 0)}</strong>
-                          {runtimeLogStats ? <em>{runtimeLogStats.fileCount} 个日志文件</em> : null}
-                        </div>
-                      </div>
-                    </>
-                  ) : <div className="config-block"><div className="detail-empty">正在加载超时配置...</div></div>}
-                </div>
+                <RuntimeTimeoutsPage configDraft={configDraft} runtimeLogStats={runtimeLogStats} isRuntimeLogStatsLoading={isRuntimeLogStatsLoading} isClearingLogs={isClearingLogs} onResetTimeouts={resetTimeoutDraft} onUpdateTimeout={updateTimeoutDraft} onSave={saveConfigDraft} onRequestClearLogs={() => setIsClearLogsConfirmOpen(true)} formatStorageBytes={formatStorageBytes} />
               ) : null}
 
               {settingsTab === "timeouts" && configDraft ? (
-                <div className="settings-section">
-                  <div className="config-block general-tone-settings">
-                    <div className="section-copy">
-                      <strong>语气设置</strong>
-                      <span>选择聊天回复的整体表达风格，不影响任务执行、工具调用和结果准确性。</span>
-                    </div>
-                    <div className="general-tone-segmented" role="radiogroup" aria-label="回复语气">
-                      {RESPONSE_TONE_OPTIONS.map((option) => {
-                        const active = (configDraft.responseTone ?? DEFAULT_RESPONSE_TONE) === option.value;
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            role="radio"
-                            aria-checked={active}
-                            className={active ? "active" : ""}
-                            onClick={() => setConfigDraft((current) => current ? { ...current, responseTone: option.value } : current)}
-                          >
-                            <strong>{option.label}</strong>
-                            <span>{option.description}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <div className="settings-save-row">
-                      <span className="subtle-inline">保存后立即应用于后续回复。</span>
-                      <button className="button warm" type="button" onClick={() => void saveConfigDraft()}>保存</button>
-                    </div>
-                  </div>
-                </div>
+                <ResponseTonePage configDraft={configDraft} options={RESPONSE_TONE_OPTIONS} defaultTone={DEFAULT_RESPONSE_TONE} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 
               {settingsTab === "update" ? (
-                <div className="settings-section">
-                  <div className="config-block update-settings-panel">
-                    <div className="section-copy section-copy-with-action">
-                      <div>
-                        <strong>CodeXH 更新</strong>
-                        <span>启动时会静默检查；安装更新会保留本地聊天、项目、知识库和日志。</span>
-                      </div>
-                      <button
-                        className="button ghost"
-                        onClick={() => void checkForUpdates()}
-                        disabled={updateState?.phase === "checking" || updateState?.phase === "downloading" || updateState?.phase === "installing"}
-                      >
-                        {updateState?.phase === "checking" ? "检查中" : "检查更新"}
-                      </button>
-                    </div>
-                    <div className="update-version-row">
-                      <span>当前版本</span>
-                      <strong>{updateState?.currentVersion ?? "读取中"}</strong>
-                      {updateState?.remoteVersion ? <><span>最新版本</span><strong>{updateState.remoteVersion}</strong></> : null}
-                      {updateState ? <span className={`update-phase ${updateState.phase}`}>{formatUpdatePhase(updateState.phase)}</span> : null}
-                    </div>
-                    {updateState?.changelog ? <pre className="update-changelog">{updateState.changelog}</pre> : null}
-                    {updateState?.phase === "downloading" ? (
-                      <div className="update-progress-group">
-                        <div className="update-progress" aria-label={`下载进度 ${updateState.progress ?? 0}%`}>
-                          <span style={{ width: `${updateState.progress ?? 0}%` }} />
-                        </div>
-                        <div className="update-progress-meta">
-                          <span>{formatUpdateDownloadSize(updateState.receivedBytes, updateState.totalBytes)}</span>
-                          <strong>{updateState.progress === undefined ? "正在接收" : `${updateState.progress}%`}</strong>
-                        </div>
-                      </div>
-                    ) : null}
-                    {updateState?.error ? <div className="update-error">{updateState.error}</div> : null}
-                    {updateState?.phase === "downloaded" && updateState.downloadedInstaller ? (
-                      <div className="update-download-path">安装包已保存至：<code>{updateState.downloadedInstaller}</code></div>
-                    ) : null}
-                    {updateState?.phase === "available" ? (
-                      <div className="action-row">
-                        <button className="button warm" onClick={() => void downloadAvailableUpdate()} disabled={!updateState.isPackaged}>
-                          {updateState.isPackaged ? "下载更新" : "开发模式不可下载"}
-                        </button>
-                      </div>
-                    ) : null}
-                    {updateState?.phase === "downloaded" ? (
-                      <div className="action-row">
-                        <button className="button warm" onClick={() => void installDownloadedUpdate()}>立即安装并重启</button>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
+                <SettingsUpdatePage updateState={updateState} onCheck={() => void checkForUpdates()} onDownload={() => void downloadAvailableUpdate()} onInstall={() => void installDownloadedUpdate()} formatPhase={formatUpdatePhase} formatDownloadSize={formatUpdateDownloadSize} />
               ) : null}
 
               {settingsTab === "knowledge" ? (
-                <div className="settings-section knowledge-settings-section">
-                  <div className={`config-block knowledge-import-panel ${isKnowledgeImporting ? "is-importing" : ""}`}>
-                    <div className="section-copy section-copy-row knowledge-import-heading">
-                      <div>
-                        <strong>新建知识库</strong>
-                        <span>从本地文件、网页或当前浏览器页面创建可检索资料。</span>
-                      </div>
-                      <span className="knowledge-source-count">{knowledgeSources.length} 个来源</span>
-                    </div>
-                    <div className="knowledge-import-layout">
-                      <section className="knowledge-import-column knowledge-import-details" aria-label="知识库基本信息">
-                        <div className="knowledge-column-heading"><span>01</span><strong>基本信息</strong></div>
-                        <label className="settings-field">
-                          <span>名称</span>
-                          <input value={knowledgeName} onChange={(event) => setKnowledgeName(event.target.value)} placeholder="知识库名称" />
-                        </label>
-                        <label className="settings-field">
-                          <span>可见范围</span>
-                          <ComposerSelect
-                            className="form-select knowledge-scope-select"
-                            ariaLabel="可见范围"
-                            value={knowledgeScope}
-                            onChange={(scope) => setKnowledgeScope(scope as KnowledgeScope)}
-                            options={[
-                              { value: "global", label: "全局知识库" },
-                              { value: "project", label: "项目知识库" },
-                              { value: "imported", label: "仅当前会话导入" }
-                            ]}
-                            placeholder="选择可见范围"
-                          />
-                        </label>
-                        {knowledgeScope === "project" && !canImportProjectKnowledge ? <div className="knowledge-scope-warning">项目知识库需要先切换到项目聊天。</div> : null}
-                        <details className="knowledge-format-details">
-                          <summary>支持的文件格式</summary>
-                          <span>md、txt、json、html、csv、xlsx、xls、docx、pdf、pptx</span>
-                        </details>
-                      </section>
-                      <section className="knowledge-import-column knowledge-import-sources" aria-label="知识库来源">
-                        <div className="knowledge-column-heading"><span>02</span><strong>添加来源</strong></div>
-                        {isKnowledgeUrlEditorOpen ? (
-                          <div className="knowledge-url-editor">
-                            <textarea autoFocus value={knowledgeUrlInput} onChange={(event) => setKnowledgeUrlInput(event.target.value)} placeholder="粘贴 URL，每行一个" rows={2} />
-                            <div className="knowledge-url-editor-actions">
-                              <button className="button ghost" type="button" onClick={() => { setKnowledgeUrlInput(""); setIsKnowledgeUrlEditorOpen(false); }}>取消</button>
-                              <button className="button primary" type="button" onClick={() => { if (addKnowledgeUrls()) setIsKnowledgeUrlEditorOpen(false); }} disabled={!knowledgeUrlInput.trim()}>确定</button>
-                            </div>
-                          </div>
-                        ) : null}
-                        <div className="knowledge-source-toolbar">
-                          <button className="button ghost" type="button" onClick={() => void chooseKnowledgeSources("files")}><IconFile />文件</button>
-                          <button className="button ghost" type="button" onClick={() => void chooseKnowledgeSources("folders")}><IconFolder />文件夹</button>
-                          <button className="button ghost" type="button" onClick={() => setIsKnowledgeUrlEditorOpen(true)}><IconPlus />添加 URL</button>
-                        </div>
-                        <div className="knowledge-source-list" aria-label="待导入来源">
-                          {knowledgeSources.length ? knowledgeSources.map((source) => (
-                            <div key={knowledgeSourceKey(source)} className={`knowledge-source-item ${source.kind}`}>
-                              <span className="knowledge-source-icon" aria-hidden>{source.kind === "folder" ? <IconFolder /> : source.kind === "file" ? <IconFile /> : <IconGlobe />}</span>
-                              <code title={source.kind === "file" || source.kind === "folder" ? source.path : source.url}>{source.kind === "file" || source.kind === "folder" ? source.path : source.url}</code>
-                              <button type="button" className="knowledge-source-remove" onClick={() => removeKnowledgeSource(knowledgeSourceKey(source))} title="移除来源" aria-label="移除来源"><IconClose /></button>
-                            </div>
-                          )) : <div className="knowledge-source-empty">尚未添加来源</div>}
-                        </div>
-                      </section>
-                    </div>
-                    <div className="knowledge-import-footer">
-                      <span>{knowledgeSources.length ? `将处理 ${knowledgeSources.length} 个来源` : "添加来源后即可导入"}</span>
-                      <button className="button primary" onClick={() => void importKnowledge()} disabled={isKnowledgeImporting || knowledgeSources.length === 0 || (knowledgeScope === "project" && !canImportProjectKnowledge)}>
-                        {isKnowledgeImporting ? <><IconSpinner />正在导入...</> : "导入并生成 Bundle"}
-                      </button>
-                    </div>
-                    {isKnowledgeImporting ? (
-                      <div className="knowledge-import-progress" role="status" aria-live="polite">
-                        <IconSpinner />
-                        <span>正在抓取网页内容并建立知识索引...</span>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="config-block knowledge-binding-panel">
-                    <div className="section-copy section-copy-row">
-                      <div>
-                        <strong>当前任务可用</strong>
-                        <span>当前任务会自动检索这些知识库。</span>
-                      </div>
-                      <span className="knowledge-source-count">{snapshot?.knowledgeBases.length ?? 0}</span>
-                    </div>
-                    <div className="knowledge-binding-list">
-                      {snapshot?.knowledgeBases.length ? (
-                        snapshot.knowledgeBases.map((knowledgeBase) => (
-                          <article key={knowledgeBase.id} className="knowledge-binding-item">
-                            <span className="knowledge-binding-icon" aria-hidden><IconKnowledge /></span>
-                            <div>
-                              <strong>{knowledgeBase.displayName}</strong>
-                              <span>{formatKnowledgeScope(knowledgeBase.scope)}</span>
-                            </div>
-                          </article>
-                        ))
-                      ) : (
-                        <div className="knowledge-binding-empty">当前任务还没有可用知识库</div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="config-block knowledge-management-panel">
-                    <div className="section-copy section-copy-row">
-                      <div>
-                        <strong>知识库管理</strong>
-                        <span>全局资料自动对所有聊天可见；项目资料仅对同一项目可见。</span>
-                      </div>
-                      <button className="button ghost compact-icon-button" onClick={() => void refreshKnowledgeBases()} title="刷新列表">
-                        <IconRefresh />
-                      </button>
-                    </div>
-                    <div className="knowledge-base-list">
-                      {knowledgeBases.length ? knowledgeBases.map((knowledgeBase) => {
-                        const documents = knowledgeDocuments[knowledgeBase.id];
-                        const isBusy = knowledgeBusyId === knowledgeBase.id;
-                        return (
-                          <article key={knowledgeBase.id} className="knowledge-base-row">
-                            <div className="knowledge-base-main">
-                              <div className="knowledge-base-title">
-                                <strong>{knowledgeBase.displayName}</strong>
-                                <span className={`knowledge-scope-pill ${knowledgeBase.scope}`}>{formatKnowledgeScope(knowledgeBase.scope)}</span>
-                                <span className={`knowledge-status ${knowledgeBase.status}`}>{formatKnowledgeStatus(knowledgeBase.status)}</span>
-                              </div>
-                              {knowledgeBase.scopeTargetLabel ? (
-                                <span className={`knowledge-base-target ${knowledgeBase.scope}`} title={knowledgeBase.scopeTargetLabel}>
-                                  {knowledgeBase.scopeTargetLabel}
-                                </span>
-                              ) : null}
-                              <span className="knowledge-base-meta">
-                                {knowledgeBase.documentCount} 个文档 · {knowledgeBase.chunkCount} 个片段 · {formatKnowledgeBytes(knowledgeBase.indexedBytes)} · 更新于 {formatRelativeTime(knowledgeBase.updatedAt)}
-                              </span>
-                            </div>
-                            <div className="knowledge-base-actions">
-                              <button className="button ghost" onClick={() => void toggleKnowledgeDocuments(knowledgeBase.id)}>
-                                {documents ? "收起文档" : "查看文档"}
-                              </button>
-                              <button className="button ghost" onClick={() => void refreshKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
-                                {isBusy ? "处理中" : "刷新"}
-                              </button>
-                              <button className="button ghost danger-icon-button" onClick={() => void deleteKnowledgeBase(knowledgeBase.id)} disabled={isBusy} title="删除知识库">
-                                <IconTrash />
-                              </button>
-                            </div>
-                            {documents ? (
-                              <div className="knowledge-document-list">
-                                {documents.map((document) => (
-                                  <div key={document.id} className={`knowledge-document-row ${document.status}`}>
-                                    <IconFile />
-                                    <span title={document.sourcePath}>{document.title}</span>
-                                    <small>{document.status === "missing" ? "源文件已删除" : document.status}</small>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : null}
-                          </article>
-                        );
-                      }) : <div className="detail-empty">尚未导入本地知识库。</div>}
-                    </div>
-                  </div>
-                </div>
+                <KnowledgePage
+                  knowledgeSources={knowledgeSources}
+                  knowledgeName={knowledgeName}
+                  setKnowledgeName={setKnowledgeName}
+                  knowledgeScope={knowledgeScope}
+                  setKnowledgeScope={setKnowledgeScope}
+                  canImportProjectKnowledge={canImportProjectKnowledge}
+                  isKnowledgeUrlEditorOpen={isKnowledgeUrlEditorOpen}
+                  setIsKnowledgeUrlEditorOpen={setIsKnowledgeUrlEditorOpen}
+                  knowledgeUrlInput={knowledgeUrlInput}
+                  setKnowledgeUrlInput={setKnowledgeUrlInput}
+                  onAddUrls={addKnowledgeUrls}
+                  onChooseSources={chooseKnowledgeSources}
+                  onRemoveSource={removeKnowledgeSource}
+                  getSourceKey={knowledgeSourceKey}
+                  isKnowledgeImporting={isKnowledgeImporting}
+                  onImport={importKnowledge}
+                  snapshot={snapshot}
+                  knowledgeBases={knowledgeBases}
+                  knowledgeDocuments={knowledgeDocuments}
+                  knowledgeBusyId={knowledgeBusyId}
+                  onRefreshBases={refreshKnowledgeBases}
+                  onToggleDocuments={toggleKnowledgeDocuments}
+                  onRefreshBase={refreshKnowledgeBase}
+                  onDeleteBase={deleteKnowledgeBase}
+                  formatScope={formatKnowledgeScope}
+                  formatStatus={formatKnowledgeStatus}
+                  formatBytes={formatKnowledgeBytes}
+                  formatRelativeTime={formatRelativeTime}
+                />
               ) : null}
 
               {settingsTab === "apiFavorites" ? (
-                <div className="settings-section api-favorites-settings-section">
-                  <ApiCardFavoritesPanel
-                    onInsert={(favorite) => {
-                      setIsSettingsOpen(false);
-                      void sendApiCardFavoriteToChat(favorite);
-                    }}
-                  />
-                </div>
+                <ApiFavoritesPage onInsert={(favorite) => {
+                  setIsSettingsOpen(false);
+                  void sendApiCardFavoriteToChat(favorite);
+                }} />
               ) : null}
               {settingsTab === "memory" ? (
-                <div className="settings-section memory-settings-section">
-                  <div className="config-block memory-management-panel">
-                    <div className="section-copy">
-                      <strong>记忆</strong>
-                      <span>从已完成主任务中提炼脱敏经验；通用经验全局可用，项目经验只在对应项目中使用。</span>
-                    </div>
-                    {configDraft ? (
-                      <div className="memory-toolbar">
-                        <div className="memory-toolbar-main">
-                          <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.generateMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, generateMemories: event.target.checked } } : current)} /> <span>生成经验</span></label>
-                          <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.useMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, useMemories: event.target.checked } } : current)} /> <span>任务中使用</span></label>
-                          <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.dedicatedTools} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, dedicatedTools: event.target.checked } } : current)} /> <span>开放专用工具</span></label>
-                          <label className="memory-filter-field"><span>保留天数</span><input className="form-input" type="number" min="7" max="3650" value={configDraft.selfImprovement.retentionDays} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, retentionDays: Number(event.target.value) || 180 } } : current)} /></label>
-                          <label className="memory-filter-field"><span>最大记录</span><input className="form-input" type="number" min="20" max="5000" value={configDraft.selfImprovement.maxMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, maxMemories: Number(event.target.value) || 500 } } : current)} /></label>
-                        </div>
-                        <div className="memory-toolbar-actions">
-                          <span className="memory-count-pill">{selfImprovementMemories.length} 条记录</span>
-                          <button className="button ghost" type="button" onClick={() => void refreshSelfImprovementNow()} disabled={isRefreshingSelfImprovementMemories}><IconRefresh /><span>{isRefreshingSelfImprovementMemories ? "处理中" : "立即提炼"}</span></button>
-                          <button className="button ghost" type="button" onClick={() => setIsClearSelfImprovementConfirmOpen(true)} disabled={selfImprovementMemories.length === 0 || isClearingSelfImprovement}><IconTrash /><span>清空记忆</span></button>
-                          <button className="button ghost" type="button" onClick={() => void saveConfigDraft()}><span>保存设置</span></button>
-                        </div>
-                      </div>
-                    ) : null}
-                    <div ref={selfImprovementMemoryListRef} className="memory-solution-list memory-paged-list" aria-label="自我完善经验列表">
-                      {visibleSelfImprovementMemories.map((memory) => (
-                        <article key={memory.id} className="memory-solution-card">
-                          <div className="memory-solution-card-head"><div className="memory-solution-card-copy"><div className="memory-solution-card-title"><strong>{memory.title}</strong><span className="memory-meta-chip soft">{memory.scope === "project" ? "项目" : "全局"}</span></div><p className="memory-solution-summary">{memory.content}</p></div><button className="button ghost danger-icon-button" type="button" title="删除经验" onClick={() => void deleteSelfImprovementMemory(memory.id)}><IconTrash /></button></div>
-                        </article>
-                      ))}
-                      {!selfImprovementMemories.length ? <div className="memory-empty-state"><div className="memory-empty-icon" aria-hidden><IconKnowledge /></div><strong>暂无记忆记录</strong><p>完成的主任务会在空闲后自动提炼为记忆。</p></div> : null}
-                    </div>
-                    <MemoryPagination
-                      label="记忆列表"
-                      page={safeSelfImprovementMemoryPage}
-                      pageCount={selfImprovementMemoryPageCount}
-                      totalCount={selfImprovementMemories.length}
-                      onPageChange={(page) => {
-                        setSelfImprovementMemoryPage(page);
-                        window.requestAnimationFrame(() => selfImprovementMemoryListRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
-                      }}
-                    />
-                  </div>
-                  <div className="config-block memory-management-panel">
-                    <div className="section-copy">
-                      <strong>错误恢复经验</strong>
-                      <span>按模型隔离存储；不同模型的失败模式不会互相干扰。</span>
-                    </div>
-
-                    <div className="memory-toolbar">
-                      <div className="memory-toolbar-main">
-                        <label className="memory-filter-field">
-                          <span>模型</span>
-                          <ComposerSelect
-                            className="form-select memory-model-filter"
-                            ariaLabel="按模型筛选记忆"
-                            value={errorSolutionModelFilter}
-                            onChange={(value) => {
-                              setErrorSolutionModelFilter(value);
-                              setErrorSolutionPage(0);
-                              void refreshErrorSolutions(value);
-                            }}
-                            options={errorSolutionModelOptions}
-                            placeholder="选择模型"
-                          />
-                        </label>
-                        <span className="memory-count-pill">{errorSolutions.length} 条记录</span>
-                      </div>
-                      <div className="memory-toolbar-actions">
-                        <button
-                          className="button ghost"
-                          type="button"
-                          onClick={() => void refreshErrorSolutions()}
-                          title="刷新列表"
-                        >
-                          <IconRefresh />
-                          <span>刷新</span>
-                        </button>
-                        <button
-                          className="button ghost"
-                          type="button"
-                          disabled={errorSolutions.length === 0 || isClearingErrorSolutions}
-                          onClick={() => setIsClearErrorSolutionsConfirmOpen(true)}
-                        >
-                          <IconTrash />
-                          <span>{errorSolutionModelFilter === "all" ? "清空全部" : "清空当前模型"}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div ref={errorSolutionListRef} className="memory-solution-list memory-paged-list" aria-label="错误恢复经验列表">
-                      {visibleErrorSolutions.length ? visibleErrorSolutions.map((solution) => {
-                        const isBusy = errorSolutionBusyId === solution.id;
-                        const isExpanded = expandedErrorSolutionIds.has(solution.id);
-                        const modelLabel = resolveErrorSolutionModelLabel(solution.modelId);
-                        const recallCount = solution.recallCount ?? 0;
-                        const recallStatus = getErrorSolutionRecallStatus(solution.lastRecallOutcome);
-                        return (
-                          <article key={solution.id} className={`memory-solution-card${isExpanded ? " is-expanded" : ""}`}>
-                            <div className="memory-solution-card-head">
-                              <div className="memory-solution-card-copy">
-                                <div className="memory-solution-card-title">
-                                  <strong title={solution.toolName}>{solution.toolName}</strong>
-                                  <span className="memory-meta-chip">{modelLabel}</span>
-                                  <span className="memory-meta-chip soft">成功 {solution.successCount} 次</span>
-                                </div>
-                                <p className="memory-solution-summary" title={solution.solutionSummary}>
-                                  {solution.solutionSummary}
-                                </p>
-                                <div className="memory-solution-card-meta">
-                                  <span title={solution.taskKeyPattern}>{solution.taskKeyPattern}</span>
-                                  <span>{solution.projectId ? "项目范围" : "全局范围"}</span>
-                                  <span>引用 {recallCount} 次</span>
-                                  <span>{solution.lastRecalledAt ? `最近命中 ${formatRelativeTime(solution.lastRecalledAt)}` : "尚未命中"}</span>
-                                  {recallStatus ? <span className={`memory-recall-status is-${solution.lastRecallOutcome}`}>{recallStatus}</span> : null}
-                                  <span>最近使用 {formatRelativeTime(solution.lastUsedAt)}</span>
-                                </div>
-                              </div>
-                              <div className="memory-solution-card-actions">
-                                <button
-                                  className={`button ghost memory-solution-toggle${isExpanded ? " is-expanded" : ""}`}
-                                  type="button"
-                                  onClick={() => toggleErrorSolutionExpanded(solution.id)}
-                                  aria-expanded={isExpanded}
-                                  aria-controls={`error-solution-details-${solution.id}`}
-                                >
-                                  <IconChevronDown />
-                                  <span>{isExpanded ? "收起" : "详情"}</span>
-                                </button>
-                                <button
-                                  className="button ghost danger-icon-button"
-                                  type="button"
-                                  onClick={() => void deleteErrorSolution(solution.id)}
-                                  disabled={isBusy || isClearingErrorSolutions}
-                                  title="删除错误恢复经验"
-                                  aria-label="删除错误恢复经验"
-                                >
-                                  <IconTrash />
-                                </button>
-                              </div>
-                            </div>
-                            {isExpanded ? (
-                              <div id={`error-solution-details-${solution.id}`} className="memory-solution-details">
-                                <div className="memory-solution-detail-block">
-                                  <span>所属模型</span>
-                                  <p>{modelLabel}（{solution.modelId || "未知"}）</p>
-                                </div>
-                                <div className="memory-solution-detail-block">
-                                  <span>引用情况</span>
-                                  <p>累计引用 {recallCount} 次；{solution.lastRecalledAt
-                                    ? `最近命中于 ${formatRelativeTime(solution.lastRecalledAt)}${recallStatus ? `，结果：${recallStatus}` : ""}`
-                                    : "尚未在后续任务中命中"}</p>
-                                </div>
-                                <div className="memory-solution-detail-block">
-                                  <span>失败摘要</span>
-                                  <p>{solution.errorSummary || "无"}</p>
-                                </div>
-                                <div className="memory-solution-detail-block">
-                                  <span>最优解</span>
-                                  <p>{solution.solutionSummary || "无"}</p>
-                                </div>
-                                <div className="memory-solution-detail-meta">
-                                  <span>签名：{solution.errorSignature}</span>
-                                  <span>创建于 {formatRelativeTime(solution.createdAt)}</span>
-                                </div>
-                                <button
-                                  className="memory-solution-collapse"
-                                  type="button"
-                                  onClick={() => toggleErrorSolutionExpanded(solution.id)}
-                                >
-                                  <IconChevronDown />
-                                  <span>收起详情</span>
-                                </button>
-                              </div>
-                            ) : null}
-                          </article>
-                        );
-                      }) : (
-                        <div className="memory-empty-state">
-                          <div className="memory-empty-icon" aria-hidden>
-                            <IconKnowledge />
-                          </div>
-                          <strong>暂无记忆记录</strong>
-                          <p>
-                            {errorSolutionModelFilter === "all"
-                              ? "Agent 在失败并成功恢复后，会按模型自动写入最优解。"
-                              : "当前模型还没有记忆。可切换到「全部模型」查看其他记录。"}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                    <MemoryPagination
-                      label="错误恢复经验列表"
-                      page={safeErrorSolutionPage}
-                      pageCount={errorSolutionPageCount}
-                      totalCount={errorSolutions.length}
-                      onPageChange={(page) => {
-                        setErrorSolutionPage(page);
-                        window.requestAnimationFrame(() => errorSolutionListRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
-                      }}
-                    />
-                  </div>
-                </div>
+                <MemoryPage configDraft={configDraft} setConfigDraft={setConfigDraft} selfImprovementMemories={selfImprovementMemories} visibleSelfImprovementMemories={visibleSelfImprovementMemories} selfImprovementMemoryListRef={selfImprovementMemoryListRef} safeSelfImprovementMemoryPage={safeSelfImprovementMemoryPage} selfImprovementMemoryPageCount={selfImprovementMemoryPageCount} setSelfImprovementMemoryPage={setSelfImprovementMemoryPage} isRefreshingSelfImprovementMemories={isRefreshingSelfImprovementMemories} isClearingSelfImprovement={isClearingSelfImprovement} onRefreshMemories={refreshSelfImprovementNow} onOpenClearMemories={() => setIsClearSelfImprovementConfirmOpen(true)} onSaveConfig={saveConfigDraft} onDeleteMemory={deleteSelfImprovementMemory} errorSolutionModelFilter={errorSolutionModelFilter} setErrorSolutionModelFilter={setErrorSolutionModelFilter} setErrorSolutionPage={setErrorSolutionPage} onRefreshErrorSolutions={refreshErrorSolutions} errorSolutionModelOptions={errorSolutionModelOptions} errorSolutions={errorSolutions} visibleErrorSolutions={visibleErrorSolutions} errorSolutionListRef={errorSolutionListRef} safeErrorSolutionPage={safeErrorSolutionPage} errorSolutionPageCount={errorSolutionPageCount} isClearingErrorSolutions={isClearingErrorSolutions} errorSolutionBusyId={errorSolutionBusyId} expandedErrorSolutionIds={expandedErrorSolutionIds} resolveModelLabel={resolveErrorSolutionModelLabel} getRecallStatus={getErrorSolutionRecallStatus} formatRelativeTime={formatRelativeTime} onToggleExpanded={toggleErrorSolutionExpanded} onDeleteErrorSolution={deleteErrorSolution} onOpenClearErrorSolutions={() => setIsClearErrorSolutionsConfirmOpen(true)} />
               ) : null}
-
               {settingsTab === "capabilities" ? (
-                <div className="settings-subtab-bar capability-tab-strip" role="tablist" aria-label="能力中心分类">
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={capabilityTab === "skills"}
-                      className={`capability-subtab${capabilityTab === "skills" ? " active" : ""}`}
-                      onClick={() => setCapabilityTab("skills")}
-                    >
-                      <span>Skill 库</span>
-                      <small className="capability-tab-count">{skills.length}</small>
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={capabilityTab === "userSkills"}
-                      className={`capability-subtab${capabilityTab === "userSkills" ? " active" : ""}`}
-                      onClick={() => setCapabilityTab("userSkills")}
-                    >
-                      <span>用户技能</span>
-                      <small className="capability-tab-count">{userSkills.length}</small>
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={capabilityTab === "plugins"}
-                      className={`capability-subtab${capabilityTab === "plugins" ? " active" : ""}`}
-                      onClick={() => setCapabilityTab("plugins")}
-                    >
-                      <span>插件</span>
-                      <small className="capability-tab-count">{plugins.length}</small>
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={capabilityTab === "lab"}
-                      className={`capability-subtab${capabilityTab === "lab" ? " active" : ""}`}
-                      onClick={() => setCapabilityTab("lab")}
-                    >
-                      <span>技能实验室</span>
-                    </button>
-                </div>
+                <CapabilitiesPage activeTab={capabilityTab} skillsCount={skills.length} userSkillsCount={userSkills.length} pluginsCount={plugins.length} onTabChange={setCapabilityTab} />
               ) : null}
-
               {settingsTab === "capabilities" && capabilityTab === "skills" ? (
-                <div key="capability-skills" className="settings-section capability-panel">
-                  <div className="config-block skills-config-block">
-                    <div className="section-copy">
-                      <strong>独立 Skills</strong>
-                      <span>展示系统、用户和项目 Skill。插件内的 Skill 请在“插件管理”中查看和移除。</span>
-                    </div>
-                    <div className="skills-toolbar">
-                      <div className="skills-search-wrap">
-                        <span className="skills-search-icon" aria-hidden><IconSearch /></span>
-                        <input
-                          className="skills-search-input"
-                          type="search"
-                          value={skillsSearchQuery}
-                          onChange={(event) => setSkillsSearchQuery(event.target.value)}
-                          placeholder="搜索名称 / 领域 / 描述"
-                        />
-                      </div>
-                      <div className="skills-sort-control" ref={skillsSortMenuRef}>
-                        <span>排序</span>
-                        <div className="skills-sort-menu">
-                          <button
-                            type="button"
-                            className={`skills-sort-trigger${skillsSortOpen ? " is-open" : ""}`}
-                            aria-haspopup="listbox"
-                            aria-expanded={skillsSortOpen}
-                            onClick={() => setSkillsSortOpen((current) => !current)}
-                          >
-                            <span>{getSkillSortLabel(skillsSortMode)}</span>
-                            <IconChevronDown />
-                          </button>
-                          {skillsSortPresence.value ? (
-                            <div className="skills-sort-popover" data-motion={skillsSortPresence.phase} role="listbox">
-                              {SKILL_SORT_OPTIONS.map(({ value, label }) => (
-                                <button
-                                  key={value}
-                                  type="button"
-                                  role="option"
-                                  aria-selected={skillsSortMode === value}
-                                  className={`skills-sort-option${skillsSortMode === value ? " is-selected" : ""}`}
-                                  onClick={() => {
-                                    setSkillsSortMode(value);
-                                    setSkillsSortOpen(false);
-                                  }}
-                                >
-                                  <span>{label}</span>
-                                  {skillsSortMode === value ? <IconCheck /> : null}
-                                </button>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="skills-list capability-list">
-                      {visibleSkills.length ? visibleSkills.map(({ skill, stats }) => {
-                        const scopeLabel = skill.scope;
-                        const scopeClass = skill.scope === "system"
-                          ? "system"
-                          : skill.scope === "repo"
-                            ? "repo"
-                            : "user";
-                        const successLabel = stats.callCount > 0
-                          ? `${Math.round(stats.successRate * 100)}%`
-                          : "—";
-                        const canRemove = !skill.pluginId && skill.scope === "user";
-                        return (
-                          <article key={skill.id} className="skill-row capability-list-item">
-                            <div className="skill-row-main">
-                              <div className="skill-row-title">
-                                <span className="skill-row-icon" aria-hidden><IconSkills /></span>
-                                <strong title={skill.displayName ?? skill.qualifiedName}>
-                                  {skill.displayName ?? skill.qualifiedName}
-                                </strong>
-                                <span className={`skill-scope-pill ${scopeClass}`}>{scopeLabel}</span>
-                                <span className="skill-domain-chip">{skill.domain ?? "通用"}</span>
-                              </div>
-                              <p className="skill-row-desc" title={skill.description}>{skill.description}</p>
-                              <div className="skill-row-meta">
-                                <span className={`skill-stat ${stats.callCount > 0 ? "is-hot" : ""}`}>
-                                  调用 {stats.callCount}
-                                </span>
-                                <span className={`skill-stat ${stats.callCount > 0 && stats.successRate >= 0.9 ? "is-good" : ""}`}>
-                                  成功 {successLabel}
-                                </span>
-                                <span className="skill-stat">
-                                  {stats.lastUsedAt ? formatRelativeTime(stats.lastUsedAt) : "未使用"}
-                                </span>
-                                <span className="skill-row-path" title={skill.skillPath}>{skill.skillPath}</span>
-                              </div>
-                            </div>
-                            {canRemove ? (
-                              <button
-                                type="button"
-                                className="button ghost danger-icon-button skill-remove-button"
-                                title={`移除 ${skill.displayName ?? skill.qualifiedName}`}
-                                aria-label={`移除 ${skill.displayName ?? skill.qualifiedName}`}
-                                onClick={() => setManagedRemoval({ kind: "skill", skill })}
-                              >
-                                <IconTrash />
-                              </button>
-                            ) : null}
-                          </article>
-                        );
-                      }) : <div className="detail-empty">{skillsSearchQuery.trim() ? "没有匹配的 Skill。" : "尚未加载独立 Skill。"}</div>}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-
-              {settingsTab === "mcp" && false ? (
-                <div className="settings-section">
-                  <div className="config-block">
-                    <div className="section-copy">
-                      <strong>MCP 服务</strong>
-                      <span>启用后的服务可在聊天任务中被模型调用。</span>
-                    </div>
-                    <div className="stack-list">
-                      {(configDraft?.mcpServers ?? []).length ? (
-                        (configDraft?.mcpServers ?? []).map((server) => (
-                          <article key={server.id} className="stack-card compact mcp-settings-card">
-                            <div className="stack-card-header">
-                              <strong>{server.name}</strong>
-                              <label className="model-capability-toggle">
-                                <input
-                                  type="checkbox"
-                                  checked={server.enabled}
-                                  onChange={(event) =>
-                                    setConfigDraft((current) => {
-                                      if (!current) {
-                                        return current;
-                                      }
-                                      const next = cloneConfig(current);
-                                      next.mcpServers = next.mcpServers.map((item) =>
-                                        item.id === server.id ? { ...item, enabled: event.target.checked } : item
-                                      );
-                                      return next;
-                                    })
-                                  }
-                                />
-                                <span>{server.enabled ? "已启用" : "已停用"}</span>
-                              </label>
-                            </div>
-                            <span>{server.url ?? server.command ?? server.id}</span>
-                          </article>
-                        ))
-                      ) : (
-                        <div className="detail-empty">当前还没有配置 MCP 服务。</div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="settings-save-row">
-                    <span className="subtle-inline">保存后会同步到聊天运行时。</span>
-                    <button className="button warm" onClick={() => void saveConfigDraft()} disabled={!configDraft}>
-                      保存
-                    </button>
-                  </div>
-                </div>
+                <SkillsPage skillsSearchQuery={skillsSearchQuery} setSkillsSearchQuery={setSkillsSearchQuery} skillsSortMenuRef={skillsSortMenuRef} skillsSortOpen={skillsSortOpen} setSkillsSortOpen={setSkillsSortOpen} skillsSortMode={skillsSortMode} setSkillsSortMode={setSkillsSortMode} skillsSortPresence={skillsSortPresence} visibleSkills={visibleSkills} formatRelativeTime={formatRelativeTime} onRemove={(skill) => setManagedRemoval({ kind: "skill", skill })} />
               ) : null}
 
               {settingsTab === "database" ? (
-                <div className="settings-section database-settings-section">
-                  <div className="config-block database-config-block">
-                    <div className="section-copy-with-action">
-                      <div><strong>数据库连接</strong><span>按连接权限执行查询或数据变更。密码由系统加密保存，不会写入配置文件。</span></div>
-                      <button className="button primary" type="button" onClick={addDatabaseConnection} disabled={!configDraft}>添加数据库</button>
-                    </div>
-                    <div className="mcp-server-list database-connection-list">
-                      {(configDraft?.databaseConnections ?? []).map((connection) => {
-                        const hasSavedCredential = savedDatabaseCredentialIds.has(connection.id);
-                        const isTesting = testingDatabaseConnectionId === connection.id;
-                        const isSavingPassword = savingDatabaseCredentialId === connection.id;
-                        const isChangingEnabled = changingDatabaseEnabledId === connection.id;
-                        const isEditing = editingDatabaseConnectionId === connection.id;
-                        const engineLabel = connection.engine === "postgresql" ? "PostgreSQL" : connection.engine === "mysql" ? "MySQL" : "SQL Server";
-                        const target = `${connection.username || "user"}@${connection.host || "host"}:${connection.port}/${connection.database || "database"}`;
-                        const databaseOptions = [...new Set([connection.database, ...(databaseCatalogs[connection.id] ?? [])])].filter(Boolean).map((database) => ({ value: database, label: database }));
-                        return (
-                        <article key={connection.id} className={`mcp-server-row database-connection-row ${isEditing ? "is-editing" : ""} ${connection.enabled ? "is-enabled" : "is-disabled"}`}>
-                          <div className="mcp-server-row-top">
-                            <div className="mcp-server-row-main">
-                              <div className="mcp-server-row-title">
-                                <span className="mcp-server-row-icon" aria-hidden><IconMcp /></span>
-                                <strong>{connection.name || connection.id}</strong>
-                                <span className="mcp-transport-pill">{engineLabel}</span>
-                                <span className={`mcp-status-pill ${connection.enabled ? "ready" : "disabled"}`}>{connection.enabled ? "启用" : "停用"}</span>
-                              </div>
-                              {!isEditing ? <span className="mcp-server-row-target" title={target}>{target}</span> : null}
-                            </div>
-                            <div className="mcp-server-row-side">
-                              <label className={`mcp-enable-switch ${connection.enabled ? "is-on" : ""}`}>
-                                <input type="checkbox" checked={connection.enabled} disabled={isChangingEnabled} onChange={(event) => void setDatabaseConnectionEnabled(connection, event.target.checked)} />
-                                <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
-                                <span className="mcp-enable-label">{connection.enabled ? "启用" : "停用"}</span>
-                              </label>
-                            </div>
-                          </div>
-                          {isEditing ? <div className="mcp-editor-grid database-connection-grid">
-                            <label className="settings-field"><span>名称</span><input value={connection.name} onChange={(event) => updateDatabaseDraft(connection.id, { name: event.target.value })} /></label>
-                            <label className="settings-field"><span>ID</span><input value={connection.id} disabled /></label>
-                            <label className="settings-field"><span>类型</span><ComposerSelect className="mcp-select" ariaLabel="数据库类型" value={connection.engine} onChange={(value) => { const engine = value as DatabaseConnectionConfig["engine"]; updateDatabaseDraft(connection.id, { engine, port: engine === "postgresql" ? 5432 : engine === "mysql" ? 3306 : 1433 }); }} options={[{ value: "postgresql", label: "PostgreSQL" }, { value: "mysql", label: "MySQL" }, { value: "sqlserver", label: "SQL Server" }]} placeholder="选择数据库类型" /></label>
-                            <label className="settings-field"><span>主机</span><input value={connection.host} onChange={(event) => updateDatabaseDraft(connection.id, { host: event.target.value })} /></label>
-                            <label className="settings-field"><span>端口</span><input type="number" value={connection.port} onChange={(event) => updateDatabaseDraft(connection.id, { port: Number(event.target.value) })} /></label>
-                            <label className="settings-field"><span>数据库</span>{databaseOptions.length > 0 ? <ComposerSelect className="mcp-select database-catalog-select" ariaLabel="数据库" value={connection.database} onChange={(database) => updateDatabaseDraft(connection.id, { database })} options={databaseOptions} placeholder="测试连接后选择数据库" /> : <input value={connection.database} onChange={(event) => updateDatabaseDraft(connection.id, { database: event.target.value })} />}</label>
-                            <label className="settings-field"><span>用户名</span><input value={connection.username} onChange={(event) => updateDatabaseDraft(connection.id, { username: event.target.value })} /></label>
-                            <label className="settings-field"><span>TLS</span><ComposerSelect className="mcp-select" ariaLabel="TLS 设置" value={connection.tlsMode} onChange={(value) => updateDatabaseDraft(connection.id, { tlsMode: value as DatabaseConnectionConfig["tlsMode"] })} options={[{ value: "require", label: "加密" }, { value: "verify", label: "验证证书" }, { value: "disable", label: "关闭" }]} placeholder="选择 TLS 设置" /></label>
-                            <fieldset className="database-permission-field">
-                              <legend>权限</legend>
-                              <div className="database-permission-options">
-                                {DATABASE_PERMISSION_OPTIONS.map((permission) => (
-                                  <label key={permission.value} className="database-permission-option">
-                                    <input
-                                      type="checkbox"
-                                      checked={connection.permissions.includes(permission.value)}
-                                      onChange={(event) => updateDatabaseDraft(connection.id, {
-                                        permissions: event.target.checked
-                                          ? [...new Set([...connection.permissions, permission.value])]
-                                          : connection.permissions.filter((value) => value !== permission.value)
-                                      })}
-                                    />
-                                    <span>{permission.label}</span>
-                                  </label>
-                                ))}
-                              </div>
-                            </fieldset>
-                            <label className="settings-field database-row-limit-field">
-                              <span>查询最大数量</span>
-                              <input
-                                type="number"
-                                min={1}
-                                max={1000}
-                                value={connection.maxRows}
-                                disabled={!connection.permissions.includes("query")}
-                                onChange={(event) => updateDatabaseDraft(connection.id, {
-                                  maxRows: Math.min(1000, Math.max(1, Number(event.target.value) || 1))
-                                })}
-                              />
-                              <small>每次查询最多 1000 条，运行时会再次限制。</small>
-                            </label>
-                            <label className="settings-field database-password-field"><span>密码</span><div className="database-password-control"><input type="password" value={databasePasswordDrafts[connection.id] ?? ""} placeholder={hasSavedCredential ? "已安全保存，输入可更新" : "输入数据库密码"} onChange={(event) => setDatabasePasswordDrafts((current) => ({ ...current, [connection.id]: event.target.value }))} />{hasSavedCredential ? <span className="database-credential-status">已保存</span> : null}</div><small>留空测试时会使用已加密保存的密码。</small></label>
-                          </div> : null}
-                          <div className="mcp-server-row-actions">
-                            <button className="button secondary" type="button" onClick={() => setEditingDatabaseConnectionId(isEditing ? null : connection.id)}>{isEditing ? "收起" : "编辑"}</button>
-                            <button className="button secondary" type="button" disabled={isTesting || isSavingPassword} onClick={() => void testDatabaseConnection(connection)}>{isTesting ? "测试中..." : "测试连接"}</button>
-                            <button className="button secondary" type="button" disabled={isSavingPassword || isTesting} onClick={() => void saveDatabaseConnection(connection)}>{isSavingPassword ? "保存中..." : "保存"}</button>
-                            <button className="button ghost" type="button" onClick={() => removeDatabaseConnection(connection.id)}>删除</button>
-                            {isEditing ? <span className="mcp-test-summary">{hasSavedCredential ? "密码已由系统加密保存。" : "输入并保存密码后可随时测试连接。"}</span> : null}
-                          </div>
-                        </article>
-                        );
-                      })}
-                      {(configDraft?.databaseConnections ?? []).length === 0 ? <div className="detail-empty">尚未配置数据库连接。</div> : null}
-                    </div>
-                  </div>
-                </div>
+                <DatabasePage configDraft={configDraft} savedCredentialIds={savedDatabaseCredentialIds} testingId={testingDatabaseConnectionId} savingCredentialId={savingDatabaseCredentialId} changingEnabledId={changingDatabaseEnabledId} editingId={editingDatabaseConnectionId} databaseCatalogs={databaseCatalogs} passwordDrafts={databasePasswordDrafts} permissions={DATABASE_PERMISSION_OPTIONS} setPasswordDrafts={setDatabasePasswordDrafts} setEditingId={setEditingDatabaseConnectionId} onAdd={addDatabaseConnection} onSetEnabled={setDatabaseConnectionEnabled} onUpdate={updateDatabaseDraft} onTest={testDatabaseConnection} onSave={saveDatabaseConnection} onRemove={removeDatabaseConnection} />
               ) : null}
 
               {settingsTab === "mcp" ? (
-                <div className="settings-section mcp-settings-section">
-                  <div className="config-block mcp-service-config">
-                    <div className="section-copy-with-action">
-                      <div>
-                        <strong>MCP 服务</strong>
-                        <span>按需编辑、测试和管理已载入的服务。</span>
-                      </div>
-                      <button className="button primary" type="button" onClick={addMcpServer} disabled={!configDraft}>添加服务</button>
-                    </div>
-                    <div className="mcp-server-list">
-                      {configDraft?.mcpServers.length ? configDraft.mcpServers.map((server) => {
-                        const runtime = mcpRuntimeServers.find((item) => item.id === server.id);
-                        const isEditing = editingMcpServerId === server.id;
-                        const testResult = mcpTestResults[server.id];
-                        const isStdio = (server.transport ?? "stdio") === "stdio";
-                        const transport = server.transport ?? "stdio";
-                        const transportLabel = transport === "streamable_http" ? "HTTP" : transport === "sse" ? "SSE" : "stdio";
-                        const statusState = (runtime?.status.state ?? (server.enabled ? "idle" : "disabled")).toLowerCase();
-                        return (
-                          <article key={server.id} className={`mcp-server-row ${isEditing ? "is-editing" : ""} ${server.enabled ? "is-enabled" : "is-disabled"}`}>
-                            <div className="mcp-server-row-top">
-                              <div className="mcp-server-row-main">
-                                <div className="mcp-server-row-title">
-                                  <span className="mcp-server-row-icon" aria-hidden><IconMcp /></span>
-                                  <strong>{server.name || server.id}</strong>
-                                 <span className={`mcp-transport-pill ${transport}`}>{transportLabel}</span>
-                                  <span className={`mcp-status-pill ${statusState}`}>{statusState}</span>
-                                  {server.auth?.mode === "oauth" ? <span className="mcp-transport-pill">{runtime?.authStatus === "signed_in" ? "OAuth 已登录" : "OAuth 未登录"}</span> : null}
-                                </div>
-                                {!isEditing ? (
-                                  <span className="mcp-server-row-target" title={server.command ?? server.url ?? server.id}>
-                                    {server.command ?? server.url ?? server.id}
-                                  </span>
-                                ) : null}
-                              </div>
-                              <div className="mcp-server-row-side">
-                                <label className={`mcp-enable-switch ${server.enabled ? "is-on" : ""}`}>
-                                  <input type="checkbox" checked={server.enabled} onChange={(event) => updateMcpServerDraft(server.id, { enabled: event.target.checked })} />
-                                  <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
-                                  <span className="mcp-enable-label">{server.enabled ? "启用" : "停用"}</span>
-                                </label>
-                              </div>
-                            </div>
-                            {runtime?.status.error ? <p className="mcp-error">{runtime.status.error}</p> : null}
-                            {isEditing ? (
-                              <div className="mcp-editor-grid">
-                                <label className="settings-field"><span>名称</span><input value={server.name} onChange={(event) => updateMcpServerDraft(server.id, { name: event.target.value })} /></label>
-                                <label className="settings-field"><span>ID</span><input value={server.id} onChange={(event) => updateMcpServerDraft(server.id, { id: event.target.value.trim() })} /></label>
-                                <label className="settings-field full"><span>描述</span><input value={server.description ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { description: event.target.value || undefined })} /></label>
-                                <label className="settings-field"><span>传输方式</span><ComposerSelect className="mcp-select" ariaLabel="传输方式" value={server.transport ?? "stdio"} onChange={(transport) => updateMcpServerDraft(server.id, { transport, command: transport === "stdio" ? server.command : undefined, url: transport === "stdio" ? undefined : server.url })} options={[{ value: "stdio", label: "stdio" }, { value: "sse", label: "SSE" }, { value: "streamable_http", label: "HTTP" }]} placeholder="选择传输方式" /></label>
-                                {isStdio ? <>
-                                  <label className="settings-field full"><span>命令</span><input value={server.command ?? ""} placeholder="npx" onChange={(event) => updateMcpServerDraft(server.id, { command: event.target.value })} /></label>
-                                  <label className="settings-field"><span>参数（每行一个）</span><textarea value={(server.args ?? []).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { args: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} /></label>
-                                  <label className="settings-field"><span>环境变量（KEY=VALUE）</span><textarea value={Object.entries(server.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => updateMcpServerDraft(server.id, { env: parseMcpEnvironment(event.target.value) })} /></label>
-                                </> : <>
-                                  <label className="settings-field full"><span>服务 URL</span><input value={server.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => updateMcpServerDraft(server.id, { url: event.target.value })} /></label>
-                                  <label className="settings-field"><span>认证方式</span><ComposerSelect className="mcp-select" ariaLabel="认证方式" value={server.auth?.mode ?? "none"} onChange={(mode) => updateMcpServerDraft(server.id, { auth: { mode: mode as "none" | "bearer_env" | "oauth" } })} options={[{ value: "none", label: "无认证" }, { value: "bearer_env", label: "Bearer 环境变量" }, { value: "oauth", label: "OAuth" }]} placeholder="选择认证方式" /></label>
-                                  <label className="settings-field"><span>默认工具审批</span><ComposerSelect className="mcp-select" ariaLabel="默认工具审批" value={server.defaultToolsApprovalMode ?? "prompt"} onChange={(defaultToolsApprovalMode) => updateMcpServerDraft(server.id, { defaultToolsApprovalMode: defaultToolsApprovalMode as "auto" | "prompt" | "writes" | "approve" })} options={[{ value: "prompt", label: "每次确认" }, { value: "auto", label: "自动执行" }, { value: "writes", label: "写入时确认" }, { value: "approve", label: "高风险确认" }]} placeholder="选择审批方式" /></label>
-                                  {server.auth?.mode === "bearer_env" ? <label className="settings-field full"><span>Bearer Token 环境变量</span><input value={server.auth.bearerTokenEnvVar ?? ""} placeholder="MCP_TOKEN" onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, bearerTokenEnvVar: event.target.value } })} /></label> : null}
-                                  {server.auth?.mode === "oauth" ? <>
-                                    <label className="settings-field"><span>OAuth Client ID</span><input value={server.auth.oauthClientId ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, oauthClientId: event.target.value } })} /></label>
-                                    <label className="settings-field"><span>Scopes（空格分隔）</span><input value={(server.auth.oauthScopes ?? []).join(" ")} onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, oauthScopes: event.target.value.split(/\s+/).filter(Boolean) } })} /></label>
-                                    <label className="settings-field full"><span>Resource Metadata URL（可选）</span><input value={server.auth.oauthResource ?? ""} onChange={(event) => updateMcpServerDraft(server.id, { auth: { ...server.auth!, oauthResource: event.target.value || undefined } })} /></label>
-                                  </> : null}
-                                </>}
-                              </div>
-                            ) : null}
-                            <div className="mcp-server-row-actions">
-                               <button className="button secondary" type="button" onClick={() => setEditingMcpServerId(isEditing ? null : server.id)}>{isEditing ? "收起" : "编辑"}</button>
-                               <button className="button secondary" type="button" disabled={testingMcpServerId === server.id} onClick={() => void testMcpServer(server)}>{testingMcpServerId === server.id ? "测试中" : "测试连接"}</button>
-                               <button className="button secondary" type="button" onClick={() => void refreshMcpToolDirectory(server.id)}>刷新工具</button>
-                               {server.auth?.mode === "oauth" ? <button className="button secondary" type="button" disabled={mcpAuthBusyId === server.id} onClick={() => void (runtime?.authStatus === "signed_in" ? logoutMcpServer(server.id) : loginMcpServer(server.id))}>{mcpAuthBusyId === server.id ? "处理中" : runtime?.authStatus === "signed_in" ? "退出 OAuth" : "登录 OAuth"}</button> : null}
-                               <button className="button ghost" type="button" onClick={() => removeMcpServer(server.id)}>删除</button>
-                               {testResult ? <span className="mcp-test-summary">工具 {testResult.tools.length} · 资源 {testResult.resources.length} · 模板 {testResult.resourceTemplates.length} · 提示词 {testResult.prompts.length}</span> : null}
-                             </div>
-                             {testResult ? (
-                               <details className="mcp-test-details">
-                                 <summary>
-                                   <span>查看发现的能力</span>
-                                   <span>{testResult.tools.length} 个工具</span>
-                                 </summary>
-                                 <div className="mcp-tool-list">
-                                   {testResult.tools.map((tool) => {
-                                     const policy = server.tools?.[tool.name];
-                                     return (
-                                       <div className="mcp-tool-row" key={tool.name}>
-                                         <label className="mcp-tool-enabled" title={policy?.enabled === false ? "启用工具" : "停用工具"}>
-                                           <input
-                                             type="checkbox"
-                                             checked={policy?.enabled !== false}
-                                             onChange={(event) => updateMcpServerDraft(server.id, {
-                                               tools: { ...(server.tools ?? {}), [tool.name]: { ...policy, enabled: event.target.checked } }
-                                             })}
-                                           />
-                                           <span className="mcp-tool-name">{tool.name}</span>
-                                         </label>
-                                         <span className="mcp-tool-description" title={tool.description}>{tool.description || "无描述"}</span>
-                                         <ComposerSelect
-                                           className="mcp-tool-approval-select"
-                                           ariaLabel={`${tool.name} 的审批策略`}
-                                           value={policy?.approvalMode ?? server.defaultToolsApprovalMode ?? "prompt"}
-                                           onChange={(approvalMode) => updateMcpServerDraft(server.id, {
-                                             tools: {
-                                               ...(server.tools ?? {}),
-                                               [tool.name]: { ...policy, approvalMode: approvalMode as "auto" | "prompt" | "writes" | "approve" }
-                                             }
-                                           })}
-                                           options={[
-                                             { value: "auto", label: "自动" },
-                                             { value: "prompt", label: "每次确认" },
-                                             { value: "writes", label: "写入确认" },
-                                             { value: "approve", label: "高风险确认" }
-                                           ]}
-                                           placeholder="选择审批策略"
-                                         />
-                                       </div>
-                                     );
-                                   })}
-                                 </div>
-                                 {(testResult.resources.length || testResult.resourceTemplates.length || testResult.prompts.length) ? (
-                                   <div className="mcp-discovery-meta">
-                                     {testResult.resources.length ? <span>资源 {testResult.resources.length}</span> : null}
-                                     {testResult.resourceTemplates.length ? <span>模板 {testResult.resourceTemplates.length}</span> : null}
-                                     {testResult.prompts.length ? <span>提示词 {testResult.prompts.length}</span> : null}
-                                   </div>
-                                 ) : null}
-                               </details>
-                             ) : null}
-                          </article>
-                        );
-                      }) : <div className="detail-empty">尚未配置 MCP 服务。</div>}
-                    </div>
-                  </div>
-                  <div className="config-block mcp-plugin-config">
-                    <div className="section-copy"><strong>插件提供的 MCP 服务</strong><span>由插件清单管理，只能通过项目插件启用状态控制。</span></div>
-                    <div className="mcp-server-list">
-                      {mcpRuntimeServers.filter((server) => server.source === "plugin").length ? mcpRuntimeServers.filter((server) => server.source === "plugin").map((server) => (
-                        <article key={server.id} className="mcp-server-row is-plugin">
-                          <div className="mcp-server-row-top">
-                            <div className="mcp-server-row-main">
-                              <div className="mcp-server-row-title">
-                                <span className="mcp-server-row-icon" aria-hidden><IconMcp /></span>
-                                <strong>{server.name}</strong>
-                                <span className="mcp-transport-pill plugin">plugin</span>
-                                <span className={`mcp-status-pill ${String(server.status.state).toLowerCase()}`}>{server.status.state}</span>
-                              </div>
-                              <span className="mcp-server-row-target">{server.command ?? server.url ?? server.id}</span>
-                            </div>
-                          </div>
-                          {server.status.error ? <p className="mcp-error">{server.status.error}</p> : null}
-                        </article>
-                      )) : <div className="detail-empty">没有插件提供的 MCP 服务。</div>}
-                    </div>
-                  </div>
-                  <div className="settings-save-row"><span className="subtle-inline">保存后立即重建已变更的 MCP 连接。</span><button className="button warm" onClick={() => void saveConfigDraft()} disabled={!configDraft}>保存</button></div>
-                </div>
+                <McpPage configDraft={configDraft} mcpRuntimeServers={mcpRuntimeServers} editingMcpServerId={editingMcpServerId} setEditingMcpServerId={setEditingMcpServerId} mcpTestResults={mcpTestResults} testingMcpServerId={testingMcpServerId} mcpAuthBusyId={mcpAuthBusyId} onAdd={addMcpServer} onUpdate={updateMcpServerDraft} onTest={testMcpServer} onRefreshTools={refreshMcpToolDirectory} onLogin={loginMcpServer} onLogout={logoutMcpServer} onRemove={removeMcpServer} onSave={saveConfigDraft} parseEnvironment={parseMcpEnvironment} />
               ) : null}
-
               {settingsTab === "capabilities" && capabilityTab === "plugins" ? (
-                <div key="capability-plugins" className="settings-section capability-panel plugin-settings-section">
-                  <div className="config-block plugin-library-card">
-                    <div className="section-copy">
-                      <strong>已安装插件</strong>
-                      <span>在聊天输入框的“插件”菜单中选择后，AI 会自动匹配其中的 Skill。这里仅用于安装和查看已安装的能力包。</span>
-                    </div>
-                    <div className="capability-list">
-                      {plugins.map((plugin) => {
-                        const callCount = pluginCallCounts.get(plugin.id) ?? 0;
-                        return (
-                          <article key={plugin.id} className="skill-row capability-list-item">
-                            <div className="skill-row-main">
-                              <div className="skill-row-title">
-                                <span className="skill-row-icon" aria-hidden><IconSkills /></span>
-                                <strong title={plugin.name}>{plugin.name}</strong>
-                                <span className="skill-scope-pill plugin">插件</span>
-                                <span className="skill-domain-chip">v{plugin.version}</span>
-                              </div>
-                              <p className="skill-row-desc" title={plugin.source}>{plugin.source}</p>
-                              <div className="skill-row-meta">
-                                <span className="skill-stat">已安装</span>
-                                <span className={`skill-stat ${callCount > 0 ? "is-hot" : ""}`}>
-                                  调用 {callCount.toLocaleString()} 次
-                                </span>
-                                <span className="skill-row-path" title={plugin.installPath}>{plugin.installPath}</span>
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              className="button ghost danger-icon-button skill-remove-button"
-                              title={`移除 ${plugin.name}`}
-                              aria-label={`移除 ${plugin.name}`}
-                              onClick={() => setManagedRemoval({ kind: "plugin", plugin })}
-                            >
-                              <IconTrash />
-                            </button>
-                          </article>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
+                <PluginsPage {...{ plugins, pluginCallCounts, setManagedRemoval }} />
               ) : null}
-
               {settingsTab === "capabilities" && capabilityTab === "userSkills" ? (
-                <div key="capability-user-skills" className="settings-section capability-panel user-skill-settings-section">
-                  <div className="config-block user-skill-library-block">
-                    <div className="section-copy">
-                      <strong>已生成技能</strong>
-                      <span>在历史聊天上右键选择“提炼技能”后，生成的工作流会显示在这里，并可在后续聊天中复用。</span>
-                    </div>
-                    <div className="capability-list">
-                      {userSkills.length > 0 ? userSkills.map((skill) => {
-                        const callCount = resolveSkillUsageStats(skill).callCount;
-                        return <article key={skill.id} className="skill-row capability-list-item">
-                          <div className="skill-row-main">
-                            <div className="skill-row-title">
-                              <span className="skill-row-icon" aria-hidden><IconSkills /></span>
-                              <strong title={skill.displayName ?? skill.name}>{skill.displayName ?? skill.name}</strong>
-                              <span className="skill-scope-pill user">用户</span>
-                              <span className="skill-domain-chip">提炼</span>
-                            </div>
-                            <p className="skill-row-desc" title={skill.description}>{skill.description}</p>
-                            <div className="skill-row-meta">
-                              <span className="skill-stat">用户技能</span>
-                              <span className={`skill-stat ${callCount > 0 ? "is-hot" : ""}`}>
-                                调用 {callCount.toLocaleString()} 次
-                              </span>
-                              <span className="skill-row-path" title={skill.skillPath}>{skill.skillPath}</span>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            className="button ghost danger-icon-button skill-remove-button"
-                            title={`删除 ${skill.displayName ?? skill.name}`}
-                            aria-label={`删除 ${skill.displayName ?? skill.name}`}
-                            onClick={() => setManagedRemoval({ kind: "skill", skill })}
-                          >
-                            <IconTrash />
-                          </button>
-                        </article>;
-                      }) : <div className="detail-empty">尚未生成用户技能。</div>}
-                    </div>
-                  </div>
-                </div>
+                <UserSkillsPage {...{ userSkills, resolveSkillUsageStats, setManagedRemoval }} />
               ) : null}
 
               {settingsTab === "capabilities" && capabilityTab === "lab" ? (
-                <div key="capability-lab" className="settings-section capability-panel skill-lab-settings-section">
-                  <div className="config-block skill-lab-editor">
-                    <div className="section-copy">
-                      <strong>技能实验室</strong>
-                      <span>{skillLabMode === "optimize" ? "选择已生成的用户技能，继续测试并迭代完善。" : "输入需求，自动生成并迭代优化可复用 Skill。"}</span>
-                    </div>
-                    <div className="skill-lab-mode-choice" role="group" aria-label="技能实验室模式">
-                      <button
-                        type="button"
-                        aria-pressed={skillLabMode === "create"}
-                        className={skillLabMode === "create" ? "active" : ""}
-                        disabled={isSkillLabBusy}
-                        onClick={() => setSkillLabMode("create")}
-                      >
-                        新建 Skill
-                      </button>
-                      <button
-                        type="button"
-                        aria-pressed={skillLabMode === "optimize"}
-                        className={skillLabMode === "optimize" ? "active" : ""}
-                        disabled={isSkillLabBusy}
-                        onClick={() => setSkillLabMode("optimize")}
-                      >
-                        持续优化
-                      </button>
-                    </div>
-                    <label className="settings-field skill-lab-prompt-field">
-                      <span>{skillLabMode === "optimize" ? "优化目标（可选）" : "需求"}</span>
-                      <textarea
-                        value={skillLabPrompt}
-                        onChange={(event) => setSkillLabPrompt(event.target.value)}
-                        placeholder={skillLabMode === "optimize"
-                          ? "例如：加强异常恢复和只读检查；留空则根据现有 Skill 自动测试并优化"
-                          : "例如：整理项目发布流程，生成一个包含检查、验证和回滚步骤的工作流 Skill"}
-                        rows={7}
-                        disabled={isSkillLabBusy}
-                      />
-                    </label>
-                    <div className="skill-lab-options-row">
-                      {skillLabMode === "optimize" ? (
-                        <label className="settings-field skill-lab-name-field">
-                          <span>选择用户技能</span>
-                          <ComposerSelect
-                            className="form-select skill-lab-skill-select"
-                            ariaLabel="选择要持续优化的 Skill"
-                            value={skillLabTargetSkillId}
-                            disabled={isSkillLabBusy}
-                            onChange={setSkillLabTargetSkillId}
-                            options={userSkills.map((skill) => ({
-                              value: skill.id,
-                              label: skill.displayName ?? skill.name
-                            }))}
-                            placeholder="请选择要持续优化的 Skill"
-                            searchable
-                            searchPlaceholder="筛选 Skill"
-                            emptyLabel="没有匹配的用户 Skill"
-                          />
-                        </label>
-                      ) : (
-                        <label className="settings-field skill-lab-name-field">
-                          <span>Skill 名称（可选）</span>
-                          <input
-                            value={skillLabName}
-                            onChange={(event) => setSkillLabName(event.target.value)}
-                            placeholder="例如：release-workflow"
-                            maxLength={64}
-                            disabled={isSkillLabBusy}
-                          />
-                        </label>
-                      )}
-                      <label className="settings-field skill-lab-model-field">
-                        <span>实验模型</span>
-                        <ComposerSelect
-                          className="form-select skill-lab-skill-select"
-                          ariaLabel="选择技能实验室模型"
-                          value={skillLabModelSelection}
-                          disabled={isSkillLabBusy || skillLabModelOptions.length === 0}
-                          onChange={setSkillLabModelSelection}
-                          options={skillLabModelOptions}
-                          placeholder="请选择实验模型"
-                          searchable
-                          searchPlaceholder="搜索供应商或模型"
-                          emptyLabel="没有可用的实验模型"
-                        />
-                      </label>
-                      <label className="settings-field skill-lab-iterations-field">
-                        <span>迭代次数</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={20}
-                          step={1}
-                          value={skillLabIterations}
-                          onChange={(event) => {
-                            const value = Number(event.target.value);
-                            if (Number.isInteger(value) && value >= 1 && value <= 20) setSkillLabIterations(value);
-                          }}
-                          disabled={isSkillLabBusy}
-                        />
-                      </label>
-                    </div>
-                    <div className="skill-lab-actions">
-                      {isSkillLabBusy ? (
-                        <button className="button ghost" type="button" onClick={() => void cancelSkillLab()}>
-                          <IconStop />
-                          <span>{skillLabStatus === "clarifying" ? "取消澄清" : "取消生成"}</span>
-                        </button>
-                      ) : (
-                        <button
-                          className="button primary"
-                          type="button"
-                          disabled={
-                            !skillLabModelSelection ||
-                            (skillLabMode === "create" ? !skillLabPrompt.trim() : !skillLabTargetSkillId)
-                          }
-                          onClick={() => void startSkillLab()}
-                        >
-                          <IconSkills />
-                          <span>{skillLabMode === "optimize" ? "开始持续优化" : "分析需求"}</span>
-                        </button>
-                      )}
-                      {skillLabStatus === "failed" && skillLabError ? <span className="skill-lab-error">{skillLabError}</span> : null}
-                      {skillLabStatus === "cancelled" ? <span className="subtle-inline">已取消，可重新开始。</span> : null}
-                    </div>
-                  </div>
-
-                  {skillLabClarification ? (
-                    <div className="config-block skill-lab-clarification-block">
-                      <div className="section-copy">
-                        <strong>需求澄清</strong>
-                        <span>{skillLabClarification.summary}</span>
-                      </div>
-                      <div className="skill-lab-clarification-questions">
-                        {skillLabClarification.questions.map((question, index) => (
-                          <fieldset key={question.id} className="skill-lab-clarification-question">
-                            <legend>{index + 1}. {question.question}{question.required ? " *" : ""}</legend>
-                            {question.options.filter((option) => !/^(?:其他|其它)(?:\s*(?:[（(].*[）)]|请说明|手填|自定义|补充))?$/u.test(option.trim())).map((option) => (
-                              <label key={option} className="skill-lab-choice-option">
-                                <input
-                                  type="radio"
-                                  name={`skill-lab-${skillLabClarification.clarificationId}-${question.id}`}
-                                  checked={!skillLabClarification.custom[question.id] && skillLabClarification.answers[question.id] === option}
-                                  onChange={() => setSkillLabClarification((current) => current ? {
-                                    ...current,
-                                    answers: { ...current.answers, [question.id]: option },
-                                    custom: { ...current.custom, [question.id]: false }
-                                  } : current)}
-                                />
-                                <span>{option}</span>
-                              </label>
-                            ))}
-                            {question.allowOther ? (
-                              <label className="skill-lab-choice-option">
-                                <input
-                                  type="radio"
-                                  name={`skill-lab-${skillLabClarification.clarificationId}-${question.id}`}
-                                  checked={skillLabClarification.custom[question.id] === true}
-                                  onChange={() => setSkillLabClarification((current) => current ? {
-                                    ...current,
-                                    answers: { ...current.answers, [question.id]: "" },
-                                    custom: { ...current.custom, [question.id]: true }
-                                  } : current)}
-                                />
-                                <span>其他（手填）</span>
-                              </label>
-                            ) : null}
-                            {question.allowOther && skillLabClarification.custom[question.id] ? (
-                              <input
-                                className="skill-lab-custom-answer"
-                                value={skillLabClarification.answers[question.id] ?? ""}
-                                placeholder="请填写你的答案"
-                                onChange={(event) => setSkillLabClarification((current) => current ? {
-                                  ...current,
-                                  answers: { ...current.answers, [question.id]: event.target.value }
-                                } : current)}
-                              />
-                            ) : null}
-                            {!question.options.length && !question.allowOther ? (
-                              <textarea
-                                rows={3}
-                                value={skillLabClarification.answers[question.id] ?? ""}
-                                onChange={(event) => setSkillLabClarification((current) => current ? {
-                                  ...current,
-                                  answers: { ...current.answers, [question.id]: event.target.value }
-                                } : current)}
-                              />
-                            ) : null}
-                          </fieldset>
-                        ))}
-                      </div>
-                      <div className="skill-lab-clarification-actions">
-                        <button
-                          className="button primary"
-                          type="button"
-                          disabled={skillLabClarification.questions.some((question) =>
-                            question.required && !skillLabClarification.answers[question.id]?.trim()
-                          )}
-                          onClick={() => void submitSkillLabClarification()}
-                        >
-                          <IconCheck />
-                          <span>{skillLabProgress.some((item) => item.iteration === 0 && item.state === "tested") ? "确认并继续本轮" : "确认并开始生成"}</span>
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {skillLabStatus !== "idle" ? (
-                  <div className={`config-block skill-lab-progress-block is-${skillLabStatus}`}>
-                    <div className="skill-lab-live-status" aria-live="polite">
-                      <span className="skill-lab-live-icon" aria-hidden>
-                        {skillLabStatus === "completed" ? <IconCheck /> : <IconSkills />}
-                      </span>
-                      <div className="skill-lab-live-copy">
-                        <span className="skill-lab-live-kicker">
-                          <i aria-hidden />
-                          {skillLabHeartbeatText}
-                        </span>
-                        <strong>{skillLabCurrentPhase}</strong>
-                        <p>{skillLabCurrentSummary}</p>
-                      </div>
-                      <div className="skill-lab-live-metric">
-                        <strong>{skillLabCompletedIterations}<span>/{skillLabTotalIterations}</span></strong>
-                        <small>{skillLabElapsedLabel}</small>
-                      </div>
-                    </div>
-                    <div
-                      className={`skill-lab-progress-track ${isSkillLabBusy ? "is-running" : ""}`}
-                      role="progressbar"
-                      aria-label="技能迭代完成进度"
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={skillLabProgressPercent}
-                    >
-                      <span style={{ width: `${skillLabProgressPercent}%` }} />
-                      {isSkillLabBusy ? <i aria-hidden /> : null}
-                    </div>
-                    <div className="skill-lab-progress-footer">
-                      <div className="skill-lab-iteration-rail" aria-label="迭代轮次">
-                        {Array.from({ length: skillLabTotalIterations }, (_, index) => {
-                          const iteration = index + 1;
-                          const progress = skillLabProgress.find((item) => item.iteration === iteration);
-                          const completed = skillLabStatus === "completed" || progress?.state === "tested";
-                          const active = skillLabStatus === "running" && skillLabCurrentIteration === iteration && !completed;
-                          const failed = skillLabStatus === "failed" && skillLabCurrentIteration === iteration;
-                          return (
-                            <div
-                              key={iteration}
-                              title={`第 ${iteration} 轮${completed ? "已完成" : active ? "进行中" : "待执行"}`}
-                              className={`skill-lab-iteration-node ${completed ? "is-complete" : ""} ${active ? "is-active" : ""} ${failed ? "is-failed" : ""}`}
-                            >
-                              <span className="skill-lab-iteration-dot">{completed ? <IconCheck /> : iteration}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <div className="skill-lab-last-result">
-                        {skillLabLastCompletedActivity ? (
-                          <><IconCheck /><span>最近完成：{skillLabLastCompletedActivity.phase}</span></>
-                        ) : (
-                          <><span className="skill-lab-waiting-dot" aria-hidden /><span>初始版本完成后进入第 1 轮测试</span></>
-                        )}
-                      </div>
-                    </div>
-                    {skillLabResult ? (
-                      <div className="skill-lab-result" role="status">
-                        <IconCheck />
-                        <span>{skillLabLastRunMode === "optimize" ? "已优化并更新" : "已生成并发布"}：{skillLabResult.displayName ?? skillLabResult.name}</span>
-                      </div>
-                    ) : null}
-                  </div>
-                  ) : null}
-                  {skillLabApproval ? (
-                    <div className="skill-lab-approval" role="alertdialog" aria-live="assertive">
-                      <div>
-                        <strong>{skillLabApproval.title}</strong>
-                        <span>{skillLabApproval.description}</span>
-                      </div>
-                      <div className="skill-lab-approval-actions">
-                        <button className="button ghost" type="button" onClick={() => void resolveSkillLabApproval(false)}>拒绝</button>
-                        <button className="button primary" type="button" onClick={() => void resolveSkillLabApproval(true)}>允许本次</button>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
+                <SkillLabPage {...{ skillLabMode, setSkillLabMode, isSkillLabBusy, skillLabPrompt, setSkillLabPrompt, skillLabTargetSkillId, setSkillLabTargetSkillId, userSkills, skillLabName, setSkillLabName, skillLabModelSelection, setSkillLabModelSelection, skillLabModelOptions, skillLabIterations, setSkillLabIterations, cancelSkillLab, skillLabStatus, startSkillLab, skillLabError, skillLabClarification, setSkillLabClarification, submitSkillLabClarification, skillLabProgress, skillLabCurrentPhase, skillLabCurrentSummary, skillLabHeartbeatText, skillLabCompletedIterations, skillLabTotalIterations, skillLabElapsedLabel, skillLabCurrentIteration, skillLabLastCompletedActivity, skillLabResult, skillLabLastRunMode, skillLabApproval, resolveSkillLabApproval, skillLabProgressPercent }} />
               ) : null}
 
-              {settingsTab === "mcp" && false ? (
-                <div className="settings-section">
-                  <div className="config-block">
-                    <div className="section-copy">
-                      <strong>MCP Server 列表</strong>
-                      <span>这里展示当前配置文件中可见的 MCP 配置，便于核对 transport、命令和地址。</span>
-                    </div>
-                    <div className="stack-list">
-                      {(configDraft?.mcpServers ?? config?.mcpServers ?? []).length > 0 ? (
-                        (configDraft?.mcpServers ?? config?.mcpServers ?? []).map((server) => (
-                          <article key={server.id} className="stack-card">
-                            <div className="stack-card-header">
-                              <strong>{server.name}</strong>
-                              <span className="pill">{server.transport ?? "stdio"}</span>
-                            </div>
-                            <p>{server.command ?? server.url ?? "未配置命令或 URL"}</p>
-                            <span>
-                              {server.enabled === false ? "已禁用" : "已启用"} · {server.id}
-                            </span>
-                          </article>
-                        ))
-                      ) : (
-                        <div className="detail-empty">当前还没有 MCP Server 配置。</div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-              </div>
-            </div>
-          </div>
-        </div>
+                      </SettingsDialog>
       ) : null}
 
-      {helpPresence.value ? (
-        <div className="project-sheet-overlay help-overlay motion-overlay" data-motion={helpPresence.phase}>
-          <section className="project-sheet help-sheet" role="dialog" aria-modal="true" aria-labelledby="help-title">
-            <header className="project-sheet-header">
-              <div className="project-sheet-copy"><strong id="help-title">CodeXH 使用指南</strong><span>产品功能与常用工作流</span></div>
-              <button className="project-sheet-close" type="button" title="关闭" aria-label="关闭" onClick={() => setIsHelpOpen(false)}><IconClose /></button>
-            </header>
-            <div className="help-layout">
-              <div className="help-content">
-                <section id="help-overview" className="help-overview"><span>CODEXH WORKSPACE</span><h2>为开发工作准备的 AI 工作台</h2><p>把对话、项目文件、终端、浏览器、知识库、技能和 MCP 工具放在同一个任务上下文中。</p><div><b>对话驱动</b><b>项目上下文</b><b>工具协作</b></div></section>
-                <section id="help-task" className="help-feature"><h3><span><IconCompose /></span>开始一个任务</h3><ol><li><b>01</b> 点击“新建任务”进行普通问答、代码分析或内容处理。</li><li><b>02</b> 点击“新建项目”选择工作目录，让 AI 读取项目文件、使用终端并处理 Git 工作流。</li><li><b>03</b> 在输入框写清目标、约束和预期结果，必要时附上文件或图片后发送。</li></ol></section>
-                <section className="help-feature"><h3><span><IconFolder /></span>项目工作区</h3><p>项目模式提供文件浏览、预览、终端、Git 状态与变更操作。右侧工具区可在文件、终端和浏览器间切换；涉及外部影响的操作会根据权限设置请求确认。</p></section>
-                <section id="help-chat" className="help-feature"><h3><span><IconImage /></span>对话与附件</h3><p>侧栏保留任务历史，放大镜可检索历史内容。输入框支持拖拽、文件选择和粘贴图片；可一次附加多张图片，单次最多 16 个二进制附件。发送前请确认所选模型支持多模态输入。</p></section>
-                <section id="help-knowledge" className="help-feature"><h3><span><IconKnowledge /></span>知识库与随手记</h3><p>知识库可导入文档、文件夹、网页或浏览器页面，用于后续检索。侧栏笔记本图标打开“随手记”：笔记按 Markdown 保存，并同步到全局知识库。不要把密码、密钥或其他敏感信息写入可检索笔记。</p></section>
-                <section className="help-feature"><h3><span><IconSkills /></span>技能、MCP 与 GPA</h3><p>技能为任务提供专门流程和工具说明；MCP 用于连接外部服务；GPA 适合目标明确的项目任务，会按目标、计划、执行逐步推进。它们均可在设置和任务上下文中配置。</p></section>
-                <section id="help-security" className="help-feature help-safety"><h3><span><IconShield /></span>设置与安全</h3><p>设置中管理模型提供商、默认模型、权限、MCP、技能和更新。使用第三方模型或 MCP 前，核对服务地址、凭据范围和数据处理规则；任何有副作用的命令都应在确认影响后执行。</p></section>
-              </div>
-            </div>
-          </section>
-        </div>
-      ) : null}
+      {helpPresence.value ? <HelpSheet motionPhase={helpPresence.phase} onClose={() => setIsHelpOpen(false)} /> : null}
 
       {quickNotesPresence.value ? (
-        <div className="project-sheet-overlay quick-notes-overlay motion-overlay" data-motion={quickNotesPresence.phase}>
-          <section className="project-sheet quick-notes-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-notes-title">
-            <header className="project-sheet-header">
-              <div className="quick-notes-header-title">
-                <span className="quick-notes-header-icon" aria-hidden="true"><IconKnowledge /></span>
-                <strong id="quick-notes-title">随手记</strong>
-                <span className="quick-notes-header-scope">全局知识库</span>
-              </div>
-              <button className="project-sheet-close" type="button" title="关闭" aria-label="关闭" onClick={() => setIsQuickNotesOpen(false)}>
-                <IconClose />
-              </button>
-            </header>
-            <div className="quick-notes-layout">
-              <aside className="quick-notes-list">
-                <div className="quick-notes-list-header">
-                  <span>笔记</span>
-                  <button type="button" title="新建笔记" aria-label="新建笔记" className="quick-notes-add" onClick={() => { setSelectedQuickNoteId(null); setQuickNoteTitle(""); setQuickNoteContent(""); quickNoteContentRef.current = ""; setQuickNoteStatus("尚未保存"); }}><IconPlus /></button>
-                </div>
-                {quickNotes.length ? (
-                  <div className="quick-notes-items">
-                    {quickNotes.map((note) => (
-                      <button key={note.id} type="button" className={`quick-notes-item ${note.id === selectedQuickNoteId ? "selected" : ""}`} onClick={() => selectQuickNote(note)} onContextMenu={(event) => { event.preventDefault(); setQuickNoteListMenu({ x: event.clientX, y: event.clientY, note }); }}>
-                        {renamingQuickNoteId === note.id ? <input autoFocus value={quickNoteRenameDraft} onChange={(event) => setQuickNoteRenameDraft(event.target.value)} onClick={(event) => event.stopPropagation()} onBlur={() => void renameQuickNote(note)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") setRenamingQuickNoteId(null); }} /> : <strong>{note.title}</strong>}
-                        <span>{new Date(note.updatedAt).toLocaleString()}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : <div className="quick-notes-empty">新建一条笔记，记录随时浮现的想法。</div>}
-              </aside>
-              <div className="quick-notes-editor">
-                <div className="quick-notes-markdown-bar" aria-label="文档编辑器">
-                  <strong>文档</strong>
-                  <span>富文本编辑 · 右键插入内容</span>
-                </div>
-                <textarea className="quick-notes-content-input quick-notes-plain-editor" value={quickNoteContent} onChange={(event) => { quickNoteContentRef.current = event.target.value; setQuickNoteContent(event.target.value); setQuickNoteStatus("尚未保存"); }} placeholder="在这里开始写作..." spellCheck={false} />
-                <footer className="quick-notes-footer">
-                  <span className={`quick-notes-status ${quickNoteStatus.includes("已同步") ? "is-synced" : ""}`}>{quickNoteStatus}</span>
-                  <button type="button" className="button primary" disabled={quickNoteSaving} onClick={() => void saveQuickNote()}>{quickNoteSaving ? "保存中..." : "保存"}</button>
-                </footer>
-              </div>
-            </div>
-            {visibleQuickNoteListMenu ? <div className="quick-notes-list-context-menu" data-motion={quickNoteListMenuPresence.phase} style={{ left: visibleQuickNoteListMenu.x, top: visibleQuickNoteListMenu.y }} onMouseLeave={() => setQuickNoteListMenu(null)}><button type="button" onClick={() => { setRenamingQuickNoteId(visibleQuickNoteListMenu.note.id); setQuickNoteRenameDraft(visibleQuickNoteListMenu.note.title); setQuickNoteListMenu(null); }}>重命名</button><button type="button" className="danger" onClick={() => { setQuickNoteDeleteConfirm({ id: visibleQuickNoteListMenu.note.id, title: visibleQuickNoteListMenu.note.title }); setQuickNoteListMenu(null); }}>删除</button></div> : null}
-            {visibleQuickNoteDeleteConfirm ? <div className="quick-notes-confirm-overlay motion-overlay" data-motion={quickNoteDeleteConfirmPresence.phase}><section className="quick-notes-confirm-dialog" role="alertdialog" aria-modal="true"><strong>删除随手记？</strong><p>“{visibleQuickNoteDeleteConfirm.title}”及其对应的全局知识库内容将被删除。</p><footer><button type="button" onClick={() => setQuickNoteDeleteConfirm(null)}>取消</button><button type="button" className="danger" onClick={() => void deleteQuickNote(visibleQuickNoteDeleteConfirm)}>删除</button></footer></section></div> : null}
-          </section>
-        </div>
+        <QuickNotesSheet
+          motionPhase={quickNotesPresence.phase}
+          notes={quickNotes}
+          selectedId={selectedQuickNoteId}
+          title={quickNoteTitle}
+          content={quickNoteContent}
+          saving={quickNoteSaving}
+          status={quickNoteStatus}
+          renamingId={renamingQuickNoteId}
+          setRenamingId={setRenamingQuickNoteId}
+          renameDraft={quickNoteRenameDraft}
+          setRenameDraft={setQuickNoteRenameDraft}
+          visibleMenu={visibleQuickNoteListMenu}
+          menuMotionPhase={quickNoteListMenuPresence.phase}
+          visibleDeleteConfirm={visibleQuickNoteDeleteConfirm}
+          deleteMotionPhase={quickNoteDeleteConfirmPresence.phase}
+          onClose={() => setIsQuickNotesOpen(false)}
+          onCreate={createQuickNote}
+          onSelect={selectQuickNote}
+          onOpenMenu={setQuickNoteListMenu}
+          onCloseMenu={() => setQuickNoteListMenu(null)}
+          onRequestDelete={setQuickNoteDeleteConfirm}
+          onCloseDeleteConfirm={() => setQuickNoteDeleteConfirm(null)}
+          onRename={renameQuickNote}
+          onContentChange={changeQuickNoteContent}
+          onSave={saveQuickNote}
+          onDelete={deleteQuickNote}
+        />
       ) : null}
 
       {mcpCreatePresence.value && visibleMcpCreateDraft ? (
-        <div
-          className="project-sheet-overlay mcp-create-overlay motion-overlay"
-          data-motion={mcpCreatePresence.phase}
-        >
-          <div className="project-sheet mcp-create-sheet" role="dialog" aria-modal="true" aria-labelledby="mcp-create-title">
-            <div className="project-sheet-header">
-              <div className="project-sheet-copy">
-                <strong id="mcp-create-title">新增 MCP 服务</strong>
-                <span>选择填写方式，加入后在管理页统一保存。</span>
-              </div>
-              <button className="project-sheet-close" type="button" onClick={closeMcpCreateSheet} title="关闭" aria-label="关闭">
-                <IconClose />
-              </button>
-            </div>
-
-            <div className="mcp-create-mode" role="tablist" aria-label="MCP 配置方式">
-              <button type="button" role="tab" aria-selected={mcpCreateMode === "form"} className={mcpCreateMode === "form" ? "active" : ""} onClick={() => { setMcpCreateMode("form"); setMcpJsonError(null); }}>控件填写</button>
-              <button type="button" role="tab" aria-selected={mcpCreateMode === "json"} className={mcpCreateMode === "json" ? "active" : ""} onClick={() => {
-                setMcpCreateMode("json");
-                setMcpCreateError(null);
-                if (!mcpJsonDraft) setMcpJsonDraft(JSON.stringify(serializeMcpJsonConfig([visibleMcpCreateDraft]), null, 2));
-              }}>JSON 配置</button>
-            </div>
-
-            <div className="mcp-create-body">
-              {mcpCreateMode === "form" ? (
-                <div className="mcp-editor-grid mcp-create-form">
-                  <label className="settings-field"><span>名称</span><input autoFocus value={visibleMcpCreateDraft.name} placeholder="例如：网页检索" onChange={(event) => { setMcpCreateDraft({ ...visibleMcpCreateDraft, name: event.target.value }); setMcpCreateError(null); }} /></label>
-                  <label className="settings-field"><span>ID</span><input value={visibleMcpCreateDraft.id} onChange={(event) => { setMcpCreateDraft({ ...visibleMcpCreateDraft, id: event.target.value }); setMcpCreateError(null); }} /></label>
-                  <label className="settings-field full"><span>描述</span><input value={visibleMcpCreateDraft.description ?? ""} placeholder="可选" onChange={(event) => setMcpCreateDraft({ ...visibleMcpCreateDraft, description: event.target.value || undefined })} /></label>
-                  <div className="settings-field mcp-transport-field">
-                    <span>传输方式</span>
-                    <div className="mcp-transport-options" role="radiogroup" aria-label="传输方式">
-                      {[
-                        ["stdio", "stdio", "本地进程"],
-                        ["sse", "SSE", "事件流"],
-                        ["streamable_http", "HTTP", "流式 HTTP"]
-                      ].map(([transport, label, hint]) => {
-                        const selected = (visibleMcpCreateDraft.transport ?? "stdio") === transport;
-                        return (
-                          <button
-                            key={transport}
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            className={selected ? "is-selected" : ""}
-                            onClick={() => {
-                              setMcpCreateDraft({
-                                ...visibleMcpCreateDraft,
-                                transport,
-                                command: transport === "stdio" ? visibleMcpCreateDraft.command : undefined,
-                                url: transport === "stdio" ? undefined : visibleMcpCreateDraft.url
-                              });
-                              setMcpCreateError(null);
-                            }}
-                          >
-                            <strong>{label}</strong>
-                            <small>{hint}</small>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <div className="settings-field mcp-create-enabled">
-                    <span>状态</span>
-                    <label className={`mcp-enable-switch ${visibleMcpCreateDraft.enabled !== false ? "is-on" : ""}`}>
-                      <input
-                        type="checkbox"
-                        checked={visibleMcpCreateDraft.enabled !== false}
-                        onChange={(event) => setMcpCreateDraft({ ...visibleMcpCreateDraft, enabled: event.target.checked })}
-                      />
-                      <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
-                      <span className="mcp-enable-label">{visibleMcpCreateDraft.enabled !== false ? "已启用" : "已停用"}</span>
-                    </label>
-                  </div>
-                  {(visibleMcpCreateDraft.transport ?? "stdio") === "stdio" ? <>
-                    <label className="settings-field full"><span>命令</span><input value={visibleMcpCreateDraft.command ?? ""} placeholder="npx" onChange={(event) => { setMcpCreateDraft({ ...visibleMcpCreateDraft, command: event.target.value }); setMcpCreateError(null); }} /></label>
-                    <label className="settings-field"><span>参数（每行一个）</span><textarea value={(visibleMcpCreateDraft.args ?? []).join("\n")} onChange={(event) => setMcpCreateDraft({ ...visibleMcpCreateDraft, args: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} /></label>
-                    <label className="settings-field"><span>环境变量（KEY=VALUE）</span><textarea value={Object.entries(visibleMcpCreateDraft.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n")} onChange={(event) => setMcpCreateDraft({ ...visibleMcpCreateDraft, env: parseMcpEnvironment(event.target.value) })} /></label>
-                  </> : <label className="settings-field full"><span>服务 URL</span><input value={visibleMcpCreateDraft.url ?? ""} placeholder="https://example.com/mcp" onChange={(event) => { setMcpCreateDraft({ ...visibleMcpCreateDraft, url: event.target.value }); setMcpCreateError(null); }} /></label>}
-                  {mcpCreateError ? <p className="mcp-error full">{mcpCreateError}</p> : null}
-                </div>
-              ) : (
-                <div className="mcp-create-json">
-                  <textarea className="mcp-json-input" autoFocus value={mcpJsonDraft} spellCheck={false} onChange={(event) => { setMcpJsonDraft(event.target.value); setMcpJsonError(null); }} />
-                  {mcpJsonError ? <p className="mcp-error">{mcpJsonError}</p> : null}
-                </div>
-              )}
-            </div>
-
-            <div className="project-sheet-actions">
-              <button className="button ghost" type="button" onClick={closeMcpCreateSheet}>取消</button>
-              <button className="button warm" type="button" onClick={confirmMcpCreate} disabled={mcpCreateMode === "json" && !mcpJsonDraft.trim()}>添加到列表</button>
-            </div>
-          </div>
-        </div>
+        <McpCreateSheet
+          motionPhase={mcpCreatePresence.phase}
+          draft={visibleMcpCreateDraft}
+          mode={mcpCreateMode}
+          jsonDraft={mcpJsonDraft}
+          error={mcpCreateError ?? mcpJsonError}
+          onClose={closeMcpCreateSheet}
+          onConfirm={confirmMcpCreate}
+          onModeChange={(mode) => {
+            setMcpCreateMode(mode);
+            setMcpCreateError(null);
+            setMcpJsonError(null);
+            if (mode === "json" && !mcpJsonDraft) {
+              setMcpJsonDraft(JSON.stringify(serializeMcpJsonConfig([visibleMcpCreateDraft]), null, 2));
+            }
+          }}
+          onDraftChange={setMcpCreateDraft}
+          onJsonDraftChange={setMcpJsonDraft}
+          onClearError={() => {
+            setMcpCreateError(null);
+            setMcpJsonError(null);
+          }}
+        />
       ) : null}
 
       {projectCreatePresence.value ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={projectCreatePresence.phase}
-        >
-          <div className="project-sheet">
-            <div className="project-sheet-header">
-              <div className="project-sheet-copy">
-                <strong>新建项目</strong>
-                <span>选择一个文件夹，此项目中的文件操作将限制在该文件夹内。</span>
-              </div>
-              <button
-                className="project-sheet-close"
-                onClick={() => setIsProjectCreateOpen(false)}
-                title="关闭"
-              >
-                <IconClose />
-              </button>
-            </div>
-            <label className="settings-field project-sheet-field">
-              <span>项目文件夹</span>
-              <div className="project-folder-picker">
-                <output>{projectPathDraft || "尚未选择文件夹"}</output>
-                <button
-                  className="button ghost"
-                  type="button"
-                  onClick={() => void chooseProjectFolder()}
-                  disabled={isPickingProjectFolder}
-                >
-                  <IconFolder />
-                  {isPickingProjectFolder ? "正在打开..." : "选择文件夹"}
-                </button>
-              </div>
-            </label>
-            {recentProjectPaths.length > 0 ? (
-              <div className="recent-projects" aria-label="最近项目">
-                <span className="recent-projects-label">最近项目</span>
-                <div className="recent-projects-list">
-                  {recentProjectPaths.map((projectPath) => (
-                    <button
-                      className={`recent-project-button ${projectPathDraft === projectPath ? "selected" : ""}`}
-                      type="button"
-                      key={projectPath}
-                      title={projectPath}
-                      onClick={() => setProjectPathDraft(projectPath)}
-                    >
-                      <IconFolder />
-                      <span className="recent-project-name">{getFileLeafName(projectPath)}</span>
-                      <span className="recent-project-path">{projectPath}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-            <div className="project-sheet-actions">
-              <button className="button ghost" onClick={() => setIsProjectCreateOpen(false)}>
-                取消
-              </button>
-              <button
-                className="button warm"
-                onClick={() => void confirmProjectCreate()}
-                disabled={!projectPathDraft || isPickingProjectFolder}
-              >
-                创建
-              </button>
-            </div>
-          </div>
-        </div>
+        <ProjectCreateSheet
+          motionPhase={projectCreatePresence.phase}
+          pathDraft={projectPathDraft}
+          recentPaths={recentProjectPaths}
+          isPickingFolder={isPickingProjectFolder}
+          onClose={() => setIsProjectCreateOpen(false)}
+          onChooseFolder={() => void chooseProjectFolder()}
+          onPathChange={setProjectPathDraft}
+          onConfirm={() => void confirmProjectCreate()}
+        />
       ) : null}
 
       {visibleGpaPlanResumeDialog ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={gpaPlanResumePresence.phase}
-        >
-          <div className="project-sheet gpa-plan-resume-sheet">
-            <div className="project-sheet-header">
-              <div className="project-sheet-copy">
-                <strong>
-                  {visibleGpaPlanResumeDialog.step === "ask" ? "发现未完成的 GPA 计划" : "确认继续剩余任务"}
-                </strong>
-                <span>
-                  {visibleGpaPlanResumeDialog.step === "ask"
-                    ? "此项目有一份未完成的计划。是否继续完成？"
-                    : `已完成 ${visibleGpaPlanResumeDialog.plan.doneCount} / ${visibleGpaPlanResumeDialog.plan.tasks.length}，剩余 ${visibleGpaPlanResumeDialog.plan.pendingCount} 项。`}
-                </span>
-              </div>
-              <button
-                className="project-sheet-close"
-                onClick={() => void dismissGpaPlanResumeDialog()}
-                title="关闭"
-                disabled={gpaPlanResumeBusy}
-              >
-                <IconClose />
-              </button>
-            </div>
-
-            {visibleGpaPlanResumeDialog.step === "review" ? (
-              <div className="gpa-plan-resume-body">
-                <div className="gpa-plan-resume-progress">
-                  {visibleGpaPlanResumeDialog.plan.tasks.map((task) => (
-                    <div
-                      key={task.id}
-                      className={`gpa-plan-resume-task ${task.done ? "is-done" : "is-pending"}`}
-                    >
-                      <span aria-hidden="true">{task.done ? "✓" : "○"}</span>
-                      <strong>{task.id}</strong>
-                      <span>{task.title}</span>
-                    </div>
-                  ))}
-                </div>
-                {visibleGpaPlanResumeDialog.plan.body ? (
-                  <pre className="gpa-plan-resume-markdown">{visibleGpaPlanResumeDialog.plan.body.slice(0, 4000)}</pre>
-                ) : null}
-              </div>
-            ) : null}
-
-            <div className="project-sheet-actions">
-              <button
-                className="button ghost"
-                type="button"
-                disabled={gpaPlanResumeBusy}
-                onClick={() =>
-                  void dismissGpaPlanResumeDialog({
-                    abandon: visibleGpaPlanResumeDialog.step === "ask"
-                  })
-                }
-              >
-                {visibleGpaPlanResumeDialog.step === "ask" ? "否，废弃此计划" : "取消"}
-              </button>
-              {visibleGpaPlanResumeDialog.step === "ask" ? (
-                <button className="button warm" type="button" onClick={() => void acceptGpaPlanResumeAsk()}>
-                  是，查看计划
-                </button>
-              ) : (
-                <button
-                  className="button warm"
-                  type="button"
-                  disabled={gpaPlanResumeBusy}
-                  onClick={() => void confirmGpaPlanResumeExecution()}
-                >
-                  {gpaPlanResumeBusy ? "正在继续..." : "继续执行剩余步骤"}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <GpaPlanResumeSheet
+          motionPhase={gpaPlanResumePresence.phase}
+          dialog={visibleGpaPlanResumeDialog}
+          busy={gpaPlanResumeBusy}
+          onDismiss={(options) => void dismissGpaPlanResumeDialog(options)}
+          onReview={() => void acceptGpaPlanResumeAsk()}
+          onConfirm={() => void confirmGpaPlanResumeExecution()}
+        />
       ) : null}
 
       {clearLogsConfirmPresence.value ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={clearLogsConfirmPresence.phase}
-        >
-          <div
-            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="clear-logs-confirm-title"
-          >
-            <div className="project-sheet-header delete-confirm-header">
-              <button
-                className="project-sheet-close"
-                type="button"
-                onClick={() => setIsClearLogsConfirmOpen(false)}
-                title="关闭"
-                aria-label="关闭"
-                disabled={isClearingLogs}
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
-              <strong id="clear-logs-confirm-title">清理日志？</strong>
-              <p>
-                将删除约 {formatStorageBytes(runtimeLogStats?.bytes ?? 0)} 的应用运行日志并回收 SQLite WAL。
-                此操作不会删除聊天、项目文件或知识库数据。
-              </p>
-            </div>
-            <div className="project-sheet-actions">
-              <button
-                className="button ghost"
-                type="button"
-                disabled={isClearingLogs}
-                onClick={() => setIsClearLogsConfirmOpen(false)}
-              >
-                取消
-              </button>
-              <button
-                className="button clear-chat-danger"
-                type="button"
-                disabled={isClearingLogs}
-                onClick={() => void confirmClearRuntimeLogs()}
-              >
-                {isClearingLogs ? "正在清理..." : "确认清理"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmationSheet
+          motionPhase={clearLogsConfirmPresence.phase}
+          titleId="clear-logs-confirm-title"
+          title="清理日志？"
+          description={<>将删除约 {formatStorageBytes(runtimeLogStats?.bytes ?? 0)} 的应用运行日志并回收 SQLite WAL。此操作不会删除聊天、项目文件或知识库数据。</>}
+          confirmLabel={isClearingLogs ? "正在清理..." : "确认清理"}
+          busy={isClearingLogs}
+          role="alertdialog"
+          onClose={() => setIsClearLogsConfirmOpen(false)}
+          onConfirm={() => void confirmClearRuntimeLogs()}
+        />
       ) : null}
 
       {clearChatConfirmPresence.value ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={clearChatConfirmPresence.phase}
-        >
-          <div
-            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="clear-chat-confirm-title"
-          >
-            <div className="project-sheet-header delete-confirm-header">
-              <button
-                className="project-sheet-close"
-                type="button"
-                onClick={() => setIsClearChatConfirmOpen(false)}
-                title="关闭"
-                aria-label="关闭"
-                disabled={isClearingChat}
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
-              <strong id="clear-chat-confirm-title">清空本次聊天？</strong>
-              <p>消息、执行记录和本次打开的网页都会被永久删除，且无法恢复。项目文件不会被删除。</p>
-            </div>
-            <div className="project-sheet-actions">
-              <button
-                className="button ghost"
-                type="button"
-                disabled={isClearingChat}
-                onClick={() => setIsClearChatConfirmOpen(false)}
-              >
-                取消
-              </button>
-              <button
-                className="button clear-chat-danger"
-                type="button"
-                disabled={isClearingChat}
-                onClick={() => void confirmClearCurrentChat()}
-              >
-                {isClearingChat ? "正在清空..." : "确认清空"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmationSheet
+          motionPhase={clearChatConfirmPresence.phase}
+          titleId="clear-chat-confirm-title"
+          title="清空本次聊天？"
+          description="消息、执行记录和本次打开的网页都会被永久删除，且无法恢复。项目文件不会被删除。"
+          confirmLabel={isClearingChat ? "正在清空..." : "确认清空"}
+          busy={isClearingChat}
+          onClose={() => setIsClearChatConfirmOpen(false)}
+          onConfirm={() => void confirmClearCurrentChat()}
+        />
       ) : null}
 
       {clearSelfImprovementConfirmPresence.value ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={clearSelfImprovementConfirmPresence.phase}
-        >
-          <div
-            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="clear-self-improvement-confirm-title"
-          >
-            <div className="project-sheet-header delete-confirm-header">
-              <button
-                className="project-sheet-close"
-                type="button"
-                onClick={() => setIsClearSelfImprovementConfirmOpen(false)}
-                title="关闭"
-                aria-label="关闭"
-                disabled={isClearingSelfImprovement}
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
-              <strong id="clear-self-improvement-confirm-title">清空全部记忆？</strong>
-              <p>将删除全部 {selfImprovementMemories.length} 条任务经验，且无法恢复。错误记忆、聊天、项目和知识库不会受到影响。</p>
-            </div>
-            <div className="project-sheet-actions">
-              <button
-                className="button ghost"
-                type="button"
-                disabled={isClearingSelfImprovement}
-                onClick={() => setIsClearSelfImprovementConfirmOpen(false)}
-              >
-                取消
-              </button>
-              <button
-                className="button clear-chat-danger"
-                type="button"
-                disabled={isClearingSelfImprovement}
-                onClick={() => void confirmClearSelfImprovementMemories()}
-              >
-                {isClearingSelfImprovement ? "正在清空..." : "确认清空"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmationSheet
+          motionPhase={clearSelfImprovementConfirmPresence.phase}
+          titleId="clear-self-improvement-confirm-title"
+          title="清空全部记忆？"
+          description={`将删除全部 ${selfImprovementMemories.length} 条任务经验，且无法恢复。错误记忆、聊天、项目和知识库不会受到影响。`}
+          confirmLabel={isClearingSelfImprovement ? "正在清空..." : "确认清空"}
+          busy={isClearingSelfImprovement}
+          role="alertdialog"
+          onClose={() => setIsClearSelfImprovementConfirmOpen(false)}
+          onConfirm={() => void confirmClearSelfImprovementMemories()}
+        />
       ) : null}
 
       {clearErrorSolutionsConfirmPresence.value ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={clearErrorSolutionsConfirmPresence.phase}
-        >
-          <div
-            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="clear-error-solutions-confirm-title"
-          >
-            <div className="project-sheet-header delete-confirm-header">
-              <button
-                className="project-sheet-close"
-                type="button"
-                onClick={() => setIsClearErrorSolutionsConfirmOpen(false)}
-                title="关闭"
-                aria-label="关闭"
-                disabled={isClearingErrorSolutions}
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
-              <strong id="clear-error-solutions-confirm-title">
-                {errorSolutionModelFilter === "all" ? "清空全部错误记忆？" : "清空当前模型错误记忆？"}
-              </strong>
-              <p>
-                {errorSolutionModelFilter === "all"
-                  ? `将删除全部 ${errorSolutions.length} 条错误记忆，且无法恢复。任务经验和其他数据不会受到影响。`
-                  : `将删除模型“${resolveErrorSolutionModelLabel(errorSolutionModelFilter)}”的 ${errorSolutions.length} 条记忆，其他模型的记忆会保留。`}
-              </p>
-            </div>
-            <div className="project-sheet-actions">
-              <button
-                className="button ghost"
-                type="button"
-                disabled={isClearingErrorSolutions}
-                onClick={() => setIsClearErrorSolutionsConfirmOpen(false)}
-              >
-                取消
-              </button>
-              <button
-                className="button clear-chat-danger"
-                type="button"
-                disabled={isClearingErrorSolutions}
-                onClick={() => void confirmClearErrorSolutions()}
-              >
-                {isClearingErrorSolutions ? "正在清空..." : "确认清空"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmationSheet
+          motionPhase={clearErrorSolutionsConfirmPresence.phase}
+          titleId="clear-error-solutions-confirm-title"
+          title={errorSolutionModelFilter === "all" ? "清空全部错误记忆？" : "清空当前模型错误记忆？"}
+          description={errorSolutionModelFilter === "all"
+            ? `将删除全部 ${errorSolutions.length} 条错误记忆，且无法恢复。任务经验和其他数据不会受到影响。`
+            : `将删除模型“${resolveErrorSolutionModelLabel(errorSolutionModelFilter)}”的 ${errorSolutions.length} 条记忆，其他模型的记忆会保留。`}
+          confirmLabel={isClearingErrorSolutions ? "正在清空..." : "确认清空"}
+          busy={isClearingErrorSolutions}
+          onClose={() => setIsClearErrorSolutionsConfirmOpen(false)}
+          onConfirm={() => void confirmClearErrorSolutions()}
+        />
       ) : null}
-
       {visibleUserSkillGenerationDialog ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={userSkillGenerationDialogPresence.phase}
-        >
-          <div className="project-sheet confirm-sheet user-skill-generation-sheet" role="dialog" aria-modal="true" aria-labelledby="user-skill-generation-title">
-            <div className="project-sheet-header">
-              <div className="project-sheet-copy">
-                <strong id="user-skill-generation-title">提炼技能</strong>
-                <span>描述和工作流将根据所选聊天自动生成。</span>
-              </div>
-              <button
-                className="project-sheet-close"
-                type="button"
-                onClick={() => setUserSkillGenerationDialog(null)}
-                title="关闭"
-                aria-label="关闭"
-                disabled={isGeneratingUserSkill}
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body user-skill-generation-body">
-              <p>将从“{visibleUserSkillGenerationDialog.thread.title}”提炼可复用的用户技能。</p>
-              <label className="settings-field user-skill-name-field">
-                <span>技能名称</span>
-                <input
-                  autoFocus
-                  value={visibleUserSkillGenerationDialog.name}
-                  onChange={(event) => setUserSkillGenerationDialog((current) => current ? { ...current, name: event.target.value } : current)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && visibleUserSkillGenerationDialog.name.trim() && !isGeneratingUserSkill) {
-                      void generateUserSkill(visibleUserSkillGenerationDialog);
-                    }
-                  }}
-                  maxLength={64}
-                  placeholder="例如：月度报表生成"
-                  disabled={isGeneratingUserSkill}
-                />
-                <small>支持中文、字母、数字和连字符。</small>
-              </label>
-            </div>
-            <div className="project-sheet-actions">
-              <button className="button ghost" type="button" disabled={isGeneratingUserSkill} onClick={() => setUserSkillGenerationDialog(null)}>取消</button>
-              <button
-                className="button primary"
-                type="button"
-                disabled={!visibleUserSkillGenerationDialog.name.trim() || isGeneratingUserSkill}
-                aria-busy={isGeneratingUserSkill}
-                onClick={() => void generateUserSkill(visibleUserSkillGenerationDialog)}
-              >
-                {isGeneratingUserSkill ? <><IconSpinner /><span className="user-skill-generating-label">正在生成<span className="user-skill-generating-dots" aria-hidden="true"><i /><i /><i /></span></span></> : "确认生成"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <UserSkillGenerationDialogView dialog={visibleUserSkillGenerationDialog} motionPhase={userSkillGenerationDialogPresence.phase} generating={isGeneratingUserSkill} onClose={() => setUserSkillGenerationDialog(null)} onNameChange={(name) => setUserSkillGenerationDialog((current) => current ? { ...current, name } : current)} onGenerate={() => void generateUserSkill(visibleUserSkillGenerationDialog)} />
       ) : null}
-
       {visibleManagedRemoval ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={managedRemovalPresence.phase}
-        >
-          <div className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="managed-removal-title">
-            <div className="project-sheet-header delete-confirm-header">
-              <button className="project-sheet-close" type="button" onClick={() => setManagedRemoval(null)} disabled={removingManagedItem} title="关闭" aria-label="关闭">
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
-              <strong id="managed-removal-title">{visibleManagedRemoval.kind === "plugin" ? "移除插件？" : "移除 Skill？"}</strong>
-              <p>
-                {visibleManagedRemoval.kind === "plugin"
-                  ? `“${visibleManagedRemoval.plugin.name}”及其所有 Skill、项目绑定和聊天选择都会被移除。`
-                  : `“${visibleManagedRemoval.skill.displayName ?? visibleManagedRemoval.skill.qualifiedName}”及其关联文件会被移除。`}
-              </p>
-            </div>
-            <div className="project-sheet-actions">
-              <button className="button ghost" type="button" disabled={removingManagedItem} onClick={() => setManagedRemoval(null)}>取消</button>
-              <button className="button clear-chat-danger" type="button" disabled={removingManagedItem} onClick={() => void confirmManagedRemoval()}>
-                {removingManagedItem ? "正在移除..." : "确认移除"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmationSheet
+          motionPhase={managedRemovalPresence.phase}
+          titleId="managed-removal-title"
+          title={visibleManagedRemoval.kind === "plugin" ? "移除插件？" : "移除 Skill？"}
+          description={visibleManagedRemoval.kind === "plugin"
+            ? `“${visibleManagedRemoval.plugin.name}”及其所有 Skill、项目绑定和聊天选择都会被移除。`
+            : `“${visibleManagedRemoval.skill.displayName ?? visibleManagedRemoval.skill.qualifiedName}”及其关联文件会被移除。`}
+          confirmLabel={removingManagedItem ? "正在移除..." : "确认移除"}
+          busy={removingManagedItem}
+          onClose={() => setManagedRemoval(null)}
+          onConfirm={() => void confirmManagedRemoval()}
+        />
       ) : null}
 
       {visibleHistoryThreadDeleteConfirmation ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={historyThreadDeleteConfirmPresence.phase}
-        >
-          <div
-            className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="history-thread-delete-confirm-title"
-          >
-            <div className="project-sheet-header delete-confirm-header">
-              <button
-                className="project-sheet-close"
-                type="button"
-                onClick={() => setHistoryThreadDeleteConfirmation(null)}
-                title="关闭"
-                aria-label="关闭"
-                disabled={Boolean(deletingThreadId)}
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body">
-              <strong id="history-thread-delete-confirm-title">删除历史任务？</strong>
-              <p>“{visibleHistoryThreadDeleteConfirmation.title}”的消息、执行记录、附件和子任务都会被永久删除，且无法恢复。</p>
-            </div>
-            <div className="project-sheet-actions">
-              <button
-                className="button ghost"
-                type="button"
-                disabled={Boolean(deletingThreadId)}
-                onClick={() => setHistoryThreadDeleteConfirmation(null)}
-              >
-                取消
-              </button>
-              <button
-                className="button clear-chat-danger"
-                type="button"
-                disabled={Boolean(deletingThreadId)}
-                onClick={() => void confirmDeleteHistoryThread()}
-              >
-                {deletingThreadId ? "正在删除..." : "确认删除"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmationSheet
+          motionPhase={historyThreadDeleteConfirmPresence.phase}
+          titleId="history-thread-delete-confirm-title"
+          title="删除历史任务？"
+          description={`“${visibleHistoryThreadDeleteConfirmation.title}”的消息、执行记录、附件和子任务都会被永久删除，且无法恢复。`}
+          confirmLabel={deletingThreadId ? "正在删除..." : "确认删除"}
+          busy={Boolean(deletingThreadId)}
+          onClose={() => setHistoryThreadDeleteConfirmation(null)}
+          onConfirm={() => void confirmDeleteHistoryThread()}
+        />
       ) : null}
 
       {visibleUpdateConfirmDialog ? (
-        <div
-          className="project-sheet-overlay motion-overlay"
-          data-motion={updateConfirmPresence.phase}
+        <ConfirmationSheet
+          motionPhase={updateConfirmPresence.phase}
+          titleId="update-confirm-title"
+          title={visibleUpdateConfirmDialog.title}
+          description={visibleUpdateConfirmDialog.message}
+          confirmLabel={visibleUpdateConfirmDialog.kind === "download" ? "继续下载" : "立即安装并重启"}
+          confirmVariant="warm"
+          sheetClassName="delete-confirm-sheet update-confirm-sheet"
+          bodyClassName="delete-confirm-body update-confirm-body"
+          onClose={() => setUpdateConfirmDialog(null)}
+          onConfirm={() => void confirmUpdateDialog()}
         >
-          <div
-            className="project-sheet confirm-sheet delete-confirm-sheet update-confirm-sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="update-confirm-title"
-          >
-            <div className="project-sheet-header delete-confirm-header">
-              <button
-                className="project-sheet-close"
-                type="button"
-                onClick={() => setUpdateConfirmDialog(null)}
-                title="关闭"
-                aria-label="关闭"
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="confirm-sheet-body delete-confirm-body update-confirm-body">
-              <strong id="update-confirm-title">{visibleUpdateConfirmDialog.title}</strong>
-              <p>{visibleUpdateConfirmDialog.message}</p>
-              {visibleUpdateConfirmDialog.details.length > 0 ? (
-                <ul className="update-confirm-details">
-                  {visibleUpdateConfirmDialog.details.map((detail) => (
-                    <li key={detail}>{detail}</li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-            <div className="project-sheet-actions">
-              <button className="button ghost" type="button" onClick={() => setUpdateConfirmDialog(null)}>
-                取消
-              </button>
-              <button className="button warm" type="button" onClick={() => void confirmUpdateDialog()}>
-                {visibleUpdateConfirmDialog.kind === "download" ? "继续下载" : "立即安装并重启"}
-              </button>
-            </div>
-          </div>
-        </div>
+          {visibleUpdateConfirmDialog.details.length > 0 ? <ul className="update-confirm-details">{visibleUpdateConfirmDialog.details.map((detail) => <li key={detail}>{detail}</li>)}</ul> : null}
+        </ConfirmationSheet>
       ) : null}
 
       {notice ? (
@@ -11589,4179 +5904,43 @@ export function App() {
         </div>
       ) : null}
 
-      {fetchedModelsPresence.value ? createPortal(
-        <div className="fetch-models-overlay motion-overlay" data-motion={fetchedModelsPresence.phase}>
-          <div className="fetch-models-dialog" role="dialog" aria-label="选择要添加的模型">
-            <div className="fetch-models-head">
-              <strong>选择要添加的模型</strong>
-              <button
-                type="button"
-                onClick={() => setShowFetchedModels(false)}
-                title="关闭"
-              >
-                <IconClose />
-              </button>
-            </div>
-            <div className="fetch-models-list">
-              {fetchedModels.map((entry) => {
-                const checked = selectedFetchedModelIds.includes(entry.id);
-                const already = configDraft?.models.some((model) =>
-                  model.providerId === settingsProvider?.id && model.id === entry.id
-                ) ?? false;
-                return (
-                  <label
-                    key={entry.id}
-                    className={`fetch-models-item ${checked ? "is-checked" : ""} ${already ? "is-existed" : ""}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleFetchedModelSelection(entry.id)}
-                    />
-                    <div className="fetch-models-copy">
-                      <strong>{entry.id}</strong>
-                      {entry.displayName && entry.displayName !== entry.id ? (
-                        <span>{entry.displayName}</span>
-                      ) : null}
-                    </div>
-                    {already ? <em>已存在</em> : null}
-                  </label>
-                );
-              })}
-            </div>
-            <div className="fetch-models-actions">
-              <button
-                className="button ghost"
-                onClick={() => {
-                  setSelectedFetchedModelIds(
-                    fetchedModels
-                      .filter((entry) => {
-                        return !configDraft?.models.some((model) =>
-                          model.providerId === settingsProvider?.id && model.id === entry.id
-                        );
-                      })
-                      .map((entry) => entry.id)
-                  );
-                }}
-              >
-                全选
-              </button>
-              <button
-                className="button ghost"
-                onClick={() => setShowFetchedModels(false)}
-              >
-                取消
-              </button>
-              <button
-                className="button warm"
-                onClick={applyFetchedModels}
-                disabled={selectedFetchedModelIds.length === 0}
-              >
-                添加到模型列表（{selectedFetchedModelIds.length}）
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      ) : null}
-
-      {visibleMultimodalPickerRole && configDraft ? createPortal(
-        <div className="fetch-models-overlay motion-overlay" data-motion={multimodalPickerPresence.phase}>
-          <div className="fetch-models-dialog multimodal-picker-dialog" role="dialog" aria-label="选择模型角色">
-            <div className="fetch-models-head">
-              <strong>
-                {visibleMultimodalPickerRole === "input"
-                  ? "选择多模态识别模型"
-                  : `添加到${visibleMultimodalPickerRole === "reasoning" ? "推理模型" : visibleMultimodalPickerRole === "image" ? "图片模型" : "视频模型"}`}
-              </strong>
-              <button type="button" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }} title="关闭"><IconClose /></button>
-            </div>
-            <div className="fetch-models-list multimodal-picker-list">
-              {visibleMultimodalPickerRole === "input" ? (
-                configDraft.models.filter((model) => model.supportsMultimodalInput).length > 0 ? (
-                  configDraft.models
-                    .filter((model) => model.supportsMultimodalInput)
-                    .sort((left, right) => left.displayName.localeCompare(right.displayName) || left.id.localeCompare(right.id))
-                    .map((model) => {
-                      const key = modelKey(model.providerId, model.id);
-                      const checked = multimodalPickerSelected[0] === key;
-                      const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          className={`fetch-models-item multimodal-picker-item multimodal-picker-single ${checked ? "is-checked" : ""}`}
-                          onClick={() => {
-                            setMultimodalPickerRole(null);
-                            setMultimodalPickerSelected([]);
-                            setMultimodalDefault("input", model.providerId, model.id);
-                          }}
-                        >
-                          <div className="fetch-models-copy multimodal-picker-main">
-                            <strong>{model.displayName}</strong>
-                            <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : model.providerId}</span>
-                            {checked ? <em className="mm-tag is-default">当前</em> : null}
-                            <em className="mm-tag is-mm">多模态</em>
-                          </div>
-                        </button>
-                      );
-                    })
-                ) : (
-                  <div className="provider-empty-state">
-                    暂无支持多模态输入的模型。请先在供应商设置中为模型勾选「支持多模态」。
-                  </div>
-                )
-              ) : (
-                configDraft.models
-                  .filter((model) => visibleMultimodalPickerRole === "reasoning"
-                    ? !isReasoningModel(model)
-                    : model.role !== visibleMultimodalPickerRole)
-                  .sort((left, right) => {
-                    const score = (model: typeof left) => {
-                      if (visibleMultimodalPickerRole === "video") return model.supportsVideoGeneration ? 2 : model.supportsMultimodalInput ? 1 : 0;
-                      return model.supportsMultimodalInput ? 1 : 0;
-                    };
-                    return score(right) - score(left) || left.id.localeCompare(right.id);
-                  })
-                  .map((model) => {
-                    const key = modelKey(model.providerId, model.id);
-                    const checked = multimodalPickerSelected.includes(key);
-                    const provider = configDraft.providers.find((entry) => entry.id === model.providerId);
-                    const currentRoleLabel = model.role === "reasoning"
-                      ? "已在推理"
-                      : model.role === "image"
-                        ? "已在图片"
-                        : model.role === "video"
-                          ? "已在视频"
-                          : null;
-                    return (
-                      <label key={key} className={`fetch-models-item multimodal-picker-item ${checked ? "is-checked" : ""}`}>
-                        <input type="checkbox" checked={checked} onChange={() => setMultimodalPickerSelected((current) =>
-                          current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
-                        )} />
-                        <div className="fetch-models-copy multimodal-picker-main">
-                          <strong>{model.displayName}</strong>
-                          <span className="multimodal-list-meta">{provider ? getProviderDisplayName(provider) : model.providerId}</span>
-                          {model.supportsMultimodalInput ? <em className="mm-tag is-mm">多模态</em> : null}
-                          {model.supportsVideoGeneration ? <em className="mm-tag is-video">视频</em> : null}
-                          {currentRoleLabel ? <em className={`mm-tag is-muted is-role-${model.role}`}>{currentRoleLabel}</em> : null}
-                        </div>
-                      </label>
-                    );
-                  })
-              )}
-            </div>
-            {visibleMultimodalPickerRole === "input" ? (
-              <div className="fetch-models-actions">
-                <button className="button ghost" type="button" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }}>取消</button>
-              </div>
-            ) : (
-              <div className="fetch-models-actions">
-                <button className="button ghost" type="button" onClick={() => { setMultimodalPickerRole(null); setMultimodalPickerSelected([]); }}>取消</button>
-                <button className="button warm" type="button" onClick={applyMultimodalPicker} disabled={multimodalPickerSelected.length === 0}>确认添加（{multimodalPickerSelected.length}）</button>
-              </div>
-            )}
-          </div>
-        </div>,
-        document.body
-      ) : null}
-
-      {visibleGpaMenuPos
-        ? createPortal(
-            <>
-              <div
-                className="gpa-backdrop"
-                data-motion={gpaMenuPresence.phase}
-                onMouseDown={() => {
-                  setGpaMenuOpen(false);
-                  setGpaMenuPos(null);
-                }}
-              />
-              <div
-                className="gpa-popover"
-                data-motion={gpaMenuPresence.phase}
-                role="menu"
-                onMouseEnter={clearComposerAddMenuCloseTimer}
-                onMouseLeave={scheduleComposerAddMenuClose}
-                style={{
-                  position: "fixed",
-                  left: visibleGpaMenuPos.left,
-                  top: visibleGpaMenuPos.top,
-                  transform: "translateY(-100%)"
-                }}
-              >
-                <>
-                    <button className="gpa-popover-item" role="menuitem" disabled={!composerCanAttachMultimodal} title={!composerCanAttachMultimodal ? "当前模型不支持多模态输入，且未配置默认多模态识别模型" : undefined} onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(false)}>
-                      <span className="gpa-popover-item-icon" aria-hidden><IconFile /></span>
-                      <span className="gpa-popover-item-copy">
-                        <span className="gpa-popover-item-title">添加文件</span>
-                        <span className="gpa-popover-item-hint">选择文件作为任务上下文</span>
-                      </span>
-                    </button>
-                    <button className="gpa-popover-item" role="menuitem" disabled={!composerCanAttachMultimodal} title={!composerCanAttachMultimodal ? "当前模型不支持多模态输入，且未配置默认多模态识别模型" : undefined} onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }} onClick={() => void chooseComposerFiles(true)}>
-                      <span className="gpa-popover-item-icon" aria-hidden><IconImage /></span>
-                      <span className="gpa-popover-item-copy">
-                        <span className="gpa-popover-item-title">添加图片</span>
-                        <span className="gpa-popover-item-hint">选择图片作为视觉参考</span>
-                      </span>
-                    </button>
-                    <div
-                      className="composer-add-menu-item-with-submenu"
-                      onMouseEnter={(event) => openComposerAddSubmenu("apiCards", event.currentTarget)}
-                    >
-                    <button
-                      type="button"
-                      className="gpa-popover-item composer-add-menu-parent"
-                      role="menuitem"
-                      aria-haspopup="menu"
-                      aria-expanded={composerAddMenuView === "apiCards"}
-                      onFocus={(event) => openComposerAddSubmenu("apiCards", event.currentTarget)}
-                    >
-                      <span className="gpa-popover-item-icon" aria-hidden><IconGlobe /></span>
-                      <span className="gpa-popover-item-copy">
-                        <span className="gpa-popover-item-title">接口卡片</span>
-                        <span className="gpa-popover-item-hint">调用收藏的 API 卡片</span>
-                      </span>
-                      <IconChevronRight />
-                    </button>
-                    </div>
-                    <div
-                      className="composer-add-menu-item-with-submenu"
-                      onMouseEnter={(event) => openComposerAddSubmenu("skills", event.currentTarget)}
-                    >
-                    <button
-                      type="button"
-                      className="gpa-popover-item composer-add-menu-parent"
-                      role="menuitem"
-                      aria-haspopup="menu"
-                      aria-expanded={composerAddMenuView === "skills"}
-                      onFocus={(event) => openComposerAddSubmenu("skills", event.currentTarget)}
-                    >
-                      <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
-                      <span className="gpa-popover-item-copy">
-                        <span className="gpa-popover-item-title">Skills</span>
-                        <span className="gpa-popover-item-hint">为本次任务添加专业技能</span>
-                      </span>
-                      <IconChevronRight />
-                    </button>
-                    </div>
-                    <div
-                      className="composer-add-menu-item-with-submenu"
-                      onMouseEnter={(event) => openComposerAddSubmenu("mcp", event.currentTarget)}
-                    >
-                    <button
-                      type="button"
-                      className="gpa-popover-item composer-add-menu-parent"
-                      role="menuitem"
-                      data-composer-add-menu-view="mcp"
-                      aria-haspopup="menu"
-                      aria-expanded={composerAddMenuView === "mcp"}
-                      onFocus={(event) => openComposerAddSubmenu("mcp", event.currentTarget)}
-                    >
-                      <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span>
-                      <span className="gpa-popover-item-copy">
-                        <span className="gpa-popover-item-title">MCP 服务</span>
-                        <span className="gpa-popover-item-hint">指定本次任务优先使用的服务</span>
-                      </span>
-                      <IconChevronRight />
-                    </button>
-                    </div>
-                    <div className="composer-add-menu-item-with-submenu" onMouseEnter={(event) => openComposerAddSubmenu("database", event.currentTarget)}>
-                      <button className="gpa-popover-item composer-add-menu-parent" type="button" role="menuitem" aria-haspopup="menu" aria-expanded={composerAddMenuView === "database"} onFocus={(event) => openComposerAddSubmenu("database", event.currentTarget)}>
-                        <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span><span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">数据库</span><span className="gpa-popover-item-hint">限定本轮可查询的数据源</span></span>
-                        <IconChevronRight />
-                      </button>
-                    </div>
-                    <div className="gpa-popover-divider" />
-                </>
-                <button
-                  className={`gpa-popover-item gpa-popover-item-full-access ${gpaState.fullAccess ? "is-active" : ""}`}
-                  role="menuitem"
-                  onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  disabled={gpaState.fullAccess}
-                  onClick={() => void setFullAccess(true)}
-                >
-                  <span className="gpa-popover-item-icon" aria-hidden><IconShield /></span>
-                  <span className="gpa-popover-item-copy">
-                    <span className="gpa-popover-item-title">完全访问</span>
-                    <span className="gpa-popover-item-hint">最大权限，执行时无需确认</span>
-                  </span>
-                  {gpaState.fullAccess ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
-                </button>
-                <button
-                  className={`gpa-popover-item gpa-popover-item-knowledge ${gpaState.knowledgeEnabled ? "is-active" : ""}`}
-                  role="menuitem"
-                  onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  disabled={gpaState.knowledgeEnabled}
-                  onClick={() => void setKnowledgeEnabled(true)}
-                >
-                  <span className="gpa-popover-item-icon" aria-hidden><IconKnowledge /></span>
-                  <span className="gpa-popover-item-copy">
-                    <span className="gpa-popover-item-title">开启知识库</span>
-                    <span className="gpa-popover-item-hint">允许本对话检索本地知识库</span>
-                  </span>
-                  {gpaState.knowledgeEnabled ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
-                </button>
-                <button
-                  className={`gpa-popover-item gpa-popover-item-agent ${multiAgentMode === "proactive" ? "is-active" : ""}`}
-                  role="menuitemcheckbox"
-                  aria-checked={multiAgentMode === "proactive"}
-                  onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  onClick={() => void updateMultiAgentMode(multiAgentMode === "proactive" ? "disabled" : "proactive")}
-                >
-                  <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
-                  <span className="gpa-popover-item-copy">
-                    <span className="gpa-popover-item-title">子智能体</span>
-                    <span className="gpa-popover-item-hint">{multiAgentMode === "proactive" ? "当前任务已开启，点击关闭" : "为当前任务开启并行探索、审查与诊断"}</span>
-                  </span>
-                  <span className={`gpa-popover-item-check ${multiAgentMode === "proactive" ? "is-active" : ""}`}>{multiAgentMode === "proactive" ? "已开启" : "已关闭"}</span>
-                </button>
-                <button
-                  className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`}
-                  role="menuitem"
-                  onMouseEnter={() => { clearComposerAddMenuCloseTimer(); setComposerAddMenuView("root"); }}
-                  disabled={selectedThread?.mode !== "project"}
-                  title={selectedThread?.mode !== "project" ? "仅项目模式可开启 GPA" : gpaState.stage !== "off" ? "检查 GPA 状态" : undefined}
-                  onClick={() => void enableGpaMode()}
-                >
-                  <span className="gpa-popover-item-icon" aria-hidden><IconGpa /></span>
-                  <span className="gpa-popover-item-copy">
-                    <span className="gpa-popover-item-title">{gpaState.stage !== "off" ? "GPA 已开启" : "开启 GPA"}</span>
-                    <span className="gpa-popover-item-hint">
-                      {selectedThread?.mode === "project"
-                        ? gpaState.stage !== "off"
-                          ? `当前处于${gpaModeLabel(gpaState.stage)}阶段，点击检查状态`
-                          : "目标、计划、执行三阶段工作流"
-                        : "仅项目对话可用，请先新建项目"}
-                    </span>
-                  </span>
-                  {gpaState.stage !== "off" ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
-                </button>
-              </div>
-              {gpaMenuOpen && composerAddMenuView !== "root" ? (
-                <FloatingSideMenu
-                  anchor={composerAddSubmenuAnchor}
-                  open={Boolean(composerAddSubmenuAnchor)}
-                  width={252}
-                  placementKey={composerAddMenuView}
-                  className="composer-add-menu-submenu composer-add-menu-submenu-floating"
-                  onMouseEnter={clearComposerAddMenuCloseTimer}
-                  onMouseLeave={scheduleComposerAddMenuClose}
-                >
-                  <div className="composer-add-menu-submenu-title">
-                    {composerAddMenuView === "skills" ? "Skills" : composerAddMenuView === "mcp" ? "MCP 服务" : composerAddMenuView === "apiCards" ? "接口卡片" : "数据库"}
-                  </div>
-                  <div className="composer-add-menu-list">
-                    {composerAddMenuView === "skills" ? (
-                      <>
-                        <div className="composer-add-menu-search">
-                          <input
-                            className="form-input composer-add-menu-search-input"
-                            type="text"
-                            placeholder="搜索 Skills"
-                            aria-label="搜索 Skills"
-                            value={skillsMenuQuery}
-                            autoFocus
-                            onChange={(event) => setSkillsMenuQuery(event.target.value)}
-                          />
-                        </div>
-                        {filteredComposerSkills.length > 0 ? filteredComposerSkills.map((skill) => {
-                        const isUserSkill = isGeneratedUserSkill(skill);
-                        return (
-                          <button
-                            key={skill.id}
-                            className={`gpa-popover-item${isUserSkill ? " is-user-skill" : ""}`}
-                            role="menuitem"
-                            onClick={() => {
-                              addComposerAttachment({
-                                kind: "skill",
-                                skillId: skill.id,
-                                label: skill.displayName ?? skill.name,
-                                description: skill.shortDescription ?? skill.description
-                              });
-                              setGpaMenuOpen(false);
-                              setGpaMenuPos(null);
-                              setSkillsMenuQuery("");
-                            }}
-                          >
-                            <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
-                            <span className="gpa-popover-item-copy">
-                              <span className="gpa-popover-item-title">{skill.displayName ?? skill.name}</span>
-                              <span className="gpa-popover-item-hint">{skill.shortDescription ?? skill.description}</span>
-                            </span>
-                          </button>
-                        );
-                        }) : (
-                        <span className="composer-add-menu-empty">
-                          {visibleComposerSkills.length === 0 ? "没有可用的 Skills" : "没有匹配的 Skills"}
-                        </span>
-                      )}
-                      </>
-                    ) : composerAddMenuView === "mcp" ? (
-                      <>
-                        {(config?.mcpServers ?? []).filter((server) => server.enabled).map((server) => (
-                          <button
-                            key={server.id}
-                            className="gpa-popover-item"
-                            role="menuitem"
-                            onClick={() => {
-                              addComposerAttachment({
-                                kind: "mcp",
-                                serverId: server.id,
-                                label: server.name,
-                                description: server.url ?? server.command ?? server.id
-                              });
-                              setGpaMenuOpen(false);
-                              setGpaMenuPos(null);
-                            }}
-                          >
-                            <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span>
-                            <span className="gpa-popover-item-copy">
-                              <span className="gpa-popover-item-title">{server.name}</span>
-                              <span className="gpa-popover-item-hint">{server.url ?? server.command ?? server.id}</span>
-                            </span>
-                          </button>
-                        ))}
-                        {(config?.mcpServers ?? []).filter((server) => server.enabled).length === 0 ? <span className="composer-add-menu-empty">没有已启用的 MCP 服务</span> : null}
-                      </>
-                    ) : composerAddMenuView === "apiCards" ? (
-                      <>
-                        <div className="composer-add-menu-search">
-                          <input
-                            className="form-input composer-add-menu-search-input"
-                            type="text"
-                            placeholder="搜索名称或 URL"
-                            aria-label="搜索收藏的接口卡片"
-                            value={apiCardMenuQuery}
-                            autoFocus
-                            onChange={(event) => setApiCardMenuQuery(event.target.value)}
-                          />
-                        </div>
-                        {apiCardMenuMatches.length > 0 ? apiCardMenuMatches.map((favorite) => (
-                          <button
-                            key={favorite.id}
-                            className="gpa-popover-item"
-                            role="menuitem"
-                            onClick={() => {
-                              setGpaMenuOpen(false);
-                              setGpaMenuPos(null);
-                              setComposerAddMenuView("root");
-                              setApiCardMenuQuery("");
-                              void sendApiCardFavoriteToChat(favorite);
-                            }}
-                          >
-                            <span className={`api-card-method is-${favorite.config.method.toLowerCase()}`}>
-                              {favorite.config.method}
-                            </span>
-                            <span className="gpa-popover-item-copy">
-                              <span className="gpa-popover-item-title">{favorite.name}</span>
-                              <span className="gpa-popover-item-hint">{favorite.config.url}</span>
-                            </span>
-                          </button>
-                        )) : (
-                          <span className="composer-add-menu-empty">
-                            {apiCardFavorites.length === 0 ? "还没有收藏的接口卡片,点击卡片右上角星标即可收藏" : "没有匹配的收藏卡片"}
-                          </span>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        {(config?.databaseConnections ?? []).filter((connection) => connection.enabled).map((connection) => (
-                          <button key={connection.id} className="gpa-popover-item" role="menuitem" onClick={() => { addComposerAttachment({ kind: "database", connectionId: connection.id, label: connection.name, description: `${connection.engine} · ${connection.host}:${connection.port}/${connection.database}` }); setGpaMenuOpen(false); setGpaMenuPos(null); }}>
-                            <span className="gpa-popover-item-icon" aria-hidden><IconMcp /></span><span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">{connection.name}</span><span className="gpa-popover-item-hint">{connection.engine} · {connection.host}</span></span>
-                          </button>
-                        ))}
-                        {(config?.databaseConnections ?? []).filter((connection) => connection.enabled).length === 0 ? <span className="composer-add-menu-empty">没有已启用的数据库</span> : null}
-                      </>
-                    )}
-                  </div>
-                </FloatingSideMenu>
-              ) : null}
-            </>,
-            document.body
-          )
-        : null}
-    </div>
-  );
-}
-
-function RightWorkspacePanel({
-  hidden,
-  activeTab,
-  onTabChange,
-  expandedTab,
-  onExpandedTabChange,
-  onHide,
-  projectRoot,
-  onAddAttachment,
-  projectFiles,
-  projectFilesLoading,
-  gitSnapshot,
-  gitLoading,
-  gitActionBusy,
-  gitActionMessage,
-  onGitRefresh,
-  onGitAction,
-  onGitComment,
-  selectedProjectFile,
-  projectToolCalls,
-  onSelectProjectFile,
-  onOpenProjectFile,
-  browserTabsByThread,
-  onCloseBrowserTab,
-  threadId
-}: {
-  hidden: boolean;
-  activeTab: RightWorkspaceTab;
-  onTabChange: (tab: RightWorkspaceTab) => void;
-  expandedTab: RightWorkspaceTab | null;
-  onExpandedTabChange: (tab: RightWorkspaceTab | null) => void;
-  onHide: () => void;
-  projectRoot: string;
-  onAddAttachment: (attachment: ComposerAttachmentInput) => void;
-  projectFiles: ProjectFileEntry[];
-  projectFilesLoading: boolean;
-  gitSnapshot: GitSnapshot | null;
-  gitLoading: boolean;
-  gitActionBusy: boolean;
-  gitActionMessage: string | null;
-  onGitRefresh: () => void;
-  onGitAction: (action: () => Promise<GitActionResult>) => void;
-  onGitComment: (content: string) => void;
-  selectedProjectFile: string | null;
-  projectToolCalls: ToolCallRecord[];
-  onSelectProjectFile: (path: string) => void;
-  onOpenProjectFile: (path: string) => void;
-  browserTabsByThread: Record<string, RuntimeThreadSnapshot["browserTabs"]>;
-  onCloseBrowserTab: (threadId: string, tabId: string) => void;
-  threadId: string | null;
-}) {
-  return (
-    <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="Right workspace" aria-hidden={hidden}>
-      <div className="right-workspace-accordion">
-        <WorkspaceAccordionSection
-          active={expandedTab === "changes"}
-          id="git"
-          label="Git"
-          badge={gitSnapshot?.files.length ?? 0}
-          icon={<IconFileChanges />}
-          onClick={() => toggleWorkspaceSection("changes", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
-        >
-          <GitChangesWorkspace
-            threadId={threadId}
-            snapshot={gitSnapshot}
-            loading={gitLoading}
-            busy={gitActionBusy}
-            message={gitActionMessage}
-            onRefresh={onGitRefresh}
-            onAction={onGitAction}
-            onComment={onGitComment}
-          />
-        </WorkspaceAccordionSection>
-        <WorkspaceAccordionSection
-          active={expandedTab === "files"}
-          id="files"
-          label="文件夹"
-          icon={<IconFolder />}
-          onClick={() => toggleWorkspaceSection("files", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
-        >
-          <ProjectFilesWorkspace
-            files={projectFiles}
-            toolCalls={projectToolCalls}
-            loading={projectFilesLoading}
-            selectedPath={selectedProjectFile}
-            onSelect={onSelectProjectFile}
-            onOpen={onOpenProjectFile}
-            projectRoot={projectRoot}
-            onAddAttachment={onAddAttachment}
-          />
-        </WorkspaceAccordionSection>
-        <WorkspaceAccordionSection
-          active={expandedTab === "browser"}
-          id="browser"
-          label="浏览器"
-          icon={<IconGlobe />}
-          onClick={() => toggleWorkspaceSection("browser", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
-        >
-          {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
-            <BrowserWorkspace
-              key={browserThreadId}
-              tabs={tabs}
-              threadId={browserThreadId}
-              onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
-              visible={!hidden && expandedTab === "browser" && browserThreadId === threadId}
-            />
-          ) : null)}
-          {threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
-            <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里。" />
-          ) : null}
-        </WorkspaceAccordionSection>
-      </div>
-      <button
-        type="button"
-        className="right-workspace-hide-button"
-        title="向右隐藏工作区"
-        aria-label="向右隐藏工作区"
-        onClick={onHide}
-      >
-        <IconChevronRight />
-      </button>
-    </aside>
-  );
-}
-
-function toggleWorkspaceSection(
-  tab: RightWorkspaceTab,
-  activeTab: RightWorkspaceTab,
-  expandedTab: RightWorkspaceTab | null,
-  onTabChange: (tab: RightWorkspaceTab) => void,
-  onExpandedTabChange: (tab: RightWorkspaceTab | null) => void
-): void {
-  if (expandedTab === tab) {
-    onExpandedTabChange(null);
-    return;
-  }
-  if (activeTab !== tab) {
-    onTabChange(tab);
-  }
-  onExpandedTabChange(tab);
-}
-
-function LegacyTerminalWorkspace({
-  tabs,
-  activeSessionId,
-  shell,
-  cwd,
-  output,
-  input,
-  scrollRef,
-  onInputChange,
-  onSubmit,
-  onSelectTab,
-  onAddTab,
-  onCloseTab,
-  hasThread
-}: {
-  tabs: TerminalWorkspaceTab[];
-  activeSessionId: string | null;
-  shell: string;
-  cwd: string;
-  output: string;
-  input: string;
-  scrollRef: React.RefObject<HTMLPreElement | null>;
-  onInputChange: (value: string) => void;
-  onSubmit: () => void;
-  onSelectTab: (sessionId: string) => void;
-  onAddTab: () => void;
-  onCloseTab: (sessionId: string) => void;
-  hasThread: boolean;
-}) {
-  return (
-    <section className="terminal-workspace" aria-label="终端">
-      <div className="terminal-heading">
-        <span className="terminal-heading-icon" aria-hidden="true"><IconTerminal /></span>
-        <div>
-          <strong>{shell}</strong>
-          <span title={cwd}>{cwd || "正在连接终端"}</span>
-        </div>
-      </div>
-      <pre ref={scrollRef} className="terminal-output" aria-live="polite">
-        {hasThread ? output || " " : "选择一个任务后即可使用终端。"}
-      </pre>
-      <div className="terminal-composer">
-        <span className="terminal-prompt" aria-hidden="true">&gt;</span>
-        <input
-          value={input}
-          disabled={!hasThread}
-          onChange={(event) => onInputChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              onSubmit();
-            }
-          }}
-          placeholder={hasThread ? "输入命令" : "请选择任务"}
-          aria-label="终端命令"
-          spellCheck={false}
+      {fetchedModelsPresence.value ? <FetchedModelsDialog {...{ motionPhase: fetchedModelsPresence.phase, fetchedModels, selectedFetchedModelIds, configDraft, settingsProvider, setSelectedFetchedModelIds, setShowFetchedModels, toggleFetchedModelSelection, applyFetchedModels }} /> : null}
+      {visibleMultimodalPickerRole && configDraft ? <MultimodalPickerDialog {...{ motionPhase: multimodalPickerPresence.phase, role: visibleMultimodalPickerRole, configDraft, selected: multimodalPickerSelected, setSelected: setMultimodalPickerSelected, onClose: resetMultimodalPicker, onApply: applyMultimodalPicker, onSetDefault: setMultimodalDefault }} /> : null}
+      {visibleGpaMenuPos ? (
+        <ComposerAddMenu
+          position={visibleGpaMenuPos}
+          motionPhase={gpaMenuPresence.phase}
+          open={gpaMenuOpen}
+          view={composerAddMenuView}
+          submenuAnchor={composerAddSubmenuAnchor}
+          config={config}
+          gpaState={gpaState}
+          multiAgentMode={multiAgentMode}
+          isProjectThread={selectedThread?.mode === "project"}
+          canAttachMultimodal={composerCanAttachMultimodal}
+          skills={visibleComposerSkills}
+          filteredSkills={filteredComposerSkills}
+          apiCardFavorites={apiCardFavorites}
+          apiCardMatches={apiCardMenuMatches}
+          skillsQuery={skillsMenuQuery}
+          apiCardQuery={apiCardMenuQuery}
+          onClose={() => { setGpaMenuOpen(false); setGpaMenuPos(null); }}
+          onChooseFiles={chooseComposerFiles}
+          onOpenSubmenu={openComposerAddSubmenu}
+          onSetView={setComposerAddMenuView}
+          onSetSkillsQuery={setSkillsMenuQuery}
+          onSetApiCardQuery={setApiCardMenuQuery}
+          onAddAttachment={addComposerAttachment}
+          onSendApiCard={sendApiCardFavoriteToChat}
+          onSetFullAccess={setFullAccess}
+          onSetKnowledgeEnabled={setKnowledgeEnabled}
+          onSetMultiAgentMode={updateMultiAgentMode}
+          onEnableGpa={enableGpaMode}
+          onClearCloseTimer={clearComposerAddMenuCloseTimer}
+          onScheduleCloseTimer={scheduleComposerAddMenuClose}
+          isGeneratedUserSkill={isGeneratedUserSkill}
+          formatGpaStage={gpaModeLabel}
         />
-      </div>
-    </section>
-  );
-}
-
-function LegacyBrowserWorkspace({
-  tabs,
-  threadId
-}: {
-  tabs: RuntimeThreadSnapshot["browserTabs"];
-  threadId: string | null;
-}) {
-  const activeTab = tabs.find((tab) => tab.isActive) ?? tabs[0];
-  if (!activeTab || !threadId) {
-    return <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里" />;
-  }
-
-  return (
-    <section className="browser-workspace" aria-label="浏览器">
-      <div className="browser-tab-strip" role="tablist" aria-label="浏览器标签">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`browser-tab ${tab.id === activeTab.id ? "active" : ""}`}
-            role="tab"
-            aria-selected={tab.id === activeTab.id}
-            title={tab.url}
-            onClick={() => void window.codexh.focusBrowserTab({ threadId, tabId: tab.id })}
-          >
-            <IconGlobe />
-            <span>{tab.title || tab.url}</span>
-          </button>
-        ))}
-      </div>
-      <div className="browser-location" title={activeTab.url}>{activeTab.url}</div>
-      <iframe
-        key={`${activeTab.id}:${activeTab.url}`}
-        className="browser-frame"
-        src={activeTab.url}
-        title={activeTab.title || "任务浏览器"}
-      />
-    </section>
-  );
-}
-
-function TerminalWorkspace({
-  tabs,
-  activeSessionId,
-  shell,
-  cwd,
-  output,
-  input,
-  scrollRef,
-  onInputChange,
-  onSubmit,
-  onSelectTab,
-  onAddTab,
-  onCloseTab,
-  hasThread
-}: {
-  tabs: TerminalWorkspaceTab[];
-  activeSessionId: string | null;
-  shell: string;
-  cwd: string;
-  output: string;
-  input: string;
-  scrollRef: React.RefObject<HTMLPreElement | null>;
-  onInputChange: (value: string) => void;
-  onSubmit: () => void;
-  onSelectTab: (sessionId: string) => void;
-  onAddTab: () => void;
-  onCloseTab: (sessionId: string) => void;
-  hasThread: boolean;
-}) {
-  if (!hasThread) {
-    return <WorkspaceEmptyState icon={<IconTerminal />} title="打开终端" message="选择一个任务后即可使用终端。" />;
-  }
-
-  if (tabs.length === 0) {
-    return (
-      <section className="terminal-workspace" aria-label="终端">
-        <WorkspaceSubtabStrip items={[]} addLabel="新建终端" onAdd={onAddTab} />
-        <WorkspaceEmptyState icon={<IconTerminal />} title="打开终端" message="新建一个终端后即可开始输入命令。" />
-      </section>
-    );
-  }
-
-  return (
-    <section className="terminal-workspace" aria-label="终端">
-      <WorkspaceSubtabStrip
-        items={tabs.map((tab) => ({
-          id: tab.id,
-          label: tab.title,
-          title: tab.title,
-          active: tab.id === activeSessionId,
-          icon: <IconTerminal />,
-          onClick: () => onSelectTab(tab.id),
-          onClose: () => onCloseTab(tab.id)
-        }))}
-        addLabel="新建终端"
-        onAdd={onAddTab}
-      />
-      <div className="terminal-heading">
-        <span className="terminal-heading-icon" aria-hidden="true"><IconTerminal /></span>
-        <div>
-          <strong>{shell}</strong>
-          <span title={cwd}>{cwd || "正在连接终端"}</span>
-        </div>
-      </div>
-      <pre ref={scrollRef} className="terminal-output" aria-live="polite">
-        {output || " "}
-      </pre>
-      <div className="terminal-composer">
-        <span className="terminal-prompt" aria-hidden="true">&gt;</span>
-        <input
-          value={input}
-          onChange={(event) => onInputChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              onSubmit();
-            }
-          }}
-          placeholder="输入命令"
-          aria-label="终端命令"
-          spellCheck={false}
-        />
-      </div>
-    </section>
-  );
-}
-
-function BrowserWorkspace({
-  tabs,
-  threadId,
-  onCloseTab,
-  visible
-}: {
-  tabs: RuntimeThreadSnapshot["browserTabs"];
-  threadId: string | null;
-  onCloseTab: (tabId: string) => void;
-  visible: boolean;
-}) {
-  const activeTab = tabs.find((tab) => tab.isActive) ?? tabs[0];
-  if (!activeTab || !threadId) {
-    return visible ? <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里" /> : null;
-  }
-
-  return (
-    <section className={`browser-workspace ${visible ? "is-visible" : "is-background"}`} aria-label="浏览器">
-      <WorkspaceSubtabStrip
-        items={tabs.map((tab) => ({
-          id: tab.id,
-          label: tab.title || tab.url,
-          title: tab.url,
-          active: tab.id === activeTab.id,
-          icon: <IconGlobe />,
-          onClick: () => void window.codexh.focusBrowserTab({ threadId, tabId: tab.id }),
-          onClose: () => onCloseTab(tab.id)
-        }))}
-      />
-      <div className="browser-location" title={activeTab.url}>{activeTab.url}</div>
-      <div className="browser-page-stack">
-        {tabs.map((tab) => (
-          <BrowserTabWebview
-            key={tab.id}
-            tab={tab}
-            threadId={threadId}
-            visible={visible && tab.id === activeTab.id}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function BrowserTabWebview({
-  tab,
-  threadId,
-  visible
-}: {
-  tab: RuntimeThreadSnapshot["browserTabs"][number];
-  threadId: string;
-  visible: boolean;
-}) {
-  const webviewRef = useRef<BrowserWebviewElement | null>(null);
-  const syncTimerRef = useRef<number | null>(null);
-  const cleanupRef = useRef<(() => void) | null>(null);
-
-  const bindWebview = useCallback((view: BrowserWebviewElement | null) => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
-    webviewRef.current = view;
-    if (!view) return;
-
-    const sync = () => {
-      if (syncTimerRef.current !== null) {
-        window.clearTimeout(syncTimerRef.current);
-      }
-      syncTimerRef.current = window.setTimeout(() => {
-        syncTimerRef.current = null;
-        void window.codexh.syncBrowserWebContents({ threadId, tabId: tab.id }).catch(() => undefined);
-      }, 180);
-    };
-    const register = () => {
-      let webContentsId: number;
-      try {
-        webContentsId = view.getWebContentsId();
-      } catch {
-        return false;
-      }
-      if (!Number.isFinite(webContentsId) || webContentsId <= 0) {
-        return false;
-      }
-      void window.codexh.registerBrowserWebContents({ threadId, tabId: tab.id, webContentsId })
-        .then(sync)
-        .catch((error) => {
-          console.warn("[browser] registerBrowserWebContents failed", {
-            threadId,
-            tabId: tab.id,
-            webContentsId,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        });
-      return true;
-    };
-
-    view.addEventListener("dom-ready", register);
-    view.addEventListener("did-attach", register);
-    view.addEventListener("did-navigate", sync);
-    view.addEventListener("did-navigate-in-page", sync);
-    view.addEventListener("page-title-updated", sync);
-    register();
-    const registrarKey = browserWebviewRegistrarKey(threadId, tab.id);
-    browserWebviewRegistrars.set(registrarKey, register);
-
-    const poll = window.setInterval(() => {
-      if (register()) {
-        window.clearInterval(poll);
-      }
-    }, 200);
-    const pollTimeout = window.setTimeout(() => window.clearInterval(poll), 20_000);
-
-    cleanupRef.current = () => {
-      browserWebviewRegistrars.delete(registrarKey);
-      window.clearInterval(poll);
-      window.clearTimeout(pollTimeout);
-      if (syncTimerRef.current !== null) {
-        window.clearTimeout(syncTimerRef.current);
-        syncTimerRef.current = null;
-      }
-      view.removeEventListener("dom-ready", register);
-      view.removeEventListener("did-attach", register);
-      view.removeEventListener("did-navigate", sync);
-      view.removeEventListener("did-navigate-in-page", sync);
-      view.removeEventListener("page-title-updated", sync);
-    };
-  }, [tab.id, threadId]);
-
-  useEffect(() => () => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
-  }, []);
-
-  return (
-    <div className={`browser-page-host ${visible ? "is-visible" : "is-background"}`}>
-      {createElement("webview", {
-        ref: bindWebview,
-        className: "browser-frame",
-        src: tab.url,
-        webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
-        title: tab.title || "任务浏览器"
-      })}
-    </div>
-  );
-}
-
-function TerminalPanel({
-  shell,
-  cwd,
-  output,
-  input,
-  scrollRef,
-  onInputChange,
-  onSubmit,
-  onHide,
-  hasThread
-}: {
-  shell: string;
-  cwd: string;
-  output: string;
-  input: string;
-  scrollRef: React.RefObject<HTMLPreElement | null>;
-  onInputChange: (value: string) => void;
-  onSubmit: () => void;
-  onHide: () => void;
-  hasThread: boolean;
-}) {
-  return (
-    <aside className="terminal-panel" aria-label="终端">
-      <header className="terminal-header">
-        <div className="terminal-heading">
-          <span className="terminal-heading-icon" aria-hidden="true">
-            <IconTerminal />
-          </span>
-          <div>
-            <strong>{shell}</strong>
-            <span title={cwd}>{cwd || "正在连接终端"}</span>
-          </div>
-        </div>
-        <button
-          type="button"
-          className="terminal-hide-button"
-          title="向右隐藏终端"
-          aria-label="向右隐藏终端"
-          onClick={onHide}
-        >
-          <IconChevronRight />
-        </button>
-      </header>
-
-      <pre ref={scrollRef} className="terminal-output" aria-live="polite">
-        {hasThread ? output || " " : "选择一个任务后即可使用终端。"}
-      </pre>
-
-      <div className="terminal-composer">
-        <span className="terminal-prompt" aria-hidden="true">&gt;</span>
-        <input
-          value={input}
-          disabled={!hasThread}
-          onChange={(event) => onInputChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              onSubmit();
-            }
-          }}
-          placeholder={hasThread ? "输入命令" : "请选择任务"}
-          aria-label="终端命令"
-          spellCheck={false}
-        />
-      </div>
-    </aside>
-  );
-}
-
-const GPT_REASONING_EFFORT_LABELS: Record<GptReasoningEffort, string> = {
-  low: "轻度",
-  medium: "中",
-  high: "高",
-  xhigh: "极高"
-};
-
-function ReasoningEffortPicker({
-  value,
-  onChange,
-  disabled
-}: {
-  value: GptReasoningEffort;
-  onChange: (value: GptReasoningEffort) => void;
-  disabled: boolean;
-}) {
-  const [isOpen, setIsOpen] = useState(false);
-  const menuPresence = useMotionPresence(isOpen ? true : null, 140);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (disabled && isOpen) setIsOpen(false);
-  }, [disabled, isOpen]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setIsOpen(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setIsOpen(false);
-    };
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [isOpen]);
-
-  return (
-    <div ref={rootRef} className={`reasoning-effort-picker ${isOpen ? "open" : ""}`}>
-      <button
-        type="button"
-        className="reasoning-effort-trigger"
-        onClick={() => !disabled && setIsOpen((current) => !current)}
-        aria-haspopup="listbox"
-        aria-expanded={isOpen}
-        aria-label={`推理强度：${GPT_REASONING_EFFORT_LABELS[value]}`}
-        title="推理强度"
-        disabled={disabled}
-      >
-        <span>推理 · {GPT_REASONING_EFFORT_LABELS[value]}</span>
-        <span className="composer-select-chevron" aria-hidden="true"><IconChevronDown /></span>
-      </button>
-      {menuPresence.value ? (
-        <div className="reasoning-effort-menu" data-motion={menuPresence.phase} role="listbox" aria-label="推理强度">
-          <div className="reasoning-effort-title">推理强度</div>
-          {GPT_REASONING_EFFORTS.map((effort) => (
-            <button
-              key={effort}
-              type="button"
-              className={`reasoning-effort-option ${effort === value ? "selected" : ""}`}
-              onClick={() => {
-                onChange(effort);
-                setIsOpen(false);
-              }}
-              role="option"
-              aria-selected={effort === value}
-            >
-              <span>{GPT_REASONING_EFFORT_LABELS[effort]}</span>
-              {effort === value ? <span className="reasoning-effort-check" aria-hidden="true">✓</span> : null}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-type ComposerModelGroup = {
-  providerId: string;
-  providerLabel: string;
-  models: Array<{ id: string; label: string; supportsMultimodalInput: boolean }>;
-};
-
-function ContextCompactionNotice({ compaction }: { compaction: ContextCompactionRecord }) {
-  return (
-    <details className="context-compaction-notice">
-      <summary>
-        <span className="context-compaction-icon" aria-hidden="true">↳</span>
-        <strong>上下文已自动压缩</strong>
-        <span>{formatTokenCount(compaction.beforeTokens)} → {formatTokenCount(compaction.afterTokens)}</span>
-      </summary>
-      <div className="context-compaction-detail">
-        <span>消息 {compaction.messagesBefore} → {compaction.messagesAfter}</span>
-        <span>占用约 {Math.round((compaction.afterTokens / Math.max(1, compaction.contextWindow)) * 100)}%</span>
-        <span>{new Date(compaction.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</span>
-      </div>
-    </details>
-  );
-}
-
-function ContextUsageControl({
-  usage,
-  open,
-  onToggle,
-  onClose
-}: {
-  usage: ContextUsage;
-  open: boolean;
-  onToggle: () => void;
-  onClose: () => void;
-}) {
-  const reportPresence = useMotionPresence(open ? true : null, 140);
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    const close = () => onClose();
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    };
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [onClose, open]);
-
-  return (
-    <div className="context-usage-anchor" onPointerDown={(event) => event.stopPropagation()}>
-      <button
-        type="button"
-        className={`context-usage-button ${open ? "is-open" : ""}`}
-        aria-label="查看上下文占用"
-        aria-expanded={open}
-        title={`上下文占用：约 ${usage.percentage}%`}
-        onClick={onToggle}
-      >
-        <span
-          className="context-usage-ring"
-          style={{ "--context-usage-angle": `${Math.max(3, usage.percentage * 3.6)}deg` } as React.CSSProperties}
-        >
-          <span>{usage.percentage}%</span>
-        </span>
-      </button>
-      {reportPresence.value ? <ContextUsageReport usage={usage} motionPhase={reportPresence.phase} onClose={onClose} /> : null}
-    </div>
-  );
-}
-
-function ContextUsageReport({ usage, motionPhase, onClose }: { usage: ContextUsage; motionPhase?: string; onClose: () => void }) {
-  return (
-    <section className="context-usage-report" data-motion={motionPhase} aria-label="上下文占用详情">
-      <header>
-        <div>
-          <strong>上下文占用</strong>
-          <span>{usage.compaction ? "压缩后估算" : "本地估算"}</span>
-        </div>
-        <button type="button" title="关闭" aria-label="关闭上下文详情" onClick={onClose}>
-          <IconClose />
-        </button>
-      </header>
-      <div className="context-usage-summary">
-        <span>{usage.percentage}% 已用</span>
-        <strong>约 {formatTokenCount(usage.usedTokens)} / {formatTokenCount(usage.contextWindow)} tokens</strong>
-      </div>
-      {usage.compaction ? (
-        <div className="context-usage-compaction">
-          <span>压缩前 {formatTokenCount(usage.compaction.beforeTokens)}</span>
-          <strong>压缩后 {formatTokenCount(usage.compaction.afterTokens)}</strong>
-        </div>
-      ) : null}
-      <div className="context-usage-bar" aria-hidden="true">
-        {usage.segments.map((segment) => (
-          <i
-            key={segment.id}
-            style={{
-              width: `${Math.max(usage.contextWindow ? (segment.tokens / usage.contextWindow) * 100 : 0, 0.8)}%`,
-              background: segment.color
-            }}
-          />
-        ))}
-      </div>
-      <div className="context-usage-segments">
-        {usage.segments.map((segment) => (
-          <div key={segment.id}>
-            <span style={{ background: segment.color }} aria-hidden="true" />
-            <strong>{segment.label}</strong>
-            <em>{formatTokenCount(segment.tokens)}</em>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function FloatingSideMenu({
-  anchor,
-  open,
-  width,
-  placementKey,
-  className,
-  children,
-  panelRef,
-  onMouseEnter,
-  onMouseLeave
-}: {
-  anchor: HTMLElement | null;
-  open: boolean;
-  width: number;
-  placementKey?: string;
-  className: string;
-  children: ReactNode;
-  panelRef?: MutableRefObject<HTMLDivElement | null>;
-  onMouseEnter?: () => void;
-  onMouseLeave?: () => void;
-}) {
-  const localPanelRef = useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = useState<{ left: number; top: number; maxHeight: number; anchorTop: number } | null>(null);
-  const viewportMargin = 12;
-  const gap = 6;
-
-  useLayoutEffect(() => {
-    if (!open || !anchor) {
-      setPosition(null);
-      return;
-    }
-    const updatePosition = () => {
-      const rect = anchor.getBoundingClientRect();
-      const maxHeight = Math.min(380, Math.max(160, window.innerHeight - viewportMargin * 2));
-      const opensRight = rect.right + gap + width <= window.innerWidth - viewportMargin;
-      setPosition({
-        left: opensRight ? rect.right + gap : Math.max(viewportMargin, rect.left - width - gap),
-        top: Math.min(Math.max(viewportMargin, rect.top), window.innerHeight - maxHeight - viewportMargin),
-        maxHeight,
-        anchorTop: rect.top
-      });
-    };
-    updatePosition();
-    window.addEventListener("resize", updatePosition);
-    return () => window.removeEventListener("resize", updatePosition);
-  }, [anchor, open, placementKey, width]);
-
-  useLayoutEffect(() => {
-    if (!position || !localPanelRef.current) {
-      return;
-    }
-    const actualHeight = localPanelRef.current.getBoundingClientRect().height;
-    const top = Math.min(
-      Math.max(viewportMargin, position.anchorTop),
-      window.innerHeight - actualHeight - viewportMargin
-    );
-    if (Math.abs(top - position.top) > 1) {
-      setPosition((current) => current ? { ...current, top } : current);
-    }
-  }, [position]);
-
-  if (!open || !position) {
-    return null;
-  }
-
-  return createPortal(
-    <div
-      ref={(node) => {
-        localPanelRef.current = node;
-        if (panelRef) panelRef.current = node;
-      }}
-      className={`floating-side-menu ${className}`}
-      role="menu"
-      style={{ left: position.left, top: position.top, maxHeight: position.maxHeight }}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-    >
-      {children}
-    </div>,
-    document.body
-  );
-}
-
-function ComposerModelPicker({
-  triggerLabel,
-  providers,
-  modelGroups,
-  selectedProviderId,
-  selectedModelId,
-  onSelectModel,
-  disabled
-}: {
-  triggerLabel: string;
-  providers: ComposerSelectOption[];
-  modelGroups: ComposerModelGroup[];
-  selectedProviderId: string;
-  selectedModelId: string;
-  onSelectModel: (providerId: string, modelId: string) => void;
-  disabled: boolean;
-}) {
-  const [isOpen, setIsOpen] = useState(false);
-  const menuPresence = useMotionPresence(isOpen ? true : null, 140);
-  const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
-  const [hoveredProviderId, setHoveredProviderId] = useState<string | null>(null);
-  const [modelsPanelAnchor, setModelsPanelAnchor] = useState<HTMLElement | null>(null);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const modelsPanelRef = useRef<HTMLDivElement | null>(null);
-  const hoverTimerRef = useRef<number | null>(null);
-
-  const clearHoverTimer = () => {
-    if (hoverTimerRef.current !== null) {
-      window.clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
-  };
-
-  useEffect(() => {
-    if (disabled && isOpen) {
-      setIsOpen(false);
-      setActiveProviderId(null);
-      setModelsPanelAnchor(null);
-    }
-  }, [disabled, isOpen]);
-
-  useEffect(() => {
-    return () => {
-      clearHoverTimer();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!isOpen) {
-      clearHoverTimer();
-      return;
-    }
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!rootRef.current?.contains(target) && !modelsPanelRef.current?.contains(target)) {
-        setIsOpen(false);
-        setActiveProviderId(null);
-        setHoveredProviderId(null);
-        setModelsPanelAnchor(null);
-      }
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setIsOpen(false);
-        setActiveProviderId(null);
-        setHoveredProviderId(null);
-        setModelsPanelAnchor(null);
-      }
-    };
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-    const root = rootRef.current;
-    if (!root) {
-      return;
-    }
-    const handleMove = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (!target) {
-        return;
-      }
-      const providerItem = target.closest<HTMLElement>(".composer-model-picker-provider");
-      if (providerItem) {
-        const providerId = providerItem.dataset.providerId;
-        if (providerId) {
-          handleProviderHover(providerId, providerItem);
-          return;
-        }
-      }
-      const modelItem = target.closest<HTMLElement>(".composer-model-picker-model");
-      if (modelItem) {
-        clearHoverTimer();
-        return;
-      }
-    };
-    root.addEventListener("mousemove", handleMove);
-    return () => {
-      root.removeEventListener("mousemove", handleMove);
-    };
-  }, [isOpen]);
-
-  if (providers.length === 0) {
-    return (
-      <div ref={rootRef} className="composer-model-picker disabled">
-        <span className="composer-model-picker-label">选择模型</span>
-      </div>
-    );
-  }
-
-  const openMenu = (initialProviderId: string | null) => {
-    clearHoverTimer();
-    setIsOpen(true);
-    setActiveProviderId(initialProviderId);
-    setHoveredProviderId(null);
-    setModelsPanelAnchor(null);
-  };
-
-  const handleProviderHover = (providerId: string, providerItem?: HTMLElement) => {
-    clearHoverTimer();
-    setHoveredProviderId(providerId);
-    if (providerItem) setModelsPanelAnchor(providerItem);
-  };
-
-  const handleProviderLeave = () => {
-    clearHoverTimer();
-    hoverTimerRef.current = window.setTimeout(() => {
-      setHoveredProviderId(null);
-    }, 160);
-  };
-
-  const handleModelPanelEnter = () => {
-    clearHoverTimer();
-  };
-
-  const handleModelPanelLeave = () => {
-    clearHoverTimer();
-    hoverTimerRef.current = window.setTimeout(() => {
-      setHoveredProviderId(null);
-    }, 180);
-  };
-
-  const visibleSecondaryProviderId = hoveredProviderId ?? activeProviderId;
-  const visibleSecondaryProvider = providers.find((provider) => provider.value === visibleSecondaryProviderId);
-
-  return (
-    <div
-      ref={rootRef}
-      className={`composer-model-picker ${isOpen ? "open" : ""} ${disabled ? "disabled" : ""}`}
-    >
-      <button
-        type="button"
-        className="composer-model-picker-trigger"
-        onClick={() => {
-          if (disabled) {
-            return;
-          }
-          if (isOpen) {
-            setIsOpen(false);
-            setActiveProviderId(null);
-            setHoveredProviderId(null);
-            setModelsPanelAnchor(null);
-            return;
-          }
-          openMenu(null);
-        }}
-        aria-haspopup="listbox"
-        aria-expanded={isOpen}
-        disabled={disabled}
-        title="选择模型"
-      >
-        <span className="composer-model-picker-label">{triggerLabel}</span>
-        <span className="composer-select-chevron">
-          <IconChevronRight />
-        </span>
-      </button>
-
-      {menuPresence.value ? (
-        <div className="composer-model-picker-menu" data-motion={menuPresence.phase} role="listbox">
-          <ul
-            className="composer-model-picker-providers"
-            onMouseLeave={handleProviderLeave}
-          >
-            {providers.map((provider) => (
-              <li key={provider.value}>
-                <button
-                  type="button"
-                  data-provider-id={provider.value}
-                  className={`composer-model-picker-provider ${visibleSecondaryProviderId === provider.value ? "is-active" : ""}`}
-                  onClick={(event) => {
-                    setActiveProviderId(provider.value);
-                    handleProviderHover(provider.value, event.currentTarget);
-                  }}
-                  onMouseEnter={(event) => handleProviderHover(provider.value, event.currentTarget)}
-                  onFocus={(event) => {
-                    setActiveProviderId(provider.value);
-                    handleProviderHover(provider.value, event.currentTarget);
-                  }}
-                  role="option"
-                  aria-selected={selectedProviderId === provider.value}
-                >
-                  <span>{provider.label}</span>
-                  <span className="composer-model-picker-chevron">
-                    <IconChevronRight />
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-          {visibleSecondaryProviderId && modelsPanelAnchor ? (
-            <FloatingSideMenu
-              anchor={modelsPanelAnchor}
-              open={isOpen}
-              width={264}
-              placementKey={visibleSecondaryProviderId}
-              className="composer-model-picker-models"
-              panelRef={modelsPanelRef}
-              onMouseEnter={handleModelPanelEnter}
-              onMouseLeave={handleModelPanelLeave}
-            >
-            <ul className="composer-model-picker-models-list">
-              <li className="composer-model-picker-models-title">
-                {visibleSecondaryProvider ? `${visibleSecondaryProvider.label} · 模型` : "模型"}
-              </li>
-              {modelGroups
-                .find((group) => group.providerId === visibleSecondaryProviderId)
-                ?.models.map((model) => (
-                  <li key={model.id}>
-                    <button
-                      type="button"
-                      className={`composer-model-picker-model ${selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id ? "is-selected" : ""}`}
-                      onClick={() => {
-                        if (visibleSecondaryProviderId) {
-                          onSelectModel(visibleSecondaryProviderId, model.id);
-                        }
-                        setIsOpen(false);
-                        setActiveProviderId(null);
-                        setHoveredProviderId(null);
-                        setModelsPanelAnchor(null);
-                      }}
-                      role="option"
-                      aria-selected={selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id}
-                    >
-                      <span className="composer-model-picker-model-label">
-                        {model.supportsMultimodalInput ? (
-                          <span className="composer-model-picker-multimodal" title="支持多模态输入" aria-label="支持多模态输入">
-                            <IconImage />
-                          </span>
-                        ) : null}
-                        <span>{model.label}</span>
-                      </span>
-                      {selectedProviderId === visibleSecondaryProviderId && selectedModelId === model.id ? (
-                        <span className="composer-model-picker-check" aria-hidden="true">✓</span>
-                      ) : null}
-                    </button>
-                  </li>
-                ))}
-            </ul>
-            </FloatingSideMenu>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function FileChangeSummary({
-  files,
-  onOpenFolder
-}: {
-  files: FileChangeSummaryItem[];
-  onOpenFolder: (filePath: string) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [diffPreview, setDiffPreview] = useState<{ file: FileChangeSummaryItem; anchor: DOMRect } | null>(null);
-  const diffPreviewPresence = useMotionPresence(diffPreview, 140);
-  const visibleDiffPreview = diffPreview ?? diffPreviewPresence.value;
-  const hoverTimerRef = useRef<number | null>(null);
-  const closeTimerRef = useRef<number | null>(null);
-  useEffect(() => () => {
-    if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
-    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
-  }, []);
-  if (files.length === 0) {
-    return null;
-  }
-
-  const defaultVisibleCount = 5;
-  const canExpand = files.length > 0;
-  const visibleFiles = expanded ? files : files.slice(0, defaultVisibleCount);
-
-  const clearPreviewCloseTimer = () => {
-    if (closeTimerRef.current === null) return;
-    window.clearTimeout(closeTimerRef.current);
-    closeTimerRef.current = null;
-  };
-  const startDiffPreviewTimer = (file: FileChangeSummaryItem, anchor: DOMRect) => {
-    if (!file.snapshot) return;
-    clearPreviewCloseTimer();
-    if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
-    hoverTimerRef.current = window.setTimeout(() => {
-      setDiffPreview({ file, anchor });
-      hoverTimerRef.current = null;
-    }, 3_000);
-  };
-  const scheduleDiffPreviewClose = () => {
-    if (hoverTimerRef.current !== null) {
-      window.clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
-    clearPreviewCloseTimer();
-    closeTimerRef.current = window.setTimeout(() => {
-      setDiffPreview(null);
-      closeTimerRef.current = null;
-    }, 140);
-  };
-
-  return (
-    <>
-      <section className="generated-file-list" aria-label="主要改动文件">
-        <header
-          className="generated-file-list-head"
-          role="button"
-          tabIndex={0}
-          aria-expanded={expanded}
-          onClick={() => {
-            setExpanded((current) => !current);
-            setDiffPreview(null);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            setExpanded((current) => !current);
-            setDiffPreview(null);
-          }}
-        >
-          <div className="generated-file-list-heading">
-            <span className="generated-file-list-icon" aria-hidden="true"><IconFileChanges /></span>
-            <h3 className="generated-file-list-title">主要改动文件</h3>
-            <span className="generated-file-list-count">{files.length}</span>
-          </div>
-          {canExpand ? (
-            <button
-              type="button"
-              className={`generated-file-list-toggle ${expanded ? "is-expanded" : ""}`}
-              aria-expanded={expanded}
-              title={expanded ? "收起文件列表" : `展开全部 ${files.length} 个文件`}
-              onClick={(event) => {
-                event.stopPropagation();
-                setExpanded((current) => !current);
-                setDiffPreview(null);
-              }}
-            >
-              <span>{visibleFiles.length}/{files.length}</span>
-              <IconChevronDown />
-            </button>
-          ) : null}
-        </header>
-        <ul className="generated-file-list-items">
-          {visibleFiles.map((file) => (
-            <li
-              key={file.path}
-              className={`generated-file-list-item ${file.snapshot ? "has-diff-preview" : ""}`}
-              onMouseEnter={(event) => startDiffPreviewTimer(file, event.currentTarget.getBoundingClientRect())}
-              onMouseLeave={scheduleDiffPreviewClose}
-            >
-              <button
-                type="button"
-                className="generated-file-path"
-                onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
-                title={file.snapshot ? "停留 3 秒查看快照 Diff；点击打开所在文件夹" : "打开所在文件夹"}
-              >
-                {getFileLeafName(file.path)}
-              </button>
-              <span className="generated-file-sep" aria-hidden="true">—</span>
-              <span className="generated-file-desc">{getMainChangedFileDescription(file)}</span>
-            </li>
-          ))}
-        </ul>
-      </section>
-      {visibleDiffPreview?.file.snapshot ? (
-        <FileSnapshotDiffPopover
-          file={visibleDiffPreview.file}
-          anchor={visibleDiffPreview.anchor}
-          motionPhase={diffPreviewPresence.phase}
-          onMouseEnter={clearPreviewCloseTimer}
-          onMouseLeave={scheduleDiffPreviewClose}
-        />
-      ) : null}
-    </>
-  );
-}
-
-function FileSnapshotDiffPopover({
-  file,
-  anchor,
-  motionPhase,
-  onMouseEnter,
-  onMouseLeave
-}: {
-  file: FileChangeSummaryItem;
-  anchor: DOMRect;
-  motionPhase?: string;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
-}) {
-  const snapshot = file.snapshot;
-  if (!snapshot) return null;
-  const lines = buildFileSnapshotDiffPreview(snapshot.before, snapshot.after);
-  const width = Math.min(720, window.innerWidth - 32);
-  const left = Math.max(16, Math.min(anchor.left, window.innerWidth - width - 16));
-  const placeAbove = anchor.top > Math.min(440, window.innerHeight * 0.56);
-  const style: CSSProperties = placeAbove
-    ? { left, width, bottom: Math.max(16, window.innerHeight - anchor.top + 8) }
-    : { left, width, top: Math.min(window.innerHeight - 180, anchor.bottom + 8) };
-
-  return createPortal(
-    <aside
-      className="generated-file-diff-popover"
-      data-motion={motionPhase}
-      aria-label={`${file.path} 快照 Diff`}
-      style={style}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-    >
-      <header className="generated-file-diff-head">
-        <span title={file.path}>{file.path}</span>
-        <div>
-          <b>+{file.additions}</b>
-          <i>-{file.deletions}</i>
-        </div>
-      </header>
-      <div className="generated-file-diff-code">
-        {lines.map((line, index) => (
-          <div key={`${file.path}-hover-diff-${index}`} className={`is-${line.kind} ${line.omitted ? "is-omitted" : ""}`}>
-            <span className="generated-file-diff-line-number" aria-hidden="true">{line.lineNumber ?? ""}</span>
-            <span className="generated-file-diff-marker" aria-hidden="true">{line.omitted ? "" : getFileSnapshotDiffMarker(line.kind)}</span>
-            <code>{line.omitted ? line.content : renderCodePreviewLine(line.content, `${file.path}-hover-${index}`)}</code>
-          </div>
-        ))}
-      </div>
-      {snapshot.beforeTruncated || snapshot.afterTruncated ? (
-        <footer className="generated-file-diff-note">快照内容过长，仅显示已保存的部分。</footer>
-      ) : null}
-    </aside>,
-    document.body
-  );
-}
-
-function getMainChangedFileDescription(file: FileChangeSummaryItem): string {
-  if (file.description) {
-    return file.description;
-  }
-  if (file.action === "created" || file.kind) {
-    return getGeneratedFileDescription(file.path, file.kind, undefined, file.action);
-  }
-
-  const symbols = file.symbols?.slice(0, 3).map((symbol) => symbol.name).filter(Boolean) ?? [];
-  const changeLabel = file.action === "deleted"
-    ? "已删除"
-    : symbols.length > 0
-      ? `修改 ${symbols.join("、")}`
-      : "已修改";
-  const lineCounts = [
-    file.additions > 0 ? `+${file.additions}` : "",
-    file.deletions > 0 ? `-${file.deletions}` : ""
-  ].filter(Boolean).join(" ");
-  return lineCounts ? `${changeLabel}（${lineCounts}）` : changeLabel;
-}
-
-function buildConversationTurnItems(
-  messages: MessageRecord[],
-  toolCalls: ToolCallRecord[],
-  workspaceRoot?: string | null
-): ConversationTurnItem[] {
-  const filesByTurn = collectFileChangesByTurn(toolCalls, workspaceRoot);
-
-  return messages
-    .filter((message) => message.role === "user" && !message.content.startsWith("[internal:"))
-    .map((message) => ({
-      id: message.id,
-      content: message.content,
-      createdAt: message.createdAt,
-      files: message.turnRunId ? filesByTurn.get(message.turnRunId) ?? [] : []
-    }));
-}
-
-function ConversationTurnRail({ turns }: { turns: ConversationTurnItem[] }) {
-  const [hoveredTurnId, setHoveredTurnId] = useState<string | null>(null);
-
-  if (turns.length === 0) {
-    return null;
-  }
-
-  const latestTurnId = turns.at(-1)?.id;
-
-  return (
-    <nav className="conversation-turn-rail" aria-label="问话轨迹">
-      {turns.map((turn) => {
-        const preview = getConversationTurnPreview(turn.content);
-        const isHovered = hoveredTurnId === turn.id;
-        const isLatest = latestTurnId === turn.id;
-
-        return (
-          <button
-            key={turn.id}
-            type="button"
-            className={`conversation-turn-marker ${isHovered ? "is-hovered" : ""} ${isLatest ? "is-latest" : ""}`}
-            aria-label={`问话：${preview}`}
-            onClick={() => document.getElementById(`transcript-message-${turn.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
-            onMouseEnter={() => setHoveredTurnId(turn.id)}
-            onMouseLeave={() => setHoveredTurnId(null)}
-            onFocus={() => setHoveredTurnId(turn.id)}
-            onBlur={() => setHoveredTurnId(null)}
-          >
-            <span className="conversation-turn-marker-line" style={{ width: getConversationTurnMarkerWidth(turn.content) }} />
-            <span className="conversation-turn-preview" role="tooltip">
-              <span className="conversation-turn-preview-copy">{preview}</span>
-              {turn.files.length > 0 ? (
-                <span className="conversation-turn-preview-files">
-                  {turn.files.slice(0, 3).map((file) => (
-                    <span key={file.path} className="conversation-turn-preview-file">
-                      {getFileLeafName(file.path)}
-                    </span>
-                  ))}
-                  {turn.files.length > 3 ? <em>+{turn.files.length - 3}</em> : null}
-                </span>
-              ) : null}
-            </span>
-          </button>
-        );
-      })}
-    </nav>
-  );
-}
-
-function getConversationTurnPreview(content: string) {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  return normalized.length > 120 ? `${normalized.slice(0, 119)}...` : normalized || "空白问话";
-}
-
-function getConversationTurnMarkerWidth(content: string) {
-  const length = content.trim().length;
-  return Math.min(28, Math.max(7, 6 + Math.round(Math.sqrt(length) * 2.1)));
-}
-
-function formatFileChangeAction(action: FileChangeAction) {
-  switch (action) {
-    case "created":
-      return "已生成";
-    case "deleted":
-      return "已删除";
-    default:
-      return "已编辑";
-  }
-}
-
-function getFileChangeActionClass(action: FileChangeAction) {
-  switch (action) {
-    case "created":
-      return "is-created";
-    case "deleted":
-      return "is-deleted";
-    default:
-      return "is-modified";
-  }
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("无法读取图片预览。"));
-    reader.onload = () => typeof reader.result === "string"
-      ? resolve(reader.result)
-      : reject(new Error("无法读取图片预览。"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function getKnowledgeDefaultName(source: KnowledgeSourceAttachment) {
-  if (source.kind === "url" || source.kind === "browser") {
-    return new URL(source.url).hostname;
-  }
-  const leaf = getFileLeafName(source.path.replace(/[\\/]+$/, "")) || source.path;
-  if (source.kind === "folder") return leaf;
-  const extensionIndex = leaf.lastIndexOf(".");
-  return extensionIndex > 0 ? leaf.slice(0, extensionIndex) : leaf;
-}
-
-function knowledgeSourceKey(source: KnowledgeSourceAttachment): string {
-  if (source.kind === "url") return `url:${source.url.toLowerCase()}`;
-  if (source.kind === "browser") return `browser:${source.threadId}:${source.tabId}`;
-  return `${source.kind}:${source.path.toLowerCase()}`;
-}
-
-function getFileParentPath(filePath: string) {
-  const normalized = filePath.replace(/\\/g, "/");
-  const index = normalized.lastIndexOf("/");
-  return index === -1 ? "./" : normalized.slice(0, index + 1);
-}
-
-function PlanTimeline({ state, isRunning }: { state: GpaState; isRunning: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const items = buildPlanTimelineItems(state);
-  const completedCount = items.filter((item) => item.status === "completed").length;
-  const isFinalizing = items.length > 0 && completedCount === items.length && state.stage === "act";
-  const currentItem = getActivePlanTimelineItem(items) ?? (isFinalizing ? {
-    id: "finalizing",
-    label: isRunning
-      ? `计划 ${completedCount}/${items.length} 已完成，正在最终验证`
-      : `计划 ${completedCount}/${items.length} 已完成`,
-    status: isRunning ? "in_progress" as const : "completed" as const
-  } : null);
-
-  if (!currentItem) return null;
-
-  return (
-    <section className={`composer-plan ${expanded ? "is-expanded" : ""}`} aria-label="Updated Plan">
-      <button
-        type="button"
-        className="composer-plan-summary"
-        aria-expanded={expanded}
-        title={expanded ? "收起计划" : "向上展开查看全部计划"}
-        onClick={() => setExpanded((current) => !current)}
-      >
-        <span className="composer-plan-title"><span>●</span><strong>Updated Plan</strong></span>
-        {currentItem ? (
-          <span className={`composer-plan-current ${currentItem.status}`}>
-            <StatusIcon status={currentItem.status} />
-            <span>{currentItem.label}</span>
-          </span>
-        ) : null}
-        <span className="composer-plan-chevron" aria-hidden="true" />
-      </button>
-      {expanded ? (
-        <div className="composer-plan-panel" role="region" aria-label="全部计划">
-          <div className="composer-plan-list">
-            {items.map((item) => <PlanItem key={item.id} label={item.label} status={item.status} />)}
-          </div>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function getRuntimeActivityStartedAt(entries: RuntimeActivityEntry[]): string | undefined {
-  for (const entry of entries) {
-    if (entry.kind === "tool") {
-      if (entry.toolCall.startedAt) return entry.toolCall.startedAt;
-      continue;
-    }
-    if (entry.createdAt) return entry.createdAt;
-  }
-  return undefined;
-}
-
-function getRuntimeBrowserScreenshotPaths(entries: RuntimeActivityEntry[], artifacts: ArtifactRecord[]): string[] {
-  const turnRunIds = new Set(
-    entries.filter((entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool")
-      .map((entry) => entry.toolCall.turnRunId)
-  );
-  const paths = artifacts
-    .filter((artifact) => artifact.artifactKind === "browser-screenshot" && !!artifact.turnRunId && turnRunIds.has(artifact.turnRunId))
-    .map((artifact) => artifact.absolutePath);
-  for (const entry of entries) {
-    if (entry.kind !== "tool" || entry.toolCall.toolName !== "browser.capture_screenshot") continue;
-    const result = parseTimelineJson(entry.toolCall.resultJson);
-    const json = result.json && typeof result.json === "object" ? result.json as Record<string, unknown> : {};
-    if (typeof json.filePath === "string") paths.push(json.filePath);
-  }
-  return [...new Set(paths)];
-}
-
-function useElapsedClock(startedAt: string | null | undefined, active: boolean, completedAt?: string | null) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active || !startedAt || completedAt) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, [active, startedAt, completedAt]);
-
-  if (!startedAt) return 0;
-  const end = completedAt ? Date.parse(completedAt) : now;
-  return Math.max(0, end - Date.parse(startedAt));
-}
-
-function formatElapsedClock(durationMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
-
-function ActiveSubagentLines({
-  agents,
-  queuedAgentIds,
-  runtimeActivities,
-  onInterrupt
-}: {
-  agents: ThreadRecord[];
-  queuedAgentIds: Set<string>;
-  runtimeActivities: Record<string, RuntimeActivity>;
-  onInterrupt: (agent: ThreadRecord) => void;
-}) {
-  return (
-    <div className="active-subagent-lines" aria-label="运行中的子智能体" aria-live="polite">
-      {agents.map((agent) => {
-        const queued = queuedAgentIds.has(agent.id);
-        const state = queued ? "queued" : agent.status === "waiting" ? "waiting" : "running";
-        const runtimeActivity = runtimeActivities[agent.id];
-        const runtimeLabel = getSubagentRuntimeLabel(runtimeActivity);
-        const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity);
-        const title = getSubagentTitle(agent);
-        const statusLabel = queued ? "排队中" : agent.status === "waiting" ? "等待中" : "运行中";
-        const activityLabel = queued
-          ? "等待可用名额"
-          : runtimeLabel ?? (agent.status === "waiting" ? "等待处理中" : "正在准备任务");
-        return (
-          <details key={agent.id} className={`active-subagent-line ${state}`}>
-            <summary title="展开子智能体详情">
-              <span className="active-subagent-name">子智能体 {title}</span>
-              <span className="active-subagent-separator">:</span>
-              <span className="active-subagent-activity">{activityLabel}</span>
-            </summary>
-            <div className="active-subagent-detail">
-              <div className="active-subagent-meta">
-                <code>{agent.agentPath}</code>
-                <span>{statusLabel}</span>
-                <span aria-hidden>·</span>
-                <SubagentElapsedTime
-                  startedAt={runtimeActivity?.startedAt ?? agent.createdAt}
-                  active
-                  completedAt={null}
-                />
-                <button type="button" className="active-subagent-stop" onClick={() => onInterrupt(agent)}>
-                  停止
-                </button>
-              </div>
-              {runtimeHistory.length > 0 ? (
-                <div className="active-subagent-history">
-                  {runtimeHistory.map((entry) => <span key={entry.id}>{entry.label}</span>)}
-                </div>
-              ) : <div className="active-subagent-empty">正在等待运行状态。</div>}
-              <div className="active-subagent-prompt">{agent.lastTaskMessage || agent.agentRole || "暂无任务说明。"}</div>
-            </div>
-          </details>
-        );
-      })}
-    </div>
-  );
-}
-
-function getSubagentTitle(agent: ThreadRecord): string {
-  return agent.agentRole?.trim() || "子任务分析";
-}
-
-function SubagentElapsedTime({
-  startedAt,
-  active,
-  completedAt
-}: {
-  startedAt: string;
-  active: boolean;
-  completedAt: string | null;
-}) {
-  const elapsedMs = useElapsedClock(startedAt, active, completedAt);
-  return <time>{formatElapsedClock(elapsedMs)}</time>;
-}
-
-function getSubagentRuntimeLabel(activity: RuntimeActivity | undefined): string | null {
-  if (!activity) return null;
-  const activeTool = [...activity.entries].reverse().find(
-    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool" && entry.toolCall.status === "running"
-  );
-  if (activeTool) return getToolProcessingLabel(activeTool.toolCall.toolName, activeTool.toolCall.argumentsJson);
-  const latestStatus = [...activity.entries].reverse().find(
-    (entry): entry is Extract<RuntimeActivityEntry, { kind: "status" }> => entry.kind === "status"
-  );
-  return latestStatus?.label ?? null;
-}
-
-function getSubagentRuntimeHistory(activity: RuntimeActivity | undefined): Array<{ id: string; label: string }> {
-  if (!activity) return [];
-  return activity.entries.slice(-5).reverse().map((entry) => ({
-    id: entry.id,
-    label: entry.kind === "tool"
-      ? entry.toolCall.status === "running"
-        ? getToolProcessingLabel(entry.toolCall.toolName, entry.toolCall.argumentsJson)
-        : `${entry.toolCall.status === "failed" ? "工具失败" : "已完成"} · ${entry.toolCall.toolName}`
-      : entry.kind === "status"
-        ? entry.label
-        : entry.label
-  }));
-}
-
-function PendingResumeCard({
-  pending,
-  onResume,
-  onDismiss
-}: {
-  pending: PendingResumeThread;
-  onResume: () => void;
-  onDismiss: () => void;
-}) {
-  const preview = pending.lastUserMessage.trim();
-  return (
-    <section className="pending-resume-card" aria-label="恢复已停止的任务">
-      <div className="pending-resume-card-body">
-        <strong className="pending-resume-card-title">之前的任务已停止</strong>
-        <span className="pending-resume-card-text">上次退出程序时该任务被中断，是否继续执行？</span>
-        {preview ? <p className="pending-resume-card-preview" title={preview}>{preview}</p> : null}
-      </div>
-      <div className="pending-resume-card-actions">
-        <button type="button" className="pending-resume-card-primary" onClick={onResume}>继续任务</button>
-        <button type="button" className="pending-resume-card-dismiss" onClick={onDismiss}>忽略</button>
-      </div>
-    </section>
-  );
-}
-
-function TurnElapsedBanner({
-  startedAt,
-  completedAt,
-  active = false,
-  collapsed = false,
-  onToggle
-}: {
-  startedAt: string;
-  completedAt?: string | null;
-  active?: boolean;
-  collapsed?: boolean;
-  onToggle?: () => void;
-}) {
-  const elapsedMs = useElapsedClock(startedAt, active, completedAt);
-  return (
-    <div className={`turn-elapsed-banner ${active ? "active" : "completed"}`} aria-live="polite">
-      <div className="turn-elapsed-head">
-        <span className="turn-elapsed-label">已处理 {formatElapsedClock(elapsedMs)}</span>
-        {onToggle ? (
-          <button
-            type="button"
-            className={`turn-elapsed-toggle ${collapsed ? "" : "is-expanded"}`}
-            aria-expanded={!collapsed}
-            title={collapsed ? "展开处理过程" : "折叠处理过程"}
-            onClick={onToggle}
-          >
-            <IconChevronRight />
-          </button>
-        ) : null}
-      </div>
-      <div className="turn-elapsed-track" aria-hidden="true">
-        <span className="turn-elapsed-bar" />
-      </div>
-    </div>
-  );
-}
-
-function ComposerSubmissionStatus({ submission }: { submission: ComposerSubmission }) {
-  const elapsedMs = useElapsedClock(submission.startedAt, true);
-  const isSlow = elapsedMs >= 5_000;
-  const isDelayed = elapsedMs >= 15_000;
-  const content = submission.content.replace(/\s+/g, " ").trim();
-  const label = isDelayed
-    ? `\u4ecd\u5728\u51c6\u5907\u4efb\u52a1 \u00b7 \u5df2\u7b49\u5f85 ${formatElapsedClock(elapsedMs)}`
-    : isSlow
-      ? `\u6b63\u5728\u542f\u52a8\u4efb\u52a1 \u00b7 \u5df2\u7b49\u5f85 ${formatElapsedClock(elapsedMs)}`
-      : "\u6d88\u606f\u5df2\u6536\u5230\uff0c\u6b63\u5728\u51c6\u5907\u4efb\u52a1";
-
-  return (
-    <section className={`composer-submission-status ${isSlow ? "slow" : ""}`} aria-live="polite">
-      <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
-      <div>
-        <strong>{label}</strong>
-        {content ? <span className="composer-submission-preview">{content}</span> : null}
-      </div>
-    </section>
-  );
-}
-
-function RuntimeActivityPanel({
-  label,
-  entries,
-  deferredToolCalls,
-  preferLabel = false,
-  hideCurrentStatus = false,
-  activeSubagents,
-  queuedSubagentIds,
-  runtimeActivities,
-  onInterruptSubagent
-}: {
-  label: string;
-  entries: RuntimeActivityEntry[];
-  deferredToolCalls: ToolCallRecord[];
-  preferLabel?: boolean;
-  hideCurrentStatus?: boolean;
-  activeSubagents: ThreadRecord[];
-  queuedSubagentIds: Set<string>;
-  runtimeActivities: Record<string, RuntimeActivity>;
-  onInterruptSubagent: (agent: ThreadRecord) => void;
-}) {
-  const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
-  const runningToolCall = [...entries].reverse().find(
-    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> =>
-      entry.kind === "tool" && (entry.toolCall.status === "pending" || entry.toolCall.status === "running")
-  )?.toolCall ?? null;
-  const displayLabel = preferLabel ? label : latestStatus?.label ?? label;
-  const runningToolLabel = runningToolCall
-    ? getConciseToolActivityLabel([runningToolCall], runningToolCall)
-    : null;
-  const runningToolDetail = runningToolLabel && !preferLabel && latestStatus?.label && latestStatus.label !== runningToolLabel
-    ? latestStatus.label
-    : null;
-  const runningCommand = displayLabel.startsWith("正在运行 ")
-    ? displayLabel.slice("正在运行 ".length)
-    : null;
-
-  const currentStatusContent = <>
-      {runningToolCall ? (
-        <span className="runtime-activity-current-icon" aria-hidden>
-          <ToolActivityIcon toolName={runningToolCall.toolName} />
-        </span>
-      ) : null}
-      {runningToolLabel ? <strong>{runningToolLabel}</strong> : runningCommand ? (
-        <span className="runtime-activity-command">
-          <span>正在运行</span>
-          <code title={runningCommand}>{runningCommand}</code>
-        </span>
-      ) : <strong>{displayLabel}</strong>}
-      {runningToolDetail ? <span className="runtime-activity-current-detail">{runningToolDetail}</span> : null}
-    </>;
-  const currentStatus = <div className="runtime-activity-current">{currentStatusContent}</div>;
-  const liveToolCalls = deferredToolCalls.length > 0
-    ? deferredToolCalls
-    : runningToolCall
-      ? [runningToolCall]
-      : [];
-  return (
-    <section className="runtime-activity-panel" aria-live="polite">
-      {liveToolCalls.length > 0
-        ? <ToolActivityGroup toolCalls={liveToolCalls} />
-        : hideCurrentStatus
-          ? null
-          : currentStatus}
-      {activeSubagents.length > 0 ? (
-        <ActiveSubagentLines
-          agents={activeSubagents}
-          queuedAgentIds={queuedSubagentIds}
-          runtimeActivities={runtimeActivities}
-          onInterrupt={onInterruptSubagent}
-        />
-      ) : null}
-    </section>
-  );
-}
-
-function RuntimeActivityOutputRow({ label, content }: { label: string; content: string }) {
-  return (
-    <details className="runtime-activity-output">
-      <summary>
-        <span className="runtime-activity-output-icon" aria-hidden><IconTerminal /></span>
-        <strong>{label}</strong>
-        <span>查看输出</span>
-      </summary>
-      <pre>{content}</pre>
-    </details>
-  );
-}
-
-function QueuedMessageList({
-  messages,
-  hasProject,
-  deletingId,
-  onDelete,
-  onSteer
-}: {
-  messages: QueuedMessageRecord[];
-  hasProject: boolean;
-  deletingId: string | null;
-  onDelete: (id: string) => void;
-  onSteer: (message: QueuedMessageRecord) => void;
-}) {
-  const visible = messages.filter(
-    (message) =>
-      !message.content.trimStart().startsWith("[internal:") &&
-      !message.displayContent.trimStart().startsWith("[internal:")
-  );
-  if (visible.length === 0) {
-    return null;
-  }
-  return (
-    <section className={`composer-queue ${hasProject ? "has-project" : ""}`} aria-label="排队消息">
-      {visible.map((message, index) => (
-        <div key={message.id} className={`composer-queue-item ${deletingId === message.id ? "is-removing" : ""}`}>
-          <span className="composer-queue-index" aria-hidden>{index + 1}</span>
-          <span className="composer-queue-label">{index === 0 ? "下一项" : "待处理"}</span>
-          <span className="composer-queue-preview" title={message.displayContent}>{message.displayContent}</span>
-          {message.attachments.length > 0 ? <span className="composer-queue-attachments">{message.attachments.length} 个附件</span> : null}
-          <button
-            type="button"
-            className="composer-queue-steer"
-            title="引导当前任务"
-            aria-label="引导当前任务"
-            disabled={deletingId === message.id}
-            onClick={() => onSteer(message)}
-          >
-            <IconGuide />
-          </button>
-          <button
-            type="button"
-            className="composer-queue-delete"
-            title="删除排队消息"
-            aria-label="删除排队消息"
-            disabled={deletingId === message.id}
-            onClick={() => onDelete(message.id)}
-          >
-            <IconClose />
-          </button>
-        </div>
-      ))}
-    </section>
-  );
-}
-
-function GpaConfirmationCard({
-  stage,
-  disabled,
-  isEditing,
-  revisionDraft,
-  revisionRef,
-  onConfirm,
-  onRevise,
-  onRevisionChange,
-  onRevisionCancel,
-  onRevisionSubmit
-}: {
-  stage: Exclude<GpaStage, "off" | "act">;
-  disabled: boolean;
-  isEditing: boolean;
-  revisionDraft: string;
-  revisionRef: React.RefObject<HTMLTextAreaElement | null>;
-  onConfirm: () => void;
-  onRevise: () => void;
-  onRevisionChange: (value: string) => void;
-  onRevisionCancel: () => void;
-  onRevisionSubmit: () => void;
-}) {
-  const isPlan = stage === "plan";
-  const title = isPlan ? "确认计划" : "确认目标";
-  const description = isPlan
-    ? "计划确认后将直接进入执行阶段。"
-    : "目标确认后将生成可执行的任务计划。";
-  const confirmLabel = isPlan ? "确认并开始执行" : "确认并生成计划";
-
-  if (isEditing) {
-    return (
-      <section className="gpa-confirmation editing" aria-label="修改计划">
-        <div className="gpa-confirmation-copy">
-          <strong>修改计划</strong>
-          <span>说明需要调整的范围、顺序或验收条件。</span>
-        </div>
-        <textarea
-          ref={revisionRef}
-          className="gpa-revision-input"
-          value={revisionDraft}
-          onChange={(event) => onRevisionChange(event.target.value)}
-          onKeyDown={(event) => {
-            if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-              event.preventDefault();
-              onRevisionSubmit();
-            }
-          }}
-          placeholder="例如：先完成基础玩法，再加入难度选择；验收时补充单元测试。"
-          disabled={disabled}
-        />
-        <div className="gpa-revision-footer">
-          <span>Ctrl / Cmd + Enter 提交</span>
-          <div className="gpa-confirmation-actions">
-            <button className="gpa-confirmation-button secondary" type="button" onClick={onRevisionCancel} disabled={disabled}>
-              取消
-            </button>
-            <button className="gpa-confirmation-button primary" type="button" onClick={onRevisionSubmit} disabled={disabled || !revisionDraft.trim()}>
-              提交修改
-            </button>
-          </div>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className={`gpa-confirmation stage-${stage}`} aria-label={title}>
-      <div className="gpa-confirmation-copy">
-        <strong>{title}</strong>
-        <span>{description}</span>
-      </div>
-      <div className="gpa-confirmation-actions">
-        <button className="gpa-confirmation-button secondary" type="button" onClick={onRevise} disabled={disabled}>
-          修改
-        </button>
-        <button className={`gpa-confirmation-button primary stage-${stage}`} type="button" onClick={onConfirm} disabled={disabled}>
-          {confirmLabel}
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function GpaPlanResumeRetryConfirmationCard({
-  pendingCount,
-  disabled,
-  onDismiss,
-  onConfirm
-}: {
-  pendingCount: number;
-  disabled: boolean;
-  onDismiss: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <section className="gpa-confirmation gpa-resume-retry" aria-label="确认继续 GPA 计划">
-      <div className="gpa-confirmation-copy">
-        <strong>GPA 计划已暂停</strong>
-        <span>剩余 {pendingCount} 项任务尚未完成。是否从下一项继续执行？</span>
-      </div>
-      <div className="gpa-confirmation-actions">
-        <button className="gpa-confirmation-button secondary" type="button" onClick={onDismiss} disabled={disabled}>
-          暂不继续
-        </button>
-        <button className="gpa-confirmation-button primary" type="button" onClick={onConfirm} disabled={disabled}>
-          {disabled ? "正在重试..." : "重试剩余任务"}
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function PlanItem({ label, status }: { label: string; status: "pending" | "in_progress" | "completed" }) {
-  return (
-    <div className={`plan-timeline-item ${status}`}>
-      <span className="plan-tree">└─</span>
-      <StatusIcon status={status} />
-      <span className="plan-timeline-label">{label}</span>
-    </div>
-  );
-}
-
-function StatusIcon({ status }: { status: "pending" | "in_progress" | "completed" | "failed" | "blocked" }) {
-  const glyph = status === "completed" ? "✔" : status === "in_progress" ? "◐" : status === "failed" ? "✕" : "□";
-  return <span className={`timeline-status-icon ${status}`}>{glyph}</span>;
-}
-
-function DirectoryReadGroup({ directory, count }: { directory: string; count: number }) {
-  return (
-    <section className="directory-read-group">
-      <span className="directory-read-group-dot" aria-hidden="true" />
-      <span>检查 <code>{directory}</code> 目录内容</span>
-      <span className="directory-read-group-count">{count} 次</span>
-    </section>
-  );
-}
-
-function ExecutionStep({ toolCall }: { toolCall: ToolCallRecord }) {
-  const input = parseTimelineJson(toolCall.argumentsJson);
-  const result = parseTimelineJson(toolCall.resultJson);
-  const command = getTimelineCommand(toolCall.toolName, input);
-  const isRunning = toolCall.status === "running" || toolCall.status === "pending";
-  const blocked = toolCall.status === "blocked";
-  const failed = toolCall.status === "failed" || toolCall.status === "denied";
-  const status = isRunning ? "in_progress" : blocked ? "blocked" : failed ? "failed" : "completed";
-  const duration = toolCall.completedAt
-    ? Math.max(0, Date.parse(toolCall.completedAt) - Date.parse(toolCall.startedAt))
-    : null;
-  const output = getTimelineOutput(result);
-  const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
-
-  return (
-    <details className={`execution-step ${status}`}>
-      <summary className="execution-step-head">
-        <StatusIcon status={status} />
-        <strong>{isRunning ? "Running" : blocked ? "Blocked before execution" : failed ? "Command failed" : "Ran command"}</strong>
-        <span className="execution-tool-name">{formatToolName(toolCall.toolName)}</span>
-        {duration !== null ? <span className="execution-duration">{formatDuration(duration)}</span> : null}
-      </summary>
-      <div className="execution-step-details">
-        <code className="execution-command">$ {command}</code>
-        {localUrl ? <LocalServerPreview url={localUrl} /> : null}
-        {output ? (
-          <details className="execution-output" open={failed || blocked}>
-            <summary>{blocked ? "View block reason" : failed ? "View error output" : "View output"}</summary>
-            <pre>{output}</pre>
-            <MessageDetectedMediaGallery content={output} />
-          </details>
-        ) : isRunning ? <div className="execution-progress">Working…</div> : null}
-      </div>
-    </details>
-  );
-}
-
-type ToolActivityGroupProps = {
-  toolCalls: ToolCallRecord[];
-};
-
-const ToolActivityGroup = memo(function ToolActivityGroup({
-  toolCalls
-}: ToolActivityGroupProps) {
-  const toolPresentation = getToolActivityPresentation(toolCalls);
-  const { runningCall } = toolPresentation;
-  const isRunning = Boolean(runningCall);
-  const groupRef = useRef<HTMLDetailsElement>(null);
-  const wasRunningRef = useRef(isRunning);
-  const status = toolPresentation.status;
-  const conciseLabel = runningCall
-    ? getToolProcessingLabel(runningCall.toolName, runningCall.argumentsJson)
-    : getConciseToolActivityLabel(toolCalls);
-
-  useEffect(() => {
-    if (isRunning) {
-      wasRunningRef.current = true;
-      return;
-    }
-    if (wasRunningRef.current) {
-      wasRunningRef.current = false;
-      groupRef.current?.removeAttribute("open");
-    }
-  }, [isRunning, runningCall?.id]);
-
-  return (
-    <details ref={groupRef} className={`tool-activity-group ${status}`}>
-      <summary
-        className="tool-activity-summary"
-        aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}，${toolCalls.length} 项`}
-      >
-        <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={toolCalls[0]?.toolName ?? ""} /></span>
-        <span className="tool-activity-summary-copy"><strong>{conciseLabel}</strong></span>
-        <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}</span>
-        <span className="tool-activity-summary-count">{toolCalls.length} 项</span>
-        <span className="tool-activity-chevron" aria-hidden />
-      </summary>
-      <div className="tool-activity-details-shell">
-        <div className="tool-activity-details">
-          {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact />)}
-        </div>
-      </div>
-    </details>
-  );
-}, (previous, next) => areToolActivityGroupsEqual(previous.toolCalls, next.toolCalls));
-
-function areToolActivityGroupsEqual(previous: ToolCallRecord[], next: ToolCallRecord[]) {
-  if (previous === next) return true;
-  if (previous.length !== next.length) return false;
-  return previous.every((call, index) => {
-    const candidate = next[index];
-    return candidate?.id === call.id
-      && candidate.status === call.status
-      && candidate.startedAt === call.startedAt
-      && candidate.completedAt === call.completedAt
-      && candidate.argumentsJson === call.argumentsJson
-      && candidate.resultJson === call.resultJson;
-  });
-}
-
-function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallRecord; compact?: boolean }) {
-  const input = parseTimelineJson(toolCall.argumentsJson);
-  const result = parseTimelineJson(toolCall.resultJson);
-  const command = getTimelineCommand(toolCall.toolName, input);
-  const isRunning = toolCall.status === "running" || toolCall.status === "pending";
-  const blocked = toolCall.status === "blocked";
-  const failed = toolCall.status === "failed" || toolCall.status === "denied";
-  const status = isRunning ? "in_progress" : blocked ? "blocked" : failed ? "failed" : "completed";
-  const duration = toolCall.completedAt
-    ? Math.max(0, Date.parse(toolCall.completedAt) - Date.parse(toolCall.startedAt))
-    : null;
-  const output = getTimelineOutput(result);
-  const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
-  const target = getToolActivityTarget(toolCall.toolName, input, command);
-
-  if (compact) {
-    return (
-      <details className={`tool-activity-row compact ${status}`}>
-        <summary className={`tool-activity-compact-summary${target ? "" : " without-target"}`}>
-          <span className="tool-activity-row-icon" aria-hidden><ToolActivityIcon toolName={toolCall.toolName} /></span>
-          <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
-          {target ? <code title={target}>{target}</code> : null}
-          <span className="tool-activity-compact-status">{isRunning ? "执行中" : blocked ? "已拦截" : failed ? "失败" : "完成"}</span>
-          {duration !== null ? <time>{formatDuration(duration)}</time> : null}
-        </summary>
-        <div className="tool-activity-compact-details">
-          <code>$ {command}</code>
-          {localUrl ? <LocalServerPreview url={localUrl} /> : null}
-          {output ? (
-            <details className="tool-activity-output" open>
-              <summary>{blocked ? "查看拦截原因" : failed ? "查看错误输出" : "查看输出"}</summary>
-              <pre>{output}</pre>
-              <MessageDetectedMediaGallery content={output} />
-            </details>
-          ) : isRunning ? <span className="tool-activity-row-progress">等待工具返回...</span> : null}
-        </div>
-      </details>
-    );
-  }
-
-  return (
-    <article className={`tool-activity-row ${status}`}>
-      <span className="tool-activity-row-icon" aria-hidden><ToolActivityIcon toolName={toolCall.toolName} /></span>
-      <div className="tool-activity-row-copy">
-        <div className="tool-activity-row-head">
-          <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
-          <span>{isRunning ? "正在执行" : blocked ? "执行前已拦截" : failed ? "执行失败" : "已完成"}</span>
-          {duration !== null ? <time>{formatDuration(duration)}</time> : null}
-        </div>
-        <code>{isFileWriteTool(toolCall.toolName) ? getFileWriteTarget(input) : `$ ${command}`}</code>
-        {localUrl ? <LocalServerPreview url={localUrl} /> : null}
-        {output ? (
-          <details className="tool-activity-output" open={failed || blocked}>
-            <summary>{blocked ? "查看拦截原因" : failed ? "查看错误输出" : "查看输出"}</summary>
-            <pre>{output}</pre>
-            <MessageDetectedMediaGallery content={output} />
-          </details>
-        ) : isRunning ? <span className="tool-activity-row-progress">等待工具返回...</span> : null}
-      </div>
-    </article>
-  );
-}
-
-function ToolActivityIcon({ toolName }: { toolName: string }) {
-  if (toolName === "shell.exec" || toolName === "execute_command") return <IconTerminal />;
-  if (isFileWriteTool(toolName)) return <IconFileChanges />;
-  if (toolName === "fs.read_file") return <IconFile />;
-  if (toolName === "fs.read_directory") return <IconFolder />;
-  if (toolName === "code.search" || toolName === "knowledge.search") return <IconSearch />;
-  if (toolName.startsWith("browser.") || toolName.startsWith("web_search.")) return <IconGlobe />;
-  return <IconTerminal />;
-}
-
-function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord): string {
-  if (runningCall) {
-    switch (getToolActivityKind(runningCall)) {
-      case "search": return "正在搜索项目";
-      case "read": return "正在查看文件";
-      case "write": return "正在编辑文件";
-      case "verify": return "正在验证结果";
-      case "browser": return "正在浏览网页";
-      default: return "正在运行命令";
-    }
-  }
-
-  const counts = { search: 0, read: 0, write: 0, verify: 0, browser: 0, other: 0 };
-  for (const toolCall of toolCalls) counts[getToolActivityKind(toolCall)] += 1;
-
-  const commandCount = toolCalls.filter((toolCall) =>
-    toolCall.toolName === "shell.exec" || toolCall.toolName === "execute_command"
-  ).length;
-  const labels = [
-    counts.write ? "编辑了文件" : "",
-    commandCount ? (commandCount > 1 ? "运行了多个命令" : "运行了命令") : "",
-    !counts.write && counts.read ? (counts.read > 1 ? "查看了多个文件" : "查看了文件") : "",
-    !counts.write && !counts.read && counts.search ? "搜索了项目" : "",
-    !counts.write && !counts.read && !counts.search && counts.browser ? "浏览了网页" : ""
-  ].filter(Boolean);
-
-  return labels.slice(0, 2).join("，") || "完成了多个操作";
-}
-
-function getLegacyToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord) {
-  if (runningCall) {
-    const input = parseTimelineJson(runningCall.argumentsJson);
-    return {
-      title: getToolProcessingLabel(runningCall.toolName),
-      detail: isFileWriteTool(runningCall.toolName) ? getFileWriteTarget(input) : getTimelineCommand(runningCall.toolName, input)
-    };
-  }
-
-  const commandCount = toolCalls.filter((toolCall) => toolCall.toolName === "shell.exec" || toolCall.toolName === "execute_command").length;
-  const fileCount = toolCalls.filter((toolCall) => isFileWriteTool(toolCall.toolName)).length;
-  const failed = toolCalls.some((toolCall) => toolCall.status === "failed" || toolCall.status === "denied");
-
-  if (failed) return { title: "部分步骤执行失败", detail: `${toolCalls.length} 个操作` };
-  if (fileCount && commandCount) return { title: `编辑了 ${fileCount} 个文件，运行了 ${commandCount} 个命令` };
-  if (commandCount) return { title: commandCount === 1 ? "运行了 1 个命令" : `运行了 ${commandCount} 个命令` };
-  if (fileCount) return { title: fileCount === 1 ? "编辑了 1 个文件" : `编辑了 ${fileCount} 个文件` };
-  return { title: toolCalls.length === 1 ? getToolActivityLabel(toolCalls[0]?.toolName ?? "") : `调用了 ${toolCalls.length} 个工具` };
-}
-
-function getToolActivityLabel(toolName: string) {
-  if (toolName === "shell.exec" || toolName === "execute_command") return "运行命令";
-  if (toolName === "fs.read_file") return "读取文件";
-  if (toolName === "fs.read_directory") return "读取目录";
-  if (isFileWriteTool(toolName)) return "写入文件";
-  if (toolName === "code.search" || toolName === "knowledge.search") return "搜索代码";
-  if (toolName.startsWith("browser.")) return "操作浏览器";
-  return formatToolName(toolName);
-}
-
-function LocalServerPreview({ url }: { url: string }) {
-  return (
-    <section className="local-server-preview">
-      <span className="local-server-preview-icon" aria-hidden="true"><IconGlobe /></span>
-      <span className="local-server-preview-copy">
-        <strong>网页预览</strong>
-        <span>{url}</span>
-      </span>
-      <button type="button" onClick={() => void window.codexh.openExternal(url)}>
-        打开网页
-      </button>
-    </section>
-  );
-}
-
-function InteractionCountdown({ expiresAt, timeoutLabel }: { expiresAt: string | null | undefined; timeoutLabel: string }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!expiresAt) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, [expiresAt]);
-  if (!expiresAt) return null;
-  const seconds = Math.max(0, Math.ceil((Date.parse(expiresAt) - now) / 1_000));
-  return <small className="interaction-countdown">{seconds > 0 ? `${seconds} 秒${timeoutLabel}` : "正在自动处理..."}</small>;
-}
-
-function ApprovalCard({
-  approval,
-  resolving,
-  onResolve
-}: {
-  approval: ApprovalRequest;
-  resolving: boolean;
-  onResolve: (decision: "approved" | "denied", mode?: "once" | "session" | "remember") => void;
-}) {
-  return (
-    <section id={`approval-card-${approval.id}`} className="approval-card" aria-label={`审批请求: ${approval.title}`}>
-      <div className="approval-card-copy">
-        <span className="approval-card-label">需要审批</span>
-        <strong>{approval.title}</strong>
-        <p>{approval.description}</p>
-        <InteractionCountdown expiresAt={approval.expiresAt} timeoutLabel="后将自动拒绝" />
-      </div>
-      <div className="approval-card-actions">
-        <button type="button" className="approval-deny-button" disabled={resolving} onClick={() => onResolve("denied")}>
-          拒绝
-        </button>
-        <button type="button" className="approval-session-button" disabled={resolving} onClick={() => onResolve("approved", "session")}>
-          本会话允许
-        </button>
-        <button type="button" className="approval-remember-button" disabled={resolving} onClick={() => onResolve("approved", "remember")}>
-          允许且不再询问
-        </button>
-        <button type="button" className="approval-allow-button" disabled={resolving} onClick={() => onResolve("approved", "once")}>
-          {resolving ? "处理中..." : "允许并继续"}
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function UserInputPromptCard({
-  prompt,
-  resolving,
-  canAnswer,
-  onAnswer
-}: {
-  prompt: UserInputPrompt;
-  resolving: boolean;
-  canAnswer: boolean;
-  onAnswer: (answers: Record<string, string>) => void;
-}) {
-  const [selected, setSelected] = useState<Record<string, string>>({});
-  const [notes, setNotes] = useState<Record<string, string>>({});
-  const [resolvedPlanExpanded, setResolvedPlanExpanded] = useState(false);
-  const pending = prompt.status === "pending";
-  const canSubmit = prompt.questions.every((question) => {
-    const hasOptions = (question.options?.length ?? 0) > 0;
-    return !hasOptions || !!selected[question.id] || !!notes[question.id]?.trim();
-  });
-
-  if (!pending) {
-    if (prompt.kind === "gpa_plan_clarification") {
-      const answers = prompt.questions.map((question) => {
-        const rawAnswer = prompt.answers?.[question.id] ?? "";
-        const selectedOption = question.options?.find((option) => option.id === rawAnswer);
-        const note = prompt.answers?.[`${question.id}__note`]?.replace(/^__note__:/, "").trim();
-        return {
-          id: question.id,
-          question: question.prompt.trim() || question.label,
-          answer: rawAnswer === "__skip__"
-            ? "保持原计划"
-            : (selectedOption?.label ?? rawAnswer.replace(/^__custom__:/, "")) || "未选择",
-          note
-        };
-      });
-      const detailsId = `gpa-plan-answers-${prompt.id}`;
-      return (
-        <section className={`user-input-prompt-card resolved gpa-plan-answers ${resolvedPlanExpanded ? "is-expanded" : "is-collapsed"}`} aria-label={`已询问 ${answers.length} 个问题`}>
-          <button
-            type="button"
-            className="gpa-plan-answers-toggle"
-            aria-expanded={resolvedPlanExpanded}
-            aria-controls={detailsId}
-            onClick={() => setResolvedPlanExpanded((current) => !current)}
-          >
-            <span className="gpa-plan-answers-icon" aria-hidden><IconChecklist /></span>
-            <span>已询问 {answers.length} 个问题</span>
-            {resolvedPlanExpanded ? <IconChevronDown /> : null}
-          </button>
-          {resolvedPlanExpanded ? (
-            <div id={detailsId} className="gpa-plan-answers-details">
-              {answers.map((entry) => (
-                <div key={entry.id} className="gpa-plan-answer">
-                  <span className="gpa-plan-answer-question">{entry.question}</span>
-                  <span className="gpa-plan-answer-value">{entry.answer}</span>
-                  {entry.note ? <span className="gpa-plan-answer-note">{entry.note}</span> : null}
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </section>
-      );
-    }
-    const skipped = Object.values(prompt.answers ?? {}).includes("__skip__");
-    const firstQuestion = prompt.questions[0];
-    const rawAnswer = firstQuestion ? prompt.answers?.[firstQuestion.id] ?? "" : "";
-    const selectedLabel = firstQuestion?.options?.find((option) => option.id === rawAnswer)?.label;
-    const summary = selectedLabel ?? rawAnswer.replace(/^__custom__:/, "");
-    return (
-      <section className="user-input-prompt-card resolved" aria-label={`${prompt.title} 已处理`}>
-        <span className="user-input-prompt-resolved-mark" aria-hidden><IconCheck /></span>
-        <span>{prompt.kind === "gpa_plan_clarification" ? "计划澄清已选择" : "已提供输入"}</span>
-        <strong>{skipped ? "保持原计划" : summary || "已提交"}</strong>
-      </section>
-    );
-  }
-
-  if (!canAnswer) {
-    return (
-      <section className="user-input-prompt-card resolved interrupted" aria-label={`${prompt.title} 已中断`}>
-        <span className="user-input-prompt-resolved-mark" aria-hidden><IconClose /></span>
-        <span>该问题所属任务已中断</span>
-        <strong>请重新开始后再决定</strong>
-      </section>
-    );
-  }
-
-  return (
-    <section id={`user-input-prompt-${prompt.id}`} className={`user-input-prompt-card ${prompt.kind}`} aria-label={prompt.title}>
-      <header className="user-input-prompt-head">
-        <span className="user-input-prompt-icon" aria-hidden><IconHelpCircle /></span>
-        <strong>{prompt.title}</strong>
-        <InteractionCountdown expiresAt={prompt.expiresAt} timeoutLabel="后将自动执行默认操作" />
-      </header>
-      <div className="user-input-prompt-questions">
-        {prompt.questions.map((question, index) => (
-          <fieldset key={question.id} className="user-input-question" disabled={resolving}>
-            <legend>{prompt.questions.length > 1 ? `${index + 1}. ${question.label}` : question.label}</legend>
-            <p>{question.prompt}</p>
-            {question.options?.length ? (
-              <div className="user-input-options">
-                {question.options.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    className={`user-input-option ${selected[question.id] === option.id ? "selected" : ""}`}
-                    onClick={() => setSelected((current) => ({ ...current, [question.id]: option.id }))}
-                  >
-                    <span className="user-input-option-marker" aria-hidden>{selected[question.id] === option.id ? "●" : "○"}</span>
-                    <span className="user-input-option-copy">
-                      <strong>{option.label}</strong>
-                      {option.description ? <small>{option.description}</small> : null}
-                    </span>
-                    {option.recommended ? <em>推荐</em> : null}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            {(question.allowFreeText || !question.options?.length) ? (
-              <textarea
-                value={notes[question.id] ?? ""}
-                onChange={(event) => setNotes((current) => ({ ...current, [question.id]: event.target.value }))}
-                placeholder="补充你的决定或其他方案"
-                rows={2}
-              />
-            ) : null}
-          </fieldset>
-        ))}
-      </div>
-      <footer className="user-input-prompt-actions">
-        {prompt.allowSkip ? (
-          <button type="button" className="user-input-skip" disabled={resolving} onClick={() => onAnswer({ [prompt.questions[0]?.id ?? "decision"]: "__skip__" })}>
-            跳过
-          </button>
-        ) : <span />}
-        <button
-          type="button"
-          className="user-input-submit"
-          disabled={resolving || !canSubmit}
-          onClick={() => {
-            const answers: Record<string, string> = {};
-            for (const question of prompt.questions) {
-              const note = notes[question.id]?.trim();
-              answers[question.id] = selected[question.id] || (note ? `__custom__:${note}` : "");
-              if (note && selected[question.id]) answers[`${question.id}__note`] = `__note__:${note}`;
-            }
-            onAnswer(answers);
-          }}
-        >
-          {resolving ? "提交中..." : "确认选择"}
-        </button>
-      </footer>
-    </section>
-  );
-}
-
-function getTimelineCommand(toolName: string, input: Record<string, unknown>): string {
-  const command = input.command ?? input.filePath ?? input.path ?? input.query;
-  return typeof command === "string" && command.trim() ? command : toolName;
-}
-
-function getTimelineOutput(result: Record<string, unknown>): string {
-  const content = result.content;
-  if (typeof content === "string") return content;
-  return Object.keys(result).length > 0 ? JSON.stringify(result, null, 2) : "";
-}
-
-function formatToolName(name: string): string {
-  return name.replace(/[._-]+/g, " ");
-}
-
-function formatDuration(durationMs: number): string {
-  return durationMs < 1_000 ? `${durationMs} ms` : `${(durationMs / 1_000).toFixed(1)} s`;
-}
-
-function renderRole(role: string, assistantLabel = "Assistant") {
-  switch (role) {
-    case "assistant":
-      return assistantLabel;
-    case "user":
-      return "User";
-    case "tool":
-      return "Tool";
-    case "system":
-      return "System";
-    default:
-      return role;
-  }
-}
-
-type UserMessageActions = {
-  editingMessage: { id: string; content: string } | null;
-  onEditDraftChange: (content: string) => void;
-  onCopy: (content: string) => void;
-  onEdit: (message: MessageRecord) => void;
-  onEditCancel: () => void;
-  onEditSubmit: () => void;
-};
-
-type TranscriptMessageProps = {
-  message: MessageRecord;
-  assistantLabel: string;
-  userMessageActions: UserMessageActions;
-  isGpaPlanMessage?: boolean;
-  isFinalizingFromDraft?: boolean;
-};
-
-type AssistantDraftMessageProps = {
-  assistantLabel: string;
-  content: string;
-  draftId: string;
-  phase: AssistantDraftPhase;
-  startedAt: string;
-  completed: boolean;
-  /** Latest runtime status (e.g. retry reason). Shown instead of the generic
-   *  phase label while the draft is in a waiting phase, so users can see why
-   *  the draft is stalled (e.g. "模型响应超时，正在自动重试（第 2 次）"). */
-  statusLabel?: string | null;
-};
-
-const AssistantDraftMessage = memo(function AssistantDraftMessage({
-  assistantLabel,
-  content,
-  draftId,
-  phase,
-  startedAt,
-  completed,
-  statusLabel
-}: AssistantDraftMessageProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const followsLatestRef = useRef(true);
-  const elapsedMs = useElapsedClock(startedAt, !completed);
-  const stateLabel = completed
-    ? "正在发布回复"
-    : phase === "generating" && !content
-    ? `模型正在生成 · 已等待 ${formatElapsedClock(elapsedMs)}`
-    : statusLabel ?? getAssistantDraftPhaseLabel(phase);
-
-  useLayoutEffect(() => {
-    const scrollElement = scrollRef.current;
-    if (!scrollElement || !followsLatestRef.current) return;
-    scrollElement.scrollTop = scrollElement.scrollHeight;
-  }, [content]);
-
-  return (
-    <article className={`message-card assistant streaming-assistant is-provisional phase-${phase}`} aria-live="polite" aria-busy={!completed}>
-      <div className="message-header">
-        <span className="message-author assistant">{assistantLabel}</span>
-        <span className="streaming-assistant-state">{stateLabel}</span>
-      </div>
-      <div className="message-flat-body streaming-assistant-body">
-        {content
-          ? (
-            <div
-              className="assistant-draft-scroll"
-              ref={scrollRef}
-              onScroll={(event) => {
-                const element = event.currentTarget;
-                followsLatestRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 4;
-              }}
-            >
-              <span className="streaming-assistant-plain-body" data-draft-id={draftId}>{content}</span>
-              {phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
-            </div>
-          )
-          : <span className="assistant-draft-waiting" aria-hidden><i /><i /><i /></span>}
-      </div>
-    </article>
-  );
-});
-
-const TranscriptMessage = memo(function TranscriptMessage({
-  message,
-  assistantLabel,
-  userMessageActions,
-  isGpaPlanMessage = false,
-  isFinalizingFromDraft = false
-}: TranscriptMessageProps) {
-  const gpaTaskProgress = getGpaTaskProgress(message);
-  if (gpaTaskProgress) {
-    return <GpaTaskProgressMessage message={message} task={gpaTaskProgress} />;
-  }
-  const displayContent = getDisplayMessageContent(message);
-  if (message.role === "assistant" && !displayContent.trim()) {
-    return null;
-  }
-
-  if (message.role === "user") {
-    return (
-      <article
-        id={`transcript-message-${message.id}`}
-        className={`message-card user${message.id.startsWith("optimistic-") ? " is-sending" : ""}`}
-      >
-        {renderMessageContent(message, displayContent, userMessageActions)}
-      </article>
-    );
-  }
-
-  return (
-    <article
-      id={`transcript-message-${message.id}`}
-      className={`message-card ${message.role}${getMessageDisplayKind(message) === "commentary" ? " commentary" : ""}${isFinalizingFromDraft ? " is-finalizing-from-draft" : ""}`}
-    >
-      <div className="message-header">
-        <span className={`message-author ${message.role}`}>{renderRole(message.role, assistantLabel)}</span>
-        <span className="timestamp">{formatRelativeTime(message.createdAt)}</span>
-      </div>
-      <div className="message-flat-body">
-        {isGpaPlanMessage ? (
-          <GpaPlanMessageBubble>{renderMessageContent(message, displayContent)}</GpaPlanMessageBubble>
-        ) : renderMessageContent(message, displayContent)}
-      </div>
-    </article>
-  );
-}, areTranscriptMessagePropsEqual);
-
-function areTranscriptMessagePropsEqual(
-  previous: Readonly<TranscriptMessageProps>,
-  next: Readonly<TranscriptMessageProps>
-): boolean {
-  if (
-    previous.assistantLabel !== next.assistantLabel ||
-    previous.isGpaPlanMessage !== next.isGpaPlanMessage ||
-    previous.isFinalizingFromDraft !== next.isFinalizingFromDraft
-  ) {
-    return false;
-  }
-  const previousMessage = previous.message;
-  const nextMessage = next.message;
-  if (previousMessage !== nextMessage) {
-    const previousKeys = Object.keys(previousMessage) as Array<keyof MessageRecord>;
-    const nextKeys = Object.keys(nextMessage) as Array<keyof MessageRecord>;
-    if (previousKeys.length !== nextKeys.length || previousKeys.some((key) => previousMessage[key] !== nextMessage[key])) {
-      return false;
-    }
-  }
-  return previousMessage.role !== "user" || previous.userMessageActions === next.userMessageActions;
-}
-
-function reuseEquivalentRecordArray<T extends object>(previous: T[], next: T[]): T[] {
-  if (previous === next || previous.length !== next.length) {
-    return next;
-  }
-
-  for (let index = 0; index < previous.length; index += 1) {
-    const previousItem = previous[index] as Record<string, unknown>;
-    const nextItem = next[index] as Record<string, unknown>;
-    const previousKeys = Object.keys(previousItem);
-    const nextKeys = Object.keys(nextItem);
-    if (
-      previousKeys.length !== nextKeys.length ||
-      previousKeys.some((key) => previousItem[key] !== nextItem[key])
-    ) {
-      return next;
-    }
-  }
-
-  return previous;
-}
-
-type GpaTaskProgress = {
-  taskId: string;
-  taskTitle: string;
-};
-
-function GpaTaskProgressMessage({ message, task }: { message: MessageRecord; task: GpaTaskProgress }) {
-  return (
-    <article key={message.id} className="gpa-task-progress-message" aria-label={`${task.taskId} 已完成`}>
-      <span className="gpa-task-progress-icon" aria-hidden><IconCheck /></span>
-      <span className="gpa-task-progress-copy"><strong>{task.taskId}</strong><span>{task.taskTitle}</span></span>
-      <span className="gpa-task-progress-status">已完成</span>
-      <span className="gpa-task-progress-time">{formatRelativeTime(message.createdAt)}</span>
-    </article>
-  );
-}
-
-function GpaPlanMessageBubble({ children }: { children: ReactNode }) {
-  const [expanded, setExpanded] = useState(true);
-
-  return (
-    <section className={`gpa-plan-message ${expanded ? "is-expanded" : "is-collapsed"}`} aria-label="GPA 计划">
-      <header className="gpa-plan-message-head">
-        <span className="gpa-plan-message-title"><IconGpa />GPA 计划</span>
-        <button
-          type="button"
-          className="gpa-plan-message-toggle"
-          aria-expanded={expanded}
-          aria-label={expanded ? "收起 GPA 计划" : "展开 GPA 计划"}
-          title={expanded ? "收起 GPA 计划" : "展开 GPA 计划"}
-          onClick={() => setExpanded((current) => !current)}
-        >
-          <IconChevronDown />
-        </button>
-      </header>
-      {expanded ? <div className="gpa-plan-message-content">{children}</div> : null}
-    </section>
-  );
-}
-
-function renderMessageContent(
-  message: MessageRecord,
-  content = message.content,
-  userMessageActions?: UserMessageActions
-) {
-  const attachments = getMessageAttachments(message);
-  if (message.role === "user") {
-    if (!userMessageActions) {
-      return (
-        <div className="message-user-content">
-          <div className="message-user-bubble">
-            {content ? <div className="message-user-text">{content}</div> : null}
-            <MessageSelectedContextChips content={message.content} />
-            <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
-          </div>
-        </div>
-      );
-    }
-
-    const editingMessage =
-      userMessageActions.editingMessage?.id === message.id ? userMessageActions.editingMessage : null;
-    return (
-      <div className={`message-user-content ${editingMessage ? "is-editing" : ""}`}>
-        <div className="message-user-bubble">
-          {editingMessage ? (
-            <>
-              <div className="message-user-edit-head">
-                <IconCompose />
-                <span>编辑消息</span>
-              </div>
-              <textarea
-                className="message-user-edit-input"
-                value={editingMessage.content}
-                onChange={(event) => userMessageActions.onEditDraftChange(event.target.value)}
-                onKeyDown={(event) => {
-                  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                    event.preventDefault();
-                    userMessageActions.onEditSubmit();
-                  }
-                }}
-                aria-label="编辑已发送的消息"
-                autoFocus
-              />
-              <div className="message-user-edit-actions">
-                <button type="button" className="message-user-edit-button" onClick={userMessageActions.onEditCancel}>
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className="message-user-edit-button primary"
-                  onClick={userMessageActions.onEditSubmit}
-                  disabled={!editingMessage.content.trim()}
-                >
-                  发送
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              {content ? <div className="message-user-text">{content}</div> : null}
-              <MessageSelectedContextChips content={message.content} />
-              <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
-            </>
-          )}
-        </div>
-        {!editingMessage ? (
-          <div className="message-user-actions" aria-label="消息操作">
-            <button
-              type="button"
-              title="复制消息"
-              aria-label="复制消息"
-              onClick={() => userMessageActions.onCopy(content)}
-            >
-              <IconCopy />
-            </button>
-            <button
-              type="button"
-              title="重新编辑消息"
-              aria-label="重新编辑消息"
-              onClick={() => userMessageActions.onEdit(message)}
-            >
-              <IconCompose />
-            </button>
-          </div>
-        ) : null}
-      </div>
-    );
-  }
-
-  const eventBlocks = parseMessageEventBlocks({ ...message, content });
-  const knowledgeSources = message.role === "assistant" ? getMessageKnowledgeSources(message) : [];
-  const browserSources = message.role === "assistant" ? getMessageBrowserSources(message) : [];
-  if (!eventBlocks || eventBlocks.length === 0) {
-    return <>
-      {renderMarkdownDocument(content, `${message.id}-markdown`, "message-markdown")}
-      {message.role === "assistant" ? <MessageDetectedMediaGallery content={content} /> : null}
-      <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
-      <MessageKnowledgeSources sources={knowledgeSources} />
-      <MessageBrowserSources sources={browserSources} />
-    </>;
-  }
-
-  return (
-    <div className="message-event-stream">
-      {eventBlocks.map((block, index) => renderEventBlock(block, `${message.id}-${block.type}-${index}`))}
-      {message.role === "assistant" ? <MessageDetectedMediaGallery content={content} /> : null}
-      <MessageAttachmentGallery threadId={message.threadId} attachments={attachments} />
-      <MessageKnowledgeSources sources={knowledgeSources} />
-      <MessageBrowserSources sources={browserSources} />
-    </div>
-  );
-}
-
-function getMessageKnowledgeSources(message: MessageRecord): MessageKnowledgeSource[] {
-  try {
-    const sources = JSON.parse(message.metadataJson ?? "{}").knowledgeSources;
-    if (!Array.isArray(sources)) return [];
-    return sources.filter((source): source is MessageKnowledgeSource =>
-      Boolean(source) &&
-      typeof source.knowledgeBaseId === "string" &&
-      typeof source.knowledgeBaseName === "string" &&
-      typeof source.sourcePath === "string"
-    );
-  } catch {
-    return [];
-  }
-}
-
-function MessageKnowledgeSources({ sources }: { sources: MessageKnowledgeSource[] }) {
-  if (sources.length === 0) return null;
-  const byKnowledgeBase = new Map<string, MessageKnowledgeSource[]>();
-  for (const source of sources) {
-    byKnowledgeBase.set(source.knowledgeBaseId, [...(byKnowledgeBase.get(source.knowledgeBaseId) ?? []), source]);
-  }
-  return (
-    <div className="message-knowledge-sources" aria-label="知识库来源">
-      {[...byKnowledgeBase.values()].map((entries) => {
-        const [source] = entries;
-        const locations = entries.map((item) => `${item.sourcePath}${item.locator ? ` (${item.locator})` : ""}`).join("\n");
-        return (
-          <span key={source.knowledgeBaseId} className="message-knowledge-source" title={`知识库来源\n${locations}`}>
-            <IconKnowledge />
-            <span>知识库来源 · {source.knowledgeBaseName}</span>
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
-function getMessageBrowserSources(message: MessageRecord): MessageBrowserSource[] {
-  try {
-    const sources = JSON.parse(message.metadataJson ?? "{}").browserSources;
-    if (!Array.isArray(sources)) return [];
-    return sources.filter((source): source is MessageBrowserSource =>
-      Boolean(source) &&
-      typeof source.title === "string" &&
-      typeof source.url === "string" &&
-      /^https?:\/\//i.test(source.url)
-    );
-  } catch {
-    return [];
-  }
-}
-
-const COLLAPSED_BROWSER_SOURCE_COUNT = 6;
-
-function MessageBrowserSources({ sources }: { sources: MessageBrowserSource[] }) {
-  const [expanded, setExpanded] = useState(false);
-  if (sources.length === 0) return null;
-  const hiddenCount = Math.max(0, sources.length - COLLAPSED_BROWSER_SOURCE_COUNT);
-  const visibleSources = expanded ? sources : sources.slice(0, COLLAPSED_BROWSER_SOURCE_COUNT);
-  return (
-    <div className="message-browser-sources" aria-label="网页来源">
-      {visibleSources.map((source) => (
-        <a
-          key={source.url}
-          className="message-browser-source"
-          href={source.url}
-          title={`网页来源\n${source.title}\n${source.url}`}
-          onClick={(event) => {
-            event.preventDefault();
-            void window.codexh.openExternal(source.url);
-          }}
-        >
-          <IconGlobe />
-          <span>网页来源 · {source.title}</span>
-        </a>
-      ))}
-      {hiddenCount > 0 ? (
-        <button
-          type="button"
-          className={`message-browser-sources-toggle${expanded ? " is-expanded" : ""}`}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((current) => !current)}
-        >
-          <span>{expanded ? "收起来源" : `展开 ${hiddenCount} 个来源`}</span>
-          <IconChevronDown />
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function getMessageAttachments(message: MessageRecord): MessageAttachment[] {
-  try {
-    const attachments = JSON.parse(message.metadataJson ?? "{}").attachments;
-    return Array.isArray(attachments) ? attachments as MessageAttachment[] : [];
-  } catch {
-    return [];
-  }
-}
-
-function isVideoAttachment(attachment: MessageAttachment): boolean {
-  if (attachment.kind === "video") return true;
-  if (attachment.mimeType?.startsWith("video/")) return true;
-  return /\.(mp4|webm|mov|mkv)$/i.test(attachment.name || attachment.absolutePath || "");
-}
-
-function MessageAttachmentGallery({ threadId, attachments }: { threadId: string; attachments: MessageAttachment[] }) {
-  const [preview, setPreview] = useState<MessageMediaPreview | null>(null);
-  const previewPresence = useMotionPresence(preview);
-  const visiblePreview = preview ?? previewPresence.value;
-  if (attachments.length === 0) return null;
-  const mediaCount = attachments.filter((attachment) => attachment.kind === "image" || isVideoAttachment(attachment)).length;
-  return (
-    <>
-      <div className={`message-attachment-gallery ${mediaCount > 1 ? "image-grid" : ""}`}>
-        {attachments.map((attachment) => {
-          if (attachment.kind === "image") {
-            return (
-              <MessageAttachmentImage
-                key={attachment.id}
-                threadId={threadId}
-                attachment={attachment}
-                onPreview={(source) => setPreview({
-                  source,
-                  name: attachment.name,
-                  kind: "image",
-                  localPath: attachment.absolutePath
-                })}
-              />
-            );
-          }
-          if (isVideoAttachment(attachment)) {
-            return (
-              <MessageAttachmentVideo
-                key={attachment.id}
-                threadId={threadId}
-                attachment={attachment}
-                onExpand={(source) => setPreview({
-                  source,
-                  name: attachment.name,
-                  kind: "video",
-                  localPath: attachment.absolutePath
-                })}
-              />
-            );
-          }
-          return (
-            <button
-              key={attachment.id}
-              type="button"
-              className="message-file-attachment"
-              title={`打开文件：${attachment.absolutePath}`}
-              onClick={() => void window.codexh.openPath(attachment.absolutePath)}
-            >
-              <IconFile />{attachment.name}
-            </button>
-          );
-        })}
-      </div>
-      {visiblePreview ? <MessageMediaLightbox preview={visiblePreview} motionPhase={previewPresence.phase} onClose={() => setPreview(null)} /> : null}
-    </>
-  );
-}
-
-function MessageAttachmentImage({
-  threadId,
-  attachment,
-  onPreview
-}: {
-  threadId: string;
-  attachment: MessageAttachment;
-  onPreview: (source: string) => void;
-}) {
-  const [source, setSource] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void window.codexh.previewAttachment({ threadId, absolutePath: attachment.absolutePath })
-      .then((value) => { if (!cancelled) setSource(value); })
-      .catch(() => { if (!cancelled) setSource(null); });
-    return () => { cancelled = true; };
-  }, [attachment.absolutePath, threadId]);
-  return (
-    <button className="message-image-attachment" type="button" title={`查看原图：${attachment.name}`} onClick={() => source && onPreview(source)}>
-      {source ? <img src={source} alt={attachment.name} /> : <span><IconImage />{attachment.name}</span>}
-    </button>
-  );
-}
-
-function MessageAttachmentVideo({
-  threadId,
-  attachment,
-  onExpand
-}: {
-  threadId: string;
-  attachment: MessageAttachment;
-  onExpand: (source: string) => void;
-}) {
-  const [source, setSource] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void window.codexh.getAttachmentMediaUrl({ threadId, absolutePath: attachment.absolutePath })
-      .then((value) => {
-        if (cancelled) return;
-        if (value.kind !== "video") {
-          setError("无法预览该视频");
-          return;
-        }
-        setSource(value.url);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => { cancelled = true; };
-  }, [attachment.absolutePath, threadId]);
-
-  if (error) {
-    return (
-      <button
-        type="button"
-        className="message-file-attachment"
-        title={error}
-        onClick={() => void window.codexh.openPath(attachment.absolutePath)}
-      >
-        <IconVideo />{attachment.name}
-      </button>
-    );
-  }
-
-  return (
-    <div className="message-video-attachment">
-      <div className="message-video-attachment-head">
-        <span title={attachment.name}><IconVideo />{attachment.name}</span>
-        <div>
-          <button
-            type="button"
-            title="放大播放"
-            aria-label="放大播放"
-            disabled={!source}
-            onClick={() => source && onExpand(source)}
-          >
-            <IconEye />
-          </button>
-          <button
-            type="button"
-            title="打开本地文件"
-            aria-label="打开本地文件"
-            onClick={() => void window.codexh.openPath(attachment.absolutePath)}
-          >
-            <IconFolder />
-          </button>
-        </div>
-      </div>
-      {source ? (
-        <video className="message-video-player" src={source} controls playsInline preload="metadata" />
-      ) : (
-        <div className="message-video-loading">正在加载视频…</div>
-      )}
-    </div>
-  );
-}
-
-type MessageMediaReference = { source: string; kind: "local" | "url" };
-
-function MessageDetectedMediaGallery({ content }: { content: string }) {
-  const references = extractMessageMediaReferences(content);
-  const [preview, setPreview] = useState<MessageMediaPreview | null>(null);
-  const previewPresence = useMotionPresence(preview);
-  const visiblePreview = preview ?? previewPresence.value;
-  if (references.length === 0) return null;
-  return (
-    <>
-      <div className={`message-attachment-gallery detected-media ${references.length > 1 ? "image-grid" : ""}`}>
-        {references.map((reference) => (
-          <DetectedMessageImage
-            key={reference.source}
-            reference={reference}
-            onPreview={(source) => setPreview({
-              source,
-              name: getFileLeafName(reference.source),
-              kind: "image",
-              ...(reference.kind === "local" ? { localPath: reference.source } : { url: reference.source })
-            })}
-          />
-        ))}
-      </div>
-      {visiblePreview ? <MessageMediaLightbox preview={visiblePreview} motionPhase={previewPresence.phase} onClose={() => setPreview(null)} /> : null}
-    </>
-  );
-}
-
-function DetectedMessageImage({ reference, onPreview }: { reference: MessageMediaReference; onPreview: (source: string) => void }) {
-  const [source, setSource] = useState<string | null>(reference.kind === "url" ? reference.source : null);
-  useEffect(() => {
-    if (reference.kind === "url") {
-      setSource(reference.source);
-      return;
-    }
-    let cancelled = false;
-    void window.codexh.previewLocalImage({ absolutePath: reference.source })
-      .then((value) => { if (!cancelled) setSource(value); })
-      .catch(() => { if (!cancelled) setSource(null); });
-    return () => { cancelled = true; };
-  }, [reference]);
-  if (!source) return null;
-  return (
-    <button className="message-image-attachment" type="button" title={`查看原图：${getFileLeafName(reference.source)}`} onClick={() => onPreview(source)}>
-      <img src={source} alt={getFileLeafName(reference.source)} />
-    </button>
-  );
-}
-
-export function extractMessageMediaReferences(content: string): MessageMediaReference[] {
-  const matches: MessageMediaReference[] = [];
-  const seen = new Set<string>();
-  const add = (source: string, kind: MessageMediaReference["kind"]) => {
-    const normalized = source.replace(/[),.;，。；]+$/, "").trim();
-    if (!normalized || seen.has(normalized)) return;
-    seen.add(normalized);
-    matches.push({ source: normalized, kind });
-  };
-  const localPattern = /[a-zA-Z]:[\\/][^\r\n<>"|?*]+?\.(?:png|jpe?g|gif|webp|bmp)/gi;
-  const urlPattern = /https?:\/\/[^\s<>()]+?\.(?:png|jpe?g|gif|webp|bmp)(?:\?[^\s<>()]*)?/gi;
-  for (const match of content.matchAll(urlPattern)) add(match[0], "url");
-  // A URL contains the substring "s://", which otherwise looks like a Windows drive path.
-  const contentWithoutUrls = content.replace(urlPattern, " ");
-  for (const match of contentWithoutUrls.matchAll(localPattern)) add(match[0], "local");
-  return matches;
-}
-
-function renderEventBlock(block: ChatEventBlock, key: string) {
-  if (block.type === "commentary") {
-    return (
-      <section key={key} className="event-block commentary">
-        <div className="event-commentary-shell">
-          <span className={`event-badge ${block.type}`}>{block.type}</span>
-          <div className="event-commentary-copy">
-            {renderMarkdownDocument(block.content, `${key}-markdown`, "event-commentary-markdown")}
-          </div>
-        </div>
-      </section>
-    );
-  }
-
-  if (block.type === "final") {
-    return (
-      <section key={key} className="event-block final">
-        <div className="event-block-head">
-          <span className={`event-badge ${block.type}`}>{block.type}</span>
-          <span className="event-title">{block.title ?? "Outcome"}</span>
-        </div>
-        <div className="event-final-shell">
-          {renderMarkdownDocument(block.content, `${key}-markdown`, "event-final-markdown")}
-        </div>
-      </section>
-    );
-  }
-
-  const meta = collectEventMeta(block);
-
-  return (
-    <section key={key} className={`event-block ${block.type}`}>
-      <div className="event-block-head">
-        <span className={`event-badge ${block.type}`}>{block.type}</span>
-        <span className="event-title">{getEventPrimaryTitle(block)}</span>
-        {meta.length > 0 ? (
-          <div className="event-meta-row">
-            {meta.map((item) => (
-              <span key={`${key}-${item.label}`} className={`event-meta-pill ${item.tone}`}>
-                {item.label}
-              </span>
-            ))}
-          </div>
-        ) : null}
-      </div>
-      {renderEventDetails(block, key)}
-    </section>
-  );
-}
-
-function usesMonospaceEventBody(type: ChatEventType): boolean {
-  return type === "tool_call" || type === "file_view" || type === "file_change";
-}
-
-function renderEventDetails(block: ChatEventBlock, key: string) {
-  if (!block.content) {
-    return null;
-  }
-
-  switch (block.type) {
-    case "tool_call":
-      return renderMonoShell(block.content, key, "event-mono");
-    case "tool_result":
-      return renderToolResultBody(block, key);
-    case "file_view":
-      return renderFileViewBody(block, key);
-    case "file_change":
-      return renderFileChangeBody(block, key);
-    case "test_result":
-      return renderTestResultBody(block, key);
-    default:
-      return usesMonospaceEventBody(block.type)
-        ? renderMonoShell(block.content, key, "event-mono")
-        : renderMarkdownDocument(block.content, `${key}-markdown`, "event-markdown");
-  }
-}
-
-function renderToolResultBody(block: ChatEventBlock, key: string) {
-  const sections = parseNamedSections(block.content);
-  const content = sections.preview ?? sections.body;
-  const remainder = sections.preview ? sections.body : "";
-
-  return (
-    <div className="event-stack">
-      {content
-        ? looksLikeStructuredOutput(content)
-          ? renderMonoShell(content, `${key}-preview`, "event-mono")
-          : renderMarkdownDocument(content, `${key}-preview`, "event-markdown")
-        : null}
-      {remainder ? renderMarkdownDocument(remainder, `${key}-body`, "event-markdown") : null}
-    </div>
-  );
-}
-
-function renderFileViewBody(block: ChatEventBlock, key: string) {
-  return (
-    <div className="event-stack">
-      {block.path ? (
-        <div className="event-path-row">
-          <code>{block.path}</code>
-          {typeof block.startLine === "number" ? <span className="event-inline-line">Line {block.startLine}</span> : null}
-        </div>
-      ) : null}
-      {renderMonoShell(block.content, `${key}-file-view`, "event-mono event-code")}
-    </div>
-  );
-}
-
-function renderFileChangeBody(block: ChatEventBlock, key: string) {
-  const sections = parseNamedSections(block.content);
-  let summary = sections.summary ?? "";
-  let diff = sections.diff ?? "";
-  let remainder = sections.body;
-  const entitiesSection = sections.entities ?? sections.symbols ?? "";
-
-  if (!diff) {
-    const extracted = splitDiffFromContent(remainder);
-    summary = summary || extracted.summary;
-    diff = extracted.diff;
-    remainder = extracted.remainder;
-  }
-
-  const entityLines = (entitiesSection || extractEntityLines(summary) || extractEntityLines(remainder))
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("- ") || /^(added|removed|modified|renamed)\b/i.test(line));
-
-  return (
-    <div className="event-stack">
-      {summary ? renderMarkdownDocument(summary, `${key}-summary`, "event-markdown event-summary-markdown") : null}
-      {entityLines.length > 0 ? (
-        <ul className="event-entity-list">
-          {entityLines.slice(0, 24).map((line) => (
-            <li key={`${key}-${line}`}>{line.replace(/^- /, "")}</li>
-          ))}
-        </ul>
-      ) : null}
-      {remainder && remainder !== entitiesSection ? renderMarkdownDocument(remainder, `${key}-details`, "event-markdown") : null}
-      {diff ? renderMonoShell(diff, `${key}-diff`, "event-mono event-diff") : null}
-    </div>
-  );
-}
-
-function extractEntityLines(text: string): string {
-  if (!text) {
-    return "";
-  }
-  const lines = text.split(/\r?\n/).filter((line) =>
-    /^\s*-\s+(added|removed|modified|renamed)\b/i.test(line) ||
-    /^\s*(added|removed|modified|renamed)\s+\w+/i.test(line)
-  );
-  return lines.join("\n");
-}
-
-function formatSymbolChange(change: string): string {
-  switch (change) {
-    case "added":
-      return "added";
-    case "removed":
-      return "removed";
-    case "renamed":
-      return "renamed";
-    default:
-      return "modified";
-  }
-}
-
-function renderTestResultBody(block: ChatEventBlock, key: string) {
-  const sections = parseNamedSections(block.content);
-  const summary = sections.summary || sections.body;
-  const details = sections.details;
-
-  return (
-    <div className="event-stack">
-      {summary ? renderMarkdownDocument(summary, `${key}-summary`, "event-markdown") : null}
-      {details ? renderMonoShell(details, `${key}-details`, "event-mono") : null}
-    </div>
-  );
-}
-
-function renderMonoShell(content: string, key: string, className: string) {
-  return (
-    <div key={key} className="event-mono-shell">
-      <CopyTextButton content={content} />
-      <pre className={className}>{content}</pre>
-    </div>
-  );
-}
-
-function getEventPrimaryTitle(block: ChatEventBlock) {
-  switch (block.type) {
-    case "tool_call":
-    case "tool_result":
-    case "test_result":
-      return block.name ?? block.title ?? "Task event";
-    case "file_view":
-    case "file_change":
-      return block.path ?? block.title ?? "Workspace file";
-    default:
-      return block.title ?? block.type;
-  }
-}
-
-function collectEventMeta(block: ChatEventBlock): Array<{ label: string; tone: string }> {
-  const meta: Array<{ label: string; tone: string }> = [];
-
-  if (block.action) {
-    meta.push({ label: formatEventAction(block.action), tone: "action" });
-  }
-
-  if (block.status) {
-    meta.push({ label: block.status, tone: mapStatusTone(block.status) });
-  }
-
-  if (typeof block.ok === "boolean") {
-    meta.push({ label: block.ok ? "ok" : "failed", tone: block.ok ? "success" : "danger" });
-  }
-
-  if (typeof block.exitCode === "number") {
-    meta.push({ label: `exit ${block.exitCode}`, tone: block.exitCode === 0 ? "neutral" : "danger" });
-  }
-
-  if (typeof block.durationMs === "number") {
-    meta.push({ label: `${block.durationMs} ms`, tone: "neutral" });
-  }
-
-  if (typeof block.startLine === "number" && !block.path) {
-    meta.push({ label: `L${block.startLine}`, tone: "neutral" });
-  }
-
-  return meta;
-}
-
-function formatEventAction(action: string) {
-  switch (action.trim().toLowerCase()) {
-    case "create":
-    case "created":
-      return "Created";
-    case "update":
-    case "updated":
-    case "modify":
-    case "modified":
-      return "Modified";
-    case "delete":
-    case "deleted":
-      return "Deleted";
-    case "move":
-    case "moved":
-      return "Moved";
-    default:
-      return action;
-  }
-}
-
-function mapStatusTone(status: string) {
-  switch (status.trim().toLowerCase()) {
-    case "running":
-    case "queued":
-    case "in_progress":
-      return "running";
-    case "completed":
-    case "success":
-      return "success";
-    case "failed":
-    case "error":
-    case "cancelled":
-      return "danger";
-    default:
-      return "neutral";
-  }
-}
-
-function parseNamedSections(content: string) {
-  const sections = new Map<string, string[]>();
-  let current = "body";
-
-  const pushLine = (key: string, value: string) => {
-    const bucket = sections.get(key) ?? [];
-    bucket.push(value);
-    sections.set(key, bucket);
-  };
-
-  for (const line of content.split("\n")) {
-    const match = line.match(/^(summary|preview|diff|details|notes|entities|symbols):\s*(.*)$/i);
-    if (match) {
-      current = match[1].toLowerCase();
-      if (match[2]) {
-        pushLine(current, match[2]);
-      } else if (!sections.has(current)) {
-        sections.set(current, []);
-      }
-      continue;
-    }
-
-    pushLine(current, line);
-  }
-
-  return {
-    body: (sections.get("body") ?? []).join("\n").trim(),
-    summary: (sections.get("summary") ?? []).join("\n").trim(),
-    preview: (sections.get("preview") ?? []).join("\n").trim(),
-    diff: (sections.get("diff") ?? []).join("\n").trim(),
-    details: (sections.get("details") ?? []).join("\n").trim(),
-    notes: (sections.get("notes") ?? []).join("\n").trim(),
-    entities: (sections.get("entities") ?? []).join("\n").trim(),
-    symbols: (sections.get("symbols") ?? []).join("\n").trim()
-  };
-}
-
-function splitDiffFromContent(content: string) {
-  const lines = content.split("\n");
-  const diffIndex = lines.findIndex((line) => /^(@@|\+\+\+|---)/.test(line.trim()));
-
-  if (diffIndex < 0) {
-    return {
-      summary: "",
-      diff: "",
-      remainder: content.trim()
-    };
-  }
-
-  return {
-    summary: lines.slice(0, diffIndex).join("\n").trim(),
-    diff: lines.slice(diffIndex).join("\n").trim(),
-    remainder: ""
-  };
-}
-
-function looksLikeStructuredOutput(content: string) {
-  const trimmed = content.trim();
-  if (!trimmed) {
-    return false;
-  }
-
-  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith("```")) {
-    return true;
-  }
-
-  if (trimmed.includes("\n")) {
-    return true;
-  }
-
-  return /^([A-Z]:\\|\/|@@|\+\+\+|---|\$ |\> )/.test(trimmed);
-}
-
-function formatUpdatePhase(phase: UpdateState["phase"]): string {
-  switch (phase) {
-    case "checking": return "正在检查";
-    case "up-to-date": return "已是最新";
-    case "available": return "发现新版本";
-    case "downloading": return "正在下载";
-    case "downloaded": return "已验证，可安装";
-    case "installing": return "正在安装";
-    case "error": return "更新失败";
-    default: return "等待检查";
-  }
-}
-
-function getGpaTaskProgress(message: MessageRecord): GpaTaskProgress | null {
-  if (message.role !== "assistant" || !message.metadataJson) return null;
-  try {
-    const metadata = JSON.parse(message.metadataJson) as {
-      displayKind?: unknown;
-      taskId?: unknown;
-      taskTitle?: unknown;
-      status?: unknown;
-    };
-    if (
-      metadata.displayKind !== "gpa-task-progress" ||
-      metadata.status !== "completed" ||
-      typeof metadata.taskId !== "string" ||
-      typeof metadata.taskTitle !== "string"
-    ) {
-      return null;
-    }
-    return { taskId: metadata.taskId, taskTitle: metadata.taskTitle };
-  } catch {
-    return null;
-  }
-}
-
-function formatUpdateDownloadSize(receivedBytes?: number, totalBytes?: number): string {
-  const received = formatByteSize(receivedBytes ?? 0);
-  return totalBytes && totalBytes > 0 ? `${received} / ${formatByteSize(totalBytes)}` : `${received} 已下载`;
-}
-
-function formatStorageBytes(bytes: number): string {
-  if (bytes < 1024 * 1024 * 1024) return formatByteSize(bytes);
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function formatByteSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-export function getSidebarUpdateReminder(phase?: UpdateState["phase"]): string | null {
-  if (phase === "available") return "有更新";
-  if (phase === "downloading") return "下载中";
-  if (phase === "downloaded") return "可安装";
-  return null;
-}
-
-function getWorkspaceLabel(thread: ThreadRecord | null) {
-  const target = thread?.cwd?.trim();
-  if (!target) {
-    return "workagent";
-  }
-
-  const parts = target.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] ?? "workagent";
-}
-
-function formatRelativeTime(isoTime: string) {
-  const target = new Date(isoTime).getTime();
-  const diffMs = Date.now() - target;
-  const diffMinutes = Math.max(0, Math.floor(diffMs / 60000));
-
-  if (diffMinutes < 1) {
-    return "刚刚";
-  }
-  if (diffMinutes < 60) {
-    return `${diffMinutes} 分钟前`;
-  }
-
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) {
-    return `${diffHours} 小时前`;
-  }
-
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays} 天前`;
-}
-
-function formatNotificationElapsed(startedAt: string, endTime: number): string {
-  const started = Date.parse(startedAt);
-  const seconds = Number.isFinite(started) && Number.isFinite(endTime)
-    ? Math.max(0, Math.floor((endTime - started) / 1_000))
-    : 0;
-  if (seconds < 60) return `${seconds} 秒`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
-  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
-}
-
-function getNotificationStatusLabel(status: NotificationCenterItem["status"]): string {
-  if (status === "attention") return "待处理";
-  if (status === "running") return "运行中";
-  if (status === "completed") return "已完成";
-  if (status === "failed") return "失败";
-  return "已停止";
-}
-
-function formatKnowledgeScope(scope: KnowledgeScope): string {
-  if (scope === "global") return "全局";
-  if (scope === "project") return "项目";
-  return "会话";
-}
-
-function formatKnowledgeStatus(status: KnowledgeBaseSummary["status"]): string {
-  if (status === "ready") return "可用";
-  if (status === "importing") return "索引中";
-  return "失败";
-}
-
-function formatKnowledgeBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getErrorSolutionRecallStatus(outcome: ErrorSolutionRecord["lastRecallOutcome"]): string | null {
-  switch (outcome) {
-    case "matched":
-      return "已提供建议";
-    case "blocked":
-      return "最近已拦截";
-    case "prerequisite":
-      return "已要求重新读取";
-    case "recovered":
-      return "已成功恢复";
-    default:
-      return null;
-  }
-}
-
-function formatLatency(latencyMs: number): string {
-  return latencyMs >= 1_000 ? `${(latencyMs / 1_000).toFixed(2)} s` : `${latencyMs} ms`;
-}
-
-function formatTokensPerSecond(tokensPerSecond: number): string {
-  return `${tokensPerSecond.toFixed(tokensPerSecond >= 10 ? 1 : 2)} Tokens/s`;
-}
-
-function gpaModeLabel(mode: GpaStage): string {
-  switch (mode) {
-    case "goal":
-      return "目标 GOAL";
-    case "plan":
-      return "计划 PLAN";
-    case "act":
-      return "执行 ACT";
-    default:
-      return "GPA";
-  }
-}
-
-function MessageSelectedContextChips({ content }: { content: string }) {
-  const contexts = getSelectedMessageContexts(content);
-  if (contexts.length === 0) return null;
-  const labels: Record<SelectedMessageContext["kind"], string> = {
-    skill: "Skill",
-    mcp: "MCP",
-    database: "数据库",
-    code: "代码",
-    folder: "文件夹",
-    file: "文件"
-  };
-  const icons: Record<SelectedMessageContext["kind"], () => ReactNode> = {
-    skill: IconSkills,
-    mcp: IconMcp,
-    database: IconMcp,
-    code: IconCode,
-    folder: IconFolder,
-    file: IconFile
-  };
-  return (
-    <div className="message-selected-contexts" aria-label="已选择的聊天上下文">
-      {contexts.map((context) => {
-        const Icon = icons[context.kind];
-        return (
-          <span key={`${context.kind}-${context.label}`} className={`message-selected-context-chip ${context.kind}`} title={`${labels[context.kind]}：${context.label}`}>
-            <Icon />
-            <span>{context.label}</span>
-          </span>
-        );
-      })}
-    </div>
+      ) : null}    </div>
   );
 }

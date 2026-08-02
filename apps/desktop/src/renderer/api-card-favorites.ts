@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { ApiCardConfig } from "./api-card";
+import type { ApiCardConfig } from "./cards/api-card";
 
 export interface ApiCardFavorite {
   id: string;

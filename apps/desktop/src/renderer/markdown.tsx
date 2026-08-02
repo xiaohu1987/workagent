@@ -21,9 +21,9 @@ import sql from "highlight.js/lib/languages/sql";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
-import { useMotionPresence } from "./motion-presence";
-import { EChartsMessageChart } from "./EChartsMessageChart";
-import { ApiCardMessage } from "./api-card-message";
+import { useMotionPresence } from "./core/motion-presence";
+import { EChartsMessageChart } from "./charts/echarts-message-chart";
+import { ApiCardMessage } from "./cards/api-card-message";
 import { IconClose, IconCopy, IconEye, IconFolder, IconGlobe } from "./icons";
 
 hljs.registerLanguage("bash", bash);

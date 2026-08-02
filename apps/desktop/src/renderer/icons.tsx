@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { NotificationCenterItem } from "./notification-center";
+import type { NotificationCenterItem } from "./core/notification-center";
 
 export function SvgIcon({
   children,

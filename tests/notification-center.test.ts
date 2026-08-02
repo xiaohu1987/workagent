@@ -7,7 +7,7 @@ import {
   resolveThreadStatusTransition,
   sortNotificationItems,
   type NotificationCenterItem
-} from "../apps/desktop/src/renderer/notification-center";
+} from "../apps/desktop/src/renderer/core/notification-center";
 
 function item(id: string, status: NotificationCenterItem["status"] = "running", updatedAt = "2026-07-22T10:00:00.000Z"): NotificationCenterItem {
   return {
