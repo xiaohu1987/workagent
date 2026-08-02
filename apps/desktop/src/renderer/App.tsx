@@ -1944,9 +1944,10 @@ export function App() {
           }
           return null;
         });
-        if (status !== "idle") {
-          pendingRuntimeStartsRef.current.delete(runtimeThreadId);
-        }
+        // A stopped task returns to idle. Leaving this marker behind makes the
+        // next user message look like it must wait behind an active runtime,
+        // so it is queued without an optimistic message bubble until restart.
+        pendingRuntimeStartsRef.current.delete(runtimeThreadId);
         if (status !== "running" && status !== "waiting") {
           discardQueuedAssistantDraftsForThread(runtimeThreadId);
           setAssistantDrafts((current) => {
