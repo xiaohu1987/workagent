@@ -1,4 +1,5 @@
 import { Fragment, createElement, memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent } from "react";
 import "./timeline.css";
 import type {
@@ -184,6 +185,7 @@ import {
   IconGpa,
   IconGuide,
   IconHelpCircle,
+  IconImage,
   IconKnowledge,
   IconNotificationStatus,
   IconPin,
@@ -308,6 +310,20 @@ import {
   type RuntimeActivityEntry,
   type RuntimeProgress,
 } from "./core/app-types";
+
+const MAX_RUNTIME_ACTIVITY_ENTRIES = 120;
+
+function trimRuntimeActivityEntries(entries: RuntimeActivityEntry[]): RuntimeActivityEntry[] {
+  if (entries.length <= MAX_RUNTIME_ACTIVITY_ENTRIES) return entries;
+  const recentEntries = entries.slice(-MAX_RUNTIME_ACTIVITY_ENTRIES);
+  const retainedIds = new Set(recentEntries.map((entry) => entry.id));
+  for (const entry of entries) {
+    if (entry.kind === "tool" && (entry.toolCall.status === "pending" || entry.toolCall.status === "running")) {
+      retainedIds.add(entry.id);
+    }
+  }
+  return entries.filter((entry) => retainedIds.has(entry.id));
+}
 import {
   formatKnowledgeBytes,
   formatKnowledgeScope,
@@ -543,6 +559,7 @@ export function App() {
     updatedAt: ""
   });
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
+  const [composerMediaIntent, setComposerMediaIntent] = useState<"image" | "video" | null>(null);
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
   const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp" | "database" | "apiCards">("root");
@@ -988,6 +1005,10 @@ export function App() {
   }, [selectedThreadId]);
 
   useEffect(() => {
+    void window.codexh.setLiveEditPreviewActiveThread(selectedThreadId);
+  }, [selectedThreadId]);
+
+  useEffect(() => {
     window.localStorage.setItem("codexh.sidebar-width", String(sidebarWidth));
   }, [sidebarWidth]);
 
@@ -1195,6 +1216,9 @@ export function App() {
   }
 
   function appendRuntimeStatus(threadId: string, label: string, createdAt = new Date().toISOString()) {
+    // Background tasks can emit many recovery events. Their detail is persisted
+    // in the snapshot; only the visible task needs live transcript activity.
+    if (threadId !== selectedThreadIdRef.current) return;
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       const last = activity.entries.at(-1);
@@ -1204,7 +1228,10 @@ export function App() {
         [threadId]: {
           ...activity,
           startedAt: activity.startedAt ?? createdAt,
-          entries: [...activity.entries, { id: `status-${createdAt}-${label}`, kind: "status", label, createdAt }]
+          entries: trimRuntimeActivityEntries([
+            ...activity.entries,
+            { id: `status-${createdAt}-${label}`, kind: "status", label, createdAt }
+          ])
         }
       };
     });
@@ -1216,6 +1243,7 @@ export function App() {
     content: string,
     createdAt = new Date().toISOString()
   ) {
+    if (threadId !== selectedThreadIdRef.current) return;
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       return {
@@ -1223,13 +1251,17 @@ export function App() {
         [threadId]: {
           ...activity,
           startedAt: activity.startedAt ?? createdAt,
-          entries: [...activity.entries, { id: `output-${createdAt}`, kind: "output", label, content, createdAt }]
+          entries: trimRuntimeActivityEntries([
+            ...activity.entries,
+            { id: `output-${createdAt}`, kind: "output", label, content, createdAt }
+          ])
         }
       };
     });
   }
 
   function upsertRuntimeTool(threadId: string, toolCall: ToolCallRecord) {
+    if (threadId !== selectedThreadIdRef.current) return;
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? {
         threadId,
@@ -1248,7 +1280,7 @@ export function App() {
         [threadId]: {
           ...activity,
           startedAt: activity.startedAt ?? toolCall.startedAt ?? new Date().toISOString(),
-          entries
+          entries: trimRuntimeActivityEntries(entries)
         }
       };
     });
@@ -1261,6 +1293,7 @@ export function App() {
     resultJson: string | null,
     completedAt: string
   ) {
+    if (threadId !== selectedThreadIdRef.current) return;
     setRuntimeActivities((current) => {
       const activity = current[threadId];
       if (!activity) return current;
@@ -1268,10 +1301,10 @@ export function App() {
         ...current,
         [threadId]: {
           ...activity,
-          entries: activity.entries.map((entry) => entry.kind === "tool" && entry.toolCall.id === toolCallId
+          entries: trimRuntimeActivityEntries(activity.entries.map((entry) => entry.kind === "tool" && entry.toolCall.id === toolCallId
             ? { ...entry, toolCall: { ...entry.toolCall, status, resultJson, completedAt } }
             : entry
-          )
+          ))
         }
       };
     });
@@ -1394,6 +1427,9 @@ export function App() {
       const currentSelectedThreadId = selectedThreadIdRef.current;
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
       if (typed.type === "terminal.output" && typed.threadId) {
+        if (typed.threadId !== selectedThreadIdRef.current) {
+          return;
+        }
         const sessionId = typeof typed.payload?.sessionId === "string" ? typed.payload.sessionId : "default";
         ensureTerminalTab(typed.threadId, sessionId);
         queueTerminalOutput(typed.threadId, sessionId, typed.payload?.data ?? "");
@@ -1540,6 +1576,19 @@ export function App() {
         if (suppressRuntimeProgressRef.current[typed.threadId]) {
           return;
         }
+        if (typed.threadId !== selectedThreadIdRef.current) {
+          if (notificationThreadId) {
+            updateThreadNotification(
+              notificationThreadId,
+              getToolProcessingLabel(
+                typed.payload.toolName,
+                typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}"
+              ),
+              typed.createdAt
+            );
+          }
+          return;
+        }
         setActiveToolCall({
           threadId: typed.threadId,
           toolCallId: typed.payload.toolCallId,
@@ -1601,6 +1650,12 @@ export function App() {
         return;
       }
       if (typed.type === "tool.completed" && typed.payload?.toolCallId) {
+        if (typed.threadId && typed.threadId !== selectedThreadIdRef.current) {
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, "工具已完成，正在根据结果决策。", typed.createdAt);
+          }
+          return;
+        }
         setActiveToolCall((current) =>
           current?.toolCallId === typed.payload?.toolCallId ? null : current
         );
@@ -1654,6 +1709,12 @@ export function App() {
           : reason === "turn_start"
             ? "正在请求模型决策"
             : "正在重新请求模型决策";
+        if (typed.threadId !== selectedThreadIdRef.current) {
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
+          }
+          return;
+        }
         appendRuntimeStatus(typed.threadId, statusLabel, typed.createdAt);
         if (notificationThreadId) {
           updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
@@ -1669,6 +1730,9 @@ export function App() {
         const phase = isAssistantDraftPhase(payload.phase) ? payload.phase : "generating";
         if (suppressRuntimeProgressRef.current[threadId]) {
           discardQueuedAssistantDraft(draftId);
+          return;
+        }
+        if (threadId !== selectedThreadIdRef.current) {
           return;
         }
         queueAssistantDraft({
@@ -2662,6 +2726,21 @@ export function App() {
     );
   }, [config]);
   const composerCanAttachMultimodal = composerSupportsMultimodalInput || multimodalInputFallbackReady;
+  // 生成图片/视频入口仅在「设置 → 多模态」配置了对应默认模型且未关闭时出现。
+  const composerMediaGenerationReady = useMemo(() => {
+    const resolve = (role: "image" | "video") => {
+      const modality = config?.multimodal?.[role];
+      if (!config || !modality || modality.enabled === false) return false;
+      if (!modality.defaultProviderId || !modality.defaultModelId) return false;
+      return config.models.some(
+        (model) =>
+          model.providerId === modality.defaultProviderId &&
+          model.id === modality.defaultModelId &&
+          model.role === role
+      );
+    };
+    return { image: resolve("image"), video: resolve("video") };
+  }, [config]);
   const composerProviderOptions = useMemo<ComposerSelectOption[]>(
     () =>
       composerProviders.map((provider) => ({
@@ -3343,9 +3422,6 @@ export function App() {
 
   async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
     const isSwitchingThread = selectedThreadIdRef.current !== threadId;
-    if (isSwitchingThread) {
-      setIsThreadSwitching(true);
-    }
     if (options?.scrollToLatest) {
       cancelPendingAutoScrollFrame();
       clearAutoScrollReleaseTimer();
@@ -3353,20 +3429,26 @@ export function App() {
       pendingLatestScrollThreadIdRef.current = threadId;
     }
 
-    selectThreadId(threadId);
+    const hasCachedSnapshot = snapshotCacheByThreadRef.current.has(threadId);
+    if (isSwitchingThread) {
+      // A busy transcript can continuously schedule normal-priority updates.
+      // Commit selection and unmount the old transcript in the click itself so
+      // a history switch is never queued behind a running task's activity.
+      flushSync(() => {
+        setIsThreadSwitching(true);
+        selectThreadId(threadId);
+        if (!hasCachedSnapshot) {
+          snapshotThreadIdRef.current = null;
+          setSnapshot(null);
+        }
+      });
+    } else {
+      selectThreadId(threadId);
+    }
     if (restoreCachedThreadSnapshot(threadId)) {
       // Paint the previous transcript first, then verify it incrementally.
       void refreshSnapshot(threadId);
     } else {
-      if (isSwitchingThread) {
-        // A running thread keeps emitting drafts and progress while its next
-        // history entry is loading. Retaining that old snapshot here keeps
-        // the expensive timeline derivation alive and can starve the switch.
-        // The cache still preserves it for an instant return; detach only the
-        // mounted snapshot so the new selection and loading state can paint.
-        snapshotThreadIdRef.current = null;
-        setSnapshot(null);
-      }
       await refreshSnapshot(threadId);
       // Safety net: never leave the switch skeleton up once the load settled,
       // regardless of which in-flight/pending branch handled the refresh.
@@ -3730,6 +3812,7 @@ export function App() {
   ) {
     const inputContent = (forcedContent ?? input.trim()).trim();
     const submittedAttachments = forcedContent ? [] : [...composerAttachments];
+    const submittedMediaIntent = forcedContent ? null : composerMediaIntent;
     const hasOneShotAttachment = submittedAttachments.some((attachment) => !isPersistentComposerContextKind(attachment.kind));
     if (!inputContent && (forcedContent || !hasOneShotAttachment)) {
       return;
@@ -3810,6 +3893,7 @@ export function App() {
     if (!forcedContent) {
       setInput("");
       setComposerAttachments([]);
+      setComposerMediaIntent(null);
     }
 
     try {
@@ -3837,6 +3921,7 @@ export function App() {
       if (!forcedContent) {
         setInput((current) => current.trim() ? current : inputContent);
         setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
+        setComposerMediaIntent((current) => current ?? submittedMediaIntent);
       }
       if (startedLocalRuntime) {
         pendingRuntimeStartsRef.current.delete(threadId);
@@ -3887,7 +3972,7 @@ export function App() {
       setComposerSubmission(null);
     }
     try {
-      await window.codexh.sendMessage({ threadId, content: raw, displayContent, attachments: importedAttachments });
+      await window.codexh.sendMessage({ threadId, content: raw, displayContent, attachments: importedAttachments, mediaIntent: submittedMediaIntent });
     } catch (error) {
       if (optimisticMessage) {
         removeOptimisticUserMessage(threadId, optimisticMessage.id);
@@ -3896,6 +3981,7 @@ export function App() {
       if (!forcedContent) {
         setInput((current) => current.trim() ? current : inputContent);
         setComposerAttachments((current) => current.length > 0 ? current : submittedAttachments);
+        setComposerMediaIntent((current) => current ?? submittedMediaIntent);
       }
       setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
       pendingRuntimeStartsRef.current.delete(threadId);
@@ -4458,6 +4544,22 @@ export function App() {
       showNotice("移除失败", { message: error instanceof Error ? error.message : String(error) });
     } finally {
       setRemovingManagedItem(false);
+    }
+  }
+
+  async function setLiveEditPreviewEnabled(enabled: boolean) {
+    if (!config) return;
+    const previousConfig = config;
+    const previousDraft = configDraft;
+    const nextConfig = { ...config, desktop: { ...config.desktop, liveEditPreview: enabled } };
+    setConfig(nextConfig);
+    setConfigDraft((current) => current ? { ...current, desktop: { ...current.desktop, liveEditPreview: enabled } } : current);
+    try {
+      await window.codexh.setLiveEditPreviewEnabled(enabled);
+    } catch (error) {
+      setConfig(previousConfig);
+      setConfigDraft(previousDraft);
+      showNotice("代码编辑预览设置失败。", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -5315,6 +5417,18 @@ export function App() {
               </div>
             ) : null}
             <div className="chat-composer">
+              {composerMediaIntent ? (
+                <div className="composer-attachments" aria-label="当前生成模式">
+                  <div
+                    className={`composer-attachment-chip media-intent is-${composerMediaIntent}`}
+                    title={composerMediaIntent === "image" ? "本次发送将使用默认图片模型生成图片" : "本次发送将使用默认视频模型生成视频"}
+                  >
+                    <span className="composer-attachment-icon" aria-hidden>{composerMediaIntent === "image" ? <IconImage /> : <IconVideo />}</span>
+                    <span className="composer-attachment-copy"><strong><span>{composerMediaIntent === "image" ? "生成图片" : "生成视频"}</span></strong></span>
+                    <button type="button" className="composer-attachment-remove" aria-label="取消生成模式" onClick={() => setComposerMediaIntent(null)}><IconClose /></button>
+                  </div>
+                </div>
+              ) : null}
               <ComposerAttachments
                 attachments={composerAttachments}
                 removingAttachmentId={removingComposerAttachmentId}
@@ -5340,7 +5454,7 @@ export function App() {
                   event.preventDefault();
                   if (event.dataTransfer.files.length > 0) void addDroppedFiles(event.dataTransfer.files);
                 }}
-                placeholder="随心输入"
+                placeholder={composerMediaIntent === "image" ? "描述要生成的图片…" : composerMediaIntent === "video" ? "描述要生成的视频…" : "随心输入"}
               />
               <div className="composer-toolbar">
                 <div className="composer-toolbar-left">
@@ -5590,7 +5704,7 @@ export function App() {
               ) : null}
 
               {settingsTab === "timeouts" ? (
-                <RuntimeOverviewPage config={config} configDraft={configDraft} threadCount={threads.length} skillCount={skills.length} subagentDefaultModelValue={subagentDefaultModelValue} subagentDefaultModelOptions={subagentDefaultModelOptions} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
+                <RuntimeOverviewPage config={config} configDraft={configDraft} threadCount={threads.length} skillCount={skills.length} subagentDefaultModelValue={subagentDefaultModelValue} subagentDefaultModelOptions={subagentDefaultModelOptions} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} onSetLiveEditPreviewEnabled={(enabled) => void setLiveEditPreviewEnabled(enabled)} />
               ) : null}
 
     {settingsTab === "provider" ? (
@@ -5918,6 +6032,10 @@ export function App() {
           multiAgentMode={multiAgentMode}
           isProjectThread={selectedThread?.mode === "project"}
           canAttachMultimodal={composerCanAttachMultimodal}
+          canGenerateImage={composerMediaGenerationReady.image}
+          canGenerateVideo={composerMediaGenerationReady.video}
+          mediaIntent={composerMediaIntent}
+          onSelectMediaIntent={(intent) => setComposerMediaIntent((current) => (current === intent ? null : intent))}
           skills={visibleComposerSkills}
           filteredSkills={filteredComposerSkills}
           apiCardFavorites={apiCardFavorites}

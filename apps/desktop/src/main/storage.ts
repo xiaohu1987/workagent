@@ -271,7 +271,8 @@ export function defaultConfig(): AppConfig {
     desktop: {
       theme: "system",
       approvals: "prompt",
-      inAppBrowser: true
+      inAppBrowser: true,
+      liveEditPreview: true
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -425,7 +426,8 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     desktop: {
       theme: parsed.desktop?.theme ?? 'system',
       approvals: parsed.desktop?.approvals ?? 'prompt',
-      inAppBrowser: parsed.desktop?.inAppBrowser ?? true
+      inAppBrowser: parsed.desktop?.inAppBrowser ?? true,
+      liveEditPreview: parsed.desktop?.liveEditPreview ?? true
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),
@@ -604,6 +606,7 @@ export class DatabaseService {
         content TEXT NOT NULL,
         display_content TEXT NOT NULL,
         attachments_json TEXT NOT NULL,
+        media_intent TEXT,
         user_message_id TEXT,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL
@@ -904,6 +907,7 @@ export class DatabaseService {
     this.ensureColumn("user_input_prompts", "resolution_source", "TEXT");
     this.ensureColumn("turn_runs", "usage_json", "TEXT");
     this.ensureColumn("queued_messages", "user_message_id", "TEXT");
+    this.ensureColumn("queued_messages", "media_intent", "TEXT");
     this.ensureColumn("error_solutions", "model_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("error_solutions", "memory_kind", "TEXT NOT NULL DEFAULT 'recovered'");
     this.ensureColumn("error_solutions", "scope_mode", "TEXT NOT NULL DEFAULT 'model'");
@@ -1428,8 +1432,8 @@ export class DatabaseService {
     };
     this.#db
       .prepare(
-        `INSERT INTO queued_messages (id, thread_id, content, display_content, attachments_json, user_message_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO queued_messages (id, thread_id, content, display_content, attachments_json, media_intent, user_message_id, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -1437,6 +1441,7 @@ export class DatabaseService {
         record.content,
         record.displayContent,
         JSON.stringify(record.attachments),
+        record.mediaIntent ?? null,
         record.userMessageId,
         record.status,
         record.createdAt
@@ -3500,6 +3505,7 @@ function mapQueuedMessageRow(row: any): QueuedMessageRecord {
     content: row.content,
     displayContent: row.display_content,
     attachments,
+    mediaIntent: row.media_intent === "image" || row.media_intent === "video" ? row.media_intent : null,
     userMessageId: row.user_message_id ?? null,
     status: row.status === "dispatching" ? "dispatching" : "queued",
     createdAt: row.created_at

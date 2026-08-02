@@ -7977,6 +7977,15 @@ select:focus {
   background: rgba(117, 86, 26, 0.22);
 }
 .composer-attachment-chip.mcp { border-color: rgba(187, 141, 221, 0.28); }
+.composer-attachment-chip.media-intent {
+  border-color: rgba(94, 203, 155, 0.4);
+  background: rgba(38, 110, 80, 0.18);
+}
+.composer-attachment-chip.media-intent .composer-attachment-icon {
+  color: #5ecb9b;
+  background: rgba(94, 203, 155, 0.1);
+}
+.composer-attachment-chip.media-intent .composer-attachment-copy strong { color: #7fd9b2; }
 
 .composer-attachment-icon {
   display: grid;

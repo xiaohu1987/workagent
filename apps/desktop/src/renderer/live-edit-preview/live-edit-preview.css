@@ -1,0 +1,23 @@
+:root { color: #e7ebf2; background: #0b0c0e; font-family: Inter, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+.live-edit-preview { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; border: 1px solid rgba(111, 154, 221, 0.28); background: #0b0c0e; }
+.live-edit-preview-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; padding: 13px 14px 11px; border-bottom: 1px solid rgba(145, 170, 205, 0.15); background: #111418; }
+.live-edit-preview-title { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.live-edit-preview-title strong { overflow: hidden; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.live-edit-preview-status { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: #39c58f; box-shadow: 0 0 0 3px rgba(57, 197, 143, 0.13); animation: live-edit-pulse 1.2s ease-in-out infinite; }
+.live-edit-preview-language, .live-edit-preview-state { color: #93a1b4; font-size: 11px; white-space: nowrap; }
+.live-edit-preview-state { color: #6fd0a3; }
+.live-edit-preview-header p { grid-column: 1 / -1; margin: 0; overflow: hidden; color: #7f8ca0; font: 11px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.live-edit-preview-code-wrap { min-width: 0; min-height: 0; overflow: auto; background: #0b0c0e; }
+.live-edit-preview-code { min-width: max-content; margin: 0; padding: 10px 0 16px 48px; color: #d8e0eb; counter-reset: line; font: 12px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.live-edit-preview-code li { min-height: 19px; padding: 0 14px 0 10px; white-space: pre; }
+.live-edit-preview-code li::marker { color: #566174; }
+.live-edit-preview-code code { font: inherit; }
+.live-edit-preview-code .hljs-comment, .live-edit-preview-code .hljs-quote { color: #6f7c8f; }
+.live-edit-preview-code .hljs-keyword, .live-edit-preview-code .hljs-selector-tag { color: #d58cff; }
+.live-edit-preview-code .hljs-string, .live-edit-preview-code .hljs-attr { color: #9ad785; }
+.live-edit-preview-code .hljs-number, .live-edit-preview-code .hljs-literal { color: #efa66d; }
+.live-edit-preview-loading, .live-edit-preview-note { padding: 18px; color: #8794a8; font-size: 12px; }
+.live-edit-preview-note { position: sticky; bottom: 0; border-top: 1px solid rgba(145, 170, 205, 0.14); background: #111418; }
+@keyframes live-edit-pulse { 50% { opacity: 0.38; } }

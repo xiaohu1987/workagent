@@ -480,6 +480,8 @@ export interface QueuedMessageRecord {
   content: string;
   displayContent: string;
   attachments: MessageAttachment[];
+  /** Explicit image/video generation request chosen from the composer "+" menu. */
+  mediaIntent?: "image" | "video" | null;
   userMessageId: string | null;
   status: "queued" | "dispatching";
   createdAt: string;
@@ -888,6 +890,7 @@ export interface AppConfig {
     theme: "light" | "dark" | "system";
     approvals: ApprovalMode;
     inAppBrowser: boolean;
+    liveEditPreview: boolean;
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;

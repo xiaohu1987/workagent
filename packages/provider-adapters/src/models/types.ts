@@ -102,6 +102,12 @@ export interface ModelCompat {
   resolveToolCallMode(ctx: ModelCompatContext): ModelCompatToolCallMode;
 
   /**
+   * Whether the runtime should rely on deterministic completion validation
+   * instead of issuing its optional second model-based completion audit.
+   */
+  shouldBypassStandardCompletionAudit(model: Pick<ModelProfile, "id" | "displayName">): boolean;
+
+  /**
    * Adjust the chat request payload built by the provider (model, messages,
    * temperature, max_tokens, tools, response_format, ...). Return the
    * patched object. The base already reflects the tool-call decision, so

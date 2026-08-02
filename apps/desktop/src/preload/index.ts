@@ -49,6 +49,11 @@ const api = {
     ipcRenderer.invoke("projects:read-file", payload),
   writeProjectFile: (payload: { threadId: string; path: string; content: string }) =>
     ipcRenderer.invoke("projects:write-file", payload),
+  setLiveEditPreviewActiveThread: (threadId: string | null) =>
+    ipcRenderer.invoke("live-edit-preview:set-active-thread", threadId),
+  acknowledgeLiveEditPreviewPath: (payload: { toolCallId: string; path: string }) =>
+    ipcRenderer.invoke("live-edit-preview:acknowledge-path", payload),
+  markLiveEditPreviewReady: () => ipcRenderer.invoke("live-edit-preview:ready"),
   getGitSnapshot: (threadId: string) => ipcRenderer.invoke("git:snapshot", threadId),
   stageGitFile: (payload: { threadId: string; path: string }) => ipcRenderer.invoke("git:stage-file", payload),
   stageAllGitChanges: (threadId: string) => ipcRenderer.invoke("git:stage-all", threadId),
@@ -70,7 +75,7 @@ const api = {
   clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),
   getThreadSnapshot: (threadId: string, cursor?: RuntimeThreadSnapshotCursor) =>
     ipcRenderer.invoke("threads:snapshot", threadId, cursor),
-  sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[] }) =>
+  sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[]; mediaIntent?: "image" | "video" | null }) =>
     ipcRenderer.invoke("threads:send", payload),
   requestHttp: (payload: {
     method: string;
@@ -168,6 +173,7 @@ const api = {
     return result;
   },
   saveConfig: (config: unknown) => ipcRenderer.invoke("config:save", config),
+  setLiveEditPreviewEnabled: (enabled: boolean) => ipcRenderer.invoke("config:set-live-edit-preview", enabled),
   listDatabases: () => ipcRenderer.invoke("databases:list"),
   listDatabaseCredentialConnectionIds: () => ipcRenderer.invoke("databases:credential-connection-ids"),
   testDatabase: (payload: { connection: unknown; password?: string }) => ipcRenderer.invoke("databases:test", payload),
@@ -276,6 +282,11 @@ const api = {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("runtime:event", wrapped);
     return () => ipcRenderer.off("runtime:event", wrapped);
+  },
+  onLiveEditPreviewEvent: (listener: (event: { kind: "show"; toolCallId: string; threadId: string; path: string; completed: boolean } | { kind: "complete"; toolCallId: string }) => void) => {
+    const wrapped = (_event: unknown, payload: { kind: "show"; toolCallId: string; threadId: string; path: string; completed: boolean } | { kind: "complete"; toolCallId: string }) => listener(payload);
+    ipcRenderer.on("live-edit-preview:event", wrapped);
+    return () => ipcRenderer.off("live-edit-preview:event", wrapped);
   }
 };
 

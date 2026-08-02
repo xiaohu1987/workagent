@@ -63,7 +63,10 @@ export default defineConfig({
     build: {
       outDir: path.resolve(root, "dist/renderer"),
       rollupOptions: {
-        input: path.resolve(root, "apps/desktop/src/renderer/index.html")
+        input: {
+          main: path.resolve(root, "apps/desktop/src/renderer/index.html"),
+          "live-edit-preview": path.resolve(root, "apps/desktop/src/renderer/live-edit-preview.html")
+        }
       }
     }
   }

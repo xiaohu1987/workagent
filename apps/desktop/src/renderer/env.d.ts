@@ -75,6 +75,10 @@ declare global {
       listProjectFiles: (threadId: string) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
       readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
       writeProjectFile: (payload: { threadId: string; path: string; content: string }) => Promise<{ path: string }>;
+      setLiveEditPreviewEnabled: (enabled: boolean) => Promise<boolean>;
+      setLiveEditPreviewActiveThread: (threadId: string | null) => Promise<void>;
+      acknowledgeLiveEditPreviewPath: (payload: { toolCallId: string; path: string }) => Promise<void>;
+      markLiveEditPreviewReady: () => Promise<void>;
       getGitSnapshot: (threadId: string) => Promise<any>;
       stageGitFile: (payload: { threadId: string; path: string }) => Promise<any>;
       stageAllGitChanges: (threadId: string) => Promise<any>;
@@ -94,7 +98,7 @@ declare global {
       deleteThread: (threadId: string) => Promise<void>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
       getThreadSnapshot: (threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) => Promise<any>;
-      sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[] }) => Promise<void>;
+      sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[]; mediaIntent?: "image" | "video" | null }) => Promise<void>;
       requestHttp: (payload: {
         method: string;
         url: string;
@@ -283,6 +287,7 @@ declare global {
       setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) => Promise<void>;
       setKnowledgeEnabled: (payload: { threadId: string; knowledgeEnabled: boolean }) => Promise<void>;
       onRuntimeEvent: (listener: (event: unknown) => void) => () => void;
+      onLiveEditPreviewEvent: (listener: (event: { kind: "show"; toolCallId: string; threadId: string; path: string; completed: boolean } | { kind: "complete"; toolCallId: string }) => void) => () => void;
     };
   }
 }

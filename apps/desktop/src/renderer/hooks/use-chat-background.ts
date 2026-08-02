@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import {
   DEFAULT_CHAT_BACKGROUND_SURFACES,
+  getChatBackgroundActiveIndex,
   getChatBackgroundSurfaceStyleVars,
   isChatBackgroundRotationActive,
   loadChatBackgroundBlob,
@@ -28,6 +29,12 @@ type Options = {
   showNotice: Notice;
 };
 
+const BACKGROUND_LOAD_ATTEMPTS = 3;
+
+function waitForBackgroundStorage(delayMs: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+}
+
 export function useChatBackground({ appShellRef, showNotice }: Options) {
   const [settings, setSettings] = useState<ChatBackgroundSettings>(() => readChatBackgroundSettings());
   const [images, setImages] = useState<ChatBackgroundImage[]>([]);
@@ -53,39 +60,48 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
   useEffect(() => {
     let active = true;
     void (async () => {
-      const persisted = await window.codexh.getApplicationBackgrounds();
-      if (persisted) {
-        if (!active) return;
-        const restoredSettings = normalizeChatBackgroundSettings(persisted.settings);
-        setSettings(normalizeChatBackgroundSettings({
-          ...restoredSettings,
-          fileName: restoredSettings.fileName ?? persisted.items[0]?.fileName ?? null
-        }));
-        const restoredImages = persisted.items.map((item) => {
-          const url = URL.createObjectURL(new Blob([item.bytes], { type: item.mimeType }));
-          urlsRef.current.add(url);
-          return { ...item, url };
-        });
-        setImages(restoredImages);
-        setActiveImageIndex(0);
-        return;
-      }
+      for (let attempt = 0; attempt < BACKGROUND_LOAD_ATTEMPTS; attempt += 1) {
+        try {
+          const persisted = await window.codexh.getApplicationBackgrounds();
+          if (persisted) {
+            if (!active) return;
+            const restoredSettings = normalizeChatBackgroundSettings(persisted.settings);
+            setSettings(normalizeChatBackgroundSettings({
+              ...restoredSettings,
+              fileName: restoredSettings.fileName ?? persisted.items[0]?.fileName ?? null
+            }));
+            const restoredImages = persisted.items.map((item) => {
+              const url = URL.createObjectURL(new Blob([item.bytes], { type: item.mimeType }));
+              urlsRef.current.add(url);
+              return { ...item, url };
+            });
+            setImages(restoredImages);
+            setActiveImageIndex(getChatBackgroundActiveIndex(restoredSettings, restoredImages));
+            return;
+          }
 
-      const legacyBlob = await loadChatBackgroundBlob();
-      if (!legacyBlob) return;
-      const legacySettings = readChatBackgroundSettings();
-      const bytes = await legacyBlob.arrayBuffer();
-      const id = globalThis.crypto.randomUUID();
-      await window.codexh.saveApplicationBackgrounds({
-        items: [{ id, bytes, mimeType: legacyBlob.type, fileName: legacySettings.fileName ?? "background" }],
-        settings: legacySettings
-      });
-      await removeChatBackgroundBlob();
-      if (!active) return;
-      const url = URL.createObjectURL(legacyBlob);
-      urlsRef.current.add(url);
-      setImages([{ id, bytes, mimeType: legacyBlob.type, fileName: legacySettings.fileName ?? "background", url }]);
-      setActiveImageIndex(0);
+          const legacyBlob = await loadChatBackgroundBlob();
+          if (!legacyBlob) return;
+          const legacySettings = readChatBackgroundSettings();
+          const bytes = await legacyBlob.arrayBuffer();
+          const id = globalThis.crypto.randomUUID();
+          await window.codexh.saveApplicationBackgrounds({
+            items: [{ id, bytes, mimeType: legacyBlob.type, fileName: legacySettings.fileName ?? "background" }],
+            settings: legacySettings
+          });
+          await removeChatBackgroundBlob();
+          if (!active) return;
+          const url = URL.createObjectURL(legacyBlob);
+          urlsRef.current.add(url);
+          setImages([{ id, bytes, mimeType: legacyBlob.type, fileName: legacySettings.fileName ?? "background", url }]);
+          setActiveImageIndex(0);
+          return;
+        } catch (error) {
+          if (attempt === BACKGROUND_LOAD_ATTEMPTS - 1) throw error;
+          await waitForBackgroundStorage(200 * (attempt + 1));
+          if (!active) return;
+        }
+      }
     })()
       .catch(() => {
         if (active) {
@@ -209,6 +225,13 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
     updateSettings({ surfaces: { [key]: value } });
   }
 
+  function selectImage(index: number) {
+    const image = imagesRef.current[index];
+    if (!image) return;
+    setActiveImageIndex(index);
+    updateSettings({ fileName: image.fileName });
+  }
+
   function beginDrag(event: ReactPointerEvent<HTMLImageElement>) {
     if (!imageUrl || event.button !== 0) return;
     const bounds = event.currentTarget.parentElement?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect();
@@ -277,6 +300,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
       urlsRef.current.add(nextUrl);
       imagesRef.current = nextImages;
       setImages(nextImages);
+      setActiveImageIndex(nextImages.length - 1);
       setSettings(nextSettings);
       showNotice("应用背景已更新", { message: "位置、模糊度和透明度可继续实时调整。", tone: "success" });
     } catch (error) {
@@ -364,7 +388,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
   return {
     images,
     activeImageIndex,
-    setActiveImageIndex,
+    setActiveImageIndex: selectImage,
     settings,
     inputRef,
     imageUrl,

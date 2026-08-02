@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AppNotice, AppNoticeTone } from "../core/app-types";
 
 export function useAppNotice() {
@@ -6,15 +6,15 @@ export function useAppNotice() {
   const [isNoticeHovered, setIsNoticeHovered] = useState(false);
   const [exitingNoticeId, setExitingNoticeId] = useState<number | null>(null);
 
-  function showNotice(title: string, options?: { message?: string; tone?: AppNoticeTone }) {
+  const showNotice = useCallback((title: string, options?: { message?: string; tone?: AppNoticeTone }) => {
     setExitingNoticeId(null);
     setNotice({ id: Date.now(), title, message: options?.message, tone: options?.tone ?? "warning" });
-  }
+  }, []);
 
-  function dismissNotice(noticeId: number) {
+  const dismissNotice = useCallback((noticeId: number) => {
     setIsNoticeHovered(false);
     setExitingNoticeId((current) => current ?? noticeId);
-  }
+  }, []);
 
   useEffect(() => {
     if (!notice || isNoticeHovered) return;

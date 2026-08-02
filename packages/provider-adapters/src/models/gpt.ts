@@ -43,6 +43,10 @@ export const gptCompat: ModelCompat = {
     };
   },
 
+  shouldBypassStandardCompletionAudit(): boolean {
+    return false;
+  },
+
   normalizeRequestParams(
     { input }: ModelCompatContext,
     base: Record<string, unknown>

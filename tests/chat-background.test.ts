@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CHAT_BACKGROUND_SETTINGS,
   DEFAULT_CHAT_BACKGROUND_SURFACES,
+  getChatBackgroundActiveIndex,
   getChatBackgroundSurfaceStyleVars,
   getChatBackgroundTransform,
   isChatBackgroundRotationActive,
@@ -165,5 +166,16 @@ describe("chat background settings", () => {
       ...DEFAULT_CHAT_BACKGROUND_SETTINGS,
       rotationEnabled: true
     }, 2)).toBe(true);
+  });
+
+  it("restores the manually selected background image", () => {
+    expect(getChatBackgroundActiveIndex(
+      { fileName: "second.png" },
+      [{ fileName: "first.png" }, { fileName: "second.png" }]
+    )).toBe(1);
+    expect(getChatBackgroundActiveIndex(
+      { fileName: "missing.png" },
+      [{ fileName: "first.png" }, { fileName: "second.png" }]
+    )).toBe(0);
   });
 });

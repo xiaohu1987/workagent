@@ -12,7 +12,8 @@ import {
   IconKnowledge,
   IconMcp,
   IconShield,
-  IconSkills
+  IconSkills,
+  IconVideo
 } from "../icons";
 import { FloatingSideMenu } from "./model-controls";
 
@@ -29,6 +30,10 @@ type ComposerAddMenuProps = {
   multiAgentMode: MultiAgentMode;
   isProjectThread: boolean;
   canAttachMultimodal: boolean;
+  canGenerateImage: boolean;
+  canGenerateVideo: boolean;
+  mediaIntent: "image" | "video" | null;
+  onSelectMediaIntent: (intent: "image" | "video") => void;
   skills: SkillMetadata[];
   filteredSkills: SkillMetadata[];
   apiCardFavorites: ApiCardFavorite[];
@@ -64,6 +69,10 @@ export function ComposerAddMenu({
   multiAgentMode,
   isProjectThread,
   canAttachMultimodal,
+  canGenerateImage,
+  canGenerateVideo,
+  mediaIntent,
+  onSelectMediaIntent,
   skills,
   filteredSkills,
   apiCardFavorites,
@@ -118,6 +127,20 @@ export function ComposerAddMenu({
             <span className="gpa-popover-item-icon" aria-hidden><IconImage /></span>
             <span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">添加图片</span><span className="gpa-popover-item-hint">选择图片作为视觉参考</span></span>
           </button>
+          {canGenerateImage ? (
+            <button className={`gpa-popover-item gpa-popover-item-generate-image ${mediaIntent === "image" ? "is-active" : ""}`} role="menuitemcheckbox" aria-checked={mediaIntent === "image"} onMouseEnter={resetToRoot} onClick={() => { onSelectMediaIntent("image"); closeMenu(); }}>
+              <span className="gpa-popover-item-icon" aria-hidden><IconImage /></span>
+              <span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">生成图片</span><span className="gpa-popover-item-hint">{mediaIntent === "image" ? "已选中，点击取消生成模式" : "输入描述，使用默认图片模型生成"}</span></span>
+              {mediaIntent === "image" ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
+            </button>
+          ) : null}
+          {canGenerateVideo ? (
+            <button className={`gpa-popover-item gpa-popover-item-generate-video ${mediaIntent === "video" ? "is-active" : ""}`} role="menuitemcheckbox" aria-checked={mediaIntent === "video"} onMouseEnter={resetToRoot} onClick={() => { onSelectMediaIntent("video"); closeMenu(); }}>
+              <span className="gpa-popover-item-icon" aria-hidden><IconVideo /></span>
+              <span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">生成视频</span><span className="gpa-popover-item-hint">{mediaIntent === "video" ? "已选中，点击取消生成模式" : "输入描述，使用默认视频模型生成"}</span></span>
+              {mediaIntent === "video" ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
+            </button>
+          ) : null}
           <MenuSubmenuButton icon={<IconGlobe />} title="接口卡片" hint="调用收藏的 API 卡片" view="apiCards" activeView={view} onOpen={openSubmenu} />
           <MenuSubmenuButton icon={<IconSkills />} title="Skills" hint="为本次任务添加专业技能" view="skills" activeView={view} onOpen={openSubmenu} />
           <MenuSubmenuButton icon={<IconMcp />} title="MCP 服务" hint="指定本次任务优先使用的服务" view="mcp" activeView={view} onOpen={openSubmenu} />

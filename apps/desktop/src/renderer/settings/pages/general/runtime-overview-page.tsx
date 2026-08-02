@@ -4,8 +4,8 @@ import { ComposerSelect } from "../../../workspace/composer-select";
 import { IconChart, IconChecklist, IconGear, IconGlobe, IconSkills } from "../../../icons";
 import { getProviderDisplayName, modelKey } from "../../../lib/config-utils";
 
-type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: () => Promise<void> };
-export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave }: Props) { return (
+type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: () => Promise<void>; onSetLiveEditPreviewEnabled: (enabled: boolean) => void };
+export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave, onSetLiveEditPreviewEnabled }: Props) { return (
       <div className="settings-section">
         <div className="general-overview">
           <div className="general-overview-heading">
@@ -63,6 +63,20 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
         </div>
 
         {configDraft ? (
+          <>
+          <div className="config-block">
+            <div className="section-copy section-copy-with-action">
+              <div>
+                <strong>代码编辑预览</strong>
+                <span>任务写入代码文件时，在主窗口旁显示文件内容和写入过程。</span>
+              </div>
+              <label className={`mcp-enable-switch ${configDraft.desktop.liveEditPreview ? "is-on" : ""}`}>
+                <input type="checkbox" checked={configDraft.desktop.liveEditPreview} onChange={(event) => onSetLiveEditPreviewEnabled(event.target.checked)} />
+                <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
+                <span className="mcp-enable-label">{configDraft.desktop.liveEditPreview ? "启用" : "禁用"}</span>
+              </label>
+            </div>
+          </div>
           <div className="config-block general-subagent-settings">
             <div className="section-copy">
               <strong><IconSkills />子智能体</strong>
@@ -121,6 +135,7 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
             </div>
             <div className="settings-save-row"><span className="subtle-inline">更改仅影响后续创建的子智能体。</span><button className="button warm" type="button" onClick={() => void onSave()}>保存</button></div>
           </div>
+          </>
         ) : null}
       </div>
       ); }

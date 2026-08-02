@@ -166,6 +166,18 @@ describe("OpenAiCompatibleProvider", () => {
     expect(resolveModelCompat({ id: "my-custom-model", displayName: "" }).id).toBe("gpt");
   });
 
+  it("bypasses the optional completion audit only for Kimi K3", () => {
+    expect(resolveModelCompat({ id: "kimi-k3", displayName: "Kimi K3" })
+      .shouldBypassStandardCompletionAudit({ id: "kimi-k3", displayName: "Kimi K3" }))
+      .toBe(true);
+    expect(resolveModelCompat({ id: "kimi-k2-0711-preview", displayName: "Kimi K2" })
+      .shouldBypassStandardCompletionAudit({ id: "kimi-k2-0711-preview", displayName: "Kimi K2" }))
+      .toBe(false);
+    expect(resolveModelCompat({ id: "gpt-5", displayName: "GPT-5" })
+      .shouldBypassStandardCompletionAudit({ id: "gpt-5", displayName: "GPT-5" }))
+      .toBe(false);
+  });
+
   it("strips sampling params and raises the max_tokens floor for Kimi thinking models", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]

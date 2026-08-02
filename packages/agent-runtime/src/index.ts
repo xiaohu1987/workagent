@@ -37,7 +37,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, resolveModelCompat, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
@@ -87,14 +87,8 @@ import {
   applyMultimodalInputRecognitionToTranscript,
   buildMultimodalInputRecognizeSystemPrompt,
   buildMultimodalInputRecognizeTranscript,
-  buildMultimodalIntentClassifySystemPrompt,
-  buildMultimodalIntentClassifyTranscript,
-  detectMultimodalIntent,
   detectRequestedImageCount,
-  hasRecognizableMultimodalAttachments,
-  parseMultimodalIntentClassification,
-  stripThinkTags,
-  type MultimodalIntentClassification
+  hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
 import type { GpaStage, GpaState } from "@shared-types";
 
@@ -140,6 +134,10 @@ export {
 export const MAX_REPEATED_TASK_FAILURES = MAX_TARGET_FAILURE_ATTEMPTS;
 export { MAX_PREMATURE_COMPLETION_ATTEMPTS, MAX_TARGET_FAILURE_ATTEMPTS } from "./error-recovery";
 export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
+// A model can ignore a strategy-switch instruction after a failed call and
+// resend the same rejected invocation indefinitely. End the turn after a
+// small number of blocked repeats so that a busy task cannot spin forever.
+export const MAX_BLOCKED_IDENTICAL_TOOL_RETRIES = 3;
 export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs;
 export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
 export const MAX_AGENT_PROTOCOL_FAILURES = 2;
@@ -154,6 +152,10 @@ export const CONTEXT_COMPACTION_TARGET = 0.45;
 export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 32_000;
 export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
 export const MAX_CONTEXT_MESSAGE_TOKENS = 24_000;
+
+export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
+  return blockedAttempts >= MAX_BLOCKED_IDENTICAL_TOOL_RETRIES;
+}
 export const MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES = 5;
 export const AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS = 30_000;
 export const AGENT_PROTOCOL_RECOVERY_QUESTION_ID = "agent_protocol_recovery";
@@ -334,7 +336,7 @@ export function buildFunctionCallCompatibilityTranscript(
 }
 
 type Submission =
-  | { type: "queue_wakeup"; resumed?: boolean }
+  | { type: "queue_wakeup" }
   | { type: "approval_response"; requestId: string; approved: boolean }
   | { type: "user_input_response"; promptId: string; answers: Record<string, string> }
   | { type: "shutdown" };
@@ -1108,15 +1110,14 @@ class ThreadSessionRuntime {
         continue;
       }
       if (submission.type === "queue_wakeup") {
-        await this.drainQueuedMessages(submission.resumed === true);
+        await this.drainQueuedMessages();
       }
     }
   }
 
-  private async drainQueuedMessages(resumeFirst = false): Promise<void> {
+  private async drainQueuedMessages(): Promise<void> {
     this.#busy = true;
     try {
-      let skipMultimodalIntentClassification = resumeFirst;
       while (!this.#activeTurnRunId && !this.#stopping) {
         const queued = await this.services.persistence.claimNextQueuedMessage(this.threadId);
         if (!queued) {
@@ -1129,9 +1130,7 @@ class ThreadSessionRuntime {
           createdAt: new Date().toISOString()
         });
         try {
-          const isResumedTurn = skipMultimodalIntentClassification;
-          skipMultimodalIntentClassification = false;
-          await this.runTurn(queued.id, queued.content, queued.attachments, queued.displayContent, isResumedTurn);
+          await this.runTurn(queued.id, queued.content, queued.attachments, queued.displayContent, queued.mediaIntent ?? null);
         } catch (error) {
           console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
           await this.services.log("turn.unhandled_error", this.threadId, {
@@ -1209,7 +1208,7 @@ class ThreadSessionRuntime {
     initialInput: string,
     attachments: MessageAttachment[] = [],
     displayContent?: string,
-    skipMultimodalIntentClassification = false
+    mediaIntent: "image" | "video" | null = null
   ): Promise<void> {
     const thread = await this.services.persistence.getThread(this.threadId);
     const gpa = await this.#ensureGpa();
@@ -1454,31 +1453,19 @@ class ThreadSessionRuntime {
         };
       }
 
-      const resumedRuleIntent = skipMultimodalIntentClassification
-        ? detectMultimodalIntent(initialInput, attachments)
-        : null;
-      const multimodalClassification = skipMultimodalIntentClassification
-        ? {
-            intent: resumedRuleIntent ?? "none",
-            prompt: resumedRuleIntent ? initialInput.trim() : "",
-            count: resumedRuleIntent === "image" ? detectRequestedImageCount(initialInput) : 1,
-            parseOk: true
-          }
-        : await this.classifyMultimodalIntent({
-            currentInput: initialInput,
-            attachments,
-            priorMessages: priorMessagesBeforeCurrentInput.map((message) => ({ role: message.role, content: message.content })),
-            model,
-            provider,
-            abortController,
-            turnId: turn.id
-          });
-      if (multimodalClassification.intent === "image" || multimodalClassification.intent === "video") {
+      // Image/video generation is only triggered by an explicit composer
+      // selection (the "+" menu), never by semantic intent classification.
+      if (mediaIntent === "image" || mediaIntent === "video") {
+        await this.services.log("multimodal.explicit_intent", this.threadId, {
+          turnRunId: turn.id,
+          intent: mediaIntent,
+          promptPreview: initialInput.trim().slice(0, 200)
+        });
         await this.runMultimodalIntentTurn({
-          intent: multimodalClassification.intent,
+          intent: mediaIntent,
           turnId: turn.id,
-          prompt: multimodalClassification.prompt,
-          count: multimodalClassification.count,
+          prompt: initialInput.trim(),
+          count: mediaIntent === "image" ? detectRequestedImageCount(initialInput) : 1,
           abortController
         });
         return;
@@ -1550,6 +1537,7 @@ class ThreadSessionRuntime {
       const managedWriteRecoveryBlocks = new Map<string, number>();
       const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
       const failedToolCallFingerprints = new Map<string, number>();
+      const blockedToolCallFingerprints = new Map<string, number>();
       const successfullyCreatedFiles = new Set<string>();
       const successfulReusableToolResults = new Map<string, string>();
       const recoveryEpisodes = new Map<string, RecoveryEpisode>();
@@ -2366,7 +2354,22 @@ class ThreadSessionRuntime {
           throw new Error("Turn interrupted.");
         }
 
-        const returnedVisibleContent = decision.assistantMessage?.trim() ?? streamedVisibleContent;
+        const returnedVisibleContent = resolveVisibleAssistantContent(
+          decision.assistantMessage,
+          streamedVisibleContent
+        );
+        // Some compatible providers stream the visible reply but return an
+        // empty assistant_message in the terminal decision envelope. Preserve
+        // that reply before completion validation and persistence discard it.
+        if (
+          decision.toolCalls.length === 0 &&
+          decision.endTurn &&
+          !decision.assistantMessage?.trim() &&
+          returnedVisibleContent &&
+          !isPatchPayload(returnedVisibleContent)
+        ) {
+          decision.assistantMessage = returnedVisibleContent;
+        }
         await updateDraft("validating", returnedVisibleContent);
 
         const stepUsage = decision.usage ?? (typeof decision.outputTokens === "number"
@@ -2948,6 +2951,8 @@ class ThreadSessionRuntime {
           }
         }
 
+        const bypassStandardCompletionAudit = resolveModelCompat(model)
+          .shouldBypassStandardCompletionAudit(model);
         if (
           this.#gpa.stage === "off" &&
           decision.toolCalls.length === 0 &&
@@ -3017,6 +3022,14 @@ class ThreadSessionRuntime {
             continue;
           }
 
+          if (bypassStandardCompletionAudit) {
+            await this.services.log("turn.standard_completion_audit_bypassed", this.threadId, {
+              turnRunId: turn.id,
+              reason: "model_compatibility",
+              modelId: model.id,
+              modelName: model.displayName
+            });
+          } else {
           await this.services.log("turn.standard_completion_audit_requested", this.threadId, {
             turnRunId: turn.id,
             originalRequestPreview: initialInput.slice(0, 500),
@@ -3131,6 +3144,7 @@ class ThreadSessionRuntime {
                 successfulEvidenceCount: successfulToolEvidence.length
               });
             }
+          }
           }
         }
 
@@ -3715,6 +3729,8 @@ class ThreadSessionRuntime {
               `The identical tool call ${toolCall.name} already failed ${failedCallAttempts} times.`;
             appendBlockedToolCallResult(toolCall, lastError);
             await persistBlockedToolCall(toolCall, lastError, "identical_retry");
+            const blockedAttempts = (blockedToolCallFingerprints.get(toolCallFingerprint) ?? 0) + 1;
+            blockedToolCallFingerprints.set(toolCallFingerprint, blockedAttempts);
             const rememberedSolutions = await lookupErrorSolutionMemories({
               toolName: toolCall.name,
               taskKey: toolTaskKey,
@@ -3733,6 +3749,21 @@ class ThreadSessionRuntime {
                 rememberedSolutions
               })
             });
+            if (shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts)) {
+              repeatedTaskFailure = {
+                taskKey: toolTaskKey,
+                attempts: failedCallAttempts + blockedAttempts,
+                lastError: `${lastError} The call was blocked ${blockedAttempts} times after the initial failure.`
+              };
+              await this.services.log("turn.identical_retry_limit_reached", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                taskKey: toolTaskKey,
+                failedCallAttempts,
+                blockedAttempts
+              });
+              break;
+            }
             continue;
           }
           const preflightMemories = isRepeatableCoordinationTool
@@ -5091,90 +5122,6 @@ class ThreadSessionRuntime {
     }
   }
 
-  private async classifyMultimodalIntent(input: {
-    currentInput: string;
-    attachments: MessageAttachment[];
-    priorMessages: Array<{ role: string; content: string }>;
-    model: ModelProfile;
-    provider: ProviderDefinition;
-    abortController: AbortController;
-    turnId: string;
-  }): Promise<MultimodalIntentClassification> {
-    const fallback: MultimodalIntentClassification = { intent: "none", prompt: "", count: 1, parseOk: false };
-    // Rule-based fast path: explicit phrasing ("给我生成一张美女图片",
-    // "generate an image", ...) routes directly. This is deterministic,
-    // instant (skips a model round-trip), and immune to reasoning-style
-    // models whose <think> blocks otherwise poison the JSON classification
-    // output and silently drop image requests into the chat path.
-    const ruleIntent = detectMultimodalIntent(input.currentInput, input.attachments);
-    if (ruleIntent) {
-      const count = ruleIntent === "image" ? detectRequestedImageCount(input.currentInput) : 1;
-      await this.services.log("multimodal.intent_classify", this.threadId, {
-        turnRunId: input.turnId,
-        intent: ruleIntent,
-        count,
-        parseOk: true,
-        viaModel: false,
-        viaRule: true,
-        promptPreview: input.currentInput.trim().slice(0, 200)
-      });
-      return { intent: ruleIntent, prompt: input.currentInput.trim(), count, parseOk: true };
-    }
-    try {
-      const adapter = this.services.providerFactory.create(input.provider);
-      const classifyAbort = createChildAbortController(input.abortController.signal);
-      const decision = await waitForAbortOrTimeout(
-        adapter.runTurn({
-          systemPrompt: buildMultimodalIntentClassifySystemPrompt(),
-          transcript: buildMultimodalIntentClassifyTranscript({
-            priorMessages: input.priorMessages,
-            currentInput: input.currentInput,
-            attachments: input.attachments
-          }),
-          availableTools: [],
-          model: input.model,
-          provider: input.provider,
-          stream: false,
-          abortSignal: classifyAbort.signal
-        }),
-        input.abortController.signal,
-        this.services.config.timeouts.multimodalIntentClassifyMs,
-        () => classifyAbort.abort()
-      );
-
-      const raw =
-        typeof decision.assistantMessage === "string" && decision.assistantMessage.trim()
-          ? decision.assistantMessage
-          : "";
-      // Reasoning-style models may wrap the JSON in a <think> block (or emit
-      // only an unterminated think block); strip it before parsing.
-      const classification = parseMultimodalIntentClassification(stripThinkTags(raw));
-      await this.services.log("multimodal.intent_classify", this.threadId, {
-        turnRunId: input.turnId,
-        intent: classification.intent,
-        count: classification.count,
-        parseOk: classification.parseOk,
-        viaModel: true,
-        promptPreview: classification.prompt.slice(0, 200),
-        rawPreview: raw.slice(0, 240)
-      });
-      return classification;
-    } catch (error) {
-      if (input.abortController.signal.aborted) {
-        throw error instanceof Error ? error : new Error(String(error));
-      }
-      await this.services.log("multimodal.intent_classify", this.threadId, {
-        turnRunId: input.turnId,
-        intent: "none",
-        parseOk: false,
-        viaModel: true,
-        failed: true,
-        reason: error instanceof Error ? error.message : String(error)
-      });
-      return fallback;
-    }
-  }
-
   private async runMultimodalIntentTurn(input: {
     intent: "image" | "video";
     turnId: string;
@@ -5564,6 +5511,13 @@ export function buildCommentaryMessageMetadata(toolCalls: RuntimeToolCall[]): Re
     displayKind: "commentary",
     toolCallIds: toolCalls.map((toolCall) => toolCall.id)
   };
+}
+
+export function resolveVisibleAssistantContent(
+  assistantMessage: string | undefined,
+  streamedVisibleContent: string
+): string {
+  return assistantMessage?.trim() || streamedVisibleContent.trim();
 }
 
 export function buildToolBatchProgressMessage(toolCalls: RuntimeToolCall[], tone: ResponseTone = "concise"): string {
@@ -6950,8 +6904,8 @@ export class AgentRuntimeService {
     return runtime;
   }
 
-  public wakeQueuedMessages(threadId: string, options?: { resumed?: boolean }): void {
-    this.ensureThread(threadId).submit({ type: "queue_wakeup", resumed: options?.resumed === true });
+  public wakeQueuedMessages(threadId: string): void {
+    this.ensureThread(threadId).submit({ type: "queue_wakeup" });
   }
 
   public guideActiveTurn(threadId: string, content: string): string | null {

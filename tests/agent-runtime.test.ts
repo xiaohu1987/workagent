@@ -7,6 +7,7 @@ import {
   buildCommentaryMessageMetadata,
   buildToolBatchMessageMetadata,
   buildToolBatchProgressMessage,
+  resolveVisibleAssistantContent,
   applyResponseToneToProgressMessage,
   buildResponseTonePrompt,
   isSafeCommentaryMessage,
@@ -111,6 +112,8 @@ import {
   isAgentToolEnabled,
   prioritizeUserInputToolCall,
   MAX_REPEATED_TASK_FAILURES,
+  MAX_BLOCKED_IDENTICAL_TOOL_RETRIES,
+  shouldStopAfterBlockedIdenticalToolRetry,
   MAX_MODEL_TIMEOUT_RETRIES,
   parseGpaState,
   normalizeSequentialPlanTasks,
@@ -146,6 +149,16 @@ describe("user message context persistence", () => {
     const metadata = buildUserMessageMetadata(initialInput, "Inspect this folder", []);
 
     expect(metadata).toEqual({ displayContent: "Inspect this folder" });
+  });
+});
+
+describe("visible assistant response fallback", () => {
+  it("keeps streamed content when the terminal decision provides an empty message", () => {
+    expect(resolveVisibleAssistantContent("", "  The task is complete.  ")).toBe("The task is complete.");
+  });
+
+  it("prefers the terminal decision message when it is present", () => {
+    expect(resolveVisibleAssistantContent("Final response", "Draft response")).toBe("Final response");
   });
 });
 
@@ -236,6 +249,13 @@ describe("createToolCallFingerprint", () => {
         patch: "*** Begin Patch\n*** Add File: js/renderer.js\n+export {}\n*** Add File: css/game.css\n+.game {}\n*** End Patch"
       })
     ).toEqual(["js/renderer.js", "css/game.css"]);
+  });
+});
+
+describe("blocked identical tool retries", () => {
+  it("ends a turn after a bounded number of rejected duplicate calls", () => {
+    expect(shouldStopAfterBlockedIdenticalToolRetry(MAX_BLOCKED_IDENTICAL_TOOL_RETRIES - 1)).toBe(false);
+    expect(shouldStopAfterBlockedIdenticalToolRetry(MAX_BLOCKED_IDENTICAL_TOOL_RETRIES)).toBe(true);
   });
 });
 

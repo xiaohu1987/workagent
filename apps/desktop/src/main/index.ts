@@ -20,6 +20,8 @@ import {
 } from "./notification-policy";
 import { UpdateService } from "./update-service";
 import { executeHttpRequest, type HttpProxyRequestPayload } from "./http-proxy";
+import { LiveEditPreviewWindow } from "./live-edit-preview-window";
+import { getLiveEditWriteTargets } from "./live-edit-preview-utils";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -53,6 +55,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const sessionDataDir = path.join(app.getPath("userData"), "session-data");
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+const liveEditPreview = new LiveEditPreviewWindow({
+  getMainWindow: () => mainWindow,
+  getPreviewUrl: getLiveEditPreviewUrl,
+  preloadPath: path.join(__dirname, "../preload/index.cjs")
+});
 
 app.setPath("sessionData", sessionDataDir);
 
@@ -87,6 +94,7 @@ function showMainWindow(): void {
 
 function quitApplication(): void {
   isQuitting = true;
+  liveEditPreview.destroy();
   tray?.destroy();
   tray = null;
   app.quit();
@@ -276,6 +284,7 @@ async function createWindow(): Promise<void> {
 
   backend.onEvent((event) => {
     notifyBackgroundRuntimeEvent(event);
+    handleLiveEditPreviewRuntimeEvent(event);
     mainWindow?.webContents.send("runtime:event", event);
   });
   backend.onSkillLabEvent((event) => {
@@ -292,9 +301,14 @@ async function createWindow(): Promise<void> {
     }
 
     event.preventDefault();
+    liveEditPreview.hide();
     mainWindow?.hide();
     notifyMinimizedToTray();
   });
+  mainWindow.on("move", () => liveEditPreview.reposition());
+  mainWindow.on("resize", () => liveEditPreview.reposition());
+  mainWindow.on("hide", () => liveEditPreview.hide());
+  mainWindow.on("show", () => liveEditPreview.show());
   registerIpc();
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
     console.error("[renderer] Failed to load", { errorCode, errorDescription, validatedURL });
@@ -400,6 +414,16 @@ function registerIpc(): void {
   ipcMain.handle("projects:write-file", (_event, payload: { threadId: string; path: string; content: string }) =>
     backend.writeProjectFile(payload.threadId, payload.path, payload.content)
   );
+  ipcMain.handle("live-edit-preview:set-active-thread", (_event, threadId: string | null) => {
+    const activeThread = typeof threadId === "string" ? backend.listThreads().find((thread) => thread.id === threadId) : null;
+    liveEditPreview.setActiveRootThread(activeThread?.rootThreadId ?? null);
+  });
+  ipcMain.handle("live-edit-preview:acknowledge-path", (_event, payload: { toolCallId: string; path: string }) => {
+    if (typeof payload?.toolCallId === "string" && typeof payload?.path === "string") {
+      liveEditPreview.acknowledgePath(payload.toolCallId, payload.path);
+    }
+  });
+  ipcMain.handle("live-edit-preview:ready", () => liveEditPreview.markReady());
   ipcMain.handle("git:snapshot", (_event, threadId: string) => backend.getGitSnapshot(threadId));
   ipcMain.handle("git:stage-file", (_event, payload: { threadId: string; path: string }) =>
     backend.stageGitFile(payload.threadId, payload.path)
@@ -432,7 +456,7 @@ function registerIpc(): void {
     backend.getThreadSnapshot(threadId, cursor)
   );
   ipcMain.handle("threads:send", (_event, payload) =>
-    backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent)
+    backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent, true, payload.mediaIntent ?? null)
   );
   ipcMain.handle("http:request", (_event, payload: HttpProxyRequestPayload) => executeHttpRequest(payload));
   ipcMain.handle("threads:guide", (_event, payload: { threadId: string; content: string }) =>
@@ -570,7 +594,15 @@ function registerIpc(): void {
     });
     return config;
   });
-  ipcMain.handle("config:save", (_event, config) => backend.saveConfig(config));
+  ipcMain.handle("config:save", async (_event, config) => {
+    await backend.saveConfig(config);
+    if (!backend.getConfig().desktop.liveEditPreview) liveEditPreview.clear();
+  });
+  ipcMain.handle("config:set-live-edit-preview", async (_event, enabled: boolean) => {
+    const next = await backend.setLiveEditPreviewEnabled(enabled === true);
+    if (!next) liveEditPreview.clear();
+    return next;
+  });
   ipcMain.handle("config:set-reasoning-effort", (_event, reasoningEffort) =>
     backend.setGlobalReasoningEffort(reasoningEffort)
   );
@@ -709,6 +741,32 @@ async function ensureRendererServerUrl(): Promise<string> {
   }
 
   return `http://127.0.0.1:${address.port}/`;
+}
+
+async function getLiveEditPreviewUrl(): Promise<string> {
+  const baseUrl = process.env.VITE_DEV_SERVER_URL ?? await ensureRendererServerUrl();
+  return new URL("live-edit-preview.html", baseUrl).toString();
+}
+
+function handleLiveEditPreviewRuntimeEvent(event: RuntimeEvent): void {
+  if (!backend.getConfig().desktop.liveEditPreview) return;
+  if (!liveEditPreview.matchesActiveThread(event.threadId, event.notificationThreadId)) return;
+  const toolCallId = typeof event.payload.toolCallId === "string" ? event.payload.toolCallId : null;
+  if (!toolCallId) return;
+
+  if (event.type === "tool.started") {
+    const toolName = typeof event.payload.toolName === "string" ? event.payload.toolName : "";
+    const argumentsJson = typeof event.payload.argumentsJson === "string" ? event.payload.argumentsJson : null;
+    const paths = getLiveEditWriteTargets({ toolName, argumentsJson });
+    if (paths.length > 0 && event.threadId) {
+      liveEditPreview.start({ toolCallId, threadId: event.threadId, paths });
+    }
+    return;
+  }
+
+  if (event.type === "tool.completed") {
+    liveEditPreview.complete(toolCallId);
+  }
 }
 
 function normalizeRendererPath(pathname: string): string {

@@ -1,7 +1,7 @@
 import { surfaceThinkBlocksInStream } from "../index";
 import { defineCompat } from "./types";
 import type { ModelCompatContext } from "./types";
-import type { ProviderTurnDecision, ProviderTurnInput, RuntimeToolCall } from "@shared-types";
+import type { ModelProfile, ProviderTurnDecision, ProviderTurnInput, RuntimeToolCall } from "@shared-types";
 import { gptCompat } from "./gpt";
 import { preserveChineseOutputLanguage } from "./output-language";
 
@@ -364,6 +364,11 @@ function repairKimiMessages(messages: unknown[]): unknown[] {
   return coalesceKimiMessages(out);
 }
 
+function isKimiK3(model: Pick<ModelProfile, "id" | "displayName">): boolean {
+  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  return /(?:^|[\s_-])(?:kimi[\s_-]?)?k3(?:$|[\s_-])/.test(identity);
+}
+
 /**
  * Moonshot validates chat history more strictly than the OpenAI API and
  * rejects runs of same-role messages (the runtime can record several
@@ -428,6 +433,12 @@ function mergeKimiMessageContent(left: unknown, right: unknown): unknown {
 export const kimiCompat = defineCompat(gptCompat, {
   id: "kimi",
   keywords: ["kimi", "moonshot"],
+  shouldBypassStandardCompletionAudit(model): boolean {
+    // Kimi K3 can leave a no-tool, non-streaming audit call open after the
+    // visible final reply has already been generated. Deterministic runtime
+    // validation still verifies delivery and post-change evidence first.
+    return isKimiK3(model);
+  },
   normalizeRequestParams(
     ctx: ModelCompatContext,
     base: Record<string, unknown>

@@ -128,6 +128,16 @@ export function isChatBackgroundRotationActive(settings: ChatBackgroundSettings,
   return settings.enabled && settings.rotationEnabled && imageCount > 1;
 }
 
+export function getChatBackgroundActiveIndex(
+  settings: Pick<ChatBackgroundSettings, "fileName">,
+  images: ReadonlyArray<{ fileName: string }>
+): number {
+  const index = settings.fileName
+    ? images.findIndex((image) => image.fileName === settings.fileName)
+    : -1;
+  return index >= 0 ? index : 0;
+}
+
 export function getChatBackgroundSurfaceStyleVars(
   surfaces: ChatBackgroundSurfaces
 ): Record<string, string> {

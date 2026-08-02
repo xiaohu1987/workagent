@@ -1027,7 +1027,8 @@ export class DesktopBackend {
     content: string,
     attachments: MessageAttachment[] = [],
     displayContent?: string,
-    dispatch = true
+    dispatch = true,
+    mediaIntent?: "image" | "video" | null
   ): Promise<void> {
     // Queue first so cold-start maintenance (plugin discovery, skill indexing,
     // MCP refresh) never delays visible message submission.
@@ -1053,7 +1054,8 @@ export class DesktopBackend {
       threadId,
       content,
       displayContent: displayContent || content,
-      attachments
+      attachments,
+      mediaIntent: mediaIntent ?? null
     });
     // Emit synchronously before the first await inside emit, but do not make
     // queue dispatch wait for the event-log append that follows it.
@@ -1412,7 +1414,7 @@ export class DesktopBackend {
       payload: { queueItemId: queued.id, action: "queued" },
       createdAt: new Date().toISOString()
     }).catch(() => undefined);
-    this.#runtime.wakeQueuedMessages(threadId, { resumed: true });
+    this.#runtime.wakeQueuedMessages(threadId);
   }
 
   public async interruptThread(threadId: string): Promise<void> {
@@ -1769,6 +1771,19 @@ export class DesktopBackend {
     }
     await this.#logs.append("config.reasoning_effort_updated", { reasoningEffort });
     return reasoningEffort;
+  }
+
+  public async setLiveEditPreviewEnabled(enabled: boolean): Promise<boolean> {
+    const previous = this.#config.desktop.liveEditPreview;
+    this.#config.desktop.liveEditPreview = enabled;
+    try {
+      await saveConfig(this.#layout.configFile, this.#config);
+    } catch (error) {
+      this.#config.desktop.liveEditPreview = previous;
+      throw error;
+    }
+    await this.#logs.append("config.live_edit_preview_updated", { enabled });
+    return enabled;
   }
 
   public async getApplicationBackgrounds(): Promise<ApplicationBackgroundCollectionPayload | null> {
@@ -4434,6 +4449,11 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       image: normalizeMultimodalDefaults(config.multimodal?.image, nextModels, "image"),
       video: normalizeMultimodalDefaults(config.multimodal?.video, nextModels, "video"),
       input: normalizeMultimodalInputDefaults(config.multimodal?.input, nextModels)
+    },
+    desktop: {
+      ...fallback.desktop,
+      ...config.desktop,
+      liveEditPreview: config.desktop?.liveEditPreview !== false
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     timeouts: normalizeRuntimeTimeouts(config.timeouts),
