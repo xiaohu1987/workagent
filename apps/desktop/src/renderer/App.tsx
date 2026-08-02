@@ -1746,9 +1746,14 @@ export function App() {
           completed: false
         });
         const statusLabel = getAssistantDraftPhaseLabel(phase);
-        appendRuntimeStatus(threadId, statusLabel, typed.createdAt);
-        if (notificationThreadId) {
-          updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
+        // Retry events provide a concrete reason (such as a 429 backoff) just
+        // before their draft update. Do not overwrite that visible status with
+        // the generic draft-phase label.
+        if (phase !== "retrying") {
+          appendRuntimeStatus(threadId, statusLabel, typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
+          }
         }
         setRuntimeProgress({ threadId, phase: "generating", runtimeObserved: true });
         return;
@@ -2530,6 +2535,16 @@ export function App() {
       };
     });
   }, [activeSnapshotThreadId, conversationTurnSections, isTaskProcessing, latestConversationTurn?.id]);
+  useEffect(() => {
+    if (!activeSnapshotThreadId || !isTaskProcessing || !latestConversationTurn) return;
+    setCollapsedConversationTurns((current) => {
+      const currentIds = current[activeSnapshotThreadId];
+      if (!currentIds?.has(latestConversationTurn.id)) return current;
+      const nextIds = new Set(currentIds);
+      nextIds.delete(latestConversationTurn.id);
+      return { ...current, [activeSnapshotThreadId]: nextIds };
+    });
+  }, [activeSnapshotThreadId, isTaskProcessing, latestConversationTurn]);
   const latestRootRuntimeTool = useMemo(
     () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
       (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"

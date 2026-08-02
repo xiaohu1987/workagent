@@ -329,6 +329,90 @@ describe("OpenAiCompatibleProvider", () => {
     expect((request.tools as unknown[]).length).toBe(50);
   });
 
+  it("caps the tools array at 50 for DeepSeek-compatible gateways", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const manyTools = Array.from({ length: 65 }, (_, index) => ({
+      name: `fs.tool_${index}`,
+      description: "Read a file",
+      inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      riskLevel: "low" as const
+    }));
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: manyTools,
+      model: {
+        id: "deepseek-v4-flash-0731",
+        providerId: provider.id,
+        displayName: "DeepSeek V4 Flash",
+        contextWindow: 1_000_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(Array.isArray(request.tools)).toBe(true);
+    expect((request.tools as unknown[]).length).toBe(50);
+  });
+
+  it("compacts oversized DeepSeek relay requests without dropping recent tool context", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const manyTools = Array.from({ length: 50 }, (_, index) => ({
+      name: `fs.tool_${index}`,
+      description: "Read a file ".repeat(20),
+      inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      riskLevel: "low" as const
+    }));
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "System rule. ".repeat(5_000),
+      transcript: [
+        { role: "assistant", content: "Old skill output. ".repeat(3_000) },
+        { role: "assistant", content: "Old progress. ".repeat(3_000) },
+        { role: "user", content: "Continue the task." },
+        { role: "assistant", content: "Recent progress." },
+        { role: "tool", content: "Recent tool output", toolCallId: "call-1" }
+      ],
+      availableTools: manyTools,
+      model: {
+        id: "deepseek-v4-flash-0731",
+        providerId: provider.id,
+        displayName: "DeepSeek V4 Flash",
+        contextWindow: 1_000_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const messages = request.messages as Array<Record<string, unknown>>;
+    expect(Buffer.byteLength(JSON.stringify(request), "utf8")).toBeLessThanOrEqual(120 * 1024);
+    expect(messages.some((message) => message.content === "Recent tool output")).toBe(true);
+    expect(messages.some((message) => String(message.content).includes("Earlier assistant progress omitted"))).toBe(true);
+  });
+
   it("repairs interrupted tool-call pairing and null assistant content for Kimi", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
