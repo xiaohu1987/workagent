@@ -537,9 +537,14 @@ export const AssistantDraftMessage = memo(function AssistantDraftMessage({
   const scrollRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
   const elapsedMs = useElapsedClock(startedAt, !completed);
+  const diagnosticStatus = statusLabel && /重试|失败|错误|超时|受限|不兼容|回退/.test(statusLabel)
+    ? statusLabel
+    : null;
   const stateLabel = completed
     ? "正在发布回复"
-    : phase === "generating" && !content
+    : diagnosticStatus
+      ? diagnosticStatus
+      : phase === "generating" && !content
     ? `模型正在生成 · 已等待 ${formatElapsedClock(elapsedMs)}`
     : statusLabel ?? getAssistantDraftPhaseLabel(phase);
 
@@ -570,7 +575,9 @@ export const AssistantDraftMessage = memo(function AssistantDraftMessage({
               {phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
             </div>
           )
-          : <span className="assistant-draft-waiting" aria-hidden><i /><i /><i /></span>}
+          : diagnosticStatus
+            ? <span className="assistant-draft-waiting-label" role="status">{diagnosticStatus}</span>
+            : <span className="assistant-draft-waiting" aria-hidden><i /><i /><i /></span>}
       </div>
     </article>
   );

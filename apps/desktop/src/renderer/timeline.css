@@ -1200,6 +1200,14 @@
   min-height: 18px;
 }
 
+.assistant-draft-waiting-label {
+  display: block;
+  min-height: 18px;
+  color: #c4ccd6;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
 .assistant-draft-waiting i {
   width: 5px;
   height: 5px;
