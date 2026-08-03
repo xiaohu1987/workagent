@@ -506,7 +506,7 @@ describe("tool timeline grouping", () => {
         threadId: "thread-1",
         turnRunId: "turn-1",
         role: "assistant",
-        content: "[Executed tools: fs.read_directory, fs.read_file, fs.read_file]",
+        content: "密码已修复，现在重新运行启动脚本。 [Executed tools: shell.exec]",
         metadataJson: null,
         createdAt: "2026-07-15T00:00:01.000Z"
       },

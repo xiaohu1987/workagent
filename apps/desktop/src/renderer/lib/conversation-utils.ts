@@ -1432,7 +1432,7 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
       return false;
     }
 
-    if (message.role === "assistant" && /^\s*\[Executed tools:\s*[^\]\r\n]+\]\s*$/i.test(message.content)) {
+    if (message.role === "assistant" && /\[Executed tools:\s*[^\]\r\n]+\]/i.test(message.content)) {
       return false;
     }
 

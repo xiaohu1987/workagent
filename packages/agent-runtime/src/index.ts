@@ -379,7 +379,9 @@ export function buildFunctionCallCompatibilityTranscript(
 }
 
 export function isInternalToolCompatibilityMarker(content: string | undefined): boolean {
-  return Boolean(content && /^\s*\[Executed tools:\s*[^\]\r\n]+\]\s*$/i.test(content));
+  // Some providers append this compatibility artifact after otherwise normal
+  // prose. It is never user-facing content and must not be treated as a final reply.
+  return Boolean(content && /\[Executed tools:\s*[^\]\r\n]+\]/i.test(content));
 }
 
 type Submission =

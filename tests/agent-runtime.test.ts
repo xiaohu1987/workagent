@@ -966,6 +966,7 @@ describe("network error retries", () => {
 
   it("recognizes internal tool-compatibility markers so they cannot become assistant replies", () => {
     expect(isInternalToolCompatibilityMarker("[Executed tools: fs.read_directory, fs.read_file]")).toBe(true);
+    expect(isInternalToolCompatibilityMarker("密码已修复，现在重新运行启动脚本。 [Executed tools: shell.exec]")).toBe(true);
     expect(isInternalToolCompatibilityMarker("Finished reading the requested files.")).toBe(false);
   });
 });
