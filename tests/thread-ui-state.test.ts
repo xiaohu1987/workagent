@@ -499,6 +499,31 @@ describe("tool timeline grouping", () => {
     });
   });
 
+  it("hides legacy internal tool-compatibility markers from the transcript", () => {
+    const visible = filterTranscriptMessages([
+      {
+        id: "internal-tools",
+        threadId: "thread-1",
+        turnRunId: "turn-1",
+        role: "assistant",
+        content: "[Executed tools: fs.read_directory, fs.read_file, fs.read_file]",
+        metadataJson: null,
+        createdAt: "2026-07-15T00:00:01.000Z"
+      },
+      {
+        id: "result",
+        threadId: "thread-1",
+        turnRunId: "turn-1",
+        role: "assistant",
+        content: "已完成文件检查。",
+        metadataJson: null,
+        createdAt: "2026-07-15T00:00:02.000Z"
+      }
+    ]);
+
+    expect(visible.map((message) => message.id)).toEqual(["result"]);
+  });
+
   it("keeps a context compaction notice in chronological transcript order", () => {
     const message = (id: string, createdAt: string): MessageRecord => ({
       id,
