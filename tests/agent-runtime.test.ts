@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import type { ModelProfile, SkillMetadata } from "@shared-types";
-import { DEFAULT_RUNTIME_TIMEOUTS, normalizeRuntimeTimeouts } from "@shared-types";
 import {
   createToolCallFingerprint,
   createCommentaryMessageKey,
@@ -60,16 +59,22 @@ import {
   CONTEXT_COMPACTION_THRESHOLD,
   estimateRuntimeTokens,
   isUpstreamContextOverflowError,
+  isEmptyProviderBadRequestError,
+  isUpstreamServiceUnavailableError,
   isFunctionCallProtocolError,
   isModelRateLimitError,
   resolveModelRateLimitDelayMs,
   isNetworkError,
+  isProviderOutputLimitError,
   resolveNetworkErrorDelayMs,
+  resolveProviderOutputLimitRecoveryTokens,
   MAX_NETWORK_ERROR_RETRIES,
+  MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES,
   NETWORK_ERROR_BASE_DELAY_MS,
   NETWORK_ERROR_MAX_DELAY_MS,
   isToolArgsTruncated,
   buildFunctionCallCompatibilityTranscript,
+  isInternalToolCompatibilityMarker,
   buildActiveTurnGuidanceInstruction,
   buildBlockedToolCallTranscriptResult,
   clearReusableObservationFingerprints,
@@ -929,8 +934,8 @@ describe("model decision timeout retries", () => {
 });
 
 describe("network error retries", () => {
-  it("uses three attempts as the default network recovery window", () => {
-    expect(MAX_NETWORK_ERROR_RETRIES).toBe(3);
+  it("keeps automatic network recovery unbounded", () => {
+    expect(MAX_NETWORK_ERROR_RETRIES).toBe(0);
   });
 
   it("recognizes common network / stream faults", () => {
@@ -948,6 +953,8 @@ describe("network error retries", () => {
     expect(isNetworkError(new Error("The model decision timed out after 90000ms."))).toBe(false);
     expect(isNetworkError(new Error("HTTP 429 Too Many Requests"))).toBe(false);
     expect(isNetworkError(new Error("HTTP 400 invalid API key"))).toBe(false);
+    expect(isNetworkError(new Error("Provider stream terminated because the response reached its output limit."))).toBe(false);
+    expect(isNetworkError(new Error("Provider stream terminated because its response was filtered."))).toBe(false);
   });
 
   it("uses exponential back-off capped at the max delay", () => {
@@ -955,6 +962,29 @@ describe("network error retries", () => {
     expect(resolveNetworkErrorDelayMs(2)).toBe(NETWORK_ERROR_BASE_DELAY_MS * 2);
     expect(resolveNetworkErrorDelayMs(3)).toBe(NETWORK_ERROR_BASE_DELAY_MS * 4);
     expect(resolveNetworkErrorDelayMs(10)).toBe(NETWORK_ERROR_MAX_DELAY_MS);
+  });
+
+  it("recognizes internal tool-compatibility markers so they cannot become assistant replies", () => {
+    expect(isInternalToolCompatibilityMarker("[Executed tools: fs.read_directory, fs.read_file]")).toBe(true);
+    expect(isInternalToolCompatibilityMarker("Finished reading the requested files.")).toBe(false);
+  });
+});
+
+describe("provider output-limit recovery", () => {
+  it("recognizes output truncation separately from network failures", () => {
+    expect(isProviderOutputLimitError(
+      new Error("Provider stream terminated because the response reached its output limit.")
+    )).toBe(true);
+    expect(isProviderOutputLimitError(new Error("finish_reason: length"))).toBe(true);
+    expect(isProviderOutputLimitError(new Error("Connection error: stream terminated"))).toBe(false);
+  });
+
+  it("keeps output-limit recovery unbounded while increasing output budgets", () => {
+    expect(MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES).toBe(0);
+    expect(resolveProviderOutputLimitRecoveryTokens(4_096, 1)).toBe(16_384);
+    expect(resolveProviderOutputLimitRecoveryTokens(4_096, 2)).toBe(32_768);
+    expect(resolveProviderOutputLimitRecoveryTokens(16_384, 1)).toBe(32_768);
+    expect(resolveProviderOutputLimitRecoveryTokens(64_000, 1)).toBe(64_000);
   });
 });
 
@@ -973,14 +1003,6 @@ describe("tool argument truncation detection", () => {
 });
 
 describe("tool execution timeout", () => {
-  it("exposes a configurable tool execution timeout in RuntimeTimeoutSettings", () => {
-    expect(DEFAULT_RUNTIME_TIMEOUTS.toolExecutionMs).toBeGreaterThan(0);
-    const normalized = normalizeRuntimeTimeouts({ toolExecutionMs: 0 });
-    expect(normalized.toolExecutionMs).toBe(0);
-    const fallback = normalizeRuntimeTimeouts(null);
-    expect(fallback.toolExecutionMs).toBe(DEFAULT_RUNTIME_TIMEOUTS.toolExecutionMs);
-  });
-
   it("lets terminal commands use output-based stall detection", () => {
     expect(shouldApplyToolExecutionTimeout("shell.exec")).toBe(false);
     expect(shouldApplyToolExecutionTimeout("fs.read_file")).toBe(true);
@@ -1818,14 +1840,26 @@ describe("browser test choice", () => {
 });
 
 describe("context overflow recovery", () => {
-  it("recognizes the upstream 400 returned for an oversized request", () => {
-    expect(isUpstreamContextOverflowError(new Error("400 Upstream error: 400"))).toBe(true);
+  it("only recognizes a 400 when its message explicitly describes an oversized request", () => {
     expect(isUpstreamContextOverflowError(new Error("HTTP 400 request body too large"))).toBe(true);
+    expect(isUpstreamContextOverflowError(new Error("HTTP 400 maximum context window exceeded"))).toBe(true);
   });
 
   it("does not retry unrelated provider errors", () => {
+    expect(isUpstreamContextOverflowError(new Error("400 Upstream error: 400"))).toBe(false);
+    expect(isUpstreamContextOverflowError(new Error("400 status code (no body)"))).toBe(false);
     expect(isUpstreamContextOverflowError(new Error("HTTP 400 invalid API key"))).toBe(false);
     expect(isUpstreamContextOverflowError(new Error("HTTP 500 upstream unavailable"))).toBe(false);
+  });
+
+  it("distinguishes empty bad requests from transient service failures", () => {
+    expect(isEmptyProviderBadRequestError(new Error("400 status code (no body)"))).toBe(true);
+    expect(isEmptyProviderBadRequestError(new Error("HTTP 400 invalid API key"))).toBe(false);
+    expect(isUpstreamServiceUnavailableError(new Error("503 status code (no body)"))).toBe(true);
+    expect(isUpstreamServiceUnavailableError(Object.assign(new Error("upstream unavailable"), { status: 502 }))).toBe(true);
+    expect(isUpstreamServiceUnavailableError(new Error("HTTP 504 Gateway Timeout"))).toBe(true);
+    expect(isUpstreamServiceUnavailableError(new Error("HTTP 400 invalid API key"))).toBe(false);
+    expect(isUpstreamServiceUnavailableError(new Error("HTTP 429 rate limit"))).toBe(false);
   });
 
   it("caps generic tool results before adding them to model context", () => {

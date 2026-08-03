@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { isConfigurableGptReasoningModel, normalizeResponseTone, resolveModelReasoningEffort, withGptReasoningCapabilities } from "@shared-types";
 import type { ModelProfile } from "@shared-types";
 import { defaultConfig, loadConfig, saveConfig } from "../apps/desktop/src/main/storage";
+import { normalizeDraftConfig } from "../apps/desktop/src/renderer/lib/config-utils";
 
 const temporaryDirectories: string[] = [];
 
@@ -13,11 +14,25 @@ afterEach(async () => {
 });
 
 describe("model configuration storage", () => {
+  it("preserves a deliberately cleared default multimodal input model", () => {
+    const config = defaultConfig();
+    const recognizableModel = config.models.find((model) => model.supportsMultimodalInput);
+    expect(recognizableModel).toBeDefined();
+
+    delete config.multimodal.input.defaultProviderId;
+    delete config.multimodal.input.defaultModelId;
+
+    const normalized = normalizeDraftConfig(config);
+
+    expect(normalized.multimodal.input).toEqual({ enabled: true });
+  });
+
   it("ships selectable Claude and Grok defaults without replacing the current default", () => {
     const config = defaultConfig();
 
     expect(config.defaultModel).toBe("mock-codexh");
     expect(config.responseTone).toBe("concise");
+    expect(config.desktop.liveEditPreview).toBe(false);
     expect(config.providers).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "anthropic", baseUrl: "https://api.anthropic.com/v1" }),
       expect.objectContaining({ id: "xai", transport: "responses", baseUrl: "https://api.x.ai/v1" })
@@ -39,6 +54,25 @@ describe("model configuration storage", () => {
     const loaded = await loadConfig(configFile);
 
     expect(loaded.responseTone).toBe("friendly");
+  });
+
+  it("removes legacy timeout settings while loading the configuration", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-autonomous-runtime-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    await fs.writeFile(configFile, [
+      'defaultModel = "mock-codexh"',
+      'defaultProvider = "mock"',
+      'responseTone = "concise"',
+      'reasoningEffort = "medium"',
+      '[timeouts]',
+      'modelDecisionMs = 1000',
+      'toolExecutionMs = 1000'
+    ].join("\n"), "utf8");
+
+    await loadConfig(configFile);
+
+    expect(await fs.readFile(configFile, "utf8")).not.toContain("[timeouts]");
   });
 
   it("defaults legacy configs to medium GPT reasoning effort and persists later selections", async () => {

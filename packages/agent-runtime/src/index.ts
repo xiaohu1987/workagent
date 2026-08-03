@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_PROJECT_EXECUTION_POLICY, DEFAULT_RUNTIME_TIMEOUTS, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, resolveModelReasoningEffort } from "@shared-types";
+import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, resolveModelReasoningEffort } from "@shared-types";
 import type {
   AppConfig,
   AssistantDraftPhase,
@@ -138,15 +138,16 @@ export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
 // resend the same rejected invocation indefinitely. End the turn after a
 // small number of blocked repeats so that a busy task cannot spin forever.
 export const MAX_BLOCKED_IDENTICAL_TOOL_RETRIES = 3;
-export const MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs;
-export const MAX_MODEL_TIMEOUT_RETRIES = DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries;
+/** Zero disables wall-clock aborts. The user can stop an active task explicitly. */
+export const MODEL_DECISION_TIMEOUT_MS = 0;
+export const MAX_MODEL_TIMEOUT_RETRIES = 5;
 export const MAX_AGENT_PROTOCOL_FAILURES = 2;
 export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 6;
 // Explicit audit rejections may revise a base-valid candidate, but the audit
 // itself must never create an unbounded completion loop.
 export const MAX_STANDARD_COMPLETION_RECOVERIES = 6;
 export const STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS = 2;
-export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs;
+export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 0;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
 export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 32_000;
@@ -167,24 +168,43 @@ export const MODEL_RATE_LIMIT_RECOVERY_TIMEOUT_MS = 30_000;
 export const MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID = "model_rate_limit_recovery";
 export const MODEL_RATE_LIMIT_BASE_DELAY_MS = 1_000;
 export const MODEL_RATE_LIMIT_MAX_DELAY_MS = 30_000;
-export const MAX_NETWORK_ERROR_RETRIES = 3;
+/** Zero denotes unbounded automatic recovery. */
+export const MAX_NETWORK_ERROR_RETRIES = 0;
 export const NETWORK_ERROR_BASE_DELAY_MS = 1_000;
 export const NETWORK_ERROR_MAX_DELAY_MS = 10_000;
+export const MAX_UPSTREAM_SERVICE_RETRIES = 0;
+export const MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES = 0;
+export const PROVIDER_OUTPUT_LIMIT_RECOVERY_BASE_TOKENS = 8_192;
+export const PROVIDER_OUTPUT_LIMIT_RECOVERY_MAX_TOKENS = 32_768;
 
 export function isUpstreamContextOverflowError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  if (/\b400\s+Upstream error:\s*400\b/i.test(message)) {
-    return true;
-  }
   if (!/\b(?:HTTP\s*)?400\b/i.test(message)) {
     return false;
   }
   return /(context(?:\s+window)?|token|request|payload|body).*(?:too\s+(?:large|long|many)|exceed|limit|maximum)|(?:too\s+(?:large|long|many)|exceed|limit|maximum).*(context|token|request|payload|body)/i.test(message);
 }
 
+/** Availability failures are retried unchanged; they are not evidence of oversized context. */
+export function isUpstreamServiceUnavailableError(error: unknown): boolean {
+  if (error && typeof error === "object" && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    if (status === 502 || status === 503 || status === 504) {
+      return true;
+    }
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b(?:HTTP\s*)?(?:502|503|504)\b/i.test(message);
+}
+
 export function isFunctionCallProtocolError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /\b400\b.*\bno tool (?:call|output) found for function call\b/i.test(message);
+}
+
+export function isEmptyProviderBadRequestError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b400\s+status code\s*\(no body\)/i.test(message);
 }
 
 export function isModelRateLimitError(error: unknown): boolean {
@@ -218,6 +238,9 @@ export function isNetworkError(error: unknown): boolean {
   }
   const message = error instanceof Error ? error.message : String(error);
   if (!message) return false;
+  if (isProviderOutputLimitError(error) || /response was filtered/i.test(message)) {
+    return false;
+  }
   if (/\babort(?:ed)?\b/i.test(message)) {
     return false;
   }
@@ -229,6 +252,26 @@ export function isNetworkError(error: unknown): boolean {
     }
   }
   return /\b(?:socket\s+hang\s+up|fetch\s+failed|connection\s+(?:error|refused|reset|timed?\s*out)|network\s+error|stream\s+(?:disconnected?|terminated)|APIConnectionError|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|terminated)\b/i.test(message);
+}
+
+export function isProviderOutputLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /response reached its output limit|finish_reason\s*[:=]?\s*["']?length|stop_reason\s*[:=]?\s*["']?max_tokens|maximum output tokens|max_tokens.*(?:reached|exceeded)/i.test(message);
+}
+
+export function resolveProviderOutputLimitRecoveryTokens(configuredTokens: number | undefined, attempt: number): number {
+  const configured = typeof configuredTokens === "number" && Number.isFinite(configuredTokens)
+    ? Math.max(1, Math.floor(configuredTokens))
+    : 0;
+  const recoveryBase = Math.max(
+    PROVIDER_OUTPUT_LIMIT_RECOVERY_BASE_TOKENS,
+    Math.min(configured, PROVIDER_OUTPUT_LIMIT_RECOVERY_MAX_TOKENS)
+  );
+  const recovery = Math.min(
+    PROVIDER_OUTPUT_LIMIT_RECOVERY_MAX_TOKENS,
+    recoveryBase * (2 ** Math.max(1, attempt))
+  );
+  return Math.max(configured, recovery);
 }
 
 export function resolveNetworkErrorDelayMs(attempt: number): number {
@@ -333,6 +376,10 @@ export function buildFunctionCallCompatibilityTranscript(
     }
     return message;
   });
+}
+
+export function isInternalToolCompatibilityMarker(content: string | undefined): boolean {
+  return Boolean(content && /^\s*\[Executed tools:\s*[^\]\r\n]+\]\s*$/i.test(content));
 }
 
 type Submission =
@@ -1590,7 +1637,9 @@ class ThreadSessionRuntime {
       let modelTimeoutAttempts = 0;
       let modelRateLimitAttempts = 0;
       let networkErrorAttempts = 0;
+      let providerOutputLimitAttempts = 0;
       let upstreamContextRecoveryAttempts = 0;
+      let upstreamServiceErrorAttempts = 0;
       let functionCallProtocolRecoveryAttempts = 0;
       let agentProtocolFailureAttempts = 0;
       let agentProtocolAutoRecoveryBatches = 0;
@@ -2105,9 +2154,13 @@ class ThreadSessionRuntime {
           useTextToolProtocol
             ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
             : ""
+        }${
+          providerOutputLimitAttempts > 0
+            ? "\n\n[Output-limit recovery] The previous response was truncated. Do not repeat analysis, logs, source text, or completed work. Return only one compact next tool call, or a concise final answer under 500 words using the verified results already present."
+            : ""
         }`;
         const compactContext = async (
-          trigger: "pre_model_request" | "post_tool_batch" | "upstream_400_recovery" | "model_timeout_recovery" | "task_completed",
+          trigger: "pre_model_request" | "post_tool_batch" | "upstream_context_overflow" | "model_timeout_recovery" | "task_completed",
           force = false
         ): Promise<boolean> => {
           const compaction = compactTranscriptForContext(
@@ -2142,11 +2195,9 @@ class ThreadSessionRuntime {
           return true;
         };
         await compactContext("pre_model_request");
-        const timeoutRecoveryWindow = Math.max(1, this.services.config.timeouts.modelTimeoutRetries);
+        const timeoutRecoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
         const timeoutRecoveryMultiplier = Math.min(3, 1 + Math.floor(modelTimeoutAttempts / timeoutRecoveryWindow));
-        const decisionTimeoutMs = requiresAgentDecisionProtocol() && agentProtocolFailureAttempts > 0
-          ? this.services.config.timeouts.recoveryModelDecisionMs
-          : this.services.config.timeouts.modelDecisionMs * timeoutRecoveryMultiplier;
+        const decisionTimeoutMs = MODEL_DECISION_TIMEOUT_MS * timeoutRecoveryMultiplier;
         const awaitingModelPayload = {
           turnRunId: turn.id,
           reason: modelAwaitReason
@@ -2162,6 +2213,15 @@ class ThreadSessionRuntime {
         modelAwaitReason = "recovery";
         let decision: ProviderTurnDecision;
         try {
+          const requestModel = providerOutputLimitAttempts > 0
+            ? {
+                ...model,
+                defaultMaxOutputTokens: resolveProviderOutputLimitRecoveryTokens(
+                  model.defaultMaxOutputTokens,
+                  providerOutputLimitAttempts
+                )
+              }
+            : model;
           decision = await waitForAbortOrTimeout(
             adapter.runTurn({
               systemPrompt,
@@ -2169,7 +2229,7 @@ class ThreadSessionRuntime {
                 ? buildFunctionCallCompatibilityTranscript(transcript)
                 : transcript,
               availableTools: selectedMcpToolsOnly,
-              model,
+              model: requestModel,
               provider,
               reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
               forceTextToolProtocol: useTextToolProtocol,
@@ -2188,10 +2248,51 @@ class ThreadSessionRuntime {
           );
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
+          if (!abortController.signal.aborted && isProviderOutputLimitError(error)) {
+            providerOutputLimitAttempts += 1;
+            const retrying = true;
+            const nextMaxOutputTokens = resolveProviderOutputLimitRecoveryTokens(
+              model.defaultMaxOutputTokens,
+              providerOutputLimitAttempts
+            );
+            await this.services.log("provider.output_limit", this.threadId, {
+              turnRunId: turn.id,
+              attempt: providerOutputLimitAttempts,
+              retryWindow: null,
+              nextMaxOutputTokens,
+              retrying,
+              error: errorMessage
+            });
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: providerOutputLimitAttempts,
+                maxAttempts: 0,
+                reason: "provider_output_limit",
+                nextMaxOutputTokens
+              },
+              createdAt: new Date().toISOString()
+            });
+            transcript.push({
+              role: "user",
+              content:
+                "The previous response reached the provider output limit. Do not repeat analysis, logs, source text, or completed work. " +
+                "Use the verified tool results already in the transcript. Return only one compact next tool call, or a concise final answer under 500 words."
+            });
+            await retryDraft();
+            continue;
+          }
           if (
             !abortController.signal.aborted &&
             functionCallProtocolRecoveryAttempts === 0 &&
-            isFunctionCallProtocolError(error)
+            (
+              isFunctionCallProtocolError(error) ||
+              (
+                isEmptyProviderBadRequestError(error) &&
+                transcript.some((message) => Boolean(message.toolCalls?.length || message.toolCallId))
+              )
+            )
           ) {
             functionCallProtocolRecoveryAttempts += 1;
             this.#useFunctionCallCompatibilityTranscript = true;
@@ -2221,7 +2322,7 @@ class ThreadSessionRuntime {
             isUpstreamContextOverflowError(error)
           ) {
             upstreamContextRecoveryAttempts += 1;
-            await compactContext("upstream_400_recovery", true);
+            await compactContext("upstream_context_overflow", true);
             const errorMessage = error instanceof Error ? error.message : String(error);
             await this.services.log("provider.context_overflow_recovery", this.threadId, {
               turnRunId: turn.id,
@@ -2239,6 +2340,34 @@ class ThreadSessionRuntime {
               createdAt: new Date().toISOString()
             });
             await retryDraft();
+            continue;
+          }
+          if (
+            !abortController.signal.aborted &&
+            isUpstreamServiceUnavailableError(error)
+          ) {
+            upstreamServiceErrorAttempts += 1;
+            const delayMs = resolveNetworkErrorDelayMs(upstreamServiceErrorAttempts);
+            await this.services.log("provider.service_unavailable", this.threadId, {
+              turnRunId: turn.id,
+              attempt: upstreamServiceErrorAttempts,
+              retryWindow: null,
+              delayMs,
+              error: errorMessage
+            });
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: upstreamServiceErrorAttempts,
+                maxAttempts: 0,
+                reason: "upstream_service_unavailable",
+                delayMs
+              },
+              createdAt: new Date().toISOString()
+            });
+            await retryDraft();
+            await sleepWithAbort(delayMs, abortController.signal);
             continue;
           }
           if (!abortController.signal.aborted && isModelRateLimitError(error)) {
@@ -2277,12 +2406,13 @@ class ThreadSessionRuntime {
             await retryDraft();
             networkErrorAttempts += 1;
             const delayMs = resolveNetworkErrorDelayMs(networkErrorAttempts);
+            const retrying = true;
             await this.services.log("provider.network_error", this.threadId, {
               turnRunId: turn.id,
               attempt: networkErrorAttempts,
-              retryWindow: MAX_NETWORK_ERROR_RETRIES,
+              retryWindow: null,
               delayMs,
-              retrying: true,
+              retrying,
               error: errorMessage
             });
             await this.services.emit({
@@ -2307,7 +2437,7 @@ class ThreadSessionRuntime {
           // until the user explicitly stops it; each configured retry window
           // compacts the transcript and increases the next decision timeout.
           modelTimeoutAttempts += 1;
-          const timeoutRecoveryWindow = Math.max(1, this.services.config.timeouts.modelTimeoutRetries);
+          const timeoutRecoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
           const recoveryCycle = Math.ceil(modelTimeoutAttempts / timeoutRecoveryWindow);
           const escalated = modelTimeoutAttempts % timeoutRecoveryWindow === 0;
           await this.services.log("provider.turn_timeout", this.threadId, {
@@ -2841,6 +2971,21 @@ class ThreadSessionRuntime {
           }
         }
 
+        const assistantMessage = decision.assistantMessage?.trim();
+        if (isInternalToolCompatibilityMarker(assistantMessage)) {
+          await this.services.log("provider.internal_tool_marker_suppressed", this.threadId, {
+            turnRunId: turn.id,
+            content: assistantMessage
+          });
+          transcript.push({
+            role: "user",
+            content:
+              "The previous response echoed an internal tool-compatibility marker. " +
+              "Do not expose internal tool markers. Continue the task with the verified tool results, a new tool call, or a user-facing answer."
+          });
+          await retryDraft();
+          continue;
+        }
         if (decision.toolCalls.length > 0) {
           prematureCompletionAttempts = 0;
           if (decision.toolCalls[0]?.name !== "fs.read_directory" || executionRecoveryAttempts < 2) {
@@ -2849,10 +2994,13 @@ class ThreadSessionRuntime {
           }
           // Native provider APIs require the original call envelope before its result.
           // This remains transient and is not added to the visible chat history.
-          transcript.push({ role: "assistant", content: "", toolCalls: decision.toolCalls });
+          transcript.push({
+            role: "assistant",
+            content: assistantMessage && isSafeCommentaryMessage(assistantMessage) ? assistantMessage : "",
+            toolCalls: decision.toolCalls
+          });
         }
 
-        const assistantMessage = decision.assistantMessage?.trim();
         if (
           decision.toolCalls.length === 0 &&
           decision.endTurn &&
@@ -3062,7 +3210,7 @@ class ThreadSessionRuntime {
                 abortSignal: auditAbortController.signal
               }),
               abortController.signal,
-              this.services.config.timeouts.recoveryModelDecisionMs,
+              RECOVERY_MODEL_DECISION_TIMEOUT_MS,
               () => auditAbortController.abort()
             );
           } catch (error) {
@@ -3490,7 +3638,6 @@ class ThreadSessionRuntime {
                 buildCommentaryMessageMetadata(persistedToolCalls)
               );
               recordedToolBatchAnchor = true;
-              transcript.push({ role: "assistant", content: commentaryMessage.content });
               await settleDraft({ messageId: commentaryMessage.id });
             } else {
               await retryDraft();
@@ -3607,6 +3754,7 @@ class ThreadSessionRuntime {
         // batch as the first local read must wait for the next decision so the
         // model has actually seen and reasoned about the local evidence.
         const localWorkspaceInspectedBeforeDecision = hasInspectedLocalWorkspace;
+        const deferredFileReadRecoveryTargets = new Set<string>();
         for (const rawToolCall of decision.toolCalls) {
           if (abortController.signal.aborted) {
             throw new Error("Turn interrupted.");
@@ -3615,6 +3763,33 @@ class ThreadSessionRuntime {
             ...rawToolCall,
             name: canonicalizeToolName(rawToolCall.name)
           };
+          const deferredRecoveryTargetKey = getToolCallRecoveryTargetKey(
+            toolCall.name,
+            toolCall.arguments,
+            workspaceCwd
+          );
+          if (
+            toolCall.name === "fs.read_file" &&
+            deferredFileReadRecoveryTargets.has(deferredRecoveryTargetKey)
+          ) {
+            const reason =
+              "This file read already failed earlier in the current batch. " +
+              "The runtime will inspect its parent directory before considering another read of the same path.";
+            appendBlockedToolCallResult(toolCall, reason);
+            await persistBlockedToolCall(toolCall, reason, "recovery_prerequisite");
+            transcript.push({
+              role: "user",
+              content:
+                "Use the pending parent-directory inspection to correct the path or choose another approach. " +
+                "Do not issue another fs.read_file call for this unchanged path in the current batch."
+            });
+            await this.services.log("agent.file_read_recovery_duplicate_deferred", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              targetKey: deferredRecoveryTargetKey
+            });
+            continue;
+          }
           const projectMcpPriority = validateProjectMcpPriority({
             toolName: toolCall.name,
             projectMode: thread.mode === "project",
@@ -3945,7 +4120,7 @@ class ThreadSessionRuntime {
           let toolTimedOut = false;
           let toolArgsTruncated = false;
           let toolContext: Parameters<ToolRuntime["execute"]>[1] | null = null;
-          const toolTimeoutMs = this.services.config.timeouts.toolExecutionMs;
+          const toolTimeoutMs = 0;
           try {
             // Projectless chats must never inherit the desktop application's launch folder.
             toolContext = {
@@ -4692,6 +4867,7 @@ class ThreadSessionRuntime {
               );
               if (forcedRecoveryCall) {
                 pendingFileReadRecovery = forcedRecoveryCall;
+                deferredFileReadRecoveryTargets.add(recoveryTargetKey);
               }
               await this.services.log("agent.strategy_switch_requested", this.threadId, {
                 turnRunId: turn.id,
@@ -5094,7 +5270,7 @@ class ThreadSessionRuntime {
           abortSignal: recognizeAbort.signal
         }),
         input.abortController.signal,
-        this.services.config.timeouts.modelDecisionMs,
+        MODEL_DECISION_TIMEOUT_MS,
         () => recognizeAbort.abort()
       );
 
@@ -5317,8 +5493,8 @@ class ThreadSessionRuntime {
       model: target.model,
       prompt: input.prompt,
       abortSignal: input.abortSignal,
-      timeoutMs: this.services.config.timeouts.videoGenerationMs,
-      pollIntervalMs: this.services.config.timeouts.videoPollIntervalMs
+      timeoutMs: 0,
+      pollIntervalMs: 5_000
     }), input.abortSignal ?? new AbortController().signal);
 
     const outputDir = await this.services.getThreadOutputDir(this.threadId);

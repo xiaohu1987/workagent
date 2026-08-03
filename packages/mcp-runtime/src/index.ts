@@ -161,6 +161,7 @@ export class McpManager {
   readonly #clients = new Map<string, ManagedClient>();
   readonly #statuses = new Map<string, McpConnectionStatus>();
   readonly #toolCache = new Map<string, CachedTools>();
+  readonly #sessionReconnects = new Map<string, Promise<ManagedClient>>();
   readonly #createClient: (config: McpServerConfig) => Promise<McpClient>;
   readonly #toolCacheTtlMs: number;
 
@@ -247,7 +248,7 @@ export class McpManager {
   public async listTools(serverIds?: string[]): Promise<McpToolDescriptor[]> {
     const requested = serverIds ? new Set(serverIds) : null;
     const tools: McpToolDescriptor[] = [];
-    for (const [serverId, managed] of this.#clients) {
+    for (const [serverId, managed] of [...this.#clients]) {
       if (requested && !requested.has(serverId)) {
         continue;
       }
@@ -309,17 +310,28 @@ export class McpManager {
   }
 
   public async callTool(serverId: string, toolName: string, argumentsJson: Record<string, unknown>): Promise<any> {
-    const client = this.#clients.get(serverId)?.client;
-    if (!client?.callTool) {
-      throw new Error(`MCP server ${serverId} is not connected.`);
-    }
     const tools = await this.listTools([serverId]);
     if (!tools.some((tool) => tool.name === toolName)) {
       throw new Error(`MCP tool ${serverId}:${toolName} is not available.`);
     }
+    const managed = this.#clients.get(serverId);
+    if (!managed?.client.callTool) {
+      throw new Error(`MCP server ${serverId} is not connected.`);
+    }
     try {
-      return await client.callTool({ name: toolName, arguments: argumentsJson });
+      return await managed.client.callTool({ name: toolName, arguments: argumentsJson });
     } catch (error) {
+      if (isMcpSessionInvalidError(error)) {
+        const recovered = await this.reconnectInvalidSession(serverId, managed);
+        if (!recovered.client.callTool) {
+          throw new Error(`MCP server ${serverId} is not connected.`);
+        }
+        const refreshedTools = await this.getServerTools(serverId, recovered);
+        if (!refreshedTools.some((tool) => tool.name === toolName)) {
+          throw new Error(`MCP tool ${serverId}:${toolName} is not available after reconnecting.`);
+        }
+        return recovered.client.callTool({ name: toolName, arguments: argumentsJson });
+      }
       if (!isMissingToolError(error)) throw error;
       await this.refreshToolDirectory([serverId]);
       if (!(await this.listTools([serverId])).some((tool) => tool.name === toolName)) {
@@ -428,7 +440,15 @@ export class McpManager {
       return cached.tools;
     }
     const config = this.#configs.find((entry) => entry.id === serverId);
-    const response = (await managed.client.listTools?.()) ?? {};
+    let active = managed;
+    let response: Awaited<ReturnType<NonNullable<McpClient["listTools"]>>>;
+    try {
+      response = (await active.client.listTools?.()) ?? {};
+    } catch (error) {
+      if (!isMcpSessionInvalidError(error)) throw error;
+      active = await this.reconnectInvalidSession(serverId, active);
+      response = (await active.client.listTools?.()) ?? {};
+    }
     const tools = (response.tools ?? [])
       .filter((tool) => config?.tools?.[tool.name]?.enabled !== false)
       .map((tool) => ({
@@ -439,8 +459,43 @@ export class McpManager {
         approvalMode: config?.tools?.[tool.name]?.approvalMode ?? config?.defaultToolsApprovalMode ?? "prompt",
         annotations: tool.annotations
       }));
-    this.#toolCache.set(serverId, { fingerprint: managed.fingerprint, fetchedAt: Date.now(), tools });
+    this.#toolCache.set(serverId, { fingerprint: active.fingerprint, fetchedAt: Date.now(), tools });
     return tools;
+  }
+
+  private async reconnectInvalidSession(serverId: string, failed: ManagedClient): Promise<ManagedClient> {
+    const current = this.#clients.get(serverId);
+    if (current && current !== failed) return current;
+
+    const existingReconnect = this.#sessionReconnects.get(serverId);
+    if (existingReconnect) return existingReconnect;
+
+    const reconnect = (async () => {
+      const latest = this.#clients.get(serverId);
+      if (latest && latest !== failed) return latest;
+      const config = this.#configs.find((entry) => entry.id === serverId && entry.enabled);
+      if (!config) throw new Error(`MCP server ${serverId} is not configured or enabled.`);
+
+      try {
+        await latest?.client.close?.();
+      } catch {
+        // The remote session is already gone, so closing the stale client can fail too.
+      }
+      this.#clients.delete(serverId);
+      this.#toolCache.delete(serverId);
+      await this.connect(config);
+      const recovered = this.#clients.get(serverId);
+      if (!recovered) throw new Error(`MCP server ${serverId} failed to reconnect.`);
+      return recovered;
+    })();
+    this.#sessionReconnects.set(serverId, reconnect);
+    try {
+      return await reconnect;
+    } finally {
+      if (this.#sessionReconnects.get(serverId) === reconnect) {
+        this.#sessionReconnects.delete(serverId);
+      }
+    }
   }
 }
 
@@ -508,6 +563,11 @@ function connectionFingerprint(config: McpServerConfig): string {
 
 function isMissingToolError(error: unknown): boolean {
   return /tool.*(?:not found|unknown|unavailable)|(?:not found|unknown).*tool/i.test(error instanceof Error ? error.message : String(error));
+}
+
+function isMcpSessionInvalidError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:session\s*id|mcp-session-id).*(?:not\s+found|unknown|invalid|expired)|(?:not\s+found|unknown|invalid|expired).*(?:session\s*id|mcp-session-id)/i.test(message);
 }
 
 function isMethodUnavailableError(error: unknown): boolean {

@@ -50,7 +50,7 @@ import type {
   UserInputPrompt
 } from "@shared-types";
 import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy } from "./subagent-assignment";
-import { isGptReasoningEffort, normalizeResponseTone, normalizeRuntimeTimeouts, withGptReasoningCapabilities } from "@shared-types";
+import { isGptReasoningEffort, normalizeResponseTone, withGptReasoningCapabilities } from "@shared-types";
 import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@agent-runtime";
 import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
@@ -72,6 +72,7 @@ import { TerminalRuntime } from "./terminal-runtime";
 import { GitService } from "./git-service";
 import { SkillLabService } from "./skill-lab";
 import { parseEditableMessageMetadata } from "./message-metadata";
+import { isProjectAttachmentPath } from "./attachment-path";
 import {
   DatabaseService,
   defaultConfig,
@@ -1141,35 +1142,47 @@ export class DesktopBackend {
 
   public async importAttachments(threadId: string, inputs: AttachmentImportInput[]): Promise<MessageAttachment[]> {
     const targetDir = path.join(this.#layout.attachmentsDir, threadId);
-    await fs.mkdir(targetDir, { recursive: true });
     if (inputs.length > 16) throw new Error("一次最多添加 16 个附件。");
+    const projectRoot = this.#db.getThread(threadId).cwd;
     const attachments: MessageAttachment[] = [];
     for (const input of inputs) {
       const name = path.basename(input.name || input.path || "attachment");
-      const inputData = input.data ? Buffer.from(input.data) : input.path ? await fs.readFile(input.path) : null;
-      if (!inputData) throw new Error(`附件 ${name} 没有可读取内容。`);
+      const linkedProjectPath = isProjectAttachmentPath(projectRoot, input.path)
+        ? path.resolve(input.path)
+        : null;
+      const inputData = input.data ? Buffer.from(input.data) : linkedProjectPath ? null : input.path ? await fs.readFile(input.path) : null;
+      if (!inputData && !linkedProjectPath) throw new Error(`附件 ${name} 没有可读取内容。`);
       const mimeType = normalizeAttachmentMimeType(input.mimeType, name);
       const isImage = mimeType.startsWith("image/");
       const isVideo = mimeType.startsWith("video/");
       const maxBytes = isVideo ? 100 * 1024 * 1024 : isImage ? 10 * 1024 * 1024 : 20 * 1024 * 1024;
-      if (inputData.byteLength > maxBytes) {
+      const sizeBytes = linkedProjectPath
+        ? (await fs.stat(linkedProjectPath)).size
+        : inputData!.byteLength;
+      if (sizeBytes > maxBytes) {
         throw new Error(`${isVideo ? "视频" : isImage ? "图片" : "附件"} ${name} 超过 ${Math.round(maxBytes / (1024 * 1024))} MB 限制。`);
       }
-      const digest = createHash("sha256").update(inputData).digest("hex");
-      const extension = path.extname(name) || extensionForMimeType(mimeType);
-      const absolutePath = path.join(targetDir, `${digest.slice(0, 24)}${extension.toLowerCase()}`);
-      try { await fs.access(absolutePath); } catch { await fs.writeFile(absolutePath, inputData); }
+      const absolutePath = linkedProjectPath ?? await this.copyAttachment(targetDir, name, mimeType, inputData!);
       attachments.push({
         id: randomUUID(),
         kind: isImage ? "image" : isVideo ? "video" : "file",
         name,
         mimeType,
         absolutePath,
-        sizeBytes: inputData.byteLength,
+        sizeBytes,
         source: "user"
       });
     }
     return attachments;
+  }
+
+  private async copyAttachment(targetDir: string, name: string, mimeType: string, data: Buffer): Promise<string> {
+    await fs.mkdir(targetDir, { recursive: true });
+    const digest = createHash("sha256").update(data).digest("hex");
+    const extension = path.extname(name) || extensionForMimeType(mimeType);
+    const absolutePath = path.join(targetDir, `${digest.slice(0, 24)}${extension.toLowerCase()}`);
+    try { await fs.access(absolutePath); } catch { await fs.writeFile(absolutePath, data); }
+    return absolutePath;
   }
 
   public async getAttachmentDataUrl(threadId: string, absolutePath: string): Promise<string> {
@@ -1520,9 +1533,6 @@ export class DesktopBackend {
     if (!provider || !model || model.role !== "reasoning") throw new Error("所选聊天没有可用的推理模型。");
     const prompt = buildUserWorkflowPrompt({ title: thread.title, messages, toolCalls });
     const timeout = new AbortController();
-    const timeoutId = this.#config.timeouts.modelDecisionMs > 0
-      ? setTimeout(() => timeout.abort(), this.#config.timeouts.modelDecisionMs)
-      : null;
 
     try {
       const decision = await this.#providerFactory.create(provider).runTurn({
@@ -1552,10 +1562,7 @@ export class DesktopBackend {
         throw error;
       }
     } catch (error) {
-      if (timeout.signal.aborted) throw new Error("生成用户技能超时，请检查模型连接后重试。");
       throw error;
-    } finally {
-      if (timeoutId) clearTimeout(timeoutId);
     }
   }
 
@@ -1633,9 +1640,6 @@ export class DesktopBackend {
     const startedAt = performance.now();
     const adapter = this.#providerFactory.create(input.provider);
     const timeout = new AbortController();
-    const timeoutId = this.#config.timeouts.modelTestMs > 0
-      ? setTimeout(() => timeout.abort(), this.#config.timeouts.modelTestMs)
-      : null;
 
     try {
       if (input.model.supportsImageGeneration) {
@@ -1744,12 +1748,7 @@ export class DesktopBackend {
         agentCapabilityReason
       };
     } catch (error) {
-      if (timeout.signal.aborted) {
-        throw new Error("模型测试超时（30 秒）。请检查服务地址和网络连接。");
-      }
       throw error;
-    } finally {
-      if (timeoutId) clearTimeout(timeoutId);
     }
   }
 
@@ -2023,10 +2022,10 @@ export class DesktopBackend {
     this.#config.routing = { ...normalized.routing };
     this.#config.multimodal = {
       image: { ...normalized.multimodal.image },
-      video: { ...normalized.multimodal.video }
+      video: { ...normalized.multimodal.video },
+      input: { ...normalized.multimodal.input }
     };
     this.#config.desktop = { ...normalized.desktop };
-    this.#config.timeouts = { ...normalized.timeouts };
     this.#config.multiAgent = { ...normalized.multiAgent };
     this.#config.selfImprovement = { ...normalized.selfImprovement };
     this.#config.projectExecutionPolicies = normalized.projectExecutionPolicies;
@@ -2044,12 +2043,6 @@ export class DesktopBackend {
       .map((connection) => this.#databaseCredentials.remove(connection.credentialRef)));
 
     await saveConfig(this.#layout.configFile, this.#config);
-    await this.#logs.append("config.timeouts_updated", {
-      modelDecisionMs: this.#config.timeouts.modelDecisionMs,
-      recoveryModelDecisionMs: this.#config.timeouts.recoveryModelDecisionMs,
-      modelTimeoutRetries: this.#config.timeouts.modelTimeoutRetries,
-      effective: "immediate"
-    });
     const selectionCache = new Map<string, Pick<ThreadRecord, "providerId" | "modelId">>();
     for (const thread of this.#db.listThreads()) {
       const cacheKey = `${thread.providerId ?? ""}::${thread.modelId ?? ""}`;
@@ -2071,7 +2064,7 @@ export class DesktopBackend {
       });
     }
     // Only rebuild MCP state when server definitions actually changed. Saving
-    // unrelated settings (timeouts, tone, multi-agent, ...) must not respawn MCP
+    // Unrelated settings (tone, multi-agent, ...) must not respawn MCP.
     // child processes — that blocked the IPC handler for seconds on Windows.
     if (!areMcpServerConfigsEqual(previousMcpServers, this.#config.mcpServers)) {
       await this.refreshMcpConfiguration(
@@ -4453,10 +4446,9 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     desktop: {
       ...fallback.desktop,
       ...config.desktop,
-      liveEditPreview: config.desktop?.liveEditPreview !== false
+      liveEditPreview: config.desktop?.liveEditPreview === true
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
-    timeouts: normalizeRuntimeTimeouts(config.timeouts),
     multiAgent: {
       defaultMode: config.multiAgent?.defaultMode === "disabled" ? "disabled" : "proactive",
       maxConcurrentSubagents: Math.min(8, Math.max(2, Math.round(config.multiAgent?.maxConcurrentSubagents ?? fallback.multiAgent.maxConcurrentSubagents))),
@@ -4526,10 +4518,11 @@ function normalizeMultimodalInputDefaults(
   const candidates = models.filter((model) => model.supportsMultimodalInput);
   let defaultProviderId = value?.defaultProviderId?.trim();
   let defaultModelId = value?.defaultModelId?.trim();
+  const hasConfiguredDefault = Boolean(defaultProviderId || defaultModelId);
   const ok = candidates.some(
     (model) => model.id === defaultModelId && model.providerId === defaultProviderId
   );
-  if (!ok) {
+  if (hasConfiguredDefault && !ok) {
     const first = candidates[0];
     defaultProviderId = first?.providerId;
     defaultModelId = first?.id;

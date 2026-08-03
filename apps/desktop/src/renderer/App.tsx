@@ -31,7 +31,7 @@ import type {
   ToolCallRecord,
   UserInputPrompt
 } from "@shared-types";
-import { DEFAULT_RESPONSE_TONE, DEFAULT_RUNTIME_TIMEOUTS, GPT_REASONING_EFFORTS, createEmptyTokenUsage, isConfigurableGptReasoningModel, withGptReasoningCapabilities } from "@shared-types";
+import { DEFAULT_RESPONSE_TONE, GPT_REASONING_EFFORTS, createEmptyTokenUsage, isConfigurableGptReasoningModel, withGptReasoningCapabilities } from "@shared-types";
 import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../packages/provider-adapters/src/models/media-protocol";
 import {
   canDeleteThread,
@@ -105,6 +105,7 @@ import {
   reconcileAssistantDraftCompletion,
   reconcileAssistantDraftUpdate,
   reconcilePendingUserMessages,
+  resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
@@ -232,7 +233,6 @@ import { ProviderSettingsPage } from "./settings/pages/models/provider-page";
 import { ApiFavoritesPage } from "./settings/pages/knowledge/api-favorites-page";
 import { KnowledgePage } from "./settings/pages/knowledge/knowledge-page";
 import { MemoryPage } from "./settings/pages/knowledge/memory-page";
-import { RuntimeTimeoutsPage } from "./settings/pages/general/runtime-timeouts-page";
 import { ResponseTonePage } from "./settings/pages/general/response-tone-page";
 import { RuntimeOverviewPage } from "./settings/pages/general/runtime-overview-page";
 import { DatabasePage } from "./settings/pages/connections/database-page";
@@ -451,6 +451,8 @@ export function App() {
   const pendingRuntimeStartsRef = useRef<Set<string>>(new Set());
   const pendingOneShotSkillRemovalsRef = useRef<Record<string, string[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
+  const latestRuntimeThreadsRef = useRef<Record<string, ThreadRecord>>({});
+  const persistedRuntimeMessagesRef = useRef<Record<string, Map<string, MessageRecord>>>({});
   const snapshotRefreshInFlightRef = useRef<Record<string, Promise<void>>>({});
   const snapshotRefreshPendingRef = useRef<Record<string, boolean>>({});
   /** After Stop, ignore late runtime events that would revive the "执行中" UI. */
@@ -1075,6 +1077,38 @@ export function App() {
     }
   }
 
+  function invalidateSnapshotRequest(threadId: string) {
+    snapshotRequestIdsRef.current[threadId] = (snapshotRequestIdsRef.current[threadId] ?? 0) + 1;
+  }
+
+  function reconcileSnapshotWithRuntimeEvents(nextSnapshot: RuntimeThreadSnapshot): RuntimeThreadSnapshot {
+    const threadId = nextSnapshot.thread.id;
+    const runtimeThread = latestRuntimeThreadsRef.current[threadId];
+    const thread = runtimeThread
+      ? resolveLatestThreadRecord(nextSnapshot.thread, runtimeThread)
+      : nextSnapshot.thread;
+    const runtimeMessages = Array.from(persistedRuntimeMessagesRef.current[threadId]?.values() ?? []);
+    const messages = runtimeMessages.length > 0
+      ? mergeSnapshotRecords(nextSnapshot.messages, runtimeMessages, (message) => message.createdAt)
+      : nextSnapshot.messages;
+    const messageCount = Math.max(nextSnapshot.messageCount, messages.length);
+    if (thread === nextSnapshot.thread && messages === nextSnapshot.messages && messageCount === nextSnapshot.messageCount) {
+      return nextSnapshot;
+    }
+    return { ...nextSnapshot, thread, messages, messageCount };
+  }
+
+  function reconcileCachedAndSelectedSnapshot(threadId: string) {
+    const cached = snapshotCacheByThreadRef.current.get(threadId);
+    if (cached) {
+      cacheThreadSnapshot(reconcileSnapshotWithRuntimeEvents(cached));
+    }
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      return reconcileSnapshotWithRuntimeEvents(current);
+    });
+  }
+
   function restoreCachedThreadSnapshot(threadId: string): boolean {
     const cached = snapshotCacheByThreadRef.current.get(threadId);
     if (!cached) return false;
@@ -1087,7 +1121,7 @@ export function App() {
     // sidebar stay responsive while React renders the (potentially large)
     // message list, and the render can be interrupted by a newer switch.
     startTransition(() => {
-      setSnapshot(cached);
+      setSnapshot(() => reconcileSnapshotWithRuntimeEvents(cached));
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: cached.browserTabs }));
     });
     return true;
@@ -1402,7 +1436,7 @@ export function App() {
           status?: ToolCallRecord["status"];
           startedAt?: string;
           completedAt?: string;
-          message?: { role?: MessageRecord["role"] };
+          message?: MessageRecord;
           thread?: ThreadRecord;
           childThread?: ThreadRecord;
           pluginChanged?: { pluginId: string; enabled: boolean };
@@ -1820,6 +1854,29 @@ export function App() {
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "upstream_service_unavailable") {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          appendRuntimeStatus(typed.threadId, "服务暂时不可用，正在等待后重试", typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, "服务暂时不可用，正在等待后重试。", typed.createdAt);
+          }
+          setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        }
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "provider_output_limit") {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
+          const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 0;
+          const attemptLabel = maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : "";
+          appendRuntimeStatus(typed.threadId, `模型输出被截断，正在请求精简结果${attemptLabel}`, typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, `模型输出被截断，正在请求精简结果${attemptLabel}。`, typed.createdAt);
+          }
+          setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        }
+        return;
+      }
       if (typed.type === "agent.retrying" && typed.threadId && (
         typed.payload?.reason === "completion_validation" || typed.payload?.reason === "completion_audit"
       )) {
@@ -1903,6 +1960,22 @@ export function App() {
       if (
         typed.type === "message.created" &&
         typed.threadId &&
+        (typed.payload?.message?.role === "user" || typed.payload?.message?.role === "assistant")
+      ) {
+        // A queued user message may be persisted after the optimistic bubble is
+        // intentionally omitted. Merge the runtime event immediately; waiting
+        // for the next snapshot refresh leaves a blank transcript until reload.
+        const runtimeThreadId = typed.threadId;
+        const message = typed.payload.message as MessageRecord;
+        const messages = persistedRuntimeMessagesRef.current[runtimeThreadId] ?? new Map<string, MessageRecord>();
+        messages.set(message.id, message);
+        persistedRuntimeMessagesRef.current[runtimeThreadId] = messages;
+        invalidateSnapshotRequest(runtimeThreadId);
+        reconcileCachedAndSelectedSnapshot(runtimeThreadId);
+      }
+      if (
+        typed.type === "message.created" &&
+        typed.threadId &&
         typed.payload?.message?.role === "user" &&
         getMessageDisplayKind(typed.payload.message as MessageRecord) !== "api-card"
       ) {
@@ -1922,7 +1995,22 @@ export function App() {
       if (!isPluginStateUpdate && typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
         applyThreadStatusNotification(runtimeEvent);
         const runtimeThreadId = typed.threadId;
-        const status = typed.payload.thread.status;
+        const runtimeThread = latestRuntimeThreadsRef.current[runtimeThreadId]
+          ? resolveLatestThreadRecord(latestRuntimeThreadsRef.current[runtimeThreadId], typed.payload.thread)
+          : typed.payload.thread;
+        latestRuntimeThreadsRef.current[runtimeThreadId] = runtimeThread;
+        invalidateSnapshotRequest(runtimeThreadId);
+        setThreads((current) => {
+          let found = false;
+          const next = current.map((thread) => {
+            if (thread.id !== runtimeThreadId) return thread;
+            found = true;
+            return resolveLatestThreadRecord(thread, runtimeThread);
+          });
+          return found ? next : [runtimeThread, ...next];
+        });
+        reconcileCachedAndSelectedSnapshot(runtimeThreadId);
+        const status = runtimeThread.status;
         const resumePlan = gpaPlanResumeAttemptRef.current.get(runtimeThreadId);
         if (status === "failed") {
           if (resumePlan) {
@@ -3138,7 +3226,11 @@ export function App() {
   }
 
   async function refreshThreads(options?: { refreshSelectedSnapshot?: boolean; fallbackToFirst?: boolean }) {
-    const nextThreads = (await window.codexh.listThreads()) as ThreadRecord[];
+    const listedThreads = (await window.codexh.listThreads()) as ThreadRecord[];
+    const nextThreads = listedThreads.map((thread) => {
+      const runtimeThread = latestRuntimeThreadsRef.current[thread.id];
+      return runtimeThread ? resolveLatestThreadRecord(runtimeThread, thread) : thread;
+    });
     setThreads(nextThreads);
     syncThreadNotificationsFromThreads(nextThreads);
 
@@ -3245,7 +3337,7 @@ export function App() {
       const artifacts = next.snapshotMode === "delta" && base
         ? mergeSnapshotRecords(base.artifacts, next.artifacts, (artifact) => artifact.createdAt, "descending")
         : next.artifacts;
-      const mergedSnapshot: RuntimeThreadSnapshot = {
+      const mergedSnapshot = reconcileSnapshotWithRuntimeEvents({
         ...next,
         messages: base ? reuseEquivalentRecordArray(base.messages, messages) : messages,
         toolCalls: base ? reuseEquivalentRecordArray(base.toolCalls, toolCalls) : toolCalls,
@@ -3253,7 +3345,7 @@ export function App() {
         queuedMessages: base ? reuseEquivalentRecordArray(base.queuedMessages, next.queuedMessages) : next.queuedMessages,
         approvals: base ? reuseEquivalentRecordArray(base.approvals, next.approvals) : next.approvals,
         prompts: base ? reuseEquivalentRecordArray(base.prompts, next.prompts) : next.prompts
-      };
+      });
       cacheThreadSnapshot(mergedSnapshot);
       if (selectedThreadIdRef.current === threadId) {
         snapshotThreadIdRef.current = threadId;
@@ -3266,14 +3358,16 @@ export function App() {
         // transition so urgent interactions (clicks, another switch) are not
         // blocked behind the transcript render.
         startTransition(() => {
-          setSnapshot(mergedSnapshot);
+          setSnapshot(() => reconcileSnapshotWithRuntimeEvents(mergedSnapshot));
         });
       }
       setThreads((current) => current.map((thread) =>
-        thread.id === next.thread.id ? next.thread : thread
+        thread.id === mergedSnapshot.thread.id
+          ? resolveLatestThreadRecord(thread, mergedSnapshot.thread)
+          : thread
       ));
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: next.browserTabs }));
-      if (!isThreadExecutionInProgress(next.thread.status)) {
+      if (!isThreadExecutionInProgress(mergedSnapshot.thread.status)) {
         // Snapshot refresh can win a race where the queue already drained but the
         // thread has not flipped to running yet. Keep the local preparing
         // heartbeat so the chat does not go blank after send.
@@ -3282,14 +3376,14 @@ export function App() {
           if (current?.threadId !== threadId) return current;
           if (!current.runtimeObserved) {
             preserveLocalPreparing = shouldPreservePreparingRuntime(
-              next.thread.status,
+              mergedSnapshot.thread.status,
               next.queuedMessages.length,
               false
             );
             return preserveLocalPreparing ? current : null;
           }
           return shouldPreservePreparingRuntime(
-            next.thread.status,
+            mergedSnapshot.thread.status,
             next.queuedMessages.length,
             current.runtimeObserved
           ) ? current : null;
@@ -3303,7 +3397,7 @@ export function App() {
       }
       if (next.gpa) {
         const gpa =
-          next.thread.mode !== "project" && next.gpa.stage !== "off"
+          mergedSnapshot.thread.mode !== "project" && next.gpa.stage !== "off"
             ? {
                 ...next.gpa,
                 stage: "off" as const,
@@ -3434,6 +3528,15 @@ export function App() {
     setSnapshot(nextSnapshot);
     setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
     setIsThreadSwitching(false);
+  }
+
+  function activateNewThread(thread: ThreadRecord) {
+    selectThreadId(thread.id);
+    seedOptimisticThreadSnapshot(thread);
+    // The composer is usable from the optimistic state. Fetch everything else
+    // after paint so slow skills or MCP refreshes never delay the first prompt.
+    void refreshThreads({ refreshSelectedSnapshot: false });
+    void refreshSnapshot(thread.id);
   }
 
   async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
@@ -3606,9 +3709,7 @@ export function App() {
     }
 
     const thread = await createThreadRecord(mode);
-    selectThreadId(thread.id);
-    await refreshAll();
-    await refreshSnapshot(thread.id);
+    activateNewThread(thread);
   }
 
   async function createThreadRecord(mode: "project" | "chat", cwdInput?: string) {
@@ -3650,10 +3751,10 @@ export function App() {
     const thread = await createThreadRecord("project", projectPathDraft);
     setIsProjectCreateOpen(false);
     setProjectPathDraft("");
-    selectThreadId(thread.id);
-    await refreshAll();
-    await refreshSnapshot(thread.id);
-    await maybeHandleIncompleteGpaPlan(thread.id, { preferAutoSameSession: false });
+    activateNewThread(thread);
+    void maybeHandleIncompleteGpaPlan(thread.id, { preferAutoSameSession: false }).catch((error) => {
+      showNotice("检查 GPA 计划失败", { message: error instanceof Error ? error.message : String(error) });
+    });
   }
 
   async function chooseProjectFolder() {
@@ -3739,6 +3840,8 @@ export function App() {
       await window.codexh.deleteThread(thread.id);
       snapshotCacheByThreadRef.current.delete(thread.id);
       delete snapshotCursorByThreadRef.current[thread.id];
+      delete latestRuntimeThreadsRef.current[thread.id];
+      delete persistedRuntimeMessagesRef.current[thread.id];
       setHistoryThreadDeleteConfirmation(null);
       if (isSelectedThread) {
         selectThreadId(null);
@@ -3779,6 +3882,8 @@ export function App() {
       await window.codexh.clearThreadConversation(threadId);
       delete pendingUserMessagesRef.current[threadId];
       delete snapshotCursorByThreadRef.current[threadId];
+      delete latestRuntimeThreadsRef.current[threadId];
+      delete persistedRuntimeMessagesRef.current[threadId];
       snapshotCacheByThreadRef.current.delete(threadId);
       delete suppressRuntimeProgressRef.current[threadId];
       discardQueuedAssistantDraftsForThread(threadId);
@@ -4067,6 +4172,8 @@ export function App() {
 
     const previousSnapshot = snapshot?.thread.id === threadId ? snapshot : null;
     const previousPendingMessages = pendingUserMessagesRef.current[threadId];
+    const previousRuntimeThread = latestRuntimeThreadsRef.current[threadId];
+    const previousRuntimeMessages = persistedRuntimeMessagesRef.current[threadId];
     const originalMessage = previousSnapshot?.messages.find((message) => message.id === messageId);
     const attachments = originalMessage ? getMessageAttachments(originalMessage) : [];
 
@@ -4076,6 +4183,8 @@ export function App() {
     setEditingUserMessage(null);
     delete snapshotCursorByThreadRef.current[threadId];
     snapshotCacheByThreadRef.current.delete(threadId);
+    delete latestRuntimeThreadsRef.current[threadId];
+    delete persistedRuntimeMessagesRef.current[threadId];
     const optimisticMessage = replaceConversationTailWithOptimisticUserMessage(
       threadId,
       messageId,
@@ -4098,6 +4207,12 @@ export function App() {
         pendingUserMessagesRef.current[threadId] = previousPendingMessages;
       } else {
         delete pendingUserMessagesRef.current[threadId];
+      }
+      if (previousRuntimeMessages) {
+        persistedRuntimeMessagesRef.current[threadId] = previousRuntimeMessages;
+      }
+      if (previousRuntimeThread) {
+        latestRuntimeThreadsRef.current[threadId] = previousRuntimeThread;
       }
       setSnapshot((current) => current?.thread.id === threadId && previousSnapshot ? previousSnapshot : current);
       setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
@@ -4761,26 +4876,6 @@ export function App() {
     resetMultimodalPicker();
   }
 
-  function updateTimeoutDraft(key: keyof AppConfig["timeouts"], rawValue: string) {
-    const value = Number(rawValue);
-    if (!Number.isFinite(value)) return;
-
-    setConfigDraft((current) => {
-      if (!current) return current;
-      const next = cloneConfig(current);
-      next.timeouts[key] = key === "modelTimeoutRetries"
-        ? Math.round(value)
-        : Math.round(value * 1_000);
-      return normalizeDraftConfig(next);
-    });
-  }
-
-  function resetTimeoutDraft() {
-    setConfigDraft((current) => current
-      ? { ...cloneConfig(current), timeouts: { ...DEFAULT_RUNTIME_TIMEOUTS } }
-      : current);
-  }
-
   async function updateComposerSelection(providerId: string, modelId: string) {
     setComposerProviderId(providerId);
     setComposerModelId(modelId);
@@ -4909,7 +5004,7 @@ export function App() {
   }, [isSettingsOpen, settingsTab, usageStatisticsRangeDays, usageStatisticsGranularity]);
 
   useEffect(() => {
-    if (isSettingsOpen && settingsTab === "timeouts") void refreshRuntimeLogStats();
+    if (isSettingsOpen && settingsTab === "general") void refreshRuntimeLogStats();
   }, [isSettingsOpen, settingsTab]);
 
   const historySearchPresence = useMotionPresence(isHistorySearchOpen ? true : null);
@@ -5719,7 +5814,7 @@ export function App() {
                 />
               ) : null}
 
-              {settingsTab === "timeouts" ? (
+              {settingsTab === "general" ? (
                 <RuntimeOverviewPage config={config} configDraft={configDraft} threadCount={threads.length} skillCount={skills.length} subagentDefaultModelValue={subagentDefaultModelValue} subagentDefaultModelOptions={subagentDefaultModelOptions} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} onSetLiveEditPreviewEnabled={(enabled) => void setLiveEditPreviewEnabled(enabled)} />
               ) : null}
 
@@ -5748,11 +5843,7 @@ export function App() {
       />
     ) : null}
 
-              {settingsTab === "timeouts" ? (
-                <RuntimeTimeoutsPage configDraft={configDraft} runtimeLogStats={runtimeLogStats} isRuntimeLogStatsLoading={isRuntimeLogStatsLoading} isClearingLogs={isClearingLogs} onResetTimeouts={resetTimeoutDraft} onUpdateTimeout={updateTimeoutDraft} onSave={saveConfigDraft} onRequestClearLogs={() => setIsClearLogsConfirmOpen(true)} formatStorageBytes={formatStorageBytes} />
-              ) : null}
-
-              {settingsTab === "timeouts" && configDraft ? (
+              {settingsTab === "general" && configDraft ? (
                 <ResponseTonePage configDraft={configDraft} options={RESPONSE_TONE_OPTIONS} defaultTone={DEFAULT_RESPONSE_TONE} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 

@@ -11,7 +11,7 @@ export type SettingsMenuGroup = {
 };
 
 export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
-  { id: "timeouts", label: "通用设置", hint: "模型请求、重试、视频生成和子智能体的运行设置" },
+  { id: "general", label: "智能运行", hint: "自动恢复、运行概览和响应风格" },
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
   { id: "multimodal", label: "多模态", hint: "配置默认多模态识别、生图与视频模型" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
@@ -26,7 +26,7 @@ export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string
 ];
 
 export const SETTINGS_MENU_GROUPS: SettingsMenuGroup[] = [
-  { id: "general", label: "通用设置", hint: "超时、重试和子智能体", tabs: ["timeouts"], icon: IconGear },
+  { id: "general", label: "智能运行", hint: "自动恢复和运行策略", tabs: ["general"], icon: IconGear },
   { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"], icon: IconGlobe },
   { id: "connections", label: "连接", hint: "MCP 与数据库", tabs: ["mcp", "database"], icon: IconMcp },
   { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory", "apiFavorites"], icon: IconKnowledge },
@@ -44,7 +44,7 @@ export function getSettingsTitle(tab: SettingsTab): string {
     case "mcp": return "MCP 管理";
     case "knowledge": return "知识库";
     case "memory": return "记忆";
-    case "timeouts": return "通用设置";
+    case "general": return "智能运行";
     case "update": return "应用更新";
     default: return "设置";
   }

@@ -72,9 +72,15 @@ export function MultimodalPickerDialog({
                 <input
                   type={role === "input" ? "radio" : "checkbox"}
                   checked={checked}
-                  onChange={() => role === "input"
-                    ? onSetDefault("input", model.providerId, model.id)
-                    : setSelected(checked ? selected.filter((value) => value !== key) : [...selected, key])}
+                  onChange={() => {
+                    if (role === "input") {
+                      setSelected([key]);
+                      onSetDefault("input", model.providerId, model.id);
+                      onClose();
+                      return;
+                    }
+                    setSelected(checked ? selected.filter((value) => value !== key) : [...selected, key]);
+                  }}
                 />
                 <div className="fetch-models-copy">
                   <strong>{model.displayName}</strong>

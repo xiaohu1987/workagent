@@ -31,6 +31,7 @@ import {
   reconcilePendingUserMessages,
   reconcileAssistantDraftCompletion,
   reconcileAssistantDraftUpdate,
+  resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft
@@ -51,6 +52,36 @@ function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
     approvalMode: "auto",
     startedAt: "2026-07-15T00:00:00.000Z",
     completedAt: "2026-07-15T00:00:01.000Z",
+    ...overrides
+  };
+}
+
+function makeThread(overrides: Partial<ThreadRecord> = {}): ThreadRecord {
+  return {
+    id: "thread-1",
+    title: "Task",
+    mode: "chat",
+    workspaceKind: "projectless",
+    cwd: null,
+    projectId: null,
+    workspaceId: null,
+    modelId: "model-1",
+    providerId: "provider-1",
+    status: "idle",
+    selectedSkillIds: [],
+    selectedPluginIds: [],
+    knowledgeBaseIds: [],
+    createdAt: "2026-08-03T07:58:00.000Z",
+    updatedAt: "2026-08-03T07:58:00.000Z",
+    isPinned: false,
+    pinnedAt: null,
+    gpaStateJson: null,
+    parentThreadId: null,
+    rootThreadId: "thread-1",
+    agentPath: "/root",
+    agentRole: null,
+    lastTaskMessage: null,
+    multiAgentMode: "disabled",
     ...overrides
   };
 }
@@ -933,6 +964,64 @@ describe("incremental snapshot merging", () => {
 
     expect(mergeSnapshotRecords(existing, changes, (item) => item.createdAt, "descending"))
       .toEqual([{ id: "artifact-2", createdAt: "2026-07-15T01:02:00.000Z" }, existing[0]]);
+  });
+
+  it("merges a persisted user message into a queued-turn snapshot immediately", () => {
+    const queuedSnapshot: MessageRecord[] = [{
+      id: "assistant-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant" as const,
+      content: "Working...",
+      metadataJson: null,
+      createdAt: "2026-08-03T08:03:00.000Z"
+    }];
+    const persistedUserMessage: MessageRecord = {
+      id: "user-2",
+      threadId: "thread-1",
+      turnRunId: "turn-2",
+      role: "user",
+      content: "Continue the deployment.",
+      metadataJson: null,
+      createdAt: "2026-08-03T08:03:01.000Z"
+    };
+
+    expect(mergeSnapshotRecords(queuedSnapshot, [persistedUserMessage], (message) => message.createdAt))
+      .toEqual([queuedSnapshot[0], persistedUserMessage]);
+  });
+
+  it("keeps a completed runtime event over an older running snapshot", () => {
+    const running = makeThread({ status: "running", updatedAt: "2026-08-03T07:58:26.000Z" });
+    const completed = makeThread({ status: "completed", updatedAt: "2026-08-03T07:58:27.036Z" });
+
+    expect(resolveLatestThreadRecord(running, completed)).toBe(completed);
+    expect(resolveLatestThreadRecord(completed, running)).toBe(completed);
+  });
+
+  it("allows a newer running event to start a later turn after completion", () => {
+    const completed = makeThread({ status: "completed", updatedAt: "2026-08-03T07:58:27.036Z" });
+    const running = makeThread({ status: "running", updatedAt: "2026-08-03T08:03:10.000Z" });
+
+    expect(resolveLatestThreadRecord(completed, running)).toBe(running);
+  });
+
+  it("drops a committed draft as soon as its persisted message is merged", () => {
+    const finalMessage: MessageRecord = {
+      id: "final-message",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: "done",
+      metadataJson: null,
+      createdAt: "2026-08-03T07:58:26.969Z"
+    };
+    const messages = mergeSnapshotRecords([], [finalMessage], (message) => message.createdAt);
+
+    expect(shouldKeepAssistantDraft(
+      { completed: true, messageId: finalMessage.id },
+      messages,
+      "completed"
+    )).toBe(false);
   });
 });
 

@@ -58,7 +58,6 @@ export function cloneConfig(config: AppConfig): AppConfig {
       maxMemories: config.selfImprovement?.maxMemories ?? 500
     },
     desktop: { ...config.desktop },
-    timeouts: { ...config.timeouts },
     mcpServers: config.mcpServers.map((server) => ({
       ...server,
       args: server.args ? [...server.args] : undefined,
@@ -240,12 +239,16 @@ export function normalizeDraftConfig(config: AppConfig): AppConfig {
 
   {
     const defaults = next.multimodal.input ?? { enabled: true };
+    const hasConfiguredDefault = Boolean(defaults.defaultProviderId || defaults.defaultModelId);
     const validDefault = next.models.some((model) =>
       model.supportsMultimodalInput &&
       model.providerId === defaults.defaultProviderId &&
       model.id === defaults.defaultModelId
     );
-    if (!validDefault) {
+    if (!hasConfiguredDefault) {
+      // An empty pair is an intentional "no fallback recognizer" choice.
+      next.multimodal.input = { enabled: defaults.enabled !== false };
+    } else if (!validDefault) {
       const first = next.models.find((model) => model.supportsMultimodalInput);
       next.multimodal.input = {
         enabled: defaults.enabled !== false,

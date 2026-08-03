@@ -21,7 +21,6 @@ export type SettingsTab =
   | "capabilities"
   | "mcp"
   | "database"
-  | "timeouts"
   | "update";
 
 export type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";

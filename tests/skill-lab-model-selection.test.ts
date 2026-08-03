@@ -55,16 +55,6 @@ function makeConfig(): AppConfig {
     desktop: { theme: "system", approvals: "prompt", inAppBrowser: true, liveEditPreview: true },
     multiAgent: { enabled: false, maxAgents: 1, maxDepth: 1 },
     selfImprovement: { enabled: false, memoryEnabled: false, maxMemories: 100 },
-    timeouts: {
-      modelDecisionMs: 90_000,
-      recoveryModelDecisionMs: 20_000,
-      modelTimeoutRetries: 5,
-      toolExecutionMs: 120_000,
-      multimodalIntentClassifyMs: 20_000,
-      modelTestMs: 30_000,
-      videoGenerationMs: 600_000,
-      videoPollIntervalMs: 5_000
-    },
     mcpServers: [],
     databaseConnections: []
   };

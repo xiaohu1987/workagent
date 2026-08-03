@@ -48,6 +48,71 @@ describe("McpManager", () => {
     ]);
   });
 
+  it("reconnects once when the server rejects a stale session during tool discovery", async () => {
+    const first: McpClient = {
+      listTools: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 400): "Session ID not found."')),
+      close: vi.fn()
+    };
+    const second: McpClient = {
+      listTools: vi.fn().mockResolvedValue({
+        tools: [{ name: "market_cap", inputSchema: { type: "object" } }]
+      })
+    };
+    const createClient = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const manager = new McpManager([baseConfig], createClient);
+
+    await manager.refresh(["stocks"]);
+
+    await expect(manager.listTools(["stocks"])).resolves.toEqual([
+      expect.objectContaining({ server: "stocks", name: "market_cap" })
+    ]);
+    expect(first.close).toHaveBeenCalledTimes(1);
+    expect(createClient).toHaveBeenCalledTimes(2);
+  });
+
+  it("reconnects and retries once when a session expires during a tool call", async () => {
+    const first: McpClient = {
+      listTools: vi.fn().mockResolvedValue({
+        tools: [{ name: "market_cap", inputSchema: { type: "object" } }]
+      }),
+      callTool: vi.fn().mockRejectedValue(new Error("Mcp-Session-Id is expired")),
+      close: vi.fn()
+    };
+    const recoveredCall = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
+    const second: McpClient = {
+      listTools: vi.fn().mockResolvedValue({
+        tools: [{ name: "market_cap", inputSchema: { type: "object" } }]
+      }),
+      callTool: recoveredCall
+    };
+    const createClient = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const manager = new McpManager([baseConfig], createClient);
+
+    await manager.refresh(["stocks"]);
+
+    await expect(manager.callTool("stocks", "market_cap", { symbol: "301236" })).resolves.toEqual({
+      content: [{ type: "text", text: "ok" }]
+    });
+    expect(first.close).toHaveBeenCalledTimes(1);
+    expect(recoveredCall).toHaveBeenCalledTimes(1);
+    expect(createClient).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reconnect for unrelated MCP errors", async () => {
+    const client: McpClient = {
+      listTools: vi.fn().mockRejectedValue(new Error("HTTP 400 invalid arguments")),
+      close: vi.fn()
+    };
+    const createClient = vi.fn().mockResolvedValue(client);
+    const manager = new McpManager([baseConfig], createClient);
+
+    await manager.refresh(["stocks"]);
+
+    await expect(manager.listTools(["stocks"])).rejects.toThrow("invalid arguments");
+    expect(client.close).not.toHaveBeenCalled();
+    expect(createClient).toHaveBeenCalledTimes(1);
+  });
+
   it("tests a connected server even when optional resource discovery is unsupported", async () => {
     const client: McpClient = {
       listTools: vi.fn().mockResolvedValue({

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
-import { isGptReasoningEffort, normalizeResponseTone, normalizeRuntimeTimeouts, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
+import { isGptReasoningEffort, normalizeResponseTone, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
 import type {
   AppConfig,
   ApprovalResolutionMode,
@@ -272,7 +272,7 @@ export function defaultConfig(): AppConfig {
       theme: "system",
       approvals: "prompt",
       inAppBrowser: true,
-      liveEditPreview: true
+      liveEditPreview: false
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -284,7 +284,6 @@ export function defaultConfig(): AppConfig {
       defaultReasoningEffort: "medium"
     },
     selfImprovement: normalizeSelfImprovementSettings(),
-    timeouts: normalizeRuntimeTimeouts(),
     projectExecutionPolicies: {},
     mcpServers: [],
     databaseConnections: []
@@ -393,6 +392,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
   const raw = await fs.readFile(configFile, 'utf8');
   const parsed = TOML.parse(raw) as any;
   const needsReasoningEffortMigration = !isGptReasoningEffort(parsed.reasoningEffort);
+  const needsAutonomousRuntimeMigration = Object.prototype.hasOwnProperty.call(parsed, "timeouts");
   const providers = Object.entries(parsed.providers ?? {}).map(([id, value]) => ({
     id,
     ...(value as Record<string, unknown>)
@@ -427,11 +427,10 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       theme: parsed.desktop?.theme ?? 'system',
       approvals: parsed.desktop?.approvals ?? 'prompt',
       inAppBrowser: parsed.desktop?.inAppBrowser ?? true,
-      liveEditPreview: parsed.desktop?.liveEditPreview ?? true
+      liveEditPreview: parsed.desktop?.liveEditPreview ?? false
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),
-    timeouts: normalizeRuntimeTimeouts(parsed.timeouts),
     projectExecutionPolicies: normalizeProjectExecutionPolicies(parsed.projectExecutionPolicies),
     mcpServers: ((parsed.mcpServers ?? []) as Array<Record<string, unknown>>).map((item) => ({
       id: String(item.id),
@@ -451,7 +450,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     })) satisfies McpServerConfig[],
     databaseConnections: normalizeDatabaseConnections(parsed.databaseConnections)
   };
-  if (needsReasoningEffortMigration) {
+  if (needsReasoningEffortMigration || needsAutonomousRuntimeMigration) {
     await saveConfig(configFile, config);
   }
   return config;
@@ -468,7 +467,6 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     desktop: config.desktop,
     multiAgent: normalizeMultiAgentSettings(config.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(config.selfImprovement),
-    timeouts: normalizeRuntimeTimeouts(config.timeouts),
     projectExecutionPolicies: normalizeProjectExecutionPolicies(config.projectExecutionPolicies),
     providers: Object.fromEntries(config.providers.map((provider) => [provider.id, provider])),
     // Model IDs are only unique within a provider. The TOML table key must retain

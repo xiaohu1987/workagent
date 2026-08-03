@@ -769,17 +769,6 @@ export interface MultimodalModalityDefaults {
   defaultModelId?: string;
 }
 
-export interface RuntimeTimeoutSettings {
-  modelDecisionMs: number;
-  recoveryModelDecisionMs: number;
-  modelTimeoutRetries: number;
-  toolExecutionMs: number;
-  multimodalIntentClassifyMs: number;
-  modelTestMs: number;
-  videoGenerationMs: number;
-  videoPollIntervalMs: number;
-}
-
 export interface ProjectExecutionPolicy {
   /** Controlled mode auto-runs reads, non-destructive patches, and safe verification only. */
   mode: "controlled" | "prompt";
@@ -791,17 +780,6 @@ export interface ProjectExecutionPolicy {
 export const DEFAULT_PROJECT_EXECUTION_POLICY: ProjectExecutionPolicy = {
   mode: "controlled",
   autoVerify: true
-};
-
-export const DEFAULT_RUNTIME_TIMEOUTS: RuntimeTimeoutSettings = {
-  modelDecisionMs: 90_000,
-  recoveryModelDecisionMs: 20_000,
-  modelTimeoutRetries: 5,
-  toolExecutionMs: 120_000,
-  multimodalIntentClassifyMs: 20_000,
-  modelTestMs: 30_000,
-  videoGenerationMs: 10 * 60_000,
-  videoPollIntervalMs: 5_000
 };
 
 export type ResponseTone = "friendly" | "concise";
@@ -845,25 +823,6 @@ export function resolveModelReasoningEffort(
   return isConfigurableGptReasoningModel(model) ? globalGptEffort : model.defaultReasoningEffort;
 }
 
-export function normalizeRuntimeTimeouts(value?: Partial<RuntimeTimeoutSettings> | null): RuntimeTimeoutSettings {
-  const source = value ?? {};
-  const nonNegativeNumber = (input: unknown, fallback: number) => {
-    const numeric = typeof input === "number" && Number.isFinite(input) ? Math.round(input) : fallback;
-    return Math.max(0, numeric);
-  };
-
-  return {
-    modelDecisionMs: nonNegativeNumber(source.modelDecisionMs, DEFAULT_RUNTIME_TIMEOUTS.modelDecisionMs),
-    recoveryModelDecisionMs: nonNegativeNumber(source.recoveryModelDecisionMs, DEFAULT_RUNTIME_TIMEOUTS.recoveryModelDecisionMs),
-    modelTimeoutRetries: nonNegativeNumber(source.modelTimeoutRetries, DEFAULT_RUNTIME_TIMEOUTS.modelTimeoutRetries),
-    toolExecutionMs: nonNegativeNumber(source.toolExecutionMs, DEFAULT_RUNTIME_TIMEOUTS.toolExecutionMs),
-    multimodalIntentClassifyMs: nonNegativeNumber(source.multimodalIntentClassifyMs, DEFAULT_RUNTIME_TIMEOUTS.multimodalIntentClassifyMs),
-    modelTestMs: nonNegativeNumber(source.modelTestMs, DEFAULT_RUNTIME_TIMEOUTS.modelTestMs),
-    videoGenerationMs: nonNegativeNumber(source.videoGenerationMs, DEFAULT_RUNTIME_TIMEOUTS.videoGenerationMs),
-    videoPollIntervalMs: nonNegativeNumber(source.videoPollIntervalMs, DEFAULT_RUNTIME_TIMEOUTS.videoPollIntervalMs)
-  };
-}
-
 export interface AppConfig {
   defaultModel: string;
   defaultProvider: string;
@@ -894,7 +853,6 @@ export interface AppConfig {
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;
-  timeouts: RuntimeTimeoutSettings;
   /** Optional per-workspace overrides keyed by normalized absolute workspace path. */
   projectExecutionPolicies?: Record<string, ProjectExecutionPolicy>;
   mcpServers: McpServerConfig[];

@@ -1164,6 +1164,19 @@ export function mergeSnapshotRecords<T extends { id: string }>(
   return merged.sort((left, right) => multiplier * getCreatedAt(left).localeCompare(getCreatedAt(right)));
 }
 
+export function resolveLatestThreadRecord(current: ThreadRecord, incoming: ThreadRecord): ThreadRecord {
+  const currentUpdatedAt = Date.parse(current.updatedAt);
+  const incomingUpdatedAt = Date.parse(incoming.updatedAt);
+  if (
+    Number.isFinite(currentUpdatedAt) &&
+    Number.isFinite(incomingUpdatedAt) &&
+    currentUpdatedAt > incomingUpdatedAt
+  ) {
+    return current;
+  }
+  return incoming;
+}
+
 export function parseMessageEventBlocks(message: MessageRecord): ChatEventBlock[] | null {
   if (message.role === "tool") {
     return buildToolEventBlocks(message);
@@ -1416,6 +1429,10 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
 
   const filteredMessages = messages.filter((message) => {
     if (message.content.trimStart().startsWith("[internal:")) {
+      return false;
+    }
+
+    if (message.role === "assistant" && /^\s*\[Executed tools:\s*[^\]\r\n]+\]\s*$/i.test(message.content)) {
       return false;
     }
 
