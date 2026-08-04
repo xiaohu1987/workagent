@@ -17,6 +17,21 @@ export type ComposerPrimaryActionState = {
   disabled: boolean;
 };
 
+export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRuntimeMessages>(
+  threadId: string,
+  state: {
+    cursorByThread: Record<string, TCursor>;
+    requestIdsByThread: Record<string, number>;
+    cacheByThread: Map<string, TSnapshot>;
+    runtimeMessagesByThread: Record<string, TRuntimeMessages>;
+  }
+): void {
+  state.requestIdsByThread[threadId] = (state.requestIdsByThread[threadId] ?? 0) + 1;
+  delete state.cursorByThread[threadId];
+  state.cacheByThread.delete(threadId);
+  delete state.runtimeMessagesByThread[threadId];
+}
+
 export function isThreadExecutionInProgress(status?: ThreadRecord["status"] | null) {
   return status === "running" || status === "waiting";
 }

@@ -1,5 +1,8 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ModelProfile, SkillMetadata } from "@shared-types";
+import type { MessageRecord, ModelProfile, SkillMetadata } from "@shared-types";
 import {
   createToolCallFingerprint,
   createCommentaryMessageKey,
@@ -111,6 +114,16 @@ import {
   retargetStaleBrowserObservationToolCall,
   formatAvailableTools,
   extractSelectedMcpServerIds,
+  resolveFollowUpSourceContext,
+  buildFollowUpSourcePrompt,
+  validateFollowUpSourceToolCall,
+  resolveTurnContextCapsuleTokenBudget,
+  buildStoredTurnContextPrompt,
+  writeTurnContextMarkdown,
+  readLatestTurnContextMarkdown,
+  resolveRequestedDeliverableExtensions,
+  extractTaskTopicAnchors,
+  validateRequestedArtifactAlignment,
   isExplicitMcpRequest,
   validateProjectMcpPriority,
   buildProjectWorkspacePriorityPrompt,
@@ -305,6 +318,162 @@ describe("selected MCP server parsing", () => {
   it("preserves the explicit MCP server ids carried by a composer message", () => {
     expect(extractSelectedMcpServerIds("[Selected MCP server]\nid: internal-search\nSearch")).toEqual(["internal-search"]);
     expect(extractSelectedMcpServerIds("ordinary message")).toEqual([]);
+  });
+});
+
+describe("referential follow-up source continuity", () => {
+  const previousRequest = [
+    "给我扒一点A2项目结项自动化提单、TM项目结项自动化审批的代码",
+    "",
+    "[Selected MCP server]",
+    "id: ISS.IPSA.Project.Api",
+    "ISS.IPSA.Project.Api: http://internal.example/sse"
+  ].join("\n");
+  const messages = [
+    {
+      id: "user-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "user",
+      content: previousRequest,
+      metadataJson: null,
+      createdAt: "2026-08-04T06:54:11.413Z"
+    },
+    {
+      id: "assistant-commentary",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: "正在查询代码。",
+      metadataJson: JSON.stringify({ displayKind: "commentary" }),
+      createdAt: "2026-08-04T06:55:00.000Z"
+    },
+    {
+      id: "assistant-final",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role: "assistant",
+      content: "A2 自动提单位于 src/EndPrjAutoService.cs，TM 自动审批位于 src/EndPrjAutoApprovalDecisionService.cs。",
+      metadataJson: null,
+      createdAt: "2026-08-04T07:16:36.000Z"
+    }
+  ] as MessageRecord[];
+
+  it("inherits the immediately preceding task and MCP source", () => {
+    const context = resolveFollowUpSourceContext(messages, "把你刚刚找出来的代码总结成 doc 文档");
+
+    expect(context).toMatchObject({
+      previousTurnRunId: "turn-1",
+      sourceMcpServerIds: ["ISS.IPSA.Project.Api"],
+      allowCrossThreadHistorySearch: false
+    });
+    expect(context?.effectiveRequest).toContain("A2项目结项自动化提单");
+    expect(context?.previousResponse).toContain("EndPrjAutoService.cs");
+    expect(buildFollowUpSourcePrompt(context)).toContain("authoritative source");
+  });
+
+  it("does not inherit when the user starts a new topic or selects a new MCP source", () => {
+    expect(resolveFollowUpSourceContext(messages, "换个话题，解释一下 Redis")).toBeNull();
+    expect(resolveFollowUpSourceContext(messages, "刚刚的内容先放下\n[Selected MCP server]\nid: other-server")).toBeNull();
+    expect(resolveFollowUpSourceContext(messages, "沿用刚刚的格式，但改查另一个项目仓库 Project.B")).toBeNull();
+  });
+
+  it("blocks sibling output searches and unrelated MCP servers", () => {
+    const context = resolveFollowUpSourceContext(messages, "总结一下刚刚的代码并生成 Word");
+    expect(validateFollowUpSourceToolCall({
+      context,
+      workspaceCwd: "C:\\Users\\me\\.codexh\\outputs\\thread-1",
+      toolCall: {
+        name: "shell.exec",
+        arguments: { command: "Get-ChildItem $env:USERPROFILE\\.codexh\\outputs -Recurse" }
+      }
+    }).allowed).toBe(false);
+    expect(validateFollowUpSourceToolCall({
+      context,
+      workspaceCwd: "C:\\Users\\me\\.codexh\\outputs\\thread-1",
+      toolCall: { name: "mcp.call", arguments: { server: "unrelated", tool: "search" } }
+    }).allowed).toBe(false);
+    expect(validateFollowUpSourceToolCall({
+      context,
+      workspaceCwd: "C:\\Users\\me\\.codexh\\outputs\\thread-1",
+      toolCall: { name: "mcp.call", arguments: { server: "ISS.IPSA.Project.Api", tool: "search" } }
+    })).toEqual({ allowed: true });
+  });
+});
+
+describe("turn context Markdown capsules", () => {
+  it("stores each turn and injects a budgeted multi-turn history", async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-turn-context-"));
+    try {
+      const turnFile = await writeTurnContextMarkdown({
+        outputDir,
+        turnRunId: "turn-123",
+        completedAt: "2026-08-04T08:00:00.000Z",
+        userRequest: "查 A2 和 TM 代码",
+        effectiveRequest: "查 A2 和 TM 代码",
+        assistantResult: "已经找到 EndPrjAutoService。",
+        sourceMcpServerIds: ["ISS.IPSA.Project.Api"],
+        sourcePaths: ["src/EndPrjAutoService.cs"]
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await writeTurnContextMarkdown({
+        outputDir,
+        turnRunId: "turn-456",
+        completedAt: "2026-08-04T08:10:00.000Z",
+        userRequest: "把刚刚的代码总结成 Word",
+        effectiveRequest: "上一轮 A2/TM 代码结果 + 当前 Word 交付请求",
+        assistantResult: "已经生成 A2 与 TM 项目结项自动化说明。",
+        sourceMcpServerIds: ["ISS.IPSA.Project.Api"],
+        sourcePaths: ["A2与TM项目结项自动化方案及代码说明.docx"]
+      });
+      expect(await fs.readFile(turnFile, "utf8")).toContain("## Assistant Result");
+      const history = await readLatestTurnContextMarkdown(outputDir);
+      expect(history).toContain("查 A2 和 TM 代码");
+      expect(history).toContain("把刚刚的代码总结成 Word");
+      expect(history!.indexOf("把刚刚的代码总结成 Word")).toBeLessThan(history!.indexOf("查 A2 和 TM 代码"));
+      const prompt = buildStoredTurnContextPrompt(history, 8_000);
+      expect(prompt).toContain("Previous Turn Context Capsules");
+      expect(prompt).toContain("查 A2 和 TM 代码");
+      expect(prompt).toContain("把刚刚的代码总结成 Word");
+      expect(await fs.readFile(path.join(outputDir, "context", "history.md"), "utf8")).toContain("turn-123");
+      expect(resolveTurnContextCapsuleTokenBudget(8_000)).toBe(1_000);
+      expect(resolveTurnContextCapsuleTokenBudget(500_000)).toBe(24_000);
+    } finally {
+      await fs.rm(outputDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("requested artifact semantic alignment", () => {
+  const correctEvidence = [{
+    absolutePath: "C:\\outputs\\A2与TM项目结项自动化方案及代码说明.docx",
+    relativePath: "A2与TM项目结项自动化方案及代码说明.docx",
+    extension: ".docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    sizeBytes: 1024,
+    sha256: "abc",
+    preview: "A2 项目结项自动化提单；TM 项目结项自动化审批。",
+    verified: true
+  }];
+
+  it("requires the requested binary type and inherited topic anchors", () => {
+    const request = "总结 A2 自动提单和 TM 自动审批，给我一个 doc 文档";
+    expect(resolveRequestedDeliverableExtensions(request)).toEqual([".docx"]);
+    expect(extractTaskTopicAnchors(request)).toEqual(expect.arrayContaining(["A2", "TM", "自动提单", "自动审批"]));
+    expect(validateRequestedArtifactAlignment({
+      requestedExtensions: [".docx"],
+      evidence: correctEvidence,
+      topicAnchors: extractTaskTopicAnchors(request)
+    })).toEqual([]);
+  });
+
+  it("rejects a readable Word document about an unrelated project", () => {
+    const reasons = validateRequestedArtifactAlignment({
+      requestedExtensions: [".docx"],
+      evidence: [{ ...correctEvidence[0]!, preview: "报销附件自动下载 Skill MVP，支持 Range 和 ETag。" }],
+      topicAnchors: ["A2", "TM", "自动提单", "自动审批"]
+    });
+    expect(reasons.join(" ")).toContain("unrelated");
   });
 });
 

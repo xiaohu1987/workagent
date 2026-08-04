@@ -223,4 +223,39 @@ policy:
     });
     expect(catalog?.text).toContain("priority: recommended");
   });
+
+  it("routes generic Word delivery to file skills without implicitly loading Notion", async () => {
+    const appHome = await makeTempDir();
+    const definitions = [
+      ["artifact-writer", "Generate Word PDF and other user-visible deliverables", "系统"],
+      ["file-protocol", "Return downloadable files", "输出与文件"],
+      ["notion-knowledge-capture", "Capture conversations into Notion documentation", "文档"],
+      ["notion-meeting-intelligence", "Prepare meetings from Notion", "文档"],
+      ["notion-research-documentation", "Research Notion and produce reports", "文档"]
+    ] as const;
+    for (const [name, description, domain] of definitions) {
+      const skillDir = path.join(appHome, "skills", "imported", name);
+      await fs.mkdir(skillDir, { recursive: true });
+      await fs.writeFile(
+        path.join(skillDir, "SKILL.md"),
+        `---\nname: ${name}\ndescription: ${description}\ndomain: ${domain}\n---\n${description}.`,
+        "utf8"
+      );
+    }
+
+    const manager = new SkillsManager();
+    await manager.refresh(appHome);
+    const wordSkills = manager.selectForThread({
+      explicitSkillIds: [],
+      query: "把刚刚找到的 A2 和 TM 代码总结成 Word doc 文档"
+    });
+    expect(wordSkills.map((skill) => skill.name)).toEqual(expect.arrayContaining(["artifact-writer", "file-protocol"]));
+    expect(wordSkills.some((skill) => skill.name.startsWith("notion-"))).toBe(false);
+
+    const notionSkills = manager.selectForThread({
+      explicitSkillIds: [],
+      query: "把这次讨论整理到 Notion 文档"
+    });
+    expect(notionSkills.filter((skill) => skill.name.startsWith("notion-"))).toHaveLength(1);
+  });
 });

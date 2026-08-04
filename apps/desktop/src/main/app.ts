@@ -4152,7 +4152,7 @@ export class DesktopBackend {
     await this.syncInstalledPlugins();
     await this.refreshMcpConfiguration(false);
     await this.refreshSkills();
-    void this.#mcp.refresh().catch(async (error) => {
+    void this.#mcp.warmToolCache().catch(async (error) => {
       await this.#logs.append("mcp.background_refresh_failed", {
         error: error instanceof Error ? error.message : String(error)
       });

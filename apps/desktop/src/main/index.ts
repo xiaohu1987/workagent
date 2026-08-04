@@ -316,10 +316,18 @@ async function createWindow(): Promise<void> {
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[renderer] Render process gone", details);
   });
-  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    if (level >= 2) {
-      console.error("[renderer] Console error", { message, line, sourceId });
-    }
+  mainWindow.webContents.on("console-message", (...args: unknown[]) => {
+    const details = typeof args[1] === "object" && args[1] !== null
+      ? args[1] as { level?: string; message?: string; lineNumber?: number; sourceId?: string }
+      : null;
+    const legacyLevel = typeof args[1] === "number" ? args[1] : 0;
+    const isError = details?.level === "error" || legacyLevel >= 2;
+    if (!isError) return;
+    console.error("[renderer] Console error", {
+      message: details?.message ?? String(args[2] ?? "Unknown renderer error"),
+      line: details?.lineNumber ?? (typeof args[3] === "number" ? args[3] : undefined),
+      sourceId: details?.sourceId ?? (typeof args[4] === "string" ? args[4] : undefined)
+    });
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {

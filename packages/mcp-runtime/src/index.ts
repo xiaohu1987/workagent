@@ -161,6 +161,7 @@ export class McpManager {
   readonly #clients = new Map<string, ManagedClient>();
   readonly #statuses = new Map<string, McpConnectionStatus>();
   readonly #toolCache = new Map<string, CachedTools>();
+  readonly #toolRefreshes = new Map<string, Promise<McpToolDescriptor[]>>();
   readonly #sessionReconnects = new Map<string, Promise<ManagedClient>>();
   readonly #createClient: (config: McpServerConfig) => Promise<McpClient>;
   readonly #toolCacheTtlMs: number;
@@ -384,6 +385,37 @@ export class McpManager {
     return client.readResource({ uri });
   }
 
+  public listCachedToolSpecs(serverIds?: string[]): ToolSpecDefinition[] {
+    const requested = serverIds ? new Set(serverIds) : null;
+    const tools: McpToolDescriptor[] = [];
+    for (const [serverId, cached] of this.#toolCache) {
+      if (requested && !requested.has(serverId)) continue;
+      const managed = this.#clients.get(serverId);
+      if (!managed || cached.fingerprint !== managed.fingerprint) continue;
+      tools.push(...cached.tools);
+    }
+    return tools.map((tool) => ({
+      name: tool.name,
+      namespace: tool.server,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      riskLevel: "medium",
+      exposure: "deferred",
+      source: "mcp"
+    }));
+  }
+
+  public async warmToolCache(serverIds?: string[]): Promise<void> {
+    const requested = serverIds ? new Set(serverIds) : null;
+    const activeServerIds = this.#configs
+      .filter((config) => config.enabled && (!requested || requested.has(config.id)))
+      .map((config) => config.id);
+    await Promise.allSettled(activeServerIds.map(async (serverId) => {
+      await this.refresh([serverId]);
+      await this.listTools([serverId]);
+    }));
+  }
+
   public async listPrompts(serverId?: string): Promise<McpPromptDescriptor[]> {
     const pairs = serverId
       ? [...this.#clients.entries()].filter(([id]) => id === serverId)
@@ -439,28 +471,38 @@ export class McpManager {
     if (cached && cached.fingerprint === managed.fingerprint && Date.now() - cached.fetchedAt < this.#toolCacheTtlMs) {
       return cached.tools;
     }
-    const config = this.#configs.find((entry) => entry.id === serverId);
-    let active = managed;
-    let response: Awaited<ReturnType<NonNullable<McpClient["listTools"]>>>;
+    const existingRefresh = this.#toolRefreshes.get(serverId);
+    if (existingRefresh) return existingRefresh;
+    const refresh = (async () => {
+      const config = this.#configs.find((entry) => entry.id === serverId);
+      let active = managed;
+      let response: Awaited<ReturnType<NonNullable<McpClient["listTools"]>>>;
+      try {
+        response = (await active.client.listTools?.()) ?? {};
+      } catch (error) {
+        if (!isMcpSessionInvalidError(error)) throw error;
+        active = await this.reconnectInvalidSession(serverId, active);
+        response = (await active.client.listTools?.()) ?? {};
+      }
+      const tools = (response.tools ?? [])
+        .filter((tool) => config?.tools?.[tool.name]?.enabled !== false)
+        .map((tool) => ({
+          server: serverId,
+          name: tool.name,
+          description: tool.description ?? "MCP tool",
+          inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
+          approvalMode: config?.tools?.[tool.name]?.approvalMode ?? config?.defaultToolsApprovalMode ?? "prompt",
+          annotations: tool.annotations
+        }));
+      this.#toolCache.set(serverId, { fingerprint: active.fingerprint, fetchedAt: Date.now(), tools });
+      return tools;
+    })();
+    this.#toolRefreshes.set(serverId, refresh);
     try {
-      response = (await active.client.listTools?.()) ?? {};
-    } catch (error) {
-      if (!isMcpSessionInvalidError(error)) throw error;
-      active = await this.reconnectInvalidSession(serverId, active);
-      response = (await active.client.listTools?.()) ?? {};
+      return await refresh;
+    } finally {
+      if (this.#toolRefreshes.get(serverId) === refresh) this.#toolRefreshes.delete(serverId);
     }
-    const tools = (response.tools ?? [])
-      .filter((tool) => config?.tools?.[tool.name]?.enabled !== false)
-      .map((tool) => ({
-        server: serverId,
-        name: tool.name,
-        description: tool.description ?? "MCP tool",
-        inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
-        approvalMode: config?.tools?.[tool.name]?.approvalMode ?? config?.defaultToolsApprovalMode ?? "prompt",
-        annotations: tool.annotations
-      }));
-    this.#toolCache.set(serverId, { fingerprint: active.fingerprint, fetchedAt: Date.now(), tools });
-    return tools;
   }
 
   private async reconnectInvalidSession(serverId: string, failed: ManagedClient): Promise<ManagedClient> {

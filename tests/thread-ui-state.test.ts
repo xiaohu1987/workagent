@@ -4,6 +4,7 @@ import {
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
   getHistoryItemAffordance,
+  invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
   shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
@@ -88,6 +89,31 @@ function makeThread(overrides: Partial<ThreadRecord> = {}): ThreadRecord {
 }
 
 describe("thread UI state helpers", () => {
+  it("forces an authoritative snapshot after interrupt without clearing other threads", () => {
+    const cursorByThread = { "thread-1": "cursor-1", "thread-2": "cursor-2" };
+    const requestIdsByThread = { "thread-1": 4, "thread-2": 2 };
+    const cacheByThread = new Map([
+      ["thread-1", "snapshot-1"],
+      ["thread-2", "snapshot-2"]
+    ]);
+    const runtimeMessagesByThread = {
+      "thread-1": ["persisted-summary"],
+      "thread-2": ["other-message"]
+    };
+
+    invalidateThreadSnapshotForFullRefresh("thread-1", {
+      cursorByThread,
+      requestIdsByThread,
+      cacheByThread,
+      runtimeMessagesByThread
+    });
+
+    expect(requestIdsByThread).toEqual({ "thread-1": 5, "thread-2": 2 });
+    expect(cursorByThread).toEqual({ "thread-2": "cursor-2" });
+    expect([...cacheByThread.entries()]).toEqual([["thread-2", "snapshot-2"]]);
+    expect(runtimeMessagesByThread).toEqual({ "thread-2": ["other-message"] });
+  });
+
   it("replaces the edited message and removes its stale conversation tail locally", () => {
     const messages: MessageRecord[] = [
       { id: "user-1", threadId: "thread-1", turnRunId: "turn-1", role: "user", content: "old", metadataJson: null, createdAt: "2026-07-28T00:00:00.000Z" },

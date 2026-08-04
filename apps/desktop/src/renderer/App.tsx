@@ -37,6 +37,7 @@ import {
   canDeleteThread,
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
+  invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
   shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
@@ -4060,9 +4061,6 @@ export function App() {
           await window.codexh.setGpaStage({ threadId, stage });
         }
       }
-      if (gpaState.fullAccess) {
-        await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
-      }
     } catch (error) {
       if (optimisticMessage) removeOptimisticUserMessage(threadId, optimisticMessage.id);
       setComposerSubmission(null);
@@ -4378,7 +4376,15 @@ export function App() {
         message: error instanceof Error ? error.message : "请稍后重试。"
       });
     } finally {
-      await refreshThreads();
+      // Interrupt completion can race an in-flight delta snapshot. Reset every
+      // incremental source so persisted messages are restored authoritatively.
+      invalidateThreadSnapshotForFullRefresh(threadId, {
+        cursorByThread: snapshotCursorByThreadRef.current,
+        requestIdsByThread: snapshotRequestIdsRef.current,
+        cacheByThread: snapshotCacheByThreadRef.current,
+        runtimeMessagesByThread: persistedRuntimeMessagesRef.current
+      });
+      await refreshThreads({ refreshSelectedSnapshot: false });
       await refreshSnapshot(threadId);
     }
   }
@@ -5039,13 +5045,25 @@ export function App() {
       setSettingsContentReady(false);
       return;
     }
+    let disposed = false;
     let secondFrame = 0;
+    const showContent = () => {
+      if (disposed) return;
+      setSettingsContentReady(true);
+    };
+    // requestAnimationFrame is suspended for hidden or occluded Electron
+    // windows. Keep a timer fallback so the settings body cannot remain a
+    // permanent placeholder when the window is restored.
+    const fallback = window.setTimeout(showContent, 150);
     const firstFrame = window.requestAnimationFrame(() => {
       secondFrame = window.requestAnimationFrame(() => {
-        startTransition(() => setSettingsContentReady(true));
+        window.clearTimeout(fallback);
+        showContent();
       });
     });
     return () => {
+      disposed = true;
+      window.clearTimeout(fallback);
       window.cancelAnimationFrame(firstFrame);
       if (secondFrame) window.cancelAnimationFrame(secondFrame);
     };

@@ -41,6 +41,7 @@ import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFacto
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
+import * as mammoth from "mammoth";
 import {
   applyCompletedPlanTasks,
   buildGpaRiskClarificationQuestions,
@@ -1260,6 +1261,14 @@ class ThreadSessionRuntime {
     mediaIntent: "image" | "video" | null = null
   ): Promise<void> {
     const thread = await this.services.persistence.getThread(this.threadId);
+    const turnOutputDir = await this.services.getThreadOutputDir(this.threadId);
+    const storedTurnContextMarkdown = await readLatestTurnContextMarkdown(turnOutputDir);
+    const priorMessagesBeforeTurn = await this.services.persistence.listMessages(this.threadId);
+    const followUpSourceContext = resolveFollowUpSourceContext(priorMessagesBeforeTurn, initialInput);
+    const effectiveRequest = followUpSourceContext?.effectiveRequest ?? initialInput;
+    const workspaceCwd = thread.cwd ?? turnOutputDir;
+    const requestedDeliverableExtensions = resolveRequestedDeliverableExtensions(effectiveRequest);
+    const outputFilesBeforeTurn = await snapshotOutputFiles(turnOutputDir);
     const gpa = await this.#ensureGpa();
     const knowledgeEnabled = gpa.knowledgeEnabled;
     const enabledPluginIds = await this.services.getEnabledPluginIdsForThread(this.threadId);
@@ -1283,7 +1292,7 @@ class ThreadSessionRuntime {
     const model = resolveModel(this.services.config, thread.modelId);
     const provider = resolveProvider(this.services.config, thread.providerId);
     const skillSelectionQuery = [
-      initialInput,
+      effectiveRequest,
       this.#gpa.planTasks.map((task) => task.title).join("\n")
     ]
       .filter(Boolean)
@@ -1338,7 +1347,8 @@ class ThreadSessionRuntime {
       activeMcpServerIds,
       knowledgeEnabled,
       agentToolsEnabled,
-      thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only"
+      thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
+      selectedMcpServerIds.length > 0 || explicitlyRequestedMcp
     );
     const selectedMcpToolsOnly = selectedMcpServerIds.length > 0
       ? tools.filter((tool) => tool.name === "mcp.list_tools" || tool.name === "mcp.call")
@@ -1402,7 +1412,7 @@ class ThreadSessionRuntime {
         payload: { thread: runningThread },
         createdAt: runningThread.updatedAt
       });
-      const priorMessages = await this.services.persistence.listMessages(this.threadId);
+      const priorMessages = priorMessagesBeforeTurn;
       const userMessageMetadata = buildUserMessageMetadata(initialInput, displayContent, attachments);
       const queuedUserMessage = await this.services.persistence.createQueuedUserMessage(queueItemId, {
         threadId: this.threadId,
@@ -1559,6 +1569,7 @@ class ThreadSessionRuntime {
 
       let turnTokenUsage = createEmptyTokenUsage();
       let activeDraftId: string | null = null;
+      let latestRequestedArtifactEvidence: RequestedArtifactEvidence[] = [];
 
       try {
         let transcript = compactTranscript(history);
@@ -1571,7 +1582,6 @@ class ThreadSessionRuntime {
       } else if (!model.supportsMultimodalInput) {
         transcript = transcript.map((message) => ({ ...message, attachments: undefined }));
       }
-      const workspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
       const policyKey = normalizeWorkspacePolicyKey(workspaceCwd);
       const executionPolicy = this.services.config.projectExecutionPolicies?.[policyKey] ?? DEFAULT_PROJECT_EXECUTION_POLICY;
       const expectedFileVersions = new Map<string, string>();
@@ -1935,7 +1945,7 @@ class ThreadSessionRuntime {
       const persistBlockedToolCall = async (
         toolCall: RuntimeToolCall,
         reason: string,
-        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority"
+        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "followup_source_scope"
       ) => {
         const toolRecord = await this.services.persistence.recordToolCall({
           threadId: this.threadId,
@@ -2152,7 +2162,7 @@ class ThreadSessionRuntime {
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${buildStoredTurnContextPrompt(storedTurnContextMarkdown, model.contextWindow)}\n\n${buildFollowUpSourcePrompt(followUpSourceContext)}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
           useTextToolProtocol
             ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
             : ""
@@ -3108,12 +3118,28 @@ class ThreadSessionRuntime {
           decision.toolCalls.length === 0 &&
           decision.endTurn
         ) {
+          latestRequestedArtifactEvidence = await collectRequestedArtifactEvidence({
+            outputDir: turnOutputDir,
+            baseline: outputFilesBeforeTurn,
+            requestedExtensions: requestedDeliverableExtensions
+          });
+          const artifactValidationReasons = validateRequestedArtifactAlignment({
+            requestedExtensions: requestedDeliverableExtensions,
+            evidence: latestRequestedArtifactEvidence,
+            topicAnchors: extractTaskTopicAnchors(followUpSourceContext?.previousRequest ?? effectiveRequest)
+          });
+          const deliveredPaths = [...new Set([
+            ...managedWriteCompletion.deliveredPaths,
+            ...latestRequestedArtifactEvidence.map((artifact) => artifact.absolutePath)
+          ])];
           const standardCompletion = validateStandardCompletion({
             decision,
-            originalRequest: initialInput,
-            requiresFileDelivery: isProjectFileMutationRequest(initialInput),
-            deliveredPaths: [...managedWriteCompletion.deliveredPaths],
-            successfulEvidence: successfulToolEvidence
+            originalRequest: effectiveRequest,
+            requiresFileDelivery: isProjectFileMutationRequest(initialInput) || requestedDeliverableExtensions.length > 0,
+            deliveredPaths,
+            successfulEvidence: successfulToolEvidence,
+            verifiedArtifactPaths: latestRequestedArtifactEvidence.filter((artifact) => artifact.verified).map((artifact) => artifact.absolutePath),
+            artifactValidationReasons
           });
           if (!standardCompletion.valid) {
             standardCompletionAttempts += 1;
@@ -3184,7 +3210,7 @@ class ThreadSessionRuntime {
             turnRunId: turn.id,
             originalRequestPreview: initialInput.slice(0, 500),
             candidateSummaryPreview: (assistantMessage ?? "").slice(0, 500),
-            deliveredPaths: [...managedWriteCompletion.deliveredPaths],
+            deliveredPaths,
             successfulEvidenceCount: successfulToolEvidence.length
           });
           await updateDraft("auditing", assistantMessage ?? streamedVisibleContent);
@@ -3198,10 +3224,11 @@ class ThreadSessionRuntime {
                 transcript: [{
                   role: "user",
                   content: buildStandardCompletionAuditInstruction({
-                    originalRequest: initialInput,
+                    originalRequest: effectiveRequest,
                     candidateSummary: assistantMessage ?? "",
-                    deliveredPaths: [...managedWriteCompletion.deliveredPaths],
-                    successfulEvidence: successfulToolEvidence
+                    deliveredPaths,
+                    successfulEvidence: successfulToolEvidence,
+                    artifactEvidence: latestRequestedArtifactEvidence
                   })
                 }],
                 availableTools: [],
@@ -3290,7 +3317,7 @@ class ThreadSessionRuntime {
             } else {
               await this.services.log("turn.standard_completion_audit_accepted", this.threadId, {
                 turnRunId: turn.id,
-                deliveredPaths: [...managedWriteCompletion.deliveredPaths],
+                deliveredPaths,
                 successfulEvidenceCount: successfulToolEvidence.length
               });
             }
@@ -3737,9 +3764,46 @@ class ThreadSessionRuntime {
             await compactContext("task_completed", true);
           }
           await persistRecoveredEpisodes();
+          const completedAt = new Date().toISOString();
+          const assistantResult = decision.assistantMessage?.trim()
+            || [...transcript].reverse().find((message) => message.role === "assistant")?.content.trim()
+            || "";
+          try {
+            await registerRequestedArtifacts(
+              this.services.persistence,
+              this.threadId,
+              turn.id,
+              turnOutputDir,
+              latestRequestedArtifactEvidence
+            );
+            const verifiedPaths = successfulToolEvidence.flatMap((item) => item.verifiedPaths ?? []);
+            await writeTurnContextMarkdown({
+              outputDir: turnOutputDir,
+              turnRunId: turn.id,
+              completedAt,
+              userRequest: initialInput,
+              effectiveRequest,
+              assistantResult,
+              sourceMcpServerIds: [...new Set([
+                ...selectedMcpServerIds,
+                ...(followUpSourceContext?.sourceMcpServerIds ?? [])
+              ])],
+              sourcePaths: [
+                ...(followUpSourceContext?.sourcePaths ?? []),
+                ...verifiedPaths,
+                ...managedWriteCompletion.deliveredPaths,
+                ...latestRequestedArtifactEvidence.map((artifact) => artifact.absolutePath)
+              ]
+            });
+          } catch (error) {
+            await this.services.log("turn.context_markdown_write_failed", this.threadId, {
+              turnRunId: turn.id,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
           await this.services.persistence.finishTurn(turn.id, {
             status: "completed",
-            completedAt: new Date().toISOString()
+            completedAt
           });
           terminalThread = await this.services.persistence.updateThread(this.threadId, {
             // GOAL and PLAN end a response, not the user task. The confirmed
@@ -3809,6 +3873,24 @@ class ThreadSessionRuntime {
               turnRunId: turn.id,
               toolName: toolCall.name,
               projectCwd: thread.cwd,
+              reason
+            });
+            continue;
+          }
+          const followUpSourceValidation = validateFollowUpSourceToolCall({
+            context: followUpSourceContext,
+            toolCall,
+            workspaceCwd
+          });
+          if (!followUpSourceValidation.allowed) {
+            const reason = followUpSourceValidation.message ?? "This tool call is outside the inherited follow-up source scope.";
+            appendBlockedToolCallResult(toolCall, reason);
+            await persistBlockedToolCall(toolCall, reason, "followup_source_scope");
+            transcript.push({ role: "user", content: reason });
+            await this.services.log("turn.followup_source_blocked", this.threadId, {
+              turnRunId: turn.id,
+              previousTurnRunId: followUpSourceContext?.previousTurnRunId ?? null,
+              toolName: toolCall.name,
               reason
             });
             continue;
@@ -5173,10 +5255,15 @@ class ThreadSessionRuntime {
     accessibleMcpServerIds: string[],
     knowledgeEnabled: boolean,
     agentToolsEnabled: boolean,
-    childReadOnly = false
+    childReadOnly = false,
+    waitForMcpTools = false
   ) {
-    await this.services.mcp.refresh(accessibleMcpServerIds);
-    const mcpTools = await this.services.mcp.listToolSpecs(accessibleMcpServerIds);
+    if (waitForMcpTools) {
+      await this.services.mcp.warmToolCache(accessibleMcpServerIds);
+    } else {
+      void this.services.mcp.warmToolCache(accessibleMcpServerIds);
+    }
+    const mcpTools = this.services.mcp.listCachedToolSpecs(accessibleMcpServerIds);
     const { direct } = this.services.toolRuntime.listToolSpecs(mcpTools);
     const gpaEnabled = this.#gpa.stage !== "off";
     const imageReady = !!resolveDefaultModalityModel(this.services.config, "image");
@@ -6347,19 +6434,197 @@ export function buildGpaPlanProgressCheckpointInstruction(task: GpaState["planTa
   ].join(" ");
 }
 
+export function resolveRequestedDeliverableExtensions(request: string): string[] {
+  const extensions = new Set<string>();
+  if (/(?:\bdocx?\b|\bword\b|word\s*文档|doc\s*文档)/i.test(request)) extensions.add(".docx");
+  if (/\bpdf\b/i.test(request)) extensions.add(".pdf");
+  if (/\b(?:pptx?|powerpoint)\b/i.test(request)) extensions.add(".pptx");
+  if (/\b(?:xlsx?|excel)\b/i.test(request)) extensions.add(".xlsx");
+  if (/\bcsv\b/i.test(request)) extensions.add(".csv");
+  if (/(?:\bmarkdown\b|\.md\b)/i.test(request)) extensions.add(".md");
+  return [...extensions];
+}
+
+export function extractTaskTopicAnchors(request: string): string[] {
+  const anchors = new Set<string>();
+  const ignored = new Set(["MCP", "HTTP", "HTTPS", "API", "SELECTED", "SERVER", "DOC", "DOCX", "WORD", "PDF"]);
+  for (const match of request.matchAll(/\b[A-Z][A-Z0-9_.-]{1,40}\b/g)) {
+    const value = match[0].toUpperCase();
+    if (!ignored.has(value)) anchors.add(match[0]);
+  }
+  for (const phrase of ["项目结项", "自动化提单", "自动提单", "自动化审批", "自动审批"]) {
+    if (request.includes(phrase)) anchors.add(phrase);
+  }
+  return [...anchors].slice(0, 12);
+}
+
+async function listOutputFiles(root: string, depth = 0): Promise<string[]> {
+  if (depth > 2) return [];
+  let entries: Array<import("node:fs").Dirent>;
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of entries) {
+    if (entry.name === "context") continue;
+    const absolutePath = path.join(root, entry.name);
+    if (entry.isFile()) files.push(absolutePath);
+    else if (entry.isDirectory()) files.push(...await listOutputFiles(absolutePath, depth + 1));
+  }
+  return files;
+}
+
+export async function snapshotOutputFiles(outputDir: string): Promise<Map<string, string>> {
+  const snapshot = new Map<string, string>();
+  for (const filePath of await listOutputFiles(outputDir)) {
+    try {
+      const stats = await fs.stat(filePath);
+      snapshot.set(path.resolve(filePath), `${stats.size}:${stats.mtimeMs}`);
+    } catch {
+      // A concurrently removed output is absent from the baseline by design.
+    }
+  }
+  return snapshot;
+}
+
+function mimeTypeForExtension(extension: string): string | null {
+  switch (extension) {
+    case ".docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case ".pdf": return "application/pdf";
+    case ".pptx": return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    case ".xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case ".csv": return "text/csv";
+    case ".md": return "text/markdown";
+    default: return null;
+  }
+}
+
+async function extractArtifactPreview(filePath: string, extension: string): Promise<{ preview: string; verified: boolean }> {
+  try {
+    if (extension === ".docx") {
+      const result = await mammoth.extractRawText({ path: filePath });
+      const preview = result.value.replace(/\s+/g, " ").trim().slice(0, 12_000);
+      return { preview, verified: preview.length > 0 };
+    }
+    if ([".md", ".csv"].includes(extension)) {
+      const preview = (await fs.readFile(filePath, "utf8")).replace(/\s+/g, " ").trim().slice(0, 12_000);
+      return { preview, verified: preview.length > 0 };
+    }
+    const stats = await fs.stat(filePath);
+    return { preview: path.basename(filePath), verified: stats.size > 0 };
+  } catch {
+    return { preview: "", verified: false };
+  }
+}
+
+export async function collectRequestedArtifactEvidence(input: {
+  outputDir: string;
+  baseline: ReadonlyMap<string, string>;
+  requestedExtensions: string[];
+}): Promise<RequestedArtifactEvidence[]> {
+  if (input.requestedExtensions.length === 0) return [];
+  const requested = new Set(input.requestedExtensions.map((extension) => extension.toLowerCase()));
+  const evidence: RequestedArtifactEvidence[] = [];
+  for (const filePath of await listOutputFiles(input.outputDir)) {
+    const extension = path.extname(filePath).toLowerCase();
+    if (!requested.has(extension)) continue;
+    const absolutePath = path.resolve(filePath);
+    try {
+      const stats = await fs.stat(absolutePath);
+      const fingerprint = `${stats.size}:${stats.mtimeMs}`;
+      if (input.baseline.get(absolutePath) === fingerprint) continue;
+      const buffer = await fs.readFile(absolutePath);
+      const extracted = await extractArtifactPreview(absolutePath, extension);
+      evidence.push({
+        absolutePath,
+        relativePath: path.relative(input.outputDir, absolutePath),
+        extension,
+        mimeType: mimeTypeForExtension(extension),
+        sizeBytes: stats.size,
+        sha256: createHash("sha256").update(buffer).digest("hex"),
+        preview: extracted.preview,
+        verified: extracted.verified
+      });
+    } catch {
+      // The validation result below treats a disappeared or unreadable file as missing.
+    }
+  }
+  return evidence;
+}
+
+export function validateRequestedArtifactAlignment(input: {
+  requestedExtensions: string[];
+  evidence: RequestedArtifactEvidence[];
+  topicAnchors: string[];
+}): string[] {
+  if (input.requestedExtensions.length === 0) return [];
+  if (input.evidence.length === 0) {
+    return [`No newly created ${input.requestedExtensions.join("/")} deliverable was found in the current thread output directory.`];
+  }
+  const verified = input.evidence.filter((artifact) => artifact.verified);
+  if (verified.length === 0) {
+    return ["The requested deliverable exists but could not be opened or its content is empty."];
+  }
+  if (input.topicAnchors.length === 0) return [];
+  const searchable = verified.map((artifact) => artifact.preview).join("\n").toLowerCase();
+  const matched = input.topicAnchors.filter((anchor) => searchable.includes(anchor.toLowerCase()));
+  const minimumMatches = Math.min(2, input.topicAnchors.length);
+  if (matched.length < minimumMatches) {
+    return [
+      `The deliverable content is unrelated to the inherited task. Expected topic anchors include ${input.topicAnchors.join(", ")}; matched ${matched.length}.`
+    ];
+  }
+  return [];
+}
+
+async function registerRequestedArtifacts(
+  persistence: RuntimePersistence,
+  threadId: string,
+  turnRunId: string,
+  outputDir: string,
+  evidence: RequestedArtifactEvidence[]
+): Promise<void> {
+  const existing = await persistence.listThreadArtifacts(threadId);
+  const existingKeys = new Set(existing.map((artifact) => `${path.resolve(artifact.absolutePath)}:${artifact.sha256 ?? ""}`));
+  for (const artifact of evidence.filter((entry) => entry.verified)) {
+    const key = `${artifact.absolutePath}:${artifact.sha256}`;
+    if (existingKeys.has(key)) continue;
+    await persistence.addArtifact({
+      threadId,
+      turnRunId,
+      messageId: null,
+      toolCallId: null,
+      artifactKind: artifact.extension === ".docx" ? "document" : "file",
+      displayName: path.basename(artifact.absolutePath),
+      absolutePath: artifact.absolutePath,
+      relativePath: path.relative(outputDir, artifact.absolutePath),
+      mimeType: artifact.mimeType,
+      sizeBytes: artifact.sizeBytes,
+      sha256: artifact.sha256,
+      sourceKind: "agent",
+      isUserVisible: true,
+      status: "ready"
+    });
+  }
+}
+
 export function validateStandardCompletion(input: {
   decision: Pick<ProviderTurnDecision, "assistantMessage" | "toolCalls" | "endTurn" | "goalCompleted">;
   originalRequest?: string;
   requiresFileDelivery: boolean;
   deliveredPaths: string[];
   successfulEvidence: SuccessfulToolEvidence[];
+  verifiedArtifactPaths?: string[];
+  artifactValidationReasons?: string[];
 }): StandardCompletionValidationResult {
   const reasons: string[] = [];
   const assistantMessage = input.decision.assistantMessage?.trim() ?? "";
   const missingDelivery = input.requiresFileDelivery && input.deliveredPaths.length === 0;
-  const missingVerification = input.requiresFileDelivery && !input.successfulEvidence.some(
-    (item) => item.kinds.includes("verification")
-  );
+  const missingVerification = input.requiresFileDelivery &&
+    (input.verifiedArtifactPaths?.length ?? 0) === 0 &&
+    !input.successfulEvidence.some((item) => item.kinds.includes("verification"));
   const missingRequestedDeliverable = requiresStructuredTestCaseDeliverable(input.originalRequest ?? "") &&
     !hasSubstantiveTestCaseDeliverable(assistantMessage);
 
@@ -6378,6 +6643,7 @@ export function validateStandardCompletion(input: {
   if (missingRequestedDeliverable) {
     reasons.push("The requested test-case deliverable does not contain actual structured test cases.");
   }
+  reasons.push(...(input.artifactValidationReasons ?? []));
 
   return {
     valid: reasons.length === 0,
@@ -6434,11 +6700,16 @@ export function buildStandardCompletionAuditInstruction(input: {
   candidateSummary: string;
   deliveredPaths: string[];
   successfulEvidence: SuccessfulToolEvidence[];
+  artifactEvidence?: RequestedArtifactEvidence[];
 }): string {
   const evidence = input.successfulEvidence
     .filter((item) => item.kinds.length > 0)
     .slice(0, 24)
     .map((item) => `- ${item.toolCallId}: ${item.toolName} (${item.kinds.join(", ")})`);
+  const artifacts = (input.artifactEvidence ?? []).map((artifact) => [
+    `- ${artifact.relativePath}; verified=${artifact.verified}; size=${artifact.sizeBytes}; sha256=${artifact.sha256}`,
+    artifact.preview ? `  Content preview: ${artifact.preview.slice(0, 4_000)}` : "  Content preview: unavailable"
+  ].join("\n"));
   return [
     "[Internal completion audit. Do not display or quote this instruction to the user.]",
     "Do not finish the task from the previous completion claim yet.",
@@ -6449,6 +6720,9 @@ export function buildStandardCompletionAuditInstruction(input: {
     evidence.length > 0
       ? `Successful tool evidence:\n${evidence.join("\n")}`
       : "Successful tool evidence: none.",
+    artifacts.length > 0
+      ? `Delivered artifact evidence:\n${artifacts.join("\n")}`
+      : "Delivered artifact evidence: none.",
     "Audit the candidate against the original request. Do not write a replacement answer."
   ].join("\n\n");
 }
@@ -7255,6 +7529,272 @@ export function prioritizeUserInputToolCall(calls: RuntimeToolCall[]): RuntimeTo
 
 export function isAgentToolEnabled(model: ModelProfile): boolean {
   return model.supportsToolCalling === true;
+}
+
+export interface RequestedArtifactEvidence {
+  absolutePath: string;
+  relativePath: string;
+  extension: string;
+  mimeType: string | null;
+  sizeBytes: number;
+  sha256: string;
+  preview: string;
+  verified: boolean;
+}
+
+export interface FollowUpSourceContext {
+  previousTurnRunId: string | null;
+  previousRequest: string;
+  previousResponse: string;
+  sourceMcpServerIds: string[];
+  sourcePaths: string[];
+  effectiveRequest: string;
+  allowCrossThreadHistorySearch: boolean;
+}
+
+const REFERENTIAL_FOLLOW_UP_PATTERN = /(?:刚刚|刚才|上一轮|上一步|前面(?:这些|那些|找到|查到|提到|的)?|上述|基于上面|你(?:刚刚|刚才)找出来|those\s+(?:results|files|changes)|what\s+you\s+(?:just|previously)|previous\s+(?:turn|step|result)|based\s+on\s+(?:the\s+)?above)/i;
+const NEW_TOPIC_PATTERN = /(?:换个话题|另一个问题|新问题|与前面无关|ignore\s+(?:the\s+)?previous|new\s+topic|unrelated\s+question)/i;
+const EXPLICIT_SOURCE_OVERRIDE_PATTERN = /(?:(?:改用|换用|切换到|改查|转到|另查).{0,80}(?:项目|仓库|mcp|服务)|(?:new|different|another)\s+(?:project|repository|repo|mcp|source)|use\s+.{1,80}\s+instead)/i;
+const HISTORY_SEARCH_PATTERN = /(?:历史输出|以前的输出|其他任务|别的任务|所有输出目录|跨任务|historical\s+outputs?|other\s+(?:tasks?|threads?)|search\s+all\s+outputs?)/i;
+
+export function isReferentialFollowUp(input: string): boolean {
+  return REFERENTIAL_FOLLOW_UP_PATTERN.test(input) && !NEW_TOPIC_PATTERN.test(input);
+}
+
+function isFinalAssistantHistoryMessage(message: MessageRecord): boolean {
+  if (message.role !== "assistant") return false;
+  if (!message.metadataJson) return true;
+  try {
+    const metadata = JSON.parse(message.metadataJson) as { displayKind?: unknown };
+    return metadata.displayKind !== "commentary" && metadata.displayKind !== "tool_batch";
+  } catch {
+    return true;
+  }
+}
+
+function extractSourcePaths(content: string): string[] {
+  const paths = new Set<string>();
+  for (const match of content.matchAll(/(?:[A-Za-z]:[\\/][^\s`"'<>]+|(?:src|apps|packages|tests)[\\/][^\s`"'<>]+)/g)) {
+    paths.add(match[0].replace(/[),.;:]+$/, ""));
+    if (paths.size >= 24) break;
+  }
+  return [...paths];
+}
+
+export function resolveFollowUpSourceContext(
+  messages: MessageRecord[],
+  currentInput: string
+): FollowUpSourceContext | null {
+  if (!isReferentialFollowUp(currentInput)) return null;
+  if (extractSelectedMcpServerIds(currentInput).length > 0 || EXPLICIT_SOURCE_OVERRIDE_PATTERN.test(currentInput)) return null;
+
+  let previousUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      previousUserIndex = index;
+      break;
+    }
+  }
+  if (previousUserIndex < 0) return null;
+
+  const previousUser = messages[previousUserIndex]!;
+  const previousTurnMessages = messages.slice(previousUserIndex + 1);
+  const previousAssistant = [...previousTurnMessages].reverse().find(isFinalAssistantHistoryMessage)
+    ?? [...previousTurnMessages].reverse().find((message) => message.role === "assistant");
+  if (!previousAssistant?.content.trim()) return null;
+
+  const previousRequest = previousUser.content.trim();
+  const previousResponse = previousAssistant.content.trim().slice(0, 24_000);
+  const sourceMcpServerIds = extractSelectedMcpServerIds(previousRequest);
+  return {
+    previousTurnRunId: previousUser.turnRunId ?? previousAssistant.turnRunId ?? null,
+    previousRequest,
+    previousResponse,
+    sourceMcpServerIds,
+    sourcePaths: extractSourcePaths(previousResponse),
+    effectiveRequest: [
+      "Previous task that the current follow-up refers to:",
+      previousRequest,
+      "Current follow-up request:",
+      currentInput.trim()
+    ].join("\n"),
+    allowCrossThreadHistorySearch: HISTORY_SEARCH_PATTERN.test(currentInput)
+  };
+}
+
+export function buildFollowUpSourcePrompt(context: FollowUpSourceContext | null): string {
+  if (!context) return "";
+  return [
+    "## Follow-up Source Continuity",
+    "The current request explicitly refers to the immediately preceding turn. Treat that turn as the authoritative source; do not guess a different project or substitute unrelated historical outputs.",
+    `Previous user request:\n${context.previousRequest.slice(0, 8_000)}`,
+    `Previous verified response:\n${context.previousResponse.slice(0, 16_000)}`,
+    context.sourceMcpServerIds.length > 0
+      ? `Inherited source MCP server(s): ${context.sourceMcpServerIds.join(", ")}. Re-query only these servers if the retained response is insufficient.`
+      : "No MCP source was recorded for the preceding turn; use only its retained response and verified paths unless the user broadens scope.",
+    context.sourcePaths.length > 0
+      ? `Previously identified paths: ${context.sourcePaths.join(", ")}.`
+      : "No local source paths were identified in the preceding response.",
+    context.allowCrossThreadHistorySearch
+      ? "The user explicitly allowed historical-output search for this follow-up."
+      : "Do not inspect sibling thread directories under .codexh/outputs. An empty current output directory does not mean the preceding conversation context is missing."
+  ].join("\n\n");
+}
+
+export function resolveTurnContextCapsuleTokenBudget(contextWindow: number): number {
+  return Math.max(1_000, Math.min(24_000, Math.floor(Math.max(1, contextWindow) * 0.05)));
+}
+
+export async function readLatestTurnContextMarkdown(outputDir: string): Promise<string | null> {
+  const contextDir = path.join(outputDir, "context");
+  try {
+    const entries = await fs.readdir(contextDir, { withFileTypes: true });
+    const turnFiles = await Promise.all(entries
+      .filter((entry) => entry.isFile() && /^turn-.+\.md$/i.test(entry.name))
+      .map(async (entry) => {
+        const filePath = path.join(contextDir, entry.name);
+        const [content, stats] = await Promise.all([fs.readFile(filePath, "utf8"), fs.stat(filePath)]);
+        return { name: entry.name, content: content.trim(), modifiedAt: stats.mtimeMs };
+      }));
+    const history = turnFiles
+      .filter((entry) => entry.content)
+      .sort((left, right) => right.modifiedAt - left.modifiedAt || right.name.localeCompare(left.name))
+      .map((entry) => entry.content)
+      .join("\n\n---\n\n");
+    if (history) return history;
+    const latest = await fs.readFile(path.join(contextDir, "latest.md"), "utf8");
+    return latest.trim() || null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+export function buildStoredTurnContextPrompt(markdown: string | null, contextWindow: number): string {
+  if (!markdown?.trim()) return "";
+  const budget = resolveTurnContextCapsuleTokenBudget(contextWindow);
+  const storedCapsules = markdown.split(/\n\n---\n\n(?=# Conversation Turn Context)/g).filter(Boolean);
+  const capsuleCount = Math.min(storedCapsules.length, Math.max(2, Math.min(6, Math.floor(budget / 400))));
+  const capsules = storedCapsules.slice(0, capsuleCount);
+  const newestBudget = capsules.length === 1 ? budget : Math.floor(budget * 0.5);
+  const olderBudget = capsules.length > 1 ? Math.max(128, Math.floor((budget - newestBudget) / (capsules.length - 1))) : 0;
+  const retainedHistory = capsules.map((capsule, index) => truncateToRuntimeTokenBudget(
+    capsule,
+    index === 0 ? newestBudget : olderBudget
+  )).join("\n\n---\n\n");
+  return [
+    "## Previous Turn Context Capsules",
+    "These runtime-owned Markdown capsules summarize recent completed turns in newest-first order. Use relevant earlier turns for continuity; the current user request overrides them when the user clearly starts a new topic.",
+    retainedHistory
+  ].join("\n\n");
+}
+
+export async function writeTurnContextMarkdown(input: {
+  outputDir: string;
+  turnRunId: string;
+  completedAt: string;
+  userRequest: string;
+  effectiveRequest: string;
+  assistantResult: string;
+  sourceMcpServerIds: string[];
+  sourcePaths: string[];
+}): Promise<string> {
+  const contextDir = path.join(input.outputDir, "context");
+  await fs.mkdir(contextDir, { recursive: true });
+  const uniquePaths = [...new Set(input.sourcePaths.filter(Boolean))];
+  const markdown = [
+    "# Conversation Turn Context",
+    "",
+    `- Turn run: \`${input.turnRunId}\``,
+    `- Completed at: \`${input.completedAt}\``,
+    `- MCP sources: ${input.sourceMcpServerIds.length > 0 ? input.sourceMcpServerIds.map((id) => `\`${id}\``).join(", ") : "none"}`,
+    "",
+    "## User Request",
+    "",
+    input.userRequest.trim(),
+    "",
+    "## Effective Task Context",
+    "",
+    input.effectiveRequest.trim(),
+    "",
+    "## Assistant Result",
+    "",
+    input.assistantResult.trim(),
+    "",
+    "## Verified Sources And Deliverables",
+    "",
+    ...(uniquePaths.length > 0 ? uniquePaths.map((filePath) => `- \`${filePath}\``) : ["- none"]),
+    ""
+  ].join("\n");
+  const turnFile = path.join(contextDir, `turn-${input.turnRunId}.md`);
+  const latestFile = path.join(contextDir, "latest.md");
+  await fs.writeFile(turnFile, markdown, "utf8");
+  const temporaryLatest = path.join(contextDir, `.latest-${input.turnRunId}.tmp`);
+  await fs.writeFile(temporaryLatest, markdown, "utf8");
+  await fs.rename(temporaryLatest, latestFile).catch(async () => {
+    await fs.rm(latestFile, { force: true });
+    await fs.rename(temporaryLatest, latestFile);
+  });
+  const historyMarkdown = await readLatestTurnContextMarkdown(input.outputDir);
+  if (historyMarkdown) {
+    const historyFile = path.join(contextDir, "history.md");
+    const temporaryHistory = path.join(contextDir, `.history-${input.turnRunId}.tmp`);
+    await fs.writeFile(temporaryHistory, historyMarkdown, "utf8");
+    await fs.rename(temporaryHistory, historyFile).catch(async () => {
+      await fs.rm(historyFile, { force: true });
+      await fs.rename(temporaryHistory, historyFile);
+    });
+  }
+  return turnFile;
+}
+
+function normalizeGuardPath(value: string): string {
+  return value.replace(/\//g, "\\").replace(/\\+/g, "\\").toLowerCase();
+}
+
+export function validateFollowUpSourceToolCall(input: {
+  context: FollowUpSourceContext | null;
+  toolCall: Pick<RuntimeToolCall, "name" | "arguments">;
+  workspaceCwd: string;
+}): { allowed: boolean; message?: string } {
+  const context = input.context;
+  if (!context) return { allowed: true };
+
+  if (input.toolCall.name === "mcp.call" && context.sourceMcpServerIds.length > 0) {
+    const server = String(input.toolCall.arguments.server ?? "");
+    if (server && !context.sourceMcpServerIds.includes(server)) {
+      return {
+        allowed: false,
+        message: `This follow-up is locked to the previous MCP source (${context.sourceMcpServerIds.join(", ")}); MCP server ${server} is unrelated.`
+      };
+    }
+  }
+
+  if (context.allowCrossThreadHistorySearch) return { allowed: true };
+  const candidates: string[] = [];
+  if (["fs.read_file", "fs.read_directory", "code.search", "code.outline"].includes(input.toolCall.name)) {
+    for (const key of ["path", "cwd", "root", "directory"]) {
+      const value = input.toolCall.arguments[key];
+      if (typeof value === "string") candidates.push(value);
+    }
+  }
+  if (input.toolCall.name === "shell.exec") {
+    const command = input.toolCall.arguments.command;
+    if (typeof command === "string") candidates.push(command);
+  }
+  const workspace = normalizeGuardPath(input.workspaceCwd);
+  for (const candidate of candidates) {
+    const normalized = normalizeGuardPath(candidate);
+    const referencesGlobalOutputs = normalized.includes(".codexh\\outputs");
+    const referencesCurrentThread = normalized.includes(workspace);
+    if (referencesGlobalOutputs && !referencesCurrentThread) {
+      return {
+        allowed: false,
+        message: "This follow-up refers to the immediately preceding turn. Searching sibling .codexh/outputs task directories is blocked because it can substitute an unrelated project. Use the retained turn context or its inherited MCP source instead."
+      };
+    }
+  }
+  return { allowed: true };
 }
 
 export function extractSelectedMcpServerIds(input: string): string[] {

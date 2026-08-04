@@ -160,6 +160,23 @@ describe("McpManager", () => {
       expect.objectContaining({ server: "stocks", name: "summarize" })
     ]);
   });
+
+  it("serves a stale cached tool directory without waiting for network refresh", async () => {
+    const listTools = vi.fn().mockResolvedValue({
+      tools: [{ name: "read", inputSchema: { type: "object" } }]
+    });
+    const manager = new McpManager(
+      [baseConfig],
+      vi.fn().mockResolvedValue({ listTools }),
+      { toolCacheTtlMs: -1 }
+    );
+
+    await manager.warmToolCache(["stocks"]);
+    expect(manager.listCachedToolSpecs(["stocks"])).toEqual([
+      expect.objectContaining({ namespace: "stocks", name: "read" })
+    ]);
+    expect(listTools).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("repository pagination MCP contract", () => {

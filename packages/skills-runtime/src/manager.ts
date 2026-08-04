@@ -30,6 +30,25 @@ const CODING_PRIORITY_SKILLS = [
   "test-driven-development"
 ] as const;
 
+const DELIVERABLE_SKILL_BOOSTS: Record<string, number> = {
+  "artifact-writer": 32,
+  "file-protocol": 24
+};
+
+function isFileDeliverableQuery(query: string): boolean {
+  return /(?:\b(?:docx?|word|pdf|pptx?|xlsx?|csv|markdown)\b|文档|报告|交付文件|导出|下载)/i.test(query);
+}
+
+function isProductSkillEligible(skill: SkillMetadata, query: string): boolean {
+  if (!skill.name.startsWith("notion-")) return true;
+  return /\bnotion\b/i.test(query);
+}
+
+function skillProductFamily(skill: SkillMetadata): string | null {
+  if (skill.name.startsWith("notion-")) return "notion";
+  return null;
+}
+
 /** Map skill domains / categories onto the task-domain vocabulary used for scoring. */
 export function skillDomainAliases(domain: string | undefined): string[] {
   const normalized = normalizeSkillDomain(domain ?? "通用");
@@ -79,6 +98,9 @@ export function tokenizeSkillQuery(query: string): string[] {
 }
 
 export function scoreSkillForQuery(skill: SkillMetadata, query: string, domains: string[]): number {
+  if (!isProductSkillEligible(skill, query)) {
+    return 0;
+  }
   let score = 0;
   const aliases = skillDomainAliases(skill.domain);
   if (domains.some((domain) => aliases.includes(domain))) {
@@ -108,6 +130,9 @@ export function scoreSkillForQuery(skill: SkillMetadata, query: string, domains:
 
   if (skill.allowImplicitInvocation) {
     score += 1;
+  }
+  if (isFileDeliverableQuery(query)) {
+    score += DELIVERABLE_SKILL_BOOSTS[skill.name] ?? 0;
   }
   return score;
 }
@@ -175,11 +200,17 @@ export class SkillsManager {
       .sort((left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name));
 
     const recommended: SkillMetadata[] = [];
+    const recommendedProductFamilies = new Set<string>();
     const pushUnique = (skill: SkillMetadata | undefined) => {
       if (!skill || recommended.some((entry) => entry.id === skill.id) || recommended.length >= 3) {
         return;
       }
+      const family = skillProductFamily(skill);
+      if (family && recommendedProductFamilies.has(family)) {
+        return;
+      }
       recommended.push(skill);
+      if (family) recommendedProductFamilies.add(family);
     };
 
     // Prefer coding priority skills when the task is coding/frontend oriented.
