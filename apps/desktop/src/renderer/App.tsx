@@ -1867,9 +1867,10 @@ export function App() {
       }
       if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "upstream_service_unavailable") {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
-          appendRuntimeStatus(typed.threadId, "服务暂时不可用，正在等待后重试", typed.createdAt);
+          const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
+          appendRuntimeStatus(typed.threadId, `服务暂时不可用，正在等待后重试（第 ${attempt} 次）`, typed.createdAt);
           if (notificationThreadId) {
-            updateThreadNotification(notificationThreadId, "服务暂时不可用，正在等待后重试。", typed.createdAt);
+            updateThreadNotification(notificationThreadId, `服务暂时不可用，正在等待后重试（第 ${attempt} 次）。`, typed.createdAt);
           }
           setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         }

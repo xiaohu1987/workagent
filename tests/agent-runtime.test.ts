@@ -63,6 +63,7 @@ import {
   estimateRuntimeTokens,
   isUpstreamContextOverflowError,
   isEmptyProviderBadRequestError,
+  isEmptyProviderInternalServerError,
   isUpstreamServiceUnavailableError,
   isFunctionCallProtocolError,
   isModelRateLimitError,
@@ -435,6 +436,9 @@ describe("turn context Markdown capsules", () => {
       expect(prompt).toContain("Previous Turn Context Capsules");
       expect(prompt).toContain("查 A2 和 TM 代码");
       expect(prompt).toContain("把刚刚的代码总结成 Word");
+      const followUpHistory = buildStoredTurnContextPrompt(history, 500_000, { skipNewest: true });
+      expect(followUpHistory).toContain("查 A2 和 TM 代码");
+      expect(followUpHistory).not.toContain("把刚刚的代码总结成 Word");
       expect(await fs.readFile(path.join(outputDir, "context", "history.md"), "utf8")).toContain("turn-123");
       expect(resolveTurnContextCapsuleTokenBudget(8_000)).toBe(1_000);
       expect(resolveTurnContextCapsuleTokenBudget(500_000)).toBe(24_000);
@@ -2025,6 +2029,9 @@ describe("context overflow recovery", () => {
   it("distinguishes empty bad requests from transient service failures", () => {
     expect(isEmptyProviderBadRequestError(new Error("400 status code (no body)"))).toBe(true);
     expect(isEmptyProviderBadRequestError(new Error("HTTP 400 invalid API key"))).toBe(false);
+    expect(isEmptyProviderInternalServerError(new Error("500 status code (no body)"))).toBe(true);
+    expect(isEmptyProviderInternalServerError(new Error("HTTP 500 validation failed"))).toBe(false);
+    expect(isUpstreamServiceUnavailableError(new Error("500 status code (no body)"))).toBe(true);
     expect(isUpstreamServiceUnavailableError(new Error("503 status code (no body)"))).toBe(true);
     expect(isUpstreamServiceUnavailableError(Object.assign(new Error("upstream unavailable"), { status: 502 }))).toBe(true);
     expect(isUpstreamServiceUnavailableError(new Error("HTTP 504 Gateway Timeout"))).toBe(true);

@@ -186,16 +186,16 @@ export function isUpstreamContextOverflowError(error: unknown): boolean {
   return /(context(?:\s+window)?|token|request|payload|body).*(?:too\s+(?:large|long|many)|exceed|limit|maximum)|(?:too\s+(?:large|long|many)|exceed|limit|maximum).*(context|token|request|payload|body)/i.test(message);
 }
 
-/** Availability failures are retried unchanged; they are not evidence of oversized context. */
+/** Availability failures are retried unchanged after any one-time request slimming recovery. */
 export function isUpstreamServiceUnavailableError(error: unknown): boolean {
   if (error && typeof error === "object" && "status" in error) {
     const status = (error as { status?: unknown }).status;
-    if (status === 502 || status === 503 || status === 504) {
+    if (status === 500 || status === 502 || status === 503 || status === 504) {
       return true;
     }
   }
   const message = error instanceof Error ? error.message : String(error);
-  return /\b(?:HTTP\s*)?(?:502|503|504)\b/i.test(message);
+  return /\b(?:HTTP\s*)?(?:500|502|503|504)\b/i.test(message);
 }
 
 export function isFunctionCallProtocolError(error: unknown): boolean {
@@ -206,6 +206,11 @@ export function isFunctionCallProtocolError(error: unknown): boolean {
 export function isEmptyProviderBadRequestError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /\b400\s+status code\s*\(no body\)/i.test(message);
+}
+
+export function isEmptyProviderInternalServerError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b500\s+status code\s*\(no body\)/i.test(message);
 }
 
 export function isModelRateLimitError(error: unknown): boolean {
@@ -1653,6 +1658,7 @@ class ThreadSessionRuntime {
       let upstreamContextRecoveryAttempts = 0;
       let upstreamServiceErrorAttempts = 0;
       let functionCallProtocolRecoveryAttempts = 0;
+      let providerRequestSlimmingAttempts = 0;
       let agentProtocolFailureAttempts = 0;
       let agentProtocolAutoRecoveryBatches = 0;
       let gpaAnalysisValidationAttempts = 0;
@@ -2162,7 +2168,12 @@ class ThreadSessionRuntime {
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${buildStoredTurnContextPrompt(storedTurnContextMarkdown, model.contextWindow)}\n\n${buildFollowUpSourcePrompt(followUpSourceContext)}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${buildStoredTurnContextPrompt(storedTurnContextMarkdown, model.contextWindow, {
+          skipNewest: followUpSourceContext !== null,
+          maxBudgetTokens: providerRequestSlimmingAttempts > 0 ? 2_000 : undefined
+        })}\n\n${buildFollowUpSourcePrompt(followUpSourceContext, {
+          maxPreviousResponseCharacters: providerRequestSlimmingAttempts > 0 ? 6_000 : 16_000
+        })}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
           useTextToolProtocol
             ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
             : ""
@@ -2348,6 +2359,33 @@ class ThreadSessionRuntime {
                 attempt: upstreamContextRecoveryAttempts,
                 maxAttempts: 1,
                 reason: "upstream_context_overflow"
+              },
+              createdAt: new Date().toISOString()
+            });
+            await retryDraft();
+            continue;
+          }
+          if (
+            !abortController.signal.aborted &&
+            providerRequestSlimmingAttempts === 0 &&
+            isEmptyProviderInternalServerError(error)
+          ) {
+            providerRequestSlimmingAttempts += 1;
+            await compactContext("upstream_context_overflow", true);
+            await this.services.log("provider.request_slimming_recovery", this.threadId, {
+              turnRunId: turn.id,
+              attempt: providerRequestSlimmingAttempts,
+              error: errorMessage,
+              storedContextTokenBudget: 2_000,
+              followUpResponseCharacterBudget: 6_000
+            });
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: providerRequestSlimmingAttempts,
+                maxAttempts: 1,
+                reason: "provider_request_slimming"
               },
               createdAt: new Date().toISOString()
             });
@@ -7622,13 +7660,17 @@ export function resolveFollowUpSourceContext(
   };
 }
 
-export function buildFollowUpSourcePrompt(context: FollowUpSourceContext | null): string {
+export function buildFollowUpSourcePrompt(
+  context: FollowUpSourceContext | null,
+  options: { maxPreviousResponseCharacters?: number } = {}
+): string {
   if (!context) return "";
+  const maxPreviousResponseCharacters = Math.max(1_000, options.maxPreviousResponseCharacters ?? 16_000);
   return [
     "## Follow-up Source Continuity",
     "The current request explicitly refers to the immediately preceding turn. Treat that turn as the authoritative source; do not guess a different project or substitute unrelated historical outputs.",
     `Previous user request:\n${context.previousRequest.slice(0, 8_000)}`,
-    `Previous verified response:\n${context.previousResponse.slice(0, 16_000)}`,
+    `Previous verified response:\n${context.previousResponse.slice(0, maxPreviousResponseCharacters)}`,
     context.sourceMcpServerIds.length > 0
       ? `Inherited source MCP server(s): ${context.sourceMcpServerIds.join(", ")}. Re-query only these servers if the retained response is insufficient.`
       : "No MCP source was recorded for the preceding turn; use only its retained response and verified paths unless the user broadens scope.",
@@ -7670,12 +7712,21 @@ export async function readLatestTurnContextMarkdown(outputDir: string): Promise<
   }
 }
 
-export function buildStoredTurnContextPrompt(markdown: string | null, contextWindow: number): string {
+export function buildStoredTurnContextPrompt(
+  markdown: string | null,
+  contextWindow: number,
+  options: { skipNewest?: boolean; maxBudgetTokens?: number } = {}
+): string {
   if (!markdown?.trim()) return "";
-  const budget = resolveTurnContextCapsuleTokenBudget(contextWindow);
+  const budget = Math.min(
+    resolveTurnContextCapsuleTokenBudget(contextWindow),
+    Math.max(256, options.maxBudgetTokens ?? Number.POSITIVE_INFINITY)
+  );
   const storedCapsules = markdown.split(/\n\n---\n\n(?=# Conversation Turn Context)/g).filter(Boolean);
-  const capsuleCount = Math.min(storedCapsules.length, Math.max(2, Math.min(6, Math.floor(budget / 400))));
-  const capsules = storedCapsules.slice(0, capsuleCount);
+  const eligibleCapsules = options.skipNewest ? storedCapsules.slice(1) : storedCapsules;
+  if (eligibleCapsules.length === 0) return "";
+  const capsuleCount = Math.min(eligibleCapsules.length, Math.max(2, Math.min(6, Math.floor(budget / 400))));
+  const capsules = eligibleCapsules.slice(0, capsuleCount);
   const newestBudget = capsules.length === 1 ? budget : Math.floor(budget * 0.5);
   const olderBudget = capsules.length > 1 ? Math.max(128, Math.floor((budget - newestBudget) / (capsules.length - 1))) : 0;
   const retainedHistory = capsules.map((capsule, index) => truncateToRuntimeTokenBudget(

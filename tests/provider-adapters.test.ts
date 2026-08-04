@@ -380,7 +380,13 @@ describe("OpenAiCompatibleProvider", () => {
     }));
 
     await new ProviderFactory().create(provider).runTurn({
-      systemPrompt: "System rule. ".repeat(5_000),
+      systemPrompt: [
+        "System rule. ".repeat(3_000),
+        "## Previous Turn Context Capsules",
+        "OLD_DUPLICATED_CAPSULE ".repeat(2_000),
+        "## Follow-up Source Continuity",
+        "SOURCE_LOCK_PAYLOAD ".repeat(500)
+      ].join("\n\n"),
       transcript: [
         { role: "assistant", content: "Old skill output. ".repeat(3_000) },
         { role: "assistant", content: "Old progress. ".repeat(3_000) },
@@ -411,6 +417,8 @@ describe("OpenAiCompatibleProvider", () => {
     expect(Buffer.byteLength(JSON.stringify(request), "utf8")).toBeLessThanOrEqual(120 * 1024);
     expect(messages.some((message) => message.content === "Recent tool output")).toBe(true);
     expect(messages.some((message) => String(message.content).includes("Earlier assistant progress omitted"))).toBe(true);
+    expect(String(messages[0]?.content)).not.toContain("OLD_DUPLICATED_CAPSULE");
+    expect(String(messages[0]?.content)).toContain("SOURCE_LOCK_PAYLOAD");
   });
 
   it("repairs interrupted tool-call pairing and null assistant content for Kimi", async () => {
@@ -622,6 +630,40 @@ describe("OpenAiCompatibleProvider", () => {
         provider
       })
     ).rejects.toThrow(/400 Invalid request parameters \[provider-request model=kimi-k3 tools=1 messages=2\(system,user\) bytes=\d+ upstream\(code=11133 type=invalid_request_error\) dump=/);
+  });
+
+  it("reports provider request size as UTF-8 bytes", async () => {
+    const apiError = Object.assign(new Error("500 status code (no body)"), { status: 500 });
+    mocks.chatCreate.mockRejectedValue(apiError);
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await expect(
+      new ProviderFactory().create(provider).runTurn({
+        systemPrompt: "处理中文上下文。",
+        transcript: [{ role: "user", content: "总结刚才的代码。" }],
+        availableTools: [],
+        model: {
+          id: "deepseek-v4-flash-0731",
+          providerId: provider.id,
+          displayName: "DeepSeek V4 Flash",
+          contextWindow: 500_000,
+          supportsStreaming: false,
+          supportsToolCalling: true,
+          supportsParallelToolCalls: false,
+          supportsJsonOutput: true,
+          supportsMultimodalInput: false,
+          supportsReasoningSummary: false,
+          defaultTemperature: 0.2,
+          defaultMaxOutputTokens: 8192
+        },
+        provider
+      })
+    ).rejects.toThrow(apiError);
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const expectedBytes = Buffer.byteLength(JSON.stringify(request), "utf8");
+    expect(apiError.message).toContain(`bytes=${expectedBytes}`);
+    expect(expectedBytes).toBeGreaterThan(JSON.stringify(request).length);
   });
 
   it("keeps Kimi k2 non-envelope stream content visible", () => {

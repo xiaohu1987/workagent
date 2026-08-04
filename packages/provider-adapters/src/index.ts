@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import * as cheerio from "cheerio";
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -203,7 +204,7 @@ function enrichProviderRequestError(
   const roleSummary = messages.map((message) => String(message.role ?? "?")).join(",");
   let bytes = -1;
   try {
-    bytes = JSON.stringify(request).length;
+    bytes = Buffer.byteLength(JSON.stringify(request), "utf8");
   } catch {
     // Non-serializable payloads still get the rest of the diagnostics.
   }
