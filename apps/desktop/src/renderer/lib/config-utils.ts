@@ -301,6 +301,15 @@ export function resolveSelectionFromConfig(
     };
   }
 
+  const defaultProviderModels = getReasoningModelsForProvider(normalized, normalized.defaultProvider);
+  if (defaultProviderModels.length > 0) {
+    return {
+      providerId: normalized.defaultProvider,
+      modelId: defaultProviderModels.find((model) => model.id === normalized.defaultModel)?.id
+        ?? defaultProviderModels[0].id
+    };
+  }
+
   const fallbackProviderId =
     normalized.providers.find((provider) => getReasoningModelsForProvider(normalized, provider.id).length > 0)?.id ??
     normalized.providers[0]?.id ??
@@ -309,7 +318,7 @@ export function resolveSelectionFromConfig(
 
   return {
     providerId: fallbackProviderId,
-    modelId: fallbackModels.find((model) => model.id === normalized.defaultModel)?.id ?? fallbackModels[0]?.id ?? ""
+    modelId: fallbackModels[0]?.id ?? ""
   };
 }
 

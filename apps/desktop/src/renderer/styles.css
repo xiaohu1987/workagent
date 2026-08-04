@@ -73,7 +73,8 @@ body {
   animation: motion-overlay-out var(--motion-fast) var(--motion-exit-ease) both;
 }
 
-.motion-overlay[data-motion] {
+.motion-overlay[data-motion="entering"],
+.motion-overlay[data-motion="exiting"] {
   will-change: opacity;
 }
 
@@ -12191,6 +12192,33 @@ select:focus {
   content-visibility: visible;
 }
 
+.virtual-timeline {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  content-visibility: visible !important;
+  contain: layout style;
+}
+
+.virtual-timeline-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  min-width: 0;
+  padding-bottom: 16px;
+  contain: layout style;
+}
+
+.virtual-timeline-anchor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
 .message-card {
   display: flex;
   flex-direction: column;
@@ -17510,15 +17538,16 @@ body.panel-resizing .app-shell { transition: none; }
   overflow: hidden;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   background: #0b0c0e;
-  will-change: height, min-height, opacity, transform;
 }
 
 .workspace-terminal-drawer[data-motion="entering"] {
+  will-change: height, min-height, opacity, transform;
   animation: terminal-drawer-in var(--motion-layout) var(--motion-ease) both;
 }
 
 .workspace-terminal-drawer[data-motion="exiting"] {
   pointer-events: none;
+  will-change: height, min-height, opacity, transform;
   animation: terminal-drawer-out var(--motion-layout) var(--motion-exit-ease) both;
 }
 
@@ -19114,7 +19143,6 @@ select option:checked {
     0
   );
   transition: transform 720ms cubic-bezier(0.22, 0.61, 0.36, 1);
-  will-change: transform;
 }
 
 .app-background-depth-backdrop {
@@ -19124,7 +19152,6 @@ select option:checked {
     0
   ) scale(1.035);
   transition: transform 720ms cubic-bezier(0.22, 0.61, 0.36, 1);
-  will-change: transform;
 }
 
 .app-background-depth-foreground {
@@ -19136,8 +19163,41 @@ select option:checked {
   ) scale(1.025);
   transition: transform 720ms cubic-bezier(0.22, 0.61, 0.36, 1);
   mask-image: linear-gradient(to bottom, transparent 35%, rgba(0, 0, 0, 0.25) 60%, #000 100%);
+}
+
+.app-background-motion.is-active :is(
+  .app-background-parallax,
+  .app-background-depth-backdrop,
+  .app-background-depth-foreground
+) {
   will-change: transform;
 }
+
+.chat-scroll,
+.right-workspace-panel,
+.workspace-terminal-drawer {
+  contain: layout paint;
+}
+
+.settings-body {
+  contain: layout style;
+}
+
+.settings-content-placeholder {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+}
+
+.settings-content-placeholder span {
+  height: 42px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+  animation: thread-switch-shimmer 1.2s ease-in-out infinite;
+}
+
+.settings-content-placeholder span:nth-child(2) { width: 72%; }
+.settings-content-placeholder span:nth-child(3) { width: 88%; }
 
 .app-background-atmosphere {
   overflow: hidden;

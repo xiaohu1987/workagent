@@ -1,4 +1,4 @@
-import { Fragment, createElement, memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, createElement, memo, startTransition, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent } from "react";
 import "./timeline.css";
@@ -105,6 +105,7 @@ import {
   reconcileAssistantDraftCompletion,
   reconcileAssistantDraftUpdate,
   reconcilePendingUserMessages,
+  reconcilePendingUserMessagesDetailed,
   resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
   selectActiveAssistantDraft,
@@ -269,6 +270,7 @@ import { useNotificationUiState } from "./hooks/use-notification-ui-state";
 import { useThreadNotifications } from "./hooks/use-thread-notifications";
 import { useAppNotice } from "./hooks/use-app-notice";
 import { useProjectFilePreview } from "./hooks/use-project-file-preview";
+import { useStableEvent } from "./hooks/use-stable-event";
 import { DATABASE_PERMISSION_OPTIONS, getSkillSortLabel, RESPONSE_TONE_OPTIONS, SKILL_SORT_OPTIONS } from "./settings/settings-options";
 import { reregisterBrowserWebviews } from "./workspace/browser-workspace";
 import { RightWorkspacePanel, type RightWorkspaceTab } from "./workspace/right-workspace";
@@ -283,12 +285,12 @@ import { ComposerAttachments } from "./composer/composer-attachments";
 import { ComposerAddMenu } from "./composer/composer-add-menu";
 import { AppBackgroundLayer } from "./workspace/app-background-layer";
 import { WorkspaceControls } from "./workspace/workspace-controls";
-import { ComposerModelPicker, ContextCompactionNotice, ContextUsageControl, FloatingSideMenu, ReasoningEffortPicker, type ComposerModelGroup } from "./composer/model-controls";
-import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, TurnElapsedBanner } from "./cards/runtime-cards";
+import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEffortPicker, type ComposerModelGroup } from "./composer/model-controls";
+import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
-import { FileChangeSummary, buildConversationTurnItems, ConversationTurnRail } from "./timeline/conversation-rail";
-import { DirectoryReadGroup } from "./timeline/directory-read-group";
-import { ApprovalCard, AssistantDraftMessage, getConciseToolActivityLabel, getMessageAttachments, reuseEquivalentRecordArray, ToolActivityGroup, ToolActivityIcon, TranscriptMessage, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
+import { buildConversationTurnItems, ConversationTurnRail } from "./timeline/conversation-rail";
+import { TimelineEntries } from "./timeline/timeline-entries";
+import { ApprovalCard, AssistantDraftMessage, getConciseToolActivityLabel, getMessageAttachments, reuseEquivalentRecordArray, ToolActivityGroup, ToolActivityIcon, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
 import {
   HISTORY_COLLAPSED_GROUPS_STORAGE_KEY,
@@ -309,6 +311,7 @@ import {
   type RuntimeActivity,
   type RuntimeActivityEntry,
   type RuntimeProgress,
+  type SettingsTab,
 } from "./core/app-types";
 
 const MAX_RUNTIME_ACTIVITY_ENTRIES = 120;
@@ -775,6 +778,7 @@ export function App() {
     capabilityTab,
     setCapabilityTab
   } = useSettingsDialogState();
+  const [settingsContentReady, setSettingsContentReady] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
@@ -1081,16 +1085,22 @@ export function App() {
     snapshotRequestIdsRef.current[threadId] = (snapshotRequestIdsRef.current[threadId] ?? 0) + 1;
   }
 
-  function reconcileSnapshotWithRuntimeEvents(nextSnapshot: RuntimeThreadSnapshot): RuntimeThreadSnapshot {
+  function reconcileSnapshotWithRuntimeEvents(
+    nextSnapshot: RuntimeThreadSnapshot,
+    consumedOptimisticIds?: ReadonlySet<string>
+  ): RuntimeThreadSnapshot {
     const threadId = nextSnapshot.thread.id;
     const runtimeThread = latestRuntimeThreadsRef.current[threadId];
     const thread = runtimeThread
       ? resolveLatestThreadRecord(nextSnapshot.thread, runtimeThread)
       : nextSnapshot.thread;
+    const snapshotMessages = consumedOptimisticIds?.size
+      ? nextSnapshot.messages.filter((message) => !consumedOptimisticIds.has(message.id))
+      : nextSnapshot.messages;
     const runtimeMessages = Array.from(persistedRuntimeMessagesRef.current[threadId]?.values() ?? []);
     const messages = runtimeMessages.length > 0
-      ? mergeSnapshotRecords(nextSnapshot.messages, runtimeMessages, (message) => message.createdAt)
-      : nextSnapshot.messages;
+      ? mergeSnapshotRecords(snapshotMessages, runtimeMessages, (message) => message.createdAt)
+      : snapshotMessages;
     const messageCount = Math.max(nextSnapshot.messageCount, messages.length);
     if (thread === nextSnapshot.thread && messages === nextSnapshot.messages && messageCount === nextSnapshot.messageCount) {
       return nextSnapshot;
@@ -1098,14 +1108,14 @@ export function App() {
     return { ...nextSnapshot, thread, messages, messageCount };
   }
 
-  function reconcileCachedAndSelectedSnapshot(threadId: string) {
+  function reconcileCachedAndSelectedSnapshot(threadId: string, consumedOptimisticIds?: ReadonlySet<string>) {
     const cached = snapshotCacheByThreadRef.current.get(threadId);
     if (cached) {
-      cacheThreadSnapshot(reconcileSnapshotWithRuntimeEvents(cached));
+      cacheThreadSnapshot(reconcileSnapshotWithRuntimeEvents(cached, consumedOptimisticIds));
     }
     setSnapshot((current) => {
       if (!current || current.thread.id !== threadId) return current;
-      return reconcileSnapshotWithRuntimeEvents(current);
+      return reconcileSnapshotWithRuntimeEvents(current, consumedOptimisticIds);
     });
   }
 
@@ -1967,11 +1977,22 @@ export function App() {
         // for the next snapshot refresh leaves a blank transcript until reload.
         const runtimeThreadId = typed.threadId;
         const message = typed.payload.message as MessageRecord;
+        let consumedOptimisticIds: ReadonlySet<string> | undefined;
+        if (message.role === "user") {
+          const pending = pendingUserMessagesRef.current[runtimeThreadId] ?? [];
+          const reconciliation = reconcilePendingUserMessagesDetailed(pending, [message]);
+          consumedOptimisticIds = reconciliation.consumedIds;
+          if (reconciliation.remaining.length > 0) {
+            pendingUserMessagesRef.current[runtimeThreadId] = reconciliation.remaining;
+          } else {
+            delete pendingUserMessagesRef.current[runtimeThreadId];
+          }
+        }
         const messages = persistedRuntimeMessagesRef.current[runtimeThreadId] ?? new Map<string, MessageRecord>();
         messages.set(message.id, message);
         persistedRuntimeMessagesRef.current[runtimeThreadId] = messages;
         invalidateSnapshotRequest(runtimeThreadId);
-        reconcileCachedAndSelectedSnapshot(runtimeThreadId);
+        reconcileCachedAndSelectedSnapshot(runtimeThreadId, consumedOptimisticIds);
       }
       if (
         typed.type === "message.created" &&
@@ -3210,7 +3231,7 @@ export function App() {
 
     const nextSelection = selectedThread
       ? resolveSelectionFromConfig(config, selectedThread.providerId, selectedThread.modelId)
-      : resolveSelectionFromConfig(config, composerProviderId, composerModelId);
+      : resolveSelectionFromConfig(config);
 
     if (nextSelection.providerId !== composerProviderId) {
       setComposerProviderId(nextSelection.providerId);
@@ -3712,11 +3733,17 @@ export function App() {
     activateNewThread(thread);
   }
 
-  async function createThreadRecord(mode: "project" | "chat", cwdInput?: string) {
+  async function createThreadRecord(
+    mode: "project" | "chat",
+    cwdInput?: string,
+    options?: { useComposerSelection?: boolean }
+  ) {
     const title = mode === "project" ? "新建项目" : "新建任务";
     const cwd = mode === "project" && cwdInput?.trim() ? cwdInput.trim() : undefined;
     const selection = config
-      ? resolveSelectionFromConfig(config, composerProviderId, composerModelId)
+      ? options?.useComposerSelection
+        ? resolveSelectionFromConfig(config, composerProviderId, composerModelId)
+        : resolveSelectionFromConfig(config)
       : null;
 
     return (await window.codexh.createThread({
@@ -3963,7 +3990,7 @@ export function App() {
 
     let threadId = selectedThreadId;
     if (!threadId) {
-      const thread = await createThreadRecord("chat");
+      const thread = await createThreadRecord("chat", undefined, { useComposerSelection: true });
       threadId = thread.id;
       selectThreadId(thread.id);
       seedOptimisticThreadSnapshot(thread);
@@ -5007,8 +5034,27 @@ export function App() {
     if (isSettingsOpen && settingsTab === "general") void refreshRuntimeLogStats();
   }, [isSettingsOpen, settingsTab]);
 
+  useEffect(() => {
+    if (!isSettingsOpen) {
+      setSettingsContentReady(false);
+      return;
+    }
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        startTransition(() => setSettingsContentReady(true));
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [isSettingsOpen]);
+
   const historySearchPresence = useMotionPresence(isHistorySearchOpen ? true : null);
   const settingsPresence = useMotionPresence(isSettingsOpen ? true : null, 220);
+  const deferredSettingsTab = useDeferredValue(settingsTab);
+  const deferredCapabilityTab = useDeferredValue(capabilityTab);
   const projectCreatePresence = useMotionPresence(isProjectCreateOpen ? true : null);
   const mcpCreatePresence = useMotionPresence(isMcpCreateOpen && mcpCreateDraft ? mcpCreateDraft : null);
   const visibleMcpCreateDraft = mcpCreateDraft ?? mcpCreatePresence.value;
@@ -5128,6 +5174,41 @@ export function App() {
     }, 180);
   }
 
+  const openGeneratedFileLocationEvent = useStableEvent((filePath: string) => {
+    void openGeneratedFileLocation(filePath);
+  });
+  const toggleConversationTurnCollapsedEvent = useStableEvent(toggleConversationTurnCollapsed);
+  const createThreadEvent = useStableEvent(createThread);
+  const openThreadEvent = useStableEvent(openThread);
+  const openQuickNotesEvent = useStableEvent(openQuickNotes);
+  const openHistorySearchEvent = useStableEvent(openHistorySearch);
+  const openSettingsEvent = useStableEvent((tab: SettingsTab) => {
+    if (config) resetConfigDraft(config);
+    setSettingsTab(tab);
+    setCapabilityTab("skills");
+    setIsSettingsOpen(true);
+  });
+  const openHelpEvent = useStableEvent(() => setIsHelpOpen(true));
+  const generateUserSkillEvent = useStableEvent(openUserSkillGenerationDialog);
+  const toggleThreadPinnedEvent = useStableEvent(toggleThreadPinned);
+  const requestDeleteHistoryThreadEvent = useStableEvent(requestDeleteHistoryThread);
+  const beginRenameHistoryThreadEvent = useStableEvent(beginRenameHistoryThread);
+  const commitRenameHistoryThreadEvent = useStableEvent(commitRenameHistoryThread);
+  const cancelRenameHistoryThreadEvent = useStableEvent(cancelRenameHistoryThread);
+  const hideRightWorkspaceEvent = useStableEvent(() => setIsRightWorkspaceOpen(false));
+  const addComposerAttachmentEvent = useStableEvent(addComposerAttachment);
+  const refreshGitEvent = useStableEvent(() => {
+    if (!selectedThreadId || gitLoading) return;
+    setGitRefreshRevision((current) => current + 1);
+  });
+  const runGitActionEvent = useStableEvent(runGitAction);
+  const sendGitCommentEvent = useStableEvent((content: string) => { void sendMessage(content); });
+  const selectProjectFileEvent = useStableEvent(selectProjectFile);
+  const openProjectPreviewEvent = useStableEvent(openProjectPreview);
+  const closeBrowserTabEvent = useStableEvent((threadId: string, tabId: string) => {
+    void window.codexh.closeBrowserTab({ threadId, tabId });
+  });
+
   const skillLabCurrentProgress = skillLabProgress[skillLabProgress.length - 1] ?? null;
   const skillLabCurrentIteration = skillLabCurrentProgress?.iteration ?? 0;
   const skillLabCompletedIterations = skillLabStatus === "completed"
@@ -5203,21 +5284,21 @@ export function App() {
         setExpandedGroups={setExpandedHistoryThreadGroups}
         renamingThread={renamingHistoryThread}
         setRenamingThread={setRenamingHistoryThread}
-        onCommitRename={commitRenameHistoryThread}
-        onCancelRename={cancelRenameHistoryThread}
-        onCreateThread={createThread}
-        onOpenThread={openThread}
-        onOpenQuickNotes={openQuickNotes}
-        onOpenSearch={openHistorySearch}
-        onOpenSettings={(tab) => { if (config) resetConfigDraft(config); setSettingsTab(tab); setCapabilityTab("skills"); setIsSettingsOpen(true); }}
+        onCommitRename={commitRenameHistoryThreadEvent}
+        onCancelRename={cancelRenameHistoryThreadEvent}
+        onCreateThread={createThreadEvent}
+        onOpenThread={openThreadEvent}
+        onOpenQuickNotes={openQuickNotesEvent}
+        onOpenSearch={openHistorySearchEvent}
+        onOpenSettings={openSettingsEvent}
         updatePhase={updateState?.phase}
         updateReminder={getSidebarUpdateReminder(updateState?.phase)}
-        onOpenHelp={() => setIsHelpOpen(true)}
+        onOpenHelp={openHelpEvent}
         isGeneratingUserSkill={isGeneratingUserSkill}
-        onGenerateUserSkill={openUserSkillGenerationDialog}
-        onTogglePinned={toggleThreadPinned}
-        onRequestDelete={requestDeleteHistoryThread}
-        onBeginRename={beginRenameHistoryThread}
+        onGenerateUserSkill={generateUserSkillEvent}
+        onTogglePinned={toggleThreadPinnedEvent}
+        onRequestDelete={requestDeleteHistoryThreadEvent}
+        onBeginRename={beginRenameHistoryThreadEvent}
       />
 
       {historySearchPresence.value ? (
@@ -5318,66 +5399,22 @@ export function App() {
               />
             ) : (
               <div key={activeSnapshotThreadId ?? selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
-                {timelineEntries.map((entry) => {
-                  const entryTurn = timelineTurnByEntryId.get(entry.id);
-                  const isLatestTurn = entryTurn?.id === latestConversationTurn?.id;
-                  const isActiveTurn = Boolean(isLatestTurn && isTaskProcessing);
-                  const isHiddenByTurnCollapse = Boolean(
-                    entryTurn &&
-                    collapsedTurnIds.has(entryTurn.id) &&
-                    entry.id !== entryTurn.userEntryId &&
-                    entry.id !== entryTurn.summaryEntryId
-                  );
-                  const isCurrentToolGroup = Boolean(
-                    deferredRuntimeToolGroup &&
-                    entry.kind === "tool-group" &&
-                    entry.toolCalls.some((toolCall) => deferredRuntimeToolGroup.some((tool) => tool.id === toolCall.id))
-                  );
-                  return (
-                  <Fragment key={entry.id}>
-                    {!isHiddenByTurnCollapse && !isCurrentToolGroup && (entry.kind === "message" ? (
-                      <TranscriptMessage
-                        message={entry.message}
-                        assistantLabel={activeAssistantLabel}
-                        userMessageActions={transcriptUserMessageActions}
-                        isGpaPlanMessage={entry.message.id === gpaPlanMessageId}
-                        isFinalizingFromDraft={finalizingAssistantMessageIds.has(entry.message.id)}
-                      />
-                    ) : entry.kind === "file-summary" ? (
-                      <FileChangeSummary
-                        files={entry.files}
-                        onOpenFolder={(filePath) => void openGeneratedFileLocation(filePath)}
-                      />
-                    ) : entry.kind === "directory-read-group" ? (
-                      <DirectoryReadGroup directory={entry.directory} count={entry.count} />
-                    ) : entry.kind === "context-compaction" ? (
-                      <ContextCompactionNotice compaction={entry.compaction} />
-                    ) : entry.kind === "user-input" ? (
-                      <UserInputPromptCard
-                        prompt={entry.prompt}
-                        resolving={false}
-                        canAnswer={false}
-                        onAnswer={() => undefined}
-                      />
-                    ) : (
-                      <ToolActivityGroup toolCalls={entry.toolCalls} />
-                    ))}
-                    {entryTurn && entry.id === entryTurn.userEntryId ? (
-                      <TurnElapsedBanner
-                        startedAt={entryTurn.startedAt}
-                        completedAt={isActiveTurn
-                          ? null
-                          : !isActiveTurn && isLatestTurn && completedTurnTimer
-                            ? completedTurnTimer.completedAt
-                            : entryTurn.completedAt}
-                        active={isActiveTurn}
-                        collapsed={collapsedTurnIds.has(entryTurn.id)}
-                        onToggle={() => toggleConversationTurnCollapsed(entryTurn.id)}
-                      />
-                    ) : null}
-                  </Fragment>
-                  );
-                })}
+                <TimelineEntries
+                  entries={timelineEntries}
+                  turnByEntryId={timelineTurnByEntryId}
+                  latestTurnId={latestConversationTurn?.id ?? null}
+                  taskProcessing={isTaskProcessing}
+                  collapsedTurnIds={collapsedTurnIds}
+                  deferredRuntimeToolGroup={deferredRuntimeToolGroup}
+                  assistantLabel={activeAssistantLabel}
+                  userMessageActions={transcriptUserMessageActions}
+                  gpaPlanMessageId={gpaPlanMessageId}
+                  finalizingAssistantMessageIds={finalizingAssistantMessageIds}
+                  completedLatestTurnAt={completedTurnTimer?.completedAt ?? null}
+                  scrollElementRef={chatScrollRef}
+                  onOpenFolder={openGeneratedFileLocationEvent}
+                  onToggleTurn={toggleConversationTurnCollapsedEvent}
+                />
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -5744,29 +5781,24 @@ export function App() {
           onTabChange={setRightWorkspaceTab}
           expandedTab={rightWorkspaceExpandedTab}
           onExpandedTabChange={setRightWorkspaceExpandedTab}
-          onHide={() => setIsRightWorkspaceOpen(false)}
+          onHide={hideRightWorkspaceEvent}
           projectRoot={selectedThread?.cwd ?? ""}
-          onAddAttachment={addComposerAttachment}
+          onAddAttachment={addComposerAttachmentEvent}
           projectFiles={projectFiles}
           projectFilesLoading={isProjectFilesLoading}
           gitSnapshot={gitSnapshot}
           gitLoading={gitLoading}
           gitActionBusy={gitActionBusy}
           gitActionMessage={gitActionMessage}
-          onGitRefresh={() => {
-            if (!selectedThreadId || gitLoading) return;
-            setGitRefreshRevision((current) => current + 1);
-          }}
-          onGitAction={runGitAction}
-          onGitComment={(content) => { void sendMessage(content); }}
+          onGitRefresh={refreshGitEvent}
+          onGitAction={runGitActionEvent}
+          onGitComment={sendGitCommentEvent}
           selectedProjectFile={selectedProjectFile}
           projectToolCalls={projectToolCalls}
-          onSelectProjectFile={selectProjectFile}
-          onOpenProjectFile={openProjectPreview}
+          onSelectProjectFile={selectProjectFileEvent}
+          onOpenProjectFile={openProjectPreviewEvent}
           browserTabsByThread={browserTabsByThread}
-          onCloseBrowserTab={(threadId, tabId) => {
-            void window.codexh.closeBrowserTab({ threadId, tabId });
-          }}
+          onCloseBrowserTab={closeBrowserTabEvent}
           threadId={selectedThreadId}
         />
 
@@ -5789,10 +5821,11 @@ export function App() {
           onClose={() => setIsSettingsOpen(false)}
           onTabChange={setSettingsTab}
         >
-              {settingsTab === "usage" ? (
+          {settingsContentReady ? <>
+              {deferredSettingsTab === "usage" ? (
                 <SettingsUsagePage summary={usageStatistics} providers={config?.providers ?? []} loading={isUsageStatisticsLoading} rangeDays={usageStatisticsRangeDays} granularity={usageStatisticsGranularity} onRangeChange={setUsageStatisticsRangeDays} onGranularityChange={setUsageStatisticsGranularity} onRefresh={() => void refreshUsageStatistics()} />
               ) : null}
-              {settingsTab === "appearance" ? (
+              {deferredSettingsTab === "appearance" ? (
                 <AppearanceSettingsPage
                   inputRef={chatBackgroundInputRef}
                   images={chatBackgroundImages}
@@ -5814,11 +5847,11 @@ export function App() {
                 />
               ) : null}
 
-              {settingsTab === "general" ? (
+              {deferredSettingsTab === "general" ? (
                 <RuntimeOverviewPage config={config} configDraft={configDraft} threadCount={threads.length} skillCount={skills.length} subagentDefaultModelValue={subagentDefaultModelValue} subagentDefaultModelOptions={subagentDefaultModelOptions} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} onSetLiveEditPreviewEnabled={(enabled) => void setLiveEditPreviewEnabled(enabled)} />
               ) : null}
 
-    {settingsTab === "provider" ? (
+    {deferredSettingsTab === "provider" ? (
       <ProviderSettingsPage
         configDraft={configDraft} config={config} settingsProvider={settingsProvider} settingsProviderModels={settingsProviderModels}
         providerSecretDrafts={providerSecretDrafts} setProviderSecretDrafts={setProviderSecretDrafts} isFetchingModels={isFetchingModels}
@@ -5830,7 +5863,7 @@ export function App() {
       />
     ) : null}
 
-    {settingsTab === "multimodal" ? (
+    {deferredSettingsTab === "multimodal" ? (
       <MultimodalSettingsPage
         configDraft={configDraft}
         setPickerRole={setMultimodalPickerRole}
@@ -5843,15 +5876,15 @@ export function App() {
       />
     ) : null}
 
-              {settingsTab === "general" && configDraft ? (
+              {deferredSettingsTab === "general" && configDraft ? (
                 <ResponseTonePage configDraft={configDraft} options={RESPONSE_TONE_OPTIONS} defaultTone={DEFAULT_RESPONSE_TONE} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 
-              {settingsTab === "update" ? (
+              {deferredSettingsTab === "update" ? (
                 <SettingsUpdatePage updateState={updateState} onCheck={() => void checkForUpdates()} onDownload={() => void downloadAvailableUpdate()} onInstall={() => void installDownloadedUpdate()} formatPhase={formatUpdatePhase} formatDownloadSize={formatUpdateDownloadSize} />
               ) : null}
 
-              {settingsTab === "knowledge" ? (
+              {deferredSettingsTab === "knowledge" ? (
                 <KnowledgePage
                   knowledgeSources={knowledgeSources}
                   knowledgeName={knowledgeName}
@@ -5884,40 +5917,40 @@ export function App() {
                 />
               ) : null}
 
-              {settingsTab === "apiFavorites" ? (
+              {deferredSettingsTab === "apiFavorites" ? (
                 <ApiFavoritesPage onInsert={(favorite) => {
                   setIsSettingsOpen(false);
                   void sendApiCardFavoriteToChat(favorite);
                 }} />
               ) : null}
-              {settingsTab === "memory" ? (
+              {deferredSettingsTab === "memory" ? (
                 <MemoryPage configDraft={configDraft} setConfigDraft={setConfigDraft} selfImprovementMemories={selfImprovementMemories} visibleSelfImprovementMemories={visibleSelfImprovementMemories} selfImprovementMemoryListRef={selfImprovementMemoryListRef} safeSelfImprovementMemoryPage={safeSelfImprovementMemoryPage} selfImprovementMemoryPageCount={selfImprovementMemoryPageCount} setSelfImprovementMemoryPage={setSelfImprovementMemoryPage} isRefreshingSelfImprovementMemories={isRefreshingSelfImprovementMemories} isClearingSelfImprovement={isClearingSelfImprovement} onRefreshMemories={refreshSelfImprovementNow} onOpenClearMemories={() => setIsClearSelfImprovementConfirmOpen(true)} onSaveConfig={saveConfigDraft} onDeleteMemory={deleteSelfImprovementMemory} errorSolutionModelFilter={errorSolutionModelFilter} setErrorSolutionModelFilter={setErrorSolutionModelFilter} setErrorSolutionPage={setErrorSolutionPage} onRefreshErrorSolutions={refreshErrorSolutions} errorSolutionModelOptions={errorSolutionModelOptions} errorSolutions={errorSolutions} visibleErrorSolutions={visibleErrorSolutions} errorSolutionListRef={errorSolutionListRef} safeErrorSolutionPage={safeErrorSolutionPage} errorSolutionPageCount={errorSolutionPageCount} isClearingErrorSolutions={isClearingErrorSolutions} errorSolutionBusyId={errorSolutionBusyId} expandedErrorSolutionIds={expandedErrorSolutionIds} resolveModelLabel={resolveErrorSolutionModelLabel} getRecallStatus={getErrorSolutionRecallStatus} formatRelativeTime={formatRelativeTime} onToggleExpanded={toggleErrorSolutionExpanded} onDeleteErrorSolution={deleteErrorSolution} onOpenClearErrorSolutions={() => setIsClearErrorSolutionsConfirmOpen(true)} />
               ) : null}
-              {settingsTab === "capabilities" ? (
+              {deferredSettingsTab === "capabilities" ? (
                 <CapabilitiesPage activeTab={capabilityTab} skillsCount={skills.length} userSkillsCount={userSkills.length} pluginsCount={plugins.length} onTabChange={setCapabilityTab} />
               ) : null}
-              {settingsTab === "capabilities" && capabilityTab === "skills" ? (
+              {deferredSettingsTab === "capabilities" && deferredCapabilityTab === "skills" ? (
                 <SkillsPage skillsSearchQuery={skillsSearchQuery} setSkillsSearchQuery={setSkillsSearchQuery} skillsSortMenuRef={skillsSortMenuRef} skillsSortOpen={skillsSortOpen} setSkillsSortOpen={setSkillsSortOpen} skillsSortMode={skillsSortMode} setSkillsSortMode={setSkillsSortMode} skillsSortPresence={skillsSortPresence} visibleSkills={visibleSkills} formatRelativeTime={formatRelativeTime} onRemove={(skill) => setManagedRemoval({ kind: "skill", skill })} />
               ) : null}
 
-              {settingsTab === "database" ? (
+              {deferredSettingsTab === "database" ? (
                 <DatabasePage configDraft={configDraft} savedCredentialIds={savedDatabaseCredentialIds} testingId={testingDatabaseConnectionId} savingCredentialId={savingDatabaseCredentialId} changingEnabledId={changingDatabaseEnabledId} editingId={editingDatabaseConnectionId} databaseCatalogs={databaseCatalogs} passwordDrafts={databasePasswordDrafts} permissions={DATABASE_PERMISSION_OPTIONS} setPasswordDrafts={setDatabasePasswordDrafts} setEditingId={setEditingDatabaseConnectionId} onAdd={addDatabaseConnection} onSetEnabled={setDatabaseConnectionEnabled} onUpdate={updateDatabaseDraft} onTest={testDatabaseConnection} onSave={saveDatabaseConnection} onRemove={removeDatabaseConnection} />
               ) : null}
 
-              {settingsTab === "mcp" ? (
+              {deferredSettingsTab === "mcp" ? (
                 <McpPage configDraft={configDraft} mcpRuntimeServers={mcpRuntimeServers} editingMcpServerId={editingMcpServerId} setEditingMcpServerId={setEditingMcpServerId} mcpTestResults={mcpTestResults} testingMcpServerId={testingMcpServerId} mcpAuthBusyId={mcpAuthBusyId} onAdd={addMcpServer} onUpdate={updateMcpServerDraft} onTest={testMcpServer} onRefreshTools={refreshMcpToolDirectory} onLogin={loginMcpServer} onLogout={logoutMcpServer} onRemove={removeMcpServer} onSave={saveConfigDraft} parseEnvironment={parseMcpEnvironment} />
               ) : null}
-              {settingsTab === "capabilities" && capabilityTab === "plugins" ? (
+              {deferredSettingsTab === "capabilities" && deferredCapabilityTab === "plugins" ? (
                 <PluginsPage {...{ plugins, pluginCallCounts, setManagedRemoval }} />
               ) : null}
-              {settingsTab === "capabilities" && capabilityTab === "userSkills" ? (
+              {deferredSettingsTab === "capabilities" && deferredCapabilityTab === "userSkills" ? (
                 <UserSkillsPage {...{ userSkills, resolveSkillUsageStats, setManagedRemoval }} />
               ) : null}
 
-              {settingsTab === "capabilities" && capabilityTab === "lab" ? (
+              {deferredSettingsTab === "capabilities" && deferredCapabilityTab === "lab" ? (
                 <SkillLabPage {...{ skillLabMode, setSkillLabMode, isSkillLabBusy, skillLabPrompt, setSkillLabPrompt, skillLabTargetSkillId, setSkillLabTargetSkillId, userSkills, skillLabName, setSkillLabName, skillLabModelSelection, setSkillLabModelSelection, skillLabModelOptions, skillLabIterations, setSkillLabIterations, cancelSkillLab, skillLabStatus, startSkillLab, skillLabError, skillLabClarification, setSkillLabClarification, submitSkillLabClarification, skillLabProgress, skillLabCurrentPhase, skillLabCurrentSummary, skillLabHeartbeatText, skillLabCompletedIterations, skillLabTotalIterations, skillLabElapsedLabel, skillLabCurrentIteration, skillLabLastCompletedActivity, skillLabResult, skillLabLastRunMode, skillLabApproval, resolveSkillLabApproval, skillLabProgressPercent }} />
               ) : null}
-
+          </> : <div className="settings-content-placeholder" aria-hidden="true"><span /><span /><span /></div>}
                       </SettingsDialog>
       ) : null}
 

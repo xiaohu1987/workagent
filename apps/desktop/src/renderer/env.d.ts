@@ -100,10 +100,12 @@ declare global {
       getThreadSnapshot: (threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) => Promise<any>;
       sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[]; mediaIntent?: "image" | "video" | null }) => Promise<void>;
       requestHttp: (payload: {
+        threadId: string;
         method: string;
         url: string;
         headers?: Record<string, string>;
         body?: string;
+        downloadFileName?: string;
       }) => Promise<
         | {
             ok: true;
@@ -111,6 +113,13 @@ declare global {
             statusText: string;
             headers: Record<string, string>;
             bodyText: string;
+            bodyKind: "text" | "file";
+            download?: {
+              fileName: string;
+              filePath: string;
+              mimeType: string;
+              sizeBytes: number;
+            };
             truncated: boolean;
             durationMs: number;
           }

@@ -1,13 +1,13 @@
 import type { ToolCallRecord } from "@shared-types";
 import { useMotionPresence } from "../core/motion-presence";
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { IconChevronRight, IconSearch, IconCompose, IconCopy, IconFolder, IconFile, IconEye, IconSpinner } from "../icons";
 import { ProjectFileChangeKind, ProjectFileEntry, ProjectFileTreeNode, buildProjectFileTree, buildProjectFolderManifest, getProjectFileChangeKinds, getProjectFileGlyphClass, getProjectFileNodeChangeKind, projectFileChangeBadge, projectFileChangeLabel, projectFileNodeMatches, resolveProjectFilePath } from "../lib/project-files";
 import { ComposerAttachmentInput } from "../lib/conversation-utils";
 import { WorkspaceContextMenu, WorkspaceEmptyState } from "./panels";
 
-export function ProjectFilesWorkspace({
+export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
   files,
   toolCalls,
   loading,
@@ -127,7 +127,7 @@ export function ProjectFilesWorkspace({
       ) : null}
     </section>
   );
-}
+});
 
 export function ProjectFileTreeRows({
   nodes,

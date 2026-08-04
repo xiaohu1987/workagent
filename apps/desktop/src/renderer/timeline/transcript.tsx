@@ -6,6 +6,7 @@ import type { ChatEventBlock, ChatEventType, SelectedMessageContext } from "../l
 import { IconCheck, IconChecklist, IconChevronDown, IconClose, IconCode, IconCompose, IconCopy, IconEye, IconFile, IconFileChanges, IconFolder, IconGlobe, IconGpa, IconHelpCircle, IconImage, IconKnowledge, IconMcp, IconSearch, IconSkills, IconTerminal, IconVideo } from "../icons";
 import { CopyTextButton, MessageMediaLightbox, getFileLeafName, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
+import { ApiCardThreadContext } from "../cards/api-card-message";
 
 type ToolActivityGroupProps = {
   toolCalls: ToolCallRecord[];
@@ -619,11 +620,13 @@ export const TranscriptMessage = memo(function TranscriptMessage({
         <span className={`message-author ${message.role}`}>{renderRole(message.role, assistantLabel)}</span>
         <span className="timestamp">{formatRelativeTime(message.createdAt)}</span>
       </div>
-      <div className="message-flat-body">
-        {isGpaPlanMessage ? (
-          <GpaPlanMessageBubble>{renderMessageContent(message, displayContent)}</GpaPlanMessageBubble>
-        ) : renderMessageContent(message, displayContent)}
-      </div>
+      <ApiCardThreadContext.Provider value={message.threadId}>
+        <div className="message-flat-body">
+          {isGpaPlanMessage ? (
+            <GpaPlanMessageBubble>{renderMessageContent(message, displayContent)}</GpaPlanMessageBubble>
+          ) : renderMessageContent(message, displayContent)}
+        </div>
+      </ApiCardThreadContext.Provider>
     </article>
   );
 }, areTranscriptMessagePropsEqual);

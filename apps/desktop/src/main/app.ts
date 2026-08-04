@@ -4306,7 +4306,7 @@ export class DesktopBackend {
     await fs.rm(resolvedOutputDir, { recursive: true, force: true });
   }
 
-  private async getThreadOutputDir(threadId: string): Promise<string> {
+  public async getThreadOutputDir(threadId: string): Promise<string> {
     const thread = this.#db.getThread(threadId);
     const { outputDir } = this.resolveThreadOutputPaths(thread);
     await fs.mkdir(outputDir, { recursive: true });

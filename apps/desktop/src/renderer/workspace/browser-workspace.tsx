@@ -1,4 +1,4 @@
-import { createElement, useCallback, useEffect, useRef } from "react";
+import { createElement, memo, useCallback, useEffect, useRef } from "react";
 import type { RuntimeThreadSnapshot } from "@shared-types";
 import { IconGlobe } from "../icons";
 import { WorkspaceEmptyState, WorkspaceSubtabStrip } from "./panels";
@@ -24,7 +24,7 @@ export function reregisterBrowserWebviews(threadId: string, tabId?: string): voi
   }
 }
 
-export function BrowserWorkspace({
+export const BrowserWorkspace = memo(function BrowserWorkspace({
   tabs,
   threadId,
   onCloseTab,
@@ -66,7 +66,7 @@ export function BrowserWorkspace({
       </div>
     </section>
   );
-}
+});
 
 function BrowserTabWebview({
   tab,

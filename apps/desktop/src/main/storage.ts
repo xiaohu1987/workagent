@@ -549,9 +549,14 @@ export class DatabaseService {
 
   public constructor(dbFile: string) {
     this.#db = new DatabaseSync(dbFile);
-    this.#db.exec("PRAGMA journal_mode = WAL;");
-    this.#db.exec("PRAGMA foreign_keys = ON;");
-    this.bootstrap();
+    try {
+      this.#db.exec("PRAGMA journal_mode = WAL;");
+      this.#db.exec("PRAGMA foreign_keys = ON;");
+      this.bootstrap();
+    } catch (error) {
+      this.#db.close();
+      throw error;
+    }
   }
 
   public close(): void {
@@ -922,6 +927,7 @@ export class DatabaseService {
     this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_error_solutions_preflight
       ON error_solutions(project_id, tool_name, target_key_pattern, strategy_fingerprint, scope_mode, model_id)`);
     this.migrateSubagentDefaultOff();
+    this.migrateRuntimeEventStorage();
   }
 
   /** One-shot: legacy installs defaulted multi_agent_mode to proactive. */
@@ -933,6 +939,43 @@ export class DatabaseService {
     }
     this.#db.prepare("UPDATE threads SET multi_agent_mode = 'disabled' WHERE multi_agent_mode != 'disabled'").run();
     this.#db.exec("PRAGMA user_version = 1");
+  }
+
+  /** One-shot: retain only the runtime event type consumed by persisted snapshots. */
+  private migrateRuntimeEventStorage(): void {
+    const row = this.#db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
+    const version = Number(row?.user_version ?? 0);
+    if (version >= 2) {
+      this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_runtime_events_thread_type_created
+        ON runtime_events(thread_id, type, created_at DESC)`);
+      return;
+    }
+
+    this.#db.exec("BEGIN");
+    try {
+      this.#db.exec(`
+        CREATE TABLE runtime_events_compacted (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          thread_id TEXT,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO runtime_events_compacted (id, type, thread_id, payload_json, created_at)
+          SELECT id, type, thread_id, payload_json, created_at
+          FROM runtime_events
+          WHERE type = 'agent.context_compacted';
+        DROP TABLE runtime_events;
+        ALTER TABLE runtime_events_compacted RENAME TO runtime_events;
+        CREATE INDEX idx_runtime_events_thread_type_created
+          ON runtime_events(thread_id, type, created_at DESC);
+        PRAGMA user_version = 2;
+      `);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -2982,6 +3025,9 @@ export class DatabaseService {
   }
 
   public addRuntimeEvent(event: RuntimeEvent): void {
+    if (event.type !== "agent.context_compacted") {
+      return;
+    }
     this.#db
       .prepare("INSERT INTO runtime_events (id, type, thread_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), event.type, event.threadId ?? null, JSON.stringify(event.payload), event.createdAt);

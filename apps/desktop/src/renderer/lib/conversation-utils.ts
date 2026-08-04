@@ -1519,9 +1519,17 @@ export function reconcilePendingUserMessages(
   pending: MessageRecord[],
   persisted: MessageRecord[]
 ): MessageRecord[] {
-  const consumedPersistedIds = new Set<string>();
+  return reconcilePendingUserMessagesDetailed(pending, persisted).remaining;
+}
 
-  return pending.filter((optimistic) => {
+export function reconcilePendingUserMessagesDetailed(
+  pending: MessageRecord[],
+  persisted: MessageRecord[]
+): { remaining: MessageRecord[]; consumedIds: Set<string> } {
+  const consumedPersistedIds = new Set<string>();
+  const consumedIds = new Set<string>();
+
+  const remaining = pending.filter((optimistic) => {
     const optimisticContent = normalizeUserMessageForReconciliation(optimistic.content);
     const optimisticCreatedAt = Date.parse(optimistic.createdAt);
     const matched = persisted.find((message) => {
@@ -1534,8 +1542,11 @@ export function reconcilePendingUserMessages(
 
     if (!matched) return true;
     consumedPersistedIds.add(matched.id);
+    consumedIds.add(optimistic.id);
     return false;
   });
+
+  return { remaining, consumedIds };
 }
 
 export function replaceConversationMessagesFromEdit(

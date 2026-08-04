@@ -1,15 +1,28 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { net } from "electron";
+import {
+  hasAttachmentDisposition,
+  isTextualResponseMimeType,
+  normalizeResponseMimeType,
+  looksLikeBinaryData,
+  resolveHttpDownloadFileName,
+  shouldDownloadHttpResponse
+} from "./http-download";
 
 export const HTTP_PROXY_TIMEOUT_MS = 30_000;
 export const HTTP_PROXY_MAX_BODY_BYTES = 1024 * 1024;
+export const HTTP_PROXY_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
 export interface HttpProxyRequestPayload {
+  threadId: string;
   method: string;
   url: string;
   headers?: Record<string, string>;
   body?: string;
+  downloadFileName?: string;
 }
 
 export type HttpProxyResult =
@@ -19,6 +32,13 @@ export type HttpProxyResult =
       statusText: string;
       headers: Record<string, string>;
       bodyText: string;
+      bodyKind: "text" | "file";
+      download?: {
+        fileName: string;
+        filePath: string;
+        mimeType: string;
+        sizeBytes: number;
+      };
       truncated: boolean;
       durationMs: number;
     }
@@ -34,18 +54,20 @@ function isPlainStringRecord(value: unknown): value is Record<string, string> {
 async function readBodyWithLimit(
   response: Response,
   maxBytes: number,
-  deadlineAt: number
-): Promise<{ text: string; truncated: boolean }> {
+  deadlineAt: number,
+  binaryMaxBytes = maxBytes
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   if (!response.body) {
-    const text = await response.text();
-    const bytes = new TextEncoder().encode(text);
-    if (bytes.byteLength <= maxBytes) return { text, truncated: false };
-    return { text: new TextDecoder().decode(bytes.slice(0, maxBytes)), truncated: true };
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const effectiveLimit = looksLikeBinaryData(bytes) ? binaryMaxBytes : maxBytes;
+    if (bytes.byteLength <= effectiveLimit) return { bytes, truncated: false };
+    return { bytes: bytes.slice(0, effectiveLimit), truncated: true };
   }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let received = 0;
   let truncated = false;
+  let effectiveLimit = maxBytes;
   try {
     for (;;) {
       if (Date.now() > deadlineAt) {
@@ -55,9 +77,12 @@ async function readBodyWithLimit(
       const { done, value } = await reader.read();
       if (done) break;
       if (!value || value.byteLength === 0) continue;
+      if (received === 0 && binaryMaxBytes > maxBytes && looksLikeBinaryData(value)) {
+        effectiveLimit = binaryMaxBytes;
+      }
       received += value.byteLength;
-      if (received > maxBytes) {
-        const remaining = maxBytes - (received - value.byteLength);
+      if (received > effectiveLimit) {
+        const remaining = effectiveLimit - (received - value.byteLength);
         if (remaining > 0) chunks.push(value.slice(0, remaining));
         truncated = true;
         break;
@@ -78,10 +103,34 @@ async function readBodyWithLimit(
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return { text: new TextDecoder().decode(merged), truncated };
+  return { bytes: merged, truncated };
 }
 
-export async function executeHttpRequest(payload: HttpProxyRequestPayload): Promise<HttpProxyResult> {
+export async function writeUniqueDownload(directory: string, fileName: string, bytes: Uint8Array): Promise<string> {
+  await fs.mkdir(directory, { recursive: true });
+  const extension = path.extname(fileName);
+  const stem = path.basename(fileName, extension);
+  for (let attempt = 0; attempt < 10_000; attempt += 1) {
+    const candidate = path.join(directory, attempt === 0 ? fileName : `${stem} (${attempt})${extension}`);
+    try {
+      const handle = await fs.open(candidate, "wx");
+      try {
+        await handle.writeFile(bytes);
+      } finally {
+        await handle.close();
+      }
+      return candidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("无法生成不重复的下载文件名。");
+}
+
+export async function executeHttpRequest(
+  payload: HttpProxyRequestPayload,
+  getThreadOutputDir: (threadId: string) => Promise<string>
+): Promise<HttpProxyResult> {
   if (!payload || typeof payload !== "object") {
     return { ok: false, error: "请求参数缺失。" };
   }
@@ -107,6 +156,12 @@ export async function executeHttpRequest(payload: HttpProxyRequestPayload): Prom
   if (payload.body !== undefined && typeof payload.body !== "string") {
     return { ok: false, error: "请求体必须是字符串。" };
   }
+  if (typeof payload.threadId !== "string" || !payload.threadId.trim()) {
+    return { ok: false, error: "任务 ID 缺失。" };
+  }
+  if (payload.downloadFileName !== undefined && typeof payload.downloadFileName !== "string") {
+    return { ok: false, error: "下载文件名格式非法。" };
+  }
   if ((method === "GET" || method === "HEAD") && payload.body) {
     return { ok: false, error: `${method} 请求不允许携带请求体。` };
   }
@@ -126,17 +181,59 @@ export async function executeHttpRequest(payload: HttpProxyRequestPayload): Prom
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
-    const bodyLimit = method === "HEAD" ? 0 : HTTP_PROXY_MAX_BODY_BYTES;
-    const { text, truncated } =
+    const mimeType = normalizeResponseMimeType(responseHeaders);
+    const possibleFile = response.status >= 200 && response.status < 300 && (
+      hasAttachmentDisposition(responseHeaders) || !isTextualResponseMimeType(mimeType)
+    );
+    const declaredBodyBytes = Number(responseHeaders["content-length"] ?? 0);
+    if (possibleFile && Number.isFinite(declaredBodyBytes) && declaredBodyBytes > HTTP_PROXY_MAX_DOWNLOAD_BYTES) {
+      return { ok: false, error: `返回文件超过 ${Math.round(HTTP_PROXY_MAX_DOWNLOAD_BYTES / (1024 * 1024))} MB，未开始下载。` };
+    }
+    const bodyLimit = method === "HEAD"
+      ? 0
+      : possibleFile || !mimeType
+        ? HTTP_PROXY_MAX_DOWNLOAD_BYTES
+        : HTTP_PROXY_MAX_BODY_BYTES;
+    const { bytes, truncated } =
       bodyLimit === 0
-        ? { text: "", truncated: false }
-        : await readBodyWithLimit(response, bodyLimit, deadlineAt);
+        ? { bytes: new Uint8Array(), truncated: false }
+        : await readBodyWithLimit(response, bodyLimit, deadlineAt, HTTP_PROXY_MAX_DOWNLOAD_BYTES);
+    const downloadResponse = shouldDownloadHttpResponse(response.status, responseHeaders, bytes);
+    if (downloadResponse && truncated) {
+      return { ok: false, error: `返回文件超过 ${Math.round(HTTP_PROXY_MAX_DOWNLOAD_BYTES / (1024 * 1024))} MB，未保存不完整文件。` };
+    }
+    if (downloadResponse) {
+      const fileName = resolveHttpDownloadFileName({
+        preferredFileName: payload.downloadFileName,
+        headers: responseHeaders,
+        url: targetUrl.toString()
+      });
+      const outputDir = await getThreadOutputDir(payload.threadId);
+      const filePath = await writeUniqueDownload(outputDir, fileName, bytes);
+      return {
+        ok: true,
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+        bodyText: "",
+        bodyKind: "file",
+        download: {
+          fileName: path.basename(filePath),
+          filePath,
+          mimeType: mimeType || "application/octet-stream",
+          sizeBytes: bytes.byteLength
+        },
+        truncated: false,
+        durationMs: Date.now() - startedAt
+      };
+    }
     return {
       ok: true,
       status: response.status,
       statusText: response.statusText,
       headers: responseHeaders,
-      bodyText: text,
+      bodyText: new TextDecoder().decode(bytes),
+      bodyKind: "text",
       truncated,
       durationMs: Date.now() - startedAt
     };

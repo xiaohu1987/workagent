@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { isConfigurableGptReasoningModel, normalizeResponseTone, resolveModelReasoningEffort, withGptReasoningCapabilities } from "@shared-types";
 import type { ModelProfile } from "@shared-types";
 import { defaultConfig, loadConfig, saveConfig } from "../apps/desktop/src/main/storage";
-import { normalizeDraftConfig } from "../apps/desktop/src/renderer/lib/config-utils";
+import { normalizeDraftConfig, resolveSelectionFromConfig } from "../apps/desktop/src/renderer/lib/config-utils";
 
 const temporaryDirectories: string[] = [];
 
@@ -14,6 +14,21 @@ afterEach(async () => {
 });
 
 describe("model configuration storage", () => {
+  it("resolves a new thread to the configured default provider and model", () => {
+    const config = defaultConfig();
+    config.defaultProvider = "anthropic";
+    config.defaultModel = "claude-sonnet-4-20250514";
+
+    expect(resolveSelectionFromConfig(config)).toEqual({
+      providerId: "anthropic",
+      modelId: "claude-sonnet-4-20250514"
+    });
+    expect(resolveSelectionFromConfig(config, "mock", "mock-codexh")).toEqual({
+      providerId: "mock",
+      modelId: "mock-codexh"
+    });
+  });
+
   it("preserves a deliberately cleared default multimodal input model", () => {
     const config = defaultConfig();
     const recognizableModel = config.models.find((model) => model.supportsMultimodalInput);

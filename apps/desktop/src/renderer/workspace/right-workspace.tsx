@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { GitActionResult, GitSnapshot, RuntimeThreadSnapshot, ToolCallRecord } from "@shared-types";
 import type { ComposerAttachmentInput } from "../lib/conversation-utils";
 import type { ProjectFileEntry } from "../lib/project-files";
@@ -8,7 +9,7 @@ import { WorkspaceAccordionSection, WorkspaceEmptyState } from "./panels";
 import { ProjectFilesWorkspace } from "./project-files";
 
 export type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
-export function RightWorkspacePanel({
+export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   hidden,
   activeTab,
   onTabChange,
@@ -131,7 +132,7 @@ export function RightWorkspacePanel({
       </button>
     </aside>
   );
-}
+});
 
 function toggleWorkspaceSection(
   tab: RightWorkspaceTab,

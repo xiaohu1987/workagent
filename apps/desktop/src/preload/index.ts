@@ -78,10 +78,12 @@ const api = {
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[]; mediaIntent?: "image" | "video" | null }) =>
     ipcRenderer.invoke("threads:send", payload),
   requestHttp: (payload: {
+    threadId: string;
     method: string;
     url: string;
     headers?: Record<string, string>;
     body?: string;
+    downloadFileName?: string;
   }) => ipcRenderer.invoke("http:request", payload),
   guideActiveThread: (payload: { threadId: string; content: string }) =>
     ipcRenderer.invoke("threads:guide", payload),

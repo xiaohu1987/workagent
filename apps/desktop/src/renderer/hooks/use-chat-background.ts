@@ -168,6 +168,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
       shell.style.setProperty("--app-background-parallax-front-y", `${(targetY * 1.5).toFixed(2)}px`);
     };
     const handlePointerMove = (event: PointerEvent) => {
+      if (document.hidden) return;
       targetX = ((event.clientX / Math.max(1, window.innerWidth)) - 0.5) * 14;
       targetY = ((event.clientY / Math.max(1, window.innerHeight)) - 0.5) * 14;
       if (!animationFrame) animationFrame = window.requestAnimationFrame(paint);
@@ -177,11 +178,16 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
       targetY = 0;
       if (!animationFrame) animationFrame = window.requestAnimationFrame(paint);
     };
+    const handleVisibilityChange = () => {
+      if (document.hidden) handlePointerLeave();
+    };
     window.addEventListener("pointermove", handlePointerMove, { passive: true });
     window.addEventListener("blur", handlePointerLeave);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("blur", handlePointerLeave);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
       reset();
     };

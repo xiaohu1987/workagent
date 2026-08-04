@@ -29,6 +29,7 @@ import {
   getAssistantDraftDisplayContent,
   mergeSnapshotRecords,
   reconcilePendingUserMessages,
+  reconcilePendingUserMessagesDetailed,
   reconcileAssistantDraftCompletion,
   reconcileAssistantDraftUpdate,
   resolveLatestThreadRecord,
@@ -744,6 +745,67 @@ describe("optimistic user message reconciliation", () => {
     const persisted: MessageRecord = { ...first, id: "persisted-1", createdAt: "2026-07-15T01:00:02.000Z" };
 
     expect(reconcilePendingUserMessages([first, second], [persisted])).toEqual([second]);
+  });
+
+  it("consumes an API card optimistic title when its full persisted payload arrives", () => {
+    const displayContent = "调用接口卡片「根据 OBS 地址下载附件」";
+    const optimistic: MessageRecord = {
+      id: "optimistic-api-card",
+      threadId: "thread-1",
+      turnRunId: null,
+      role: "user",
+      content: displayContent,
+      metadataJson: null,
+      createdAt: "2026-08-04T01:00:00.000Z"
+    };
+    const persisted: MessageRecord = {
+      ...optimistic,
+      id: "persisted-api-card",
+      content: "```api-card\n{\"url\":\"https://example.test/download\"}\n```",
+      metadataJson: JSON.stringify({ displayContent }),
+      createdAt: "2026-08-04T01:00:00.250Z"
+    };
+
+    const reconciliation = reconcilePendingUserMessagesDetailed([optimistic], [persisted]);
+    const visibleMessages = mergeSnapshotRecords(
+      [optimistic].filter((message) => !reconciliation.consumedIds.has(message.id)),
+      [persisted],
+      (message) => message.createdAt
+    );
+
+    expect(reconciliation.remaining).toEqual([]);
+    expect(reconciliation.consumedIds).toEqual(new Set([optimistic.id]));
+    expect(visibleMessages).toEqual([persisted]);
+  });
+
+  it("consumes only one API card optimistic message per persisted event", () => {
+    const displayContent = "调用接口卡片「根据 OBS 地址下载附件」";
+    const first: MessageRecord = {
+      id: "optimistic-api-card-1",
+      threadId: "thread-1",
+      turnRunId: null,
+      role: "user",
+      content: displayContent,
+      metadataJson: null,
+      createdAt: "2026-08-04T01:00:00.000Z"
+    };
+    const second: MessageRecord = {
+      ...first,
+      id: "optimistic-api-card-2",
+      createdAt: "2026-08-04T01:00:01.000Z"
+    };
+    const persisted: MessageRecord = {
+      ...first,
+      id: "persisted-api-card",
+      content: "```api-card\n{\"url\":\"https://example.test/download\"}\n```",
+      metadataJson: JSON.stringify({ displayContent }),
+      createdAt: "2026-08-04T01:00:02.000Z"
+    };
+
+    const reconciliation = reconcilePendingUserMessagesDetailed([first, second], [persisted]);
+
+    expect(reconciliation.remaining).toEqual([second]);
+    expect(reconciliation.consumedIds).toEqual(new Set([first.id]));
   });
 });
 

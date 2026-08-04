@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { useState } from "react";
 import type { ThreadRecord } from "@shared-types";
@@ -54,7 +55,7 @@ type Props = {
   onBeginRename: (thread: ThreadRecord) => void;
 };
 
-export function HistorySidebar({ threads, projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, collapsedGroups, setCollapsedGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onBeginRename }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ threads, projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, collapsedGroups, setCollapsedGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onBeginRename }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const contextPresence = useMotionPresence(contextMenu, 140);
   const visibleContextMenu = contextMenu ?? contextPresence.value;
@@ -105,4 +106,4 @@ export function HistorySidebar({ threads, projectGroups, standaloneThreads, sele
     </div>
     <div className="sidebar-settings"><button type="button" className="sidebar-settings-button" onClick={() => onOpenSettings("provider")}><span className="sidebar-settings-main"><IconGear /><span>设置</span></span></button>{updateReminder ? <button type="button" className={`sidebar-update-reminder ${updatePhase ?? ""}`} title="打开更新设置" onClick={() => onOpenSettings("update")}><span className="sidebar-update-reminder-dot" aria-hidden /><span>{updateReminder}</span></button> : null}<button type="button" className="sidebar-settings-help" title="产品说明与使用指南" aria-label="产品说明与使用指南" onClick={onOpenHelp}><IconHelpCircle /></button></div>
   </aside>;
-}
+});

@@ -458,7 +458,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent, true, payload.mediaIntent ?? null)
   );
-  ipcMain.handle("http:request", (_event, payload: HttpProxyRequestPayload) => executeHttpRequest(payload));
+  ipcMain.handle("http:request", (_event, payload: HttpProxyRequestPayload) =>
+    executeHttpRequest(payload, (threadId) => backend.getThreadOutputDir(threadId))
+  );
   ipcMain.handle("threads:guide", (_event, payload: { threadId: string; content: string }) =>
     backend.guideActiveThread(payload.threadId, payload.content)
   );

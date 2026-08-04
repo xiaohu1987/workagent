@@ -97,6 +97,18 @@ export type BuildApiRequestResult =
   | { ok: true; request: ApiRequestSpec }
   | { ok: false; error?: string; fieldErrors: Record<string, string> };
 
+export function resolveApiCardDownloadFileName(
+  config: ApiCardConfig,
+  values: ApiCardValues
+): string | undefined {
+  const fileNameField = config.fields.find((field) =>
+    /(?:download[-_ ]*)?file[-_ ]*name|文件名|下载名称|附件名称/i.test(`${field.name} ${field.label}`)
+  );
+  if (!fileNameField) return undefined;
+  const value = values[fileNameField.name];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function findForbiddenKey(value: unknown): string | null {
   if (Array.isArray(value)) {
     for (const item of value) {

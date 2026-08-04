@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import {
   buildApiRequest,
   createInitialValues,
   formatApiResponseBody,
   parseApiCardConfig,
+  resolveApiCardDownloadFileName,
   type ApiCardConfig,
   type ApiCardField,
   type ApiCardValues,
@@ -39,7 +40,15 @@ type ApiCardResult = {
   headers: Record<string, string>;
   rawBody: string;
   formatted: FormattedApiResponse;
+  download?: {
+    fileName: string;
+    filePath: string;
+    mimeType: string;
+    sizeBytes: number;
+  };
 };
+
+export const ApiCardThreadContext = createContext<string | null>(null);
 
 function methodBadgeClass(method: ApiCardConfig["method"]): string {
   return `api-card-method is-${method.toLowerCase()}`;
@@ -195,6 +204,7 @@ function ApiCardFieldControl(props: {
 }
 
 export function ApiCardMessage({ configText }: { configText: string }) {
+  const threadId = useContext(ApiCardThreadContext);
   const parsed = useMemo(() => parseApiCardConfig(configText), [configText]);
   const config = parsed.ok ? parsed.config : null;
 
@@ -252,6 +262,10 @@ export function ApiCardMessage({ configText }: { configText: string }) {
   const handleSubmit = async () => {
     if (loading) return;
     setGlobalError(null);
+    if (!threadId) {
+      setGlobalError("无法确定当前任务，不能保存接口返回文件。");
+      return;
+    }
     const built = buildApiRequest(config, values, authToken);
     if (!built.ok) {
       setFieldErrors(built.fieldErrors);
@@ -261,7 +275,11 @@ export function ApiCardMessage({ configText }: { configText: string }) {
     setFieldErrors({});
     setLoading(true);
     try {
-      const response = await window.codexh.requestHttp(built.request);
+      const response = await window.codexh.requestHttp({
+        threadId,
+        ...built.request,
+        downloadFileName: resolveApiCardDownloadFileName(config, values)
+      });
       if (!response.ok) {
         setResult(null);
         setGlobalError(response.error);
@@ -274,7 +292,8 @@ export function ApiCardMessage({ configText }: { configText: string }) {
         truncated: response.truncated,
         headers: response.headers,
         rawBody: response.bodyText,
-        formatted: formatApiResponseBody(response.bodyText)
+        formatted: formatApiResponseBody(response.bodyText),
+        download: response.download
       });
     } catch (error) {
       setResult(null);
@@ -403,21 +422,27 @@ export function ApiCardMessage({ configText }: { configText: string }) {
                 <span className="api-card-result-duration">{result.durationMs} ms</span>
                 {result.truncated ? <span className="api-card-result-truncated">响应过大已截断</span> : null}
               </div>
-              {result.formatted.pretty ? (
+              {result.download ? (
+                <pre className="api-card-result-body is-plain">{result.download.filePath}</pre>
+              ) : result.formatted.pretty ? (
                 <pre className={`api-card-result-body${result.formatted.isJson ? "" : " is-plain"}`}>
                   {result.formatted.pretty}
                 </pre>
               ) : (
                 <div className="api-card-result-empty">(响应体为空)</div>
               )}
-              <details className="api-card-result-details">
-                <summary>查看原始内容</summary>
-                <pre>{result.rawBody || "(空)"}</pre>
-              </details>
-              <details className="api-card-result-details">
-                <summary>响应头</summary>
-                <pre>{JSON.stringify(result.headers, null, 2)}</pre>
-              </details>
+              {!result.download ? (
+                <details className="api-card-result-details">
+                  <summary>查看原始内容</summary>
+                  <pre>{result.rawBody || "(空)"}</pre>
+                </details>
+              ) : null}
+              {!result.download ? (
+                <details className="api-card-result-details">
+                  <summary>响应头</summary>
+                  <pre>{JSON.stringify(result.headers, null, 2)}</pre>
+                </details>
+              ) : null}
             </div>
           ) : null}
         </div>
