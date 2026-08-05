@@ -31,6 +31,7 @@ import {
   validateManagedWriteCompletion,
   buildManagedWriteCompletionRecoveryInstruction,
   validateStandardCompletion,
+  hasValidApiCardDeliverable,
   buildStandardCompletionAuditSystemPrompt,
   buildStandardCompletionAuditInstruction,
   buildStandardCompletionAuditRecoveryInstruction,
@@ -930,6 +931,34 @@ describe("standard completion validation", () => {
     expect(MAX_STANDARD_COMPLETION_RECOVERIES).toBeGreaterThan(MAX_AGENT_PROTOCOL_FAILURES);
   });
 
+  it("recognizes a valid api-card as the chat deliverable", () => {
+    expect(hasValidApiCardDeliverable(
+      "把接口调用制作成一张 api 卡片",
+      [
+        "```api-card",
+        JSON.stringify({
+          title: "查询项目",
+          method: "POST",
+          url: "https://example.test/api",
+          fields: [{ name: "id", label: "项目 ID", type: "text" }],
+          bodyTemplate: "{\\\"id\\\": \\\"{{id}}\\\"}"
+        }),
+        "```"
+      ].join("\n")
+    )).toBe(true);
+  });
+
+  it("does not bypass delivery checks for malformed or unrelated api-card text", () => {
+    expect(hasValidApiCardDeliverable(
+      "把接口调用制作成一张 api 卡片",
+      "```api-card\n{\"method\":\"POST\"}\n```"
+    )).toBe(false);
+    expect(hasValidApiCardDeliverable(
+      "请总结这段文字",
+      "```api-card\n{\"method\":\"POST\",\"url\":\"https://example.test\",\"fields\":[]}\n```"
+    )).toBe(false);
+  });
+
   it("recognizes direct project mutation requests without classifying diagnostic questions", () => {
     expect(isProjectFileMutationRequest("修改一下程序 ，换一个语音源 你这个太生硬了")).toBe(true);
     expect(isProjectFileMutationRequest("Please fix the login bug")).toBe(true);
@@ -1080,6 +1109,11 @@ describe("standard completion validation", () => {
     expect(resolveStandardCompletionAuditDisposition({
       outcome: "rejected",
       attempt: MAX_STANDARD_COMPLETION_RECOVERIES
+    })).toBe("accept_candidate");
+    expect(resolveStandardCompletionAuditDisposition({
+      outcome: "rejected",
+      attempt: 1,
+      candidateHasStructuredDeliverable: true
     })).toBe("accept_candidate");
   });
 

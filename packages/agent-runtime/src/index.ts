@@ -3450,6 +3450,10 @@ class ThreadSessionRuntime {
 
         const bypassStandardCompletionAudit = resolveModelCompat(model)
           .shouldBypassStandardCompletionAudit(model);
+        const hasApiCardDeliverable = hasValidApiCardDeliverable(
+          effectiveRequest,
+          decision.assistantMessage ?? ""
+        );
         if (
           this.#gpa.stage === "off" &&
           decision.toolCalls.length === 0 &&
@@ -3631,7 +3635,8 @@ class ThreadSessionRuntime {
               });
               const disposition = resolveStandardCompletionAuditDisposition({
                 outcome: "rejected",
-                attempt: standardCompletionAttempts
+                attempt: standardCompletionAttempts,
+                candidateHasStructuredDeliverable: hasApiCardDeliverable
               });
               if (disposition === "retry") {
                 await scheduleStandardCompletionRecovery("completion_audit");
@@ -3647,7 +3652,7 @@ class ThreadSessionRuntime {
               }
               await this.services.log("turn.standard_completion_audit_bypassed", this.threadId, {
                 turnRunId: turn.id,
-                reason: "recovery_limit",
+                reason: hasApiCardDeliverable ? "structured_deliverable" : "recovery_limit",
                 attempt: standardCompletionAttempts,
                 gaps: auditResult.gaps
               });
@@ -7154,6 +7159,45 @@ export function validateStandardCompletion(input: {
   };
 }
 
+/**
+ * An api-card code block is the user-visible deliverable for this request.
+ * It does not need a file write or an external API call before the turn can
+ * complete, so the generic evidence audit must not turn it into a retry loop.
+ */
+export function hasValidApiCardDeliverable(request: string, content: string): boolean {
+  if (!/(?:\bapi\b|接口\s*(?:调用|请求)?\s*卡片)/i.test(request)) return false;
+
+  const blocks = [...content.matchAll(/```api-card\s*([\s\S]*?)```/gi)];
+  if (blocks.length !== 1) return false;
+
+  try {
+    const value: unknown = JSON.parse(blocks[0][1].trim());
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const card = value as {
+      method?: unknown;
+      url?: unknown;
+      fields?: unknown;
+      bodyTemplate?: unknown;
+    };
+    if (!(typeof card.method === "string" &&
+      /^(?:GET|POST|PUT|PATCH|DELETE)$/i.test(card.method) &&
+      typeof card.url === "string" &&
+      /^https?:\/\//i.test(card.url) &&
+      Array.isArray(card.fields))) return false;
+    const names = new Set<string>();
+    for (const field of card.fields) {
+      if (!field || typeof field !== "object" || Array.isArray(field)) return false;
+      const entry = field as { name?: unknown; type?: unknown };
+      if (typeof entry.name !== "string" || !entry.name.trim() || names.has(entry.name)) return false;
+      if (typeof entry.type !== "string" || !entry.type.trim()) return false;
+      names.add(entry.name);
+    }
+    return card.bodyTemplate === undefined || typeof card.bodyTemplate === "string";
+  } catch {
+    return false;
+  }
+}
+
 export function buildStandardCompletionAuditSystemPrompt(model: ModelProfile): string {
   return [
     "You are a completion auditor for a desktop agent. You are not the user-facing assistant.",
@@ -7189,8 +7233,10 @@ export function resolveStandardCompletionAuditDisposition(input: {
   outcome: "unavailable" | "rejected";
   attempt: number;
   maxAttempts?: number;
+  candidateHasStructuredDeliverable?: boolean;
 }): "accept_candidate" | "retry" {
   if (input.outcome === "unavailable") return "accept_candidate";
+  if (input.candidateHasStructuredDeliverable) return "accept_candidate";
   const maxAttempts = input.maxAttempts ?? MAX_STANDARD_COMPLETION_RECOVERIES;
   return input.attempt >= maxAttempts ? "accept_candidate" : "retry";
 }
