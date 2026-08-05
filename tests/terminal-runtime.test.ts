@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildBackgroundLaunchCommand,
   isLocalServerCommand,
-  redirectStaticHtmlLaunch
+  redirectStaticHtmlLaunch,
+  TerminalRuntime
 } from "../apps/desktop/src/main/terminal-runtime";
 
 describe("TerminalRuntime local servers", () => {
@@ -31,6 +32,32 @@ describe("TerminalRuntime local servers", () => {
       "npx http-server . -p 8000 -c-1"
     );
     expect(redirectStaticHtmlLaunch("git status --short")).toBeUndefined();
+  });
+});
+
+describe("TerminalRuntime idle command observation", () => {
+  it("reports a quiet live process as running instead of timing it out", async () => {
+    const runtime = new TerminalRuntime(25);
+    const onIdle = vi.fn().mockResolvedValue("No concrete failure evidence was found.");
+
+    try {
+      const result = await runtime.execute(
+        "quiet-command-thread",
+        process.cwd(),
+        'node -e "setTimeout(() => {}, 1000)"',
+        () => undefined,
+        undefined,
+        "default",
+        onIdle
+      );
+
+      expect(onIdle).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({ running: true, idleForMs: 25 });
+      expect(result.output).toContain("inactivity observation, not a timeout or failure");
+    } finally {
+      runtime.cancelCommands("quiet-command-thread", "Test cleanup.");
+      await runtime.close("quiet-command-thread");
+    }
   });
 });
 

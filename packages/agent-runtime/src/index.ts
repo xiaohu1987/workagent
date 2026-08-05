@@ -649,8 +649,8 @@ interface RuntimeServices {
     threadId: string,
     cwd: string,
     command: string,
-    input?: { onStalled?: () => Promise<string | null> }
-  ): Promise<{ output: string; localUrl?: string; stalled?: boolean; diagnosis?: string }>;
+    input?: { onIdle?: () => Promise<string | null> }
+  ): Promise<{ output: string; localUrl?: string; running?: boolean; idleForMs?: number; diagnosis?: string }>;
   cancelTerminalCommands(threadId: string, reason?: string): Promise<void> | void;
   requestApproval(threadId: string, turnRunId: string, input: {
     title: string;
@@ -4591,7 +4591,7 @@ class ThreadSessionRuntime {
                   }
                 }
                 return this.services.runTerminalCommand(this.threadId, workspaceCwd, command, {
-                  onStalled: () => this.diagnoseStalledTerminalCommand({
+                  onIdle: () => this.observeIdleTerminalCommand({
                     thread,
                     turnId: turn.id,
                     initialInput,
@@ -5588,7 +5588,7 @@ class ThreadSessionRuntime {
     }
   }
 
-  private async diagnoseStalledTerminalCommand(input: {
+  private async observeIdleTerminalCommand(input: {
     thread: ThreadRecord;
     turnId: string;
     initialInput: string;
@@ -5597,20 +5597,20 @@ class ThreadSessionRuntime {
     let systemOverride = false;
     if (input.thread.multiAgentMode === "disabled") {
       const answers = await this.services.requestUserInput(this.threadId, input.turnId, {
-        title: "命令已 5 分钟无响应",
+        title: "命令已 5 分钟未产生输出",
         kind: "generic",
         allowSkip: false,
         timeoutMs: 30_000,
         defaultAnswers: { delegation: "continue_without_subagent" },
         questions: [{
           id: "delegation",
-          label: "是否使用子智能体检查",
-          prompt: "是否启动只读子智能体检查服务状态并诊断这条仍在运行的命令？",
+          label: "是否检查任务进度",
+          prompt: "命令进程仍在运行。是否启动只读子智能体检查可验证的进度信号？仅未产生输出不能判定超时。",
           options: [
             {
               id: "start_subagent",
-              label: "启动诊断子智能体",
-              description: "检查公开服务端点，并返回继续等待或中断命令的建议。"
+              label: "检查进度信号",
+              description: "检查公开服务端点等只读证据，并返回继续等待或中断命令的建议。"
             },
             {
               id: "continue_without_subagent",
@@ -5622,14 +5622,14 @@ class ThreadSessionRuntime {
         }]
       });
       if (answers.delegation !== "start_subagent") {
-        return "未启动诊断子智能体。命令会继续运行，因为选择了继续等待或确认已超时。";
+        return "未启动诊断子智能体；进程仍在运行，继续等待。未产生输出本身不构成超时依据。";
       }
       systemOverride = true;
     }
 
     const child = await this.services.spawnChildAgent(this.threadId, {
       role: "deployment-observer",
-      prompt: buildStalledCommandObserverPrompt(input.initialInput, input.command),
+      prompt: buildIdleCommandObserverPrompt(input.initialInput, input.command),
       systemOverride
     });
     const waited = await this.services.waitForSubagents(this.threadId, {
@@ -9709,7 +9709,7 @@ function redactSensitiveText(value: string): string {
 }
 
 function isTerminalCommandTimeout(content: string): boolean {
-  return /command (?:timed out|produced no output|is still running after)|timed out after \d+ms/i.test(content);
+  return /command timed out|timed out after \d+ms/i.test(content);
 }
 
 function buildTimedOutDeploymentRecoveryInstruction(): string {
@@ -9721,13 +9721,13 @@ function buildTimedOutDeploymentRecoveryInstruction(): string {
   ].join(" ");
 }
 
-function buildStalledCommandObserverPrompt(initialInput: string, command: string): string {
+function buildIdleCommandObserverPrompt(initialInput: string, command: string): string {
   return [
-    "A parent terminal command has run without completing for five minutes. Diagnose its current state without changing files, servers, processes, or external systems.",
-    "Use read-only web tools to test any public host, port, frontend URL, backend API, or health endpoint mentioned in the parent task. Do not use shell commands or browser interaction tools.",
-    "Return a concise structured recommendation with one of: continue waiting, interrupt the parent command, or repair required. Include HTTP status evidence and explain uncertainty.",
+    "A parent terminal process is still running but has produced no output for five minutes. This is an inactivity observation, not proof of a timeout. Diagnose its current state without changing files, servers, processes, or external systems.",
+    "Use read-only tools to look for concrete progress or failure evidence: changing output or artifact size, reachable service health endpoints, explicit errors, or a completed/failed external job. Do not infer failure from elapsed time alone. Do not use shell commands or browser interaction tools.",
+    "Return a concise structured recommendation with one of: continue waiting, interrupt the parent command, or repair required. Recommend interruption only when concrete failure or lack-of-progress evidence supports it; include the evidence and explain uncertainty.",
     `Parent task: ${redactSensitiveText(initialInput)}`,
-    `Stalled command: ${redactSensitiveText(command)}`
+    `Observed command: ${redactSensitiveText(command)}`
   ].join("\n\n");
 }
 

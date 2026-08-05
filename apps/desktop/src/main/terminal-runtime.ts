@@ -19,12 +19,13 @@ type ActiveCommand = {
 };
 
 const MAX_BUFFER_LENGTH = 80_000;
-const DEFAULT_COMMAND_IDLE_TIMEOUT_MS = 300_000;
+const DEFAULT_COMMAND_IDLE_OBSERVATION_MS = 300_000;
 
 export type TerminalCommandResult = {
   output: string;
   localUrl?: string;
-  stalled?: boolean;
+  running?: boolean;
+  idleForMs?: number;
   diagnosis?: string;
 };
 
@@ -32,6 +33,8 @@ export type TerminalCommandResult = {
 export class TerminalRuntime {
   readonly #sessions = new Map<string, TerminalSession>();
   readonly #activeCommands = new Map<string, Set<ActiveCommand>>();
+
+  public constructor(private readonly commandIdleObservationMs = DEFAULT_COMMAND_IDLE_OBSERVATION_MS) {}
 
   public open(threadId: string, cwd: string, onOutput: (data: string) => void, sessionId = "default") {
     const key = this.#sessionKey(threadId, sessionId);
@@ -102,7 +105,7 @@ export class TerminalRuntime {
     onOutput: (data: string) => void,
     onLocalUrl?: (url: string) => void,
     sessionId = "default",
-    onStalled?: () => Promise<string | null>
+    onIdle?: () => Promise<string | null>
   ): Promise<TerminalCommandResult> {
     const key = this.#sessionKey(threadId, sessionId);
     this.#sessions.get(key) ?? this.open(threadId, cwd, onOutput, sessionId);
@@ -158,7 +161,7 @@ export class TerminalRuntime {
       let stderr = "";
       let localUrl: string | undefined;
       let settled = false;
-      let timedOut = false;
+      let idleReported = false;
       let idleTimeout: ReturnType<typeof setTimeout> | undefined;
       const removeActiveCommand = () => {
         activeForThread.delete(activeCommand);
@@ -171,11 +174,11 @@ export class TerminalRuntime {
         removeActiveCommand();
         callback();
       };
-      const reportStall = async (limitMs: number) => {
-        if (settled || timedOut) return;
-        timedOut = true;
-        this.#publish(session, `Command produced no output for ${limitMs}ms. Starting a diagnostic subagent while the command continues.\n`);
-        const diagnosis = await onStalled?.().catch((error) =>
+      const reportIdle = async (idleForMs: number) => {
+        if (settled || idleReported) return;
+        idleReported = true;
+        this.#publish(session, `Command is still running but produced no output for ${idleForMs}ms. Checking progress evidence while the command continues.\n`);
+        const diagnosis = await onIdle?.().catch((error) =>
           `Diagnostic subagent could not start: ${error instanceof Error ? error.message : String(error)}`
         ) ?? null;
         if (settled) return;
@@ -185,20 +188,22 @@ export class TerminalRuntime {
         resolve({
           output: [
             output,
-            `Command is still running after ${limitMs}ms.`,
-            diagnosis ?? "No diagnostic result was available before the watchdog returned."
+            `The process is still running and has produced no output for ${idleForMs}ms. This is an inactivity observation, not a timeout or failure.`,
+            diagnosis ?? "No additional progress evidence was available.",
+            "Do not restart or duplicate the command based only on elapsed time. Check concrete progress signals such as output or file growth, network activity, service health, an explicit error, or process exit status first."
           ].filter(Boolean).join("\n\n"),
           localUrl,
-          stalled: true,
+          running: true,
+          idleForMs,
           diagnosis: diagnosis ?? undefined
         });
       };
       const resetIdleTimeout = () => {
-        if (!onStalled) return;
+        if (!onIdle) return;
         if (idleTimeout) clearTimeout(idleTimeout);
         idleTimeout = setTimeout(
-          () => void reportStall(DEFAULT_COMMAND_IDLE_TIMEOUT_MS),
-          DEFAULT_COMMAND_IDLE_TIMEOUT_MS
+          () => void reportIdle(this.commandIdleObservationMs),
+          this.commandIdleObservationMs
         );
       };
 

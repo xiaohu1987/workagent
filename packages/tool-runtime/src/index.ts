@@ -228,7 +228,8 @@ interface ToolRegistration {
 type TerminalCommandResult = {
   output: string;
   localUrl?: string;
-  stalled?: boolean;
+  running?: boolean;
+  idleForMs?: number;
   diagnosis?: string;
 };
 
@@ -754,13 +755,14 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       }
       const terminal = await runShell(command, ctx);
       return {
-        ok: terminal.stalled !== true,
+        ok: true,
         content: terminal.output,
         json: {
           command,
           output: terminal.output,
           localUrl: terminal.localUrl,
-          stalled: terminal.stalled,
+          running: terminal.running,
+          idleForMs: terminal.idleForMs,
           diagnosis: terminal.diagnosis
         }
       };

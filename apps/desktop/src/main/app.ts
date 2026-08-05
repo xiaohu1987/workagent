@@ -373,7 +373,7 @@ export class DesktopBackend {
           void this.emitTerminalOutput(threadId, data);
         }, (url) => {
           void this.openLocalServerUrl(threadId, url);
-        }, "default", input?.onStalled),
+        }, "default", input?.onIdle),
       cancelTerminalCommands: async (threadId, reason) => this.#terminal.cancelCommands(threadId, reason),
       requestApproval: async (threadId, turnRunId, input) =>
         this.requestApproval(threadId, turnRunId, input),

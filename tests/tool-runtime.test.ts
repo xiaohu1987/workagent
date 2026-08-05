@@ -497,6 +497,28 @@ describe("ToolRuntime", () => {
     );
   });
 
+  it("treats a live command with no recent output as running instead of timed out", async () => {
+    const runTerminalCommand = vi.fn().mockResolvedValue({
+      output: "The process is still running. This is an inactivity observation, not a timeout or failure.",
+      running: true,
+      idleForMs: 300_000
+    });
+    const runtime = new ToolRuntime();
+
+    const result = await runtime.execute(
+      { id: "quiet-download", name: "shell.exec", arguments: { command: "download large-file" } },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        runTerminalCommand
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.json).toMatchObject({ running: true, idleForMs: 300_000 });
+    expect(result.content).toContain("not a timeout or failure");
+  });
+
   it("rejects invalid tool arguments before requesting approval or executing", async () => {
     const requestApproval = vi.fn();
     const runTerminalCommand = vi.fn();
