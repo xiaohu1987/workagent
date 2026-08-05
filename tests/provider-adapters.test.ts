@@ -263,6 +263,96 @@ describe("provider transport limits", () => {
     expect(serialized).toContain("Earlier assistant progress omitted");
   });
 
+  it("shrinks recent tool evidence when a tool-free request exceeds the hard limit by 45 bytes", () => {
+    const maxRequestBytes = 120 * 1024;
+    const targetRequestBytes = maxRequestBytes - 4 * 1024;
+    const messages = [
+      { role: "system", content: "" },
+      { role: "user", content: "CURRENT_REQUEST_MUST_STAY" },
+      { role: "tool", tool_call_id: "read-1", content: `FIRST_EVIDENCE_START\n${"a".repeat(5_000)}\nFIRST_EVIDENCE_END` },
+      { role: "tool", tool_call_id: "read-2", content: `LATEST_EVIDENCE_START\n${"b".repeat(5_000)}\nLATEST_EVIDENCE_END` }
+    ];
+    const request = {
+      model: deepseekModel.id,
+      messages,
+      stream: true
+    };
+    const bytesWithoutSystemPadding = Buffer.byteLength(JSON.stringify(request), "utf8");
+    messages[0]!.content = "S".repeat(maxRequestBytes + 45 - bytesWithoutSystemPadding);
+    expect(Buffer.byteLength(JSON.stringify(request), "utf8")).toBe(maxRequestBytes + 45);
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible" },
+      deepseekModel
+    );
+    const serialized = JSON.stringify(limited);
+
+    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(targetRequestBytes);
+    expect(serialized).toContain("CURRENT_REQUEST_MUST_STAY");
+    expect(serialized).toContain("LATEST_EVIDENCE_START");
+    expect(serialized).toContain("LATEST_EVIDENCE_END");
+    expect(serialized).toContain("Recent tool output shortened");
+    expect(limited).not.toHaveProperty("tools");
+  });
+
+  it("compacts regenerated system context when no historical message can be removed", () => {
+    const maxRequestBytes = 120 * 1024;
+    const targetRequestBytes = maxRequestBytes - 4 * 1024;
+    const request = {
+      model: deepseekModel.id,
+      messages: [
+        { role: "system", content: `SAFETY_RULES_MUST_STAY\n${"s".repeat(138_000)}\nSYSTEM_TAIL_MUST_STAY` },
+        { role: "user", content: "CURRENT_REQUEST_MUST_STAY" }
+      ],
+      stream: true
+    };
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible" },
+      deepseekModel
+    );
+    const serialized = JSON.stringify(limited);
+
+    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(targetRequestBytes);
+    expect(serialized).toContain("CURRENT_REQUEST_MUST_STAY");
+    expect(serialized).toContain("SAFETY_RULES_MUST_STAY");
+    expect(serialized).toContain("SYSTEM_TAIL_MUST_STAY");
+    expect(serialized).toContain("Supplementary system context shortened");
+  });
+
+  it("drops a large internal compaction summary before preserving the current request", () => {
+    const maxRequestBytes = 120 * 1024;
+    const targetRequestBytes = maxRequestBytes - 4 * 1024;
+    const request = {
+      model: deepseekModel.id,
+      messages: [
+        { role: "system", content: "SYSTEM_RULES_MUST_STAY" },
+        {
+          role: "user",
+          content: `[Internal context compaction summary. Preserve task goals.]\n${"history ".repeat(22_000)}`
+        },
+        { role: "user", content: "CURRENT_REQUEST_MUST_STAY" },
+        { role: "tool", tool_call_id: "schema-1", content: "schema ".repeat(15_000) }
+      ],
+      stream: true
+    };
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible" },
+      deepseekModel
+    );
+    const serialized = JSON.stringify(limited);
+
+    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(targetRequestBytes);
+    expect(serialized).toContain("CURRENT_REQUEST_MUST_STAY");
+    expect(serialized).toContain("SYSTEM_RULES_MUST_STAY");
+    expect(serialized).toContain("Earlier internal context summary omitted");
+    expect(serialized).not.toContain("history history history");
+  });
+
   it("drops low-priority skill catalog entries before explicit skills or project instructions", () => {
     const request = {
       model: deepseekModel.id,
@@ -667,6 +757,7 @@ describe("OpenAiCompatibleProvider", () => {
     expect(onRequestMeasured).toHaveBeenCalledWith({
       requestBytes: Buffer.byteLength(JSON.stringify(finalRequest), "utf8"),
       maxRequestBytes: 0,
+      targetRequestBytes: 0,
       maxTools: 2,
       toolCount: 2
     });
@@ -1396,7 +1487,7 @@ describe("OpenAiCompatibleProvider", () => {
       expect(decision.isStructured).toBe(false);
     });
 
-    it("deepseek compat leaves non-empty decisions untouched", () => {
+    it("deepseek compat promotes a terminal substantive reply to completed", () => {
       const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "" });
       const withMessage = compat.normalizeDecision(
         {
@@ -1410,6 +1501,7 @@ describe("OpenAiCompatibleProvider", () => {
         {} as never
       );
       expect(withMessage.assistantMessage).toBe("正常回复");
+      expect(withMessage.goalCompleted).toBe(true);
 
       const withToolCalls = compat.normalizeDecision(
         {

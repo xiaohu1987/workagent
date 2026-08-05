@@ -123,6 +123,10 @@ function normalizeProviderLimit(value: number | undefined, fallback: number): nu
 type WireMessage = { role?: unknown; content?: unknown; tool_calls?: unknown };
 const COMPACTED_ASSISTANT_HISTORY = "[Earlier assistant progress omitted to fit the provider request limit.]";
 const COMPACTED_TOOL_HISTORY = "[Earlier tool output truncated to fit the provider request limit.]";
+const COMPACTED_RECENT_TOOL_RESULT = "[Recent tool output shortened to fit the provider request limit.]";
+const COMPACTED_SYSTEM_CONTEXT = "[Supplementary system context shortened to fit the provider request limit.]";
+const INTERNAL_CONTEXT_SUMMARY_PREFIX = "[Internal context compaction summary.";
+const COMPACTED_INTERNAL_CONTEXT_SUMMARY = "[Earlier internal context summary omitted to fit the provider request limit.]";
 const PROVIDER_REQUEST_SAFETY_MARGIN_BYTES = 4 * 1024;
 const PROVIDER_REQUEST_SAFETY_MARGIN_THRESHOLD_BYTES = 64 * 1024;
 
@@ -219,6 +223,123 @@ function filterAvailableSkillsSection(messages: WireMessage[], prioritiesToRemov
     .join("\n"));
 }
 
+function compactInternalContextSummaries(messages: WireMessage[]): WireMessage[] {
+  return messages.map((message) =>
+    message.role === "user" &&
+    typeof message.content === "string" &&
+    message.content.startsWith(INTERNAL_CONTEXT_SUMMARY_PREFIX)
+      ? { ...message, content: COMPACTED_INTERNAL_CONTEXT_SUMMARY }
+      : message
+  );
+}
+
+function buildCompactedRecentToolContent(content: string, retainedCharacters: number): string {
+  if (retainedCharacters <= 0) return COMPACTED_RECENT_TOOL_RESULT;
+  const characters = Array.from(content);
+  if (retainedCharacters >= characters.length) return content;
+  const headLength = Math.ceil(retainedCharacters * 0.6);
+  const tailLength = retainedCharacters - headLength;
+  return [
+    characters.slice(0, headLength).join("").trimEnd(),
+    COMPACTED_RECENT_TOOL_RESULT,
+    characters.slice(characters.length - tailLength).join("").trimStart()
+  ].filter(Boolean).join("\n\n");
+}
+
+function compactRecentToolResultsToFit(
+  request: Record<string, unknown>,
+  messages: WireMessage[],
+  toolIndexes: number[],
+  maxRequestBytes: number
+): boolean {
+  for (const index of toolIndexes) {
+    if (serializedRequestBytes(request) <= maxRequestBytes) return true;
+    const message = messages[index]!;
+    if (typeof message.content !== "string" || message.content.length === 0) continue;
+    const originalContent = message.content;
+    const characterCount = Array.from(originalContent).length;
+    let low = 0;
+    let high = characterCount - 1;
+    let best: string | null = null;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      messages[index] = {
+        ...message,
+        content: buildCompactedRecentToolContent(originalContent, middle)
+      };
+      if (serializedRequestBytes(request) <= maxRequestBytes) {
+        best = messages[index]!.content as string;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    messages[index] = {
+      ...message,
+      content: best ?? COMPACTED_RECENT_TOOL_RESULT
+    };
+    if (serializedRequestBytes(request) <= maxRequestBytes) return true;
+  }
+  return serializedRequestBytes(request) <= maxRequestBytes;
+}
+
+function buildCompactedSystemContent(content: string, retainedCharacters: number): string {
+  if (retainedCharacters <= 0) return COMPACTED_SYSTEM_CONTEXT;
+  const characters = Array.from(content);
+  if (retainedCharacters >= characters.length) return content;
+  const headLength = Math.ceil(retainedCharacters * 0.75);
+  const tailLength = retainedCharacters - headLength;
+  return [
+    characters.slice(0, headLength).join("").trimEnd(),
+    COMPACTED_SYSTEM_CONTEXT,
+    characters.slice(characters.length - tailLength).join("").trimStart()
+  ].filter(Boolean).join("\n\n");
+}
+
+/**
+ * System prompts are regenerated for every turn, unlike the current user request.
+ * Compress them only as a final fallback after tool schemas and historical evidence.
+ */
+function compactSystemContextToFit(
+  request: Record<string, unknown>,
+  messages: WireMessage[],
+  maxRequestBytes: number
+): boolean {
+  const systemIndexes = messages
+    .map((message, index) => message.role === "system" && typeof message.content === "string" ? index : -1)
+    .filter((index) => index >= 0)
+    .sort((left, right) => String(messages[right]!.content).length - String(messages[left]!.content).length);
+
+  for (const index of systemIndexes) {
+    if (serializedRequestBytes(request) <= maxRequestBytes) return true;
+    const message = messages[index]!;
+    const originalContent = message.content as string;
+    const characterCount = Array.from(originalContent).length;
+    let low = 0;
+    let high = characterCount - 1;
+    let best: string | null = null;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      messages[index] = {
+        ...message,
+        content: buildCompactedSystemContent(originalContent, middle)
+      };
+      if (serializedRequestBytes(request) <= maxRequestBytes) {
+        best = messages[index]!.content as string;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    messages[index] = {
+      ...message,
+      content: best ?? COMPACTED_SYSTEM_CONTEXT
+    };
+    if (serializedRequestBytes(request) <= maxRequestBytes) return true;
+  }
+  return serializedRequestBytes(request) <= maxRequestBytes;
+}
+
 interface ToolDescriptionCandidate {
   owner: Record<string, unknown>;
   value: string;
@@ -310,9 +431,10 @@ export function applyProviderRequestLimits(
   if (limits.maxRequestBytes <= 0 || serializedRequestBytes(next) <= targetRequestBytes) return next;
   if (Array.isArray(next.messages)) {
     const copiedMessages = (next.messages as WireMessage[]).map((message) => ({ ...message }));
+    const messagesWithoutInternalSummaries = compactInternalContextSummaries(copiedMessages);
     const normalizedMessages = identity.includes("deepseek")
-      ? coalesceStrictWireMessages(copiedMessages)
-      : copiedMessages;
+      ? coalesceStrictWireMessages(messagesWithoutInternalSummaries)
+      : messagesWithoutInternalSummaries;
     let messages = removeDuplicatedFollowUpCapsule(normalizedMessages);
     next = { ...next, messages };
     if (serializedRequestBytes(next) <= targetRequestBytes) return next;
@@ -349,10 +471,17 @@ export function applyProviderRequestLimits(
       messages[index] = { ...message, content: `${message.content.slice(0, 2_048)}\n\n${COMPACTED_TOOL_HISTORY}` };
       if (serializedRequestBytes(next) <= targetRequestBytes) return next;
     }
+    if (compactRecentToolResultsToFit(next, messages, toolIndexes.slice(-2), targetRequestBytes)) {
+      return next;
+    }
   }
 
   next = compactToolSchemasToFit(next, targetRequestBytes);
   if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+  if (Array.isArray(next.messages)) {
+    const messages = next.messages as WireMessage[];
+    if (compactSystemContextToFit(next, messages, targetRequestBytes)) return next;
+  }
   if (serializedRequestBytes(next) <= limits.maxRequestBytes) return next;
   throw new ProviderRequestLimitError(serializedRequestBytes(next), limits.maxRequestBytes);
 }
@@ -365,6 +494,7 @@ async function reportProviderRequestMeasurement(
   await input.onRequestMeasured?.({
     requestBytes: serializedRequestBytes(request),
     maxRequestBytes: limits.maxRequestBytes,
+    targetRequestBytes: resolveProviderRequestTargetBytes(limits.maxRequestBytes),
     maxTools: limits.maxTools,
     toolCount: Array.isArray(request.tools) ? request.tools.length : 0
   });

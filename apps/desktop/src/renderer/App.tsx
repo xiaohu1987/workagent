@@ -1,4 +1,4 @@
-import { Fragment, createElement, memo, startTransition, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, createElement, memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent } from "react";
 import "./timeline.css";
@@ -5087,8 +5087,6 @@ export function App() {
 
   const historySearchPresence = useMotionPresence(isHistorySearchOpen ? true : null);
   const settingsPresence = useMotionPresence(isSettingsOpen ? true : null, 220);
-  const deferredSettingsTab = useDeferredValue(settingsTab);
-  const deferredCapabilityTab = useDeferredValue(capabilityTab);
   const projectCreatePresence = useMotionPresence(isProjectCreateOpen ? true : null);
   const mcpCreatePresence = useMotionPresence(isMcpCreateOpen && mcpCreateDraft ? mcpCreateDraft : null);
   const visibleMcpCreateDraft = mcpCreateDraft ?? mcpCreatePresence.value;
@@ -5856,10 +5854,10 @@ export function App() {
           onTabChange={setSettingsTab}
         >
           {settingsContentReady ? <>
-              {deferredSettingsTab === "usage" ? (
+              {settingsTab === "usage" ? (
                 <SettingsUsagePage summary={usageStatistics} providers={config?.providers ?? []} loading={isUsageStatisticsLoading} rangeDays={usageStatisticsRangeDays} granularity={usageStatisticsGranularity} onRangeChange={setUsageStatisticsRangeDays} onGranularityChange={setUsageStatisticsGranularity} onRefresh={() => void refreshUsageStatistics()} />
               ) : null}
-              {deferredSettingsTab === "appearance" ? (
+              {settingsTab === "appearance" ? (
                 <AppearanceSettingsPage
                   inputRef={chatBackgroundInputRef}
                   images={chatBackgroundImages}
@@ -5881,11 +5879,11 @@ export function App() {
                 />
               ) : null}
 
-              {deferredSettingsTab === "general" ? (
+              {settingsTab === "general" ? (
                 <RuntimeOverviewPage config={config} configDraft={configDraft} threadCount={threads.length} skillCount={skills.length} subagentDefaultModelValue={subagentDefaultModelValue} subagentDefaultModelOptions={subagentDefaultModelOptions} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} onSetLiveEditPreviewEnabled={(enabled) => void setLiveEditPreviewEnabled(enabled)} />
               ) : null}
 
-    {deferredSettingsTab === "provider" ? (
+    {settingsTab === "provider" ? (
       <ProviderSettingsPage
         configDraft={configDraft} config={config} settingsProvider={settingsProvider} settingsProviderModels={settingsProviderModels}
         providerSecretDrafts={providerSecretDrafts} setProviderSecretDrafts={setProviderSecretDrafts} isFetchingModels={isFetchingModels}
@@ -5897,7 +5895,7 @@ export function App() {
       />
     ) : null}
 
-    {deferredSettingsTab === "multimodal" ? (
+    {settingsTab === "multimodal" ? (
       <MultimodalSettingsPage
         configDraft={configDraft}
         setPickerRole={setMultimodalPickerRole}
@@ -5910,15 +5908,15 @@ export function App() {
       />
     ) : null}
 
-              {deferredSettingsTab === "general" && configDraft ? (
+              {settingsTab === "general" && configDraft ? (
                 <ResponseTonePage configDraft={configDraft} options={RESPONSE_TONE_OPTIONS} defaultTone={DEFAULT_RESPONSE_TONE} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 
-              {deferredSettingsTab === "update" ? (
+              {settingsTab === "update" ? (
                 <SettingsUpdatePage updateState={updateState} onCheck={() => void checkForUpdates()} onDownload={() => void downloadAvailableUpdate()} onInstall={() => void installDownloadedUpdate()} formatPhase={formatUpdatePhase} formatDownloadSize={formatUpdateDownloadSize} />
               ) : null}
 
-              {deferredSettingsTab === "knowledge" ? (
+              {settingsTab === "knowledge" ? (
                 <KnowledgePage
                   knowledgeSources={knowledgeSources}
                   knowledgeName={knowledgeName}
@@ -5951,37 +5949,37 @@ export function App() {
                 />
               ) : null}
 
-              {deferredSettingsTab === "apiFavorites" ? (
+              {settingsTab === "apiFavorites" ? (
                 <ApiFavoritesPage onInsert={(favorite) => {
                   setIsSettingsOpen(false);
                   void sendApiCardFavoriteToChat(favorite);
                 }} />
               ) : null}
-              {deferredSettingsTab === "memory" ? (
+              {settingsTab === "memory" ? (
                 <MemoryPage configDraft={configDraft} setConfigDraft={setConfigDraft} selfImprovementMemories={selfImprovementMemories} visibleSelfImprovementMemories={visibleSelfImprovementMemories} selfImprovementMemoryListRef={selfImprovementMemoryListRef} safeSelfImprovementMemoryPage={safeSelfImprovementMemoryPage} selfImprovementMemoryPageCount={selfImprovementMemoryPageCount} setSelfImprovementMemoryPage={setSelfImprovementMemoryPage} isRefreshingSelfImprovementMemories={isRefreshingSelfImprovementMemories} isClearingSelfImprovement={isClearingSelfImprovement} onRefreshMemories={refreshSelfImprovementNow} onOpenClearMemories={() => setIsClearSelfImprovementConfirmOpen(true)} onSaveConfig={saveConfigDraft} onDeleteMemory={deleteSelfImprovementMemory} errorSolutionModelFilter={errorSolutionModelFilter} setErrorSolutionModelFilter={setErrorSolutionModelFilter} setErrorSolutionPage={setErrorSolutionPage} onRefreshErrorSolutions={refreshErrorSolutions} errorSolutionModelOptions={errorSolutionModelOptions} errorSolutions={errorSolutions} visibleErrorSolutions={visibleErrorSolutions} errorSolutionListRef={errorSolutionListRef} safeErrorSolutionPage={safeErrorSolutionPage} errorSolutionPageCount={errorSolutionPageCount} isClearingErrorSolutions={isClearingErrorSolutions} errorSolutionBusyId={errorSolutionBusyId} expandedErrorSolutionIds={expandedErrorSolutionIds} resolveModelLabel={resolveErrorSolutionModelLabel} getRecallStatus={getErrorSolutionRecallStatus} formatRelativeTime={formatRelativeTime} onToggleExpanded={toggleErrorSolutionExpanded} onDeleteErrorSolution={deleteErrorSolution} onOpenClearErrorSolutions={() => setIsClearErrorSolutionsConfirmOpen(true)} />
               ) : null}
-              {deferredSettingsTab === "capabilities" ? (
+              {settingsTab === "capabilities" ? (
                 <CapabilitiesPage activeTab={capabilityTab} skillsCount={skills.length} userSkillsCount={userSkills.length} pluginsCount={plugins.length} onTabChange={setCapabilityTab} />
               ) : null}
-              {deferredSettingsTab === "capabilities" && deferredCapabilityTab === "skills" ? (
+              {settingsTab === "capabilities" && capabilityTab === "skills" ? (
                 <SkillsPage skillsSearchQuery={skillsSearchQuery} setSkillsSearchQuery={setSkillsSearchQuery} skillsSortMenuRef={skillsSortMenuRef} skillsSortOpen={skillsSortOpen} setSkillsSortOpen={setSkillsSortOpen} skillsSortMode={skillsSortMode} setSkillsSortMode={setSkillsSortMode} skillsSortPresence={skillsSortPresence} visibleSkills={visibleSkills} formatRelativeTime={formatRelativeTime} onRemove={(skill) => setManagedRemoval({ kind: "skill", skill })} />
               ) : null}
 
-              {deferredSettingsTab === "database" ? (
+              {settingsTab === "database" ? (
                 <DatabasePage configDraft={configDraft} savedCredentialIds={savedDatabaseCredentialIds} testingId={testingDatabaseConnectionId} savingCredentialId={savingDatabaseCredentialId} changingEnabledId={changingDatabaseEnabledId} editingId={editingDatabaseConnectionId} databaseCatalogs={databaseCatalogs} passwordDrafts={databasePasswordDrafts} permissions={DATABASE_PERMISSION_OPTIONS} setPasswordDrafts={setDatabasePasswordDrafts} setEditingId={setEditingDatabaseConnectionId} onAdd={addDatabaseConnection} onSetEnabled={setDatabaseConnectionEnabled} onUpdate={updateDatabaseDraft} onTest={testDatabaseConnection} onSave={saveDatabaseConnection} onRemove={removeDatabaseConnection} />
               ) : null}
 
-              {deferredSettingsTab === "mcp" ? (
+              {settingsTab === "mcp" ? (
                 <McpPage configDraft={configDraft} mcpRuntimeServers={mcpRuntimeServers} editingMcpServerId={editingMcpServerId} setEditingMcpServerId={setEditingMcpServerId} mcpTestResults={mcpTestResults} testingMcpServerId={testingMcpServerId} mcpAuthBusyId={mcpAuthBusyId} onAdd={addMcpServer} onUpdate={updateMcpServerDraft} onTest={testMcpServer} onRefreshTools={refreshMcpToolDirectory} onLogin={loginMcpServer} onLogout={logoutMcpServer} onRemove={removeMcpServer} onSave={saveConfigDraft} parseEnvironment={parseMcpEnvironment} />
               ) : null}
-              {deferredSettingsTab === "capabilities" && deferredCapabilityTab === "plugins" ? (
+              {settingsTab === "capabilities" && capabilityTab === "plugins" ? (
                 <PluginsPage {...{ plugins, pluginCallCounts, setManagedRemoval }} />
               ) : null}
-              {deferredSettingsTab === "capabilities" && deferredCapabilityTab === "userSkills" ? (
+              {settingsTab === "capabilities" && capabilityTab === "userSkills" ? (
                 <UserSkillsPage {...{ userSkills, resolveSkillUsageStats, setManagedRemoval }} />
               ) : null}
 
-              {deferredSettingsTab === "capabilities" && deferredCapabilityTab === "lab" ? (
+              {settingsTab === "capabilities" && capabilityTab === "lab" ? (
                 <SkillLabPage {...{ skillLabMode, setSkillLabMode, isSkillLabBusy, skillLabPrompt, setSkillLabPrompt, skillLabTargetSkillId, setSkillLabTargetSkillId, userSkills, skillLabName, setSkillLabName, skillLabModelSelection, setSkillLabModelSelection, skillLabModelOptions, skillLabIterations, setSkillLabIterations, cancelSkillLab, skillLabStatus, startSkillLab, skillLabError, skillLabClarification, setSkillLabClarification, submitSkillLabClarification, skillLabProgress, skillLabCurrentPhase, skillLabCurrentSummary, skillLabHeartbeatText, skillLabCompletedIterations, skillLabTotalIterations, skillLabElapsedLabel, skillLabCurrentIteration, skillLabLastCompletedActivity, skillLabResult, skillLabLastRunMode, skillLabApproval, resolveSkillLabApproval, skillLabProgressPercent }} />
               ) : null}
           </> : <div className="settings-content-placeholder" aria-hidden="true"><span /><span /><span /></div>}

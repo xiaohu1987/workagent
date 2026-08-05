@@ -7,47 +7,81 @@ import type { McpServerConfig } from "@shared-types";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 
 type StoredCredentials = Record<string, string>;
+type CredentialSafeStorage = Pick<typeof safeStorage, "isEncryptionAvailable" | "encryptString" | "decryptString">;
 
 /** Stores encrypted OAuth material outside config.toml. Never falls back to plaintext. */
 export class McpCredentialStore {
-  public constructor(private readonly filePath: string) {}
+  #mutationQueue: Promise<void> = Promise.resolve();
+
+  public constructor(
+    private readonly filePath: string,
+    private readonly credentialStorage: CredentialSafeStorage = safeStorage
+  ) {}
 
   public async read<T>(key: string): Promise<T | undefined> {
     const encrypted = (await this.readAll())[key];
     if (!encrypted) return undefined;
-    if (!safeStorage.isEncryptionAvailable()) throw new Error("Operating-system credential encryption is unavailable.");
-    return JSON.parse(safeStorage.decryptString(Buffer.from(encrypted, "base64"))) as T;
+    if (!this.credentialStorage.isEncryptionAvailable()) throw new Error("Operating-system credential encryption is unavailable.");
+    try {
+      return JSON.parse(this.credentialStorage.decryptString(Buffer.from(encrypted, "base64"))) as T;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`Saved credential ${key} cannot be decrypted. Save the password again to replace this credential. (${reason})`);
+    }
   }
 
-  /** Checks encrypted credential metadata without decrypting the stored value. */
+  /** Only report a saved credential when its ciphertext can actually be opened. */
   public async has(key: string): Promise<boolean> {
-    return key in await this.readAll();
+    try {
+      return (await this.read(key)) !== undefined;
+    } catch {
+      return false;
+    }
   }
 
   public async write(key: string, value: unknown): Promise<void> {
-    if (!safeStorage.isEncryptionAvailable()) throw new Error("Operating-system credential encryption is unavailable.");
-    const values = await this.readAll();
-    values[key] = safeStorage.encryptString(JSON.stringify(value)).toString("base64");
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, JSON.stringify(values), "utf8");
+    await this.mutate(async (values) => {
+      if (!this.credentialStorage.isEncryptionAvailable()) throw new Error("Operating-system credential encryption is unavailable.");
+      values[key] = this.credentialStorage.encryptString(JSON.stringify(value)).toString("base64");
+    });
   }
 
   public async remove(key: string): Promise<void> {
-    const values = await this.readAll();
-    if (!(key in values)) return;
-    delete values[key];
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, JSON.stringify(values), "utf8");
+    await this.mutate((values) => {
+      delete values[key];
+    });
+  }
+
+  private async mutate(change: (values: StoredCredentials) => void | Promise<void>): Promise<void> {
+    const operation = this.#mutationQueue.then(async () => {
+      const values = await this.readAll();
+      await change(values);
+      await this.writeAll(values);
+    });
+    this.#mutationQueue = operation.catch(() => undefined);
+    await operation;
   }
 
   private async readAll(): Promise<StoredCredentials> {
     try {
       const parsed = JSON.parse(await fs.readFile(this.filePath, "utf8")) as unknown;
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as StoredCredentials : {};
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      const values: StoredCredentials = {};
+      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof value === "string") values[key] = value;
+      }
+      return values;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
       throw error;
     }
+  }
+
+  private async writeAll(values: StoredCredentials): Promise<void> {
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    const temporaryPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(temporaryPath, JSON.stringify(values), "utf8");
+    await fs.rename(temporaryPath, this.filePath);
   }
 }
 

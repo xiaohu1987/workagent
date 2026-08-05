@@ -258,4 +258,31 @@ policy:
     });
     expect(notionSkills.filter((skill) => skill.name.startsWith("notion-"))).toHaveLength(1);
   });
+
+  it("does not recommend implicit Skills when the request has no relevance evidence", async () => {
+    const appHome = await makeTempDir();
+    const definitions = [
+      ["deploy-static-site", "Deploy a local frontend project to a Linux server", "交付运维"],
+      ["code-review", "Review a branch diff before merge", "代码协作"],
+      ["api-card-editor", "Create or update an API request card", "通用"]
+    ] as const;
+    for (const [name, description, domain] of definitions) {
+      const skillDir = path.join(appHome, "skills", "imported", name);
+      await fs.mkdir(skillDir, { recursive: true });
+      await fs.writeFile(
+        path.join(skillDir, "SKILL.md"),
+        `---\nname: ${name}\ndescription: ${description}\ndomain: ${domain}\n---\n${description}.`,
+        "utf8"
+      );
+    }
+
+    const manager = new SkillsManager();
+    await manager.refresh(appHome);
+    const selected = manager.selectForThread({
+      explicitSkillIds: [],
+      query: "给我找一下 国内有没有 一键生成精灵图的网站"
+    });
+
+    expect(selected).toEqual([]);
+  });
 });

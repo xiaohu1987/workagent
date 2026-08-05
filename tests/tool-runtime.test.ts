@@ -687,8 +687,8 @@ describe("ToolRuntime", () => {
       context
     );
 
-    expect(result.content).toContain("folder is empty");
-    expect(result.content).toContain("apply_patch");
+    expect(result.content).toBe("Directory listing succeeded. The directory is empty.");
+    expect(result.content).not.toContain("project");
   });
 
   it("exposes managed writing and extension installation tools directly", () => {

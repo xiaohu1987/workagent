@@ -128,11 +128,16 @@ export function scoreSkillForQuery(skill: SkillMetadata, query: string, domains:
     }
   }
 
-  if (skill.allowImplicitInvocation) {
-    score += 1;
-  }
   if (isFileDeliverableQuery(query)) {
     score += DELIVERABLE_SKILL_BOOSTS[skill.name] ?? 0;
+  }
+  // Implicit invocation is permission to auto-load a relevant Skill, not
+  // evidence that the Skill matches every request.
+  if (score <= 0) {
+    return 0;
+  }
+  if (skill.allowImplicitInvocation) {
+    score += 1;
   }
   return score;
 }

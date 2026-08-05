@@ -24,7 +24,7 @@ export function renderAvailableSkills(
   const lines = [
     "## Available Skills",
     "Skills are callable local instruction packs. Decide whether a skill is needed before responding or taking action.",
-    "Call `skills.load` with the exact `skill_id` before following a skill. Its schema is { skill_id: string }.",
+    "Call `skills.load` with the exact `skill_id` before following a skill. Its schema is { skill_id: string }. Never pass a tool name such as `database.list_sources` as a skill_id; call that tool directly.",
     "Skills marked `priority: selected` were explicitly chosen by the user and must be considered before any other skill.",
     "Skills marked `priority: recommended` are domain-matched for this task; load them with `skills.load` before related work.",
     "All listed skills are available; user-domain and plugin skills load their full instructions only after `skills.load`."

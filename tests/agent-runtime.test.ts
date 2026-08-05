@@ -2,9 +2,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { AppConfig, MessageRecord, ModelProfile, SkillMetadata } from "@shared-types";
+import type { AppConfig, MessageRecord, ModelProfile, SkillMetadata, ToolSpecDefinition } from "@shared-types";
 import {
   createToolCallFingerprint,
+  prioritizeToolsForProvider,
+  promoteToolSearchResults,
+  recoverMisroutedSkillLoadCalls,
+  buildInvalidSkillLoadRecoveryInstruction,
   createCommentaryMessageKey,
   buildCommentaryMessageMetadata,
   buildToolBatchMessageMetadata,
@@ -70,6 +74,8 @@ import {
   resolveModelRateLimitDelayMs,
   isNetworkError,
   isProviderOutputLimitError,
+  readProviderRequestLimitDetails,
+  shouldRecoverProviderRequestLimit,
   resolveNetworkErrorDelayMs,
   resolveProviderOutputLimitRecoveryTokens,
   MAX_NETWORK_ERROR_RETRIES,
@@ -131,6 +137,10 @@ import {
   isExplicitMcpRequest,
   validateProjectMcpPriority,
   buildProjectWorkspacePriorityPrompt,
+  createChatRuntimePolicy,
+  createProjectRuntimePolicy,
+  ProjectWorkspaceMissingError,
+  resolveChatLocalAccess,
   isAgentToolEnabled,
   prioritizeUserInputToolCall,
   MAX_REPEATED_TASK_FAILURES,
@@ -271,6 +281,77 @@ describe("createToolCallFingerprint", () => {
         patch: "*** Begin Patch\n*** Add File: js/renderer.js\n+export {}\n*** Add File: css/game.css\n+.game {}\n*** End Patch"
       })
     ).toEqual(["js/renderer.js", "css/game.css"]);
+  });
+});
+
+describe("provider tool routing recovery", () => {
+  const tool = (name: string, required: string[] = [], riskLevel: "low" | "medium" = "low"): ToolSpecDefinition => ({
+    name,
+    description: name,
+    inputSchema: { type: "object", properties: {}, required },
+    riskLevel
+  });
+
+  it("promotes tool_search matches into a bounded provider tool list", () => {
+    const tools = Array.from({ length: 60 }, (_, index) => tool(`tool.${index}`));
+    tools[55] = tool("database.list_sources");
+    const promoted: string[] = [];
+
+    expect(promoteToolSearchResults(promoted, {
+      json: { results: [{ name: "database.list_sources" }, { name: "missing.tool" }] }
+    }, tools)).toEqual(["database.list_sources"]);
+
+    const requestTools = prioritizeToolsForProvider({
+      tools,
+      promotedToolNames: promoted,
+      maxTools: 50
+    });
+    expect(requestTools).toHaveLength(50);
+    expect(requestTools[0]?.name).toBe("database.list_sources");
+  });
+
+  it("rewrites a low-risk tool name misrouted through skills.load", () => {
+    const recovered = recoverMisroutedSkillLoadCalls({
+      toolCalls: [{
+        id: "call-1",
+        name: "skills.load",
+        arguments: { skill_id: "database.list_sources" }
+      }],
+      availableTools: [tool("skills.load", ["skill_id"]), tool("database.list_sources")],
+      availableSkills: []
+    });
+
+    expect(recovered.toolCalls).toEqual([{
+      id: "call-1",
+      name: "database.list_sources",
+      arguments: {}
+    }]);
+    expect(recovered.recovered).toEqual([{
+      requestedSkillId: "database.list_sources",
+      recoveredToolName: "database.list_sources"
+    }]);
+    expect(recovered.invalidSkillIds).toEqual([]);
+  });
+
+  it("keeps real Skill IDs and blocks unknown values without executing them", () => {
+    const skill = {
+      id: "skill-1",
+      name: "Database guide",
+      qualifiedName: "Database guide"
+    } as SkillMetadata;
+    const result = recoverMisroutedSkillLoadCalls({
+      toolCalls: [
+        { id: "valid", name: "skills.load", arguments: { skill_id: skill.id } },
+        { id: "invalid", name: "skills.load", arguments: { skill_id: "database.query" } }
+      ],
+      availableTools: [tool("skills.load", ["skill_id"]), tool("database.query", ["sourceId", "sql"])],
+      availableSkills: [skill]
+    });
+
+    expect(result.toolCalls.map((call) => call.id)).toEqual(["valid"]);
+    expect(result.invalidSkillIds).toEqual(["database.query"]);
+    expect(buildInvalidSkillLoadRecoveryInstruction(result.invalidSkillIds, [skill], true))
+      .toContain("hidden for the rest of this turn");
   });
 });
 
@@ -566,6 +647,97 @@ describe("project workspace MCP priority", () => {
   });
 });
 
+describe("ordinary and project runtime isolation", () => {
+  const tool = (name: string) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+    riskLevel: "low" as const
+  });
+  const tools = [
+    tool("web_search.search_query"),
+    tool("skills.load"),
+    tool("fs.read_directory"),
+    tool("fs.read_file"),
+    tool("fs.write_file"),
+    tool("code.search"),
+    tool("shell.exec"),
+    tool("project.verify"),
+    tool("git.status")
+  ];
+
+  it("keeps a website-search chat projectless and hides every local project tool", () => {
+    const request = "给我找一下 国内有没有 一键生成精灵图的网站";
+    const policy = createChatRuntimePolicy({
+      outputDir: "C:\\task-output",
+      request,
+      attachments: [],
+      requestedDeliverableExtensions: []
+    });
+
+    expect(resolveChatLocalAccess({ request })).toBe("none");
+    expect(policy.workspaceLabel).toBe("task_output");
+    expect(policy.filterTools(tools).map((entry) => entry.name)).toEqual([
+      "web_search.search_query",
+      "skills.load"
+    ]);
+    expect(policy.validateToolCall({
+      toolName: "fs.read_directory",
+      localWorkspaceInspectedBeforeDecision: false
+    })).toMatchObject({ allowed: false });
+    expect(policy.systemPrompt).toContain("Do not inspect the task output directory");
+  });
+
+  it("grants the minimum ordinary-chat local capability for read, delivery, and execution requests", () => {
+    expect(resolveChatLocalAccess({
+      request: "总结这个附件\n[Attached file]\nC:\\tmp\\notes.txt"
+    })).toBe("read");
+    expect(resolveChatLocalAccess({
+      request: "把结果生成 Word 文档",
+      requestedDeliverableExtensions: [".docx"]
+    })).toBe("write");
+    expect(resolveChatLocalAccess({ request: "运行这个脚本并告诉我输出" })).toBe("execute");
+
+    const writePolicy = createChatRuntimePolicy({
+      outputDir: "C:\\task-output",
+      request: "把结果生成 Word 文档",
+      requestedDeliverableExtensions: [".docx"]
+    });
+    const writeTools = writePolicy.filterTools(tools).map((entry) => entry.name);
+    expect(writeTools).toEqual(expect.arrayContaining(["fs.read_file", "fs.write_file"]));
+    expect(writeTools).toContain("shell.exec");
+    expect(writeTools).not.toContain("code.search");
+    expect(writeTools).not.toContain("git.status");
+
+    const executePolicy = createChatRuntimePolicy({
+      outputDir: "C:\\task-output",
+      request: "运行这个脚本并告诉我输出"
+    });
+    expect(executePolicy.filterTools(tools).map((entry) => entry.name)).toContain("shell.exec");
+    expect(executePolicy.validateToolCall({
+      toolName: "git.status",
+      localWorkspaceInspectedBeforeDecision: false
+    })).toMatchObject({ allowed: false });
+  });
+
+  it("keeps the complete project tool set and refuses a project record without cwd", () => {
+    const policy = createProjectRuntimePolicy({
+      cwd: "D:\\workspace\\project",
+      explicitlySelectedMcp: false,
+      explicitlyRequestedMcp: false
+    });
+
+    expect(policy.workspaceRoot).toBe("D:\\workspace\\project");
+    expect(policy.filterTools(tools)).toEqual(tools);
+    expect(policy.systemPrompt).toContain("authoritative source");
+    expect(() => createProjectRuntimePolicy({
+      cwd: null,
+      explicitlySelectedMcp: false,
+      explicitlyRequestedMcp: false
+    })).toThrow(ProjectWorkspaceMissingError);
+  });
+});
+
 describe("stale browser tab recovery", () => {
   const tabs = [
     { id: "old-tab", threadId: "thread", title: "Old", url: "http://127.0.0.1:8000", isActive: false, createdAt: "now", updatedAt: "now" },
@@ -842,6 +1014,25 @@ describe("standard completion validation", () => {
     });
 
     expect(result.valid).toBe(true);
+  });
+
+  it("includes successful database query output in completion audit evidence", () => {
+    const evidence = classifySuccessfulToolEvidence({
+      toolCallId: "query-1",
+      toolName: "database.query",
+      hasPriorDelivery: false,
+      resultPreview: '{"rows":[{"PBC_ID":"486788"}],"rowCount":1}'
+    });
+
+    expect(evidence.kinds).toContain("observation");
+    const instruction = buildStandardCompletionAuditInstruction({
+      originalRequest: "Query PSADATA for PA26080001.",
+      candidateSummary: "PBC_ID is 486788.",
+      deliveredPaths: [],
+      successfulEvidence: [evidence]
+    });
+    expect(instruction).toContain("database.query (observation)");
+    expect(instruction).toContain('"PBC_ID":"486788"');
   });
 
   it("requires goal_completed even for a substantive standard response", () => {
@@ -1328,6 +1519,27 @@ describe("context compaction", () => {
     expect(result.compacted).toBe(true);
     expect(result.reason).toBe("forced");
     expect(result.afterTokens).toBeLessThan(result.beforeTokens);
+  });
+
+  it("keeps the complete current user request during forced provider-limit recovery", () => {
+    const currentRequest = `Implement the requested recovery exactly. ${"important ".repeat(400)}`;
+    const transcript = [
+      { role: "user" as const, content: currentRequest },
+      ...Array.from({ length: 16 }, (_, index) => ({
+        role: index % 2 === 0 ? "assistant" as const : "user" as const,
+        content: `intermediate ${index} ${"x".repeat(1_000)}`
+      })),
+      { role: "assistant" as const, content: "latest action" },
+      { role: "tool" as const, content: "latest evidence" }
+    ];
+
+    const result = compactTranscriptForContext(transcript, 8_000, "system instructions", {
+      force: true,
+      requiredUserMessage: { content: currentRequest }
+    });
+
+    expect(result.compacted).toBe(true);
+    expect(result.transcript).toContainEqual({ role: "user", content: currentRequest });
   });
 
   it("keeps recent native tool-call metadata during compaction", () => {
@@ -2088,6 +2300,23 @@ describe("browser test choice", () => {
 });
 
 describe("context overflow recovery", () => {
+  it("recognizes a local provider request limit for one-time recovery", () => {
+    const error = Object.assign(new Error("request too large"), {
+      name: "ProviderRequestLimitError",
+      requestBytes: 122_925,
+      maxRequestBytes: 122_880
+    });
+
+    expect(readProviderRequestLimitDetails(error)).toEqual({
+      requestBytes: 122_925,
+      maxRequestBytes: 122_880
+    });
+    expect(shouldRecoverProviderRequestLimit(error, 0)).toBe(true);
+    expect(shouldRecoverProviderRequestLimit(error, 1)).toBe(false);
+    expect(readProviderRequestLimitDetails(new Error("HTTP 500"))).toBeNull();
+    expect(shouldRecoverProviderRequestLimit(new Error("HTTP 500"), 0)).toBe(false);
+  });
+
   it("only recognizes a 400 when its message explicitly describes an oversized request", () => {
     expect(isUpstreamContextOverflowError(new Error("HTTP 400 request body too large"))).toBe(true);
     expect(isUpstreamContextOverflowError(new Error("HTTP 400 maximum context window exceeded"))).toBe(true);
@@ -2132,6 +2361,23 @@ describe("context overflow recovery", () => {
     expect(estimateRuntimeTokens(summarized)).toBeLessThanOrEqual(resolveModelToolResultTokenBudget(32_000, 8_000));
     expect(summarized).toContain("MCP result was shortened");
     expect(summarized).toContain("precise file search");
+  });
+
+  it("caps one tool result against the provider byte envelope", () => {
+    const providerMaxRequestBytes = 120 * 1024;
+    const budget = resolveModelToolResultTokenBudget(500_000, 375_000, providerMaxRequestBytes);
+    const summarized = summarizeToolResultForModel("database.describe_schema", {
+      ok: true,
+      content: "schema-column\n".repeat(30_000)
+    }, {
+      contextWindow: 500_000,
+      remainingInputTokens: 375_000,
+      providerMaxRequestBytes
+    });
+
+    expect(budget).toBe(15_360);
+    expect(estimateRuntimeTokens(summarized)).toBeLessThanOrEqual(budget);
+    expect(Buffer.byteLength(summarized, "utf8")).toBeLessThanOrEqual(providerMaxRequestBytes / 4 + 128);
   });
 
   it("stops blocking completion after a focused search even when MCP output is truncated", () => {

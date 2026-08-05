@@ -38,7 +38,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, ProviderRequestLimitError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
@@ -93,6 +93,28 @@ import {
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
 import type { GpaStage, GpaState } from "@shared-types";
+import { createChatRuntimePolicy } from "./chat-runtime";
+import {
+  createProjectRuntimePolicy,
+  PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE
+} from "./project-runtime";
+
+export {
+  buildChatRuntimePrompt,
+  createChatRuntimePolicy,
+  resolveChatLocalAccess,
+  type ChatLocalAccess,
+  type ChatRuntimePolicy
+} from "./chat-runtime";
+export {
+  buildProjectWorkspacePriorityPrompt,
+  createProjectRuntimePolicy,
+  ProjectWorkspaceMissingError,
+  PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE,
+  validateProjectMcpPriority,
+  type ProjectRuntimePolicy,
+  type RuntimeWorkspacePriorityContext
+} from "./project-runtime";
 
 export {
   applyCompletedPlanTasks,
@@ -264,6 +286,32 @@ export function isProviderOutputLimitError(error: unknown): boolean {
   return /response reached its output limit|finish_reason\s*[:=]?\s*["']?length|stop_reason\s*[:=]?\s*["']?max_tokens|maximum output tokens|max_tokens.*(?:reached|exceeded)/i.test(message);
 }
 
+export interface ProviderRequestLimitDetails {
+  requestBytes: number;
+  maxRequestBytes: number;
+}
+
+export function readProviderRequestLimitDetails(error: unknown): ProviderRequestLimitDetails | null {
+  if (!(error instanceof ProviderRequestLimitError) && !(
+    error instanceof Error &&
+    error.name === "ProviderRequestLimitError" &&
+    "requestBytes" in error &&
+    "maxRequestBytes" in error
+  )) {
+    return null;
+  }
+  const requestBytes = Number((error as { requestBytes?: unknown }).requestBytes);
+  const maxRequestBytes = Number((error as { maxRequestBytes?: unknown }).maxRequestBytes);
+  if (!Number.isFinite(requestBytes) || !Number.isFinite(maxRequestBytes)) {
+    return null;
+  }
+  return { requestBytes, maxRequestBytes };
+}
+
+export function shouldRecoverProviderRequestLimit(error: unknown, recoveryAttempts: number): boolean {
+  return recoveryAttempts === 0 && readProviderRequestLimitDetails(error) !== null;
+}
+
 export function resolveProviderOutputLimitRecoveryTokens(configuredTokens: number | undefined, attempt: number): number {
   const configured = typeof configuredTokens === "number" && Number.isFinite(configuredTokens)
     ? Math.max(1, Math.floor(configuredTokens))
@@ -421,6 +469,7 @@ export interface SuccessfulToolEvidence {
   toolName: string;
   kinds: CompletionEvidenceKind[];
   verifiedPaths?: string[];
+  resultPreview?: string;
 }
 
 export interface GpaPlanProgressResolution {
@@ -1270,7 +1319,6 @@ class ThreadSessionRuntime {
     const priorMessagesBeforeTurn = await this.services.persistence.listMessages(this.threadId);
     const followUpSourceContext = resolveFollowUpSourceContext(priorMessagesBeforeTurn, initialInput);
     const effectiveRequest = followUpSourceContext?.effectiveRequest ?? initialInput;
-    const workspaceCwd = thread.cwd ?? turnOutputDir;
     const requestedDeliverableExtensions = resolveRequestedDeliverableExtensions(effectiveRequest);
     const outputFilesBeforeTurn = await snapshotOutputFiles(turnOutputDir);
     const gpa = await this.#ensureGpa();
@@ -1286,6 +1334,19 @@ class ThreadSessionRuntime {
     const activeMcpServerIds = selectedMcpServerIds.length > 0
       ? selectedMcpServerIds
       : accessibleMcpServerIds;
+    const modePolicy = thread.mode === "project"
+      ? createProjectRuntimePolicy({
+          cwd: thread.cwd,
+          explicitlySelectedMcp: selectedMcpServerIds.length > 0,
+          explicitlyRequestedMcp
+        })
+      : createChatRuntimePolicy({
+          outputDir: turnOutputDir,
+          request: effectiveRequest,
+          attachments,
+          requestedDeliverableExtensions
+        });
+    const workspaceCwd = modePolicy.workspaceRoot;
     const accessibleDatabaseConnectionIds = await this.services.getAccessibleDatabaseConnectionIdsForThread(this.threadId);
     const selectedDatabaseConnectionIds = extractSelectedDatabaseConnectionIds(initialInput).filter((id) => accessibleDatabaseConnectionIds.includes(id));
     const activeDatabaseConnectionIds = selectedDatabaseConnectionIds.length > 0 ? selectedDatabaseConnectionIds : accessibleDatabaseConnectionIds;
@@ -1333,9 +1394,13 @@ class ThreadSessionRuntime {
       ? await this.services.buildKnowledgeContext(this.threadId)
       : null;
     const workflowPackContext = await this.services.buildWorkflowPackContext(this.threadId);
-    const projectInstructionContext = await loadProjectInstructionContext(thread.cwd);
+    const projectInstructionContext = await loadProjectInstructionContext(modePolicy.projectInstructionRoot);
     const selfImprovementMemories = this.services.config.selfImprovement.useMemories && !thread.parentThreadId
-      ? await this.services.searchSelfImprovementMemories?.({ query: initialInput, projectId: thread.projectId, limit: 6 }) ?? []
+      ? await this.services.searchSelfImprovementMemories?.({
+          query: initialInput,
+          projectId: modePolicy.mode === "project" ? thread.projectId : null,
+          limit: 6
+        }) ?? []
       : [];
     for (const memory of selfImprovementMemories) void this.services.markSelfImprovementMemoryUsed?.(memory.id);
     const selfImprovementContext = selfImprovementMemories.length
@@ -1349,22 +1414,22 @@ class ThreadSessionRuntime {
     // Tool availability follows the model profile's tool-calling flag only.
     // Runtime protocol failures must not permanently disable tools or force a model switch.
     const agentToolsEnabled = isAgentToolEnabled(model);
-    const { tools, mcpTools } = await this.buildVisibleTools(
+    const visibleToolSet = await this.buildVisibleTools(
       activeMcpServerIds,
       knowledgeEnabled,
       agentToolsEnabled,
       thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
       selectedMcpServerIds.length > 0 || explicitlyRequestedMcp
     );
+    const tools = modePolicy.filterTools(visibleToolSet.tools);
+    const mcpTools = visibleToolSet.mcpTools;
+    const visibleModeToolNames = new Set(tools.map((tool) => tool.name));
+    const modeHiddenToolNames = visibleToolSet.tools
+      .filter((tool) => !visibleModeToolNames.has(tool.name))
+      .map((tool) => tool.name);
     const selectedMcpToolsOnly = selectedMcpServerIds.length > 0
       ? tools.filter((tool) => tool.name === "mcp.list_tools" || tool.name === "mcp.call")
       : this.services.config.selfImprovement.dedicatedTools ? tools : tools.filter((tool) => !tool.name.startsWith("memories."));
-    // Native provider APIs already receive full function schemas. Repeating them
-    // in the system prompt wastes context and can make weaker models emit text
-    // tool payloads instead of using the provider tool-call channel.
-    const availableToolsPrompt = formatAvailableTools(selectedMcpToolsOnly, {
-      includeSchemas: !agentToolsEnabled
-    });
     const turn = await this.services.persistence.startTurn({
       threadId: this.threadId,
       kind: "regular",
@@ -1639,6 +1704,9 @@ class ThreadSessionRuntime {
       const visibleAssistantMessages = new Set<string>();
       const visibleCommentaryMessages = new Set<string>();
       const loadedSkillIds = new Set<string>();
+      const promotedProviderToolNames: string[] = [];
+      const invalidSkillLoadAttempts = new Map<string, number>();
+      let suppressSkillLoaderForTurn = false;
       let skillAutoLoadIssued = false;
       let terminalThread: ThreadRecord | null = null;
       const targetFailureCounts = new Map<string, number>();
@@ -1684,6 +1752,8 @@ class ThreadSessionRuntime {
       let upstreamServiceErrorAttempts = 0;
       let functionCallProtocolRecoveryAttempts = 0;
       let providerRequestSlimmingAttempts = 0;
+      let providerRequestLimitRecoveryAttempts = 0;
+      let pendingProviderRequestLimitRecovery: (ProviderRequestLimitDetails & { attempt: number }) | null = null;
       let agentProtocolFailureAttempts = 0;
       let agentProtocolAutoRecoveryBatches = 0;
       let gpaAnalysisValidationAttempts = 0;
@@ -1976,7 +2046,7 @@ class ThreadSessionRuntime {
       const persistBlockedToolCall = async (
         toolCall: RuntimeToolCall,
         reason: string,
-        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "followup_source_scope"
+        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope"
       ) => {
         const toolRecord = await this.services.persistence.recordToolCall({
           threadId: this.threadId,
@@ -2135,6 +2205,15 @@ class ThreadSessionRuntime {
 
         await applyPendingGuidance();
 
+        const requestTools = prioritizeToolsForProvider({
+          tools: selectedMcpToolsOnly.filter((tool) => !suppressSkillLoaderForTurn || tool.name !== "skills.load"),
+          promotedToolNames: promotedProviderToolNames,
+          maxTools: providerRequestLimits.maxTools
+        });
+        const requestAvailableToolsPrompt = formatAvailableTools(requestTools, {
+          includeSchemas: !agentToolsEnabled
+        });
+
         const prompt = buildRuntimePrompt(
           model,
           skillContext,
@@ -2143,16 +2222,11 @@ class ThreadSessionRuntime {
           projectInstructionContext,
           skillDependencyWarnings,
           knowledgeEnabled,
-          selectedMcpToolsOnly.some((tool) => tool.name === "image.generate"),
-          selectedMcpToolsOnly.some((tool) => tool.name === "video.generate"),
+          requestTools.some((tool) => tool.name === "image.generate"),
+          requestTools.some((tool) => tool.name === "video.generate"),
           availableSkills.filter((skill) => recommendedSkillIds.includes(skill.id)),
           selectedMcpServerIds,
-          {
-            mode: thread.mode,
-            cwd: thread.cwd,
-            localWorkspaceFirst:
-              selectedMcpServerIds.length === 0 && !explicitlyRequestedMcp
-          }
+          modePolicy.systemPrompt
         );
         const adapter = this.services.providerFactory.create(provider);
         const modelTurnAbortController = createChildAbortController(abortController.signal);
@@ -2207,7 +2281,7 @@ class ThreadSessionRuntime {
         });
         let systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}${
           useTextToolProtocol
             ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
             : ""
@@ -2218,7 +2292,7 @@ class ThreadSessionRuntime {
         }`;
         const toolSchemaText = useTextToolProtocol
           ? ""
-          : JSON.stringify(selectedMcpToolsOnly.map((tool) => ({
+          : JSON.stringify(requestTools.map((tool) => ({
               name: tool.name,
               description: tool.description,
               inputSchema: tool.inputSchema
@@ -2236,14 +2310,20 @@ class ThreadSessionRuntime {
           ? `${systemPrompt}\n\n[Native tool schemas]\n${toolSchemaText}`
           : systemPrompt;
         const compactContext = async (
-          trigger: "pre_model_request" | "post_tool_batch" | "upstream_context_overflow" | "model_timeout_recovery" | "task_completed",
+          trigger: "pre_model_request" | "post_tool_batch" | "provider_request_limit" | "upstream_context_overflow" | "model_timeout_recovery" | "task_completed",
           force = false
         ): Promise<boolean> => {
           const compaction = compactTranscriptForContext(
             transcript,
             model.contextWindow,
             budgetedSystemPrompt,
-            { force }
+            {
+              force,
+              requiredUserMessage: {
+                content: initialInput,
+                attachments: model.supportsMultimodalInput && attachments.length > 0 ? attachments : undefined
+              }
+            }
           );
           if (!compaction.compacted) {
             return false;
@@ -2348,7 +2428,7 @@ class ThreadSessionRuntime {
               transcript: this.#useFunctionCallCompatibilityTranscript || useTextToolProtocol
                 ? buildFunctionCallCompatibilityTranscript(transcript)
                 : transcript,
-              availableTools: selectedMcpToolsOnly,
+              availableTools: requestTools,
               model: requestModel,
               provider,
               reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
@@ -2369,6 +2449,19 @@ class ThreadSessionRuntime {
                   payload: measuredPayload,
                   createdAt: new Date().toISOString()
                 });
+                const recoveredLimit = pendingProviderRequestLimitRecovery;
+                if (recoveredLimit) {
+                  pendingProviderRequestLimitRecovery = null;
+                  const recoveryPayload = {
+                    turnRunId: turn.id,
+                    attempt: recoveredLimit.attempt,
+                    beforeBytes: recoveredLimit.requestBytes,
+                    afterBytes: measurement.requestBytes,
+                    maxRequestBytes: recoveredLimit.maxRequestBytes,
+                    recovered: measurement.maxRequestBytes <= 0 || measurement.requestBytes <= measurement.maxRequestBytes
+                  };
+                  await this.services.log("provider.request_limit_recovered", this.threadId, recoveryPayload);
+                }
               },
               abortSignal: modelTurnAbortController.signal
             }),
@@ -2378,6 +2471,54 @@ class ThreadSessionRuntime {
           );
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
+          const requestLimit = readProviderRequestLimitDetails(error);
+          if (
+            !abortController.signal.aborted &&
+            requestLimit &&
+            shouldRecoverProviderRequestLimit(error, providerRequestLimitRecoveryAttempts)
+          ) {
+            providerRequestLimitRecoveryAttempts += 1;
+            providerRequestSlimmingAttempts = Math.max(providerRequestSlimmingAttempts, 1);
+            const compacted = await compactContext("provider_request_limit", true);
+            pendingProviderRequestLimitRecovery = {
+              ...requestLimit,
+              attempt: providerRequestLimitRecoveryAttempts
+            };
+            const recoveryPayload = {
+              turnRunId: turn.id,
+              attempt: providerRequestLimitRecoveryAttempts,
+              maxAttempts: 1,
+              beforeBytes: requestLimit.requestBytes,
+              maxRequestBytes: requestLimit.maxRequestBytes,
+              overageBytes: Math.max(0, requestLimit.requestBytes - requestLimit.maxRequestBytes),
+              compacted,
+              currentRequestPreserved: true
+            };
+            await this.services.log("provider.request_limit_recovery", this.threadId, recoveryPayload);
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: providerRequestLimitRecoveryAttempts,
+                maxAttempts: 1,
+                reason: "provider_request_limit",
+                overageBytes: recoveryPayload.overageBytes
+              },
+              createdAt: new Date().toISOString()
+            });
+            await retryDraft();
+            continue;
+          }
+          if (!abortController.signal.aborted && requestLimit) {
+            await this.services.log("provider.request_limit_recovery_exhausted", this.threadId, {
+              turnRunId: turn.id,
+              attempt: providerRequestLimitRecoveryAttempts + 1,
+              requestBytes: requestLimit.requestBytes,
+              maxRequestBytes: requestLimit.maxRequestBytes,
+              overageBytes: Math.max(0, requestLimit.requestBytes - requestLimit.maxRequestBytes),
+              currentRequestPreserved: true
+            });
+          }
           if (!abortController.signal.aborted && isProviderOutputLimitError(error)) {
             providerOutputLimitAttempts += 1;
             const retrying = true;
@@ -3103,6 +3244,45 @@ class ThreadSessionRuntime {
               recommendedSkillIds,
               explicitSkillIds: thread.selectedSkillIds
             });
+          }
+        }
+
+        const skillLoadRecovery = recoverMisroutedSkillLoadCalls({
+          toolCalls: decision.toolCalls,
+          availableTools: selectedMcpToolsOnly,
+          availableSkills
+        });
+        decision.toolCalls = skillLoadRecovery.toolCalls;
+        for (const recovered of skillLoadRecovery.recovered) {
+          await this.services.log("skill.load_tool_misroute_recovered", this.threadId, {
+            turnRunId: turn.id,
+            requestedSkillId: recovered.requestedSkillId,
+            recoveredToolName: recovered.recoveredToolName
+          });
+        }
+        if (skillLoadRecovery.invalidSkillIds.length > 0) {
+          for (const skillId of skillLoadRecovery.invalidSkillIds) {
+            const attempts = (invalidSkillLoadAttempts.get(skillId) ?? 0) + 1;
+            invalidSkillLoadAttempts.set(skillId, attempts);
+            if (attempts >= 2) suppressSkillLoaderForTurn = true;
+            await this.services.log("skill.load_invalid_blocked", this.threadId, {
+              turnRunId: turn.id,
+              requestedSkillId: skillId,
+              attempts,
+              skillLoaderSuppressed: suppressSkillLoaderForTurn
+            });
+          }
+          transcript.push({
+            role: "user",
+            content: buildInvalidSkillLoadRecoveryInstruction(
+              skillLoadRecovery.invalidSkillIds,
+              availableSkills,
+              suppressSkillLoaderForTurn
+            )
+          });
+          if (decision.toolCalls.length === 0) {
+            await retryDraft();
+            continue;
           }
         }
 
@@ -4002,25 +4182,36 @@ class ThreadSessionRuntime {
             });
             continue;
           }
-          const projectMcpPriority = validateProjectMcpPriority({
+          const modeToolValidation = modePolicy.validateToolCall({
             toolName: toolCall.name,
-            projectMode: thread.mode === "project",
-            projectCwd: thread.cwd,
-            explicitlySelectedMcp: selectedMcpServerIds.length > 0,
-            explicitlyRequestedMcp,
             localWorkspaceInspectedBeforeDecision
           });
-          if (!projectMcpPriority.allowed) {
-            const reason = projectMcpPriority.message ?? PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE;
+          if (!modeToolValidation.allowed) {
+            const reason = modeToolValidation.message ?? (
+              modePolicy.mode === "project"
+                ? PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE
+                : "This local tool is unavailable in the current ordinary-chat request."
+            );
             appendBlockedToolCallResult(toolCall, reason);
-            await persistBlockedToolCall(toolCall, reason, "project_mcp_priority");
+            await persistBlockedToolCall(
+              toolCall,
+              reason,
+              modePolicy.mode === "project" ? "project_mcp_priority" : "chat_mode_scope"
+            );
             transcript.push({ role: "user", content: reason });
-            await this.services.log("agent.project_mcp_preflight_blocked", this.threadId, {
+            await this.services.log(
+              modePolicy.mode === "project"
+                ? "agent.project_mcp_preflight_blocked"
+                : "agent.chat_tool_preflight_blocked",
+              this.threadId,
+              {
               turnRunId: turn.id,
               toolName: toolCall.name,
-              projectCwd: thread.cwd,
+              workspaceRoot: modePolicy.workspaceRoot,
+              localAccess: modePolicy.localAccess,
               reason
-            });
+              }
+            );
             continue;
           }
           const followUpSourceValidation = validateFollowUpSourceToolCall({
@@ -4278,7 +4469,7 @@ class ThreadSessionRuntime {
             });
             continue;
           }
-          const recoveryWorkspaceCwd = thread.cwd ?? await this.services.getThreadOutputDir(this.threadId);
+          const recoveryWorkspaceCwd = modePolicy.workspaceRoot;
           const recoveryValidation = validateManagedWriteRecoveryToolCall(
             managedWriteRecovery,
             toolCall,
@@ -4420,13 +4611,23 @@ class ThreadSessionRuntime {
               installMcpServer: (input) => this.services.installMcpServerFromChat(input),
               listSelfImprovementMemories: async (query) => {
                 if (!this.services.config.selfImprovement.useMemories) return [];
-                const memories = await this.services.searchSelfImprovementMemories?.({ query: query ?? initialInput, projectId: thread.projectId, limit: 12 }) ?? [];
+                const memories = await this.services.searchSelfImprovementMemories?.({
+                  query: query ?? initialInput,
+                  projectId: modePolicy.mode === "project" ? thread.projectId : null,
+                  limit: 12
+                }) ?? [];
                 for (const memory of memories) void this.services.markSelfImprovementMemoryUsed?.(memory.id);
                 return memories;
               },
               addSelfImprovementMemory: async (input) => {
                 if (!this.services.config.selfImprovement.generateMemories || !this.services.addSelfImprovementMemory) throw new Error("Self-improvement memory generation is disabled.");
-                return this.services.addSelfImprovementMemory({ ...input, projectId: input.scope === "project" ? thread.projectId : null, kind: "note", sourceThreadId: this.threadId });
+                return this.services.addSelfImprovementMemory({
+                  ...input,
+                  scope: input.scope === "project" && modePolicy.mode === "project" ? "project" : "global",
+                  projectId: input.scope === "project" && modePolicy.mode === "project" ? thread.projectId : null,
+                  kind: "note",
+                  sourceThreadId: this.threadId
+                });
               },
               webSearch: (query) => trackOpenedBrowserTabs(
                 () => this.services.webSearch(this.threadId, query)
@@ -4572,6 +4773,7 @@ class ThreadSessionRuntime {
               deferredToolSpecs: mcpTools,
               readOnlyAgent: thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
               hiddenToolNames: [
+                ...modeHiddenToolNames,
                 ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read"]),
                 ...(resolveDefaultModalityModel(this.services.config, "image") ? [] : ["image.generate"]),
                 ...(resolveDefaultModalityModel(this.services.config, "video") ? [] : ["video.generate"])
@@ -4758,11 +4960,26 @@ class ThreadSessionRuntime {
           if (result.ok) {
             collectKnowledgeSources(toolCall.name, result, visibleKnowledgeBases, knowledgeSources);
             collectBrowserSources(toolCall.name, sanitizedResult, browserSources);
+            if (toolCall.name === "tool_search") {
+              const promoted = promoteToolSearchResults(
+                promotedProviderToolNames,
+                result,
+                selectedMcpToolsOnly
+              );
+              if (promoted.length > 0) {
+                await this.services.log("provider.tools_promoted_after_search", this.threadId, {
+                  turnRunId: turn.id,
+                  promotedToolNames: promoted,
+                  maxTools: providerRequestLimits.maxTools
+                });
+              }
+            }
           }
 
           const modelContent = redactSensitiveText(summarizeToolResultForModel(toolCall.name, sanitizedResult, {
             contextWindow: model.contextWindow,
-            remainingInputTokens: Math.max(256, contextBudgetPlan.maxInputTokens - estimateRuntimeTranscriptTokens(transcript))
+            remainingInputTokens: Math.max(256, contextBudgetPlan.maxInputTokens - estimateRuntimeTranscriptTokens(transcript)),
+            providerMaxRequestBytes: providerRequestLimits.maxRequestBytes
           }));
           const toolMessage = await this.recordMessage(
             "tool",
@@ -4855,7 +5072,8 @@ class ThreadSessionRuntime {
               toolName: toolCall.name,
               hasPriorDelivery: successfulToolEvidence.some((item) => item.kinds.includes("delivery")),
               verifiedPaths: pathVerification?.verifiedPaths,
-              requiresVerifiedPath: pathVerification?.requiresVerifiedPath
+              requiresVerifiedPath: pathVerification?.requiresVerifiedPath,
+              resultPreview: modelContent
             });
             successfulToolEvidence.push(evidence);
             const prerequisiteTarget = recoveryPrerequisiteTargets.get(toolCall.id);
@@ -4937,7 +5155,12 @@ class ThreadSessionRuntime {
             for (const filePath of getAddedPatchFiles(toolCall.arguments)) {
               successfullyCreatedFiles.add(filePath);
             }
-            if (toolCall.name === "apply_patch" && executionPolicy.autoVerify && toolContext) {
+            if (
+              modePolicy.mode === "project" &&
+              toolCall.name === "apply_patch" &&
+              executionPolicy.autoVerify &&
+              toolContext
+            ) {
               const verificationCall: RuntimeToolCall = {
                 id: randomUUID(),
                 name: "project.verify",
@@ -5009,7 +5232,10 @@ class ThreadSessionRuntime {
               });
               const verificationMessage = await this.recordMessage(
                 "tool",
-                `${verificationCall.name}\n${summarizeToolResultForModel(verificationCall.name, verificationSanitized, { contextWindow: model.contextWindow })}`,
+                `${verificationCall.name}\n${summarizeToolResultForModel(verificationCall.name, verificationSanitized, {
+                  contextWindow: model.contextWindow,
+                  providerMaxRequestBytes: providerRequestLimits.maxRequestBytes
+                })}`,
                 turn.id,
                 { toolCallId: verificationRecord.id }
               );
@@ -5913,6 +6139,114 @@ export function createToolCallFingerprint(name: string, argumentsJson: Record<st
   return `${name}:${stableSerialize(argumentsJson)}`;
 }
 
+export function prioritizeToolsForProvider(input: {
+  tools: ToolSpecDefinition[];
+  promotedToolNames?: string[];
+  maxTools?: number;
+}): ToolSpecDefinition[] {
+  const byName = new Map(input.tools.map((tool) => [tool.name, tool]));
+  const ordered: ToolSpecDefinition[] = [];
+  const seen = new Set<string>();
+  for (const name of input.promotedToolNames ?? []) {
+    const tool = byName.get(name);
+    if (tool && !seen.has(tool.name)) {
+      ordered.push(tool);
+      seen.add(tool.name);
+    }
+  }
+  for (const tool of input.tools) {
+    if (!seen.has(tool.name)) {
+      ordered.push(tool);
+      seen.add(tool.name);
+    }
+  }
+  const maxTools = Number.isFinite(input.maxTools)
+    ? Math.max(0, Math.floor(input.maxTools ?? 0))
+    : 0;
+  return maxTools > 0 ? ordered.slice(0, maxTools) : ordered;
+}
+
+export function promoteToolSearchResults(
+  promotedToolNames: string[],
+  result: Pick<ToolResult, "json">,
+  availableTools: ToolSpecDefinition[],
+  maxPromoted = 12
+): string[] {
+  const availableNames = new Set(availableTools.map((tool) => tool.name));
+  const results = Array.isArray(result.json?.results) ? result.json.results : [];
+  const discovered = results
+    .map((entry) => entry && typeof entry === "object" && "name" in entry ? String(entry.name) : "")
+    .filter((name) => name && availableNames.has(name));
+  if (discovered.length === 0) return [];
+  const next = [...new Set([...discovered, ...promotedToolNames])]
+    .slice(0, Math.max(1, maxPromoted));
+  promotedToolNames.splice(0, promotedToolNames.length, ...next);
+  return discovered;
+}
+
+export function recoverMisroutedSkillLoadCalls(input: {
+  toolCalls: RuntimeToolCall[];
+  availableTools: ToolSpecDefinition[];
+  availableSkills: SkillMetadata[];
+}): {
+  toolCalls: RuntimeToolCall[];
+  recovered: Array<{ requestedSkillId: string; recoveredToolName: string }>;
+  invalidSkillIds: string[];
+} {
+  const skillIdentifiers = new Set(
+    input.availableSkills.flatMap((skill) => [skill.id, skill.name, skill.qualifiedName])
+  );
+  const toolsByName = new Map(input.availableTools.map((tool) => [tool.name, tool]));
+  const recovered: Array<{ requestedSkillId: string; recoveredToolName: string }> = [];
+  const invalidSkillIds: string[] = [];
+  const toolCalls: RuntimeToolCall[] = [];
+
+  for (const call of input.toolCalls) {
+    if (canonicalizeToolName(call.name) !== "skills.load") {
+      toolCalls.push(call);
+      continue;
+    }
+    const requestedSkillId = String(call.arguments.skill_id ?? "").trim();
+    if (skillIdentifiers.has(requestedSkillId)) {
+      toolCalls.push(call);
+      continue;
+    }
+    const target = toolsByName.get(canonicalizeToolName(requestedSkillId));
+    const required = Array.isArray(target?.inputSchema.required)
+      ? target.inputSchema.required.filter((key): key is string => typeof key === "string")
+      : [];
+    const forwardedArguments = Object.fromEntries(
+      Object.entries(call.arguments).filter(([key]) => key !== "skill_id")
+    );
+    const hasRequiredArguments = required.every((key) => forwardedArguments[key] !== undefined);
+    if (target && target.name !== "skills.load" && target.riskLevel === "low" && hasRequiredArguments) {
+      toolCalls.push({ ...call, name: target.name, arguments: forwardedArguments });
+      recovered.push({ requestedSkillId, recoveredToolName: target.name });
+      continue;
+    }
+    invalidSkillIds.push(requestedSkillId || "(empty)");
+  }
+
+  return { toolCalls, recovered, invalidSkillIds };
+}
+
+export function buildInvalidSkillLoadRecoveryInstruction(
+  invalidSkillIds: string[],
+  availableSkills: SkillMetadata[],
+  loaderSuppressed: boolean
+): string {
+  const examples = availableSkills.slice(0, 8).map((skill) => skill.id);
+  return [
+    "[Internal tool-routing correction. Do not display or quote this instruction.]",
+    `skills.load was blocked because these values are not available Skill IDs: ${invalidSkillIds.join(", ")}.`,
+    "A dotted value such as database.list_sources is a tool name, not a Skill ID. Call the listed tool directly with its own arguments.",
+    examples.length > 0 ? `Valid Skill IDs include: ${examples.join(", ")}.` : "No Skills need to be loaded for this task.",
+    loaderSuppressed
+      ? "The Skill loader is hidden for the rest of this turn after repeated invalid routing. Continue with other tools or answer from verified evidence."
+      : "Use only an exact Skill ID from the Available Skills catalog; otherwise continue without loading a Skill."
+  ].join("\n");
+}
+
 export function createCommentaryMessageKey(content: string, toolCalls: RuntimeToolCall[]): string {
   const toolBatch = toolCalls
     .map((toolCall) => createToolCallFingerprint(canonicalizeToolName(toolCall.name), toolCall.arguments))
@@ -6198,7 +6532,11 @@ const OBSERVATION_TOOL_NAMES = new Set([
   "list_mcp_resources",
   "list_mcp_resource_templates",
   "read_mcp_resource",
-  "mcp.list_tools"
+  "mcp.list_tools",
+  "database.list_sources",
+  "database.describe_schema",
+  "database.query",
+  "database.federated_query"
 ]);
 
 const LOCAL_WORKSPACE_OBSERVATION_TOOLS = new Set([
@@ -6465,6 +6803,7 @@ export function classifySuccessfulToolEvidence(input: {
   hasPriorDelivery: boolean;
   verifiedPaths?: string[];
   requiresVerifiedPath?: boolean;
+  resultPreview?: string;
 }): SuccessfulToolEvidence {
   const kinds = new Set<CompletionEvidenceKind>();
   if (OBSERVATION_TOOL_NAMES.has(input.toolName)) {
@@ -6488,7 +6827,8 @@ export function classifySuccessfulToolEvidence(input: {
     toolRecordId: input.toolRecordId,
     toolName: input.toolName,
     kinds: [...kinds],
-    verifiedPaths: input.verifiedPaths
+    verifiedPaths: input.verifiedPaths,
+    resultPreview: input.resultPreview?.trim().slice(0, 2_000) || undefined
   };
 }
 
@@ -6854,7 +7194,10 @@ export function buildStandardCompletionAuditInstruction(input: {
   const evidence = input.successfulEvidence
     .filter((item) => item.kinds.length > 0)
     .slice(0, 24)
-    .map((item) => `- ${item.toolCallId}: ${item.toolName} (${item.kinds.join(", ")})`);
+    .map((item) => [
+      `- ${item.toolCallId}: ${item.toolName} (${item.kinds.join(", ")})`,
+      item.resultPreview ? `  Result preview: ${item.resultPreview}` : ""
+    ].filter(Boolean).join("\n"));
   const artifacts = (input.artifactEvidence ?? []).map((artifact) => [
     `- ${artifact.relativePath}; verified=${artifact.verified}; size=${artifact.sizeBytes}; sha256=${artifact.sha256}`,
     artifact.preview ? `  Content preview: ${artifact.preview.slice(0, 4_000)}` : "  Content preview: unavailable"
@@ -8035,27 +8378,6 @@ export function isExplicitMcpRequest(input: string): boolean {
   });
 }
 
-export const PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE = [
-  "This is a project task with an authoritative local workspace, but no successful local workspace inspection has been shown to the model yet.",
-  "The MCP call was blocked. First call fs.read_directory with {\"path\":\".\"}, then use code.search or fs.read_file against the current project.",
-  "Only reconsider repository MCP after reading that local evidence. Do not use a globally enabled MCP repository as a substitute for the current project."
-].join(" ");
-
-export function validateProjectMcpPriority(input: {
-  toolName: string;
-  projectMode: boolean;
-  projectCwd: string | null;
-  explicitlySelectedMcp: boolean;
-  explicitlyRequestedMcp: boolean;
-  localWorkspaceInspectedBeforeDecision: boolean;
-}): { allowed: boolean; message?: string } {
-  if (input.toolName !== "mcp.call") return { allowed: true };
-  if (!input.projectMode || !input.projectCwd) return { allowed: true };
-  if (input.explicitlySelectedMcp || input.explicitlyRequestedMcp) return { allowed: true };
-  if (input.localWorkspaceInspectedBeforeDecision) return { allowed: true };
-  return { allowed: false, message: PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE };
-}
-
 export function extractSelectedDatabaseConnectionIds(input: string): string[] {
   const ids = new Set<string>();
   const pattern = /\[Selected database\]\s*\r?\n\s*id:\s*([^\s\r\n]+)/gi;
@@ -8068,6 +8390,7 @@ export function formatAvailableTools(
   options: { includeSchemas?: boolean } = {}
 ): string {
   const includeSchemas = options.includeSchemas ?? true;
+  const shellAvailable = tools.some((tool) => tool.name === "shell.exec");
   const definitions = tools.map((tool) => {
     return includeSchemas
       ? `- ${tool.name}: ${tool.description} Input schema: ${JSON.stringify(tool.inputSchema)}.`
@@ -8077,10 +8400,12 @@ export function formatAvailableTools(
   return [
     "## Available Executable Tools",
     tools.length > 0
-      ? "The following tools are available in this turn. They are real executable tools, not examples. Never claim that command execution is unavailable while shell.exec appears below."
+      ? shellAvailable
+        ? "The following tools are available in this turn. They are real executable tools, not examples. Command execution is available through the listed shell tool."
+        : "The following tools are available in this turn. They are real executable tools, not examples. Use only the tools listed below."
       : "No executable tools are available in this turn.",
-    "For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete.",
-    ...(process.platform === "win32"
+    ...(shellAvailable ? ["For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete."] : []),
+    ...(shellAvailable && process.platform === "win32"
       ? ["This desktop executes shell.exec in Windows PowerShell. Use PowerShell syntax; recognizable CMD commands are adapted automatically. Do not use Bash syntax such as `||`, and never edit files through shell.exec: use apply_patch."]
       : []),
     ...definitions
@@ -8156,36 +8481,6 @@ function collectBrowserSources(
   sources.set(url, { title, url });
 }
 
-export interface RuntimeWorkspacePriorityContext {
-  mode: "project" | "chat";
-  cwd: string | null;
-  localWorkspaceFirst: boolean;
-}
-
-export function buildProjectWorkspacePriorityPrompt(
-  context: RuntimeWorkspacePriorityContext
-): string | null {
-  if (context.mode !== "project" || !context.cwd) return null;
-
-  const lines = [
-    "## Current Project Workspace",
-    `The current project path is ${JSON.stringify(context.cwd)}.`,
-    "For questions about this project's code, repository, files, modules, or behavior, this local workspace is the authoritative source."
-  ];
-  if (context.localWorkspaceFirst) {
-    lines.push(
-      "Inspect the local workspace with fs.read_directory, code.search, code.outline, git.status, git.diff, or fs.read_file before calling mcp.call.",
-      "Do not use a globally enabled repository MCP server as a substitute for the current project. Use repository MCP only after local evidence shows it is needed.",
-      "When delegating project inspection, state this as local-workspace-first with MCP available as a fallback. Do not turn it into a blanket MCP prohibition unless the user explicitly requested that restriction."
-    );
-  } else {
-    lines.push(
-      "The user explicitly selected or requested MCP for this turn, so that explicit request may override the normal local-workspace-first lookup order."
-    );
-  }
-  return lines.join("\n");
-}
-
 export function buildResponseTonePrompt(tone: ResponseTone): string {
   const shared = [
     "Apply this tone only to user-visible assistant messages, including short progress updates and the final answer.",
@@ -8228,11 +8523,7 @@ function buildRuntimePrompt(
   videoGenerateAvailable = false,
   recommendedSkills: Array<{ id: string; qualifiedName: string; domain?: string }> = [],
   selectedMcpServerIds: string[] = [],
-  workspacePriority: RuntimeWorkspacePriorityContext = {
-    mode: "chat",
-    cwd: null,
-    localWorkspaceFirst: false
-  }
+  modeSystemPrompt: string | null = null
 ): RuntimePromptBundle {
   const blocks = [
     "You are codexh, a desktop agent for project and chat workflows.",
@@ -8242,9 +8533,8 @@ function buildRuntimePrompt(
     "When a tool can gather needed facts, call it instead of guessing.",
     "Before responding, decide whether an available Skill is the best fit. When it is, call skills.load with that skill_id before following its instructions. Use Function Calling for Skills and external tools rather than merely claiming a Skill was used."
   ];
-  const projectWorkspacePriority = buildProjectWorkspacePriorityPrompt(workspacePriority);
-  if (projectWorkspacePriority) {
-    blocks.push(projectWorkspacePriority);
+  if (modeSystemPrompt) {
+    blocks.push(modeSystemPrompt);
   }
   if (imageGenerateAvailable) {
     blocks.push(
@@ -8271,9 +8561,7 @@ function buildRuntimePrompt(
   blocks.push(
     selectedMcpServerIds.length > 0
       ? `The user explicitly selected MCP server(s): ${selectedMcpServerIds.join(", ")}. This request requires an MCP-backed answer. First call mcp.list_tools with the selected server id, then call mcp.call with a discovered tool before answering. Do not use filesystem, browser, web-search, or knowledge tools for the initial lookup.`
-      : workspacePriority.localWorkspaceFirst
-        ? "For MCP capabilities needed after local project inspection, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed."
-        : "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
+      : "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
     "For browser automation, call browser.inspect_page before browser.click, browser.fill, browser.select_option, or browser.press_key. Use only element ids returned by the latest inspection, then inspect again after navigation or page changes. Never guess selectors or claim a browser action succeeded without a tool result."
   );
   if (knowledgeEnabled) {
@@ -8475,7 +8763,10 @@ export function compactTranscriptForContext(
   transcript: ProviderTurnInput["transcript"],
   contextWindow: number,
   systemPrompt: string,
-  options: { force?: boolean } = {}
+  options: {
+    force?: boolean;
+    requiredUserMessage?: Pick<ProviderTurnInput["transcript"][number], "content" | "attachments">;
+  } = {}
 ): {
   transcript: ProviderTurnInput["transcript"];
   compacted: boolean;
@@ -8515,8 +8806,15 @@ export function compactTranscriptForContext(
   const earlierMessages = transcript.slice(0, Math.max(0, transcript.length - recentMessages.length));
   const summaryBudget = Math.max(120, Math.floor(targetTranscriptTokens * 0.3));
   const summary = buildCompactedTranscriptSummary(earlierMessages, summaryBudget);
+  const requiredUserMessage = options.requiredUserMessage;
+  const requiredUserAlreadyRetained = requiredUserMessage
+    ? recentMessages.some((message) => message.role === "user" && message.content === requiredUserMessage.content)
+    : true;
   const compactedTranscript: ProviderTurnInput["transcript"] = [
     ...(summary ? [{ role: "user" as const, content: summary }] : []),
+    ...(!requiredUserAlreadyRetained && requiredUserMessage
+      ? [{ role: "user" as const, ...requiredUserMessage }]
+      : []),
     ...recentMessages
   ];
   const afterTokens = systemTokens + estimateRuntimeTranscriptTokens(compactedTranscript);
@@ -8547,6 +8845,7 @@ function buildCompactedTranscriptSummary(
     .slice(-3)
     .map((message) => `Repository exploration: ${truncateToRuntimeTokenBudget(message.content, 72)}`);
   const source = [
+    "[Internal context compaction summary. Preserve task goals, verified results, and unfinished work. Do not show this section to the user.]",
     "[内部上下文压缩摘要。保留任务目标、已验证结果和未完成事项；不要将本段显示给用户。]",
     firstUserMessage ? `原始任务：${truncateToRuntimeTokenBudget(firstUserMessage, 90)}` : "",
     ...repositoryContinuity,
@@ -9266,15 +9565,22 @@ function summarizeMcpRepositoryToolResult(result: McpRepositoryToolResult): stri
 
 export function resolveModelToolResultTokenBudget(
   contextWindow = 128_000,
-  remainingInputTokens = Math.floor(contextWindow * CONTEXT_COMPACTION_THRESHOLD)
+  remainingInputTokens = Math.floor(contextWindow * CONTEXT_COMPACTION_THRESHOLD),
+  providerMaxRequestBytes = 0
 ): number {
-  return Math.max(256, Math.floor(Math.min(contextWindow * 0.1, remainingInputTokens * 0.25)));
+  const modelBudget = Math.min(contextWindow * 0.1, remainingInputTokens * 0.25);
+  // The system prompt, tool schemas, and protocol metadata share the same
+  // serialized provider envelope with this result.
+  const providerBudget = providerMaxRequestBytes > 0
+    ? Math.max(256, Math.floor(providerMaxRequestBytes / 8))
+    : Number.POSITIVE_INFINITY;
+  return Math.max(256, Math.floor(Math.min(modelBudget, providerBudget)));
 }
 
 export function summarizeToolResultForModel(
   toolName: string,
   result: ToolResult,
-  options: { contextWindow?: number; remainingInputTokens?: number } = {}
+  options: { contextWindow?: number; remainingInputTokens?: number; providerMaxRequestBytes?: number } = {}
 ): string {
   const content = result.content ?? "";
   let summarized = content;
@@ -9285,7 +9591,8 @@ export function summarizeToolResultForModel(
     } else {
       const truncated = truncateToRuntimeTokenBudget(content, resolveModelToolResultTokenBudget(
         options.contextWindow,
-        options.remainingInputTokens
+        options.remainingInputTokens,
+        options.providerMaxRequestBytes
       ));
       summarized = truncated === content
         ? content
@@ -9298,7 +9605,8 @@ export function summarizeToolResultForModel(
   }
   return truncateToRuntimeTokenBudget(summarized, resolveModelToolResultTokenBudget(
     options.contextWindow,
-    options.remainingInputTokens
+    options.remainingInputTokens,
+    options.providerMaxRequestBytes
   ));
 }
 

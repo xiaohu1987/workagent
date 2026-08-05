@@ -113,6 +113,17 @@ export const deepseekCompat = defineCompat(gptCompat, {
   },
   normalizeDecision(decision) {
     const hasMessage = Boolean(decision.assistantMessage?.trim());
+    if (
+      hasMessage &&
+      decision.toolCalls.length === 0 &&
+      decision.endTurn &&
+      !decision.goalCompleted
+    ) {
+      // DeepSeek sometimes returns a complete terminal answer while leaving
+      // goal_completed false. The runtime still validates the answer content,
+      // pending tools, delivery, and verification after this normalization.
+      return { ...decision, goalCompleted: true };
+    }
     if (hasMessage || decision.toolCalls.length > 0) {
       return decision;
     }

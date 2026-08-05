@@ -464,7 +464,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     {
       name: "skills.load",
-      description: "Load the complete SKILL.md instructions for a listed skill before using that skill. Explicitly selected skills should be loaded first when relevant.",
+      description: "Load complete SKILL.md instructions using an exact skill_id from the Available Skills catalog. This does not execute tools: dotted names such as database.list_sources must be called directly as tools, never passed as skill_id.",
       inputSchema: {
         type: "object",
         properties: {
@@ -650,7 +650,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       const entries = await ctx.listFiles(target);
       const content = entries.length > 0
         ? `Directory listing succeeded:\n${entries.join("\n")}`
-        : "Directory listing succeeded. The selected project folder is empty. Create the requested files now with apply_patch; do not list this directory again.";
+        : "Directory listing succeeded. The directory is empty.";
       return { ok: true, content, json: { path: target, entries } };
     }
   );

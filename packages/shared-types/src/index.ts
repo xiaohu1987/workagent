@@ -976,6 +976,7 @@ export interface ProviderTurnInput {
   onRequestMeasured?: (measurement: {
     requestBytes: number;
     maxRequestBytes: number;
+    targetRequestBytes: number;
     maxTools: number;
     toolCount: number;
   }) => void | Promise<void>;
@@ -1094,6 +1095,7 @@ export interface ContextMeasurementRecord {
   outputReserveTokens: number;
   requestBytes?: number;
   maxRequestBytes?: number;
+  targetRequestBytes?: number;
   maxTools?: number;
   toolCount?: number;
   segments: ContextSegmentUsage[];

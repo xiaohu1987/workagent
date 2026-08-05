@@ -16445,11 +16445,10 @@ body.panel-resizing {
 }
 
 .memory-toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
-  flex-wrap: wrap;
   padding: 10px 11px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
@@ -16464,15 +16463,36 @@ body.panel-resizing {
   min-width: 0;
 }
 
+.memory-toolbar-main {
+  flex-wrap: wrap;
+  align-content: center;
+}
+
 .memory-toolbar-actions {
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .memory-filter-field {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 32px;
   min-width: 0;
+  white-space: nowrap;
+}
+
+.memory-filter-field > input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.memory-filter-field > .form-input {
+  box-sizing: border-box;
+  width: 144px;
+  min-width: 144px;
 }
 
 .memory-filter-field > span {
@@ -16507,6 +16527,11 @@ body.panel-resizing {
 .memory-toolbar-actions .button svg {
   width: 14px;
   height: 14px;
+}
+
+.app-shell.has-app-background .memory-management-panel {
+  background: rgba(16, 17, 22, 0.78);
+  backdrop-filter: none;
 }
 
 .memory-solution-list {
@@ -16907,6 +16932,7 @@ body.panel-resizing {
   .memory-control-actions { grid-column: 1 / -1; justify-content: flex-end; }
   .memory-toolbar {
     align-items: stretch;
+    grid-template-columns: 1fr;
   }
 
   .memory-toolbar-main,
@@ -17538,6 +17564,16 @@ body.panel-resizing .app-shell { transition: none; }
   overflow: hidden;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   background: #0b0c0e;
+}
+
+@media (max-width: 1260px) {
+  .memory-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-toolbar-actions {
+    justify-content: flex-start;
+  }
 }
 
 .workspace-terminal-drawer[data-motion="entering"] {
