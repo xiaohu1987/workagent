@@ -169,7 +169,7 @@ export function ContextUsageReport({ usage, motionPhase, onClose }: { usage: Con
       <header>
         <div>
           <strong>上下文占用</strong>
-          <span>{usage.compaction ? "压缩后估算" : "本地估算"}</span>
+          <span>{usage.measurement ? "运行时测量" : usage.compaction ? "压缩后估算" : "本地估算"}</span>
         </div>
         <button type="button" title="关闭" aria-label="关闭上下文详情" onClick={onClose}>
           <IconClose />
@@ -179,6 +179,18 @@ export function ContextUsageReport({ usage, motionPhase, onClose }: { usage: Con
         <span>{usage.percentage}% 已用</span>
         <strong>约 {formatTokenCount(usage.usedTokens)} / {formatTokenCount(usage.contextWindow)} tokens</strong>
       </div>
+      {usage.requestBytes !== undefined ? (
+        <div className="context-usage-compaction">
+          <span>请求体 {formatByteCount(usage.requestBytes)}</span>
+          <strong>{usage.maxRequestBytes && usage.maxRequestBytes > 0 ? `上限 ${formatByteCount(usage.maxRequestBytes)}` : "Provider 未限制"}</strong>
+        </div>
+      ) : null}
+      {usage.toolCount !== undefined ? (
+        <div className="context-usage-compaction">
+          <span>原生工具 {usage.toolCount}</span>
+          <strong>{usage.maxTools && usage.maxTools > 0 ? `上限 ${usage.maxTools}` : "Provider 未限制"}</strong>
+        </div>
+      ) : null}
       {usage.compaction ? (
         <div className="context-usage-compaction">
           <span>压缩前 {formatTokenCount(usage.compaction.beforeTokens)}</span>
@@ -207,6 +219,11 @@ export function ContextUsageReport({ usage, motionPhase, onClose }: { usage: Con
       </div>
     </section>
   );
+}
+
+function formatByteCount(value: number): string {
+  if (value < 1024) return `${value} B`;
+  return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KiB`;
 }
 
 export function FloatingSideMenu({

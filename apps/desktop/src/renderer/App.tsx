@@ -8,6 +8,7 @@ import type {
   ApprovalRequest,
   ArtifactRecord,
   ContextCompactionRecord,
+  ContextMeasurementRecord,
   GpaStage,
   GpaState,
   GitActionResult,
@@ -2015,6 +2016,18 @@ export function App() {
           );
         }
       }
+      if (typed.type === "agent.context_measured" && typed.threadId) {
+        const contextMeasurement: ContextMeasurementRecord = {
+          ...(typed.payload as unknown as Omit<ContextMeasurementRecord, "createdAt">),
+          createdAt: runtimeEvent.createdAt
+        };
+        const cached = snapshotCacheByThreadRef.current.get(typed.threadId);
+        if (cached) cacheThreadSnapshot({ ...cached, contextMeasurement });
+        setSnapshot((current) => {
+          if (!current || current.thread.id !== typed.threadId) return current;
+          return { ...current, contextMeasurement };
+        });
+      }
       if (!isPluginStateUpdate && typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
         applyThreadStatusNotification(runtimeEvent);
         const runtimeThreadId = typed.threadId;
@@ -2989,10 +3002,9 @@ export function App() {
     }
     const targetProviderId = composerProviderId ?? config.defaultProvider;
     const targetModelId = composerModelId ?? config.defaultModel;
-    const targetModel =
-      config.models.find((model) => model.id === targetModelId && model.providerId === targetProviderId) ??
-      config.models.find((model) => model.id === targetModelId) ??
-      null;
+    const targetModel = config.models.find(
+      (model) => model.id === targetModelId && model.providerId === targetProviderId
+    ) ?? null;
     const provider = composerProviders.find((item) => item.id === targetProviderId);
     const providerLabel = provider ? getProviderDisplayName(provider) : null;
     const resolvedModelLabel = targetModel?.displayName?.trim() || targetModel?.id || targetModelId || null;
@@ -3008,10 +3020,9 @@ export function App() {
 
     const targetProviderId = selectedThread?.providerId ?? composerProviderId ?? config.defaultProvider;
     const targetModelId = selectedThread?.modelId ?? composerModelId ?? config.defaultModel;
-    const targetModel =
-      config.models.find((model) => model.id === targetModelId && model.providerId === targetProviderId) ??
-      config.models.find((model) => model.id === targetModelId) ??
-      null;
+    const targetModel = config.models.find(
+      (model) => model.id === targetModelId && model.providerId === targetProviderId
+    ) ?? null;
 
     if (!targetModel) {
       return targetModelId || "Assistant";
@@ -3023,10 +3034,13 @@ export function App() {
   const contextUsage = useMemo(() => {
     const targetProviderId = selectedThread?.providerId ?? composerProviderId ?? config?.defaultProvider;
     const targetModelId = selectedThread?.modelId ?? composerModelId ?? config?.defaultModel;
-    const contextWindow =
-      config?.models.find((model) => model.id === targetModelId && model.providerId === targetProviderId)?.contextWindow ??
-      config?.models.find((model) => model.id === targetModelId)?.contextWindow ??
-      128_000;
+    const contextWindow = config?.models.find(
+      (model) => model.id === targetModelId && model.providerId === targetProviderId
+    )?.contextWindow ?? 128_000;
+    const contextMeasurement = snapshot?.contextMeasurement;
+    const matchingMeasurement = contextMeasurement?.modelId === targetModelId && contextMeasurement.providerId === targetProviderId
+      ? contextMeasurement
+      : null;
     return buildContextUsage({
       contextWindow,
       messages: selectedMessages,
@@ -3035,9 +3049,10 @@ export function App() {
       selectedSkillCount: selectedThread?.selectedSkillIds.length ?? 0,
       mcpServerCount: config?.mcpServers.length ?? 0,
       pendingInput: `${input}\n${formatComposerAttachments(composerAttachments)}`,
-      compaction: activeContextCompaction
+      compaction: activeContextCompaction,
+      measurement: matchingMeasurement
     });
-  }, [activeContextCompaction, composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.toolCalls]);
+  }, [activeContextCompaction, composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.contextMeasurement, snapshot?.toolCalls]);
 
   function cancelPendingAutoScrollFrame() {
     if (autoScrollFrameRef.current === null) {

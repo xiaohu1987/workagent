@@ -269,6 +269,47 @@ describe("parseMarkdownBlocks", () => {
     expect(usage.segments.map((segment) => segment.label)).toContain("对话与工具结果");
   });
 
+  it("prefers runtime token and provider byte measurements over fixed UI estimates", () => {
+    const usage = buildContextUsage({
+      contextWindow: 128_000,
+      messages: [],
+      toolCalls: [],
+      gpaStage: "act",
+      selectedSkillCount: 0,
+      mcpServerCount: 0,
+      pendingInput: "",
+      measurement: {
+        turnRunId: "turn-1",
+        modelId: "deepseek-v4-flash-0731",
+        providerId: "provider-10",
+        contextWindow: 500_000,
+        maxInputTokens: 375_000,
+        estimatedInputTokens: 128_000,
+        outputReserveTokens: 32_768,
+        requestBytes: 117_352,
+        maxRequestBytes: 122_880,
+        maxTools: 50,
+        toolCount: 47,
+        segments: [
+          { id: "system", tokens: 12_000 },
+          { id: "tools", tokens: 8_000 },
+          { id: "conversation", tokens: 100_000 },
+          { id: "capsules", tokens: 8_000 },
+          { id: "output_reserve", tokens: 32_768 }
+        ],
+        createdAt: "2026-08-04T09:00:00.000Z"
+      }
+    });
+
+    expect(usage.contextWindow).toBe(500_000);
+    expect(usage.maxInputTokens).toBe(375_000);
+    expect(usage.usedTokens).toBe(160_768);
+    expect(usage.requestBytes).toBe(117_352);
+    expect(usage.maxRequestBytes).toBe(122_880);
+    expect(usage.toolCount).toBe(47);
+    expect(usage.measurement?.providerId).toBe("provider-10");
+  });
+
   it("uses the actual compacted token count instead of the full raw history", () => {
     const usage = buildContextUsage({
       contextWindow: 128_000,

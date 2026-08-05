@@ -1,4 +1,4 @@
-import type { ArtifactRecord, AssistantDraftPhase, ContextCompactionRecord, GpaStage, GpaState, MessageAttachment, MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, UserInputPrompt } from "@shared-types";
+import type { ArtifactRecord, AssistantDraftPhase, ContextCompactionRecord, ContextMeasurementRecord, GpaStage, GpaState, MessageAttachment, MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, UserInputPrompt } from "@shared-types";
 import { isThreadExecutionInProgress } from "../core/thread-ui-state";
 import { FileSnapshot } from "./project-files";
 
@@ -43,10 +43,16 @@ export type ContextUsageSegment = {
 
 export type ContextUsage = {
   contextWindow: number;
+  maxInputTokens?: number;
   usedTokens: number;
   percentage: number;
   segments: ContextUsageSegment[];
   compaction: ContextCompactionRecord | null;
+  measurement: ContextMeasurementRecord | null;
+  requestBytes?: number;
+  maxRequestBytes?: number;
+  maxTools?: number;
+  toolCount?: number;
 };
 
 export function composerAttachmentKey(attachment: ComposerAttachment | ComposerAttachmentInput): string {
@@ -202,15 +208,41 @@ export function buildContextUsage(input: {
   mcpServerCount: number;
   pendingInput: string;
   compaction?: ContextCompactionRecord | null;
+  measurement?: ContextMeasurementRecord | null;
 }): ContextUsage {
-  const fixedSegments: ContextUsageSegment[] = [
-    { id: "system", label: "系统提示", tokens: 1_200, color: "#a8a8a8" },
-    { id: "tools", label: "工具定义", tokens: 900 + input.mcpServerCount * 240, color: "#9988ef" },
-    { id: "rules", label: "规则", tokens: input.gpaStage === "off" ? 240 : 980, color: "#4fba7b" },
-    { id: "skills", label: "技能", tokens: input.selectedSkillCount * 520, color: "#efb35c" },
-    { id: "mcp", label: "MCP 与动态工具", tokens: input.mcpServerCount * 360, color: "#bf98bd" }
-  ];
-  const fixedTokens = fixedSegments.reduce((total, segment) => total + segment.tokens, 0);
+  if (input.measurement) {
+    const labels: Record<string, { label: string; color: string }> = {
+      system: { label: "系统提示", color: "#a8a8a8" },
+      tools: { label: "工具定义", color: "#9988ef" },
+      conversation: { label: "对话与工具结果", color: "#e28b85" },
+      capsules: { label: "历史摘要", color: "#bf98bd" },
+      output_reserve: { label: "输出预留", color: "#4fba7b" }
+    };
+    const pendingTokens = estimateContextTokens(input.pendingInput);
+    const segments = input.measurement.segments.map((segment) => {
+      const metadata = labels[segment.id] ?? { label: segment.id, color: "#888888" };
+      return {
+        id: segment.id,
+        label: metadata.label,
+        color: metadata.color,
+        tokens: segment.tokens + (segment.id === "conversation" ? pendingTokens : 0)
+      };
+    });
+    const usedTokens = segments.reduce((total, segment) => total + segment.tokens, 0);
+    return {
+      contextWindow: input.measurement.contextWindow,
+      maxInputTokens: input.measurement.maxInputTokens,
+      usedTokens,
+      percentage: Math.min(100, Math.round((usedTokens / Math.max(1, input.measurement.contextWindow)) * 100)),
+      segments,
+      compaction: input.compaction ?? null,
+      measurement: input.measurement,
+      requestBytes: input.measurement.requestBytes,
+      maxRequestBytes: input.measurement.maxRequestBytes,
+      maxTools: input.measurement.maxTools,
+      toolCount: input.measurement.toolCount
+    };
+  }
   const compactedAt = input.compaction ? Date.parse(input.compaction.createdAt) : Number.NaN;
   const conversationText = input.compaction
     ? [
@@ -229,10 +261,9 @@ export function buildContextUsage(input: {
       ].join("\n");
   const recentTokens = Math.max(0, estimateContextTokens(conversationText));
   const conversationTokens = input.compaction
-    ? Math.max(1, input.compaction.afterTokens - fixedTokens) + recentTokens
+    ? Math.max(1, input.compaction.afterTokens) + recentTokens
     : Math.max(1, recentTokens);
   const segments: ContextUsageSegment[] = [
-    ...fixedSegments,
     {
       id: "conversation",
       label: input.compaction ? "压缩后的对话与工具结果" : "对话与工具结果",
@@ -245,9 +276,10 @@ export function buildContextUsage(input: {
   return {
     contextWindow,
     usedTokens,
-    percentage: Math.min(100, Math.round((usedTokens / contextWindow) * 100)),
+    percentage: Math.min(100, Math.max(usedTokens > 0 ? 1 : 0, Math.round((usedTokens / contextWindow) * 100))),
     segments,
-    compaction: input.compaction ?? null
+    compaction: input.compaction ?? null,
+    measurement: null
   };
 }
 
@@ -1574,6 +1606,7 @@ export function createOptimisticThreadSnapshot(thread: ThreadRecord): RuntimeThr
     projectPlugins: [],
     toolCalls: [],
     contextCompaction: null,
+    contextMeasurement: null,
     gpa: null,
     subagents: [],
     queuedSubagentIds: []

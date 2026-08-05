@@ -10,6 +10,7 @@ import type {
   BrowserAssertionCheck,
   BrowserViewport,
   CompletionEvidenceKind,
+  ContextSegmentUsage,
   ErrorSolutionRecord,
   MessageAttachment,
   McpRepositoryToolResult,
@@ -37,7 +38,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, resolveModelCompat, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
@@ -151,9 +152,7 @@ export const STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS = 2;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 0;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
-export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 32_000;
 export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
-export const MAX_CONTEXT_MESSAGE_TOKENS = 24_000;
 
 export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
   return blockedAttempts >= MAX_BLOCKED_IDENTICAL_TOOL_RETRIES;
@@ -173,7 +172,7 @@ export const MODEL_RATE_LIMIT_MAX_DELAY_MS = 30_000;
 export const MAX_NETWORK_ERROR_RETRIES = 0;
 export const NETWORK_ERROR_BASE_DELAY_MS = 1_000;
 export const NETWORK_ERROR_MAX_DELAY_MS = 10_000;
-export const MAX_UPSTREAM_SERVICE_RETRIES = 0;
+export const MAX_UPSTREAM_SERVICE_RETRIES = 5;
 export const MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES = 0;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_BASE_TOKENS = 8_192;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_MAX_TOKENS = 32_768;
@@ -1294,8 +1293,10 @@ class ThreadSessionRuntime {
       ? await this.services.listKnowledgeBases(this.threadId)
       : [];
     const visibleKnowledgeBaseIds = visibleKnowledgeBases.map((entry: { id: string }) => entry.id);
-    const model = resolveModel(this.services.config, thread.modelId);
+    const model = resolveModel(this.services.config, thread.modelId, thread.providerId);
     const provider = resolveProvider(this.services.config, thread.providerId);
+    const providerRequestLimits = resolveProviderRequestLimits(provider, model);
+    const contextBudgetPlan = createContextBudgetPlan(model.contextWindow, model.defaultMaxOutputTokens);
     const skillSelectionQuery = [
       effectiveRequest,
       this.#gpa.planTasks.map((task) => task.title).join("\n")
@@ -1577,7 +1578,31 @@ class ThreadSessionRuntime {
       let latestRequestedArtifactEvidence: RequestedArtifactEvidence[] = [];
 
       try {
-        let transcript = compactTranscript(history);
+        let selectedHistory = selectBudgetedHistory(history, contextBudgetPlan.rawHistoryBudgetTokens);
+        const preliminaryCapsules = buildStoredTurnContextPrompt(storedTurnContextMarkdown, model.contextWindow, {
+          skipNewest: followUpSourceContext !== null,
+          maxBudgetTokens: contextBudgetPlan.capsuleBudgetTokens,
+          excludeTurnRunIds: selectedHistory.retainedTurnRunIds
+        });
+        const unusedCapsuleTokens = Math.max(
+          0,
+          contextBudgetPlan.capsuleBudgetTokens - estimateRuntimeTokens(preliminaryCapsules)
+        );
+        if (unusedCapsuleTokens > 0) {
+          selectedHistory = selectBudgetedHistory(
+            history,
+            contextBudgetPlan.rawHistoryBudgetTokens + unusedCapsuleTokens
+          );
+        }
+        if (selectedHistory.newestTurnTokens > contextBudgetPlan.maxInputTokens) {
+          throw new ContextInputLimitError(
+            selectedHistory.newestTurnTokens,
+            contextBudgetPlan.maxInputTokens,
+            "current_user_message"
+          );
+        }
+        const retainedHistoryTurnRunIds = selectedHistory.retainedTurnRunIds;
+        let transcript = selectedHistory.transcript;
       if (multimodalInputRecognition) {
         transcript = applyMultimodalInputRecognitionToTranscript(
           transcript,
@@ -2166,14 +2191,23 @@ class ThreadSessionRuntime {
         };
         await updateDraft("generating", "");
         const multiAgentDirective = buildMultiAgentDirective(thread);
-        const systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
-          buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${buildStoredTurnContextPrompt(storedTurnContextMarkdown, model.contextWindow, {
+        const borrowedCapsuleTokens = Math.max(
+          0,
+          contextBudgetPlan.rawHistoryBudgetTokens - selectedHistory.estimatedTokens
+        );
+        const storedContextPrompt = buildStoredTurnContextPrompt(storedTurnContextMarkdown, model.contextWindow, {
           skipNewest: followUpSourceContext !== null,
-          maxBudgetTokens: providerRequestSlimmingAttempts > 0 ? 2_000 : undefined
-        })}\n\n${buildFollowUpSourcePrompt(followUpSourceContext, {
+          maxBudgetTokens: providerRequestSlimmingAttempts > 0
+            ? 2_000
+            : contextBudgetPlan.capsuleBudgetTokens + borrowedCapsuleTokens,
+          excludeTurnRunIds: retainedHistoryTurnRunIds
+        });
+        const followUpSourcePrompt = buildFollowUpSourcePrompt(followUpSourceContext, {
           maxPreviousResponseCharacters: providerRequestSlimmingAttempts > 0 ? 6_000 : 16_000
-        })}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
+        });
+        let systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
+          buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${availableToolsPrompt}${
           useTextToolProtocol
             ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
             : ""
@@ -2182,6 +2216,25 @@ class ThreadSessionRuntime {
             ? "\n\n[Output-limit recovery] The previous response was truncated. Do not repeat analysis, logs, source text, or completed work. Return only one compact next tool call, or a concise final answer under 500 words using the verified results already present."
             : ""
         }`;
+        const toolSchemaText = useTextToolProtocol
+          ? ""
+          : JSON.stringify(selectedMcpToolsOnly.map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              inputSchema: tool.inputSchema
+            })));
+        const toolSchemaTokens = estimateRuntimeTokens(toolSchemaText);
+        const latestEvidenceTokens = Math.max(
+          selectedHistory.mandatoryTokens,
+          estimateRuntimeTranscriptTokens(transcript.slice(-4))
+        );
+        systemPrompt = fitSystemPromptForContextBudget(
+          systemPrompt,
+          Math.max(256, contextBudgetPlan.maxInputTokens - toolSchemaTokens - latestEvidenceTokens)
+        );
+        const budgetedSystemPrompt = toolSchemaText
+          ? `${systemPrompt}\n\n[Native tool schemas]\n${toolSchemaText}`
+          : systemPrompt;
         const compactContext = async (
           trigger: "pre_model_request" | "post_tool_batch" | "upstream_context_overflow" | "model_timeout_recovery" | "task_completed",
           force = false
@@ -2189,7 +2242,7 @@ class ThreadSessionRuntime {
           const compaction = compactTranscriptForContext(
             transcript,
             model.contextWindow,
-            systemPrompt,
+            budgetedSystemPrompt,
             { force }
           );
           if (!compaction.compacted) {
@@ -2218,6 +2271,50 @@ class ThreadSessionRuntime {
           return true;
         };
         await compactContext("pre_model_request");
+        const capsuleTokens = systemPrompt.includes("## Previous Turn Context Capsules")
+          ? estimateRuntimeTokens(storedContextPrompt)
+          : 0;
+        const systemTokens = Math.max(0, estimateRuntimeTokens(systemPrompt) - capsuleTokens);
+        let conversationTokens = estimateRuntimeTranscriptTokens(transcript);
+        let estimatedInputTokens = systemTokens + toolSchemaTokens + conversationTokens + capsuleTokens;
+        if (estimatedInputTokens > contextBudgetPlan.maxInputTokens) {
+          await compactContext("pre_model_request", true);
+          conversationTokens = estimateRuntimeTranscriptTokens(transcript);
+          estimatedInputTokens = systemTokens + toolSchemaTokens + conversationTokens + capsuleTokens;
+        }
+        if (estimatedInputTokens > contextBudgetPlan.maxInputTokens) {
+          throw new ContextInputLimitError(
+            estimatedInputTokens,
+            contextBudgetPlan.maxInputTokens,
+            "required_context"
+          );
+        }
+        const contextSegments: ContextSegmentUsage[] = [
+          { id: "system", tokens: systemTokens },
+          { id: "tools", tokens: toolSchemaTokens },
+          { id: "conversation", tokens: conversationTokens },
+          { id: "capsules", tokens: capsuleTokens },
+          { id: "output_reserve", tokens: contextBudgetPlan.outputReserveTokens }
+        ];
+        const contextMeasurementPayload = {
+          turnRunId: turn.id,
+          modelId: model.id,
+          providerId: provider.id,
+          contextWindow: model.contextWindow,
+          maxInputTokens: contextBudgetPlan.maxInputTokens,
+          estimatedInputTokens,
+          outputReserveTokens: contextBudgetPlan.outputReserveTokens,
+          maxRequestBytes: providerRequestLimits.maxRequestBytes,
+          maxTools: providerRequestLimits.maxTools,
+          segments: contextSegments
+        };
+        await this.services.log("agent.context_measured", this.threadId, contextMeasurementPayload);
+        await this.services.emit({
+          type: "agent.context_measured",
+          threadId: this.threadId,
+          payload: contextMeasurementPayload,
+          createdAt: new Date().toISOString()
+        });
         const timeoutRecoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
         const timeoutRecoveryMultiplier = Math.min(3, 1 + Math.floor(modelTimeoutAttempts / timeoutRecoveryWindow));
         const decisionTimeoutMs = MODEL_DECISION_TIMEOUT_MS * timeoutRecoveryMultiplier;
@@ -2262,6 +2359,16 @@ class ThreadSessionRuntime {
                   return;
                 }
                 await updateDraft("generating", `${streamedVisibleContent}${delta}`);
+              },
+              onRequestMeasured: async (measurement) => {
+                const measuredPayload = { ...contextMeasurementPayload, ...measurement };
+                await this.services.log("agent.context_measured", this.threadId, measuredPayload);
+                await this.services.emit({
+                  type: "agent.context_measured",
+                  threadId: this.threadId,
+                  payload: measuredPayload,
+                  createdAt: new Date().toISOString()
+                });
               },
               abortSignal: modelTurnAbortController.signal
             }),
@@ -2394,14 +2501,15 @@ class ThreadSessionRuntime {
           }
           if (
             !abortController.signal.aborted &&
-            isUpstreamServiceUnavailableError(error)
+            isUpstreamServiceUnavailableError(error) &&
+            upstreamServiceErrorAttempts < MAX_UPSTREAM_SERVICE_RETRIES
           ) {
             upstreamServiceErrorAttempts += 1;
             const delayMs = resolveNetworkErrorDelayMs(upstreamServiceErrorAttempts);
             await this.services.log("provider.service_unavailable", this.threadId, {
               turnRunId: turn.id,
               attempt: upstreamServiceErrorAttempts,
-              retryWindow: null,
+              retryWindow: MAX_UPSTREAM_SERVICE_RETRIES,
               delayMs,
               error: errorMessage
             });
@@ -2410,7 +2518,7 @@ class ThreadSessionRuntime {
               threadId: this.threadId,
               payload: {
                 attempt: upstreamServiceErrorAttempts,
-                maxAttempts: 0,
+                maxAttempts: MAX_UPSTREAM_SERVICE_RETRIES,
                 reason: "upstream_service_unavailable",
                 delayMs
               },
@@ -4559,7 +4667,7 @@ class ThreadSessionRuntime {
           });
 
           const completedAt = new Date().toISOString();
-          const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result);
+          const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result, model.contextWindow);
           const repositoryResult = getMcpRepositoryToolResult(sanitizedResult);
           if (repositoryResult) {
             applyStructuredRepositoryResult(repositoryExploration, repositoryResult);
@@ -4652,7 +4760,10 @@ class ThreadSessionRuntime {
             collectBrowserSources(toolCall.name, sanitizedResult, browserSources);
           }
 
-          const modelContent = redactSensitiveText(summarizeToolResultForModel(toolCall.name, sanitizedResult));
+          const modelContent = redactSensitiveText(summarizeToolResultForModel(toolCall.name, sanitizedResult, {
+            contextWindow: model.contextWindow,
+            remainingInputTokens: Math.max(256, contextBudgetPlan.maxInputTokens - estimateRuntimeTranscriptTokens(transcript))
+          }));
           const toolMessage = await this.recordMessage(
             "tool",
             `${toolCall.name}\n${modelContent}`,
@@ -4875,7 +4986,7 @@ class ThreadSessionRuntime {
                 };
               }
               const verificationCompletedAt = new Date().toISOString();
-              const verificationSanitized = sanitizeToolResultForTranscript(verificationCall.name, verificationResult);
+              const verificationSanitized = sanitizeToolResultForTranscript(verificationCall.name, verificationResult, model.contextWindow);
               const verificationStatus = verificationResult.ok ? "completed" : "failed";
               await this.services.persistence.finishToolCall(verificationRecord.id, {
                 status: verificationStatus,
@@ -4898,7 +5009,7 @@ class ThreadSessionRuntime {
               });
               const verificationMessage = await this.recordMessage(
                 "tool",
-                `${verificationCall.name}\n${summarizeToolResultForModel(verificationCall.name, verificationSanitized)}`,
+                `${verificationCall.name}\n${summarizeToolResultForModel(verificationCall.name, verificationSanitized, { contextWindow: model.contextWindow })}`,
                 turn.id,
                 { toolCallId: verificationRecord.id }
               );
@@ -7665,12 +7776,14 @@ export function buildFollowUpSourcePrompt(
   options: { maxPreviousResponseCharacters?: number } = {}
 ): string {
   if (!context) return "";
-  const maxPreviousResponseCharacters = Math.max(1_000, options.maxPreviousResponseCharacters ?? 16_000);
+  void options;
+  const topicAnchors = extractTaskTopicAnchors(`${context.previousRequest}\n${context.previousResponse}`);
   return [
     "## Follow-up Source Continuity",
     "The current request explicitly refers to the immediately preceding turn. Treat that turn as the authoritative source; do not guess a different project or substitute unrelated historical outputs.",
     `Previous user request:\n${context.previousRequest.slice(0, 8_000)}`,
-    `Previous verified response:\n${context.previousResponse.slice(0, maxPreviousResponseCharacters)}`,
+    `Previous turn run: ${context.previousTurnRunId ?? "unknown"}. Its raw messages or stored Markdown capsule are already present elsewhere in this request; do not duplicate or replace them.`,
+    topicAnchors.length > 0 ? `Verified topic anchors: ${topicAnchors.join(", ")}.` : "No stable topic anchors were extracted.",
     context.sourceMcpServerIds.length > 0
       ? `Inherited source MCP server(s): ${context.sourceMcpServerIds.join(", ")}. Re-query only these servers if the retained response is insufficient.`
       : "No MCP source was recorded for the preceding turn; use only its retained response and verified paths unless the user broadens scope.",
@@ -7683,8 +7796,44 @@ export function buildFollowUpSourcePrompt(
   ].join("\n\n");
 }
 
+export interface ContextBudgetPlan {
+  contextWindow: number;
+  maxInputTokens: number;
+  targetInputTokens: number;
+  outputReserveTokens: number;
+  rawHistoryBudgetTokens: number;
+  capsuleBudgetTokens: number;
+}
+
+export class ContextInputLimitError extends Error {
+  public constructor(
+    public readonly estimatedTokens: number,
+    public readonly maxInputTokens: number,
+    public readonly segment: "current_user_message" | "required_context"
+  ) {
+    const label = segment === "current_user_message" ? "The current user message" : "The required request context";
+    super(`${label} needs about ${estimatedTokens} input tokens, exceeding this model's ${maxInputTokens}-token input budget. The current request and latest evidence were not truncated.`);
+    this.name = "ContextInputLimitError";
+  }
+}
+
+export function createContextBudgetPlan(contextWindow: number, configuredOutputTokens = 0): ContextBudgetPlan {
+  const safeContextWindow = Math.max(1_024, Math.floor(contextWindow));
+  const outputReserveTokens = Math.max(0, Math.floor(configuredOutputTokens));
+  const maxInputTokens = Math.max(256, Math.floor(safeContextWindow * CONTEXT_COMPACTION_THRESHOLD));
+  const targetInputTokens = Math.max(256, Math.floor(safeContextWindow * CONTEXT_COMPACTION_TARGET));
+  return {
+    contextWindow: safeContextWindow,
+    maxInputTokens,
+    targetInputTokens,
+    outputReserveTokens,
+    rawHistoryBudgetTokens: Math.max(256, Math.floor(maxInputTokens * 0.7)),
+    capsuleBudgetTokens: Math.max(256, Math.floor(maxInputTokens * 0.3))
+  };
+}
+
 export function resolveTurnContextCapsuleTokenBudget(contextWindow: number): number {
-  return Math.max(1_000, Math.min(24_000, Math.floor(Math.max(1, contextWindow) * 0.05)));
+  return createContextBudgetPlan(contextWindow).capsuleBudgetTokens;
 }
 
 export async function readLatestTurnContextMarkdown(outputDir: string): Promise<string | null> {
@@ -7715,24 +7864,33 @@ export async function readLatestTurnContextMarkdown(outputDir: string): Promise<
 export function buildStoredTurnContextPrompt(
   markdown: string | null,
   contextWindow: number,
-  options: { skipNewest?: boolean; maxBudgetTokens?: number } = {}
+  options: { skipNewest?: boolean; maxBudgetTokens?: number; excludeTurnRunIds?: Iterable<string> } = {}
 ): string {
   if (!markdown?.trim()) return "";
+  if (options.maxBudgetTokens !== undefined && options.maxBudgetTokens <= 0) return "";
   const budget = Math.min(
     resolveTurnContextCapsuleTokenBudget(contextWindow),
     Math.max(256, options.maxBudgetTokens ?? Number.POSITIVE_INFINITY)
   );
   const storedCapsules = markdown.split(/\n\n---\n\n(?=# Conversation Turn Context)/g).filter(Boolean);
-  const eligibleCapsules = options.skipNewest ? storedCapsules.slice(1) : storedCapsules;
+  const excludedTurnRunIds = new Set(options.excludeTurnRunIds ?? []);
+  const eligibleCapsules = (options.skipNewest ? storedCapsules.slice(1) : storedCapsules)
+    .filter((capsule) => {
+      const turnRunId = capsule.match(/^- Turn run:\s*`([^`]+)`/m)?.[1];
+      return !turnRunId || !excludedTurnRunIds.has(turnRunId);
+    });
   if (eligibleCapsules.length === 0) return "";
-  const capsuleCount = Math.min(eligibleCapsules.length, Math.max(2, Math.min(6, Math.floor(budget / 400))));
-  const capsules = eligibleCapsules.slice(0, capsuleCount);
-  const newestBudget = capsules.length === 1 ? budget : Math.floor(budget * 0.5);
-  const olderBudget = capsules.length > 1 ? Math.max(128, Math.floor((budget - newestBudget) / (capsules.length - 1))) : 0;
-  const retainedHistory = capsules.map((capsule, index) => truncateToRuntimeTokenBudget(
-    capsule,
-    index === 0 ? newestBudget : olderBudget
-  )).join("\n\n---\n\n");
+  const retainedCapsules: string[] = [];
+  let remainingBudget = budget;
+  for (const capsule of eligibleCapsules) {
+    if (remainingBudget <= 0) break;
+    const retained = truncateToRuntimeTokenBudget(capsule, remainingBudget);
+    if (!retained) break;
+    retainedCapsules.push(retained);
+    remainingBudget -= estimateRuntimeTokens(retained);
+  }
+  if (retainedCapsules.length === 0) return "";
+  const retainedHistory = retainedCapsules.join("\n\n---\n\n");
   return [
     "## Previous Turn Context Capsules",
     "These runtime-owned Markdown capsules summarize recent completed turns in newest-first order. Use relevant earlier turns for continuity; the current user request overrides them when the user clearly starts a new topic.",
@@ -8192,10 +8350,101 @@ function formatRuntimeDate(date: Date): string {
   }).format(date);
 }
 
+function rewritePromptHeadingSection(
+  prompt: string,
+  heading: string,
+  rewrite: (section: string) => string
+): string {
+  const start = prompt.indexOf(heading);
+  if (start < 0) return prompt;
+  const nextHeading = prompt.indexOf("\n## ", start + heading.length);
+  const end = nextHeading >= 0 ? nextHeading + 1 : prompt.length;
+  const replacement = rewrite(prompt.slice(start, end)).trim();
+  return `${prompt.slice(0, start).trimEnd()}${replacement ? `\n\n${replacement}` : ""}${prompt.slice(end).trimStart() ? `\n\n${prompt.slice(end).trimStart()}` : ""}`;
+}
+
+export function fitSystemPromptForContextBudget(systemPrompt: string, tokenBudget: number): string {
+  const safeBudget = Math.max(0, Math.floor(tokenBudget));
+  if (estimateRuntimeTokens(systemPrompt) <= safeBudget) return systemPrompt;
+
+  let next = rewritePromptHeadingSection(systemPrompt, "## Previous Turn Context Capsules", () => "");
+  if (estimateRuntimeTokens(next) <= safeBudget) return next;
+
+  next = rewritePromptHeadingSection(next, "## Available Skills", (section) => section
+    .split("\n")
+    .filter((line) => !/; priority: normal;/.test(line))
+    .join("\n"));
+  if (estimateRuntimeTokens(next) <= safeBudget) return next;
+
+  next = rewritePromptHeadingSection(next, "## Available Skills", (section) => section
+    .split("\n")
+    .filter((line) => !/; priority: recommended;/.test(line))
+    .join("\n"));
+  next = next
+    .split(/\n\n+/)
+    .filter((block) => !block.startsWith("Recommended skills for this task (domain-matched)."))
+    .join("\n\n");
+  if (estimateRuntimeTokens(next) <= safeBudget) return next;
+
+  next = rewritePromptHeadingSection(next, "## Workflow Packs", () => "");
+  return next;
+}
+
+export function selectBudgetedHistory(
+  messages: MessageRecord[],
+  tokenBudget: number
+): { transcript: ProviderTurnInput["transcript"]; retainedTurnRunIds: Set<string>; estimatedTokens: number; newestTurnTokens: number; mandatoryTokens: number } {
+  const visible = messages.filter((message) => !isToolBatchAnchorMessage(message));
+  const groups: MessageRecord[][] = [];
+  for (const message of visible) {
+    const previous = groups.at(-1);
+    const currentGroupKey = message.turnRunId ?? message.id;
+    const previousGroupKey = previous?.[0]?.turnRunId ?? previous?.[0]?.id;
+    if (previous && previousGroupKey === currentGroupKey) previous.push(message);
+    else groups.push([message]);
+  }
+  const selectedGroups: MessageRecord[][] = [];
+  let retainedTokens = 0;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index]!;
+    const groupTokens = group.reduce((total, message) => total + estimatePersistedMessageTokens(message), 0);
+    const mandatory = index >= groups.length - 2;
+    if (!mandatory && selectedGroups.length > 0 && retainedTokens + groupTokens > tokenBudget) break;
+    selectedGroups.unshift(group);
+    retainedTokens += groupTokens;
+  }
+  const selected = selectedGroups.flat();
+  const newestTurnTokens = groups.at(-1)?.reduce(
+    (total, message) => total + estimatePersistedMessageTokens(message),
+    0
+  ) ?? 0;
+  const mandatoryTokens = groups.slice(-2).flat().reduce(
+    (total, message) => total + estimatePersistedMessageTokens(message),
+    0
+  );
+  return {
+    transcript: selected.map((message) => ({
+      role: message.role,
+      content: message.content,
+      attachments: getMessageAttachments(message)
+    })),
+    retainedTurnRunIds: new Set(selected.flatMap((message) => message.turnRunId ? [message.turnRunId] : [])),
+    estimatedTokens: retainedTokens,
+    newestTurnTokens,
+    mandatoryTokens
+  };
+}
+
+function estimatePersistedMessageTokens(message: MessageRecord): number {
+  return estimateRuntimeTranscriptTokens([{
+    role: message.role,
+    content: message.content,
+    attachments: getMessageAttachments(message)
+  }]);
+}
+
 function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {
-  const maxMessages = 24;
-  const visible = messages.filter((message) => !isToolBatchAnchorMessage(message)).slice(-maxMessages);
-  return visible.map((message) => ({
+  return messages.filter((message) => !isToolBatchAnchorMessage(message)).map((message) => ({
     role: message.role,
     content: message.content,
     attachments: getMessageAttachments(message)
@@ -8230,7 +8479,7 @@ export function compactTranscriptForContext(
 ): {
   transcript: ProviderTurnInput["transcript"];
   compacted: boolean;
-  reason: "threshold" | "oversized_message" | "forced" | null;
+  reason: "threshold" | "forced" | null;
   beforeTokens: number;
   afterTokens: number;
   messagesBefore: number;
@@ -8239,15 +8488,8 @@ export function compactTranscriptForContext(
   const systemTokens = estimateRuntimeTokens(systemPrompt);
   const transcriptTokens = estimateRuntimeTranscriptTokens(transcript);
   const beforeTokens = systemTokens + transcriptTokens;
-  const perMessageLimitTokens = Math.max(
-    128,
-    Math.min(MAX_CONTEXT_MESSAGE_TOKENS, Math.floor(safeContextWindow * 0.08))
-  );
-  const hasOversizedMessage = transcript.some(
-    (message) => estimateRuntimeTokens(message.content) > perMessageLimitTokens
-  );
   const overThreshold = beforeTokens / safeContextWindow >= CONTEXT_COMPACTION_THRESHOLD;
-  const reason = options.force ? "forced" : hasOversizedMessage ? "oversized_message" : overThreshold ? "threshold" : null;
+  const reason = options.force ? "forced" : overThreshold ? "threshold" : null;
   if (!reason) {
     return {
       transcript,
@@ -8266,23 +8508,16 @@ export function compactTranscriptForContext(
   // A native function-call assistant message and every following tool result
   // form one protocol unit. Do not leave tool results in the context after
   // truncating their originating call envelope.
-  const recentMessages = selectProtocolSafeRecentMessages(transcript, 6);
+  const recentBudget = options.force
+    ? Math.min(Math.floor(targetTranscriptTokens * 0.7), Math.max(256, Math.floor(transcriptTokens * 0.6)))
+    : Math.floor(targetTranscriptTokens * 0.7);
+  const recentMessages = selectProtocolSafeRecentMessagesByBudget(transcript, recentBudget);
   const earlierMessages = transcript.slice(0, Math.max(0, transcript.length - recentMessages.length));
   const summaryBudget = Math.max(120, Math.floor(targetTranscriptTokens * 0.3));
-  const recentBudget = Math.max(
-    96,
-    Math.min(
-      perMessageLimitTokens,
-      Math.floor((targetTranscriptTokens - summaryBudget) / Math.max(1, recentMessages.length))
-    )
-  );
   const summary = buildCompactedTranscriptSummary(earlierMessages, summaryBudget);
   const compactedTranscript: ProviderTurnInput["transcript"] = [
     ...(summary ? [{ role: "user" as const, content: summary }] : []),
-    ...recentMessages.map((message) => ({
-      ...message,
-      content: truncateToRuntimeTokenBudget(message.content, recentBudget)
-    }))
+    ...recentMessages
   ];
   const afterTokens = systemTokens + estimateRuntimeTranscriptTokens(compactedTranscript);
   return {
@@ -8364,6 +8599,22 @@ function selectProtocolSafeRecentMessages(
   }
 
   return transcript.slice(startIndex);
+}
+
+function selectProtocolSafeRecentMessagesByBudget(
+  transcript: ProviderTurnInput["transcript"],
+  tokenBudget: number
+): ProviderTurnInput["transcript"] {
+  let startIndex = transcript.length;
+  let retainedTokens = 0;
+  while (startIndex > 0) {
+    const candidate = transcript[startIndex - 1]!;
+    const candidateTokens = estimateRuntimeTokens(candidate.content);
+    if (startIndex < transcript.length && retainedTokens + candidateTokens > tokenBudget) break;
+    startIndex -= 1;
+    retainedTokens += candidateTokens;
+  }
+  return selectProtocolSafeRecentMessages(transcript, transcript.length - startIndex);
 }
 
 function normalizeAssistantMessageForDeduplication(content: string): string {
@@ -8518,11 +8769,11 @@ export function resolveAutoLoadSkillIds(input: {
   )];
 }
 
-export function sanitizeToolResultForTranscript(toolName: string, result: ToolResult): ToolResult {
+export function sanitizeToolResultForTranscript(toolName: string, result: ToolResult, contextWindow = 128_000): ToolResult {
   const json = result.json ? sanitizeBrowserToolJson(result.json) as ToolResult["json"] : result.json;
   return {
     ...result,
-    content: summarizeToolResultForModel(toolName, { ...result, json }),
+    content: summarizeToolResultForModel(toolName, { ...result, json }, { contextWindow }),
     json
   };
 }
@@ -9013,19 +9264,29 @@ function summarizeMcpRepositoryToolResult(result: McpRepositoryToolResult): stri
   return lines.join("\n");
 }
 
-export function summarizeToolResultForModel(toolName: string, result: ToolResult): string {
+export function resolveModelToolResultTokenBudget(
+  contextWindow = 128_000,
+  remainingInputTokens = Math.floor(contextWindow * CONTEXT_COMPACTION_THRESHOLD)
+): number {
+  return Math.max(256, Math.floor(Math.min(contextWindow * 0.1, remainingInputTokens * 0.25)));
+}
+
+export function summarizeToolResultForModel(
+  toolName: string,
+  result: ToolResult,
+  options: { contextWindow?: number; remainingInputTokens?: number } = {}
+): string {
   const content = result.content ?? "";
   let summarized = content;
-  if (toolName.startsWith("browser.") || toolName === "web_search.open_page") {
-    summarized = truncateCharacters(content, 12_000);
-  } else if (toolName === "shell.exec") {
-    summarized = truncateCharacters(content, 8_000);
-  } else if (toolName === "mcp.call") {
+  if (toolName === "mcp.call") {
     const repository = getMcpRepositoryToolResult(result);
     if (repository) {
       summarized = summarizeMcpRepositoryToolResult(repository);
     } else {
-      const truncated = truncateCharacters(content, MAX_MCP_TOOL_RESULT_CHARACTERS);
+      const truncated = truncateToRuntimeTokenBudget(content, resolveModelToolResultTokenBudget(
+        options.contextWindow,
+        options.remainingInputTokens
+      ));
       summarized = truncated === content
         ? content
         : [
@@ -9034,17 +9295,11 @@ export function summarizeToolResultForModel(toolName: string, result: ToolResult
             truncated
           ].join("\n");
     }
-  } else if (toolName === "fs.read_file" && content.length > 32_000) {
-    const head = content.slice(0, 2_000);
-    const tail = content.slice(-2_000);
-    summarized = [
-      "File content is large. Prefer code.outline or fs.read_file with offset/limit.",
-      head,
-      "\n...[truncated]...\n",
-      tail
-    ].join("\n");
   }
-  return truncateCharacters(summarized, MAX_MODEL_TOOL_RESULT_CHARACTERS);
+  return truncateToRuntimeTokenBudget(summarized, resolveModelToolResultTokenBudget(
+    options.contextWindow,
+    options.remainingInputTokens
+  ));
 }
 
 function summarizeDatabaseToolResultForPersistence(result: ToolResult): ToolResult {
@@ -9073,10 +9328,10 @@ function truncateCharacters(content: string, limit: number): string {
   return `${content.slice(0, Math.max(0, limit - suffix.length))}${suffix}`;
 }
 
-function resolveModel(config: AppConfig, modelId: string): ModelProfile {
-  const model = config.models.find((entry) => entry.id === modelId);
+export function resolveModel(config: AppConfig, modelId: string, providerId: string): ModelProfile {
+  const model = config.models.find((entry) => entry.id === modelId && entry.providerId === providerId);
   if (!model) {
-    throw new Error(`Unknown model: ${modelId}`);
+    throw new Error(`Unknown model: ${providerId}/${modelId}`);
   }
   return model;
 }

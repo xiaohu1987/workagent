@@ -86,6 +86,290 @@ export class ProviderStreamIncompleteError extends Error {
   }
 }
 
+export class ProviderRequestLimitError extends Error {
+  public constructor(
+    public readonly requestBytes: number,
+    public readonly maxRequestBytes: number
+  ) {
+    super(`Provider request is ${requestBytes} UTF-8 bytes, exceeding the configured limit of ${maxRequestBytes} bytes by ${requestBytes - maxRequestBytes} bytes without removable historical context.`);
+    this.name = "ProviderRequestLimitError";
+  }
+}
+
+export interface ProviderRequestLimits {
+  maxRequestBytes: number;
+  maxTools: number;
+}
+
+export function resolveProviderRequestLimits(
+  provider: ProviderDefinition,
+  model: Pick<ModelProfile, "id" | "displayName">
+): ProviderRequestLimits {
+  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  const defaultMaxRequestBytes = identity.includes("deepseek") ? 120 * 1024 : 0;
+  const defaultMaxTools = /deepseek|kimi|moonshot/.test(identity) ? 50 : 0;
+  return {
+    maxRequestBytes: normalizeProviderLimit(provider.maxRequestBytes, defaultMaxRequestBytes),
+    maxTools: normalizeProviderLimit(provider.maxTools, defaultMaxTools)
+  };
+}
+
+function normalizeProviderLimit(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
+}
+
+type WireMessage = { role?: unknown; content?: unknown; tool_calls?: unknown };
+const COMPACTED_ASSISTANT_HISTORY = "[Earlier assistant progress omitted to fit the provider request limit.]";
+const COMPACTED_TOOL_HISTORY = "[Earlier tool output truncated to fit the provider request limit.]";
+const PROVIDER_REQUEST_SAFETY_MARGIN_BYTES = 4 * 1024;
+const PROVIDER_REQUEST_SAFETY_MARGIN_THRESHOLD_BYTES = 64 * 1024;
+
+function serializedRequestBytes(request: Record<string, unknown>): number {
+  return Buffer.byteLength(JSON.stringify(request), "utf8");
+}
+
+function resolveProviderRequestTargetBytes(maxRequestBytes: number): number {
+  if (maxRequestBytes < PROVIDER_REQUEST_SAFETY_MARGIN_THRESHOLD_BYTES) return maxRequestBytes;
+  return Math.max(1, maxRequestBytes - PROVIDER_REQUEST_SAFETY_MARGIN_BYTES);
+}
+
+function mergeWireMessageContent(left: unknown, right: unknown): unknown {
+  if (Array.isArray(left) && Array.isArray(right)) return [...left, ...right];
+  if (Array.isArray(left) && typeof right === "string") return [...left, { type: "text", text: right }];
+  if (typeof left === "string" && Array.isArray(right)) return [{ type: "text", text: left }, ...right];
+  if (typeof left === "string" && typeof right === "string") return left && right ? `${left}\n\n${right}` : left || right;
+  return right !== undefined && right !== null ? right : left;
+}
+
+function coalesceStrictWireMessages(messages: WireMessage[]): WireMessage[] {
+  const out: WireMessage[] = [];
+  for (const raw of messages) {
+    const message = raw?.role === "assistant" && (raw.content === null || raw.content === undefined)
+      ? { ...raw, content: "" }
+      : { ...raw };
+    const previous = out.at(-1);
+    const sameTextRole =
+      (message.role === "assistant" || message.role === "user") &&
+      previous?.role === message.role &&
+      !Array.isArray(previous.tool_calls) &&
+      !Array.isArray(message.tool_calls);
+    const textBeforeToolCall =
+      message.role === "assistant" && previous?.role === "assistant" &&
+      !Array.isArray(previous.tool_calls) && Array.isArray(message.tool_calls);
+    if (previous && (sameTextRole || textBeforeToolCall)) {
+      message.content = mergeWireMessageContent(previous.content, message.content);
+      out[out.length - 1] = message;
+    } else {
+      out.push(message);
+    }
+  }
+  return out;
+}
+
+function removeDuplicatedFollowUpCapsule(messages: WireMessage[]): WireMessage[] {
+  const systemIndex = messages.findIndex((message) => message.role === "system" && typeof message.content === "string");
+  if (systemIndex < 0) return messages;
+  const system = messages[systemIndex]!;
+  const content = system.content as string;
+  const storedContextStart = content.indexOf("## Previous Turn Context Capsules");
+  const followUpStart = content.indexOf("## Follow-up Source Continuity", storedContextStart + 1);
+  if (storedContextStart < 0 || followUpStart < 0) return messages;
+  const separatorStart = content.lastIndexOf("\n\n", storedContextStart);
+  const nextMessages = [...messages];
+  nextMessages[systemIndex] = {
+    ...system,
+    content: `${content.slice(0, separatorStart >= 0 ? separatorStart : storedContextStart).trimEnd()}\n\n${content.slice(followUpStart)}`
+  };
+  return nextMessages;
+}
+
+function rewriteSystemHeadingSection(
+  messages: WireMessage[],
+  heading: string,
+  rewrite: (section: string) => string
+): WireMessage[] {
+  const systemIndex = messages.findIndex((message) => message.role === "system" && typeof message.content === "string");
+  if (systemIndex < 0) return messages;
+  const system = messages[systemIndex]!;
+  const content = system.content as string;
+  const start = content.indexOf(heading);
+  if (start < 0) return messages;
+  const nextHeading = content.indexOf("\n## ", start + heading.length);
+  const end = nextHeading >= 0 ? nextHeading + 1 : content.length;
+  const replacement = rewrite(content.slice(start, end)).trim();
+  const nextContent = `${content.slice(0, start).trimEnd()}${replacement ? `\n\n${replacement}` : ""}${content.slice(end).trimStart() ? `\n\n${content.slice(end).trimStart()}` : ""}`;
+  const nextMessages = [...messages];
+  nextMessages[systemIndex] = { ...system, content: nextContent };
+  return nextMessages;
+}
+
+function removeSystemHeadingSection(messages: WireMessage[], heading: string): WireMessage[] {
+  return rewriteSystemHeadingSection(messages, heading, () => "");
+}
+
+function filterAvailableSkillsSection(messages: WireMessage[], prioritiesToRemove: Set<string>): WireMessage[] {
+  return rewriteSystemHeadingSection(messages, "## Available Skills", (section) => section
+    .split("\n")
+    .filter((line) => {
+      const priority = line.match(/; priority: ([^;]+);/)?.[1];
+      return !priority || !prioritiesToRemove.has(priority);
+    })
+    .join("\n"));
+}
+
+interface ToolDescriptionCandidate {
+  owner: Record<string, unknown>;
+  value: string;
+}
+
+function cloneToolSchemaValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(cloneToolSchemaValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, cloneToolSchemaValue(entry)])
+  );
+}
+
+function collectToolDescriptionCandidates(
+  value: unknown,
+  candidates: ToolDescriptionCandidate[]
+): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectToolDescriptionCandidates(entry, candidates);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const owner = value as Record<string, unknown>;
+  if (typeof owner.description === "string" && owner.description.length > 0) {
+    candidates.push({ owner, value: owner.description });
+  }
+  for (const [key, entry] of Object.entries(owner)) {
+    if (key !== "description") collectToolDescriptionCandidates(entry, candidates);
+  }
+}
+
+function compactToolSchemasToFit(
+  request: Record<string, unknown>,
+  maxRequestBytes: number
+): Record<string, unknown> {
+  if (!Array.isArray(request.tools) || request.tools.length === 0) return request;
+  const tools = request.tools.map(cloneToolSchemaValue);
+  const candidates: ToolDescriptionCandidate[] = [];
+  collectToolDescriptionCandidates(tools, candidates);
+  candidates.sort((left, right) => Buffer.byteLength(right.value, "utf8") - Buffer.byteLength(left.value, "utf8"));
+  let next: Record<string, unknown> = { ...request, tools };
+
+  for (const candidate of candidates) {
+    if (serializedRequestBytes(next) <= maxRequestBytes) return next;
+    let low = 0;
+    let high = candidate.value.length - 1;
+    let best: string | null = null;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      candidate.owner.description = `${candidate.value.slice(0, middle).trimEnd()}...`;
+      if (serializedRequestBytes(next) <= maxRequestBytes) {
+        best = candidate.owner.description as string;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (best !== null) {
+      candidate.owner.description = best;
+      return next;
+    }
+    delete candidate.owner.description;
+  }
+
+  while (tools.length > 0 && serializedRequestBytes(next) > maxRequestBytes) {
+    tools.pop();
+  }
+  if (tools.length === 0) {
+    next = { ...next };
+    delete next.tools;
+    delete next.parallel_tool_calls;
+    delete next.tool_choice;
+  }
+  return next;
+}
+
+export function applyProviderRequestLimits(
+  request: Record<string, unknown>,
+  provider: ProviderDefinition,
+  model: Pick<ModelProfile, "id" | "displayName">
+): Record<string, unknown> {
+  const limits = resolveProviderRequestLimits(provider, model);
+  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  const targetRequestBytes = resolveProviderRequestTargetBytes(limits.maxRequestBytes);
+  let next = request;
+  if (limits.maxTools > 0 && Array.isArray(next.tools) && next.tools.length > limits.maxTools) {
+    next = { ...next, tools: next.tools.slice(0, limits.maxTools) };
+  }
+  if (limits.maxRequestBytes <= 0 || serializedRequestBytes(next) <= targetRequestBytes) return next;
+  if (Array.isArray(next.messages)) {
+    const copiedMessages = (next.messages as WireMessage[]).map((message) => ({ ...message }));
+    const normalizedMessages = identity.includes("deepseek")
+      ? coalesceStrictWireMessages(copiedMessages)
+      : copiedMessages;
+    let messages = removeDuplicatedFollowUpCapsule(normalizedMessages);
+    next = { ...next, messages };
+    if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+
+    messages = removeSystemHeadingSection(messages, "## Previous Turn Context Capsules");
+    next = { ...next, messages };
+    if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+
+    messages = filterAvailableSkillsSection(messages, new Set(["normal"]));
+    next = { ...next, messages };
+    if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+
+    messages = filterAvailableSkillsSection(messages, new Set(["normal", "recommended"]));
+    next = { ...next, messages };
+    if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+
+    messages = removeSystemHeadingSection(messages, "## Workflow Packs");
+    next = { ...next, messages };
+    if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index]!;
+      if (message.role !== "assistant" || Array.isArray(message.tool_calls) || typeof message.content !== "string" || message.content.length < 1_024) continue;
+      messages[index] = { ...message, content: COMPACTED_ASSISTANT_HISTORY };
+      if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+    }
+
+    const toolIndexes = messages.flatMap((message, index) => message.role === "tool" ? [index] : []);
+    const newestToolIndexes = new Set(toolIndexes.slice(-2));
+    for (const index of toolIndexes) {
+      if (newestToolIndexes.has(index)) continue;
+      const message = messages[index]!;
+      if (typeof message.content !== "string" || message.content.length <= 4_096) continue;
+      messages[index] = { ...message, content: `${message.content.slice(0, 2_048)}\n\n${COMPACTED_TOOL_HISTORY}` };
+      if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+    }
+  }
+
+  next = compactToolSchemasToFit(next, targetRequestBytes);
+  if (serializedRequestBytes(next) <= targetRequestBytes) return next;
+  if (serializedRequestBytes(next) <= limits.maxRequestBytes) return next;
+  throw new ProviderRequestLimitError(serializedRequestBytes(next), limits.maxRequestBytes);
+}
+
+async function reportProviderRequestMeasurement(
+  input: ProviderTurnInput,
+  request: Record<string, unknown>
+): Promise<void> {
+  const limits = resolveProviderRequestLimits(input.provider, input.model);
+  await input.onRequestMeasured?.({
+    requestBytes: serializedRequestBytes(request),
+    maxRequestBytes: limits.maxRequestBytes,
+    maxTools: limits.maxTools,
+    toolCount: Array.isArray(request.tools) ? request.tools.length : 0
+  });
+}
+
 export class ProviderFactory {
   readonly #fetch: ProviderFetch;
 
@@ -279,20 +563,21 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       ...(nativeTools ? { tools: nativeTools, parallel_tool_calls: input.model.supportsParallelToolCalls } : {}),
       ...(!nativeTools && toolCallMode.useJsonOutput ? { response_format: { type: "json_object" as const } } : {})
     };
-    const request = compat.normalizeRequestParams(ctx, baseRequest);
+    const normalizedRequest = compat.normalizeRequestParams(ctx, baseRequest);
 
     if (input.stream && input.model.supportsStreaming) {
-      const streamRequest = {
-        ...request,
+      const streamRequest = applyProviderRequestLimits({
+        ...normalizedRequest,
         stream: true,
         // OpenAI and most compatible gateways only attach usage on the final
         // chunk when this flag is set.
         stream_options: { include_usage: true }
-      };
+      }, this.provider, input.model);
+      await reportProviderRequestMeasurement(input, streamRequest);
       let streamResponse: any;
       try {
         streamResponse = await this.#client.chat.completions.create(
-          streamRequest,
+          streamRequest as any,
           { signal: input.abortSignal }
         ) as any;
       } catch (error) {
@@ -305,7 +590,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           ? { ...fallbackDecision, reasoningSummary: fallbackReasoning }
           : fallbackDecision, ctx);
       }
-      const stream = streamResponse;
+      const stream = streamResponse as AsyncIterable<any>;
       let text = "";
       let visibleText = "";
       let reasoning = "";
@@ -391,6 +676,8 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       )), ctx);
     }
 
+    const request = applyProviderRequestLimits(normalizedRequest, this.provider, input.model);
+    await reportProviderRequestMeasurement(input, request);
     let response: any;
     try {
       response = await this.#client.chat.completions.create(request as any, {
@@ -598,7 +885,9 @@ class OpenAiResponsesProvider implements ProviderAdapter {
 
     try {
       if (input.stream && input.model.supportsStreaming) {
-        const stream = await this.#client.responses.create({ ...request, stream: true } as any, {
+        const limitedRequest = applyProviderRequestLimits({ ...request, stream: true }, this.provider, input.model);
+        await reportProviderRequestMeasurement(input, limitedRequest);
+        const stream = await this.#client.responses.create(limitedRequest as any, {
           signal: input.abortSignal
         }) as any;
         if (isAsyncIterable(stream)) {
@@ -606,7 +895,9 @@ class OpenAiResponsesProvider implements ProviderAdapter {
         }
         return parseResponsesResponse(stream, input);
       }
-      const response = await this.#client.responses.create(request as any, { signal: input.abortSignal });
+      const limitedRequest = applyProviderRequestLimits(request, this.provider, input.model);
+      await reportProviderRequestMeasurement(input, limitedRequest);
+      const response = await this.#client.responses.create(limitedRequest as any, { signal: input.abortSignal });
       return parseResponsesResponse(response, input);
     } catch (error) {
       if (supportsChatCompletionsFallback(error)) {
@@ -841,13 +1132,17 @@ class AnthropicProvider implements ProviderAdapter {
         : {})
     };
     if (input.stream && input.model.supportsStreaming) {
-      const stream = await this.#client.messages.create({ ...request, stream: true } as any, {
+      const limitedRequest = applyProviderRequestLimits({ ...request, stream: true }, this.provider, input.model);
+      await reportProviderRequestMeasurement(input, limitedRequest);
+      const stream = await this.#client.messages.create(limitedRequest as any, {
         signal: input.abortSignal
       }) as any;
       if (isAsyncIterable(stream)) return consumeAnthropicStream(stream, input, Boolean(nativeTools));
       return parseAnthropicResponse(stream, input, Boolean(nativeTools));
     }
-    const response = await this.#client.messages.create(request as any, { signal: input.abortSignal });
+    const limitedRequest = applyProviderRequestLimits(request, this.provider, input.model);
+    await reportProviderRequestMeasurement(input, limitedRequest);
+    const response = await this.#client.messages.create(limitedRequest as any, { signal: input.abortSignal });
     return parseAnthropicResponse(response, input, Boolean(nativeTools));
   }
 }

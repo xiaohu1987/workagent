@@ -139,4 +139,44 @@ describe("context compaction persistence", () => {
       createdAt: "2026-07-13T12:22:56.900Z"
     });
   });
+
+  it("returns the latest runtime context measurement for a thread snapshot", async () => {
+    const tempDir = await makeTempDir();
+    const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));
+    databases.push(db);
+
+    db.addRuntimeEvent({
+      type: "agent.context_measured",
+      threadId: "thread-1",
+      payload: {
+        turnRunId: "turn-2",
+        modelId: "deepseek-v4-flash-0731",
+        providerId: "provider-10",
+        contextWindow: 500_000,
+        maxInputTokens: 375_000,
+        estimatedInputTokens: 128_000,
+        outputReserveTokens: 32_768,
+        requestBytes: 117_352,
+        maxRequestBytes: 122_880,
+        maxTools: 50,
+        toolCount: 47,
+        segments: [
+          { id: "system", tokens: 12_000 },
+          { id: "tools", tokens: 8_000 },
+          { id: "conversation", tokens: 108_000 },
+          { id: "capsules", tokens: 0 },
+          { id: "output_reserve", tokens: 32_768 }
+        ]
+      },
+      createdAt: "2026-08-04T09:00:00.000Z"
+    });
+
+    expect(db.getLatestContextMeasurement("thread-1")).toMatchObject({
+      turnRunId: "turn-2",
+      contextWindow: 500_000,
+      requestBytes: 117_352,
+      maxRequestBytes: 122_880,
+      createdAt: "2026-08-04T09:00:00.000Z"
+    });
+  });
 });

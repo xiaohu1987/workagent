@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderStreamIncompleteError, resolveModelCompat, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { applyProviderRequestLimits, buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -91,6 +91,205 @@ describe("native tool names", () => {
     expect(mocks.chatCreate.mock.calls[0]?.[0]).not.toHaveProperty("tools");
     expect(mocks.chatCreate.mock.calls[0]?.[0]).toMatchObject({ response_format: { type: "json_object" } });
     expect(decision.toolCalls).toMatchObject([{ name: "fs.read_directory", arguments: { path: "." } }]);
+  });
+});
+
+describe("provider transport limits", () => {
+  const deepseekModel = { id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash" };
+
+  it("uses compatibility defaults independently from the model token window", () => {
+    expect(resolveProviderRequestLimits(
+      { id: "provider", type: "openai-compatible" },
+      deepseekModel
+    )).toEqual({ maxRequestBytes: 120 * 1024, maxTools: 50 });
+    expect(resolveProviderRequestLimits(
+      { id: "provider", type: "openai-compatible" },
+      { id: "kimi-k3", displayName: "Kimi K3" }
+    )).toEqual({ maxRequestBytes: 0, maxTools: 50 });
+  });
+
+  it("honors custom tool limits and treats zero as unlimited", () => {
+    const request = {
+      model: deepseekModel.id,
+      messages: [{ role: "user", content: "current request" }],
+      tools: Array.from({ length: 4 }, (_, index) => ({ name: `tool-${index}` }))
+    };
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible", maxRequestBytes: 0, maxTools: 2 },
+      deepseekModel
+    );
+    const unlimited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible", maxRequestBytes: 0, maxTools: 0 },
+      deepseekModel
+    );
+
+    expect(limited.tools).toHaveLength(2);
+    expect(unlimited.tools).toHaveLength(4);
+  });
+
+  it("counts final stream fields and rejects instead of deleting the current request", () => {
+    const request = {
+      model: deepseekModel.id,
+      messages: [{ role: "user", content: "CURRENT_REQUEST_MUST_STAY" }],
+      stream: true,
+      stream_options: { include_usage: true }
+    };
+    const requestBytes = Buffer.byteLength(JSON.stringify(request), "utf8");
+
+    expect(() => applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible", maxRequestBytes: requestBytes - 1, maxTools: 0 },
+      deepseekModel
+    )).toThrow(ProviderRequestLimitError);
+    expect(request.messages[0]?.content).toBe("CURRENT_REQUEST_MUST_STAY");
+  });
+
+  it("compacts tool descriptions to absorb a small final-byte overage", () => {
+    const request = {
+      model: deepseekModel.id,
+      messages: [{ role: "user", content: "CURRENT_REQUEST_MUST_STAY" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "large_tool",
+          description: `Useful tool details ${"x".repeat(1_000)}`,
+          parameters: { type: "object", properties: { query: { type: "string" } } }
+        }
+      }]
+    };
+    const requestBytes = Buffer.byteLength(JSON.stringify(request), "utf8");
+    const maxRequestBytes = requestBytes - 35;
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible", maxRequestBytes, maxTools: 0 },
+      deepseekModel
+    );
+
+    expect(Buffer.byteLength(JSON.stringify(limited), "utf8")).toBeLessThanOrEqual(maxRequestBytes);
+    expect(limited.tools).toHaveLength(1);
+    expect(JSON.stringify(limited)).toContain("CURRENT_REQUEST_MUST_STAY");
+    expect(JSON.stringify(limited)).toContain("large_tool");
+    expect(JSON.stringify(limited)).toContain('"query"');
+  });
+
+  it("reduces the tool list only after descriptions cannot satisfy the byte limit", () => {
+    const request = {
+      model: deepseekModel.id,
+      messages: [{ role: "user", content: "CURRENT_REQUEST_MUST_STAY" }],
+      tools: Array.from({ length: 3 }, (_, index) => ({
+        type: "function",
+        function: {
+          name: `tool_${index}`,
+          parameters: { type: "object", properties: { value: { type: "string" } } }
+        }
+      }))
+    };
+    const oneToolRequest = { ...request, tools: request.tools.slice(0, 1) };
+    const maxRequestBytes = Buffer.byteLength(JSON.stringify(oneToolRequest), "utf8");
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible", maxRequestBytes, maxTools: 0 },
+      deepseekModel
+    );
+
+    expect(limited.tools).toHaveLength(1);
+    expect(JSON.stringify(limited)).toContain("CURRENT_REQUEST_MUST_STAY");
+    expect(JSON.stringify(limited)).toContain("tool_0");
+  });
+
+  it("removes tool-only request options when the byte budget cannot retain any tool", () => {
+    const request = {
+      model: deepseekModel.id,
+      messages: [{ role: "user", content: "CURRENT_REQUEST_MUST_STAY" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "large_structural_tool",
+          parameters: {
+            type: "object",
+            properties: Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`field_${index}`, { type: "string" }]))
+          }
+        }
+      }],
+      parallel_tool_calls: true,
+      tool_choice: "auto"
+    };
+    const requestWithoutTools = {
+      model: request.model,
+      messages: request.messages
+    };
+    const maxRequestBytes = Buffer.byteLength(JSON.stringify(requestWithoutTools), "utf8");
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible", maxRequestBytes, maxTools: 0 },
+      deepseekModel
+    );
+
+    expect(limited).toEqual(requestWithoutTools);
+  });
+
+  it("keeps transport headroom and compacts a recent rejected completion candidate", () => {
+    const maxRequestBytes = 120 * 1024;
+    const targetRequestBytes = maxRequestBytes - 4 * 1024;
+    const request = {
+      model: deepseekModel.id,
+      messages: [
+        { role: "system", content: "S".repeat(114_000) },
+        { role: "user", content: "ORIGINAL_USER_REQUEST_MUST_STAY" },
+        { role: "assistant", content: `REJECTED_CANDIDATE ${"c".repeat(8_000)}` },
+        { role: "user", content: `[Internal completion audit result] ${"g".repeat(1_308)}` }
+      ],
+      stream: true
+    };
+    expect(Buffer.byteLength(JSON.stringify(request), "utf8")).toBeGreaterThan(maxRequestBytes);
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible" },
+      deepseekModel
+    );
+    const serialized = JSON.stringify(limited);
+
+    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(targetRequestBytes);
+    expect(serialized).toContain("ORIGINAL_USER_REQUEST_MUST_STAY");
+    expect(serialized).toContain("[Internal completion audit result]");
+    expect(serialized).not.toContain("REJECTED_CANDIDATE");
+    expect(serialized).toContain("Earlier assistant progress omitted");
+  });
+
+  it("drops low-priority skill catalog entries before explicit skills or project instructions", () => {
+    const request = {
+      model: deepseekModel.id,
+      messages: [{
+        role: "system",
+        content: [
+          "SAFETY_RULES",
+          "## Available Skills",
+          `- skill_id: normal; name: normal; priority: normal; description: ${"x".repeat(20_000)};`,
+          "- skill_id: selected; name: selected; priority: selected; description: required;",
+          "## Project Instructions",
+          "PROJECT_RULES_MUST_STAY"
+        ].join("\n")
+      }, { role: "user", content: "CURRENT_REQUEST_MUST_STAY" }]
+    };
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible", maxRequestBytes: 4_096, maxTools: 0 },
+      deepseekModel
+    );
+    const system = String((limited.messages as Array<{ content: string }>)[0]?.content);
+
+    expect(system).not.toContain("skill_id: normal");
+    expect(system).toContain("skill_id: selected");
+    expect(system).toContain("PROJECT_RULES_MUST_STAY");
+    expect(String((limited.messages as Array<{ content: string }>)[1]?.content)).toBe("CURRENT_REQUEST_MUST_STAY");
   });
 });
 
@@ -419,6 +618,58 @@ describe("OpenAiCompatibleProvider", () => {
     expect(messages.some((message) => String(message.content).includes("Earlier assistant progress omitted"))).toBe(true);
     expect(String(messages[0]?.content)).not.toContain("OLD_DUPLICATED_CAPSULE");
     expect(String(messages[0]?.content)).toContain("SOURCE_LOCK_PAYLOAD");
+  });
+
+  it("reports the final serialized request after applying provider limits", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const onRequestMeasured = vi.fn();
+    const provider: ProviderDefinition = {
+      id: "measured-gateway",
+      type: "openai-compatible",
+      apiKey: "secret",
+      maxRequestBytes: 0,
+      maxTools: 2
+    };
+    const model: ModelProfile = {
+      id: "measured-model",
+      providerId: provider.id,
+      displayName: "Measured model",
+      contextWindow: 500_000,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false,
+      defaultTemperature: 0.2,
+      defaultMaxOutputTokens: 8_192
+    };
+    const availableTools = Array.from({ length: 3 }, (_, index) => ({
+      name: `fs.tool_${index}`,
+      description: "Read data",
+      inputSchema: { type: "object", properties: {} },
+      riskLevel: "low" as const
+    }));
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the task.",
+      transcript: [{ role: "user", content: "Run it." }],
+      availableTools,
+      model,
+      provider,
+      onRequestMeasured
+    });
+
+    const finalRequest = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(finalRequest.tools).toHaveLength(2);
+    expect(onRequestMeasured).toHaveBeenCalledWith({
+      requestBytes: Buffer.byteLength(JSON.stringify(finalRequest), "utf8"),
+      maxRequestBytes: 0,
+      maxTools: 2,
+      toolCount: 2
+    });
   });
 
   it("repairs interrupted tool-call pairing and null assistant content for Kimi", async () => {

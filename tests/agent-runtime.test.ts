@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { MessageRecord, ModelProfile, SkillMetadata } from "@shared-types";
+import type { AppConfig, MessageRecord, ModelProfile, SkillMetadata } from "@shared-types";
 import {
   createToolCallFingerprint,
   createCommentaryMessageKey,
@@ -93,14 +93,13 @@ import {
   MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
   MAX_STANDARD_COMPLETION_RECOVERIES,
   STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
-  MAX_MODEL_TOOL_RESULT_CHARACTERS,
-  MAX_MCP_TOOL_RESULT_CHARACTERS,
   MAX_REPOSITORY_COMPLETION_REJECTIONS,
   LEGACY_MCP_OVERSIZED_FOLLOW_UP,
   createRepositoryExplorationState,
   applyLegacyMcpResultToRepositoryExploration,
   resolveRepositoryCompletionBlock,
   summarizeToolResultForModel,
+  resolveModelToolResultTokenBudget,
   shouldFinishGpaAnalysisTurn,
   resolveTerminalTurnDisposition,
   resolveRootSubagentModelGate,
@@ -118,6 +117,10 @@ import {
   resolveFollowUpSourceContext,
   buildFollowUpSourcePrompt,
   validateFollowUpSourceToolCall,
+  createContextBudgetPlan,
+  fitSystemPromptForContextBudget,
+  selectBudgetedHistory,
+  resolveModel,
   resolveTurnContextCapsuleTokenBudget,
   buildStoredTurnContextPrompt,
   writeTurnContextMarkdown,
@@ -440,11 +443,25 @@ describe("turn context Markdown capsules", () => {
       expect(followUpHistory).toContain("查 A2 和 TM 代码");
       expect(followUpHistory).not.toContain("把刚刚的代码总结成 Word");
       expect(await fs.readFile(path.join(outputDir, "context", "history.md"), "utf8")).toContain("turn-123");
-      expect(resolveTurnContextCapsuleTokenBudget(8_000)).toBe(1_000);
-      expect(resolveTurnContextCapsuleTokenBudget(500_000)).toBe(24_000);
+      expect(resolveTurnContextCapsuleTokenBudget(8_000)).toBe(1_800);
+      expect(resolveTurnContextCapsuleTokenBudget(500_000)).toBe(112_500);
     } finally {
       await fs.rm(outputDir, { recursive: true, force: true });
     }
+  });
+
+  it("loads more than eight capsules when the configured model budget allows it", () => {
+    const markdown = Array.from({ length: 10 }, (_, index) => [
+      "# Conversation Turn Context",
+      `- Turn run: \`turn-${index}\``,
+      "## User Request",
+      `request-${index}`
+    ].join("\n")).join("\n\n---\n\n");
+
+    const prompt = buildStoredTurnContextPrompt(markdown, 500_000);
+
+    expect(prompt.match(/# Conversation Turn Context/g)).toHaveLength(10);
+    expect(prompt).toContain("request-9");
   });
 });
 
@@ -1230,14 +1247,71 @@ describe("context compaction", () => {
     expect(result.transcript).toBe(transcript);
   });
 
-  it("compresses a single oversized message below the total context threshold", () => {
+  it("keeps a long single message intact while it remains below the total input threshold", () => {
     const transcript = [{ role: "tool" as const, content: "x".repeat(60_000) }];
     const result = compactTranscriptForContext(transcript, 500_000, "system instructions");
 
     expect(result.beforeTokens).toBeLessThan(500_000 * CONTEXT_COMPACTION_THRESHOLD);
-    expect(result.compacted).toBe(true);
-    expect(result.reason).toBe("oversized_message");
-    expect(result.afterTokens).toBeLessThan(result.beforeTokens);
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toBeNull();
+    expect(result.transcript[0]?.content).toBe(transcript[0]?.content);
+  });
+
+  it("uses the configured window for history instead of a fixed 24-message cap", () => {
+    const messages = Array.from({ length: 30 }, (_, index) => ({
+      id: `message-${index}`,
+      threadId: "thread-1",
+      turnRunId: `turn-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `message-${index}`,
+      metadataJson: null,
+      createdAt: new Date(2026, 0, index + 1).toISOString()
+    })) as MessageRecord[];
+
+    const selected = selectBudgetedHistory(messages, createContextBudgetPlan(500_000).rawHistoryBudgetTokens);
+
+    expect(selected.transcript).toHaveLength(30);
+    expect(selected.retainedTurnRunIds.size).toBe(30);
+  });
+
+  it("computes the 75/45 context thresholds independently from output configuration", () => {
+    const plan = createContextBudgetPlan(500_000, 32_768);
+
+    expect(plan.maxInputTokens).toBe(375_000);
+    expect(plan.targetInputTokens).toBe(225_000);
+    expect(plan.outputReserveTokens).toBe(32_768);
+    expect(plan.rawHistoryBudgetTokens).toBe(262_500);
+    expect(plan.capsuleBudgetTokens).toBe(112_500);
+  });
+
+  it("resolves duplicate model ids within their configured provider", () => {
+    const models = [
+      { id: "shared-model", providerId: "provider-128k", contextWindow: 128_000 },
+      { id: "shared-model", providerId: "provider-500k", contextWindow: 500_000 }
+    ] as ModelProfile[];
+
+    expect(resolveModel({ models } as AppConfig, "shared-model", "provider-500k").contextWindow).toBe(500_000);
+    expect(resolveModel({ models } as AppConfig, "shared-model", "provider-128k").contextWindow).toBe(128_000);
+  });
+
+  it("trims low-priority system context before explicit skills and project rules", () => {
+    const prompt = [
+      "SAFETY_RULES",
+      "## Previous Turn Context Capsules",
+      "OLD_CAPSULE ".repeat(2_000),
+      "## Available Skills",
+      `- skill_id: normal; priority: normal; description: ${"n".repeat(5_000)};`,
+      "- skill_id: selected; priority: selected; description: REQUIRED_SKILL;",
+      "## Project Instructions",
+      "PROJECT_RULES_MUST_STAY"
+    ].join("\n");
+
+    const fitted = fitSystemPromptForContextBudget(prompt, 1_000);
+
+    expect(fitted).not.toContain("OLD_CAPSULE");
+    expect(fitted).not.toContain("skill_id: normal");
+    expect(fitted).toContain("skill_id: selected");
+    expect(fitted).toContain("PROJECT_RULES_MUST_STAY");
   });
 
   it("uses UTF-8 bytes to conservatively estimate non-ASCII content", () => {
@@ -2045,17 +2119,17 @@ describe("context overflow recovery", () => {
       content: "binary-like-output\n".repeat(100_000)
     });
 
-    expect(summarized.length).toBeLessThanOrEqual(MAX_MODEL_TOOL_RESULT_CHARACTERS);
-    expect(summarized).toContain("truncated");
+    expect(estimateRuntimeTokens(summarized)).toBeLessThanOrEqual(resolveModelToolResultTokenBudget(128_000));
+    expect(summarized).toContain("context compacted");
   });
 
   it("uses a tighter context budget for large MCP responses", () => {
     const summarized = summarizeToolResultForModel("mcp.call", {
       ok: true,
       content: "repository tree\n".repeat(10_000)
-    });
+    }, { contextWindow: 32_000, remainingInputTokens: 8_000 });
 
-    expect(summarized.length).toBeLessThanOrEqual(MAX_MCP_TOOL_RESULT_CHARACTERS + 256);
+    expect(estimateRuntimeTokens(summarized)).toBeLessThanOrEqual(resolveModelToolResultTokenBudget(32_000, 8_000));
     expect(summarized).toContain("MCP result was shortened");
     expect(summarized).toContain("precise file search");
   });

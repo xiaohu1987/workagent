@@ -730,6 +730,10 @@ export interface ProviderDefinition {
   apiKey?: string;
   headers?: Record<string, string>;
   organization?: string;
+  /** Final serialized request-body limit in UTF-8 bytes. Undefined uses the compatibility default; 0 disables it. */
+  maxRequestBytes?: number;
+  /** Maximum native tools sent in one request. Undefined uses the compatibility default; 0 disables it. */
+  maxTools?: number;
 }
 
 export interface ModelProfile {
@@ -969,6 +973,12 @@ export interface ProviderTurnInput {
   forceTextToolProtocol?: boolean;
   stream?: boolean;
   onTextDelta?: (delta: string) => void | Promise<void>;
+  onRequestMeasured?: (measurement: {
+    requestBytes: number;
+    maxRequestBytes: number;
+    maxTools: number;
+    toolCount: number;
+  }) => void | Promise<void>;
   abortSignal?: AbortSignal;
 }
 
@@ -984,6 +994,7 @@ export interface RuntimeEvent {
     | "agent.retrying"
     | "agent.awaiting_model"
     | "agent.context_compacted"
+    | "agent.context_measured"
     | "agent.repository_exploration"
     | "queue.updated"
     | "turn.updated"
@@ -1068,6 +1079,27 @@ export interface ContextCompactionRecord {
   createdAt: string;
 }
 
+export interface ContextSegmentUsage {
+  id: "system" | "tools" | "conversation" | "capsules" | "output_reserve";
+  tokens: number;
+}
+
+export interface ContextMeasurementRecord {
+  turnRunId: string;
+  modelId: string;
+  providerId: string;
+  contextWindow: number;
+  maxInputTokens: number;
+  estimatedInputTokens: number;
+  outputReserveTokens: number;
+  requestBytes?: number;
+  maxRequestBytes?: number;
+  maxTools?: number;
+  toolCount?: number;
+  segments: ContextSegmentUsage[];
+  createdAt: string;
+}
+
 export interface RuntimePromptBundle {
   systemPrompt: string;
   skillContext: AvailableSkillsContext | null;
@@ -1101,6 +1133,7 @@ export interface RuntimeThreadSnapshot {
   }>;
   toolCalls: ToolCallRecord[];
   contextCompaction: ContextCompactionRecord | null;
+  contextMeasurement?: ContextMeasurementRecord | null;
   gpa: GpaState | null;
   subagents: ThreadRecord[];
   queuedSubagentIds: string[];

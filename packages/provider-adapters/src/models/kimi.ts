@@ -497,15 +497,7 @@ export const kimiCompat = defineCompat(gptCompat, {
       next = { ...next, max_tokens: 8192 };
     }
 
-    // 5. The Moonshot chat schema accepts at most 50 entries in tools and
-    //    fails the whole request with "400 Invalid request parameters"
-    //    (code 11133) beyond that. Builtin tools are ordered ahead of MCP
-    //    extras by the runtime, so the tail is the safest part to drop.
-    if (Array.isArray(next.tools) && next.tools.length > 50) {
-      next = { ...next, tools: next.tools.slice(0, 50) };
-    }
-
-    // 6. Repair the message sequence: null assistant content and tool
+    // 5. Repair the message sequence: null assistant content and tool
     //    results separated from their tool_calls message both fail the
     //    gateway's strict validation with code 11133. Coalescing ordinary
     //    same-role messages also prevents consecutive assistant progress

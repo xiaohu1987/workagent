@@ -71,6 +71,24 @@ describe("model configuration storage", () => {
     expect(loaded.responseTone).toBe("friendly");
   });
 
+  it("keeps hidden provider transport overrides compatible with existing configs", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-provider-limits-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    const config = defaultConfig();
+    const provider = config.providers.find((entry) => entry.id === "openai")!;
+    provider.maxRequestBytes = 196_608;
+    provider.maxTools = 64;
+
+    await saveConfig(configFile, config);
+    const loaded = await loadConfig(configFile);
+
+    expect(loaded.providers.find((entry) => entry.id === "openai")).toMatchObject({
+      maxRequestBytes: 196_608,
+      maxTools: 64
+    });
+  });
+
   it("removes legacy timeout settings while loading the configuration", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-autonomous-runtime-"));
     temporaryDirectories.push(directory);

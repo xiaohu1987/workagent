@@ -12,6 +12,7 @@ import type {
   ArtifactRecord,
   BrowserTabRecord,
   ContextCompactionRecord,
+  ContextMeasurementRecord,
   KnowledgeBaseRecord,
   KnowledgeBaseSummary,
   KnowledgeConcept,
@@ -941,7 +942,7 @@ export class DatabaseService {
     this.#db.exec("PRAGMA user_version = 1");
   }
 
-  /** One-shot: retain only the runtime event type consumed by persisted snapshots. */
+  /** One-shot migration for runtime events consumed by persisted snapshots. */
   private migrateRuntimeEventStorage(): void {
     const row = this.#db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
     const version = Number(row?.user_version ?? 0);
@@ -3025,7 +3026,7 @@ export class DatabaseService {
   }
 
   public addRuntimeEvent(event: RuntimeEvent): void {
-    if (event.type !== "agent.context_compacted") {
+    if (event.type !== "agent.context_compacted" && event.type !== "agent.context_measured") {
       return;
     }
     this.#db
@@ -3044,6 +3045,22 @@ export class DatabaseService {
     try {
       const payload = JSON.parse(row.payload_json) as Omit<ContextCompactionRecord, "createdAt">;
       if (!payload.turnRunId || !Number.isFinite(payload.afterTokens)) return null;
+      return { ...payload, createdAt: row.created_at };
+    } catch {
+      return null;
+    }
+  }
+
+  public getLatestContextMeasurement(threadId: string): ContextMeasurementRecord | null {
+    const row = this.#db
+      .prepare(
+        "SELECT payload_json, created_at FROM runtime_events WHERE thread_id = ? AND type = 'agent.context_measured' ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(threadId) as { payload_json: string; created_at: string } | undefined;
+    if (!row) return null;
+    try {
+      const payload = JSON.parse(row.payload_json) as Omit<ContextMeasurementRecord, "createdAt">;
+      if (!payload.turnRunId || !Number.isFinite(payload.estimatedInputTokens)) return null;
       return { ...payload, createdAt: row.created_at };
     } catch {
       return null;

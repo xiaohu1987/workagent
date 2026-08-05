@@ -894,6 +894,7 @@ export class DesktopBackend {
       projectPlugins: this.listProjectPluginsForThread(thread),
       toolCalls,
       contextCompaction: this.#db.getLatestContextCompaction(threadId),
+      contextMeasurement: this.#db.getLatestContextMeasurement(threadId),
       gpa: this.getGpaState(threadId),
       subagents,
       queuedSubagentIds: subagents

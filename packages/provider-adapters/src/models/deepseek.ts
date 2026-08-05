@@ -1,121 +1,8 @@
 import { stripThinkBlocks, surfaceThinkBlocksInStream } from "../index";
-import { Buffer } from "node:buffer";
 import { defineCompat } from "./types";
 import type { ModelCompatContext } from "./types";
 import { gptCompat } from "./gpt";
 import { preserveChineseOutputLanguage } from "./output-language";
-
-const MAX_DEEPSEEK_REQUEST_BYTES = 120 * 1024;
-const COMPACTED_ASSISTANT_HISTORY = "[Earlier assistant progress omitted to fit the gateway request limit.]";
-const COMPACTED_TOOL_HISTORY = "[Earlier tool output truncated to fit the gateway request limit.]";
-
-type DeepseekWireMessage = {
-  role?: unknown;
-  content?: unknown;
-  tool_calls?: unknown;
-};
-
-function mergeDeepseekMessageContent(left: unknown, right: unknown): unknown {
-  if (Array.isArray(left) && Array.isArray(right)) return [...left, ...right];
-  if (Array.isArray(left) && typeof right === "string") return [...left, { type: "text", text: right }];
-  if (typeof left === "string" && Array.isArray(right)) return [{ type: "text", text: left }, ...right];
-  if (typeof left === "string" && typeof right === "string") return left && right ? `${left}\n\n${right}` : left || right;
-  return right !== undefined && right !== null ? right : left;
-}
-
-/**
- * DeepSeek-compatible relays often validate OpenAI messages more strictly
- * than the OpenAI API itself. Runtime progress updates can otherwise produce
- * runs of assistant messages that the relay rejects.
- */
-function coalesceDeepseekMessages(messages: unknown[]): DeepseekWireMessage[] {
-  const out: DeepseekWireMessage[] = [];
-  for (const raw of messages as DeepseekWireMessage[]) {
-    const message = raw?.role === "assistant" && (raw.content === null || raw.content === undefined)
-      ? { ...raw, content: "" }
-      : raw;
-    const previous = out[out.length - 1];
-    const sameTextRole =
-      (message?.role === "assistant" || message?.role === "user") &&
-      previous?.role === message.role &&
-      !Array.isArray(previous.tool_calls) &&
-      !Array.isArray(message.tool_calls);
-    const textBeforeToolCall =
-      message?.role === "assistant" &&
-      previous?.role === "assistant" &&
-      !Array.isArray(previous.tool_calls) &&
-      Array.isArray(message.tool_calls);
-    if (sameTextRole || textBeforeToolCall) {
-      message.content = mergeDeepseekMessageContent(previous.content, message.content);
-      out[out.length - 1] = message;
-    } else {
-      out.push(message);
-    }
-  }
-  return out;
-}
-
-function requestBytes(request: Record<string, unknown>): number {
-  return Buffer.byteLength(JSON.stringify(request), "utf8");
-}
-
-function removeDuplicatedFollowUpCapsule(messages: DeepseekWireMessage[]): DeepseekWireMessage[] {
-  const systemIndex = messages.findIndex((message) => message.role === "system" && typeof message.content === "string");
-  if (systemIndex < 0) return messages;
-  const system = messages[systemIndex]!;
-  const content = system.content as string;
-  const storedContextStart = content.indexOf("## Previous Turn Context Capsules");
-  const followUpStart = content.indexOf("## Follow-up Source Continuity", storedContextStart + 1);
-  if (storedContextStart < 0 || followUpStart < 0) return messages;
-  const separatorStart = content.lastIndexOf("\n\n", storedContextStart);
-  const nextContent = `${content.slice(0, separatorStart >= 0 ? separatorStart : storedContextStart).trimEnd()}\n\n${content.slice(followUpStart)}`;
-  const nextMessages = [...messages];
-  nextMessages[systemIndex] = { ...system, content: nextContent };
-  return nextMessages;
-}
-
-/**
- * Some relays cap the entire JSON body at 128 KiB even for models advertised
- * with a much larger token context. Reduce only historical assistant status
- * messages when needed; user prompts and tool results remain intact.
- */
-function fitDeepseekRequestBudget(request: Record<string, unknown>): Record<string, unknown> {
-  if (!Array.isArray(request.messages)) return request;
-  // Preserve the regular OpenAI-compatible transcript shape unless this
-  // particular gateway limit is actually in play.
-  if (requestBytes(request) <= MAX_DEEPSEEK_REQUEST_BYTES) return request;
-  let messages = removeDuplicatedFollowUpCapsule(coalesceDeepseekMessages(request.messages));
-  let next: Record<string, unknown> = { ...request, messages };
-  if (requestBytes(next) <= MAX_DEEPSEEK_REQUEST_BYTES) return next;
-
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (
-      message.role !== "assistant" ||
-      Array.isArray(message.tool_calls) ||
-      typeof message.content !== "string" ||
-      message.content.length < 1_024
-    ) {
-      continue;
-    }
-    messages[index] = { ...message, content: COMPACTED_ASSISTANT_HISTORY };
-    if (requestBytes(next) <= MAX_DEEPSEEK_REQUEST_BYTES) return next;
-  }
-
-  const toolMessageIndexes = messages.flatMap((message, index) => message.role === "tool" ? [index] : []);
-  const newestToolIndexes = new Set(toolMessageIndexes.slice(-2));
-  for (const index of toolMessageIndexes) {
-    if (newestToolIndexes.has(index)) continue;
-    const message = messages[index]!;
-    if (typeof message.content !== "string" || message.content.length <= 4_096) continue;
-    messages[index] = {
-      ...message,
-      content: `${message.content.slice(0, 2_048)}\n\n${COMPACTED_TOOL_HISTORY}`
-    };
-    if (requestBytes(next) <= MAX_DEEPSEEK_REQUEST_BYTES) return next;
-  }
-  return next;
-}
 
 /**
  * DeepSeek openai-compatible shell.
@@ -210,13 +97,7 @@ export const deepseekCompat = defineCompat(gptCompat, {
       next = { ...next, max_tokens: 8192 };
     }
 
-    // Some DeepSeek-compatible gateways reject long function catalogs with
-    // an empty HTTP 400 response. Keep the core tools, which the runtime puts
-    // first, and omit only the tail of optional/MCP tools.
-    if (Array.isArray(next.tools) && next.tools.length > 50) {
-      next = { ...next, tools: next.tools.slice(0, 50) };
-    }
-    return preserveChineseOutputLanguage(ctx, fitDeepseekRequestBudget(next));
+    return preserveChineseOutputLanguage(ctx, next);
   },
   extractVisibleStreamText(accumulated: string): string {
     // Only apply the GPT envelope extractor when the buffer really is a
