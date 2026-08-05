@@ -42,18 +42,43 @@ function ActiveSubagentLines({
   onInterrupt: (agent: ThreadRecord) => void;
 }) {
   return (
-    <div className="active-subagent-lines" aria-label="运行中的子智能体" aria-live="polite">
+    <div className="active-subagent-lines" aria-label="本次任务的子智能体" aria-live="polite">
       {agents.map((agent) => {
         const queued = queuedAgentIds.has(agent.id);
-        const state = queued ? "queued" : agent.status === "waiting" ? "waiting" : "running";
+        const state = queued
+          ? "queued"
+          : agent.status === "waiting"
+            ? "waiting"
+            : agent.status === "running"
+              ? "running"
+              : agent.status;
+        const terminal = !queued && agent.status !== "running" && agent.status !== "waiting";
         const runtimeActivity = runtimeActivities[agent.id];
         const runtimeLabel = getSubagentRuntimeLabel(runtimeActivity);
         const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity);
         const title = getSubagentTitle(agent);
-        const statusLabel = queued ? "排队中" : agent.status === "waiting" ? "等待中" : "运行中";
+        const statusLabel = queued
+          ? "排队中"
+          : agent.status === "waiting"
+            ? "等待中"
+            : agent.status === "running"
+              ? "运行中"
+              : agent.status === "completed"
+                ? "已完成"
+                : agent.status === "failed"
+                  ? "失败"
+                  : agent.status === "interrupted"
+                    ? "已中断"
+                    : "已创建";
         const activityLabel = queued
           ? "等待可用名额"
-          : runtimeLabel ?? (agent.status === "waiting" ? "等待处理中" : "正在准备任务");
+          : runtimeLabel ?? (
+            agent.status === "waiting"
+              ? "等待处理中"
+              : agent.status === "running"
+                ? "正在准备任务"
+                : statusLabel
+          );
         return (
           <details key={agent.id} className={`active-subagent-line ${state}`}>
             <summary title="展开子智能体详情">
@@ -68,12 +93,14 @@ function ActiveSubagentLines({
                 <span aria-hidden>·</span>
                 <SubagentElapsedTime
                   startedAt={runtimeActivity?.startedAt ?? agent.createdAt}
-                  active
-                  completedAt={null}
+                  active={!terminal}
+                  completedAt={terminal ? agent.updatedAt : null}
                 />
-                <button type="button" className="active-subagent-stop" onClick={() => onInterrupt(agent)}>
-                  停止
-                </button>
+                {!terminal ? (
+                  <button type="button" className="active-subagent-stop" onClick={() => onInterrupt(agent)}>
+                    停止
+                  </button>
+                ) : null}
               </div>
               {runtimeHistory.length > 0 ? (
                 <div className="active-subagent-history">
