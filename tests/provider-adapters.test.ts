@@ -467,6 +467,17 @@ describe("OpenAiCompatibleProvider", () => {
       .toBe(false);
   });
 
+  it("bypasses the optional completion audit for DeepSeek after deterministic validation", () => {
+    const compat = resolveModelCompat({ id: "deepseek-v4-flash-0731", displayName: "DeepSeek V4 Flash" });
+    expect(compat.shouldBypassStandardCompletionAudit({
+      id: "deepseek-v4-flash-0731",
+      displayName: "DeepSeek V4 Flash"
+    })).toBe(true);
+    expect(resolveModelCompat({ id: "deepseek-chat", displayName: "DeepSeek Chat" })
+      .shouldBypassStandardCompletionAudit({ id: "deepseek-chat", displayName: "DeepSeek Chat" }))
+      .toBe(false);
+  });
+
   it("strips sampling params and raises the max_tokens floor for Kimi thinking models", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]

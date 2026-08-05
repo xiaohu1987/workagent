@@ -56,6 +56,14 @@ import { preserveChineseOutputLanguage } from "./output-language";
 export const deepseekCompat = defineCompat(gptCompat, {
   id: "deepseek",
   keywords: ["deepseek"],
+  shouldBypassStandardCompletionAudit(model): boolean {
+    const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+    // DeepSeek reasoning calls can spend another minute on the optional,
+    // tool-free audit even after the runtime's deterministic evidence check
+    // has already accepted the candidate. Limit this optimization to the
+    // affected reasoning families; ordinary deepseek-chat keeps the audit.
+    return /reasoner|\br1\b|thinking|v4-(?:flash|pro)/.test(identity);
+  },
   normalizeRequestParams(
     ctx: ModelCompatContext,
     base: Record<string, unknown>

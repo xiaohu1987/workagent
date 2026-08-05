@@ -85,6 +85,7 @@ import {
   isToolArgsTruncated,
   buildFunctionCallCompatibilityTranscript,
   isInternalToolCompatibilityMarker,
+  stripInternalToolCompatibilityMarkers,
   buildActiveTurnGuidanceInstruction,
   buildBlockedToolCallTranscriptResult,
   clearReusableObservationFingerprints,
@@ -1349,6 +1350,11 @@ describe("network error retries", () => {
     expect(isInternalToolCompatibilityMarker("[Executed tools: fs.read_directory, fs.read_file]")).toBe(true);
     expect(isInternalToolCompatibilityMarker("密码已修复，现在重新运行启动脚本。 [Executed tools: shell.exec]")).toBe(true);
     expect(isInternalToolCompatibilityMarker("Finished reading the requested files.")).toBe(false);
+  });
+
+  it("strips internal tool markers without treating them as a task failure", () => {
+    expect(stripInternalToolCompatibilityMarkers("已检查完成 [Executed tools: fs.read_file, code.search]"))
+      .toBe("已检查完成");
   });
 });
 

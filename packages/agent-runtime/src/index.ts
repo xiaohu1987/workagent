@@ -437,6 +437,10 @@ export function isInternalToolCompatibilityMarker(content: string | undefined): 
   return Boolean(content && /\[Executed tools:\s*[^\]\r\n]+\]/i.test(content));
 }
 
+export function stripInternalToolCompatibilityMarkers(content: string): string {
+  return content.replace(/\s*\[Executed tools:\s*[^\]\r\n]+\]/gi, "").trim();
+}
+
 type Submission =
   | { type: "queue_wakeup" }
   | { type: "approval_response"; requestId: string; approved: boolean }
@@ -3311,15 +3315,22 @@ class ThreadSessionRuntime {
 
         const assistantMessage = decision.assistantMessage?.trim();
         if (isInternalToolCompatibilityMarker(assistantMessage)) {
+          const sanitizedAssistantMessage = stripInternalToolCompatibilityMarkers(assistantMessage);
           await this.services.log("provider.internal_tool_marker_suppressed", this.threadId, {
             turnRunId: turn.id,
-            content: assistantMessage
+            content: assistantMessage,
+            sanitizedContent: sanitizedAssistantMessage
           });
+          // The marker usually accompanies progress text. Never let that text
+          // satisfy the terminal completion gates. Continue in text-tool mode
+          // so the model can produce a real call or final answer instead.
+          useTextToolProtocol = true;
+          this.#useFunctionCallCompatibilityTranscript = true;
           transcript.push({
             role: "user",
             content:
-              "The previous response echoed an internal tool-compatibility marker. " +
-              "Do not expose internal tool markers. Continue the task with the verified tool results, a new tool call, or a user-facing answer."
+              "The previous response was progress text plus an internal tool marker, not a final answer. " +
+              "Continue the task using the verified results already present. Return the next JSON decision with a real tool call, or return the complete user-facing final answer only when the task is actually complete. Do not output [Executed tools: ...] markers."
           });
           await retryDraft();
           continue;
