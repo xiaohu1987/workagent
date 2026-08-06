@@ -1,4 +1,32 @@
-import type { ThreadRecord } from "@shared-types";
+import type { GpaState, ThreadRecord } from "@shared-types";
+
+const RENDERER_DEFAULT_GPA_STATE: GpaState = {
+  stage: "off",
+  fullAccess: true,
+  knowledgeEnabled: false,
+  awaitingConfirmation: null,
+  confirmationExpiresAt: null,
+  planTasks: [],
+  updatedAt: ""
+};
+
+export function normalizeGpaStateForThread(
+  threadMode: ThreadRecord["mode"],
+  state: GpaState | null | undefined
+): GpaState {
+  const next = state
+    ? { ...state, planTasks: [...state.planTasks] }
+    : { ...RENDERER_DEFAULT_GPA_STATE, planTasks: [] };
+  if (threadMode !== "project" && next.stage !== "off") {
+    return {
+      ...next,
+      stage: "off",
+      awaitingConfirmation: null,
+      planTasks: []
+    };
+  }
+  return next;
+}
 
 export type HistoryItemAffordance =
   | {
@@ -24,12 +52,15 @@ export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRunt
     requestIdsByThread: Record<string, number>;
     cacheByThread: Map<string, TSnapshot>;
     runtimeMessagesByThread: Record<string, TRuntimeMessages>;
-  }
+  },
+  options?: { preserveRuntimeMessages?: boolean }
 ): void {
   state.requestIdsByThread[threadId] = (state.requestIdsByThread[threadId] ?? 0) + 1;
   delete state.cursorByThread[threadId];
   state.cacheByThread.delete(threadId);
-  delete state.runtimeMessagesByThread[threadId];
+  if (!options?.preserveRuntimeMessages) {
+    delete state.runtimeMessagesByThread[threadId];
+  }
 }
 
 export function isThreadExecutionInProgress(status?: ThreadRecord["status"] | null) {

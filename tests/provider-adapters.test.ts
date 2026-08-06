@@ -101,11 +101,32 @@ describe("provider transport limits", () => {
     expect(resolveProviderRequestLimits(
       { id: "provider", type: "openai-compatible" },
       deepseekModel
-    )).toEqual({ maxRequestBytes: 120 * 1024, maxTools: 50 });
+    )).toEqual({ maxRequestBytes: 128 * 1024, maxTools: 50 });
     expect(resolveProviderRequestLimits(
       { id: "provider", type: "openai-compatible" },
       { id: "kimi-k3", displayName: "Kimi K3" }
     )).toEqual({ maxRequestBytes: 0, maxTools: 50 });
+  });
+
+  it("allows a compacted DeepSeek request slightly above the legacy 120 KiB default", () => {
+    const request = {
+      model: deepseekModel.id,
+      messages: [{ role: "user", content: "x".repeat(120 * 1024) }],
+      stream: true,
+      stream_options: { include_usage: true }
+    };
+    const requestBytes = Buffer.byteLength(JSON.stringify(request), "utf8");
+
+    expect(requestBytes).toBeGreaterThan(120 * 1024);
+    expect(requestBytes).toBeLessThan(128 * 1024);
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible" },
+      deepseekModel
+    );
+
+    expect(Buffer.byteLength(JSON.stringify(limited), "utf8")).toBe(requestBytes);
   });
 
   it("honors custom tool limits and treats zero as unlimited", () => {
@@ -251,7 +272,7 @@ describe("provider transport limits", () => {
 
     const limited = applyProviderRequestLimits(
       request,
-      { id: "provider", type: "openai-compatible" },
+      { id: "provider", type: "openai-compatible", maxRequestBytes: 120 * 1024 },
       deepseekModel
     );
     const serialized = JSON.stringify(limited);
@@ -283,7 +304,7 @@ describe("provider transport limits", () => {
 
     const limited = applyProviderRequestLimits(
       request,
-      { id: "provider", type: "openai-compatible" },
+      { id: "provider", type: "openai-compatible", maxRequestBytes: 120 * 1024 },
       deepseekModel
     );
     const serialized = JSON.stringify(limited);
@@ -310,7 +331,7 @@ describe("provider transport limits", () => {
 
     const limited = applyProviderRequestLimits(
       request,
-      { id: "provider", type: "openai-compatible" },
+      { id: "provider", type: "openai-compatible", maxRequestBytes: 120 * 1024 },
       deepseekModel
     );
     const serialized = JSON.stringify(limited);
@@ -2362,6 +2383,74 @@ describe("OpenAiCompatibleProvider", () => {
 
     expect(decision).toMatchObject({
       assistantMessage: "fs.read_directory",
+      toolCalls: [],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: false,
+      requestTextToolProtocol: true
+    });
+  });
+
+  it("rejects malformed JSON-looking text from a native-tool model and requests a protocol reset", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "```json\nthis is definitely not a JSON object\n```" } }]
+    });
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "deepseek-chat", providerId: "gateway", displayName: "DeepSeek Chat", contextWindow: 8_192,
+      supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: true,
+      supportsJsonOutput: true, supportsMultimodalInput: false, supportsReasoningSummary: false
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the function tool.",
+      transcript: [{ role: "user", content: "Inspect the workspace." }],
+      availableTools: [{
+        name: "fs.read_directory",
+        description: "List a directory.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        riskLevel: "low"
+      }],
+      model,
+      provider
+    });
+
+    expect(decision).toMatchObject({
+      assistantMessage: undefined,
+      toolCalls: [],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: false,
+      requestTextToolProtocol: true
+    });
+  });
+
+  it("rejects protocol-error meta text instead of accepting it as the current task answer", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "当前模型已返回可执行的 Agent 决策。The response was not a valid JSON decision envelope." } }]
+    });
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "deepseek-chat", providerId: "gateway", displayName: "DeepSeek Chat", contextWindow: 8_192,
+      supportsStreaming: false, supportsToolCalling: true, supportsParallelToolCalls: true,
+      supportsJsonOutput: true, supportsMultimodalInput: false, supportsReasoningSummary: false
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the function tool.",
+      transcript: [{ role: "user", content: "Continue the current task." }],
+      availableTools: [{
+        name: "fs.read_directory",
+        description: "List a directory.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        riskLevel: "low"
+      }],
+      model,
+      provider
+    });
+
+    expect(decision).toMatchObject({
+      assistantMessage: undefined,
       toolCalls: [],
       endTurn: false,
       goalCompleted: false,

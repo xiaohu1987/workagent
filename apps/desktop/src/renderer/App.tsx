@@ -40,6 +40,7 @@ import {
   getDeleteThreadBlockedMessage,
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
+  normalizeGpaStateForThread,
   shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
 } from "./core/thread-ui-state";
@@ -454,6 +455,7 @@ export function App() {
   const pendingUserMessagesRef = useRef<Record<string, MessageRecord[]>>({});
   // Bridges the gap between submitting a turn and receiving its runtime status.
   const pendingRuntimeStartsRef = useRef<Set<string>>(new Set());
+  const interruptingThreadIdsRef = useRef<Set<string>>(new Set());
   const pendingOneShotSkillRemovalsRef = useRef<Record<string, string[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
   const latestRuntimeThreadsRef = useRef<Record<string, ThreadRecord>>({});
@@ -558,12 +560,7 @@ export function App() {
   const [managedRemoval, setManagedRemoval] = useState<ManagedRemoval | null>(null);
   const [removingManagedItem, setRemovingManagedItem] = useState(false);
   const [gpaState, setGpaState] = useState<GpaState>({
-    stage: "off",
-    fullAccess: true,
-    knowledgeEnabled: false,
-    awaitingConfirmation: null,
-    planTasks: [],
-    updatedAt: ""
+    ...normalizeGpaStateForThread("chat", null)
   });
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
   const [composerMediaIntent, setComposerMediaIntent] = useState<"image" | "video" | null>(null);
@@ -1126,15 +1123,18 @@ export function App() {
     if (!cached) return false;
     cacheThreadSnapshot(cached);
     snapshotThreadIdRef.current = threadId;
-    // Hiding the switch placeholder is urgent; do not couple it to the
-    // interruptible transcript transition below (it can be starved).
-    setIsThreadSwitching(false);
     // Mount the cached transcript as a transition: the selection highlight and
     // sidebar stay responsive while React renders the (potentially large)
     // message list, and the render can be interrupted by a newer switch.
     startTransition(() => {
       setSnapshot(() => reconcileSnapshotWithRuntimeEvents(cached));
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: cached.browserTabs }));
+      if (selectedThreadIdRef.current === threadId) {
+        const cachedGpa = normalizeGpaStateForThread(cached.thread.mode, cached.gpa);
+        setGpaState(cachedGpa);
+        setGpaComposerSelected(cachedGpa.stage !== "off");
+        setIsThreadSwitching(false);
+      }
     });
     return true;
   }
@@ -1206,11 +1206,20 @@ export function App() {
   }
 
   useEffect(() => {
+    setGpaState(normalizeGpaStateForThread("chat", null));
+    setGpaComposerSelected(false);
+    setGpaMenuOpen(false);
+    setGpaMenuPos(null);
+    setGpaRevisionOpen(false);
+    setGpaRevisionDraft("");
+    setGpaConfirmationSubmitting(false);
+    setGpaPlanResumeDialog(null);
+    setGpaPlanResumeRetryPrompt(null);
+    gpaConfirmationPendingStageRef.current = null;
     if (!selectedThreadId) {
       return;
     }
     ensureTerminalTab(selectedThreadId);
-    setGpaComposerSelected(false);
   }, [selectedThreadId]);
 
   useEffect(() => {
@@ -1482,15 +1491,19 @@ export function App() {
         return;
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
-        if (
-          gpaConfirmationPendingStageRef.current &&
-          typed.payload.gpa.awaitingConfirmation !== gpaConfirmationPendingStageRef.current
-        ) {
-          gpaConfirmationPendingStageRef.current = null;
-          setGpaConfirmationSubmitting(false);
+        if (typed.threadId === currentSelectedThreadId) {
+          if (
+            gpaConfirmationPendingStageRef.current &&
+            typed.payload.gpa.awaitingConfirmation !== gpaConfirmationPendingStageRef.current
+          ) {
+            gpaConfirmationPendingStageRef.current = null;
+            setGpaConfirmationSubmitting(false);
+          }
+          const currentThreadMode = threadsRef.current.find((thread) => thread.id === currentSelectedThreadId)?.mode ?? "project";
+          const gpa = normalizeGpaStateForThread(currentThreadMode, typed.payload.gpa);
+          setGpaState(gpa);
+          setGpaComposerSelected(gpa.stage !== "off");
         }
-        setGpaState(typed.payload.gpa);
-        setGpaComposerSelected(typed.payload.gpa.stage !== "off");
         if (notificationThreadId && typed.payload.gpa.awaitingConfirmation) {
           setThreadNotificationAttention(
             notificationThreadId,
@@ -3387,16 +3400,17 @@ export function App() {
       cacheThreadSnapshot(mergedSnapshot);
       if (selectedThreadIdRef.current === threadId) {
         snapshotThreadIdRef.current = threadId;
-        // Hiding the switch placeholder is urgent feedback. It must not wait
-        // behind the interruptible transcript transition below, otherwise a
-        // busy runtime (streaming events from another thread) can starve the
-        // transition and leave the skeleton on screen indefinitely.
-        setIsThreadSwitching(false);
         // The merged snapshot can carry hundreds of messages; commit it as a
         // transition so urgent interactions (clicks, another switch) are not
         // blocked behind the transcript render.
         startTransition(() => {
           setSnapshot(() => reconcileSnapshotWithRuntimeEvents(mergedSnapshot));
+          const gpa = normalizeGpaStateForThread(mergedSnapshot.thread.mode, mergedSnapshot.gpa);
+          setGpaState(gpa);
+          setGpaComposerSelected(gpa.stage !== "off");
+          // Keep the switch placeholder visible until the replacement snapshot
+          // and its thread-scoped controls commit together.
+          setIsThreadSwitching(false);
         });
       }
       setThreads((current) => current.map((thread) =>
@@ -3432,19 +3446,6 @@ export function App() {
           clearRuntimeActivity(threadId);
           setActiveToolCall((current) => current?.threadId === threadId ? null : current);
         }
-      }
-      if (next.gpa) {
-        const gpa =
-          mergedSnapshot.thread.mode !== "project" && next.gpa.stage !== "off"
-            ? {
-                ...next.gpa,
-                stage: "off" as const,
-                awaitingConfirmation: null,
-                planTasks: []
-              }
-            : next.gpa;
-        setGpaState(gpa);
-        setGpaComposerSelected(gpa.stage !== "off");
       }
     } catch (error) {
       if (selectedThreadIdRef.current === threadId) {
@@ -3620,15 +3621,21 @@ export function App() {
 
   async function softRestoreSameSessionGpaPlan(threadId: string): Promise<void> {
     const plan = (await window.codexh.getProjectGpaPlan(threadId)) as GpaPlanResumePreview | null;
-    if (!plan?.sameSession) {
+    if (!plan?.sameSession || selectedThreadIdRef.current !== threadId) {
       return;
     }
     const snapshotGpa = (await window.codexh.getGpaState(threadId)) as GpaState;
+    if (selectedThreadIdRef.current !== threadId) {
+      return;
+    }
     if (snapshotGpa.stage !== "off" && snapshotGpa.planTasks.length > 0) {
       setGpaComposerSelected(true);
       return;
     }
     const restored = (await window.codexh.restoreProjectGpaPlan(threadId)) as GpaState;
+    if (selectedThreadIdRef.current !== threadId) {
+      return;
+    }
     setGpaState(restored);
     setGpaComposerSelected(true);
     await refreshSnapshot(threadId);
@@ -3636,9 +3643,15 @@ export function App() {
 
   async function resumeGpaPlanExecution(threadId: string, plan: GpaPlanResumePreview) {
     const restored = (await window.codexh.restoreProjectGpaPlan(threadId)) as GpaState;
+    if (selectedThreadIdRef.current !== threadId) {
+      return;
+    }
     setGpaState(restored);
     setGpaComposerSelected(true);
     await refreshSnapshot(threadId);
+    if (selectedThreadIdRef.current !== threadId) {
+      return;
+    }
     if (plan.status === "in_progress" && plan.pendingCount > 0) {
       gpaPlanResumeAttemptRef.current.set(threadId, plan);
       await sendMessage(
@@ -4034,9 +4047,11 @@ export function App() {
         ? "继续"
         : forcedContent ?? inputContent);
     const queueingBehindActiveTask =
-      isThreadExecutionInProgress(selectedThreadStatus) ||
-      isPreparingRuntime ||
-      pendingRuntimeStartsRef.current.has(threadId);
+      !interruptingThreadIdsRef.current.has(threadId) && (
+        isThreadExecutionInProgress(selectedThreadStatus) ||
+        isPreparingRuntime ||
+        pendingRuntimeStartsRef.current.has(threadId)
+      );
     let startedLocalRuntime = false;
     const optimisticMessage = !options?.internal && !queueingBehindActiveTask
       ? appendOptimisticUserMessage(threadId, displayContent)
@@ -4347,6 +4362,7 @@ export function App() {
       return;
     }
 
+    interruptingThreadIdsRef.current.add(threadId);
     // Block late tool/retry/delta events from flipping the UI back to "执行中".
     suppressRuntimeProgressRef.current[threadId] = true;
     discardQueuedAssistantDraftsForThread(threadId);
@@ -4399,9 +4415,13 @@ export function App() {
         requestIdsByThread: snapshotRequestIdsRef.current,
         cacheByThread: snapshotCacheByThreadRef.current,
         runtimeMessagesByThread: persistedRuntimeMessagesRef.current
-      });
-      await refreshThreads({ refreshSelectedSnapshot: false });
-      await refreshSnapshot(threadId);
+      }, { preserveRuntimeMessages: true });
+      try {
+        await refreshThreads({ refreshSelectedSnapshot: false });
+        await refreshSnapshot(threadId);
+      } finally {
+        interruptingThreadIdsRef.current.delete(threadId);
+      }
     }
   }
 

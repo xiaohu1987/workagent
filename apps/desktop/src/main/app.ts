@@ -1444,6 +1444,21 @@ export class DesktopBackend {
       .sort((left, right) => right.agentPath.length - left.agentPath.length);
     const threadIds = [...descendants.map((child) => child.id), thread.id];
     const cancelledQueueItemIds = new Map<string, string[]>();
+    const queuedAtInterrupt = new Map<string, string[]>();
+
+    for (const id of threadIds) {
+      this.#runtime.interrupt(id);
+      this.#terminal.cancelCommands(id, "Task interrupted.");
+      this.#db.clearSubagentPendingDispatch(id);
+      // Capture the queue boundary before the first await. Messages submitted
+      // after Stop must survive the cleanup of the interrupted turn.
+      queuedAtInterrupt.set(
+        id,
+        this.#db.listQueuedMessages(id)
+          .filter((item) => item.status === "queued")
+          .map((item) => item.id)
+      );
+    }
 
     await this.#logs.append("thread.interrupt_requested", {
       targetThreadId: threadId,
@@ -1451,10 +1466,7 @@ export class DesktopBackend {
     }, threadId);
 
     for (const id of threadIds) {
-      this.#runtime.interrupt(id);
-      this.#terminal.cancelCommands(id, "Task interrupted.");
-      this.#db.clearSubagentPendingDispatch(id);
-      cancelledQueueItemIds.set(id, this.#db.cancelQueuedMessages(id));
+      cancelledQueueItemIds.set(id, this.#db.cancelQueuedMessages(id, queuedAtInterrupt.get(id) ?? []));
     }
 
     await Promise.all(threadIds.map((id) => this.finishInterruptThread(id, cancelledQueueItemIds.get(id) ?? [])));
@@ -1467,40 +1479,44 @@ export class DesktopBackend {
   }
 
   private async finishInterruptThread(threadId: string, cancelledQueueItemIds: string[]): Promise<void> {
-    // Let the aborted turn finish its persistence/finally cleanup before a
-    // caller deletes or clears this thread and its descendants.
-    await this.#runtime.waitForIdle(threadId, 5000);
-    // Always force the persisted execution state idle. The turn may still be in
-    // "preparing" (DB still idle/completed) when the user hits Stop; skipping
-    // cleanup here leaves the UI and queue believing work is still running.
-    for (const [promptId] of [...this.#promptResolvers.entries()]) {
-      const record = this.#db.getUserPrompt(promptId);
-      if (record?.threadId === threadId) {
-        this.#clearPromptTimeout(promptId);
-        this.#promptResolvers.delete(promptId);
+    try {
+      // Let the aborted turn finish its persistence/finally cleanup before a
+      // caller deletes or clears this thread and its descendants.
+      await this.#runtime.waitForIdle(threadId, 5000);
+      // Always force the persisted execution state idle. The turn may still be in
+      // "preparing" (DB still idle/completed) when the user hits Stop; skipping
+      // cleanup here leaves the UI and queue believing work is still running.
+      for (const [promptId] of [...this.#promptResolvers.entries()]) {
+        const record = this.#db.getUserPrompt(promptId);
+        if (record?.threadId === threadId) {
+          this.#clearPromptTimeout(promptId);
+          this.#promptResolvers.delete(promptId);
+        }
       }
-    }
-    for (const [approvalId] of [...this.#approvalTimeouts.entries()]) {
-      if (this.#db.getApproval(approvalId)?.threadId === threadId) {
-        this.#clearApprovalTimeout(approvalId);
-        this.#approvalResolvers.get(approvalId)?.(false);
-        this.#approvalResolvers.delete(approvalId);
+      for (const [approvalId] of [...this.#approvalTimeouts.entries()]) {
+        if (this.#db.getApproval(approvalId)?.threadId === threadId) {
+          this.#clearApprovalTimeout(approvalId);
+          this.#approvalResolvers.get(approvalId)?.(false);
+          this.#approvalResolvers.delete(approvalId);
+        }
       }
-    }
-    const updated = this.#db.interruptThreadExecution(threadId);
-    await this.emit({
-      type: "thread.updated",
-      threadId,
-      payload: { thread: updated },
-      createdAt: new Date().toISOString()
-    });
-    for (const queueItemId of cancelledQueueItemIds) {
+      const updated = this.#db.interruptThreadExecution(threadId);
       await this.emit({
-        type: "queue.updated",
+        type: "thread.updated",
         threadId,
-        payload: { queueItemId, action: "deleted" },
+        payload: { thread: updated },
         createdAt: new Date().toISOString()
       });
+      for (const queueItemId of cancelledQueueItemIds) {
+        await this.emit({
+          type: "queue.updated",
+          threadId,
+          payload: { queueItemId, action: "deleted" },
+          createdAt: new Date().toISOString()
+        });
+      }
+    } finally {
+      this.#runtime.resumeAfterInterrupt(threadId);
     }
   }
 

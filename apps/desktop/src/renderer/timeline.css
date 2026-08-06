@@ -737,9 +737,11 @@
 }
 
 .tool-activity-summary {
-  display: flex;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) max-content max-content 8px;
+  column-gap: 7px;
   align-items: center;
-  gap: 7px;
+  width: 100%;
   min-height: 28px;
   padding: 0;
   cursor: pointer;
@@ -769,15 +771,21 @@
   color: #aeb7c5;
 }
 
+.tool-activity-summary-icon {
+  width: 16px;
+  height: 16px;
+}
+
 .tool-activity-summary-icon svg { width: 15px; height: 15px; }
 
 .tool-activity-summary-copy {
-  display: flex;
-  flex: 1;
+  display: block;
   min-width: 0;
 }
 
 .tool-activity-summary-copy strong {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   color: #c7d1dc;
   font-size: 12px;
@@ -805,7 +813,7 @@
 .tool-activity-chevron {
   width: 7px;
   height: 7px;
-  margin-left: 4px;
+  margin-left: 0;
   border-right: 1px solid #9da5b0;
   border-bottom: 1px solid #9da5b0;
   transform: rotate(-45deg);

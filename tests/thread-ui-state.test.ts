@@ -6,6 +6,7 @@ import {
   getHistoryItemAffordance,
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
+  normalizeGpaStateForThread,
   shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
@@ -90,6 +91,35 @@ function makeThread(overrides: Partial<ThreadRecord> = {}): ThreadRecord {
 }
 
 describe("thread UI state helpers", () => {
+  it("isolates GPA stages from non-project chats", () => {
+    const state = normalizeGpaStateForThread("chat", {
+      stage: "plan",
+      fullAccess: true,
+      knowledgeEnabled: true,
+      awaitingConfirmation: "plan",
+      planTasks: [{ id: "task-1", title: "Task", done: false }],
+      updatedAt: "2026-08-06T00:00:00.000Z"
+    });
+
+    expect(state).toMatchObject({
+      stage: "off",
+      fullAccess: true,
+      knowledgeEnabled: true,
+      awaitingConfirmation: null,
+      planTasks: []
+    });
+  });
+
+  it("provides a clean thread-scoped GPA state when no snapshot exists", () => {
+    expect(normalizeGpaStateForThread("project", null)).toMatchObject({
+      stage: "off",
+      fullAccess: true,
+      knowledgeEnabled: false,
+      awaitingConfirmation: null,
+      planTasks: []
+    });
+  });
+
   it("forces an authoritative snapshot after interrupt without clearing other threads", () => {
     const cursorByThread = { "thread-1": "cursor-1", "thread-2": "cursor-2" };
     const requestIdsByThread = { "thread-1": 4, "thread-2": 2 };
@@ -113,6 +143,19 @@ describe("thread UI state helpers", () => {
     expect(cursorByThread).toEqual({ "thread-2": "cursor-2" });
     expect([...cacheByThread.entries()]).toEqual([["thread-2", "snapshot-2"]]);
     expect(runtimeMessagesByThread).toEqual({ "thread-2": ["other-message"] });
+  });
+
+  it("can preserve runtime messages while an interrupt refresh catches up", () => {
+    const runtimeMessagesByThread = { "thread-1": ["new-message"] };
+
+    invalidateThreadSnapshotForFullRefresh("thread-1", {
+      cursorByThread: { "thread-1": "cursor-1" },
+      requestIdsByThread: { "thread-1": 1 },
+      cacheByThread: new Map([["thread-1", "snapshot-1"]]),
+      runtimeMessagesByThread
+    }, { preserveRuntimeMessages: true });
+
+    expect(runtimeMessagesByThread).toEqual({ "thread-1": ["new-message"] });
   });
 
   it("replaces the edited message and removes its stale conversation tail locally", () => {

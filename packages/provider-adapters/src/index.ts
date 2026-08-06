@@ -106,7 +106,11 @@ export function resolveProviderRequestLimits(
   model: Pick<ModelProfile, "id" | "displayName">
 ): ProviderRequestLimits {
   const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
-  const defaultMaxRequestBytes = identity.includes("deepseek") ? 120 * 1024 : 0;
+  // DeepSeek's compatible chat endpoint accepts the normal 128 KiB request
+  // envelope. Keep a 4 KiB compaction headroom below it while allowing
+  // already-compacted requests that are only slightly above the old 120 KiB
+  // project default to proceed.
+  const defaultMaxRequestBytes = identity.includes("deepseek") ? 128 * 1024 : 0;
   const defaultMaxTools = /deepseek|kimi|moonshot/.test(identity) ? 50 : 0;
   return {
     maxRequestBytes: normalizeProviderLimit(provider.maxRequestBytes, defaultMaxRequestBytes),
@@ -1209,6 +1213,20 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
   if (structuredDecision.isStructured) {
     return structuredDecision;
   }
+  if (looksLikeMalformedDecisionProtocol(cleaned)) {
+    // A native-tool model can emit a partial or malformed text envelope when
+    // it loses the tool-call protocol. Treating that text as a final answer
+    // lets the runtime accept an off-track turn. Reset to the text protocol so
+    // the next request gets one strict JSON decision envelope.
+    return {
+      assistantMessage: undefined,
+      toolCalls: [],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: false,
+      requestTextToolProtocol: true
+    };
+  }
   return {
     assistantMessage: cleaned,
     toolCalls: [],
@@ -1216,6 +1234,16 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
     goalCompleted: true,
     isStructured: true
   };
+}
+
+function looksLikeMalformedDecisionProtocol(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith("{") ||
+    trimmed.startsWith("[") ||
+    /^```(?:json)?\b/i.test(trimmed) ||
+    /^<(?:tool_calls|invoke|request_user_input)\b/i.test(trimmed) ||
+    /\b(?:assistant_message|tool_calls|end_turn|goal_completed)\b/.test(trimmed) ||
+    /(?:valid\s+JSON\s+decision\s+envelope|Agent\s+decision|JSON\s+decision\s+envelope|可执行的\s*Agent\s*决策|JSON.*(?:解析失败|无法解析))/i.test(trimmed);
 }
 
 export function isBareToolInvocationText(text: string): boolean {

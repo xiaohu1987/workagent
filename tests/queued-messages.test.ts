@@ -176,4 +176,24 @@ describe("queued messages", () => {
     expect(db.cancelQueuedMessages("thread-1")).toEqual([queued.id]);
     expect(db.listQueuedMessages("thread-1").map((item) => item.id)).toEqual([active.id]);
   });
+
+  it("cancels only the queue items captured when interruption began", async () => {
+    const db = await createDatabase();
+    const beforeStop = db.enqueueQueuedMessage({
+      threadId: "thread-1",
+      content: "before stop",
+      displayContent: "before stop",
+      attachments: []
+    });
+    const capturedIds = [beforeStop.id];
+    const afterStop = db.enqueueQueuedMessage({
+      threadId: "thread-1",
+      content: "after stop",
+      displayContent: "after stop",
+      attachments: []
+    });
+
+    expect(db.cancelQueuedMessages("thread-1", capturedIds)).toEqual([beforeStop.id]);
+    expect(db.listQueuedMessages("thread-1").map((item) => item.id)).toEqual([afterStop.id]);
+  });
 });

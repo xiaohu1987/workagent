@@ -170,8 +170,9 @@ export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 6;
 // Explicit audit rejections may revise a base-valid candidate, but the audit
 // itself must never create an unbounded completion loop.
 export const MAX_STANDARD_COMPLETION_RECOVERIES = 6;
+export const MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES = 1;
 export const STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS = 2;
-export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 0;
+export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 30_000;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
 export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
@@ -182,6 +183,7 @@ export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number
 export const MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES = 5;
 export const AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS = 30_000;
 export const AGENT_PROTOCOL_RECOVERY_QUESTION_ID = "agent_protocol_recovery";
+const PROTOCOL_RECOVERY_MAX_REQUEST_BYTES = 96 * 1024;
 export const MAX_REPOSITORY_COMPLETION_REJECTIONS = 2;
 export const LEGACY_MCP_OVERSIZED_FOLLOW_UP =
   "The MCP server returned an oversized legacy response that was shortened.";
@@ -882,6 +884,7 @@ class ThreadSessionRuntime {
   #acceptingGuidance = false;
   #running = false;
   #stopping = false;
+  #interrupting = false;
   #busy = false;
   readonly #idleWaiters: Array<() => void> = [];
   #gpa: GpaState = { ...DEFAULT_GPA_STATE };
@@ -916,11 +919,19 @@ class ThreadSessionRuntime {
   }
 
   public interrupt(): boolean {
+    this.#interrupting = true;
     if (!this.#abortController) {
       return false;
     }
     this.#abortController.abort();
     return true;
+  }
+
+  public resumeAfterInterrupt(): void {
+    this.#interrupting = false;
+    if (this.#running) {
+      this.submit({ type: "queue_wakeup" });
+    }
   }
 
   public stop(): void {
@@ -1237,19 +1248,30 @@ class ThreadSessionRuntime {
   private async drainQueuedMessages(): Promise<void> {
     this.#busy = true;
     try {
-      while (!this.#activeTurnRunId && !this.#stopping) {
+      while (!this.#activeTurnRunId && !this.#stopping && !this.#interrupting) {
         const queued = await this.services.persistence.claimNextQueuedMessage(this.threadId);
         if (!queued) {
           return;
         }
-        await this.services.emit({
-          type: "queue.updated",
-          threadId: this.threadId,
-          payload: { queueItemId: queued.id, action: "dispatching" },
-          createdAt: new Date().toISOString()
-        });
+        // Install the abort handle before the first asynchronous dispatch
+        // event. Stop can arrive while the queue item is being handed off.
+        const abortController = new AbortController();
+        this.#abortController = abortController;
         try {
-          await this.runTurn(queued.id, queued.content, queued.attachments, queued.displayContent, queued.mediaIntent ?? null);
+          await this.services.emit({
+            type: "queue.updated",
+            threadId: this.threadId,
+            payload: { queueItemId: queued.id, action: "dispatching" },
+            createdAt: new Date().toISOString()
+          });
+          await this.runTurn(
+            queued.id,
+            queued.content,
+            queued.attachments,
+            queued.displayContent,
+            queued.mediaIntent ?? null,
+            abortController
+          );
         } catch (error) {
           console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
           await this.services.log("turn.unhandled_error", this.threadId, {
@@ -1307,6 +1329,9 @@ class ThreadSessionRuntime {
             }
           }
         } finally {
+          if (this.#abortController === abortController) {
+            this.#abortController = null;
+          }
           await this.services.persistence.completeQueuedMessage(queued.id);
           await this.services.emit({
             type: "queue.updated",
@@ -1327,7 +1352,8 @@ class ThreadSessionRuntime {
     initialInput: string,
     attachments: MessageAttachment[] = [],
     displayContent?: string,
-    mediaIntent: "image" | "video" | null = null
+    mediaIntent: "image" | "video" | null = null,
+    abortController: AbortController = new AbortController()
   ): Promise<void> {
     const thread = await this.services.persistence.getThread(this.threadId);
     const turnOutputDir = await this.services.getThreadOutputDir(this.threadId);
@@ -1458,7 +1484,6 @@ class ThreadSessionRuntime {
       errorMessage: null
     });
 
-    const abortController = new AbortController();
     const agentOpenedBrowserTabIds = new Set<string>();
     const browserVerificationEvidence: BrowserVerificationEvidenceState = {
       required: false,
@@ -1485,7 +1510,6 @@ class ThreadSessionRuntime {
         }
       }
     };
-    this.#abortController = abortController;
     this.#activeTurnRunId = turn.id;
     this.#acceptingGuidance = true;
     try {
@@ -1515,6 +1539,9 @@ class ThreadSessionRuntime {
           payload: { message: queuedUserMessage.message },
           createdAt: queuedUserMessage.message.createdAt
         });
+      }
+      if (abortController.signal.aborted) {
+        throw new Error("Turn interrupted.");
       }
       const priorMessagesBeforeCurrentInput = queuedUserMessage.created
         ? priorMessages
@@ -1855,7 +1882,10 @@ class ThreadSessionRuntime {
           allowSkip: false,
           questions: [buildAgentProtocolRecoveryQuestion(reason)],
           timeoutMs: AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS,
-          defaultAnswers: { [AGENT_PROTOCOL_RECOVERY_QUESTION_ID]: "continue" }
+          // A silent continue after the recovery budget is exhausted turns a
+          // malformed response into an unbounded spinner. Let the user opt
+          // into another run explicitly instead.
+          defaultAnswers: { [AGENT_PROTOCOL_RECOVERY_QUESTION_ID]: "stop" }
         });
         if (answers[AGENT_PROTOCOL_RECOVERY_QUESTION_ID] === "continue") {
           agentProtocolAutoRecoveryBatches = 0;
@@ -2123,6 +2153,9 @@ class ThreadSessionRuntime {
           !hasExecutedToolCall &&
           executionRecoveryAttempts === 2 &&
           tools.some((tool) => tool.name === "fs.read_directory");
+        const currentPlanTask = this.#gpa.stage === "act"
+          ? this.#gpa.planTasks.find((task) => !task.done)
+          : undefined;
 
         await this.services.log("agent.execution_recovery", this.threadId, {
           turnRunId: turn.id,
@@ -2136,7 +2169,11 @@ class ThreadSessionRuntime {
           content: buildExecutionRecoveryInstruction({
             attempt: executionRecoveryAttempts,
             reason,
-            bootstrapWorkspace
+            bootstrapWorkspace,
+            currentTask: [
+              initialInput,
+              currentPlanTask ? `Current PLAN task: ${currentPlanTask.id} ${currentPlanTask.title}` : ""
+            ].filter(Boolean).join("\n")
           })
         });
         return bootstrapWorkspace;
@@ -2146,12 +2183,15 @@ class ThreadSessionRuntime {
         reason: "completion_validation" | "completion_audit"
       ) => {
         const attempt = standardCompletionAttempts;
+        const maxAttempts = reason === "completion_audit"
+          ? MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES
+          : MAX_STANDARD_COMPLETION_RECOVERIES;
         await this.services.emit({
           type: "agent.retrying",
           threadId: this.threadId,
           payload: {
             attempt,
-            maxAttempts: MAX_STANDARD_COMPLETION_RECOVERIES,
+            maxAttempts,
             reason
           },
           createdAt: new Date().toISOString()
@@ -2438,6 +2478,11 @@ class ThreadSessionRuntime {
                 )
               }
             : model;
+          const requestProvider = resolveProtocolRecoveryProvider(
+            provider,
+            model,
+            useTextToolProtocol
+          );
           decision = await waitForAbortOrTimeout(
             adapter.runTurn({
               systemPrompt,
@@ -2446,7 +2491,7 @@ class ThreadSessionRuntime {
                 : transcript,
               availableTools: requestTools,
               model: requestModel,
-              provider,
+              provider: requestProvider,
               reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
               forceTextToolProtocol: useTextToolProtocol,
               stream: model.supportsStreaming,
@@ -2854,7 +2899,8 @@ class ThreadSessionRuntime {
             modelId: model.id,
             modelName: model.displayName,
             providerId: provider.id,
-            toolName: decision.assistantMessage
+            toolName: decision.assistantMessage,
+            reason: "off_protocol_provider_response"
           });
           await this.services.emit({
             type: "agent.retrying",
@@ -2864,8 +2910,12 @@ class ThreadSessionRuntime {
           });
           transcript.push({
             role: "user",
-            content:
-              "The provider returned a tool name as plain text instead of invoking it. Use the JSON decision envelope now, including complete tool_calls arguments, and continue the original task."
+            content: buildExecutionRecoveryInstruction({
+              attempt: 1,
+              reason: "The provider returned an off-protocol response while native tools were enabled.",
+              bootstrapWorkspace: false,
+              currentTask: initialInput
+            })
           });
           continue;
         }
@@ -3460,7 +3510,16 @@ class ThreadSessionRuntime {
           }
         }
 
-        const bypassStandardCompletionAudit = resolveModelCompat(model)
+        const auditRequired = shouldRunStandardCompletionAudit({
+          mode: modePolicy.mode,
+          request: effectiveRequest,
+          requestedDeliverableExtensions
+        });
+        const requiresGoalCompletion =
+          modePolicy.mode === "project" ||
+          isProjectFileMutationRequest(effectiveRequest) ||
+          requestedDeliverableExtensions.length > 0;
+        const bypassStandardCompletionAudit = !auditRequired || resolveModelCompat(model)
           .shouldBypassStandardCompletionAudit(model);
         const hasApiCardDeliverable = hasValidApiCardDeliverable(
           effectiveRequest,
@@ -3488,6 +3547,7 @@ class ThreadSessionRuntime {
           const standardCompletion = validateStandardCompletion({
             decision,
             originalRequest: effectiveRequest,
+            requiresGoalCompletion,
             requiresFileDelivery: isProjectFileMutationRequest(initialInput) || requestedDeliverableExtensions.length > 0,
             deliveredPaths,
             successfulEvidence: successfulToolEvidence,
@@ -3554,7 +3614,7 @@ class ThreadSessionRuntime {
           if (bypassStandardCompletionAudit) {
             await this.services.log("turn.standard_completion_audit_bypassed", this.threadId, {
               turnRunId: turn.id,
-              reason: "model_compatibility",
+              reason: !auditRequired ? "chat_mode_scope" : "model_compatibility",
               modelId: model.id,
               modelName: model.displayName
             });
@@ -3957,6 +4017,7 @@ class ThreadSessionRuntime {
           toolCallCount: decision.toolCalls.length,
           endTurn: decision.endTurn,
           goalCompleted: decision.goalCompleted,
+          requiresGoalCompletion,
           gpaStage: this.#gpa.stage,
           gpaActCompletedSuccessfully
         });
@@ -4823,12 +4884,13 @@ class ThreadSessionRuntime {
               // DeepSeek / max_tokens truncation: the streamed tool arguments
               // were incomplete JSON. Skip execution and ask the model to retry
               // with shorter output instead of silently failing with empty args.
+              useTextToolProtocol = true;
               toolArgsTruncated = true;
               result = {
                 ok: false,
                 content: "Tool arguments were truncated (incomplete JSON received from the model). " +
                   "This usually happens when the output exceeds the token limit. " +
-                  "Please retry with shorter, more focused output."
+                  "The runtime has reset to the strict JSON decision protocol. Please retry with shorter, more focused output and complete tool_calls arguments."
               };
               await this.services.log("tool.arguments_truncated", this.threadId, {
                 turnRunId: turn.id,
@@ -6542,6 +6604,7 @@ export function resolveTerminalTurnDisposition(input: {
   toolCallCount: number;
   endTurn: boolean;
   goalCompleted: boolean;
+  requiresGoalCompletion?: boolean;
   gpaStage: GpaStage;
   gpaActCompletedSuccessfully: boolean;
 }): TerminalTurnDisposition {
@@ -6554,7 +6617,7 @@ export function resolveTerminalTurnDisposition(input: {
   if (input.gpaStage === "goal" || input.gpaStage === "plan") {
     return "awaiting_user_confirmation";
   }
-  if (!input.goalCompleted) {
+  if (input.requiresGoalCompletion !== false && !input.goalCompleted) {
     return "continue";
   }
   if (input.gpaStage === "act" && !input.gpaActCompletedSuccessfully) {
@@ -7153,6 +7216,7 @@ async function registerRequestedArtifacts(
 export function validateStandardCompletion(input: {
   decision: Pick<ProviderTurnDecision, "assistantMessage" | "toolCalls" | "endTurn" | "goalCompleted">;
   originalRequest?: string;
+  requiresGoalCompletion?: boolean;
   requiresFileDelivery: boolean;
   deliveredPaths: string[];
   successfulEvidence: SuccessfulToolEvidence[];
@@ -7170,7 +7234,9 @@ export function validateStandardCompletion(input: {
 
   if (!input.decision.endTurn) reasons.push("The model did not end the turn.");
   if (input.decision.toolCalls.length > 0) reasons.push("Tool calls are still pending.");
-  if (!input.decision.goalCompleted) reasons.push("The model did not declare the original goal complete.");
+  if (input.requiresGoalCompletion !== false && !input.decision.goalCompleted) {
+    reasons.push("The model did not declare the original goal complete.");
+  }
   if (!assistantMessage) reasons.push("The final user-visible summary is empty.");
   if (isProgressOnlyAssistantMessage(assistantMessage)) {
     reasons.push("The assistant message is progress commentary, not a final summary.");
@@ -7192,6 +7258,28 @@ export function validateStandardCompletion(input: {
     missingVerification,
     missingRequestedDeliverable
   };
+}
+
+function resolveProtocolRecoveryProvider(
+  provider: ProviderDefinition,
+  model: Pick<ModelProfile, "id" | "displayName">,
+  textProtocolRecovery: boolean
+): ProviderDefinition {
+  if (!textProtocolRecovery) return provider;
+  const limits = resolveProviderRequestLimits(provider, model);
+  if (limits.maxRequestBytes <= 0) return provider;
+  const maxRequestBytes = Math.min(limits.maxRequestBytes, PROTOCOL_RECOVERY_MAX_REQUEST_BYTES);
+  if (maxRequestBytes >= limits.maxRequestBytes) return provider;
+  return { ...provider, maxRequestBytes };
+}
+
+export function shouldRunStandardCompletionAudit(input: {
+  mode: "project" | "chat";
+  request: string;
+  requestedDeliverableExtensions: readonly string[];
+}): boolean {
+  if (input.mode === "project") return true;
+  return isProjectFileMutationRequest(input.request) || input.requestedDeliverableExtensions.length > 0;
 }
 
 /**
@@ -7240,6 +7328,7 @@ export function buildStandardCompletionAuditSystemPrompt(model: ModelProfile): s
     "Assess only whether the candidate response completely satisfies the original request using the supplied evidence.",
     "Return exactly one JSON Agent decision envelope with keys assistant_message, tool_calls, end_turn, goal_completed, completed_task_ids, completion_evidence, reasoning_summary.",
     "To accept, return assistant_message exactly APPROVED, tool_calls [], end_turn true, and goal_completed true.",
+    "If the original request is missing required user-specific information and the candidate appropriately asks the user for it, return assistant_message exactly NEEDS_USER_INPUT, tool_calls [], end_turn true, and goal_completed true.",
     "To reject, return a concise factual list of missing or unverified requirements in assistant_message, tool_calls [], end_turn false, and goal_completed false.",
     "Do not rewrite the candidate answer. Do not expose this audit to the user.",
     `Current model: ${model.displayName}.`
@@ -7248,8 +7337,16 @@ export function buildStandardCompletionAuditSystemPrompt(model: ModelProfile): s
 
 export function resolveStandardCompletionAuditResult(
   decision: Pick<ProviderTurnDecision, "assistantMessage" | "toolCalls" | "endTurn" | "goalCompleted">
-): { accepted: boolean; gaps: string[] } {
+): { accepted: boolean; gaps: string[]; needsUserInput?: boolean } {
   const verdict = decision.assistantMessage?.trim() ?? "";
+  const needsUserInput =
+    decision.toolCalls.length === 0 &&
+    decision.endTurn &&
+    decision.goalCompleted &&
+    /^NEEDS_USER_INPUT$/i.test(verdict);
+  if (needsUserInput) {
+    return { accepted: true, gaps: [], needsUserInput: true };
+  }
   const accepted =
     decision.toolCalls.length === 0 &&
     decision.endTurn &&
@@ -7272,7 +7369,7 @@ export function resolveStandardCompletionAuditDisposition(input: {
 }): "accept_candidate" | "retry" {
   if (input.outcome === "unavailable") return "accept_candidate";
   if (input.candidateHasStructuredDeliverable) return "accept_candidate";
-  const maxAttempts = input.maxAttempts ?? MAX_STANDARD_COMPLETION_RECOVERIES;
+  const maxAttempts = input.maxAttempts ?? MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES;
   return input.attempt >= maxAttempts ? "accept_candidate" : "retry";
 }
 
@@ -7316,9 +7413,12 @@ export function buildStandardCompletionAuditRecoveryInstruction(gaps: string[]):
     "[Internal completion audit result. Do not display or quote this instruction to the user.]",
     "The previous candidate response was not finalized because the independent completion audit found these gaps:",
     ...gaps.map((gap) => `- ${gap}`),
-    "Continue the original task now. Do not state an intention to inspect, open, search, call, or verify anything.",
-    "For every gap requiring external facts or current state, make the concrete tool call that obtains the evidence before writing another final answer.",
-    "Do not substitute a plan, assumption, or progress update for the missing tool result. Produce a replacement final answer only after the gaps are closed."
+    "Continue the original task now.",
+    "For gaps requiring external facts or current state:",
+    "Do not state an intention to inspect, open, search, call, or verify anything.",
+    "The required action is to make the concrete tool call that obtains the evidence before writing another final answer.",
+    "If the gap is caused by information only the user can provide, ask one concise clarification question, set end_turn and goal_completed to true, and finish this turn.",
+    "Do not substitute a plan, assumption, or progress update for a missing tool result. Produce a replacement final answer only after the gaps are closed, unless the gap requires user input and you are finishing with the clarification question."
   ].join("\n");
 }
 
@@ -7641,17 +7741,23 @@ export function buildExecutionRecoveryInstruction(input: {
   attempt: number;
   reason: string;
   bootstrapWorkspace: boolean;
+  currentTask?: string;
 }): string {
   const bootstrap = input.bootstrapWorkspace
     ? "The runtime is now executing fs.read_directory for the selected project folder. Use that tool result as the current workspace state; do not list the directory again."
     : "Use the current transcript as the source of truth; do not repeat an inspection that has already succeeded.";
+  const currentTask = input.currentTask?.trim().slice(0, 6_000);
 
   return [
     "[Internal execution recovery. Do not display or quote this instruction to the user.]",
     `Recovery attempt ${input.attempt}: ${input.reason}`,
-    "The previous assistant text was discarded because it made no executable progress.",
+    currentTask
+      ? `Return to the current user task below. It is authoritative; do not answer the protocol error instead. Current task:\n${currentTask}`
+      : "Return to the current user task in the transcript; do not answer the protocol error instead.",
+    "The previous provider response was discarded because it was malformed or off-protocol and made no executable progress.",
     bootstrap,
-    "Your next response must be exactly one valid JSON decision envelope.",
+    "Your next response must be exactly one valid JSON decision envelope: one top-level object, no Markdown fences, prose, XML tags, comments, or partial JSON.",
+    "Do not continue the malformed format.",
     "Do not write progress prose such as 'starting', 'creating', or 'will write'.",
     "Call the next real tool now. For requested file changes, call apply_patch with the complete patch in tool_calls; never place the patch or a claim of completion in assistant_message.",
     "Only return end_turn: true after real tool results prove every requested deliverable is complete."
@@ -7949,7 +8055,11 @@ export class AgentRuntimeService {
   }
 
   public interrupt(threadId: string): boolean {
-    return this.#sessions.get(threadId)?.interrupt() ?? false;
+    return this.ensureThread(threadId).interrupt();
+  }
+
+  public resumeAfterInterrupt(threadId: string): void {
+    this.#sessions.get(threadId)?.resumeAfterInterrupt();
   }
 
   public waitForIdle(threadId: string, timeoutMs = 5000): Promise<boolean> {

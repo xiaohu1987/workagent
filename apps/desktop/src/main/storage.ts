@@ -1615,15 +1615,36 @@ export class DatabaseService {
     }
   }
 
-  public cancelQueuedMessages(threadId: string): string[] {
-    const queuedIds = (this.#db
-      .prepare("SELECT id FROM queued_messages WHERE thread_id = ? AND status = 'queued'")
-      .all(threadId) as Array<{ id: string }>)
-      .map((row) => row.id);
+  public cancelQueuedMessages(threadId: string, onlyIds?: readonly string[]): string[] {
+    if (onlyIds?.length === 0) {
+      return [];
+    }
+    const queuedIds = onlyIds
+      ? (this.#db
+          .prepare(
+            `SELECT id
+             FROM queued_messages
+             WHERE thread_id = ? AND status = 'queued' AND id IN (${onlyIds.map(() => "?").join(", ")})`
+          )
+          .all(threadId, ...onlyIds) as Array<{ id: string }>)
+          .map((row) => row.id)
+      : (this.#db
+          .prepare("SELECT id FROM queued_messages WHERE thread_id = ? AND status = 'queued'")
+          .all(threadId) as Array<{ id: string }>)
+          .map((row) => row.id);
     if (queuedIds.length > 0) {
-      this.#db
-        .prepare("DELETE FROM queued_messages WHERE thread_id = ? AND status = 'queued'")
-        .run(threadId);
+      if (onlyIds) {
+        this.#db
+          .prepare(
+            `DELETE FROM queued_messages
+             WHERE thread_id = ? AND status = 'queued' AND id IN (${queuedIds.map(() => "?").join(", ")})`
+          )
+          .run(threadId, ...queuedIds);
+      } else {
+        this.#db
+          .prepare("DELETE FROM queued_messages WHERE thread_id = ? AND status = 'queued'")
+          .run(threadId);
+      }
     }
     return queuedIds;
   }

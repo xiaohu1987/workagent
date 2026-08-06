@@ -885,7 +885,7 @@ export interface ProviderTurnDecision {
   completionEvidence?: CompletionEvidenceReference[];
   /** True only when the provider response matched the runtime JSON envelope. */
   isStructured: boolean;
-  /** The provider returned a native tool name as plain text and needs a JSON tool-protocol retry. */
+  /** The provider returned an off-protocol response and needs a JSON tool-protocol retry. */
   requestTextToolProtocol?: boolean;
   reasoningSummary?: string;
 }

@@ -37,6 +37,7 @@ import {
   buildStandardCompletionAuditRecoveryInstruction,
   resolveStandardCompletionAuditResult,
   resolveStandardCompletionAuditDisposition,
+  shouldRunStandardCompletionAudit,
   buildStandardCompletionRecoveryInstruction,
   buildStandardCompletionTextToolFallbackInstruction,
   shouldSwitchStandardCompletionToTextToolProtocol,
@@ -100,6 +101,8 @@ import {
   buildModelRateLimitRecoveryQuestion,
   MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
   MAX_STANDARD_COMPLETION_RECOVERIES,
+  MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES,
+  RECOVERY_MODEL_DECISION_TIMEOUT_MS,
   STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
   MAX_REPOSITORY_COMPLETION_REJECTIONS,
   LEGACY_MCP_OVERSIZED_FOLLOW_UP,
@@ -791,12 +794,17 @@ describe("ACT execution recovery", () => {
     const instruction = buildExecutionRecoveryInstruction({
       attempt: 2,
       reason: "The decision did not execute a tool.",
-      bootstrapWorkspace: true
+      bootstrapWorkspace: true,
+      currentTask: "Modify the requested file and verify the result."
     });
 
     expect(instruction).toContain("fs.read_directory");
     expect(instruction).toContain("call apply_patch");
     expect(instruction).toContain("Do not write progress prose");
+    expect(instruction).toContain("no Markdown fences");
+    expect(instruction).toContain("malformed or off-protocol");
+    expect(instruction).toContain("Modify the requested file and verify the result.");
+    expect(instruction).toContain("do not answer the protocol error instead");
     expect(instruction).not.toContain("failed");
   });
 });
@@ -954,6 +962,34 @@ describe("standard completion validation", () => {
     expect(MAX_STANDARD_COMPLETION_RECOVERIES).toBeGreaterThan(MAX_AGENT_PROTOCOL_FAILURES);
   });
 
+  it("limits model-based completion audits and gives them a finite timeout", () => {
+    expect(MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES).toBe(1);
+    expect(RECOVERY_MODEL_DECISION_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it("skips the optional audit for ordinary chat while retaining it for project delivery", () => {
+    expect(shouldRunStandardCompletionAudit({
+      mode: "chat",
+      request: "请根据我的目标起草一份清晰、可直接使用的内容。",
+      requestedDeliverableExtensions: []
+    })).toBe(false);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "chat",
+      request: "Please draft clear content based on my goal.",
+      requestedDeliverableExtensions: []
+    })).toBe(false);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "chat",
+      request: "Please create a file with the completed content.",
+      requestedDeliverableExtensions: [".md"]
+    })).toBe(true);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "project",
+      request: "Explain this function.",
+      requestedDeliverableExtensions: []
+    })).toBe(true);
+  });
+
   it("recognizes a valid api-card as the chat deliverable", () => {
     expect(hasValidApiCardDeliverable(
       "把接口调用制作成一张 api 卡片",
@@ -1105,6 +1141,23 @@ describe("standard completion validation", () => {
     expect(result.reasons).toContain("The model did not declare the original goal complete.");
   });
 
+  it("does not require the project completion flag for ordinary chat", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "你的机器配置已读取完成。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: false
+      },
+      requiresGoalCompletion: false,
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result.valid).toBe(true);
+  });
+
   it("accepts only an explicit no-tool completion-audit approval", () => {
     expect(resolveStandardCompletionAuditResult({
       assistantMessage: "APPROVED",
@@ -1112,6 +1165,12 @@ describe("standard completion validation", () => {
       endTurn: true,
       goalCompleted: true
     })).toEqual({ accepted: true, gaps: [] });
+    expect(resolveStandardCompletionAuditResult({
+      assistantMessage: "NEEDS_USER_INPUT",
+      toolCalls: [],
+      endTurn: true,
+      goalCompleted: true
+    })).toEqual({ accepted: true, gaps: [], needsUserInput: true });
     expect(resolveStandardCompletionAuditResult({
       assistantMessage: "Load a test skill first.",
       toolCalls: [{ id: "skill-1", name: "skills.load", arguments: { skill_id: "test" } }],
@@ -1127,11 +1186,11 @@ describe("standard completion validation", () => {
     })).toBe("accept_candidate");
     expect(resolveStandardCompletionAuditDisposition({
       outcome: "rejected",
-      attempt: MAX_STANDARD_COMPLETION_RECOVERIES - 1
+      attempt: MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES - 1
     })).toBe("retry");
     expect(resolveStandardCompletionAuditDisposition({
       outcome: "rejected",
-      attempt: MAX_STANDARD_COMPLETION_RECOVERIES
+      attempt: MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES
     })).toBe("accept_candidate");
     expect(resolveStandardCompletionAuditDisposition({
       outcome: "rejected",
@@ -1774,6 +1833,19 @@ describe("terminal turn state machine", () => {
       goalCompleted: true,
       gpaStage: "act",
       gpaActCompletedSuccessfully: true
+    })).toBe("complete_task");
+  });
+
+  it("completes an ordinary chat turn without a project goal flag", () => {
+    expect(resolveTerminalTurnDisposition({
+      isRootThread: true,
+      hasActiveSubagents: false,
+      toolCallCount: 0,
+      endTurn: true,
+      goalCompleted: false,
+      requiresGoalCompletion: false,
+      gpaStage: "off",
+      gpaActCompletedSuccessfully: false
     })).toBe("complete_task");
   });
 });
