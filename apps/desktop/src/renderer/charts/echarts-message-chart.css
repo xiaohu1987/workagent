@@ -55,15 +55,54 @@
 }
 
 .message-chart-actions button:hover:not(:disabled),
-.message-chart-actions button:focus-visible,
-.message-chart-dialog-header > button:hover,
-.message-chart-dialog-header > button:focus-visible,
-.message-chart-error-header > button:hover,
-.message-chart-error-header > button:focus-visible {
+.message-chart-actions button:focus-visible {
   border-color: rgba(183, 162, 255, 0.18);
   color: #f1edff;
   background: rgba(183, 162, 255, 0.09);
   outline: none;
+}
+
+.message-chart-dialog-header > button:hover:not(:disabled),
+.message-chart-dialog-header > button:focus-visible,
+.message-chart-error-header > button:hover:not(:disabled),
+.message-chart-error-header > button:focus-visible {
+  color: #fff;
+  border-color: rgba(66, 165, 255, 0.48);
+  background: linear-gradient(160deg, rgba(66, 165, 255, 0.2), rgba(184, 108, 255, 0.12));
+  box-shadow:
+    0 0 0 1px rgba(66, 165, 255, 0.16),
+    0 10px 24px rgba(0, 0, 0, 0.34);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.message-chart-dialog-header > button:hover:not(:disabled) svg,
+.message-chart-error-header > button:hover:not(:disabled) svg {
+  transform: rotate(90deg);
+}
+
+.message-chart-dialog-header > button,
+.message-chart-error-header > button {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(231, 234, 239, 0.72);
+  background: rgba(255, 255, 255, 0.04);
+  transition:
+    color 140ms cubic-bezier(0.2, 0.82, 0.2, 1),
+    border-color 140ms cubic-bezier(0.2, 0.82, 0.2, 1),
+    background 140ms cubic-bezier(0.2, 0.82, 0.2, 1),
+    box-shadow 140ms cubic-bezier(0.2, 0.82, 0.2, 1),
+    transform 140ms cubic-bezier(0.2, 0.82, 0.2, 1);
+}
+
+.message-chart-dialog-header > button svg,
+.message-chart-error-header > button svg {
+  transition: transform 140ms cubic-bezier(0.2, 0.82, 0.2, 1);
+}
+
+.message-chart-dialog-header > button:active:not(:disabled),
+.message-chart-error-header > button:active:not(:disabled) {
+  transform: translateY(0) scale(0.96);
+  box-shadow: 0 0 0 1px rgba(66, 165, 255, 0.22);
 }
 
 .message-chart-actions button:disabled {

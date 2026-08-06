@@ -972,20 +972,40 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): 
     const file = parsePatchFileChanges(String(input.patch ?? ""))[0]?.path;
     return file ? `正在修改 ${compactRuntimeTarget(file)}` : "正在写入文件";
   }
-  if (toolName === "fs.read_file" || toolName === "knowledge.read" || toolName === "read_mcp_resource") {
+  if (toolName === "fs.read_file") {
     return target ? `正在读取 ${target}` : "正在读取文件";
   }
-  if (toolName === "fs.read_directory" || toolName === "list_mcp_resources" || toolName === "list_mcp_resource_templates") {
+  if (toolName === "knowledge.read") {
+    return target ? `正在读取知识库 ${target}` : "正在读取知识库";
+  }
+  if (toolName === "read_mcp_resource") {
+    return target ? `正在读取 MCP 资源 ${target}` : "正在读取 MCP 资源";
+  }
+  if (toolName === "fs.read_directory") {
     return target ? `正在查看 ${target}` : "正在读取目录";
+  }
+  if (toolName === "list_mcp_resources" || toolName === "list_mcp_resource_templates") {
+    return "正在查看 MCP 资源";
   }
   if (toolName === "fs.write_file" || toolName === "apply_patch") {
     return target ? `正在写入 ${target}` : "正在写入文件";
   }
-  if (toolName === "code.search" || toolName === "knowledge.search") {
-    return target ? `正在搜索 ${target}` : "正在搜索代码";
+  if (toolName === "code.search") {
+    return target ? `正在代码搜索 ${target}` : "正在代码搜索";
+  }
+  if (toolName === "code.outline") return "正在查看代码大纲";
+  if (toolName === "code.ast_diff") return "正在对比代码";
+  if (toolName === "knowledge.search") {
+    return target ? `正在知识库搜索 ${target}` : "正在知识库搜索";
   }
   if (toolName === "web_search.search_query") {
-    return target ? `正在搜索 ${target}` : "正在搜索网络";
+    return target ? `正在浏览器搜索 ${target}` : "正在浏览器搜索";
+  }
+  if (toolName === "web_search.open_page") {
+    return target ? `正在打开网页 ${target}` : "正在打开网页";
+  }
+  if (toolName === "web_search.find_in_page") {
+    return target ? `正在页内查找 ${target}` : "正在页内查找";
   }
   if (toolName === "browser.set_viewport") {
     const width = Number(input.width ?? 1440);
@@ -994,13 +1014,32 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): 
   }
   if (toolName === "browser.assert_page") return "正在执行页面断言";
   if (toolName === "browser.capture_screenshot") return "正在截取页面验证图";
-  if (toolName.startsWith("browser.") || toolName === "web_search.open_page") {
+  if (toolName.startsWith("browser.")) {
     return target ? `正在打开 ${target}` : "正在操作浏览器";
   }
+  if (toolName === "image.generate") return "正在生成图片";
+  if (toolName === "video.generate") return "正在生成视频";
+  if (toolName === "database.query" || toolName === "database.federated_query") {
+    return target ? `正在查询数据库 ${target}` : "正在查询数据库";
+  }
+  if (toolName === "database.describe_schema") return "正在查看数据库结构";
+  if (toolName === "database.list_sources") return "正在查看数据源";
+  if (toolName.startsWith("database.")) return "正在操作数据库";
+  if (toolName === "memories.search") {
+    return target ? `正在搜索记忆 ${target}` : "正在搜索记忆";
+  }
+  if (toolName === "memories.list") return "正在查看记忆";
+  if (toolName === "memories.add_ad_hoc_note") return "正在记录记忆";
+  if (toolName === "skills.load") return "正在加载技能";
+  if (toolName === "skills.install") return "正在安装技能";
+  if (toolName === "mcp.call") return "正在调用 MCP";
+  if (toolName === "mcp.list_tools") return "正在查看 MCP 工具";
+  if (toolName === "mcp.install") return "正在安装 MCP";
+  if (toolName === "project.verify") return "正在验证项目";
   if (toolName.startsWith("git.")) {
     return toolName === "git.commit" ? "正在创建提交" : "正在检查 Git 状态";
   }
-  if (toolName === "shell.exec") {
+  if (toolName === "shell.exec" || toolName === "execute_command") {
     return target ? `正在运行 ${target}` : "正在执行命令";
   }
   if (toolName === "multi_agents.spawn") {
@@ -1134,7 +1173,6 @@ export function getToolActivityKind(toolCall: ToolCallRecord): "search" | "read"
   if (
     toolName === "code.search" ||
     toolName === "knowledge.search" ||
-    toolName === "web_search.search_query" ||
     toolName === "mcp.call" ||
     toolName === "mcp.list_tools" ||
     toolName === "list_mcp_resources" ||
@@ -1142,7 +1180,7 @@ export function getToolActivityKind(toolCall: ToolCallRecord): "search" | "read"
   ) return "search";
   if (toolName === "fs.read_file" || toolName === "fs.read_directory" || toolName === "knowledge.read" || toolName === "read_mcp_resource") return "read";
   if (toolName === "browser.assert_page" || toolName === "browser.capture_screenshot" || isVerificationCommand(toolCall)) return "verify";
-  if (toolName.startsWith("browser.") || toolName === "web_search.open_page") return "browser";
+  if (toolName.startsWith("browser.") || toolName.startsWith("web_search.")) return "browser";
   return "other";
 }
 

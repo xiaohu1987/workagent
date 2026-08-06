@@ -38,6 +38,7 @@ import {
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
+import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
 import { getSidebarUpdateReminder } from "../apps/desktop/src/renderer/App";
 import type { MessageRecord, ThreadRecord, ToolCallRecord } from "../packages/shared-types/src";
 
@@ -234,7 +235,18 @@ describe("tool processing labels", () => {
     expect(getToolProcessingLabel("apply_patch")).toBe("正在写入文件");
     expect(getToolProcessingLabel("shell.exec")).toBe("正在执行命令");
     expect(getToolProcessingLabel("browser.open_tab")).toBe("正在操作浏览器");
-    expect(getToolProcessingLabel("web_search.search_query")).toBe("正在搜索网络");
+    expect(getToolProcessingLabel("code.search")).toBe("正在代码搜索");
+    expect(getToolProcessingLabel("knowledge.search")).toBe("正在知识库搜索");
+    expect(getToolProcessingLabel("knowledge.read")).toBe("正在读取知识库");
+    expect(getToolProcessingLabel("web_search.search_query")).toBe("正在浏览器搜索");
+    expect(getToolProcessingLabel("web_search.open_page")).toBe("正在打开网页");
+    expect(getToolProcessingLabel("web_search.find_in_page")).toBe("正在页内查找");
+    expect(getToolProcessingLabel("image.generate")).toBe("正在生成图片");
+    expect(getToolProcessingLabel("video.generate")).toBe("正在生成视频");
+    expect(getToolProcessingLabel("database.query")).toBe("正在查询数据库");
+    expect(getToolProcessingLabel("memories.search")).toBe("正在搜索记忆");
+    expect(getToolProcessingLabel("skills.load")).toBe("正在加载技能");
+    expect(getToolProcessingLabel("mcp.call")).toBe("正在调用 MCP");
     expect(getToolProcessingLabel("wait_agent")).toBe("正在等待子智能体");
   });
 
@@ -363,6 +375,83 @@ describe("tool activity summaries", () => {
       title: "\u90e8\u5206\u67e5\u8be2\u672a\u5b8c\u6210",
       detail: "\u5df2\u5c1d\u8bd5 2 \u6b21\u67e5\u8be2 \u00b7 1 \u6b21\u5931\u8d25"
     });
+  });
+
+  it("labels search tools by their actual domain", () => {
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "code", toolName: "code.search", argumentsJson: JSON.stringify({ query: "timeline" }) })
+    ])).toBe("代码搜索");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "knowledge", toolName: "knowledge.search", argumentsJson: JSON.stringify({ query: "手册" }) })
+    ])).toBe("知识库搜索");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "knowledge-read", toolName: "knowledge.read", argumentsJson: JSON.stringify({ conceptId: "c1" }) })
+    ])).toBe("读取知识库");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({
+        id: "web-search",
+        toolName: "web_search.search_query",
+        argumentsJson: JSON.stringify({ query: "Hawaii Pacific University" })
+      })
+    ])).toBe("浏览器搜索");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "open", toolName: "web_search.open_page", argumentsJson: JSON.stringify({ url: "https://example.com" }) })
+    ])).toBe("打开网页");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "image", toolName: "image.generate" })
+    ])).toBe("生成图片");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "db", toolName: "database.query" })
+    ])).toBe("查询数据库");
+
+    expect(getConciseToolActivityLabel(
+      [makeToolCall({
+        id: "code",
+        toolName: "code.search",
+        status: "running",
+        completedAt: null,
+        argumentsJson: JSON.stringify({ query: "timeline" })
+      })],
+      makeToolCall({
+        id: "code",
+        toolName: "code.search",
+        status: "running",
+        completedAt: null,
+        argumentsJson: JSON.stringify({ query: "timeline" })
+      })
+    )).toBe("正在代码搜索");
+    expect(getConciseToolActivityLabel(
+      [makeToolCall({
+        id: "knowledge",
+        toolName: "knowledge.search",
+        status: "running",
+        completedAt: null,
+        argumentsJson: JSON.stringify({ query: "手册" })
+      })],
+      makeToolCall({
+        id: "knowledge",
+        toolName: "knowledge.search",
+        status: "running",
+        completedAt: null,
+        argumentsJson: JSON.stringify({ query: "手册" })
+      })
+    )).toBe("正在知识库搜索");
+    expect(getConciseToolActivityLabel(
+      [makeToolCall({
+        id: "web-search",
+        toolName: "web_search.search_query",
+        status: "running",
+        completedAt: null,
+        argumentsJson: JSON.stringify({ query: "Hawaii Pacific University" })
+      })],
+      makeToolCall({
+        id: "web-search",
+        toolName: "web_search.search_query",
+        status: "running",
+        completedAt: null,
+        argumentsJson: JSON.stringify({ query: "Hawaii Pacific University" })
+      })
+    )).toBe("正在浏览器搜索");
   });
 });
 

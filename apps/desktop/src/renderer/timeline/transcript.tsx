@@ -1,10 +1,10 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ApprovalRequest, AssistantDraftPhase, MessageAttachment, MessageRecord, ToolCallRecord, UserInputPrompt } from "@shared-types";
-import { getAssistantDraftPhaseLabel, getDisplayMessageContent, getFileWriteTarget, getMessageDisplayKind, getSelectedMessageContexts, getToolActivityKind, getToolActivityPresentation, getToolActivityTarget, getToolProcessingLabel, isFileWriteTool, parseMessageEventBlocks, parseTimelineJson } from "../lib/conversation-utils";
+import { getAssistantDraftPhaseLabel, getDisplayMessageContent, getFileWriteTarget, getMessageDisplayKind, getSelectedMessageContexts, getToolActivityPresentation, getToolActivityTarget, getToolProcessingLabel, isFileWriteTool, parseMessageEventBlocks, parseTimelineJson } from "../lib/conversation-utils";
 import type { ChatEventBlock, ChatEventType, SelectedMessageContext } from "../lib/conversation-utils";
-import { IconCheck, IconChecklist, IconChevronDown, IconClose, IconCode, IconCompose, IconCopy, IconEye, IconFile, IconFileChanges, IconFolder, IconGlobe, IconGpa, IconHelpCircle, IconImage, IconKnowledge, IconMcp, IconSearch, IconSkills, IconTerminal, IconVideo } from "../icons";
-import { CopyTextButton, MessageMediaLightbox, getFileLeafName, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
+import { IconChart, IconCheck, IconChecklist, IconChevronDown, IconClose, IconCode, IconCompose, IconCopy, IconEye, IconFile, IconFileChanges, IconFolder, IconGlobe, IconGpa, IconHelpCircle, IconImage, IconKnowledge, IconMcp, IconNotebook, IconSearch, IconSkills, IconTerminal, IconVideo } from "../icons";
+import { CopyTextButton, MessageMediaLightbox, getFileLeafName, normalizeMarkdownImageSource, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
 import { ApiCardThreadContext } from "../cards/api-card-message";
 
@@ -180,35 +180,52 @@ export function ToolActivityIcon({ toolName }: { toolName: string }) {
   if (isFileWriteTool(toolName)) return <IconFileChanges />;
   if (toolName === "fs.read_file") return <IconFile />;
   if (toolName === "fs.read_directory") return <IconFolder />;
-  if (toolName === "code.search" || toolName === "knowledge.search") return <IconSearch />;
+  if (toolName.startsWith("knowledge.") || toolName === "knowledge.search") return <IconKnowledge />;
+  if (toolName === "code.search" || toolName.startsWith("code.")) return <IconSearch />;
   if (toolName.startsWith("browser.") || toolName.startsWith("web_search.")) return <IconGlobe />;
+  if (toolName === "image.generate") return <IconImage />;
+  if (toolName === "video.generate") return <IconVideo />;
+  if (toolName.startsWith("skills.")) return <IconSkills />;
+  if (toolName.startsWith("mcp.") || toolName.startsWith("list_mcp_") || toolName === "read_mcp_resource" || toolName === "get_mcp_prompt") return <IconMcp />;
+  if (toolName.startsWith("database.")) return <IconChart />;
+  if (toolName.startsWith("memories.")) return <IconNotebook />;
   return <IconTerminal />;
 }
 
 export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord): string {
   if (runningCall) {
-    switch (getToolActivityKind(runningCall)) {
-      case "search": return "正在搜索项目";
-      case "read": return "正在查看文件";
-      case "write": return "正在编辑文件";
-      case "verify": return "正在验证结果";
-      case "browser": return "正在浏览网页";
-      default: return "正在运行命令";
-    }
+    return getToolProcessingLabel(runningCall.toolName);
   }
 
-  const counts = { search: 0, read: 0, write: 0, verify: 0, browser: 0, other: 0 };
-  for (const toolCall of toolCalls) counts[getToolActivityKind(toolCall)] += 1;
+  const has = (toolName: string) => toolCalls.some((toolCall) => toolCall.toolName === toolName);
+  const hasPrefix = (prefix: string) => toolCalls.some((toolCall) => toolCall.toolName.startsWith(prefix));
+  const countMatching = (predicate: (toolCall: ToolCallRecord) => boolean) => toolCalls.filter(predicate).length;
 
-  const commandCount = toolCalls.filter((toolCall) =>
+  const writeCount = countMatching((toolCall) => isFileWriteTool(toolCall.toolName));
+  const commandCount = countMatching((toolCall) =>
     toolCall.toolName === "shell.exec" || toolCall.toolName === "execute_command"
-  ).length;
+  );
+  const fileReadCount = countMatching((toolCall) =>
+    toolCall.toolName === "fs.read_file" || toolCall.toolName === "fs.read_directory"
+  );
+  const browserOnly = toolCalls.some((toolCall) => toolCall.toolName.startsWith("browser."));
   const labels = [
-    counts.write ? "编辑了文件" : "",
+    writeCount ? "编辑了文件" : "",
     commandCount ? (commandCount > 1 ? "运行了多个命令" : "运行了命令") : "",
-    !counts.write && counts.read ? (counts.read > 1 ? "查看了多个文件" : "查看了文件") : "",
-    !counts.write && !counts.read && counts.search ? "搜索了项目" : "",
-    !counts.write && !counts.read && !counts.search && counts.browser ? "浏览了网页" : ""
+    !writeCount && fileReadCount ? (fileReadCount > 1 ? "查看了多个文件" : "查看了文件") : "",
+    has("code.search") ? "代码搜索" : "",
+    has("knowledge.search") ? "知识库搜索" : "",
+    has("knowledge.read") ? "读取知识库" : "",
+    has("web_search.search_query") ? "浏览器搜索" : "",
+    has("web_search.open_page") ? "打开网页" : "",
+    has("web_search.find_in_page") ? "页内查找" : "",
+    has("image.generate") ? "生成图片" : "",
+    has("video.generate") ? "生成视频" : "",
+    hasPrefix("database.") ? "查询数据库" : "",
+    hasPrefix("memories.") ? "搜索记忆" : "",
+    hasPrefix("skills.") ? "加载技能" : "",
+    has("mcp.call") || has("mcp.list_tools") || has("list_mcp_resources") || has("list_mcp_resource_templates") ? "调用 MCP" : "",
+    !has("web_search.search_query") && !has("web_search.open_page") && !has("web_search.find_in_page") && browserOnly ? "浏览了网页" : ""
   ].filter(Boolean);
 
   return labels.slice(0, 2).join("，") || "完成了多个操作";
@@ -239,8 +256,34 @@ function getToolActivityLabel(toolName: string) {
   if (toolName === "fs.read_file") return "读取文件";
   if (toolName === "fs.read_directory") return "读取目录";
   if (isFileWriteTool(toolName)) return "写入文件";
-  if (toolName === "code.search" || toolName === "knowledge.search") return "搜索代码";
+  if (toolName === "code.search") return "代码搜索";
+  if (toolName === "code.outline") return "查看代码大纲";
+  if (toolName === "code.ast_diff") return "对比代码";
+  if (toolName === "knowledge.search") return "知识库搜索";
+  if (toolName === "knowledge.read") return "读取知识库";
+  if (toolName === "web_search.search_query") return "浏览器搜索";
+  if (toolName === "web_search.open_page") return "打开网页";
+  if (toolName === "web_search.find_in_page") return "页内查找";
   if (toolName.startsWith("browser.")) return "操作浏览器";
+  if (toolName === "image.generate") return "生成图片";
+  if (toolName === "video.generate") return "生成视频";
+  if (toolName === "database.query" || toolName === "database.federated_query") return "查询数据库";
+  if (toolName === "database.describe_schema") return "查看数据库结构";
+  if (toolName === "database.list_sources") return "查看数据源";
+  if (toolName.startsWith("database.")) return "操作数据库";
+  if (toolName === "memories.search") return "搜索记忆";
+  if (toolName === "memories.list") return "查看记忆";
+  if (toolName === "memories.add_ad_hoc_note") return "记录记忆";
+  if (toolName === "skills.load") return "加载技能";
+  if (toolName === "skills.install") return "安装技能";
+  if (toolName === "mcp.call") return "调用 MCP";
+  if (toolName === "mcp.list_tools") return "查看 MCP 工具";
+  if (toolName === "mcp.install") return "安装 MCP";
+  if (toolName === "list_mcp_resources" || toolName === "list_mcp_resource_templates") return "查看 MCP 资源";
+  if (toolName === "read_mcp_resource") return "读取 MCP 资源";
+  if (toolName === "project.verify") return "验证项目";
+  if (toolName === "git.commit") return "创建提交";
+  if (toolName.startsWith("git.")) return "检查 Git";
   return formatToolName(toolName);
 }
 
@@ -1168,8 +1211,10 @@ export function extractMessageMediaReferences(content: string): MessageMediaRefe
   const add = (source: string, kind: MessageMediaReference["kind"]) => {
     const normalized = source.replace(/[),.;，。；]+$/, "").trim();
     if (!normalized || seen.has(normalized)) return;
-    seen.add(normalized);
-    matches.push({ source: normalized, kind });
+    const imageSource = kind === "url" ? normalizeMarkdownImageSource(normalized) : normalized;
+    if (!imageSource || seen.has(imageSource)) return;
+    seen.add(imageSource);
+    matches.push({ source: imageSource, kind });
   };
   const localPattern = /[a-zA-Z]:[\\/][^\r\n<>"|?*]+?\.(?:png|jpe?g|gif|webp|bmp)/gi;
   const urlPattern = /https?:\/\/[^\s<>()]+?\.(?:png|jpe?g|gif|webp|bmp)(?:\?[^\s<>()]*)?/gi;

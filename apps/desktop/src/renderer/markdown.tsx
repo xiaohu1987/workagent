@@ -84,6 +84,27 @@ function isSafeMarkdownImageSource(source: string): boolean {
   return /^https:\/\//i.test(source) || /^data:image\/(png|jpeg|jpg|gif|webp);base64,/i.test(source);
 }
 
+export function normalizeMarkdownImageSource(source: string): string {
+  try {
+    const url = new URL(source);
+    if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "commons.wikimedia.org") {
+      return source;
+    }
+    const pathname = decodeURIComponent(url.pathname);
+    const filePrefix = "/wiki/file:";
+    if (!pathname.toLowerCase().startsWith(filePrefix)) {
+      return source;
+    }
+    const fileName = pathname.slice(filePrefix.length);
+    if (!fileName) {
+      return source;
+    }
+    return `${url.origin}/wiki/Special:FilePath/${encodeURIComponent(fileName)}`;
+  } catch {
+    return source;
+  }
+}
+
 function isAbsoluteLocalPath(source: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(source) || /^\\\\/.test(source);
 }
@@ -172,7 +193,7 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
     if (match[1] && match[2]) {
       const source = match[2];
       nodes.push((isSafeMarkdownImageSource(source) || isAbsoluteLocalPath(source))
-        ? <MarkdownMessageImage key={`${keyPrefix}-image-${tokenIndex}`} source={source} alt={match[1]} />
+        ? <MarkdownMessageImage key={`${keyPrefix}-image-${tokenIndex}`} source={normalizeMarkdownImageSource(source)} alt={match[1]} />
         : <span key={`${keyPrefix}-image-${tokenIndex}`}>{match[1] || source}</span>);
     } else if (match[3]) {
       nodes.push(<code key={`${keyPrefix}-code-${tokenIndex}`}>{match[3]}</code>);

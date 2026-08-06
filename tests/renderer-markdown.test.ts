@@ -17,7 +17,7 @@ import {
   retainPersistentComposerContexts
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { extractMessageMediaReferences, isGeneratedUserSkill } from "../apps/desktop/src/renderer/App";
-import { highlightMarkdownCode, parseMarkdownBlocks } from "../apps/desktop/src/renderer/markdown";
+import { highlightMarkdownCode, normalizeMarkdownImageSource, parseMarkdownBlocks } from "../apps/desktop/src/renderer/markdown";
 import { ECHARTS_CONFIG_MAX_BYTES, parseEChartsConfig } from "../apps/desktop/src/renderer/charts/echarts-message-chart";
 
 describe("parseMarkdownBlocks", () => {
@@ -108,6 +108,23 @@ describe("parseMarkdownBlocks", () => {
     const url = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png";
 
     expect(extractMessageMediaReferences(url)).toEqual([{ source: url, kind: "url" }]);
+  });
+
+  it("converts Wikimedia file pages into image URLs", () => {
+    const filePage = "https://commons.wikimedia.org/wiki/File:B-2_Spirit.jpg";
+    const imageUrl = "https://commons.wikimedia.org/wiki/Special:FilePath/B-2_Spirit.jpg";
+
+    expect(normalizeMarkdownImageSource(filePage)).toBe(imageUrl);
+    expect(extractMessageMediaReferences(filePage)).toEqual([{ source: imageUrl, kind: "url" }]);
+    expect(normalizeMarkdownImageSource("https://upload.wikimedia.org/wikipedia/commons/a/a0/B-2_Spirit.jpg")).toBe(
+      "https://upload.wikimedia.org/wikipedia/commons/a/a0/B-2_Spirit.jpg"
+    );
+  });
+
+  it("leaves direct Wikimedia image URLs unchanged", () => {
+    expect(normalizeMarkdownImageSource("https://commons.wikimedia.org/wiki/Special:FilePath/B-2_Spirit.jpg")).toBe(
+      "https://commons.wikimedia.org/wiki/Special:FilePath/B-2_Spirit.jpg"
+    );
   });
 
   it("marks the first incomplete plan task as in progress", () => {
