@@ -78,6 +78,18 @@ body {
   will-change: opacity;
 }
 
+/* Prevent Electron titlebar drag regions from stealing overlay clicks/cursors */
+.motion-overlay,
+.settings-overlay,
+.project-sheet-overlay,
+.fetch-models-overlay,
+.file-preview-lightbox,
+.message-image-lightbox,
+.message-chart-lightbox,
+.history-search-overlay {
+  -webkit-app-region: no-drag;
+}
+
 .motion-overlay[data-motion="entering"] > :is(
   .settings-dialog,
   .history-search-dialog,
@@ -8383,10 +8395,13 @@ select:focus {
 }
 
 .file-preview-lightbox-actions {
+  position: relative;
+  z-index: 2;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
+  -webkit-app-region: no-drag;
 }
 
 .file-preview-lightbox-actions > button:focus-visible {
@@ -8395,6 +8410,8 @@ select:focus {
 }
 
 .file-preview-lightbox-actions > button {
+  position: relative;
+  z-index: 1;
   display: grid;
   flex: 0 0 auto;
   width: 30px;
@@ -8405,6 +8422,7 @@ select:focus {
   color: rgba(207, 215, 226, 0.72);
   background: rgba(255, 255, 255, 0.025);
   cursor: pointer;
+  -webkit-app-region: no-drag;
 }
 
 .file-preview-lightbox-actions > button:hover:not(:disabled) {
@@ -8416,6 +8434,7 @@ select:focus {
 .file-preview-lightbox-actions > button svg {
   width: 15px;
   height: 15px;
+  pointer-events: none;
 }
 
 .file-preview-lightbox-actions > button:disabled {
@@ -10890,7 +10909,19 @@ select:focus {
 .file-preview-lightbox-actions > .file-preview-close-button svg,
 .message-chart-dialog-header > button svg,
 .message-chart-error-header > button svg {
+  pointer-events: none;
   transition: transform var(--motion-fast) var(--motion-ease);
+}
+
+.file-preview-lightbox-actions > .file-preview-close-button:hover:not(:disabled),
+.message-chart-dialog-header > button:hover:not(:disabled),
+.message-chart-error-header > button:hover:not(:disabled) {
+  color: #fff;
+  border-color: rgba(66, 165, 255, 0.48);
+  background: linear-gradient(160deg, rgba(66, 165, 255, 0.2), rgba(184, 108, 255, 0.12));
+  box-shadow:
+    0 0 0 1px rgba(66, 165, 255, 0.16),
+    0 10px 24px rgba(0, 0, 0, 0.34);
 }
 
 .project-sheet-close:hover:not(:disabled),
@@ -10899,10 +10930,7 @@ select:focus {
 .settings-close-button:hover:not(:disabled),
 .fetch-models-head button:hover:not(:disabled),
 .context-usage-report header button:hover:not(:disabled),
-.message-image-lightbox-head button:hover:not(:disabled),
-.file-preview-lightbox-actions > .file-preview-close-button:hover:not(:disabled),
-.message-chart-dialog-header > button:hover:not(:disabled),
-.message-chart-error-header > button:hover:not(:disabled) {
+.message-image-lightbox-head button:hover:not(:disabled) {
   color: #fff;
   border-color: rgba(66, 165, 255, 0.48);
   background: linear-gradient(160deg, rgba(66, 165, 255, 0.2), rgba(184, 108, 255, 0.12));
