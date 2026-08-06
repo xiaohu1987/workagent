@@ -31,6 +31,10 @@ const CHAT_READ_TOOLS = new Set([
 const CHAT_WRITE_TOOLS = new Set([
   ...CHAT_READ_TOOLS,
   "fs.write_file",
+  "fs.mkdir",
+  "fs.rename",
+  "fs.delete",
+  "fs.copy",
   "apply_patch"
 ]);
 

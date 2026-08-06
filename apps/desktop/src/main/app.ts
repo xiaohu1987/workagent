@@ -347,6 +347,12 @@ export class DesktopBackend {
       listKnowledgeBases: async (threadId) => this.listVisibleKnowledgeBases(threadId),
       searchKnowledge: async (query, ids) => this.#db.searchKnowledgeChunks(query, ids),
       readKnowledgeConcept: async (conceptId) => this.#db.getKnowledgeChunk(conceptId) ?? this.#db.getKnowledgeConcept(conceptId),
+      addKnowledgeNote: async (input) => this.addAgentKnowledgeNote(input),
+      readThreadTodos: async (threadId) => this.readThreadTodos(threadId),
+      writeThreadTodos: async (threadId, items) => this.writeThreadTodos(threadId, items),
+      openExternalUrl: async (url) => {
+        await shell.openExternal(url);
+      },
       searchErrorSolutions: async (input) => this.#db.searchErrorSolutions(input),
       recordErrorSolution: async (input) => this.#db.upsertErrorSolution(input),
       markErrorSolutionUsed: async (id) => {
@@ -3426,6 +3432,99 @@ export class DesktopBackend {
       status: "ready",
       updatedAt: now
     }, chunks);
+  }
+
+  public addAgentKnowledgeNote(input: {
+    title: string;
+    content: string;
+    knowledgeBaseId?: string;
+    threadId?: string;
+  }): { documentId: string; knowledgeBaseId: string; sourcePath: string } {
+    const title = input.title.trim();
+    const content = input.content.trim();
+    if (!title || !content) {
+      throw new Error("知识库笔记标题和内容不能为空。");
+    }
+    const visible = input.threadId ? this.listVisibleKnowledgeBases(input.threadId) : this.#db.listKnowledgeBases();
+    const selected = input.knowledgeBaseId
+      ? visible.find((base) => base.id === input.knowledgeBaseId) ?? this.#db.getKnowledgeBase(input.knowledgeBaseId)
+      : visible[0] ?? this.#db.findKnowledgeBase("global", "随手记");
+    const base = selected ?? this.#db.createKnowledgeBase({
+      scope: "global",
+      projectId: null,
+      displayName: "随手记",
+      bundleRoot: path.join(this.#layout.globalBundlesDir, "quick-notes"),
+      okfVersion: "0.1",
+      status: "ready"
+    });
+    if (input.knowledgeBaseId && !visible.some((item) => item.id === base.id) && input.threadId) {
+      throw new Error("指定的知识库对当前对话不可用。");
+    }
+    const noteId = randomUUID();
+    const sourcePath = `agent-notes/${noteId}.md`;
+    const documentId = randomUUID();
+    const now = new Date().toISOString();
+    const chunks = splitKnowledgeDocument(content).map((chunk, chunkIndex) => ({
+      id: randomUUID(),
+      knowledgeBaseId: base.id,
+      documentId,
+      chunkIndex,
+      title,
+      content: chunk,
+      sourcePath,
+      locator: getChunkLocator(chunk, chunkIndex),
+      createdAt: now
+    } satisfies KnowledgeChunkRecord));
+    this.#db.replaceKnowledgeDocument({
+      id: documentId,
+      knowledgeBaseId: base.id,
+      sourcePath,
+      sourceHash: createHash("sha256").update(`${title}\n${content}`).digest("hex"),
+      title,
+      mimeHint: "text/markdown",
+      status: "ready",
+      updatedAt: now
+    }, chunks);
+    this.#db.updateKnowledgeBase(base.id, { status: "ready" });
+    return { documentId, knowledgeBaseId: base.id, sourcePath };
+  }
+
+  private threadTodosPath(threadId: string): string {
+    return path.join(this.#layout.cacheDir, "thread-todos", `${threadId}.json`);
+  }
+
+  public async readThreadTodos(
+    threadId: string
+  ): Promise<Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>> {
+    try {
+      const raw = await fs.readFile(this.threadTodosPath(threadId), "utf8");
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const row = entry as Record<string, unknown>;
+        const statusRaw = String(row.status ?? "pending");
+        const status = (["pending", "in_progress", "completed", "cancelled"].includes(statusRaw)
+          ? statusRaw
+          : "pending") as "pending" | "in_progress" | "completed" | "cancelled";
+        return [{
+          id: String(row.id ?? randomUUID()),
+          content: String(row.content ?? "").trim() || "Task",
+          status
+        }];
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  public async writeThreadTodos(
+    threadId: string,
+    items: Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>
+  ): Promise<void> {
+    const target = this.threadTodosPath(threadId);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, JSON.stringify(items, null, 2), "utf8");
   }
 
   public resolveApproval(

@@ -179,9 +179,11 @@ export function ToolActivityIcon({ toolName }: { toolName: string }) {
   if (toolName === "shell.exec" || toolName === "execute_command") return <IconTerminal />;
   if (isFileWriteTool(toolName)) return <IconFileChanges />;
   if (toolName === "fs.read_file") return <IconFile />;
-  if (toolName === "fs.read_directory") return <IconFolder />;
+  if (toolName === "fs.read_directory" || toolName === "fs.mkdir") return <IconFolder />;
   if (toolName.startsWith("knowledge.") || toolName === "knowledge.search") return <IconKnowledge />;
-  if (toolName === "code.search" || toolName.startsWith("code.")) return <IconSearch />;
+  if (toolName.startsWith("todo.")) return <IconChecklist />;
+  if (toolName === "code.search" || toolName.startsWith("code.") || toolName === "project.verify") return <IconSearch />;
+  if (toolName.startsWith("git.")) return <IconCode />;
   if (toolName.startsWith("browser.") || toolName.startsWith("web_search.")) return <IconGlobe />;
   if (toolName === "image.generate") return <IconImage />;
   if (toolName === "video.generate") return <IconVideo />;
@@ -214,8 +216,12 @@ export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], running
     commandCount ? (commandCount > 1 ? "运行了多个命令" : "运行了命令") : "",
     !writeCount && fileReadCount ? (fileReadCount > 1 ? "查看了多个文件" : "查看了文件") : "",
     has("code.search") ? "代码搜索" : "",
+    has("code.diagnostics") || has("project.verify") ? "验证项目" : "",
     has("knowledge.search") ? "知识库搜索" : "",
     has("knowledge.read") ? "读取知识库" : "",
+    has("knowledge.add") ? "写入知识库" : "",
+    has("todo.write") || has("todo.read") ? "更新任务清单" : "",
+    hasPrefix("git.") ? "Git 操作" : "",
     has("web_search.search_query") ? "浏览器搜索" : "",
     has("web_search.open_page") ? "打开网页" : "",
     has("web_search.find_in_page") ? "页内查找" : "",
@@ -255,12 +261,20 @@ function getToolActivityLabel(toolName: string) {
   if (toolName === "shell.exec" || toolName === "execute_command") return "运行命令";
   if (toolName === "fs.read_file") return "读取文件";
   if (toolName === "fs.read_directory") return "读取目录";
+  if (toolName === "fs.mkdir") return "创建目录";
+  if (toolName === "fs.rename") return "重命名文件";
+  if (toolName === "fs.delete") return "删除文件";
+  if (toolName === "fs.copy") return "复制文件";
   if (isFileWriteTool(toolName)) return "写入文件";
   if (toolName === "code.search") return "代码搜索";
   if (toolName === "code.outline") return "查看代码大纲";
   if (toolName === "code.ast_diff") return "对比代码";
+  if (toolName === "code.diagnostics") return "读取诊断";
   if (toolName === "knowledge.search") return "知识库搜索";
   if (toolName === "knowledge.read") return "读取知识库";
+  if (toolName === "knowledge.add") return "写入知识库";
+  if (toolName === "todo.read") return "查看任务清单";
+  if (toolName === "todo.write") return "更新任务清单";
   if (toolName === "web_search.search_query") return "浏览器搜索";
   if (toolName === "web_search.open_page") return "打开网页";
   if (toolName === "web_search.find_in_page") return "页内查找";
@@ -268,6 +282,9 @@ function getToolActivityLabel(toolName: string) {
   if (toolName === "image.generate") return "生成图片";
   if (toolName === "video.generate") return "生成视频";
   if (toolName === "database.query" || toolName === "database.federated_query") return "查询数据库";
+  if (toolName === "database.insert") return "插入数据库";
+  if (toolName === "database.update") return "更新数据库";
+  if (toolName === "database.delete") return "删除数据库记录";
   if (toolName === "database.describe_schema") return "查看数据库结构";
   if (toolName === "database.list_sources") return "查看数据源";
   if (toolName.startsWith("database.")) return "操作数据库";
@@ -283,6 +300,13 @@ function getToolActivityLabel(toolName: string) {
   if (toolName === "read_mcp_resource") return "读取 MCP 资源";
   if (toolName === "project.verify") return "验证项目";
   if (toolName === "git.commit") return "创建提交";
+  if (toolName === "git.stage_file" || toolName === "git.stage_all") return "暂存变更";
+  if (toolName === "git.unstage_file") return "取消暂存";
+  if (toolName === "git.revert_file") return "撤销文件修改";
+  if (toolName === "git.apply_hunk") return "应用修改块";
+  if (toolName === "git.push") return "推送分支";
+  if (toolName === "git.pull") return "拉取远端";
+  if (toolName === "git.create_pr") return "创建 Pull Request";
   if (toolName.startsWith("git.")) return "检查 Git";
   return formatToolName(toolName);
 }

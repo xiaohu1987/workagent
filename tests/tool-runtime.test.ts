@@ -8,6 +8,7 @@ import {
   ToolRuntime,
   buildApplyPatchFailureMessage,
   canonicalizeToolName,
+  parseVerificationDiagnostics,
   type ToolRuntimeContext
 } from "@tool-runtime";
 
@@ -1059,5 +1060,139 @@ describe("browser page sanitize", () => {
     expect(result.json).toMatchObject({ isGitRepository: false });
     expect(runTerminalCommand).toHaveBeenCalledWith("git rev-parse --is-inside-work-tree");
     expect(runTerminalCommand).not.toHaveBeenCalledWith("git status --short --branch");
+  });
+
+  it("stages a file after approval", async () => {
+    const runTerminalCommand = vi.fn(async (command: string) => {
+      if (command === "git rev-parse --is-inside-work-tree") return { output: "true\n" };
+      return { output: "" };
+    });
+    const requestApproval = vi.fn().mockResolvedValue(true);
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "git-stage", name: "git.stage_file", arguments: { path: "src/App.tsx" } },
+      {
+        cwd: process.cwd(),
+        runTerminalCommand,
+        requestApproval
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("已暂存");
+    expect(requestApproval).toHaveBeenCalled();
+    expect(runTerminalCommand).toHaveBeenCalledWith(expect.stringContaining("git add --"));
+  });
+
+  it("rejects git.stage_file when approval is denied", async () => {
+    const runTerminalCommand = vi.fn(async (command: string) => {
+      if (command === "git rev-parse --is-inside-work-tree") return { output: "true\n" };
+      return { output: "" };
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "git-stage-deny", name: "git.stage_file", arguments: { path: "src/App.tsx" } },
+      {
+        cwd: process.cwd(),
+        runTerminalCommand,
+        requestApproval: vi.fn().mockResolvedValue(false)
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(false);
+    expect(runTerminalCommand).not.toHaveBeenCalledWith(expect.stringContaining("git add --"));
+  });
+
+  it("rejects fs.delete when approval is denied", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-delete-deny-"));
+    await fs.writeFile(path.join(cwd, "keep.txt"), "x", "utf8");
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "delete-deny", name: "fs.delete", arguments: { path: "keep.txt" } },
+      {
+        cwd,
+        requestApproval: vi.fn().mockResolvedValue(false)
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(false);
+    expect(await fs.readFile(path.join(cwd, "keep.txt"), "utf8")).toBe("x");
+  });
+
+  it("creates directories with fs.mkdir after approval", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-mkdir-"));
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "mkdir", name: "fs.mkdir", arguments: { path: "nested/dir" } },
+      {
+        cwd,
+        requestApproval: vi.fn().mockResolvedValue(true)
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(true);
+    expect((await fs.stat(path.join(cwd, "nested", "dir"))).isDirectory()).toBe(true);
+  });
+
+  it("writes and reads thread todos", async () => {
+    const items = [{ id: "T1", content: "Implement tools", status: "in_progress" as const }];
+    const runtime = new ToolRuntime();
+    const write = await runtime.execute(
+      { id: "todo-write", name: "todo.write", arguments: { items } },
+      {
+        cwd: process.cwd(),
+        writeThreadTodos: vi.fn().mockResolvedValue(undefined),
+        readThreadTodos: vi.fn().mockResolvedValue(items)
+      } as unknown as ToolRuntimeContext
+    );
+    const read = await runtime.execute(
+      { id: "todo-read", name: "todo.read", arguments: {} },
+      {
+        cwd: process.cwd(),
+        readThreadTodos: vi.fn().mockResolvedValue(items)
+      } as unknown as ToolRuntimeContext
+    );
+    expect(write.ok).toBe(true);
+    expect(read.content).toContain("T1");
+  });
+
+  it("adds a knowledge note after approval", async () => {
+    const addKnowledgeNote = vi.fn().mockResolvedValue({
+      documentId: "doc-1",
+      knowledgeBaseId: "kb-1",
+      sourcePath: "agent-notes/1.md"
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "knowledge-add",
+        name: "knowledge.add",
+        arguments: { title: "Note", content: "Remember this." }
+      },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        addKnowledgeNote
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(true);
+    expect(addKnowledgeNote).toHaveBeenCalledWith({
+      title: "Note",
+      content: "Remember this.",
+      knowledgeBaseId: undefined
+    });
+  });
+
+  it("parses compiler diagnostics from verification output", () => {
+    const diagnostics = parseVerificationDiagnostics(
+      "src/App.tsx(12,4): error TS2304: Cannot find name 'foo'."
+    );
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        severity: "error",
+        file: "src/App.tsx",
+        line: 12,
+        column: 4,
+        message: "Cannot find name 'foo'."
+      })
+    ]);
   });
 });

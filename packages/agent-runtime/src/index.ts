@@ -606,6 +606,18 @@ interface RuntimeServices {
   listKnowledgeBases(threadId: string): Promise<any[]>;
   searchKnowledge(query: string, knowledgeBaseIds?: string[]): Promise<any[]>;
   readKnowledgeConcept(conceptId: string): Promise<any | null>;
+  addKnowledgeNote?(input: {
+    title: string;
+    content: string;
+    knowledgeBaseId?: string;
+    threadId?: string;
+  }): Promise<{ documentId: string; knowledgeBaseId: string; sourcePath: string }>;
+  readThreadTodos?(threadId: string): Promise<Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>>;
+  writeThreadTodos?(
+    threadId: string,
+    items: Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>
+  ): Promise<void>;
+  openExternalUrl?(url: string): Promise<void> | void;
   searchErrorSolutions?(input: {
     query: string;
     modelId: string;
@@ -4574,6 +4586,16 @@ class ThreadSessionRuntime {
               searchKnowledge: (query, knowledgeBaseIds) =>
                 this.services.searchKnowledge(query, knowledgeBaseIds ?? visibleKnowledgeBaseIds),
               readKnowledgeConcept: this.services.readKnowledgeConcept,
+              addKnowledgeNote: this.services.addKnowledgeNote
+                ? (input) => this.services.addKnowledgeNote!({ ...input, threadId: this.threadId })
+                : undefined,
+              readThreadTodos: this.services.readThreadTodos
+                ? () => this.services.readThreadTodos!(this.threadId)
+                : undefined,
+              writeThreadTodos: this.services.writeThreadTodos
+                ? (items) => this.services.writeThreadTodos!(this.threadId, items)
+                : undefined,
+              openExternalUrl: this.services.openExternalUrl,
               listFiles: this.services.listFiles,
               readFile: this.services.readFile,
               writeFile: this.services.writeFile,
@@ -4790,7 +4812,7 @@ class ThreadSessionRuntime {
               readOnlyAgent: thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
               hiddenToolNames: [
                 ...modeHiddenToolNames,
-                ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read"]),
+                ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read", "knowledge.add"]),
                 ...(resolveDefaultModalityModel(this.services.config, "image") ? [] : ["image.generate"]),
                 ...(resolveDefaultModalityModel(this.services.config, "video") ? [] : ["video.generate"])
               ],
@@ -5661,7 +5683,11 @@ class ThreadSessionRuntime {
     const videoReady = !!resolveDefaultModalityModel(this.services.config, "video");
     const withKnowledge = knowledgeEnabled
       ? direct
-      : direct.filter((tool) => tool.name !== "knowledge.search" && tool.name !== "knowledge.read");
+      : direct.filter((tool) =>
+          tool.name !== "knowledge.search"
+          && tool.name !== "knowledge.read"
+          && tool.name !== "knowledge.add"
+        );
     const withMedia = withKnowledge.filter((tool) => {
       if (tool.name === "image.generate") return imageReady;
       if (tool.name === "video.generate") return videoReady;
@@ -5670,9 +5696,15 @@ class ThreadSessionRuntime {
     const childForbiddenTools = new Set([
       "apply_patch",
       "fs.write_file",
+      "fs.mkdir",
+      "fs.rename",
+      "fs.delete",
+      "fs.copy",
       "shell.exec",
       "shell.cancel_active",
       "request_user_input",
+      "knowledge.add",
+      "todo.write",
       "git.stage_file",
       "git.stage_all",
       "git.unstage_file",
@@ -5692,6 +5724,9 @@ class ThreadSessionRuntime {
       "database.list_sources",
       "database.describe_schema",
       "database.query",
+      "database.insert",
+      "database.update",
+      "database.delete",
       "database.federated_query",
       "image.generate",
       "video.generate",
@@ -8893,6 +8928,16 @@ function buildCompactedTranscriptSummary(
     return "";
   }
   const firstUserMessage = messages.find((message) => message.role === "user")?.content;
+  const assistantFinals = messages
+    .filter((message) => message.role === "assistant")
+    .map((message) => message.content.trim())
+    .filter((content) => content.length > 40 && !/^(正在|我来|先|接下来)/.test(content))
+    .slice(-3)
+    .map((content) => `已完成要点：${truncateToRuntimeTokenBudget(content, 64)}`);
+  const toolFailures = messages
+    .filter((message) => message.role === "tool" && /(?:failed|error|被拒绝|失败)/i.test(message.content))
+    .slice(-4)
+    .map((message) => `未完成/失败：${truncateToRuntimeTokenBudget(message.content, 48)}`);
   const recentHistory = messages.slice(-12).map((message) => {
     const label = message.role === "tool" ? "工具结果" : message.role === "assistant" ? "助手" : "用户";
     return `${label}: ${truncateToRuntimeTokenBudget(message.content, 48)}`;
@@ -8905,7 +8950,10 @@ function buildCompactedTranscriptSummary(
     "[Internal context compaction summary. Preserve task goals, verified results, and unfinished work. Do not show this section to the user.]",
     "[内部上下文压缩摘要。保留任务目标、已验证结果和未完成事项；不要将本段显示给用户。]",
     firstUserMessage ? `原始任务：${truncateToRuntimeTokenBudget(firstUserMessage, 90)}` : "",
+    ...assistantFinals,
+    ...toolFailures,
     ...repositoryContinuity,
+    "近期对话摘录：",
     ...recentHistory
   ]
     .filter(Boolean)

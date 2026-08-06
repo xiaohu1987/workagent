@@ -570,7 +570,12 @@ export function getTurnSummaryCreatedAt(
 }
 
 export function isFileWriteTool(toolName: string): boolean {
-  return toolName === "apply_patch" || toolName === "fs.write_file";
+  return toolName === "apply_patch"
+    || toolName === "fs.write_file"
+    || toolName === "fs.mkdir"
+    || toolName === "fs.rename"
+    || toolName === "fs.delete"
+    || toolName === "fs.copy";
 }
 
 export function isPatchAssistantMessage(content: string): boolean {
@@ -990,14 +995,25 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): 
   if (toolName === "fs.write_file" || toolName === "apply_patch") {
     return target ? `正在写入 ${target}` : "正在写入文件";
   }
+  if (toolName === "fs.mkdir") return target ? `正在创建目录 ${target}` : "正在创建目录";
+  if (toolName === "fs.rename") return target ? `正在重命名 ${target}` : "正在重命名文件";
+  if (toolName === "fs.delete") return target ? `正在删除 ${target}` : "正在删除文件";
+  if (toolName === "fs.copy") return target ? `正在复制 ${target}` : "正在复制文件";
   if (toolName === "code.search") {
     return target ? `正在代码搜索 ${target}` : "正在代码搜索";
   }
   if (toolName === "code.outline") return "正在查看代码大纲";
   if (toolName === "code.ast_diff") return "正在对比代码";
+  if (toolName === "code.diagnostics") return "正在读取诊断";
   if (toolName === "knowledge.search") {
     return target ? `正在知识库搜索 ${target}` : "正在知识库搜索";
   }
+  if (toolName === "knowledge.read") {
+    return target ? `正在读取知识库 ${target}` : "正在读取知识库";
+  }
+  if (toolName === "knowledge.add") return target ? `正在写入知识库 ${target}` : "正在写入知识库";
+  if (toolName === "todo.read") return "正在查看任务清单";
+  if (toolName === "todo.write") return "正在更新任务清单";
   if (toolName === "web_search.search_query") {
     return target ? `正在浏览器搜索 ${target}` : "正在浏览器搜索";
   }
@@ -1022,6 +1038,9 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): 
   if (toolName === "database.query" || toolName === "database.federated_query") {
     return target ? `正在查询数据库 ${target}` : "正在查询数据库";
   }
+  if (toolName === "database.insert") return "正在插入数据库";
+  if (toolName === "database.update") return "正在更新数据库";
+  if (toolName === "database.delete") return "正在删除数据库记录";
   if (toolName === "database.describe_schema") return "正在查看数据库结构";
   if (toolName === "database.list_sources") return "正在查看数据源";
   if (toolName.startsWith("database.")) return "正在操作数据库";
@@ -1036,9 +1055,15 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): 
   if (toolName === "mcp.list_tools") return "正在查看 MCP 工具";
   if (toolName === "mcp.install") return "正在安装 MCP";
   if (toolName === "project.verify") return "正在验证项目";
-  if (toolName.startsWith("git.")) {
-    return toolName === "git.commit" ? "正在创建提交" : "正在检查 Git 状态";
-  }
+  if (toolName === "git.commit") return "正在创建提交";
+  if (toolName === "git.stage_file" || toolName === "git.stage_all") return "正在暂存变更";
+  if (toolName === "git.unstage_file") return "正在取消暂存";
+  if (toolName === "git.revert_file") return "正在撤销文件修改";
+  if (toolName === "git.apply_hunk") return "正在应用修改块";
+  if (toolName === "git.push") return "正在推送分支";
+  if (toolName === "git.pull") return "正在拉取远端";
+  if (toolName === "git.create_pr") return "正在创建 Pull Request";
+  if (toolName.startsWith("git.")) return "正在检查 Git 状态";
   if (toolName === "shell.exec" || toolName === "execute_command") {
     return target ? `正在运行 ${target}` : "正在执行命令";
   }
@@ -1169,17 +1194,24 @@ export function getToolActivitySubject(counts: { search: number; read: number; w
 
 export function getToolActivityKind(toolCall: ToolCallRecord): "search" | "read" | "write" | "verify" | "browser" | "other" {
   const { toolName } = toolCall;
-  if (isFileWriteTool(toolName)) return "write";
+  if (isFileWriteTool(toolName) || toolName === "knowledge.add" || toolName === "todo.write") return "write";
   if (
     toolName === "code.search" ||
     toolName === "knowledge.search" ||
     toolName === "mcp.call" ||
     toolName === "mcp.list_tools" ||
     toolName === "list_mcp_resources" ||
-    toolName === "list_mcp_resource_templates"
+    toolName === "list_mcp_resource_templates" ||
+    toolName === "todo.read"
   ) return "search";
   if (toolName === "fs.read_file" || toolName === "fs.read_directory" || toolName === "knowledge.read" || toolName === "read_mcp_resource") return "read";
-  if (toolName === "browser.assert_page" || toolName === "browser.capture_screenshot" || isVerificationCommand(toolCall)) return "verify";
+  if (
+    toolName === "browser.assert_page" ||
+    toolName === "browser.capture_screenshot" ||
+    toolName === "project.verify" ||
+    toolName === "code.diagnostics" ||
+    isVerificationCommand(toolCall)
+  ) return "verify";
   if (toolName.startsWith("browser.") || toolName.startsWith("web_search.")) return "browser";
   return "other";
 }

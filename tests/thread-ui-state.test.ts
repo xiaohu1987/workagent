@@ -248,11 +248,27 @@ describe("tool processing labels", () => {
     expect(getToolProcessingLabel("skills.load")).toBe("正在加载技能");
     expect(getToolProcessingLabel("mcp.call")).toBe("正在调用 MCP");
     expect(getToolProcessingLabel("wait_agent")).toBe("正在等待子智能体");
+    expect(getToolProcessingLabel("fs.mkdir")).toBe("正在创建目录");
+    expect(getToolProcessingLabel("fs.rename")).toBe("正在重命名文件");
+    expect(getToolProcessingLabel("fs.delete")).toBe("正在删除文件");
+    expect(getToolProcessingLabel("fs.copy")).toBe("正在复制文件");
+    expect(getToolProcessingLabel("code.diagnostics")).toBe("正在读取诊断");
+    expect(getToolProcessingLabel("knowledge.add")).toBe("正在写入知识库");
+    expect(getToolProcessingLabel("todo.read")).toBe("正在查看任务清单");
+    expect(getToolProcessingLabel("todo.write")).toBe("正在更新任务清单");
+    expect(getToolProcessingLabel("git.stage_file")).toBe("正在暂存变更");
+    expect(getToolProcessingLabel("git.unstage_file")).toBe("正在取消暂存");
+    expect(getToolProcessingLabel("git.revert_file")).toBe("正在撤销文件修改");
+    expect(getToolProcessingLabel("git.apply_hunk")).toBe("正在应用修改块");
+    expect(getToolProcessingLabel("git.push")).toBe("正在推送分支");
+    expect(getToolProcessingLabel("git.pull")).toBe("正在拉取远端");
+    expect(getToolProcessingLabel("git.create_pr")).toBe("正在创建 Pull Request");
   });
 
   it("includes the current command or target in the running status", () => {
     expect(getToolProcessingLabel("shell.exec", JSON.stringify({ command: "pnpm build" }))).toBe("正在运行 pnpm build");
     expect(getToolProcessingLabel("fs.read_file", JSON.stringify({ path: "src/App.tsx" }))).toBe("正在读取 src/App.tsx");
+    expect(getToolProcessingLabel("fs.mkdir", JSON.stringify({ path: "docs/api" }))).toBe("正在创建目录 docs/api");
     expect(
       getToolProcessingLabel("apply_patch", JSON.stringify({
         patch: "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"
@@ -275,6 +291,10 @@ describe("file write transcript filtering", () => {
     expect(isPatchAssistantMessage("Implemented the requested feature.")).toBe(false);
     expect(isFileWriteTool("apply_patch")).toBe(true);
     expect(isFileWriteTool("fs.write_file")).toBe(true);
+    expect(isFileWriteTool("fs.mkdir")).toBe(true);
+    expect(isFileWriteTool("fs.rename")).toBe(true);
+    expect(isFileWriteTool("fs.delete")).toBe(true);
+    expect(isFileWriteTool("fs.copy")).toBe(true);
     expect(isFileWriteTool("fs.read_file")).toBe(false);
   });
 
@@ -403,6 +423,21 @@ describe("tool activity summaries", () => {
     expect(getConciseToolActivityLabel([
       makeToolCall({ id: "db", toolName: "database.query" })
     ])).toBe("查询数据库");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "mkdir", toolName: "fs.mkdir", argumentsJson: JSON.stringify({ path: "docs" }) })
+    ])).toBe("编辑了文件");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "diag", toolName: "code.diagnostics" })
+    ])).toBe("验证项目");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "kb-add", toolName: "knowledge.add", argumentsJson: JSON.stringify({ title: "Note" }) })
+    ])).toBe("写入知识库");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "todo", toolName: "todo.write", argumentsJson: JSON.stringify({ items: [] }) })
+    ])).toBe("更新任务清单");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "git-stage", toolName: "git.stage_file", argumentsJson: JSON.stringify({ path: "a.ts" }) })
+    ])).toBe("Git 操作");
 
     expect(getConciseToolActivityLabel(
       [makeToolCall({

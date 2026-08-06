@@ -207,6 +207,16 @@ export interface ToolRuntimeContext {
   describeDatabaseSchema?: (sourceId: string, schema?: string) => Promise<any>;
   queryDatabase?: (sourceId: string, sql: string, parameters: unknown[], maxRows?: number) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number; durationMs: number }>;
   executeDatabase?: (sourceId: string, sql: string, parameters: unknown[], operation: "insert" | "update" | "delete") => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number; durationMs: number }>;
+  openExternalUrl?: (url: string) => Promise<void> | void;
+  addKnowledgeNote?: (input: {
+    title: string;
+    content: string;
+    knowledgeBaseId?: string;
+  }) => Promise<{ conceptId?: string; documentId: string; knowledgeBaseId: string; sourcePath: string }>;
+  readThreadTodos?: () => Promise<Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>>;
+  writeThreadTodos?: (
+    items: Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>
+  ) => Promise<void>;
   deferredToolSpecs?: ToolSpecDefinition[];
   hiddenToolNames?: string[];
   /** Hard runtime guard for child agents; hiding schemas alone is insufficient. */
@@ -258,9 +268,10 @@ const TOOL_ALIASES: Record<string, string> = {
 };
 
 const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
-  "apply_patch", "fs.write_file", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
+  "apply_patch", "fs.write_file", "fs.mkdir", "fs.rename", "fs.delete", "fs.copy", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
   "skills.install", "plugins.install", "mcp.install",
   "image.generate", "video.generate",
+  "knowledge.add", "todo.write",
   "git.stage_file", "git.stage_all", "git.unstage_file", "git.revert_file", "git.apply_hunk",
   "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
   "browser.open_tab", "browser.click", "browser.fill", "browser.select_option", "browser.press_key",
@@ -645,6 +656,107 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
+    {
+      name: "fs.mkdir",
+      description: "Create a directory (and parents) inside the project workspace.",
+      inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const approved = await ctx.requestApproval({
+        title: "创建目录",
+        description: target,
+        riskLevel: "medium",
+        payload: { path: target }
+      });
+      if (!approved) return { ok: false, content: "创建目录被拒绝。" };
+      await fs.mkdir(target, { recursive: true });
+      return { ok: true, content: `Created directory ${target}`, json: { path: target } };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "fs.rename",
+      description: "Rename or move a file/directory inside the project workspace.",
+      inputSchema: {
+        type: "object",
+        properties: { from: { type: "string" }, to: { type: "string" } },
+        required: ["from", "to"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""));
+      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""));
+      const approved = await ctx.requestApproval({
+        title: "重命名/移动",
+        description: `${from} → ${to}`,
+        riskLevel: "medium",
+        payload: { from, to }
+      });
+      if (!approved) return { ok: false, content: "重命名被拒绝。" };
+      await fs.mkdir(path.dirname(to), { recursive: true });
+      await fs.rename(from, to);
+      return { ok: true, content: `Renamed ${from} → ${to}`, json: { from, to } };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "fs.delete",
+      description: "Delete a file or empty directory inside the project workspace. Set recursive=true to delete non-empty directories.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" }, recursive: { type: "boolean" } },
+        required: ["path"]
+      },
+      riskLevel: "high"
+    },
+    async (args, ctx) => {
+      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const recursive = Boolean(args.recursive);
+      const approved = await ctx.requestApproval({
+        title: "删除文件",
+        description: target,
+        riskLevel: "high",
+        payload: { path: target, recursive }
+      });
+      if (!approved) return { ok: false, content: "删除被拒绝。" };
+      await fs.rm(target, { recursive, force: false });
+      return { ok: true, content: `Deleted ${target}`, json: { path: target, recursive } };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "fs.copy",
+      description: "Copy a file or directory inside the project workspace.",
+      inputSchema: {
+        type: "object",
+        properties: { from: { type: "string" }, to: { type: "string" } },
+        required: ["from", "to"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""));
+      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""));
+      const approved = await ctx.requestApproval({
+        title: "复制文件",
+        description: `${from} → ${to}`,
+        riskLevel: "medium",
+        payload: { from, to }
+      });
+      if (!approved) return { ok: false, content: "复制被拒绝。" };
+      await fs.mkdir(path.dirname(to), { recursive: true });
+      await fs.cp(from, to, { recursive: true, errorOnExist: true, force: false });
+      return { ok: true, content: `Copied ${from} → ${to}`, json: { from, to } };
+    }
+  );
+
+  runtime.register(
     spec("fs.read_directory", "List direct children under a directory.", ["path"], "low"),
     async (args, ctx) => {
       const target = resolveFromCwd(ctx.cwd, String(args.path ?? "."));
@@ -831,6 +943,33 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
+    {
+      name: "code.diagnostics",
+      description: "Run project verification commands and return a structured list of compiler/linter diagnostics when possible.",
+      inputSchema: { type: "object", properties: {}, required: [] },
+      riskLevel: "low"
+    },
+    async (_args, ctx) => {
+      const verification = await runProjectVerification(ctx);
+      const output = String(verification.json && typeof verification.json === "object"
+        ? (verification.json as { output?: string }).output ?? verification.content
+        : verification.content);
+      const diagnostics = parseVerificationDiagnostics(output);
+      return {
+        ok: verification.ok,
+        content: diagnostics.length
+          ? diagnostics.map((item) => `${item.severity}: ${item.file ?? "?"}${item.line ? `:${item.line}` : ""} ${item.message}`).join("\n")
+          : verification.content,
+        json: {
+          ...(verification.json && typeof verification.json === "object" ? verification.json as Record<string, unknown> : {}),
+          diagnostics,
+          diagnosticCount: diagnostics.length
+        }
+      };
+    }
+  );
+
+  runtime.register(
     spec(
       "git.status",
       "Read git status for the current repository. Returns a clear notice when the workspace is not a git repo.",
@@ -880,13 +1019,16 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("git.commit", "Create a git commit with a message.", ["message"], "high"),
+    spec("git.commit", "Create a git commit with a message. Prefers already-staged changes; stages all only when the index is empty.", ["message"], "high"),
     async (args, ctx) => {
       const probe = await probeGitRepository(ctx);
       if (!probe.isGitRepository) {
         return { ...gitNotRepositoryResult(), ok: false };
       }
-      const message = String(args.message ?? "");
+      const message = String(args.message ?? "").trim();
+      if (!message) {
+        return { ok: false, content: "请输入提交说明。" };
+      }
       const approved = await ctx.requestApproval({
         title: "创建提交",
         description: message,
@@ -896,8 +1038,251 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "提交被拒绝。" };
       }
-      const output = (await runShell(`git add -A && git commit -m "${message.replace(/"/g, '\\"')}"`, ctx)).output;
-      return { ok: true, content: output, json: { output } };
+      const stagedNames = (await runShell("git diff --cached --name-only", ctx)).output.trim();
+      // Prefer explicit staging tools; only auto-stage when nothing is staged.
+      if (!stagedNames) {
+        await runShell("git add -A", ctx);
+      }
+      const output = (await runShell(`git commit -m "${escapeDoubleQuotes(message)}"`, ctx)).output;
+      return { ok: true, content: output, json: { output, message } };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "git.stage_file",
+      description: "Stage one file path in the current git repository.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => runGitMutation(ctx, {
+      title: "暂存文件",
+      riskLevel: "medium",
+      description: String(args.path ?? ""),
+      payload: { path: args.path },
+      command: `git add -- "${escapeDoubleQuotes(resolveFromCwd(ctx.cwd, String(args.path ?? "")))}"`,
+      successLabel: `已暂存 ${String(args.path ?? "")}`
+    })
+  );
+
+  runtime.register(
+    spec("git.stage_all", "Stage all changes in the current git repository.", [], "medium"),
+    async (_args, ctx) => runGitMutation(ctx, {
+      title: "暂存全部变更",
+      riskLevel: "medium",
+      description: "git add -A",
+      payload: {},
+      command: "git add -A",
+      successLabel: "已暂存所有变更"
+    })
+  );
+
+  runtime.register(
+    {
+      name: "git.unstage_file",
+      description: "Unstage one file path in the current git repository.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      return runGitMutation(ctx, {
+        title: "取消暂存",
+        riskLevel: "medium",
+        description: String(args.path ?? ""),
+        payload: { path: args.path },
+        command: `git restore --staged -- "${escapeDoubleQuotes(filePath)}"`,
+        successLabel: `已取消暂存 ${String(args.path ?? "")}`
+      });
+    }
+  );
+
+  runtime.register(
+    {
+      name: "git.revert_file",
+      description: "Discard unstaged worktree changes for one tracked file, or delete one untracked file when untracked=true.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          untracked: { type: "boolean" }
+        },
+        required: ["path"]
+      },
+      riskLevel: "high"
+    },
+    async (args, ctx) => {
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const untracked = Boolean(args.untracked);
+      return runGitMutation(ctx, {
+        title: untracked ? "删除未跟踪文件" : "撤销文件修改",
+        riskLevel: "high",
+        description: String(args.path ?? ""),
+        payload: { path: args.path, untracked },
+        command: untracked
+          ? `git clean -f -- "${escapeDoubleQuotes(filePath)}"`
+          : `git restore --worktree -- "${escapeDoubleQuotes(filePath)}"`,
+        successLabel: untracked
+          ? `已删除未跟踪文件 ${String(args.path ?? "")}`
+          : `已撤销 ${String(args.path ?? "")} 的未暂存修改`
+      });
+    }
+  );
+
+  runtime.register(
+    {
+      name: "git.apply_hunk",
+      description: "Apply one hunk from a file diff. Prefer git.stage_file / git.unstage_file for whole-file operations.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          hunkId: { type: "string" },
+          source: { type: "string", description: "staged or unstaged" },
+          action: { type: "string", description: "stage, unstage, or revert" }
+        },
+        required: ["path", "hunkId", "source", "action"]
+      },
+      riskLevel: "high"
+    },
+    async (args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return { ...gitNotRepositoryResult(), ok: false };
+      }
+      const filePath = String(args.path ?? "");
+      const hunkId = String(args.hunkId ?? "");
+      const source = String(args.source ?? "unstaged") === "staged" ? "staged" : "unstaged";
+      const action = String(args.action ?? "stage");
+      if (!["stage", "unstage", "revert"].includes(action)) {
+        return { ok: false, content: "action 必须是 stage、unstage 或 revert。" };
+      }
+      const approved = await ctx.requestApproval({
+        title: "应用 Git 修改块",
+        description: `${action} ${filePath}#${hunkId}`,
+        riskLevel: "high",
+        payload: { path: filePath, hunkId, source, action }
+      });
+      if (!approved) {
+        return { ok: false, content: "应用修改块被拒绝。" };
+      }
+      const diffCommand = source === "staged"
+        ? "git diff --cached --no-ext-diff --no-color --unified=3"
+        : "git diff --no-ext-diff --no-color --unified=3";
+      const diffOutput = (await runShell(diffCommand, ctx)).output;
+      const hunk = findGitHunkPatch(diffOutput, filePath, hunkId);
+      if (!hunk) {
+        return { ok: false, content: "修改已变化，无法应用此块。请刷新后重试。" };
+      }
+      const applyArgs = ["git", "apply"];
+      if (action !== "stage") applyArgs.push("-R");
+      if (action === "stage" || action === "unstage") applyArgs.push("--cached");
+      const tempPatch = path.join(ctx.cwd, `.codexh-hunk-${randomUUID()}.patch`);
+      try {
+        await ctx.writeFile(tempPatch, hunk);
+        const output = (await runShell(`${applyArgs.join(" ")} -- "${escapeDoubleQuotes(tempPatch)}"`, ctx)).output;
+        const label = action === "stage" ? "已暂存修改块" : action === "unstage" ? "已取消暂存修改块" : "已撤销修改块";
+        return { ok: true, content: `${label}\n${output}`.trim(), json: { path: filePath, hunkId, source, action, output } };
+      } finally {
+        try {
+          await fs.unlink(tempPatch);
+        } catch {
+          // Best-effort cleanup.
+        }
+      }
+    }
+  );
+
+  runtime.register(
+    spec("git.push", "Push the current branch to origin. Sets upstream when missing.", [], "high"),
+    async (_args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return { ...gitNotRepositoryResult(), ok: false };
+      }
+      const status = (await runShell("git status --short --branch", ctx)).output;
+      const branchMatch = status.match(/^## ([^\s.]+)/m);
+      const branch = branchMatch?.[1];
+      if (!branch || branch === "HEAD") {
+        return { ok: false, content: "detached HEAD 状态下无法推送，请先创建分支。" };
+      }
+      const hasUpstream = /^## .+\.\.\./m.test(status);
+      const command = hasUpstream ? "git push" : `git push -u origin "${escapeDoubleQuotes(branch)}"`;
+      return runGitMutation(ctx, {
+        title: "推送分支",
+        riskLevel: "high",
+        description: command,
+        payload: { branch, hasUpstream },
+        command,
+        successLabel: "已推送分支"
+      });
+    }
+  );
+
+  runtime.register(
+    spec("git.pull", "Fast-forward pull from the current branch upstream.", [], "high"),
+    async (_args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return { ...gitNotRepositoryResult(), ok: false };
+      }
+      const status = (await runShell("git status --short --branch", ctx)).output;
+      if (!/^## .+\.\.\./m.test(status)) {
+        return { ok: false, content: "当前分支没有上游分支，无法拉取。" };
+      }
+      return runGitMutation(ctx, {
+        title: "拉取远端更新",
+        riskLevel: "high",
+        description: "git pull --ff-only",
+        payload: {},
+        command: "git pull --ff-only",
+        successLabel: "已拉取远端更新"
+      });
+    }
+  );
+
+  runtime.register(
+    spec("git.create_pr", "Open a GitHub compare URL for creating a pull request from the current branch.", [], "medium"),
+    async (_args, ctx) => {
+      const probe = await probeGitRepository(ctx);
+      if (!probe.isGitRepository) {
+        return { ...gitNotRepositoryResult(), ok: false };
+      }
+      const status = (await runShell("git status --short --branch", ctx)).output;
+      const branchMatch = status.match(/^## ([^\s.]+)/m);
+      const branch = branchMatch?.[1];
+      const upstreamMatch = status.match(/^## [^\s]+\.\.\.([^\s]+)/m);
+      const upstream = upstreamMatch?.[1];
+      const remote = (await runShell("git remote get-url origin", ctx)).output.trim().split(/\r?\n/)[0] ?? "";
+      const url = buildGitHubPullRequestUrl(remote, branch, upstream);
+      if (!url) {
+        return { ok: false, content: "当前远端不是可识别的 GitHub 仓库，无法创建 Pull Request。" };
+      }
+      const approved = await ctx.requestApproval({
+        title: "打开创建 Pull Request 页面",
+        description: url,
+        riskLevel: "medium",
+        payload: { url, branch, upstream }
+      });
+      if (!approved) {
+        return { ok: false, content: "创建 Pull Request 被拒绝。" };
+      }
+      if (ctx.openExternalUrl) {
+        await ctx.openExternalUrl(url);
+      }
+      return {
+        ok: true,
+        content: `已打开创建 Pull Request 页面\n${url}`,
+        json: { url, branch, upstream, opened: Boolean(ctx.openExternalUrl) }
+      };
     }
   );
 
@@ -981,6 +1366,111 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         ok: !!concept,
         content: concept ? concept.content ?? concept.body ?? JSON.stringify(concept, null, 2) : "Not found",
         json: { concept }
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "knowledge.add",
+      description: "Add a Markdown note into an accessible knowledge base so later searches can retrieve it. Prefer an existing knowledgeBaseId when known.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          content: { type: "string" },
+          knowledgeBaseId: { type: "string" }
+        },
+        required: ["title", "content"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      if (!ctx.addKnowledgeNote) {
+        return { ok: false, content: "Knowledge write is unavailable for this task." };
+      }
+      const title = String(args.title ?? "").trim();
+      const content = String(args.content ?? "").trim();
+      if (!title || !content) {
+        return { ok: false, content: "title 和 content 不能为空。" };
+      }
+      const knowledgeBaseId = typeof args.knowledgeBaseId === "string" ? args.knowledgeBaseId : undefined;
+      const approved = await ctx.requestApproval({
+        title: "写入知识库",
+        description: title,
+        riskLevel: "medium",
+        payload: { title, knowledgeBaseId }
+      });
+      if (!approved) return { ok: false, content: "写入知识库被拒绝。" };
+      const saved = await ctx.addKnowledgeNote({ title, content, knowledgeBaseId });
+      return {
+        ok: true,
+        content: `已写入知识库：${title}\n${saved.sourcePath}`,
+        json: saved
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "todo.read",
+      description: "Read the current thread task checklist.",
+      inputSchema: { type: "object", properties: {}, required: [] },
+      riskLevel: "low",
+      parallelSafe: true
+    },
+    async (_args, ctx) => {
+      const items = ctx.readThreadTodos ? await ctx.readThreadTodos() : [];
+      return {
+        ok: true,
+        content: items.length
+          ? items.map((item) => `- [${item.status}] ${item.id}: ${item.content}`).join("\n")
+          : "当前任务清单为空。",
+        json: { items }
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "todo.write",
+      description: "Replace the current thread task checklist. Pass the full items array.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          items: {
+            type: "array",
+            description: "Array of { id, content, status } where status is pending|in_progress|completed|cancelled"
+          }
+        },
+        required: ["items"]
+      },
+      riskLevel: "low"
+    },
+    async (args, ctx) => {
+      if (!ctx.writeThreadTodos) {
+        return { ok: false, content: "Todo list is unavailable for this task." };
+      }
+      const rawItems = Array.isArray(args.items) ? args.items : [];
+      const items = rawItems.map((entry, index) => {
+        const row = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+        const statusRaw = String(row.status ?? "pending");
+        const status = (["pending", "in_progress", "completed", "cancelled"].includes(statusRaw)
+          ? statusRaw
+          : "pending") as "pending" | "in_progress" | "completed" | "cancelled";
+        return {
+          id: String(row.id ?? `T${index + 1}`),
+          content: String(row.content ?? "").trim() || `Task ${index + 1}`,
+          status
+        };
+      });
+      await ctx.writeThreadTodos(items);
+      return {
+        ok: true,
+        content: items.length
+          ? items.map((item) => `- [${item.status}] ${item.id}: ${item.content}`).join("\n")
+          : "已清空任务清单。",
+        json: { items }
       };
     }
   );
@@ -2485,14 +2975,26 @@ async function runProjectVerification(ctx: ToolRuntimeContext): Promise<ToolResu
       return {
         ok: false,
         content: `Verification failed: ${command}\n${output}`,
-        json: { commands, passed: false, failedCommand: command, exitCode: null, output: outputs.join("\n\n") }
+        json: {
+          commands,
+          passed: false,
+          failedCommand: command,
+          exitCode: null,
+          output: outputs.join("\n\n"),
+          diagnostics: parseVerificationDiagnostics(outputs.join("\n\n"))
+        }
       };
     }
   }
   return {
     ok: true,
     content: `Verification passed:\n${outputs.join("\n\n")}`,
-    json: { commands, passed: true, output: outputs.join("\n\n") }
+    json: {
+      commands,
+      passed: true,
+      output: outputs.join("\n\n"),
+      diagnostics: parseVerificationDiagnostics(outputs.join("\n\n"))
+    }
   };
 }
 
@@ -2539,6 +3041,140 @@ function escapePosixShell(value: string): string {
 
 function escapeDoubleQuotes(value: string): string {
   return value.replace(/"/g, '\\"');
+}
+
+async function runGitMutation(
+  ctx: ToolRuntimeContext,
+  input: {
+    title: string;
+    description: string;
+    riskLevel: "low" | "medium" | "high";
+    payload: Record<string, unknown>;
+    command: string;
+    successLabel: string;
+  }
+): Promise<ToolResult> {
+  const probe = await probeGitRepository(ctx);
+  if (!probe.isGitRepository) {
+    return { ...gitNotRepositoryResult(), ok: false };
+  }
+  const approved = await ctx.requestApproval({
+    title: input.title,
+    description: input.description,
+    riskLevel: input.riskLevel,
+    payload: input.payload
+  });
+  if (!approved) {
+    return { ok: false, content: `${input.title}被拒绝。` };
+  }
+  try {
+    const output = (await runShell(input.command, ctx)).output;
+    return {
+      ok: true,
+      content: `${input.successLabel}\n${output}`.trim(),
+      json: { output, ...input.payload }
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, content: message, json: { error: message, ...input.payload } };
+  }
+}
+
+function findGitHunkPatch(diffOutput: string, filePath: string, hunkId: string): string | null {
+  const normalizedPath = filePath.replace(/\\/g, "/");
+  const lines = diffOutput.replace(/\r\n/g, "\n").split("\n");
+  let current: string[] = [];
+  const files: Array<{ path: string; lines: string[] }> = [];
+  const flush = () => {
+    if (current.length === 0) return;
+    const newPath = current.find((line) => line.startsWith("+++ "));
+    const oldPath = current.find((line) => line.startsWith("--- "));
+    const pathValue = normalizeGitDiffPath(newPath?.slice(4)) ?? normalizeGitDiffPath(oldPath?.slice(4));
+    if (pathValue) files.push({ path: pathValue, lines: current });
+    current = [];
+  };
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) flush();
+    current.push(line);
+  }
+  flush();
+  const target = files.find((file) => file.path === normalizedPath || file.path.endsWith(`/${normalizedPath}`));
+  if (!target) return null;
+  const hunkIndexes = target.lines.map((line, index) => (line.startsWith("@@ ") ? index : -1)).filter((index) => index >= 0);
+  const header = target.lines.slice(0, hunkIndexes[0] ?? target.lines.length).join("\n");
+  for (let index = 0; index < hunkIndexes.length; index += 1) {
+    const start = hunkIndexes[index];
+    const end = hunkIndexes[index + 1] ?? target.lines.length;
+    const hunkLines = target.lines.slice(start, end);
+    const patch = `${header}\n${hunkLines.join("\n")}\n`;
+    const id = createHash("sha256").update(`unstaged\0${target.path}\0${patch}`).digest("hex").slice(0, 20);
+    const stagedId = createHash("sha256").update(`staged\0${target.path}\0${patch}`).digest("hex").slice(0, 20);
+    if (id === hunkId || stagedId === hunkId) return patch;
+  }
+  return null;
+}
+
+function normalizeGitDiffPath(value?: string): string | null {
+  if (!value || value === "/dev/null") return null;
+  return value.replace(/^[ab]\//, "");
+}
+
+function buildGitHubPullRequestUrl(remoteUrl: string, branch?: string, upstream?: string): string | null {
+  if (!branch) return null;
+  const match = /(?:github\.com[/:])([^/]+)\/([^/\s]+?)(?:\.git)?$/i.exec(remoteUrl.trim());
+  if (!match) return null;
+  const base = upstream?.replace(/^[^/]+\//, "") || "main";
+  return `https://github.com/${match[1]}/${match[2]}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`;
+}
+
+export type VerificationDiagnostic = {
+  severity: "error" | "warning" | "info";
+  file?: string;
+  line?: number;
+  column?: number;
+  message: string;
+  source?: string;
+};
+
+export function parseVerificationDiagnostics(output: string): VerificationDiagnostic[] {
+  const diagnostics: VerificationDiagnostic[] = [];
+  const seen = new Set<string>();
+  const patterns: Array<{ regex: RegExp; severity: VerificationDiagnostic["severity"]; source: string }> = [
+    {
+      regex: /^(?<file>[^\s:(]+)\((?<line>\d+),(?<column>\d+)\):\s*(?<severity>error|warning|info)\s+TS\d+:\s*(?<message>.+)$/gm,
+      severity: "error",
+      source: "tsc"
+    },
+    {
+      regex: /^(?<file>[^\s:]+):(?<line>\d+):(?<column>\d+):\s*(?<severity>error|warning|info):\s*(?<message>.+)$/gm,
+      severity: "error",
+      source: "compiler"
+    },
+    {
+      regex: /^(?<file>[^\s:]+):(?<line>\d+):(?<column>\d+)\s+-\s*(?<severity>error|warning|info)\s+(?<message>.+)$/gm,
+      severity: "error",
+      source: "eslint"
+    }
+  ];
+  for (const pattern of patterns) {
+    for (const match of output.matchAll(pattern.regex)) {
+      const severityRaw = String(match.groups?.severity ?? pattern.severity).toLowerCase();
+      const severity = severityRaw === "warning" || severityRaw === "info" ? severityRaw : "error";
+      const item: VerificationDiagnostic = {
+        severity,
+        file: match.groups?.file,
+        line: match.groups?.line ? Number(match.groups.line) : undefined,
+        column: match.groups?.column ? Number(match.groups.column) : undefined,
+        message: String(match.groups?.message ?? "").trim(),
+        source: pattern.source
+      };
+      const key = `${item.severity}|${item.file}|${item.line}|${item.column}|${item.message}`;
+      if (!item.message || seen.has(key)) continue;
+      seen.add(key);
+      diagnostics.push(item);
+    }
+  }
+  return diagnostics.slice(0, 200);
 }
 
 async function buildGitDiffAstSummary(

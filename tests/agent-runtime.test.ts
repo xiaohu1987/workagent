@@ -662,10 +662,20 @@ describe("ordinary and project runtime isolation", () => {
     tool("fs.read_directory"),
     tool("fs.read_file"),
     tool("fs.write_file"),
+    tool("fs.mkdir"),
+    tool("fs.rename"),
+    tool("fs.delete"),
+    tool("fs.copy"),
     tool("code.search"),
+    tool("code.diagnostics"),
     tool("shell.exec"),
     tool("project.verify"),
-    tool("git.status")
+    tool("git.status"),
+    tool("git.stage_file"),
+    tool("git.push"),
+    tool("todo.read"),
+    tool("todo.write"),
+    tool("knowledge.add")
   ];
 
   it("keeps a website-search chat projectless and hides every local project tool", () => {
@@ -681,7 +691,10 @@ describe("ordinary and project runtime isolation", () => {
     expect(policy.workspaceLabel).toBe("task_output");
     expect(policy.filterTools(tools).map((entry) => entry.name)).toEqual([
       "web_search.search_query",
-      "skills.load"
+      "skills.load",
+      "todo.read",
+      "todo.write",
+      "knowledge.add"
     ]);
     expect(policy.validateToolCall({
       toolName: "fs.read_directory",
@@ -706,10 +719,16 @@ describe("ordinary and project runtime isolation", () => {
       requestedDeliverableExtensions: [".docx"]
     });
     const writeTools = writePolicy.filterTools(tools).map((entry) => entry.name);
-    expect(writeTools).toEqual(expect.arrayContaining(["fs.read_file", "fs.write_file"]));
+    expect(writeTools).toEqual(expect.arrayContaining(["fs.read_file", "fs.write_file", "fs.mkdir", "fs.copy"]));
     expect(writeTools).toContain("shell.exec");
+    expect(writeTools).toContain("todo.read");
+    expect(writeTools).toContain("todo.write");
+    expect(writeTools).toContain("knowledge.add");
     expect(writeTools).not.toContain("code.search");
+    expect(writeTools).not.toContain("code.diagnostics");
     expect(writeTools).not.toContain("git.status");
+    expect(writeTools).not.toContain("git.stage_file");
+    expect(writeTools).not.toContain("git.push");
 
     const executePolicy = createChatRuntimePolicy({
       outputDir: "C:\\task-output",
@@ -718,6 +737,10 @@ describe("ordinary and project runtime isolation", () => {
     expect(executePolicy.filterTools(tools).map((entry) => entry.name)).toContain("shell.exec");
     expect(executePolicy.validateToolCall({
       toolName: "git.status",
+      localWorkspaceInspectedBeforeDecision: false
+    })).toMatchObject({ allowed: false });
+    expect(executePolicy.validateToolCall({
+      toolName: "code.diagnostics",
       localWorkspaceInspectedBeforeDecision: false
     })).toMatchObject({ allowed: false });
   });
