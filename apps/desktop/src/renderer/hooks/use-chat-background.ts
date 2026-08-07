@@ -293,7 +293,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
     }
 
     try {
-      const nextSettings = normalizeChatBackgroundSettings({ ...settings, enabled: true, fileName: file.name });
+      const nextSettings = normalizeChatBackgroundSettings({ ...settings, enabled: settings.enabled, fileName: file.name });
       const bytes = await file.arrayBuffer();
       const nextImage: ChatBackgroundImage = {
         id: globalThis.crypto.randomUUID(), bytes, mimeType: file.type, fileName: file.name, url: nextUrl

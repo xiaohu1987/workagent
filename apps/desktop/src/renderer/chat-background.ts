@@ -1,5 +1,7 @@
 export type ChatBackgroundFit = "cover" | "contain";
 
+export type ChatBackgroundMode = "none" | "image" | "dynamic";
+
 export type ChatBackgroundSurfaceKey =
   | "windowbar"
   | "sidebar"

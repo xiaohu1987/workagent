@@ -223,6 +223,7 @@ import {
 import {
   getChatBackgroundSurfaceStyleVars,
   CHAT_BACKGROUND_SURFACE_OPTIONS,
+  type ChatBackgroundMode,
 } from "./chat-background";
 import { SettingsUsagePage } from "./settings/usage-page";
 import { SettingsUpdatePage } from "./settings/update-page";
@@ -761,6 +762,24 @@ export function App() {
     defaultEnabled: true,
     onInterrupt: () => interruptActiveThread()
   });
+  const backgroundMode: ChatBackgroundMode = realtimeEnhancement.enabled
+    ? "dynamic"
+    : chatBackgroundUrl && chatBackgroundSettings.enabled
+      ? "image"
+      : "none";
+
+  function setBackgroundMode(mode: ChatBackgroundMode) {
+    if (mode === "dynamic") {
+      updateChatBackgroundSettings({ enabled: false });
+      realtimeEnhancement.setEnabled(true);
+      return;
+    }
+
+    realtimeEnhancement.setEnabled(false);
+    updateChatBackgroundSettings({
+      enabled: mode === "image" && Boolean(chatBackgroundUrl)
+    });
+  }
   const appUpdate = useAppUpdate(showNotice);
   const {
     state: updateState,
@@ -5323,19 +5342,19 @@ export function App() {
   return (
     <div
       ref={appShellRef}
-      className={`app-shell ${chatBackgroundUrl && chatBackgroundSettings.enabled ? "has-app-background" : ""} ${realtimeEnhancement.enabled ? "has-realtime-character" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+      className={`app-shell ${backgroundMode === "image" ? "has-app-background" : ""} ${backgroundMode === "dynamic" ? "has-realtime-character" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
         isRightWorkspaceOpen ? "right-workspace-open" : ""
       } ${isTerminalOpen ? "terminal-open" : ""}`}
       style={{
         "--sidebar-pane-width": `${sidebarWidth}px`,
         "--right-workspace-pane-width": `${rightWorkspaceWidth}px`,
-        ...(chatBackgroundUrl && chatBackgroundSettings.enabled
+        ...(backgroundMode === "image"
           ? getChatBackgroundSurfaceStyleVars(chatBackgroundSettings.surfaces)
           : {})
       } as React.CSSProperties}
     >
-      {chatBackgroundUrl && chatBackgroundSettings.enabled ? <AppBackgroundLayer images={chatBackgroundImages} activeIndex={activeChatBackgroundIndex} settings={chatBackgroundSettings} /> : null}
-      {realtimeEnhancement.enabled ? <RealtimeBackgroundLayer scene={realtimeEnhancement.scene} /> : null}
+      {backgroundMode === "image" ? <AppBackgroundLayer images={chatBackgroundImages} activeIndex={activeChatBackgroundIndex} settings={chatBackgroundSettings} /> : null}
+      {backgroundMode === "dynamic" ? <RealtimeBackgroundLayer scene={realtimeEnhancement.scene} /> : null}
       <header className="windowbar">
         <div className="windowbar-left">
           <button
@@ -5402,7 +5421,7 @@ export function App() {
       ) : null}
 
       <main className="workspace">
-        {realtimeEnhancement.enabled ? (
+        {backgroundMode === "dynamic" ? (
           <RealtimeCharacterLayer
             scene={realtimeEnhancement.scene}
             onCompletedVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
@@ -5916,14 +5935,14 @@ export function App() {
                   activeImageIndex={activeChatBackgroundIndex}
                   imageUrl={chatBackgroundUrl}
                   settings={chatBackgroundSettings}
-                  realtimeEnabled={realtimeEnhancement.enabled}
+                  backgroundMode={backgroundMode}
                   isDragging={isChatBackgroundDragging}
                   onImportFiles={importChatBackgroundFiles}
                   onSelectImage={setActiveChatBackgroundIndex}
                   onMoveImage={moveChatBackgroundImage}
                   onRemoveImage={removeChatBackgroundImage}
                   onUpdateSettings={updateChatBackgroundSettings}
-                  onRealtimeEnabledChange={realtimeEnhancement.setEnabled}
+                  onBackgroundModeChange={setBackgroundMode}
                   onUpdateSurface={updateChatBackgroundSurface}
                   onBeginDrag={beginChatBackgroundDrag}
                   onMoveDrag={moveChatBackground}

@@ -3,6 +3,7 @@ import { IconImage, IconRefresh, IconTrash, IconUpload } from "../../../icons";
 import {
   CHAT_BACKGROUND_SURFACE_OPTIONS,
   getChatBackgroundTransform,
+  type ChatBackgroundMode,
   type ChatBackgroundSettings,
   type ChatBackgroundSurfaceKey,
   type ChatBackgroundSurfaces
@@ -20,20 +21,29 @@ type ChatBackgroundSettingsPatch = Partial<Omit<ChatBackgroundSettings, "surface
   surfaces?: Partial<ChatBackgroundSurfaces>;
 };
 
+const CHAT_BACKGROUND_MODE_OPTIONS: ReadonlyArray<{
+  value: ChatBackgroundMode;
+  label: string;
+}> = [
+  { value: "none", label: "无背景" },
+  { value: "image", label: "图片背景" },
+  { value: "dynamic", label: "动态背景" }
+];
+
 type AppearanceSettingsPageProps = {
   inputRef: MutableRefObject<HTMLInputElement | null>;
   images: ChatBackgroundImage[];
   activeImageIndex: number;
   imageUrl: string | null;
   settings: ChatBackgroundSettings;
-  realtimeEnabled: boolean;
+  backgroundMode: ChatBackgroundMode;
   isDragging: boolean;
   onImportFiles: (files: File[]) => Promise<void>;
   onSelectImage: (index: number) => void;
   onMoveImage: (sourceId: string, targetId: string) => Promise<void>;
   onRemoveImage: (id: string) => Promise<void>;
   onUpdateSettings: (patch: ChatBackgroundSettingsPatch) => void;
-  onRealtimeEnabledChange: (enabled: boolean) => void;
+  onBackgroundModeChange: (mode: ChatBackgroundMode) => void;
   onUpdateSurface: (key: ChatBackgroundSurfaceKey, value: number) => void;
   onBeginDrag: PointerEventHandler<HTMLImageElement>;
   onMoveDrag: PointerEventHandler<HTMLImageElement>;
@@ -48,14 +58,14 @@ export function AppearanceSettingsPage({
   activeImageIndex,
   imageUrl,
   settings,
-  realtimeEnabled,
+  backgroundMode,
   isDragging,
   onImportFiles,
   onSelectImage,
   onMoveImage,
   onRemoveImage,
   onUpdateSettings,
-  onRealtimeEnabledChange,
+  onBackgroundModeChange,
   onUpdateSurface,
   onBeginDrag,
   onMoveDrag,
@@ -251,39 +261,45 @@ export function AppearanceSettingsPage({
               </div>
             </section>
 
-            <section className="chat-background-motion-panel realtime-enhancement-settings" aria-label="实时互动背景">
-              <div className="chat-background-control-label">
-                <span>实时互动背景</span>
-                <em>根据文字消息和执行状态轻量响应</em>
-              </div>
-              <label className="chat-background-toggle">
-                <input
-                  type="checkbox"
-                  checked={realtimeEnabled}
-                  onChange={(event) => onRealtimeEnabledChange(event.target.checked)}
-                />
-                <span aria-hidden="true" />
-                <em>{realtimeEnabled ? "开启" : "关闭"}</em>
-              </label>
-            </section>
           </div>
 
           <div className="chat-background-controls">
+            <section className="chat-background-mode-panel" aria-label="背景模式">
+              <div className="chat-background-control-label">
+                <span>背景模式</span>
+                <em>三种模式互斥，只启用其中一种</em>
+              </div>
+              <div className="chat-background-mode-options" role="radiogroup" aria-label="背景模式">
+                {CHAT_BACKGROUND_MODE_OPTIONS.map((option) => {
+                  const disabled = option.value === "image" && !imageUrl;
+                  return (
+                    <label
+                      key={option.value}
+                      className={`chat-background-mode-option ${backgroundMode === option.value ? "is-selected" : ""} ${disabled ? "is-disabled" : ""}`}
+                    >
+                      <input
+                        type="radio"
+                        name="chat-background-mode"
+                        value={option.value}
+                        checked={backgroundMode === option.value}
+                        disabled={disabled}
+                        onChange={() => onBackgroundModeChange(option.value)}
+                      />
+                      <span className="chat-background-mode-radio" aria-hidden="true" />
+                      <span className="chat-background-mode-copy">
+                        <strong>{option.label}</strong>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </section>
+
             <div className="chat-background-heading">
               <div>
                 <strong>显示效果</strong>
                 <span>{imageUrl ? "画面显示与模块可读性" : "导入背景图片后可调整"}</span>
               </div>
-              <label className="chat-background-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.enabled}
-                  disabled={!imageUrl}
-                  onChange={(event) => onUpdateSettings({ enabled: event.target.checked })}
-                />
-                <span aria-hidden="true" />
-                <em>{!imageUrl ? "未设置" : settings.enabled ? "已启用" : "已停用"}</em>
-              </label>
             </div>
 
             <div className="chat-background-visual-controls">
