@@ -13647,40 +13647,6 @@ select:focus {
   font-size: 10px;
 }
 
-.generated-file-list-toggle {
-  display: inline-flex;
-  flex: 0 0 auto;
-  width: 52px;
-  height: 28px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  color: #8995a5;
-  background: transparent;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  cursor: pointer;
-}
-
-.generated-file-list-toggle:hover {
-  border-color: rgba(116, 192, 252, 0.2);
-  color: #b9d9f7;
-  background: rgba(116, 192, 252, 0.07);
-}
-
-.generated-file-list-toggle svg {
-  width: 14px;
-  height: 14px;
-  transition: transform 150ms ease;
-}
-
-.generated-file-list-toggle.is-expanded svg {
-  transform: rotate(180deg);
-}
-
 .generated-file-list-items {
   display: grid;
   gap: 0;
@@ -17526,18 +17492,23 @@ button.multimodal-picker-single.is-checked {
 .generated-file-list-count::before { content: "\00b7"; margin-right: 6px; color: #4b806d; }
 
 .generated-file-list-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
   width: 14px;
   height: 20px;
+  align-items: center;
+  justify-content: center;
   margin: 0;
   padding: 0;
   border: 0;
   color: #68a990;
   background: transparent;
-  pointer-events: auto;
+  cursor: pointer;
 }
 
-.generated-file-list-toggle > span { display: none; }
-.generated-file-list-toggle:hover { border: 0; color: #c4ced9; background: transparent; }
+.generated-file-list-toggle:hover { color: #c4ced9; background: transparent; }
+.generated-file-list-toggle svg { width: 14px; height: 14px; transition: transform 150ms ease; }
+.generated-file-list-toggle.is-expanded svg { transform: rotate(180deg); }
 
 .generated-file-list-items {
   max-height: 0;

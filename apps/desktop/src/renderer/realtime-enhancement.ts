@@ -49,6 +49,12 @@ const RUNNING_PHASES = new Set<RealtimeEnhancementPhase>([
   "executing"
 ]);
 
+const TERMINAL_PHASES = new Set<RealtimeEnhancementPhase>([
+  "completed",
+  "interrupted",
+  "failed"
+]);
+
 const DEFAULT_REACTION: RealtimeTextReaction = {
   mood: "neutral",
   accent: "#aeb8c8",
@@ -144,6 +150,7 @@ export class RealtimeEnhancementController {
   #listeners = new Set<RealtimeStateListener>();
   #ignoredTurnRunIds = new Set<string>();
   #interrupt: RealtimeInterrupt | undefined;
+  #finalResponsePending = false;
 
   public constructor(
     config: RealtimeEnhancementConfig,
@@ -166,6 +173,7 @@ export class RealtimeEnhancementController {
     this.#generation += 1;
     this.#currentTurnRunId = null;
     this.#ignoredTurnRunIds.clear();
+    this.#finalResponsePending = false;
     this.#state = createRealtimeSceneState(this.#config.threadId, this.#generation);
     this.#emit();
   }
@@ -179,12 +187,14 @@ export class RealtimeEnhancementController {
       this.#generation += 1;
       this.#currentTurnRunId = null;
       this.#ignoredTurnRunIds.clear();
+      this.#finalResponsePending = false;
       this.#state = createRealtimeSceneState(this.#config.threadId, this.#generation);
     }
     if (enabledChanged && !this.#enabled) {
       this.#generation += 1;
       this.#currentTurnRunId = null;
       this.#ignoredTurnRunIds.clear();
+      this.#finalResponsePending = false;
       this.#state = createRealtimeSceneState(this.#config.threadId, this.#generation);
     }
     if (threadChanged || enabledChanged) this.#emit();
@@ -227,6 +237,7 @@ export class RealtimeEnhancementController {
 
     this.#generation += 1;
     this.#currentTurnRunId = null;
+    this.#finalResponsePending = false;
     this.#setState({
       threadId,
       generation: this.#generation,
@@ -257,12 +268,13 @@ export class RealtimeEnhancementController {
     this.#generation += 1;
     this.#currentTurnRunId = null;
     this.#ignoredTurnRunIds.clear();
+    this.#finalResponsePending = false;
     this.#state = createRealtimeSceneState(this.#config.threadId, this.#generation);
     this.#emit();
   }
 
   public returnToIdle(turnRunId: string | null = this.#state.turnRunId): void {
-    if (!this.#enabled || this.#state.phase !== "completed") return;
+    if (!this.#enabled || !TERMINAL_PHASES.has(this.#state.phase)) return;
     if (turnRunId && this.#state.turnRunId !== turnRunId) return;
     this.#setState({
       phase: "idle",
@@ -283,7 +295,9 @@ export class RealtimeEnhancementController {
         if (!turnRunId || !this.acceptTurn(turnRunId)) return;
         this.#setState({
           turnRunId,
-          phase: "generating",
+          // The first model draft is often only a tool decision. The final
+          // response is armed by the model request after a tool batch.
+          phase: this.#finalResponsePending ? "generating" : "thinking",
           assistantText: typeof payload.content === "string" ? payload.content : this.#state.assistantText,
           activeTool: null
         });
@@ -293,13 +307,23 @@ export class RealtimeEnhancementController {
         if (!turnRunId || !this.matchesCurrentTurn(turnRunId)) return;
         const discarded = payload.discarded === true;
         if (discarded) {
-          this.sealCurrentTurn();
-          this.#setState({ turnRunId, phase: "interrupted", activeTool: null });
+          // A discarded draft is normal for a tool decision whose text is not
+          // shown to the user. It does not mean that the turn was interrupted.
+          this.#setState({
+            turnRunId,
+            phase: this.#finalResponsePending ? "generating" : "thinking",
+            activeTool: null
+          });
+        } else if (!this.#finalResponsePending) {
+          // A no-tool conversational turn can finish directly. If this was a
+          // tool decision, the following tool.started event returns to working.
+          this.#setState({ turnRunId, phase: "generating", activeTool: null });
         }
         return;
       }
       case "tool.started": {
         if (!turnRunId || !this.acceptTurn(turnRunId)) return;
+        this.#finalResponsePending = false;
         this.#setState({
           turnRunId,
           phase: "executing",
@@ -309,21 +333,40 @@ export class RealtimeEnhancementController {
       }
       case "tool.completed": {
         if (!turnRunId || !this.matchesCurrentTurn(turnRunId)) return;
+        this.#finalResponsePending = false;
         this.#setState({
           turnRunId,
-          phase: this.#state.assistantText ? "generating" : "thinking",
+          // Tool batches are one continuous task-level working phase. The
+          // next draft event will enter the final response phase.
+          phase: "thinking",
           activeTool: null
         });
         return;
       }
       case "agent.awaiting_model": {
         if (!turnRunId || !this.acceptTurn(turnRunId)) return;
-        this.#setState({ turnRunId, phase: "thinking", activeTool: null });
+        const reason = typeof payload.reason === "string" ? payload.reason : "recovery";
+        const keepGenerating = reason === "recovery" && this.#state.phase === "generating";
+        this.#finalResponsePending = reason === "after_tools" || keepGenerating;
+        this.#setState({
+          turnRunId,
+          phase: keepGenerating ? "generating" : "thinking",
+          activeTool: null
+        });
         return;
       }
       case "thread.updated": {
-        if (!this.#currentTurnRunId) return;
         const status = readThreadStatus(payload);
+        if ((status === "running" || status === "waiting") && !this.#currentTurnRunId && this.#state.phase === "idle") {
+          // Runtime work can also start from an internal resume or an already
+          // queued message, without passing through submitText().
+          this.#generation += 1;
+          this.#finalResponsePending = false;
+          this.#state = createRealtimeSceneState(this.#config.threadId, this.#generation);
+          this.#setState({ phase: "thinking" });
+          return;
+        }
+        if (!this.#currentTurnRunId) return;
         if (status === "failed") {
           this.sealCurrentTurn();
           this.#setState({ phase: "failed", activeTool: null });
@@ -342,7 +385,14 @@ export class RealtimeEnhancementController {
   private acceptTurn(turnRunId: string): boolean {
     if (this.#ignoredTurnRunIds.has(turnRunId)) return false;
     if (this.#currentTurnRunId) return this.#currentTurnRunId === turnRunId;
-    if (!RUNNING_PHASES.has(this.#state.phase)) return false;
+    if (!RUNNING_PHASES.has(this.#state.phase)) {
+      if (this.#state.phase !== "idle" && !TERMINAL_PHASES.has(this.#state.phase)) return false;
+      // Adopt turns that were started outside the composer, such as a GPA
+      // resume or a queued runtime task.
+      this.#generation += 1;
+      this.#finalResponsePending = false;
+      this.#state = createRealtimeSceneState(this.#config.threadId, this.#generation);
+    }
     this.#currentTurnRunId = turnRunId;
     return true;
   }
@@ -353,6 +403,7 @@ export class RealtimeEnhancementController {
 
   private sealCurrentTurn(): void {
     if (!this.#currentTurnRunId) return;
+    this.#finalResponsePending = false;
     this.#ignoredTurnRunIds.add(this.#currentTurnRunId);
     this.#currentTurnRunId = null;
     while (this.#ignoredTurnRunIds.size > 64) {

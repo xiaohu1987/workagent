@@ -31,9 +31,7 @@ export function FileChangeSummary({
     return null;
   }
 
-  const defaultVisibleCount = 5;
-  const canExpand = files.length > 0;
-  const visibleFiles = expanded ? files : files.slice(0, defaultVisibleCount);
+  const visibleFiles = expanded ? files : [];
 
   const clearPreviewCloseTimer = () => {
     if (closeTimerRef.current === null) return;
@@ -85,22 +83,19 @@ export function FileChangeSummary({
             <h3 className="generated-file-list-title">主要改动文件</h3>
             <span className="generated-file-list-count">{files.length}</span>
           </div>
-          {canExpand ? (
-            <button
-              type="button"
-              className={`generated-file-list-toggle ${expanded ? "is-expanded" : ""}`}
-              aria-expanded={expanded}
-              title={expanded ? "收起文件列表" : `展开全部 ${files.length} 个文件`}
-              onClick={(event) => {
-                event.stopPropagation();
-                setExpanded((current) => !current);
-                setDiffPreview(null);
-              }}
-            >
-              <span>{visibleFiles.length}/{files.length}</span>
-              <IconChevronDown />
-            </button>
-          ) : null}
+          <button
+            type="button"
+            className={`generated-file-list-toggle ${expanded ? "is-expanded" : ""}`}
+            aria-expanded={expanded}
+            title={expanded ? "收起文件列表" : `展开全部 ${files.length} 个文件`}
+            onClick={(event) => {
+              event.stopPropagation();
+              setExpanded((current) => !current);
+              setDiffPreview(null);
+            }}
+          >
+            <IconChevronDown />
+          </button>
         </header>
         <ul className="generated-file-list-items">
           {visibleFiles.map((file) => (
@@ -289,4 +284,3 @@ function getConversationTurnMarkerWidth(content: string) {
   const length = content.trim().length;
   return Math.min(28, Math.max(7, 6 + Math.round(Math.sqrt(length) * 2.1)));
 }
-

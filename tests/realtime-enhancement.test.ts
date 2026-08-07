@@ -29,7 +29,7 @@ describe("realtime enhancement controller", () => {
       content: "I am checking the project."
     }));
     expect(controller.getState()).toMatchObject({
-      phase: "generating",
+      phase: "thinking",
       turnRunId: "turn-1",
       assistantText: "I am checking the project."
     });
@@ -44,7 +44,26 @@ describe("realtime enhancement controller", () => {
       turnRunId: "turn-1",
       toolName: "fs.read_directory"
     }));
-    expect(controller.getState()).toMatchObject({ phase: "generating", activeTool: null });
+    expect(controller.getState()).toMatchObject({ phase: "thinking", activeTool: null });
+
+    controller.handleRuntimeEvent(event("agent.awaiting_model", {
+      turnRunId: "turn-1",
+      reason: "after_tools"
+    }));
+    expect(controller.getState()).toMatchObject({ phase: "thinking", activeTool: null });
+
+    controller.handleRuntimeEvent(event("assistant.draft.updated", {
+      turnRunId: "turn-1",
+      draftId: "draft-2",
+      content: "The project is ready."
+    }));
+    expect(controller.getState()).toMatchObject({ phase: "generating", assistantText: "The project is ready." });
+
+    controller.handleRuntimeEvent(event("agent.awaiting_model", {
+      turnRunId: "turn-1",
+      reason: "recovery"
+    }));
+    expect(controller.getState().phase).toBe("generating");
 
     controller.handleRuntimeEvent(event("assistant.completed", {
       turnRunId: "turn-1",
@@ -89,7 +108,7 @@ describe("realtime enhancement controller", () => {
       turnRunId: "turn-new",
       content: "new response"
     }));
-    expect(controller.getState()).toMatchObject({ phase: "generating", turnRunId: "turn-new", assistantText: "new response" });
+    expect(controller.getState()).toMatchObject({ phase: "thinking", turnRunId: "turn-new", assistantText: "new response" });
   });
 
   it("keeps a turn open when an assistant output is followed by a tool call", async () => {
@@ -113,7 +132,7 @@ describe("realtime enhancement controller", () => {
     });
   });
 
-  it("ignores events from another thread and marks discarded output interrupted", async () => {
+  it("ignores events from another thread without treating discarded tool output as interruption", async () => {
     const controller = new RealtimeEnhancementController({ enabled: true, threadId: "thread-1" });
     await controller.submitText("cancel this");
     controller.handleRuntimeEvent(event("assistant.draft.updated", {
@@ -130,7 +149,32 @@ describe("realtime enhancement controller", () => {
       turnRunId: "turn-1",
       discarded: true
     }));
-    expect(controller.getState()).toMatchObject({ phase: "interrupted", assistantText: "partial" });
+    expect(controller.getState()).toMatchObject({ phase: "thinking", assistantText: "partial" });
+
+    controller.handleRuntimeEvent(event("tool.started", {
+      turnRunId: "turn-1",
+      toolName: "fs.read_directory"
+    }));
+    expect(controller.getState()).toMatchObject({ phase: "executing", activeTool: "fs.read_directory" });
+  });
+
+  it("adopts runtime work that did not pass through the composer", () => {
+    const controller = new RealtimeEnhancementController({ enabled: true, threadId: "thread-1" });
+
+    controller.handleRuntimeEvent(event("thread.updated", {
+      thread: { status: "running" }
+    }));
+    expect(controller.getState()).toMatchObject({ phase: "thinking", turnRunId: null });
+
+    controller.handleRuntimeEvent(event("tool.started", {
+      turnRunId: "turn-resumed",
+      toolName: "fs.write_file"
+    }));
+    expect(controller.getState()).toMatchObject({
+      phase: "executing",
+      turnRunId: "turn-resumed",
+      activeTool: "fs.write_file"
+    });
   });
 
   it("reacts to text and runtime phase without making another model request", () => {
@@ -146,5 +190,31 @@ describe("realtime enhancement controller", () => {
       assistantText: "success",
       activeTool: null
     })).toMatchObject({ mood: "success", pulse: false });
+  });
+
+  it("returns failed and interrupted terminal states to idle", async () => {
+    const controller = new RealtimeEnhancementController({ enabled: true, threadId: "thread-1" });
+
+    await controller.submitText("fail this");
+    controller.handleRuntimeEvent(event("assistant.draft.updated", {
+      turnRunId: "turn-failed",
+      content: "working"
+    }));
+    controller.handleRuntimeEvent(event("thread.updated", {
+      thread: { status: "failed" }
+    }));
+    expect(controller.getState().phase).toBe("failed");
+    controller.returnToIdle("turn-failed");
+    expect(controller.getState().phase).toBe("idle");
+
+    await controller.submitText("interrupt this");
+    controller.handleRuntimeEvent(event("assistant.draft.updated", {
+      turnRunId: "turn-interrupted",
+      content: "working"
+    }));
+    await controller.interrupt();
+    expect(controller.getState().phase).toBe("interrupted");
+    controller.returnToIdle("turn-interrupted");
+    expect(controller.getState().phase).toBe("idle");
   });
 });

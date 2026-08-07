@@ -7051,12 +7051,16 @@ export function resolveRequestedDeliverableExtensions(request: string): string[]
 export function extractTaskTopicAnchors(request: string): string[] {
   const anchors = new Set<string>();
   const ignored = new Set(["MCP", "HTTP", "HTTPS", "API", "SELECTED", "SERVER", "DOC", "DOCX", "WORD", "PDF"]);
-  for (const match of request.matchAll(/\b[A-Z][A-Z0-9_.-]{1,40}\b/g)) {
+  // Uppercase tokens inside pasted templates are examples, not stable task
+  // topics. Keeping them makes artifact validation reject relevant outputs
+  // because placeholders such as XX or ID_001 are missing.
+  const prose = request.replace(/```[\s\S]*?```/g, " ");
+  for (const match of prose.matchAll(/\b[A-Z][A-Z0-9_.-]{1,40}\b/g)) {
     const value = match[0].toUpperCase();
     if (!ignored.has(value)) anchors.add(match[0]);
   }
   for (const phrase of ["项目结项", "自动化提单", "自动提单", "自动化审批", "自动审批"]) {
-    if (request.includes(phrase)) anchors.add(phrase);
+    if (prose.includes(phrase)) anchors.add(phrase);
   }
   return [...anchors].slice(0, 12);
 }
@@ -7173,7 +7177,10 @@ export function validateRequestedArtifactAlignment(input: {
   if (input.topicAnchors.length === 0) return [];
   const searchable = verified.map((artifact) => artifact.preview).join("\n").toLowerCase();
   const matched = input.topicAnchors.filter((anchor) => searchable.includes(anchor.toLowerCase()));
-  const minimumMatches = Math.min(2, input.topicAnchors.length);
+  // A deliverable may focus on one of several topics in a compound request.
+  // Require one stable match, while still rejecting a completely unrelated
+  // artifact.
+  const minimumMatches = 1;
   if (matched.length < minimumMatches) {
     return [
       `The deliverable content is unrelated to the inherited task. Expected topic anchors include ${input.topicAnchors.join(", ")}; matched ${matched.length}.`
@@ -7424,13 +7431,22 @@ export function buildStandardCompletionAuditRecoveryInstruction(gaps: string[]):
 
 export function requiresStructuredTestCaseDeliverable(request: string): boolean {
   const normalized = request.trim().replace(/\s+/g, " ");
-  if (!/(?:\btest\s*cases?\b|\btestcases?\b|\u6d4b\u8bd5(?:\u7528\u4f8b|\u6848\u4f8b))/i.test(normalized)) {
+  const testCasePattern = /(?:\btest\s*cases?\b|\btestcases?\b|\u6d4b\u8bd5(?:\u7528\u4f8b|\u6848\u4f8b))/i;
+  if (!testCasePattern.test(normalized)) {
     return false;
   }
   if (/(?:\u4e00\u53e5(?:\u8bdd)?(?:\u603b\u7ed3|\u6982\u62ec)|\u4e00\u53e5(?:\u8bdd)?\u6458\u8981|one[- ]sentence\s+(?:summary|overview)|single[- ]sentence\s+(?:summary|overview))/i.test(normalized)) {
     return false;
   }
-  return /(?:\u8f93\u51fa|\u751f\u6210|\u7f16\u5199|\u8bbe\u8ba1|\u63d0\u4f9b|\u5217\u51fa|\u6574\u7406|\u521b\u5efa|\u7ed9\u6211|\u4ea7\u51fa|\u8865\u5145|\u5199(?:\u4e00\u4efd|\u51fa)?|\bwrite\b|\bgenerate\b|\bcreate\b|\bprovide\b|\blist\b|\bproduce\b|\bdesign\b|\bdraft\b|\bgive\s+me\b)/i.test(normalized);
+
+  const requestVerb = "(?:\u8f93\u51fa|\u751f\u6210|\u7f16\u5199|\u8bbe\u8ba1|\u63d0\u4f9b|\u5217\u51fa|\u6574\u7406|\u521b\u5efa|\u7ed9\u6211|\u4ea7\u51fa|\u8865\u5145|\u5199(?:\u4e00\u4efd|\u51fa)?|\\bwrite\\b|\\bgenerate\\b|\\bcreate\\b|\\bprovide\\b|\\blist\\b|\\bproduce\\b|\\bdesign\\b|\\bdraft\\b|\\bgive\\s+me\\b)";
+  // "可用于测试用例编写" describes a downstream use case; it is not a
+  // request to generate test cases as the current deliverable.
+  const usageMention = /(?:\u7528\u4e8e|\u53ef\u7528\u4e8e|\u4f9b|\u652f\u6301|\u4fbf\u4e8e|\u65b9\u4fbf)[^。！？;；\n]{0,80}(?:\u6d4b\u8bd5(?:\u7528\u4f8b|\u6848\u4f8b)|\btest\s*cases?\b)/i;
+  const directRequestText = normalized.replace(usageMention, " ");
+  const requestedBeforeTerm = new RegExp(`(?:^|[，。！？;；\\n])[^。！？;；\\n]{0,40}${requestVerb}[^。！？;；\\n]{0,20}${testCasePattern.source}`, "i");
+  const requestedAfterTerm = new RegExp(`${testCasePattern.source}[^。！？;；\\n]{0,20}${requestVerb}`, "i");
+  return requestedBeforeTerm.test(directRequestText) || requestedAfterTerm.test(directRequestText);
 }
 
 export function hasSubstantiveTestCaseDeliverable(content: string): boolean {

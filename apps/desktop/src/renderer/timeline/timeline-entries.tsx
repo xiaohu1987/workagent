@@ -1,6 +1,7 @@
 import { Fragment, memo, useMemo } from "react";
 import type { RefObject } from "react";
 import type { ToolCallRecord } from "@shared-types";
+import { shouldKeepTimelineEntryWhenTurnCollapsed } from "../lib/conversation-utils";
 import type { TimelineEntry } from "../lib/conversation-utils";
 import type { UserMessageActions } from "./transcript";
 import { TurnElapsedBanner } from "../cards/runtime-cards";
@@ -57,12 +58,7 @@ export const TimelineEntries = memo(function TimelineEntries({
 }: Props) {
   const visibleEntries = useMemo(() => entries.filter((entry) => {
     const entryTurn = turnByEntryId.get(entry.id);
-    if (
-      entryTurn &&
-      collapsedTurnIds.has(entryTurn.id) &&
-      entry.id !== entryTurn.userEntryId &&
-      entry.id !== entryTurn.summaryEntryId
-    ) {
+    if (!shouldKeepTimelineEntryWhenTurnCollapsed(entry, entryTurn, collapsedTurnIds)) {
       return false;
     }
     return !(

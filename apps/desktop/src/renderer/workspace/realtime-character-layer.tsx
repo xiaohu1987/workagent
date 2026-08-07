@@ -10,7 +10,7 @@ import type { RealtimeSceneState } from "../realtime-enhancement";
 
 type Props = {
   scene: RealtimeSceneState;
-  onCompletedVideoEnd?: () => void;
+  onTerminalVideoEnd?: () => void;
 };
 
 type CharacterStyle = CSSProperties & {
@@ -22,27 +22,39 @@ type VideoSlot = {
   source: string | null;
 };
 
-const videoByPhase: Record<RealtimeSceneState["phase"], string> = {
+type PlaybackMode = "idle" | "working" | "generating" | "completed" | "interrupted" | "failed";
+
+const videoByMode: Record<Exclude<PlaybackMode, "working">, string> = {
   idle: idleVideo,
-  thinking: thinkingVideo,
   generating: generatingVideo,
-  executing: executingVideo,
   completed: completedVideo,
   interrupted: interruptedVideo,
   failed: failedVideo
 };
 
-export function RealtimeCharacterLayer({ scene, onCompletedVideoEnd }: Props) {
-  const videoSource = videoByPhase[scene.phase];
+function getPlaybackMode(phase: RealtimeSceneState["phase"]): PlaybackMode {
+  if (phase === "thinking" || phase === "executing") return "working";
+  return phase;
+}
+
+function isWorkingSource(source: string | null): boolean {
+  return source === thinkingVideo || source === executingVideo;
+}
+
+export function RealtimeCharacterLayer({ scene, onTerminalVideoEnd }: Props) {
+  const playbackMode = getPlaybackMode(scene.phase);
+  const initialSource = playbackMode === "working" ? thinkingVideo : videoByMode[playbackMode];
   const [videoSlots, setVideoSlots] = useState<VideoSlot[]>(() => [
-    { source: videoSource },
+    { source: initialSource },
     { source: null }
   ]);
   const [activeSlot, setActiveSlot] = useState(0);
   const activeSlotRef = useRef(0);
   const videoSlotsRef = useRef(videoSlots);
   const pendingSwitchRef = useRef<{ slot: number; source: string; token: number } | null>(null);
-  const requestedSourceRef = useRef(videoSource);
+  const requestedSourceRef = useRef(initialSource);
+  const desiredModeRef = useRef<PlaybackMode>(playbackMode);
+  const sceneIdentityRef = useRef({ generation: scene.generation, turnRunId: scene.turnRunId });
   const readySlotSourcesRef = useRef(new Map<number, string>());
   const videoElementsRef = useRef(new Map<number, HTMLVideoElement>());
   const activeVideoEndedRef = useRef(false);
@@ -50,7 +62,6 @@ export function RealtimeCharacterLayer({ scene, onCompletedVideoEnd }: Props) {
 
   videoSlotsRef.current = videoSlots;
   activeSlotRef.current = activeSlot;
-  requestedSourceRef.current = videoSource;
 
   const activatePendingVideo = (element?: HTMLVideoElement) => {
     const pendingSwitch = pendingSwitchRef.current;
@@ -64,9 +75,10 @@ export function RealtimeCharacterLayer({ scene, onCompletedVideoEnd }: Props) {
     setActiveSlot(pendingSwitch.slot);
   };
 
-  useEffect(() => {
+  const requestVideoSource = (source: string) => {
     const currentActiveSource = videoSlotsRef.current[activeSlotRef.current]?.source;
-    if (currentActiveSource === videoSource) {
+    requestedSourceRef.current = source;
+    if (currentActiveSource === source) {
       pendingSwitchRef.current = null;
       return;
     }
@@ -74,22 +86,52 @@ export function RealtimeCharacterLayer({ scene, onCompletedVideoEnd }: Props) {
     const nextSlot = activeSlotRef.current === 0 ? 1 : 0;
     const pendingSwitch = {
       slot: nextSlot,
-      source: videoSource,
+      source,
       token: switchTokenRef.current + 1
     };
     switchTokenRef.current = pendingSwitch.token;
     pendingSwitchRef.current = pendingSwitch;
     const nextElement = videoElementsRef.current.get(nextSlot);
-    if (videoSlotsRef.current[nextSlot]?.source !== videoSource || !nextElement || nextElement.readyState < 3) {
+    if (videoSlotsRef.current[nextSlot]?.source !== source || !nextElement || nextElement.readyState < 3) {
       readySlotSourcesRef.current.delete(nextSlot);
     } else {
-      readySlotSourcesRef.current.set(nextSlot, videoSource);
+      readySlotSourcesRef.current.set(nextSlot, source);
     }
     setVideoSlots((current) => current.map((slot, index) => (
-      index === nextSlot ? { source: videoSource } : slot
+      index === nextSlot ? { source } : slot
     )));
     activatePendingVideo(nextElement);
-  }, [videoSource]);
+  };
+
+  const requestPlaybackMode = (mode: PlaybackMode, restartWorking = false) => {
+    desiredModeRef.current = mode;
+    const currentActiveSource = videoSlotsRef.current[activeSlotRef.current]?.source ?? null;
+
+    if (mode === "working") {
+      const shouldStartWithThinking = restartWorking || !isWorkingSource(currentActiveSource);
+      if (!shouldStartWithThinking) {
+        // Tool events can change thinking/executing metadata without changing
+        // the task-level working video sequence.
+        pendingSwitchRef.current = null;
+        requestedSourceRef.current = currentActiveSource as string;
+        return;
+      }
+      requestVideoSource(thinkingVideo);
+      return;
+    }
+
+    requestVideoSource(videoByMode[mode]);
+  };
+
+  useEffect(() => {
+    const identityChanged = sceneIdentityRef.current.generation !== scene.generation ||
+      sceneIdentityRef.current.turnRunId !== scene.turnRunId;
+    if (identityChanged) {
+      sceneIdentityRef.current = { generation: scene.generation, turnRunId: scene.turnRunId };
+    }
+
+    requestPlaybackMode(playbackMode, identityChanged && playbackMode === "working");
+  }, [scene.generation, scene.phase, scene.turnRunId, playbackMode]);
 
   const handleVideoCanPlay = (slot: number, source: string, element: HTMLVideoElement) => {
     readySlotSourcesRef.current.set(slot, source);
@@ -104,8 +146,23 @@ export function RealtimeCharacterLayer({ scene, onCompletedVideoEnd }: Props) {
     if (slot !== activeSlotRef.current || videoSlotsRef.current[slot]?.source !== source) return;
 
     activeVideoEndedRef.current = true;
-    if (source === completedVideo && requestedSourceRef.current === source) {
-      onCompletedVideoEnd?.();
+    const mode = desiredModeRef.current;
+
+    if (mode === "working") {
+      const nextSource = source === thinkingVideo ? executingVideo : thinkingVideo;
+      requestVideoSource(nextSource);
+      activatePendingVideo(videoElementsRef.current.get(
+        activeSlotRef.current === 0 ? 1 : 0
+      ));
+      return;
+    }
+
+    if (
+      (mode === "completed" || mode === "failed" || mode === "interrupted") &&
+      source === videoByMode[mode] &&
+      requestedSourceRef.current === source
+    ) {
+      onTerminalVideoEnd?.();
       return;
     }
 
@@ -113,6 +170,13 @@ export function RealtimeCharacterLayer({ scene, onCompletedVideoEnd }: Props) {
       activatePendingVideo(videoElementsRef.current.get(
         activeSlotRef.current === 0 ? 1 : 0
       ));
+      return;
+    }
+
+    if (mode === "idle" || mode === "generating") {
+      activeVideoEndedRef.current = false;
+      element.currentTime = 0;
+      void element.play().catch(() => undefined);
       return;
     }
 

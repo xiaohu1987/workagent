@@ -448,6 +448,19 @@ export function buildConversationTurnSections(entries: TimelineEntry[]): Convers
   return sections;
 }
 
+export function shouldKeepTimelineEntryWhenTurnCollapsed(
+  entry: TimelineEntry,
+  turn: Pick<ConversationTurnSection, "id" | "userEntryId" | "summaryEntryId"> | undefined,
+  collapsedTurnIds: Set<string>
+): boolean {
+  if (!turn || !collapsedTurnIds.has(turn.id)) {
+    return true;
+  }
+  return entry.id === turn.userEntryId
+    || entry.id === turn.summaryEntryId
+    || entry.kind === "file-summary";
+}
+
 export function getDefaultCollapsedConversationTurnIds(
   sections: Array<{ id: string }>,
   latestTurnId: string | null,

@@ -37,7 +37,8 @@ import {
   resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
   selectActiveAssistantDraft,
-  shouldKeepAssistantDraft
+  shouldKeepAssistantDraft,
+  shouldKeepTimelineEntryWhenTurnCollapsed
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
 import { getSidebarUpdateReminder } from "../apps/desktop/src/renderer/App";
@@ -539,6 +540,39 @@ describe("tool timeline grouping", () => {
 
     expect(getDefaultCollapsedConversationTurnIds(sections, "turn-3", true)).toEqual(["turn-1", "turn-2"]);
     expect(getDefaultCollapsedConversationTurnIds(sections, "turn-3", false)).toEqual(["turn-1", "turn-2", "turn-3"]);
+  });
+
+  it("keeps the file summary visible when a completed turn is collapsed", () => {
+    const makeMessage = (id: string, role: MessageRecord["role"], createdAt: string): MessageRecord => ({
+      id,
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role,
+      content: id,
+      metadataJson: null,
+      createdAt
+    });
+    const entries = buildTimelineEntries([
+      makeMessage("user-1", "user", "2026-07-15T00:00:00.000Z"),
+      makeMessage("assistant-1", "assistant", "2026-07-15T00:00:02.000Z")
+    ], [makeToolCall({
+      toolName: "apply_patch",
+      argumentsJson: JSON.stringify({
+        patch: "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"
+      }),
+      resultJson: JSON.stringify({
+        changes: [{ path: "src/App.tsx", action: "update", additions: 1, deletions: 1 }]
+      })
+    })], []);
+    const section = buildConversationTurnSections(entries)[0];
+    const fileSummary = entries.find((entry) => entry.kind === "file-summary");
+    const toolGroup = entries.find((entry) => entry.kind === "tool-group");
+
+    expect(section).toBeDefined();
+    expect(fileSummary).toBeDefined();
+    expect(toolGroup).toBeDefined();
+    expect(shouldKeepTimelineEntryWhenTurnCollapsed(fileSummary!, section, new Set([section!.id]))).toBe(true);
+    expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, section, new Set([section!.id]))).toBe(false);
   });
 
   it("builds message, elapsed-control, and response sections for every user turn", () => {

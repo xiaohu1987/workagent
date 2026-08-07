@@ -139,6 +139,7 @@ import {
   resolveRequestedDeliverableExtensions,
   extractTaskTopicAnchors,
   validateRequestedArtifactAlignment,
+  requiresStructuredTestCaseDeliverable,
   isExplicitMcpRequest,
   validateProjectMcpPriority,
   buildProjectWorkspacePriorityPrompt,
@@ -581,6 +582,27 @@ describe("requested artifact semantic alignment", () => {
       topicAnchors: ["A2", "TM", "自动提单", "自动审批"]
     });
     expect(reasons.join(" ")).toContain("unrelated");
+  });
+
+  it("ignores uppercase placeholders inside pasted templates", () => {
+    const request = [
+      "创建一个需求拆分 Skill，支持 PRD 和 OA 需求。",
+      "```markdown",
+      "### 功能点X：XX",
+      "PC、B1、B2、ID、ID_001",
+      "```"
+    ].join("\n");
+
+    expect(extractTaskTopicAnchors(request)).toEqual(expect.arrayContaining(["PRD", "OA"]));
+    expect(extractTaskTopicAnchors(request)).not.toEqual(expect.arrayContaining(["XX", "PC", "B1", "B2", "ID", "ID_001"]));
+  });
+
+  it("accepts a related artifact when one stable topic anchor matches", () => {
+    expect(validateRequestedArtifactAlignment({
+      requestedExtensions: [".md"],
+      evidence: [{ ...correctEvidence[0]!, extension: ".md", preview: "PRD 需求拆分 Skill" }],
+      topicAnchors: ["PRD", "OA"]
+    })).toEqual([]);
   });
 });
 
@@ -1250,6 +1272,13 @@ describe("standard completion validation", () => {
     expect(result.missingRequestedDeliverable).toBe(true);
     expect(result.reasons).toContain("The requested test-case deliverable does not contain actual structured test cases.");
     expect(buildStandardCompletionRecoveryInstruction(result)).toContain("Provide the actual test cases now");
+  });
+
+  it("does not treat a downstream test-case use mention as the requested deliverable", () => {
+    expect(requiresStructuredTestCaseDeliverable(
+      "生成需求文档原子化拆分 Skill，每个功能点可独立用于任务分配、开发排期、测试用例编写与归档。"
+    )).toBe(false);
+    expect(requiresStructuredTestCaseDeliverable("请输出一份测试用例")).toBe(true);
   });
 
   it("accepts a test-case response containing identifiable steps and expected results", () => {

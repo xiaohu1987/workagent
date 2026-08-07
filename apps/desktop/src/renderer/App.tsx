@@ -2667,16 +2667,19 @@ export function App() {
   const collapsedTurnIds = useMemo(() => {
     if (!activeSnapshotThreadId) return new Set<string>();
     const stored = collapsedConversationTurns[activeSnapshotThreadId];
-    if (stored !== undefined || initializedConversationTurnsByThreadRef.current[activeSnapshotThreadId]) {
-      return stored ?? new Set<string>();
+    const collapsed = stored !== undefined || initializedConversationTurnsByThreadRef.current[activeSnapshotThreadId]
+      ? new Set(stored ?? [])
+      : new Set(
+          getDefaultCollapsedConversationTurnIds(
+            conversationTurnSections,
+            latestConversationTurn?.id ?? null,
+            isTaskProcessing
+          )
+        );
+    if (isTaskProcessing && latestConversationTurn) {
+      collapsed.delete(latestConversationTurn.id);
     }
-    return new Set(
-      getDefaultCollapsedConversationTurnIds(
-        conversationTurnSections,
-        latestConversationTurn?.id ?? null,
-        isTaskProcessing
-      )
-    );
+    return collapsed;
   }, [activeSnapshotThreadId, collapsedConversationTurns, conversationTurnSections, latestConversationTurn?.id, isTaskProcessing]);
   useEffect(() => {
     if (!activeSnapshotThreadId) return;
@@ -4188,7 +4191,7 @@ export function App() {
     }
     let realtimeSubmissionStarted = false;
     try {
-      if (realtimeEnhancement.enabled && !options?.internal) {
+      if (realtimeEnhancement.enabled) {
         await realtimeEnhancement.submitText(inputContent, threadId);
         realtimeSubmissionStarted = true;
       }
@@ -5424,7 +5427,7 @@ export function App() {
         {backgroundMode === "dynamic" ? (
           <RealtimeCharacterLayer
             scene={realtimeEnhancement.scene}
-            onCompletedVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
+            onTerminalVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
           />
         ) : null}
         <WorkspaceControls
