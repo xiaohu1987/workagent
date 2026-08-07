@@ -252,6 +252,7 @@ import { useTerminalSessions } from "./hooks/use-terminal-sessions";
 import { useQuickNotes } from "./hooks/use-quick-notes";
 import { useHistorySearch } from "./hooks/use-history-search";
 import { useChatBackground } from "./hooks/use-chat-background";
+import { useRealtimeEnhancement } from "./hooks/use-realtime-enhancement";
 import { useAppUpdate } from "./hooks/use-app-update";
 import { useFetchedProviderModels } from "./hooks/use-fetched-provider-models";
 import { useMultimodalSettings } from "./hooks/use-multimodal-settings";
@@ -287,6 +288,8 @@ import { CHAT_WELCOME_CARDS, PROJECT_WELCOME_CARDS } from "./chat/welcome-cards"
 import { ComposerAttachments } from "./composer/composer-attachments";
 import { ComposerAddMenu } from "./composer/composer-add-menu";
 import { AppBackgroundLayer } from "./workspace/app-background-layer";
+import { RealtimeBackgroundLayer } from "./workspace/realtime-background-layer";
+import { RealtimeCharacterLayer } from "./workspace/realtime-character-layer";
 import { WorkspaceControls } from "./workspace/workspace-controls";
 import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEffortPicker, type ComposerModelGroup } from "./composer/model-controls";
 import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel } from "./cards/runtime-cards";
@@ -753,6 +756,11 @@ export function App() {
     resetSurfaces: resetChatBackgroundSurfaces,
     clear: clearChatBackground
   } = chatBackground;
+  const realtimeEnhancement = useRealtimeEnhancement({
+    threadId: selectedThreadId,
+    defaultEnabled: true,
+    onInterrupt: () => interruptActiveThread()
+  });
   const appUpdate = useAppUpdate(showNotice);
   const {
     state: updateState,
@@ -4042,11 +4050,22 @@ export function App() {
       return;
     }
 
+    let realtimeInterruptedForSubmission = false;
+    const shouldInterruptForRealtime = realtimeEnhancement.enabled &&
+      !options?.internal &&
+      threadId === (activeSnapshotThreadId ?? selectedThreadId) &&
+      (isThreadExecutionInProgress(selectedThreadStatus) || realtimeEnhancement.controller.isActive);
+    if (shouldInterruptForRealtime) {
+      await realtimeEnhancement.interrupt();
+      realtimeInterruptedForSubmission = true;
+    }
+
     const displayContent = options?.displayContent
       ?? (options?.internal && (forcedContent ?? inputContent).trim().startsWith("[internal:")
         ? "继续"
         : forcedContent ?? inputContent);
     const queueingBehindActiveTask =
+      !realtimeInterruptedForSubmission &&
       !interruptingThreadIdsRef.current.has(threadId) && (
         isThreadExecutionInProgress(selectedThreadStatus) ||
         isPreparingRuntime ||
@@ -4148,9 +4167,15 @@ export function App() {
     if (!options?.internal) {
       setComposerSubmission(null);
     }
+    let realtimeSubmissionStarted = false;
     try {
+      if (realtimeEnhancement.enabled && !options?.internal) {
+        await realtimeEnhancement.submitText(inputContent, threadId);
+        realtimeSubmissionStarted = true;
+      }
       await window.codexh.sendMessage({ threadId, content: raw, displayContent, attachments: importedAttachments, mediaIntent: submittedMediaIntent });
     } catch (error) {
+      if (realtimeSubmissionStarted) realtimeEnhancement.reset();
       if (optimisticMessage) {
         removeOptimisticUserMessage(threadId, optimisticMessage.id);
       }
@@ -5298,7 +5323,7 @@ export function App() {
   return (
     <div
       ref={appShellRef}
-      className={`app-shell ${chatBackgroundUrl && chatBackgroundSettings.enabled ? "has-app-background" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+      className={`app-shell ${chatBackgroundUrl && chatBackgroundSettings.enabled ? "has-app-background" : ""} ${realtimeEnhancement.enabled ? "has-realtime-character" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
         isRightWorkspaceOpen ? "right-workspace-open" : ""
       } ${isTerminalOpen ? "terminal-open" : ""}`}
       style={{
@@ -5310,6 +5335,7 @@ export function App() {
       } as React.CSSProperties}
     >
       {chatBackgroundUrl && chatBackgroundSettings.enabled ? <AppBackgroundLayer images={chatBackgroundImages} activeIndex={activeChatBackgroundIndex} settings={chatBackgroundSettings} /> : null}
+      {realtimeEnhancement.enabled ? <RealtimeBackgroundLayer scene={realtimeEnhancement.scene} /> : null}
       <header className="windowbar">
         <div className="windowbar-left">
           <button
@@ -5376,6 +5402,12 @@ export function App() {
       ) : null}
 
       <main className="workspace">
+        {realtimeEnhancement.enabled ? (
+          <RealtimeCharacterLayer
+            scene={realtimeEnhancement.scene}
+            onCompletedVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
+          />
+        ) : null}
         <WorkspaceControls
           tokenUsage={threadTokenUsage.thread}
           tokenUsageOpen={isTokenUsagePanelOpen}
@@ -5884,12 +5916,14 @@ export function App() {
                   activeImageIndex={activeChatBackgroundIndex}
                   imageUrl={chatBackgroundUrl}
                   settings={chatBackgroundSettings}
+                  realtimeEnabled={realtimeEnhancement.enabled}
                   isDragging={isChatBackgroundDragging}
                   onImportFiles={importChatBackgroundFiles}
                   onSelectImage={setActiveChatBackgroundIndex}
                   onMoveImage={moveChatBackgroundImage}
                   onRemoveImage={removeChatBackgroundImage}
                   onUpdateSettings={updateChatBackgroundSettings}
+                  onRealtimeEnabledChange={realtimeEnhancement.setEnabled}
                   onUpdateSurface={updateChatBackgroundSurface}
                   onBeginDrag={beginChatBackgroundDrag}
                   onMoveDrag={moveChatBackground}

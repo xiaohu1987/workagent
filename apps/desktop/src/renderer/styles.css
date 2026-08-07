@@ -19523,6 +19523,10 @@ select option:checked {
   background: transparent !important;
 }
 
+.app-shell.has-realtime-character .message-card.user {
+  background: transparent !important;
+}
+
 .app-shell.has-app-background .agent-activity-list {
   background: rgba(12, 14, 18, min(0.55, calc(var(--app-bg-workspace) + 0.18)));
   backdrop-filter: blur(10px);
@@ -19688,6 +19692,162 @@ body:has(.app-shell.has-app-background) .file-preview-editor-shell,
 body:has(.app-shell.has-app-background) .file-preview-lightbox-code,
 body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   background: transparent;
+}
+
+/* Optional text-driven interaction layer. It sits above the image and below workspace surfaces. */
+.realtime-enhancement-layer {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: var(--realtime-intensity, 0);
+  transition: opacity 280ms ease;
+}
+
+.realtime-enhancement-layer::before {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  border: 1px solid color-mix(in srgb, var(--realtime-accent) 34%, transparent);
+  box-shadow: inset 0 0 110px color-mix(in srgb, var(--realtime-accent) 22%, transparent);
+  transition: border-color 280ms ease, box-shadow 280ms ease;
+}
+
+.realtime-enhancement-layer::after {
+  content: "";
+  position: absolute;
+  left: 14%;
+  right: 14%;
+  bottom: 16%;
+  height: 1px;
+  background: var(--realtime-accent);
+  opacity: var(--realtime-intensity, 0.2);
+  transform: scaleX(0.22);
+  transform-origin: center;
+  transition: opacity 280ms ease, transform 360ms ease;
+}
+
+.realtime-enhancement-layer[data-pulse="true"]::after {
+  transform: scaleX(1);
+  animation: realtime-enhancement-pulse 2.4s ease-in-out infinite;
+}
+
+.realtime-enhancement-settings {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.realtime-character-layer {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  isolation: isolate;
+}
+
+.workspace > .chat-canvas,
+.workspace > .workspace-terminal-drawer {
+  position: relative;
+  z-index: 1;
+}
+
+.realtime-character-frame {
+  position: absolute;
+  right: clamp(22px, 3vw, 64px);
+  top: clamp(72px, 9vh, 112px);
+  width: clamp(340px, 38vw, 680px);
+  height: clamp(520px, 74vh, 820px);
+  border: 1px solid color-mix(in srgb, var(--character-accent) 22%, transparent);
+  border-left-color: transparent;
+  border-bottom-color: transparent;
+  opacity: 0.38;
+  transform: translate3d(0, -6px, 0);
+  transition: border-color 260ms ease, transform 460ms ease;
+}
+
+.realtime-human-video-stack {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.82) 20%, #000 42%);
+}
+
+.realtime-human-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 100% 50%;
+  opacity: 0.78;
+  filter: saturate(0.92) contrast(0.98) brightness(0.86);
+  mix-blend-mode: screen;
+  transform: scale(1) translate3d(0, 0, 0);
+  transition: opacity 680ms ease, transform 8s ease;
+  will-change: opacity, transform;
+}
+
+.realtime-human-video.is-active {
+  z-index: 1;
+}
+
+.realtime-human-video.is-preparing {
+  z-index: 0;
+  opacity: 0;
+}
+
+.realtime-character-scan {
+  display: none;
+  position: absolute;
+  top: 19%;
+  right: 4%;
+  width: min(520px, 38vw);
+  height: 1px;
+  background: color-mix(in srgb, var(--character-accent) 76%, transparent);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--character-accent) 44%, transparent);
+  opacity: 0;
+  transform: translateY(0);
+  animation: realtime-human-scan 5.8s linear infinite;
+}
+
+.realtime-character-layer[data-phase="thinking"] .realtime-character-scan,
+.realtime-character-layer[data-phase="generating"] .realtime-character-scan,
+.realtime-character-layer[data-phase="executing"] .realtime-character-scan {
+  opacity: 0.42;
+}
+
+@keyframes realtime-human-scan {
+  0% { transform: translateY(-80px); opacity: 0; }
+  18% { opacity: 0.42; }
+  82% { opacity: 0.42; }
+  100% { transform: translateY(420px); opacity: 0; }
+}
+
+@keyframes realtime-enhancement-pulse {
+  0%, 100% { opacity: 0.34; }
+  50% { opacity: 0.82; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .realtime-enhancement-layer,
+  .realtime-enhancement-layer::before,
+  .realtime-enhancement-layer::after {
+    transition: none;
+  }
+
+  .realtime-enhancement-layer[data-pulse="true"]::after {
+    animation: none;
+  }
+
+  .realtime-human-video,
+  .realtime-character-scan {
+    animation: none;
+    transition: none;
+  }
 }
 
 .chat-background-settings {

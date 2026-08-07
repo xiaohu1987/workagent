@@ -26,12 +26,14 @@ type AppearanceSettingsPageProps = {
   activeImageIndex: number;
   imageUrl: string | null;
   settings: ChatBackgroundSettings;
+  realtimeEnabled: boolean;
   isDragging: boolean;
   onImportFiles: (files: File[]) => Promise<void>;
   onSelectImage: (index: number) => void;
   onMoveImage: (sourceId: string, targetId: string) => Promise<void>;
   onRemoveImage: (id: string) => Promise<void>;
   onUpdateSettings: (patch: ChatBackgroundSettingsPatch) => void;
+  onRealtimeEnabledChange: (enabled: boolean) => void;
   onUpdateSurface: (key: ChatBackgroundSurfaceKey, value: number) => void;
   onBeginDrag: PointerEventHandler<HTMLImageElement>;
   onMoveDrag: PointerEventHandler<HTMLImageElement>;
@@ -46,12 +48,14 @@ export function AppearanceSettingsPage({
   activeImageIndex,
   imageUrl,
   settings,
+  realtimeEnabled,
   isDragging,
   onImportFiles,
   onSelectImage,
   onMoveImage,
   onRemoveImage,
   onUpdateSettings,
+  onRealtimeEnabledChange,
   onUpdateSurface,
   onBeginDrag,
   onMoveDrag,
@@ -245,6 +249,22 @@ export function AppearanceSettingsPage({
                   </label>
                 </div>
               </div>
+            </section>
+
+            <section className="chat-background-motion-panel realtime-enhancement-settings" aria-label="实时互动背景">
+              <div className="chat-background-control-label">
+                <span>实时互动背景</span>
+                <em>根据文字消息和执行状态轻量响应</em>
+              </div>
+              <label className="chat-background-toggle">
+                <input
+                  type="checkbox"
+                  checked={realtimeEnabled}
+                  onChange={(event) => onRealtimeEnabledChange(event.target.checked)}
+                />
+                <span aria-hidden="true" />
+                <em>{realtimeEnabled ? "开启" : "关闭"}</em>
+              </label>
             </section>
           </div>
 
