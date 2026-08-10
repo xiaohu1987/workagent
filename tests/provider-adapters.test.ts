@@ -1499,6 +1499,41 @@ describe("OpenAiCompatibleProvider", () => {
       expect(decision.isStructured).toBe(true);
     });
 
+    it("deepseek compat recovers DSML tool calls misplaced in reasoning_content", () => {
+      const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "" });
+      const tool = {
+        name: "fs.read_file",
+        description: "Read a file.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } } },
+        riskLevel: "low" as const
+      };
+      const decision = compat.normalizeDecision(
+        {
+          assistantMessage: undefined,
+          toolCalls: [],
+          endTurn: true,
+          goalCompleted: false,
+          isStructured: true,
+          reasoningSummary: [
+            "<｜DSML｜tool_calls>",
+            '<｜DSML｜invoke name="fs.read_file">',
+            '<｜DSML｜parameter name="path" string="true">src/app.ts</｜DSML｜parameter>',
+            "</｜DSML｜invoke>",
+            "</｜DSML｜tool_calls>"
+          ].join("\n")
+        },
+        { input: { availableTools: [tool] } } as never
+      );
+
+      expect(decision).toMatchObject({
+        toolCalls: [{ name: "fs.read_file", arguments: { path: "src/app.ts" } }],
+        assistantMessage: undefined,
+        endTurn: false,
+        goalCompleted: false,
+        isStructured: true
+      });
+    });
+
     it("deepseek compat converts a truly empty end-of-turn into a retryable decision", () => {
       const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "" });
       const decision = compat.normalizeDecision(
@@ -2457,6 +2492,141 @@ describe("OpenAiCompatibleProvider", () => {
       isStructured: false,
       requestTextToolProtocol: true
     });
+  });
+
+  it("parses DeepSeek DSML tool calls returned in the content field", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{
+        message: {
+          content: [
+            "我先读取目标文件。",
+            "<｜DSML｜tool_calls>",
+            '<｜DSML｜invoke name="fs.read_file">',
+            '<｜DSML｜parameter name="path" string="true">src/&amp;app.ts</｜DSML｜parameter>',
+            '<｜DSML｜parameter name="line" string="false">3</｜DSML｜parameter>',
+            "</｜DSML｜invoke>",
+            "</｜DSML｜tool_calls>"
+          ].join("\n")
+        }
+      }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "deepseek-v4-flash",
+      providerId: provider.id,
+      displayName: "DeepSeek V4 Flash",
+      contextWindow: 128_000,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: true
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the provided tool.",
+      transcript: [{ role: "user", content: "读取文件" }],
+      availableTools: [{
+        name: "fs.read_file",
+        description: "Read a file.",
+        inputSchema: {
+          type: "object",
+          properties: { path: { type: "string" }, line: { type: "number" } },
+          required: ["path"]
+        },
+        riskLevel: "low"
+      }],
+      model,
+      provider
+    });
+
+    expect(decision).toMatchObject({
+      assistantMessage: "我先读取目标文件。",
+      toolCalls: [{
+        name: "fs.read_file",
+        arguments: { path: "src/&app.ts", line: 3 }
+      }],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    });
+  });
+
+  it("parses the legacy DeepSeek function_calls container and encoded argument JSON", () => {
+    const decision = parseDecisionFromText([
+      "<｜DSML｜function_calls>",
+      '<｜DSML｜invoke name="fs.read_file">',
+      '<｜DSML｜parameter name="arguments" string="false">{&quot;path&quot;: &quot;src/app.ts&quot;, &quot;line&quot;: 4}</｜DSML｜parameter>',
+      "</｜DSML｜invoke>",
+      "</｜DSML｜function_calls>"
+    ].join("\n"));
+
+    expect(decision).toMatchObject({
+      assistantMessage: undefined,
+      toolCalls: [{
+        name: "fs.read_file",
+        arguments: { path: "src/app.ts", line: 4 }
+      }],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    });
+  });
+
+  it("echoes DeepSeek reasoning_content on subsequent native tool turns", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "done" } }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "deepseek-reasoner",
+      providerId: provider.id,
+      displayName: "DeepSeek Reasoner",
+      contextWindow: 128_000,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: true
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Continue with the tool result.",
+      transcript: [
+        { role: "user", content: "读取文件" },
+        {
+          role: "assistant",
+          content: "",
+          reasoningContent: "我需要先读取文件。",
+          toolCalls: [{ id: "call-1", name: "fs.read_file", arguments: { path: "src/app.ts" } }]
+        },
+        {
+          role: "tool",
+          content: "fs.read_file\nfile content",
+          toolCallId: "call-1",
+          toolResultOk: true
+        }
+      ],
+      availableTools: [{
+        name: "fs.read_file",
+        description: "Read a file.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } } },
+        riskLevel: "low"
+      }],
+      model,
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const messages = request.messages as Array<Record<string, unknown>>;
+    expect(messages).toContainEqual(expect.objectContaining({
+      role: "assistant",
+      content: "",
+      reasoning_content: "我需要先读取文件。",
+      tool_calls: expect.any(Array)
+    }));
   });
 
   it("does not treat an unstructured progress message as a completed decision", async () => {

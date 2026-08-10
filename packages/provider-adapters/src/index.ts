@@ -124,7 +124,12 @@ function normalizeProviderLimit(value: number | undefined, fallback: number): nu
   return Math.max(0, Math.floor(value));
 }
 
-type WireMessage = { role?: unknown; content?: unknown; tool_calls?: unknown };
+type WireMessage = {
+  role?: unknown;
+  content?: unknown;
+  tool_calls?: unknown;
+  reasoning_content?: unknown;
+};
 const COMPACTED_ASSISTANT_HISTORY = "[Earlier assistant progress omitted to fit the provider request limit.]";
 const COMPACTED_TOOL_HISTORY = "[Earlier tool output truncated to fit the provider request limit.]";
 const COMPACTED_RECENT_TOOL_RESULT = "[Recent tool output shortened to fit the provider request limit.]";
@@ -805,7 +810,9 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
         }, streamUsage)), ctx);
       }
       return compat.normalizeDecision(applyReasoning(withTokenUsage(
-        nativeTools ? nativeTextDecision(text.trim()) : parseDecisionFromText(text.trim()),
+        nativeTools
+          ? nativeTextDecision(text.trim(), input.availableTools)
+          : parseDecisionFromText(text.trim()),
         streamUsage
       )), ctx);
     }
@@ -1054,14 +1061,37 @@ export function nativeToolName(name: string): string {
   return `tool_${createHash("sha256").update(name).digest("hex").slice(0, 24)}`;
 }
 
+function isDeepSeekModel(model: Pick<ModelProfile, "id" | "displayName">): boolean {
+  return `${model.id} ${model.displayName ?? ""}`.toLowerCase().includes("deepseek");
+}
+
 function originalToolName(nativeName: string, availableTools: ProviderTurnInput["availableTools"]): string | null {
-  return availableTools.find((tool) => nativeToolName(tool.name) === nativeName)?.name ?? null;
+  const canonicalName = canonicalizeProviderToolName(nativeName);
+  return availableTools.find((tool) =>
+    nativeToolName(tool.name) === nativeName ||
+    tool.name === nativeName ||
+    tool.name === canonicalName
+  )?.name ?? null;
+}
+
+export function normalizeToolCallsForAvailableTools(
+  toolCalls: ProviderTurnDecision["toolCalls"],
+  availableTools: ProviderTurnInput["availableTools"]
+): ProviderTurnDecision["toolCalls"] {
+  if (availableTools.length === 0) return toolCalls;
+  return toolCalls.flatMap((call) => {
+    const name = originalToolName(call.name, availableTools);
+    return name ? [{ ...call, name }] : [];
+  });
 }
 
 export const TOOL_ARGS_TRUNCATED_KEY = "__tool_args_truncated__";
 
-export function parseNativeToolArguments(value: string): Record<string, unknown> {
-  if (!value || !value.trim()) {
+export function parseNativeToolArguments(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string" || !value.trim()) {
     return {};
   }
   try {
@@ -1176,7 +1206,9 @@ export function parseOpenAiCompatibleResponse(
     }, response.usage);
   }
   return withTokenUsage(
-    hasNativeTools ? nativeTextDecision(content) : parseDecisionFromText(content),
+    hasNativeTools
+      ? nativeTextDecision(content, input.availableTools)
+      : parseDecisionFromText(content),
     response.usage
   );
 }
@@ -1187,12 +1219,15 @@ function objectToolArguments(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function nativeTextDecision(text: string): ProviderTurnDecision {
+function nativeTextDecision(
+  text: string,
+  availableTools: ProviderTurnInput["availableTools"] = []
+): ProviderTurnDecision {
   // Inline <think> reasoning is draft-only; never persist it in the message.
   const cleaned = stripThinkBlocks(text).trim();
   if (!cleaned) {
     return {
-      assistantMessage: "The model returned neither a native tool call nor a final response.",
+      assistantMessage: undefined,
       toolCalls: [],
       endTurn: false,
       goalCompleted: false,
@@ -1211,7 +1246,10 @@ function nativeTextDecision(text: string): ProviderTurnDecision {
   }
   const structuredDecision = parseDecisionFromText(cleaned);
   if (structuredDecision.isStructured) {
-    return structuredDecision;
+    return {
+      ...structuredDecision,
+      toolCalls: normalizeToolCallsForAvailableTools(structuredDecision.toolCalls, availableTools)
+    };
   }
   if (looksLikeMalformedDecisionProtocol(cleaned)) {
     // A native-tool model can emit a partial or malformed text envelope when
@@ -1241,7 +1279,7 @@ function looksLikeMalformedDecisionProtocol(text: string): boolean {
   return trimmed.startsWith("{") ||
     trimmed.startsWith("[") ||
     /^```(?:json)?\b/i.test(trimmed) ||
-    /^<(?:tool_calls|invoke|request_user_input)\b/i.test(trimmed) ||
+    /^<(?:(?:[|｜]DSML[|｜])?(?:tool_calls|function_calls|invoke|request_user_input))\b/i.test(trimmed) ||
     /\b(?:assistant_message|tool_calls|end_turn|goal_completed)\b/.test(trimmed) ||
     /(?:valid\s+JSON\s+decision\s+envelope|Agent\s+decision|JSON\s+decision\s+envelope|可执行的\s*Agent\s*决策|JSON.*(?:解析失败|无法解析))/i.test(trimmed);
 }
@@ -1842,6 +1880,7 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
       type: "function";
       function: { name: string; arguments: string };
     }>;
+    reasoning_content?: string;
     tool_call_id?: string;
   }> = [];
 
@@ -1856,7 +1895,10 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
     if (message.role === "assistant" && message.toolCalls?.length) {
       messages.push({
         role: "assistant",
-        content: message.content || null,
+        content: isDeepSeekModel(input.model) ? (message.content || "") : (message.content || null),
+        ...(isDeepSeekModel(input.model) && message.reasoningContent
+          ? { reasoning_content: message.reasoningContent }
+          : {}),
         tool_calls: message.toolCalls.map((call) => ({
           id: call.id,
           type: "function",
@@ -2266,7 +2308,7 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
   // Reasoning-style models may wrap or precede the payload with a <think>
   // block; strip it before any protocol parsing so neither the envelope
   // extractor nor the visible-text fallback ever surfaces reasoning.
-  const content = stripThinkBlocks(text);
+  const content = normalizeDeepseekDsmlTags(stripThinkBlocks(text));
   const taggedToolCalls = tryParseTaggedToolCalls(content);
   if (taggedToolCalls) {
     const assistantMessage = stripTaggedToolCalls(content).trim();
@@ -2578,14 +2620,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * DeepSeek V4 and several local/compatible gateways expose the model's
+ * internal tool protocol directly instead of converting it to OpenAI's
+ * `message.tool_calls` field:
+ *
+ *   <｜DSML｜tool_calls>
+ *   <｜DSML｜invoke name="tool_name">
+ *   <｜DSML｜parameter name="path" string="true">src/app.ts</｜DSML｜parameter>
+ *
+ * Normalize only the DSML namespace here so the existing XML parser can also
+ * handle the ASCII `<|DSML|...>` form emitted by some relays.
+ */
+function normalizeDeepseekDsmlTags(text: string): string {
+  return text.replace(/<((?:\/)?)(?:[|｜]DSML[|｜])/g, "<$1");
+}
+
+function decodeXmlText(value: string): string {
+  return value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (entity, body: string) => {
+    const normalized = body.toLowerCase();
+    if (normalized === "amp") return "&";
+    if (normalized === "lt") return "<";
+    if (normalized === "gt") return ">";
+    if (normalized === "quot") return "\"";
+    if (normalized === "apos") return "'";
+    const radix = normalized.startsWith("#x") ? 16 : 10;
+    const digits = normalized.startsWith("#x") ? normalized.slice(2) : normalized.slice(1);
+    const codePoint = Number.parseInt(digits, radix);
+    return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+      ? String.fromCodePoint(codePoint)
+      : entity;
+  });
+}
+
 function tryParseTaggedToolCalls(text: string): ProviderTurnDecision["toolCalls"] | null {
-  const openingTag = text.match(/<tool_calls\b[^>]*>/i);
+  const normalizedText = normalizeDeepseekDsmlTags(text);
+  const openingTag = normalizedText.match(/<(tool_calls|function_calls)\b[^>]*>/i);
   if (openingTag?.index === undefined || openingTag.index < 0) {
     return null;
   }
 
-  const afterOpen = text.slice(openingTag.index + openingTag[0].length);
-  const closingMatches = [...afterOpen.matchAll(/<\/tool_calls\s*>/gi)];
+  const afterOpen = normalizedText.slice(openingTag.index + openingTag[0].length);
+  const containerName = openingTag[1] ?? "tool_calls";
+  const closingMatches = [...afterOpen.matchAll(new RegExp(`</${containerName}\\s*>`, "gi"))];
   if (closingMatches.length === 0) {
     return null;
   }
@@ -2596,7 +2673,7 @@ function tryParseTaggedToolCalls(text: string): ProviderTurnDecision["toolCalls"
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/, "")
-    .replace(/<\/tool_calls\s*>/gi, "")
+    .replace(/<\/(?:tool_calls|function_calls)\s*>/gi, "")
     .trim();
 
   return tryParseTaggedJsonToolCalls(payload) ?? tryParseTaggedInvokeToolCalls(payload);
@@ -2786,7 +2863,12 @@ function tryParseTaggedInvokeToolCalls(payload: string): ProviderTurnDecision["t
 
     const body = match[2] ?? "";
     const parameters = [...body.matchAll(/<parameter\b([^>]*)>([\s\S]*?)<\/parameter\s*>/gi)];
-    const rawArguments = parameters.find((parameter) => readXmlAttribute(parameter[1] ?? "", "name") === "arguments")?.[2]?.trim();
+    const argumentParameter = parameters.find(
+      (parameter) => readXmlAttribute(parameter[1] ?? "", "name") === "arguments"
+    );
+    const rawArguments = argumentParameter
+      ? decodeXmlText(argumentParameter[2]?.trim() ?? "")
+      : "";
     let argumentsJson: Record<string, unknown> = {};
     if (rawArguments) {
       const parsedArguments = tryParseModelJson(rawArguments);
@@ -2794,6 +2876,19 @@ function tryParseTaggedInvokeToolCalls(payload: string): ProviderTurnDecision["t
         return [];
       }
       argumentsJson = parsedArguments as Record<string, unknown>;
+    } else {
+      for (const parameter of parameters) {
+        const parameterName = readXmlAttribute(parameter[1] ?? "", "name");
+        if (!parameterName || parameterName === "arguments") continue;
+        const rawValue = parameter[2]?.trim() ?? "";
+        const decodedValue = decodeXmlText(rawValue);
+        if (readXmlAttribute(parameter[1] ?? "", "string") === "true") {
+          argumentsJson[parameterName] = decodedValue;
+          continue;
+        }
+        const parsedValue = tryParseModelJson(decodedValue);
+        argumentsJson[parameterName] = parsedValue ?? decodedValue;
+      }
     }
 
     return [{ id: crypto.randomUUID(), name, arguments: argumentsJson }];
@@ -2841,16 +2936,18 @@ function readXmlAttribute(source: string, name: string): string | null {
   return match?.[1]?.trim() || null;
 }
 
-function stripTaggedToolCalls(text: string): string {
-  const completeTag = /<tool_calls\b[^>]*>[\s\S]*?<\/tool_calls\s*>/gi;
+export function stripTaggedToolCalls(text: string): string {
+  const normalizedText = normalizeDeepseekDsmlTags(text);
+  const completeTag = /<(?:tool_calls|function_calls)\b[^>]*>[\s\S]*?<\/(?:tool_calls|function_calls)\s*>/gi;
   const completeResult = /<tool_result\b[^>]*>[\s\S]*?<\/tool_result\s*>/gi;
-  const withoutCompleteTags = text.replace(completeTag, "").replace(completeResult, "");
+  const withoutCompleteTags = normalizedText.replace(completeTag, "").replace(completeResult, "");
   // Suppress an incomplete tag until the stream completes and it can be
   // parsed. This keeps control JSON out of the transcript during streaming.
   const visible = withoutCompleteTags
-    .replace(/<tool_calls\b[^>]*>[\s\S]*$/i, "")
+    .replace(/<(?:tool_calls|function_calls)\b[^>]*>[\s\S]*$/i, "")
     .replace(/<tool_result\b[^>]*>[\s\S]*$/i, "")
     .replace(/<\/tool_(?:calls|result)\s*>/gi, "")
+    .replace(/<\/function_calls\s*>/gi, "")
     .replace(/\n{3,}/g, "\n\n");
   return stripPartialToolTagPrefix(visible);
 }
@@ -2862,7 +2959,9 @@ function stripPartialToolTagPrefix(text: string): string {
   }
 
   const trailing = text.slice(tagStart).toLowerCase();
-  return "<tool_calls".startsWith(trailing) || "<tool_result".startsWith(trailing)
+  return "<tool_calls".startsWith(trailing) ||
+    "<function_calls".startsWith(trailing) ||
+    "<tool_result".startsWith(trailing)
     ? text.slice(0, tagStart)
     : text;
 }

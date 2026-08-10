@@ -962,6 +962,8 @@ export interface ProviderTurnInput {
     attachments?: MessageAttachment[];
     /** Transient metadata used to correlate native tool calls and results. */
     toolCalls?: RuntimeToolCall[];
+    /** Internal reasoning echoed back to providers that require it for tool turns. */
+    reasoningContent?: string;
     toolCallId?: string;
     toolResultOk?: boolean;
   }>;

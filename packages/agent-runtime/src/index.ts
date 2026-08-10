@@ -3408,7 +3408,8 @@ class ThreadSessionRuntime {
           transcript.push({
             role: "assistant",
             content: assistantMessage && isSafeCommentaryMessage(assistantMessage) ? assistantMessage : "",
-            toolCalls: decision.toolCalls
+            toolCalls: decision.toolCalls,
+            reasoningContent: decision.reasoningSummary
           });
         }
 

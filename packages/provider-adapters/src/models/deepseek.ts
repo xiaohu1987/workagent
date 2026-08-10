@@ -1,4 +1,10 @@
-import { stripThinkBlocks, surfaceThinkBlocksInStream } from "../index";
+import {
+  normalizeToolCallsForAvailableTools,
+  parseDecisionFromText,
+  stripTaggedToolCalls,
+  stripThinkBlocks,
+  surfaceThinkBlocksInStream
+} from "../index";
 import { defineCompat } from "./types";
 import type { ModelCompatContext } from "./types";
 import { gptCompat } from "./gpt";
@@ -117,37 +123,60 @@ export const deepseekCompat = defineCompat(gptCompat, {
     }
     // Surface inline <think> reasoning in the streaming draft so users can
     // watch the think process; final parsing still strips it.
-    return surfaceThinkBlocksInStream(accumulated);
+    return stripTaggedToolCalls(surfaceThinkBlocksInStream(accumulated));
   },
-  normalizeDecision(decision) {
-    const hasMessage = Boolean(decision.assistantMessage?.trim());
+  normalizeDecision(decision, ctx) {
+    let next = decision;
+    const reasoning = stripThinkBlocks(decision.reasoningSummary ?? "").trim();
+    if (!next.assistantMessage?.trim() && next.toolCalls.length === 0 && reasoning) {
+      // Some DeepSeek relays put the DSML/tool payload in reasoning_content
+      // while leaving message.content empty. Re-run the same text parser over
+      // that field before treating it as ordinary reasoning.
+      const recovered = parseDecisionFromText(reasoning);
+      if (
+        recovered.isStructured &&
+        (recovered.toolCalls.length > 0 || recovered.assistantMessage?.trim())
+      ) {
+        const toolCalls = normalizeToolCallsForAvailableTools(
+          recovered.toolCalls,
+          ctx.input.availableTools
+        );
+        next = {
+          ...next,
+          ...recovered,
+          toolCalls,
+          reasoningSummary: decision.reasoningSummary
+        };
+      }
+    }
+
+    const hasMessage = Boolean(next.assistantMessage?.trim());
     if (
       hasMessage &&
-      decision.toolCalls.length === 0 &&
-      decision.endTurn &&
-      !decision.goalCompleted
+      next.toolCalls.length === 0 &&
+      next.endTurn &&
+      !next.goalCompleted
     ) {
       // DeepSeek sometimes returns a complete terminal answer while leaving
       // goal_completed false. The runtime still validates the answer content,
       // pending tools, delivery, and verification after this normalization.
-      return { ...decision, goalCompleted: true };
+      return { ...next, goalCompleted: true };
     }
-    if (hasMessage || decision.toolCalls.length > 0) {
-      return decision;
+    if (hasMessage || next.toolCalls.length > 0) {
+      return next;
     }
     // The turn produced no visible text and no tool calls.
-    const reasoning = stripThinkBlocks(decision.reasoningSummary ?? "").trim();
     if (reasoning) {
       // The reply landed entirely in reasoning_content: promote it so
       // GOAL/PLAN can parse the analysis and chat threads show the answer
       // instead of a blank end-of-turn.
-      return { ...decision, assistantMessage: reasoning };
+      return { ...next, assistantMessage: reasoning };
     }
     // Truly empty response: mark the decision unstructured and keep the turn
     // open so the runtime re-samples with an explicit correction instead of
     // accepting a blank end-of-turn.
     return {
-      ...decision,
+      ...next,
       assistantMessage: undefined,
       endTurn: false,
       goalCompleted: false,
