@@ -7853,6 +7853,19 @@ select:focus {
   padding: 14px 14px 12px;
 }
 
+/* Let the active background show through on the character side of the composer. */
+.app-shell.has-app-background .chat-composer,
+.app-shell.has-realtime-character .chat-composer {
+  border-right: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(48, 48, 51, 0.96) 0%,
+    rgba(48, 48, 51, 0.86) 34%,
+    rgba(48, 48, 51, 0.48) 68%,
+    rgba(48, 48, 51, 0) 100%
+  );
+}
+
 .composer-queue-steer {
   display: grid;
   width: 24px;
