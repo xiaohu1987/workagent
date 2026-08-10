@@ -177,6 +177,9 @@ if errorlevel 1 goto :package_verification_failed
 "%NODE_EXE%" --input-type=module -e "import{readFileSync}from'node:fs';const list=readFileSync(process.argv[1],'utf8');const modules=['sql-escaper','pg-types','pg-pool','pg-protocol','pg-connection-string','pgpass','@azure\\identity','@azure\\core-auth','@azure\\keyvault-keys','@js-joda\\core','bl','js-md4','native-duplexpair','sprintf-js'];const missing=modules.filter(name=>list.includes('\\node_modules\\'+name)===false);if(missing.length){console.error('Missing packaged dependencies: '+missing.join(', '));process.exit(1)}" "%ASAR_LIST%"
 if errorlevel 1 goto :package_verification_failed
 if not exist "%cd%\release\win-unpacked\resources\seed-plugins" goto :package_verification_failed
+set "BACKGROUND_VIDEO_DIR=%cd%\release\win-unpacked\resources\background-videos"
+"%NODE_EXE%" --input-type=module -e "import{existsSync,readdirSync}from'node:fs';const source='apps/desktop/src/renderer/assets';const target=process.argv[1];const videos=readdirSync(source).filter(name=>name.toLowerCase().endsWith('.mp4'));const missing=videos.filter(name=>existsSync(target+'\\'+name)===false);if(videos.length===0){console.error('No background videos found in '+source);process.exit(1)}if(missing.length){console.error('Missing packaged background videos: '+missing.join(', '));process.exit(1)}console.log('Verified packaged background videos: '+videos.length)" "%BACKGROUND_VIDEO_DIR%"
+if errorlevel 1 goto :package_verification_failed
 goto :package_complete
 
 :package_complete

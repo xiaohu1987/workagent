@@ -97,6 +97,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "apps/desktop/src/renderer/assets",
+        "to": "background-videos",
+        "filter": [
+          "**/*.mp4"
+        ]
       }
     ],
     "win": {
