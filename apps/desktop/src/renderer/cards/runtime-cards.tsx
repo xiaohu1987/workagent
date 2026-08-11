@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
-import type { GpaStage, PendingResumeThread, QueuedMessageRecord, ThreadRecord, ToolCallRecord } from "@shared-types";
-import { IconChevronRight, IconClose, IconGuide, IconTerminal } from "../icons";
+import type { GpaStage, PendingResumeThread, QueuedMessageRecord, ThreadRecord } from "@shared-types";
+import { IconBolt, IconChevronRight, IconClose, IconCompose, IconGuide, IconTerminal } from "../icons";
 import { getToolProcessingLabel, type SkillNameMap } from "../lib/conversation-utils";
-import { ToolActivityGroup, ToolActivityIcon, getConciseToolActivityLabel } from "../timeline/transcript";
-import type { ComposerSubmission, RuntimeActivity, RuntimeActivityEntry } from "../core/app-types";
+import { ToolActivityIcon } from "../timeline/transcript";
+import type { ComposerSubmission, RuntimeActivity, RuntimeActivityEntry, RuntimeProgress } from "../core/app-types";
 
 function useElapsedClock(startedAt: string | null | undefined, active: boolean, completedAt?: string | null) {
   const [now, setNow] = useState(() => Date.now());
@@ -28,6 +28,31 @@ function formatElapsedClock(durationMs: number): string {
   if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
   if (minutes > 0) return `${minutes}m ${seconds}s`;
   return `${seconds}s`;
+}
+
+function getRuntimeEntryCreatedAt(entry: RuntimeActivityEntry): string {
+  return entry.kind === "tool"
+    ? entry.toolCall.completedAt ?? entry.toolCall.startedAt
+    : entry.createdAt;
+}
+
+function getRuntimeHistoryLabel(entry: RuntimeActivityEntry, skillNames?: SkillNameMap): string {
+  if (entry.kind !== "tool") return entry.label;
+  const action = getToolProcessingLabel(
+    entry.toolCall.toolName,
+    entry.toolCall.argumentsJson,
+    skillNames
+  ).replace(/^正在/, "");
+  if (entry.toolCall.status === "failed" || entry.toolCall.status === "denied") return `失败 · ${action}`;
+  if (entry.toolCall.status === "blocked") return `已拦截 · ${action}`;
+  if (entry.toolCall.status === "running" || entry.toolCall.status === "pending") return `正在${action}`;
+  return `已完成 · ${action}`;
+}
+
+function formatRuntimeEventOffset(createdAt: string, startedAt?: string | null): string {
+  if (!startedAt) return "";
+  const offset = Date.parse(createdAt) - Date.parse(startedAt);
+  return Number.isFinite(offset) ? `+${formatElapsedClock(Math.max(0, offset))}` : "";
 }
 
 function ActiveSubagentLines({
@@ -229,17 +254,22 @@ export function ComposerSubmissionStatus({ submission }: { submission: ComposerS
   const isDelayed = elapsedMs >= 15_000;
   const content = submission.content.replace(/\s+/g, " ").trim();
   const label = isDelayed
-    ? `\u4ecd\u5728\u51c6\u5907\u4efb\u52a1 \u00b7 \u5df2\u7b49\u5f85 ${formatElapsedClock(elapsedMs)}`
+    ? "仍在准备任务"
     : isSlow
-      ? `\u6b63\u5728\u542f\u52a8\u4efb\u52a1 \u00b7 \u5df2\u7b49\u5f85 ${formatElapsedClock(elapsedMs)}`
-      : "\u6d88\u606f\u5df2\u6536\u5230\uff0c\u6b63\u5728\u51c6\u5907\u4efb\u52a1";
+      ? "正在启动任务"
+      : "正在准备任务";
 
   return (
     <section className={`composer-submission-status ${isSlow ? "slow" : ""}`} aria-live="polite">
-      <span className="task-processing-dots" aria-hidden="true"><i /><i /><i /></span>
-      <div>
-        <strong>{label}</strong>
-        {content ? <span className="composer-submission-preview">{content}</span> : null}
+      <span className="composer-submission-status-icon" aria-hidden><IconCompose /></span>
+      <div className="composer-submission-status-copy">
+        <div className="composer-submission-status-head">
+          <strong>{label}</strong>
+          <time>{formatElapsedClock(elapsedMs)}</time>
+        </div>
+        <span className="composer-submission-preview">
+          {isDelayed ? "准备时间较长，仍在创建任务并整理上下文" : content || "正在创建任务并整理上下文"}
+        </span>
       </div>
     </section>
   );
@@ -248,7 +278,8 @@ export function ComposerSubmissionStatus({ submission }: { submission: ComposerS
 export function RuntimeActivityPanel({
   label,
   entries,
-  deferredToolCalls,
+  startedAt,
+  phase,
   skillNames,
   preferLabel = false,
   hideCurrentStatus = false,
@@ -259,7 +290,8 @@ export function RuntimeActivityPanel({
 }: {
   label: string;
   entries: RuntimeActivityEntry[];
-  deferredToolCalls: ToolCallRecord[];
+  startedAt?: string | null;
+  phase?: RuntimeProgress["phase"] | null;
   skillNames?: SkillNameMap;
   preferLabel?: boolean;
   hideCurrentStatus?: boolean;
@@ -269,13 +301,14 @@ export function RuntimeActivityPanel({
   onInterruptSubagent: (agent: ThreadRecord) => void;
 }) {
   const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
-  const runningToolCall = [...entries].reverse().find(
+  const runningToolCalls = entries.filter(
     (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> =>
       entry.kind === "tool" && (entry.toolCall.status === "pending" || entry.toolCall.status === "running")
-  )?.toolCall ?? null;
+  ).map((entry) => entry.toolCall);
+  const runningToolCall = runningToolCalls.at(-1) ?? null;
   const displayLabel = preferLabel ? label : latestStatus?.label ?? label;
   const runningToolLabel = runningToolCall
-    ? getConciseToolActivityLabel([runningToolCall], runningToolCall, skillNames)
+    ? getToolProcessingLabel(runningToolCall.toolName, runningToolCall.argumentsJson, skillNames)
     : null;
   const runningToolDetail = runningToolLabel && !preferLabel && latestStatus?.label && latestStatus.label !== runningToolLabel
     ? latestStatus.label
@@ -283,34 +316,72 @@ export function RuntimeActivityPanel({
   const runningCommand = displayLabel.startsWith("正在运行 ")
     ? displayLabel.slice("正在运行 ".length)
     : null;
+  const activityStartedAt = startedAt ?? (entries[0] ? getRuntimeEntryCreatedAt(entries[0]) : null);
+  const elapsedMs = useElapsedClock(activityStartedAt, true);
+  const latestEntry = entries.at(-1);
+  const latestActivityAt = latestEntry ? getRuntimeEntryCreatedAt(latestEntry) : activityStartedAt;
+  const unchangedMs = useElapsedClock(latestActivityAt, true);
+  const primaryLabel = runningToolLabel ?? displayLabel;
+  const waitingForExternalInput = /等待|审批|选择/.test(primaryLabel);
+  const freshnessLabel = unchangedMs >= 10_000 && !waitingForExternalInput
+    ? `最近更新 ${formatElapsedClock(unchangedMs)} 前`
+    : null;
+  const parallelToolLabel = runningToolCalls.length > 1 ? `另有 ${runningToolCalls.length - 1} 项操作正在执行` : null;
+  const currentDetail = parallelToolLabel ?? runningToolDetail ?? freshnessLabel;
+  const currentEntryIds = new Set([
+    runningToolCall?.id,
+    latestStatus?.id
+  ].filter((id): id is string => Boolean(id)));
+  const historyItems = entries
+    .filter((entry) => !currentEntryIds.has(entry.kind === "tool" ? entry.toolCall.id : entry.id))
+    .slice(-5)
+    .reverse();
 
   const currentStatusContent = <>
-      {runningToolCall ? (
-        <span className="runtime-activity-current-icon" aria-hidden>
-          <ToolActivityIcon toolName={runningToolCall.toolName} />
-        </span>
-      ) : null}
-      {runningToolLabel ? <strong>{runningToolLabel}</strong> : runningCommand ? (
+    <span className="runtime-activity-current-icon" aria-hidden>
+      {runningToolCall
+        ? <ToolActivityIcon toolName={runningToolCall.toolName} />
+        : phase === "preparing" || phase === "generating"
+          ? <IconCompose />
+          : <IconBolt />}
+    </span>
+    <span className="runtime-activity-current-copy">
+      {runningCommand && !runningToolLabel ? (
         <span className="runtime-activity-command">
           <span>正在运行</span>
           <code title={runningCommand}>{runningCommand}</code>
         </span>
-      ) : <strong>{displayLabel}</strong>}
-      {runningToolDetail ? <span className="runtime-activity-current-detail">{runningToolDetail}</span> : null}
-    </>;
-  const currentStatus = <div className="runtime-activity-current">{currentStatusContent}</div>;
-  const liveToolCalls = deferredToolCalls.length > 0
-    ? deferredToolCalls
-    : runningToolCall
-      ? [runningToolCall]
-      : [];
+      ) : <strong>{primaryLabel}</strong>}
+      {currentDetail ? <span className="runtime-activity-current-detail">{currentDetail}</span> : null}
+    </span>
+    <time>{formatElapsedClock(elapsedMs)}</time>
+  </>;
+  const currentStatus = historyItems.length > 0 ? (
+    <details className="runtime-activity-status">
+      <summary className="runtime-activity-current">
+        {currentStatusContent}
+        <span className="runtime-activity-history-chevron" aria-hidden><IconChevronRight /></span>
+      </summary>
+      <div className="runtime-activity-history" aria-label="最近执行记录">
+        {historyItems.map((entry) => {
+          const toolName = entry.kind === "tool" ? entry.toolCall.toolName : null;
+          const eventAt = getRuntimeEntryCreatedAt(entry);
+          return (
+            <div key={entry.kind === "tool" ? entry.toolCall.id : entry.id} className="runtime-activity-history-item">
+              <span className="runtime-activity-history-icon" aria-hidden>
+                {toolName ? <ToolActivityIcon toolName={toolName} /> : entry.kind === "output" ? <IconTerminal /> : <IconBolt />}
+              </span>
+              <span>{getRuntimeHistoryLabel(entry, skillNames)}</span>
+              <time>{formatRuntimeEventOffset(eventAt, activityStartedAt)}</time>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  ) : <div className="runtime-activity-current">{currentStatusContent}</div>;
   return (
     <section className="runtime-activity-panel" aria-live="polite">
-      {liveToolCalls.length > 0
-        ? <ToolActivityGroup toolCalls={liveToolCalls} skillNames={skillNames} />
-        : hideCurrentStatus
-          ? null
-          : currentStatus}
+      {hideCurrentStatus ? null : currentStatus}
       {activeSubagents.length > 0 ? (
         <ActiveSubagentLines
           agents={activeSubagents}

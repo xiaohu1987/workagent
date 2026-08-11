@@ -5620,7 +5620,8 @@ export function App() {
                         key={activeSnapshotThreadId ?? "runtime-activity"}
                         label={taskProcessingLabel}
                         entries={activeRuntimeActivity?.entries ?? []}
-                        deferredToolCalls={completedDeferredRuntimeToolGroup ? [] : deferredRuntimeToolGroup ?? []}
+                        startedAt={activeRuntimeActivity?.startedAt ?? null}
+                        phase={localRuntimeProgress?.phase ?? null}
                         skillNames={skillNames}
                         preferLabel={isWaitingForSubagents}
                         hideCurrentStatus={Boolean(activeAssistantDraft)}

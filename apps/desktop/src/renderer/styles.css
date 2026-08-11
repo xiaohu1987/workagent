@@ -9080,11 +9080,30 @@ select:focus {
 .runtime-activity-current {
   display: inline-flex;
   align-items: center;
+  width: 100%;
   min-width: 0;
   min-height: 30px;
   max-width: min(100%, 920px);
   gap: 7px;
   color: #aeb8c5;
+}
+
+.runtime-activity-status {
+  min-width: 0;
+}
+
+.runtime-activity-status > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.runtime-activity-status > summary::-webkit-details-marker {
+  display: none;
+}
+
+.runtime-activity-status > summary:focus-visible {
+  outline: 1px solid rgba(217, 146, 104, 0.5);
+  outline-offset: 2px;
 }
 
 .runtime-activity-panel > .tool-activity-group {
@@ -9131,6 +9150,7 @@ select:focus {
 
 .tool-activity-group.in_progress .tool-activity-summary-copy strong,
 .runtime-activity-current strong,
+.composer-submission-status-head strong,
 .runtime-activity-command > span,
 .runtime-activity-command code {
   --runtime-text-base: #aeb6c1;
@@ -9167,6 +9187,14 @@ select:focus {
 }
 
 .runtime-activity-current-icon svg { width: 14px; height: 14px; }
+
+.runtime-activity-current-copy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
 
 .runtime-activity-command {
   display: flex;
@@ -9221,6 +9249,66 @@ select:focus {
   font-size: 11px;
 }
 
+.runtime-activity-history-chevron {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  color: #778291;
+  transition: transform 150ms ease;
+}
+
+.runtime-activity-history-chevron svg {
+  width: 13px;
+  height: 13px;
+}
+
+.runtime-activity-status[open] .runtime-activity-history-chevron {
+  transform: rotate(90deg);
+}
+
+.runtime-activity-history {
+  display: grid;
+  gap: 2px;
+  padding: 3px 0 4px 22px;
+}
+
+.runtime-activity-history-item {
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr) auto;
+  min-height: 25px;
+  align-items: center;
+  gap: 7px;
+  color: #8f99a6;
+  font-size: 11px;
+}
+
+.runtime-activity-history-item > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-activity-history-icon {
+  display: inline-grid;
+  width: 15px;
+  height: 15px;
+  place-items: center;
+  color: #707b88;
+}
+
+.runtime-activity-history-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.runtime-activity-history-item time {
+  color: #687381;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
 .runtime-activity-panel .active-subagent-lines {
   width: min(100%, 920px);
   padding: 0 0 0 22px;
@@ -9234,6 +9322,7 @@ select:focus {
 @media (prefers-reduced-motion: reduce) {
   .tool-activity-group.in_progress .tool-activity-summary-copy strong,
   .runtime-activity-current strong,
+  .composer-submission-status-head strong,
   .runtime-activity-command > span,
   .runtime-activity-command code {
     color: var(--runtime-text-base);
@@ -9261,20 +9350,64 @@ select:focus {
   background: rgba(240, 200, 117, 0.08);
 }
 
-.composer-submission-status > .task-processing-dots {
+.composer-submission-status-icon {
+  display: inline-grid;
   flex: 0 0 auto;
-  margin-top: 4px;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  place-items: center;
+  color: #69b7ff;
 }
 
-.composer-submission-status > div {
+.composer-submission-status.slow .composer-submission-status-icon {
+  color: #f0c875;
+}
+
+.composer-submission-status-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.composer-submission-status-copy {
   display: grid;
+  flex: 1 1 auto;
   min-width: 0;
   gap: 3px;
 }
 
+.composer-submission-status-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .composer-submission-status strong {
-  color: #d5dbe4;
+  --runtime-text-base: #d5dbe4;
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    var(--runtime-text-base) 0%,
+    var(--runtime-text-base) 40%,
+    #f4f8ff 50%,
+    var(--runtime-text-base) 60%,
+    var(--runtime-text-base) 100%
+  );
+  background-position: 115% 0;
+  background-size: 240% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
   font-weight: 600;
+  animation: runtime-activity-text-sweep 2.6s ease-in-out infinite;
+}
+
+.composer-submission-status-head time {
+  flex: 0 0 auto;
+  color: #778291;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .composer-submission-preview {
