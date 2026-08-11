@@ -233,17 +233,8 @@ function normalizeKimiFileToolDecision(
  *      frequency_penalty, presence_penalty, logprobs, top_logprobs — and
  *      response_format. They are stripped to avoid HTTP 400, mirroring the
  *      deepseek-reasoner treatment.
- *    * Raises `max_tokens` to at least 8192 when the profile default is
- *      smaller. Same incident class as deepseek: a small cap truncates long
- *      replies and apply_patch payloads mid-stream (finish_reason: length),
- *      which surfaces as unparseable tool arguments. Larger configured
- *      values are preserved.
- *    * Caps `tools` at 50 entries. The Moonshot chat schema rejects more
- *      than 50 tools with "400 Invalid request parameters" (error code
- *      11133, verified against the gateway 2026-08). The runtime merges
- *      builtin and MCP tool specs into one array, so enabling several MCP
- *      servers easily crosses the limit; truncating the tail keeps the
- *      turn alive instead of failing it outright.
+ *    * Preserves the model profile's `max_tokens` value. Output limits are
+ *      model/provider configuration, not a compatibility-layer default.
  *    * Repairs the message sequence (code 11133, replay-verified):
  *      - assistant `content: null` is rejected; it becomes "".
  *      - adjacent ordinary assistant/user messages are coalesced; runtime
@@ -489,15 +480,7 @@ export const kimiCompat = defineCompat(gptCompat, {
       next = rest;
     }
 
-    // 4. Raise max_tokens floor to 8192 to prevent mid-stream truncation
-    //    (finish_reason: length) that breaks apply_patch arguments and
-    //    truncates long replies. Larger configured values are preserved.
-    const currentMax = next.max_tokens;
-    if (typeof currentMax !== "number" || currentMax < 8192) {
-      next = { ...next, max_tokens: 8192 };
-    }
-
-    // 5. Repair the message sequence: null assistant content and tool
+    // 4. Repair the message sequence: null assistant content and tool
     //    results separated from their tool_calls message both fail the
     //    gateway's strict validation with code 11133. Coalescing ordinary
     //    same-role messages also prevents consecutive assistant progress

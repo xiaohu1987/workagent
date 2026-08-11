@@ -183,7 +183,6 @@ export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number
 export const MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES = 5;
 export const AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS = 30_000;
 export const AGENT_PROTOCOL_RECOVERY_QUESTION_ID = "agent_protocol_recovery";
-const PROTOCOL_RECOVERY_MAX_REQUEST_BYTES = 96 * 1024;
 export const MAX_REPOSITORY_COMPLETION_REJECTIONS = 2;
 export const LEGACY_MCP_OVERSIZED_FOLLOW_UP =
   "The MCP server returned an oversized legacy response that was shortened.";
@@ -7551,12 +7550,11 @@ function resolveProtocolRecoveryProvider(
   model: Pick<ModelProfile, "id" | "displayName">,
   textProtocolRecovery: boolean
 ): ProviderDefinition {
-  if (!textProtocolRecovery) return provider;
-  const limits = resolveProviderRequestLimits(provider, model);
-  if (limits.maxRequestBytes <= 0) return provider;
-  const maxRequestBytes = Math.min(limits.maxRequestBytes, PROTOCOL_RECOVERY_MAX_REQUEST_BYTES);
-  if (maxRequestBytes >= limits.maxRequestBytes) return provider;
-  return { ...provider, maxRequestBytes };
+  // Text-protocol recovery must use the same Provider limits as the normal
+  // request. Recovery changes the transport format, not the configured quota.
+  void model;
+  void textProtocolRecovery;
+  return provider;
 }
 
 export function shouldRunStandardCompletionAudit(input: {

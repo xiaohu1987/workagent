@@ -730,9 +730,9 @@ export interface ProviderDefinition {
   apiKey?: string;
   headers?: Record<string, string>;
   organization?: string;
-  /** Final serialized request-body limit in UTF-8 bytes. Undefined uses the compatibility default; 0 disables it. */
+  /** Final serialized request-body limit in UTF-8 bytes. Undefined and 0 mean no local byte limit. */
   maxRequestBytes?: number;
-  /** Maximum native tools sent in one request. Undefined uses the compatibility default; 0 disables it. */
+  /** Maximum native tools sent in one request. Undefined and 0 mean no local tool-count limit. */
   maxTools?: number;
 }
 

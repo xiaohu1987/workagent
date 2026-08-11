@@ -24,10 +24,8 @@ import { preserveChineseOutputLanguage } from "./output-language";
  *      injected only when the turn carries an explicit reasoning effort
  *      (low/medium/high/xhigh); none/minimal/undefined leaves the model in its
  *      default non-thinking mode.
- *    * Raises `max_tokens` to at least 8192 when the profile default is
- *      smaller (agnes-2.0-flash allows ~64K output). Same incident class as
- *      deepseek: a small cap truncates long replies and apply_patch payloads
- *      mid-stream (finish_reason: length). Larger configured values are kept.
+ *    * Preserves the model profile's `max_tokens` value. Output limits are
+ *      model/provider configuration, not a compatibility-layer default.
  *    * Appends the shared Chinese-output reminder when the conversation is
  *      Chinese, so English system prompts and tool output do not pull Agnes
  *      into replying in English.
@@ -88,13 +86,6 @@ export const agnesCompat = defineCompat(gptCompat, {
       };
     }
 
-    // 2. Raise max_tokens floor to 8192 to prevent mid-stream truncation
-    //    (finish_reason: length) that breaks apply_patch arguments and
-    //    truncates long replies. Larger configured values are preserved.
-    const currentMax = next.max_tokens;
-    if (typeof currentMax !== "number" || currentMax < 8192) {
-      next = { ...next, max_tokens: 8192 };
-    }
     return preserveChineseOutputLanguage(ctx, next);
   },
   extractVisibleStreamText(accumulated: string): string {

@@ -55,13 +55,8 @@ function stripInternalExecutedToolsMarker(text: string): string {
  *      frequency_penalty, presence_penalty, logprobs, top_logprobs,
  *      prompt_cache_id, and response_format. They are stripped to avoid
  *      HTTP 400.
- *    * Raises `max_tokens` to at least 8192 when the profile default is
- *      smaller. Observed incident: the default 4096 truncates long replies
- *      and apply_patch payloads mid-stream (`finish_reason: length`),
- *      which surfaces as "写入失败" (truncated tool arguments cannot be
- *      parsed) and "长文本丢失偏离" (truncated assistant message). 8192 is
- *      the documented deepseek-chat output ceiling; larger configured values
- *      are preserved.
+ *    * Preserves the model profile's `max_tokens` value. Output limits are
+ *      model/provider configuration, not a compatibility-layer default.
  *  - `extractVisibleStreamText`: deepseek runs in native-tool-call mode
  *    (supportsToolCalling=true, no forceTextToolProtocol), so `content` is a
  *    natural-language reply, NOT a JSON decision envelope. The GPT baseline
@@ -179,18 +174,6 @@ export const deepseekCompat = defineCompat(gptCompat, {
         const { reasoning_effort, ...withoutReasoningEffort } = next;
         next = withoutReasoningEffort;
       }
-    }
-
-    // 2. Raise small output caps to prevent mid-stream truncation, but keep
-    //    the floor within a quarter of unusually small model context windows.
-    //    Larger configured values are preserved.
-    const currentMax = next.max_tokens;
-    const maxTokensFloor = Math.min(
-      8_192,
-      Math.max(1_024, Math.floor(ctx.model.contextWindow / 4))
-    );
-    if (typeof currentMax !== "number" || currentMax < maxTokensFloor) {
-      next = { ...next, max_tokens: maxTokensFloor };
     }
 
     return preserveChineseOutputLanguage(ctx, next);

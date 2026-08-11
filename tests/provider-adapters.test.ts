@@ -97,18 +97,18 @@ describe("native tool names", () => {
 describe("provider transport limits", () => {
   const deepseekModel = { id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash" };
 
-  it("uses compatibility defaults independently from the model token window", () => {
+  it("does not impose a DeepSeek request-byte default", () => {
     expect(resolveProviderRequestLimits(
       { id: "provider", type: "openai-compatible" },
       deepseekModel
-    )).toEqual({ maxRequestBytes: 128 * 1024, maxTools: 50 });
+    )).toEqual({ maxRequestBytes: 0, maxTools: 0 });
     expect(resolveProviderRequestLimits(
       { id: "provider", type: "openai-compatible" },
       { id: "kimi-k3", displayName: "Kimi K3" }
-    )).toEqual({ maxRequestBytes: 0, maxTools: 50 });
+    )).toEqual({ maxRequestBytes: 0, maxTools: 0 });
   });
 
-  it("allows a compacted DeepSeek request slightly above the legacy 120 KiB default", () => {
+  it("uses an explicitly configured DeepSeek request-byte limit", () => {
     const request = {
       model: deepseekModel.id,
       messages: [{ role: "user", content: "x".repeat(120 * 1024) }],
@@ -122,7 +122,7 @@ describe("provider transport limits", () => {
 
     const limited = applyProviderRequestLimits(
       request,
-      { id: "provider", type: "openai-compatible" },
+      { id: "provider", type: "openai-compatible", maxRequestBytes: 128 * 1024 },
       deepseekModel
     );
 
@@ -259,7 +259,7 @@ describe("provider transport limits", () => {
 
   it("keeps transport headroom and compacts a recent rejected completion candidate", () => {
     const maxRequestBytes = 120 * 1024;
-    const targetRequestBytes = maxRequestBytes - 4 * 1024;
+    const targetRequestBytes = maxRequestBytes;
     const request = {
       model: deepseekModel.id,
       messages: [
@@ -288,7 +288,7 @@ describe("provider transport limits", () => {
 
   it("shrinks recent tool evidence when a tool-free request exceeds the hard limit by 45 bytes", () => {
     const maxRequestBytes = 120 * 1024;
-    const targetRequestBytes = maxRequestBytes - 4 * 1024;
+    const targetRequestBytes = maxRequestBytes;
     const messages = [
       { role: "system", content: "" },
       { role: "user", content: "CURRENT_REQUEST_MUST_STAY" },
@@ -321,7 +321,7 @@ describe("provider transport limits", () => {
 
   it("compacts regenerated system context when no historical message can be removed", () => {
     const maxRequestBytes = 120 * 1024;
-    const targetRequestBytes = maxRequestBytes - 4 * 1024;
+    const targetRequestBytes = maxRequestBytes;
     const request = {
       model: deepseekModel.id,
       messages: [
@@ -376,7 +376,7 @@ describe("provider transport limits", () => {
 
   it("drops a large internal compaction summary before preserving the current request", () => {
     const maxRequestBytes = 120 * 1024;
-    const targetRequestBytes = maxRequestBytes - 4 * 1024;
+    const targetRequestBytes = maxRequestBytes;
     const request = {
       model: deepseekModel.id,
       messages: [
@@ -393,7 +393,7 @@ describe("provider transport limits", () => {
 
     const limited = applyProviderRequestLimits(
       request,
-      { id: "provider", type: "openai-compatible" },
+      { id: "provider", type: "openai-compatible", maxRequestBytes },
       deepseekModel
     );
     const serialized = JSON.stringify(limited);
@@ -537,11 +537,11 @@ describe("OpenAiCompatibleProvider", () => {
       .toBe(false);
   });
 
-  it("strips sampling params and raises the max_tokens floor for Kimi thinking models", async () => {
+  it("strips sampling params while preserving the configured max_tokens for Kimi thinking models", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
-    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret", maxTools: 50 };
 
     await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Complete the requested task.",
@@ -570,8 +570,7 @@ describe("OpenAiCompatibleProvider", () => {
     expect(request).not.toHaveProperty("temperature");
     expect(request).not.toHaveProperty("top_p");
     expect(request).not.toHaveProperty("response_format");
-    // Small output caps are raised to 8192 to avoid mid-stream truncation.
-    expect(request.max_tokens).toBe(8192);
+    expect(request.max_tokens).toBe(4096);
   });
 
   it("strips parallel_tool_calls and clamps temperature for non-thinking Kimi models", async () => {
@@ -652,7 +651,7 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
-    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "moonshot-gateway", type: "openai-compatible", apiKey: "secret", maxTools: 50 };
     const manyTools = Array.from({ length: 55 }, (_, index) => ({
       name: `fs.tool_${index}`,
       description: "Read a file",
@@ -682,8 +681,8 @@ describe("OpenAiCompatibleProvider", () => {
     });
 
     const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    // The gateway rejects more than 50 tools with "400 Invalid request
-    // parameters" (code 11133); the compat truncates the tail instead.
+    // The configured provider limit truncates the tail instead of sending
+    // more tools than this gateway accepts.
     expect(Array.isArray(request.tools)).toBe(true);
     expect((request.tools as unknown[]).length).toBe(50);
   });
@@ -692,7 +691,7 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret", maxTools: 50 };
     const manyTools = Array.from({ length: 65 }, (_, index) => ({
       name: `fs.tool_${index}`,
       description: "Read a file",
@@ -757,7 +756,7 @@ describe("OpenAiCompatibleProvider", () => {
     const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     expect(request).toMatchObject({
       temperature: 0.2,
-      max_tokens: 8192,
+      max_tokens: 4096,
       thinking: { type: "disabled" },
       response_format: { type: "json_object" }
     });
@@ -768,7 +767,7 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"继续执行","tool_calls":[],"end_turn":false,"goal_completed":false}' } }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret", maxTools: 50 };
 
     await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Return the next Agent decision.",
@@ -811,7 +810,13 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      apiKey: "secret",
+      maxRequestBytes: 120 * 1024,
+      maxTools: 50
+    };
     const manyTools = Array.from({ length: 50 }, (_, index) => ({
       name: `fs.tool_${index}`,
       description: "Read a file ".repeat(20),
@@ -1283,7 +1288,7 @@ describe("OpenAiCompatibleProvider", () => {
     expect(resolveModelCompat({ id: "agnes-video-v2.0", displayName: "" }).id).toBe("agnes");
   });
 
-  it("injects chat_template_kwargs thinking and raises max_tokens for Agnes when effort is set", async () => {
+  it("injects chat_template_kwargs thinking and preserves max_tokens for Agnes when effort is set", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
@@ -1313,8 +1318,7 @@ describe("OpenAiCompatibleProvider", () => {
     const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     // Thinking mode is enabled via the Agnes chat_template_kwargs extension.
     expect(request.chat_template_kwargs).toEqual({ enable_thinking: true });
-    // Small output caps are raised to 8192 to avoid mid-stream truncation.
-    expect(request.max_tokens).toBe(8192);
+    expect(request.max_tokens).toBe(4096);
   });
 
   it("leaves Agnes thinking mode off when no reasoning effort is set", async () => {
@@ -1443,7 +1447,7 @@ describe("OpenAiCompatibleProvider", () => {
     expect(resolveModelCompat({ id: "imagen-3.0-generate-002", displayName: "" }).id).toBe("gemini");
   });
 
-  it("passes reasoning_effort through for Gemini and raises the max_tokens floor", async () => {
+  it("passes reasoning_effort through for Gemini and preserves max_tokens", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
@@ -1474,8 +1478,7 @@ describe("OpenAiCompatibleProvider", () => {
     // The GPT baseline only injects reasoning_effort for GPT reasoning models;
     // the Gemini shell must pass it through explicitly.
     expect(request.reasoning_effort).toBe("high");
-    // Small output caps are raised to 8192 to avoid mid-stream truncation.
-    expect(request.max_tokens).toBe(8192);
+    expect(request.max_tokens).toBe(4096);
   });
 
   it("maps xhigh to high and keeps none for Gemini thinking control", () => {
@@ -2484,10 +2487,8 @@ describe("OpenAiCompatibleProvider", () => {
           { role: "assistant", content: "Hi" },
           { role: "assistant", content: "Tool output" }
         ],
-        // deepseek compat raises max_tokens floor to 8192 to prevent
-        // mid-stream truncation (finish_reason: length) that breaks long
-        // replies and apply_patch arguments.
-        max_tokens: 8192,
+        // The DeepSeek compat preserves the model's configured output limit.
+        max_tokens: 4096,
         thinking: { type: "enabled" }
       },
       {

@@ -117,12 +117,11 @@ export function resolveProviderRequestLimits(
     provider.name ?? "",
     provider.baseUrl ?? ""
   ].join(" ").toLowerCase();
-  // DeepSeek's compatible chat endpoint accepts the normal 128 KiB request
-  // envelope. Keep a 4 KiB compaction headroom below it while allowing
-  // already-compacted requests that are only slightly above the old 120 KiB
-  // project default to proceed.
-  const defaultMaxRequestBytes = identity.includes("deepseek") ? 128 * 1024 : 0;
-  const defaultMaxTools = /deepseek|kimi|moonshot/.test(identity) ? 50 : 0;
+  // Request-body limits are provider-specific configuration. Do not impose a
+  // model-name-based default: compatible gateways vary, and the model context
+  // window is not the same thing as an HTTP request-body limit.
+  const defaultMaxRequestBytes = 0;
+  const defaultMaxTools = 0;
   return {
     maxRequestBytes: normalizeProviderLimit(provider.maxRequestBytes, defaultMaxRequestBytes),
     maxTools: normalizeProviderLimit(provider.maxTools, defaultMaxTools)
@@ -147,16 +146,12 @@ const COMPACTED_RECENT_TOOL_RESULT = "[Recent tool output shortened to fit the p
 const COMPACTED_SYSTEM_CONTEXT = "[Supplementary system context shortened to fit the provider request limit.]";
 const INTERNAL_CONTEXT_SUMMARY_PREFIX = "[Internal context compaction summary.";
 const COMPACTED_INTERNAL_CONTEXT_SUMMARY = "[Earlier internal context summary omitted to fit the provider request limit.]";
-const PROVIDER_REQUEST_SAFETY_MARGIN_BYTES = 4 * 1024;
-const PROVIDER_REQUEST_SAFETY_MARGIN_THRESHOLD_BYTES = 64 * 1024;
-
 function serializedRequestBytes(request: Record<string, unknown>): number {
   return Buffer.byteLength(JSON.stringify(request), "utf8");
 }
 
 function resolveProviderRequestTargetBytes(maxRequestBytes: number): number {
-  if (maxRequestBytes < PROVIDER_REQUEST_SAFETY_MARGIN_THRESHOLD_BYTES) return maxRequestBytes;
-  return Math.max(1, maxRequestBytes - PROVIDER_REQUEST_SAFETY_MARGIN_BYTES);
+  return Math.max(0, maxRequestBytes);
 }
 
 function mergeWireMessageContent(left: unknown, right: unknown): unknown {
