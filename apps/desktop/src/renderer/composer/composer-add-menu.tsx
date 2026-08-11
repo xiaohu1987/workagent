@@ -157,10 +157,10 @@ export function ComposerAddMenu({
           <span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">开启知识库</span><span className="gpa-popover-item-hint">允许本对话检索本地知识库</span></span>
           {gpaState.knowledgeEnabled ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
         </button>
-        <button className={`gpa-popover-item gpa-popover-item-agent ${multiAgentMode === "proactive" ? "is-active" : ""}`} role="menuitemcheckbox" aria-checked={multiAgentMode === "proactive"} onMouseEnter={resetToRoot} onClick={() => void onSetMultiAgentMode(multiAgentMode === "proactive" ? "disabled" : "proactive")}>
+        <button className={`gpa-popover-item gpa-popover-item-agent ${multiAgentMode === "proactive" ? "is-active" : ""}`} role="menuitem" onMouseEnter={resetToRoot} disabled={multiAgentMode === "proactive"} onClick={() => void onSetMultiAgentMode("proactive")}>
           <span className="gpa-popover-item-icon" aria-hidden><IconSkills /></span>
-          <span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">子智能体</span><span className="gpa-popover-item-hint">{multiAgentMode === "proactive" ? "当前任务已开启，点击关闭" : "为当前任务开启并行探索、审查与诊断"}</span></span>
-          <span className={`gpa-popover-item-check ${multiAgentMode === "proactive" ? "is-active" : ""}`}>{multiAgentMode === "proactive" ? "已开启" : "已关闭"}</span>
+          <span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">子智能体</span><span className="gpa-popover-item-hint">为当前任务开启并行探索、审查与诊断</span></span>
+          {multiAgentMode === "proactive" ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
         </button>
         <button className={`gpa-popover-item gpa-popover-item-gpa ${gpaState.stage !== "off" ? "is-active" : ""}`} role="menuitem" onMouseEnter={resetToRoot} disabled={!isProjectThread} title={!isProjectThread ? "仅项目模式可开启 GPA" : gpaState.stage !== "off" ? "检查 GPA 状态" : undefined} onClick={() => void onEnableGpa()}>
           <span className="gpa-popover-item-icon" aria-hidden><IconGpa /></span>
