@@ -34,12 +34,14 @@ function ActiveSubagentLines({
   agents,
   queuedAgentIds,
   runtimeActivities,
-  onInterrupt
+  onInterrupt,
+  skillNames
 }: {
   agents: ThreadRecord[];
   queuedAgentIds: Set<string>;
   runtimeActivities: Record<string, RuntimeActivity>;
   onInterrupt: (agent: ThreadRecord) => void;
+  skillNames?: SkillNameMap;
 }) {
   return (
     <div className="active-subagent-lines" aria-label="本次任务的子智能体" aria-live="polite">
@@ -54,8 +56,8 @@ function ActiveSubagentLines({
               : agent.status;
         const terminal = !queued && agent.status !== "running" && agent.status !== "waiting";
         const runtimeActivity = runtimeActivities[agent.id];
-        const runtimeLabel = getSubagentRuntimeLabel(runtimeActivity);
-        const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity);
+        const runtimeLabel = getSubagentRuntimeLabel(runtimeActivity, skillNames);
+        const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity, skillNames);
         const title = getSubagentTitle(agent);
         const statusLabel = queued
           ? "排队中"
@@ -133,25 +135,25 @@ function SubagentElapsedTime({
   return <time>{formatElapsedClock(elapsedMs)}</time>;
 }
 
-function getSubagentRuntimeLabel(activity: RuntimeActivity | undefined): string | null {
+function getSubagentRuntimeLabel(activity: RuntimeActivity | undefined, skillNames?: SkillNameMap): string | null {
   if (!activity) return null;
   const activeTool = [...activity.entries].reverse().find(
     (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool" && entry.toolCall.status === "running"
   );
-  if (activeTool) return getToolProcessingLabel(activeTool.toolCall.toolName, activeTool.toolCall.argumentsJson);
+  if (activeTool) return getToolProcessingLabel(activeTool.toolCall.toolName, activeTool.toolCall.argumentsJson, skillNames);
   const latestStatus = [...activity.entries].reverse().find(
     (entry): entry is Extract<RuntimeActivityEntry, { kind: "status" }> => entry.kind === "status"
   );
   return latestStatus?.label ?? null;
 }
 
-function getSubagentRuntimeHistory(activity: RuntimeActivity | undefined): Array<{ id: string; label: string }> {
+function getSubagentRuntimeHistory(activity: RuntimeActivity | undefined, skillNames?: SkillNameMap): Array<{ id: string; label: string }> {
   if (!activity) return [];
   return activity.entries.slice(-5).reverse().map((entry) => ({
     id: entry.id,
     label: entry.kind === "tool"
       ? entry.toolCall.status === "running"
-        ? getToolProcessingLabel(entry.toolCall.toolName, entry.toolCall.argumentsJson)
+        ? getToolProcessingLabel(entry.toolCall.toolName, entry.toolCall.argumentsJson, skillNames)
         : `${entry.toolCall.status === "failed" ? "工具失败" : "已完成"} · ${entry.toolCall.toolName}`
       : entry.kind === "status"
         ? entry.label
@@ -314,6 +316,7 @@ export function RuntimeActivityPanel({
           agents={activeSubagents}
           queuedAgentIds={queuedSubagentIds}
           runtimeActivities={runtimeActivities}
+          skillNames={skillNames}
           onInterrupt={onInterruptSubagent}
         />
       ) : null}
