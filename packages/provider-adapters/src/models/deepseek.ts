@@ -44,8 +44,8 @@ function looksLikeDecisionEnvelope(accumulated: string): boolean {
  *
  * Tuned:
  *  - `normalizeRequestParams`:
- *    * Reasoning models (deepseek-reasoner, deepseek-r1, v4-flash/pro with
- *      thinking in the display name) reject temperature, top_p,
+ *    * Thinking requests (deepseek-reasoner, deepseek-r1, and v4-flash/pro
+ *      variants while thinking is enabled) reject temperature, top_p,
  *      frequency_penalty, presence_penalty, logprobs, top_logprobs,
  *      prompt_cache_id, and response_format. They are stripped to avoid
  *      HTTP 400.
@@ -108,11 +108,21 @@ export const deepseekCompat = defineCompat(gptCompat, {
       ctx.input.provider.baseUrl ?? ""
     ].join(" ").toLowerCase();
     const isV4 = isDeepSeekV4Model(identity);
-    const isReasoner = DEEPSEEK_REASONER_PATTERN.test(identity);
+    const reasoningEffort = ctx.input.reasoningEffort;
+    // V4 is a thinking model even when the catalog display name does not
+    // include the word "thinking" (for example, deepseek-v4-flash-0731).
+    // Keep enabled V4 requests in the same sanitization branch as
+    // deepseek-reasoner; otherwise the generated request still carries
+    // temperature and can be rejected with an opaque HTTP 400 by compatible
+    // gateways. A deliberate `none` effort disables thinking, so normal
+    // sampling parameters remain meaningful in that mode.
+    const isThinkingRequest = isV4
+      ? reasoningEffort !== "none"
+      : DEEPSEEK_REASONER_PATTERN.test(identity);
 
     // 1. Reasoning models: strip fields the thinking API rejects (HTTP 400).
     let next: Record<string, unknown> = base;
-    if (isReasoner) {
+    if (isThinkingRequest) {
       const {
         temperature,
         top_p,
@@ -141,7 +151,6 @@ export const deepseekCompat = defineCompat(gptCompat, {
     // the app's reasoning levels to the V4 API's low/high/max values.
     if (isV4) {
       const isPro = /\bv4-pro\b/.test(identity);
-      const reasoningEffort = ctx.input.reasoningEffort;
       next = {
         ...next,
         thinking: { type: reasoningEffort === "none" ? "disabled" : "enabled" }

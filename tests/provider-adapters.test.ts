@@ -695,6 +695,44 @@ describe("OpenAiCompatibleProvider", () => {
     expect((request.tools as unknown[]).length).toBe(50);
   });
 
+  it("keeps normal sampling available when DeepSeek V4 thinking is disabled", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return JSON only.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      reasoningEffort: "none",
+      model: {
+        id: "deepseek-v4-flash-0731",
+        providerId: provider.id,
+        displayName: "DeepSeek V4 Flash",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: false,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 4096
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request).toMatchObject({
+      temperature: 0.2,
+      max_tokens: 8192,
+      thinking: { type: "disabled" },
+      response_format: { type: "json_object" }
+    });
+    expect(request).not.toHaveProperty("reasoning_effort");
+  });
+
   it("compacts oversized DeepSeek relay requests without dropping recent tool context", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
@@ -2365,13 +2403,11 @@ describe("OpenAiCompatibleProvider", () => {
           { role: "assistant", content: "Hi" },
           { role: "assistant", content: "Tool output" }
         ],
-        temperature: 0.2,
         // deepseek compat raises max_tokens floor to 8192 to prevent
         // mid-stream truncation (finish_reason: length) that breaks long
         // replies and apply_patch arguments.
         max_tokens: 8192,
-        thinking: { type: "enabled" },
-        response_format: { type: "json_object" }
+        thinking: { type: "enabled" }
       },
       {
         signal: undefined
@@ -2629,6 +2665,67 @@ describe("OpenAiCompatibleProvider", () => {
       goalCompleted: false,
       isStructured: true
     });
+  });
+
+  it("keeps DeepSeek tool results contiguous when recovery notes were interleaved", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "deepseek-v4-flash-0731",
+      providerId: provider.id,
+      displayName: "DeepSeek V4 Flash",
+      contextWindow: 128_000,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: true
+    };
+    const calls = ["call-0", "call-1", "call-2"];
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use the provided tools.",
+      transcript: [
+        { role: "user", content: "Collect the pages." },
+        {
+          role: "assistant",
+          content: "",
+          reasoningContent: "I will collect the pages.",
+          toolCalls: calls.map((id, index) => ({
+            id,
+            name: "web_search.open_page",
+            arguments: { url: `https://example.com/${index}` }
+          }))
+        },
+        { role: "tool", content: "page 0", toolCallId: "call-0" },
+        { role: "user", content: "The first result was already available; continue." },
+        { role: "tool", content: "page 1", toolCallId: "call-1" },
+        { role: "user", content: "Do not repeat the second page." },
+        { role: "tool", content: "page 2", toolCallId: "call-2" },
+        { role: "user", content: "Return the result when the batch is complete." }
+      ],
+      availableTools: [{
+        name: "web_search.open_page",
+        description: "Open a page.",
+        inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+        riskLevel: "low"
+      }],
+      model,
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const messages = request.messages as Array<Record<string, unknown>>;
+    const assistantIndex = messages.findIndex((message) => message.role === "assistant" && message.tool_calls);
+    const toolMessages = messages.filter((message) => message.role === "tool");
+    expect(toolMessages.map((message) => message.tool_call_id)).toEqual(calls);
+    expect(messages.slice(assistantIndex + 1, assistantIndex + 4).map((message) => message.role)).toEqual([
+      "tool", "tool", "tool"
+    ]);
+    expect(messages.slice(assistantIndex + 4).every((message) => message.role === "user")).toBe(true);
   });
 
   it("parses the legacy DeepSeek function_calls container and encoded argument JSON", () => {

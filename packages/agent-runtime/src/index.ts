@@ -2515,8 +2515,7 @@ class ThreadSessionRuntime {
             adapter.runTurn({
               systemPrompt,
               transcript: (
-                (this.#useFunctionCallCompatibilityTranscript || useTextToolProtocol) &&
-                resolveModelCompat(model, provider).id !== "deepseek"
+                this.#useFunctionCallCompatibilityTranscript || useTextToolProtocol
               )
                 ? buildFunctionCallCompatibilityTranscript(transcript)
                 : transcript,
@@ -2743,7 +2742,6 @@ class ThreadSessionRuntime {
           if (
             !abortController.signal.aborted &&
             functionCallProtocolRecoveryAttempts === 0 &&
-            resolveModelCompat(model, provider).id !== "deepseek" &&
             (
               isFunctionCallProtocolError(error) ||
               (
