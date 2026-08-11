@@ -20248,6 +20248,15 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   align-items: start;
 }
 
+/* 动态背景预览:待机视频铺满预览区 */
+.chat-background-preview-dynamic video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .chat-background-preview-column {
   display: grid;
   min-width: 0;
