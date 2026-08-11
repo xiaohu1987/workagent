@@ -327,6 +327,35 @@ describe("tool activity targets", () => {
     expect(getToolActivityTarget("shell.exec", { command: "pnpm test" }, "pnpm test")).toBe("pnpm test");
     expect(getToolActivityTarget("fs.write_file", { path: "src/App.tsx" }, "src/App.tsx")).toBe("src/App.tsx");
   });
+
+  it("shows the loaded skill id as the target for skill tools", () => {
+    expect(getToolActivityTarget("skills.load", { skill_id: "pdf" }, "pdf")).toBe("pdf");
+    expect(getToolActivityTarget("skills.install", { source: "https://example.com/skill" }, "skills.install")).toBe("https://example.com/skill");
+  });
+
+  it("uses the skill name when a skill catalog is available", () => {
+    const skillNames = new Map([["skill-id", "PDF 文档"]]);
+    const toolCall = makeToolCall({
+      id: "named-skill",
+      toolName: "skills.load",
+      argumentsJson: JSON.stringify({ skill_id: "skill-id" })
+    });
+
+    expect(getToolActivityTarget("skills.load", { skill_id: "skill-id" }, "skill-id", skillNames)).toBe("PDF 文档");
+    expect(getConciseToolActivityLabel([toolCall], undefined, skillNames)).toBe("加载技能 PDF 文档");
+    expect(getToolProcessingLabel("skills.load", toolCall.argumentsJson, skillNames)).toBe("正在加载技能 PDF 文档");
+  });
+
+  it("includes loaded skill ids in the concise activity label", () => {
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "s1", toolName: "skills.load", argumentsJson: JSON.stringify({ skill_id: "pdf" }) }),
+      makeToolCall({ id: "s2", toolName: "skills.load", argumentsJson: JSON.stringify({ skill_id: "pdf" }) }),
+      makeToolCall({ id: "s3", toolName: "skills.load", argumentsJson: JSON.stringify({ skill_id: "docx" }) })
+    ])).toBe("加载技能 pdf、docx");
+    expect(getConciseToolActivityLabel([
+      makeToolCall({ id: "s4", toolName: "skills.load", argumentsJson: "{}" })
+    ])).toBe("加载技能");
+  });
 });
 
 describe("file write transcript filtering", () => {

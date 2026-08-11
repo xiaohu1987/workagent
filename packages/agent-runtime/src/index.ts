@@ -199,7 +199,8 @@ export const NETWORK_ERROR_MAX_DELAY_MS = 10_000;
 export const MAX_UPSTREAM_SERVICE_RETRIES = 5;
 export const MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES = 2;
 export const MAX_PROVIDER_RESOURCE_RETRIES = 2;
-export const MAX_PROVIDER_STREAM_RECOVERY_RETRIES = 1;
+/** Zero denotes unbounded automatic recovery. */
+export const MAX_PROVIDER_STREAM_RECOVERY_RETRIES = 0;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_BASE_TOKENS = 8_192;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_MAX_TOKENS = 32_768;
 
@@ -1819,6 +1820,7 @@ class ThreadSessionRuntime {
       let providerOutputLimitAttempts = 0;
       let providerResourceAttempts = 0;
       let providerStreamRecoveryAttempts = 0;
+      let forceNonStreamingAfterIncompleteStream = false;
       let upstreamContextRecoveryAttempts = 0;
       let upstreamServiceErrorAttempts = 0;
       let functionCallProtocolRecoveryAttempts = 0;
@@ -2394,7 +2396,7 @@ class ThreadSessionRuntime {
           ? `${systemPrompt}\n\n[Native tool schemas]\n${toolSchemaText}`
           : systemPrompt;
         const compactContext = async (
-          trigger: "pre_model_request" | "post_tool_batch" | "provider_request_limit" | "upstream_context_overflow" | "model_timeout_recovery" | "task_completed",
+          trigger: "pre_model_request" | "post_tool_batch" | "provider_request_limit" | "upstream_context_overflow" | "model_timeout_recovery" | "provider_stream_recovery" | "task_completed",
           force = false
         ): Promise<boolean> => {
           const compaction = compactTranscriptForContext(
@@ -2524,7 +2526,7 @@ class ThreadSessionRuntime {
               provider: requestProvider,
               reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
               forceTextToolProtocol: useTextToolProtocol,
-              stream: model.supportsStreaming,
+              stream: model.supportsStreaming && !forceNonStreamingAfterIncompleteStream,
               onTextDelta: async (delta) => {
                 if (abortController.signal.aborted) {
                   return;
@@ -2705,21 +2707,23 @@ class ThreadSessionRuntime {
             error instanceof ProviderStreamIncompleteError &&
             error.reason === "missing_finish_reason"
           ) {
-            if (providerStreamRecoveryAttempts >= MAX_PROVIDER_STREAM_RECOVERY_RETRIES) {
-              await this.services.log("provider.stream_recovery_exhausted", this.threadId, {
-                turnRunId: turn.id,
-                attempt: providerStreamRecoveryAttempts,
-                maxAttempts: MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
-                reason: error.reason
-              });
-              throw error;
-            }
             providerStreamRecoveryAttempts += 1;
+            forceNonStreamingAfterIncompleteStream = true;
+            const delayMs = resolveNetworkErrorDelayMs(providerStreamRecoveryAttempts);
+            const recoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
+            const recoveryCycle = Math.ceil(providerStreamRecoveryAttempts / recoveryWindow);
+            const compacted = providerStreamRecoveryAttempts % recoveryWindow === 0
+              ? await compactContext("provider_stream_recovery", true)
+              : false;
             await this.services.log("provider.stream_recovery", this.threadId, {
               turnRunId: turn.id,
               attempt: providerStreamRecoveryAttempts,
               maxAttempts: MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
-              reason: error.reason
+              reason: error.reason,
+              delayMs,
+              recoveryCycle,
+              compacted,
+              streamingDisabled: true
             });
             await this.services.emit({
               type: "agent.retrying",
@@ -2727,16 +2731,21 @@ class ThreadSessionRuntime {
               payload: {
                 attempt: providerStreamRecoveryAttempts,
                 maxAttempts: MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
-                reason: "provider_missing_finish_reason"
+                reason: "provider_missing_finish_reason",
+                delayMs,
+                streamingDisabled: true
               },
               createdAt: new Date().toISOString()
             });
-            transcript.push({
-              role: "user",
-              content:
-                "The previous provider stream ended without a completion signal. Retry once without repeating completed work; return one compact tool call or a concise final answer."
-            });
+            if (providerStreamRecoveryAttempts === 1) {
+              transcript.push({
+                role: "user",
+                content:
+                  "The previous provider stream ended without a completion signal. Continue from the verified transcript without repeating completed work; return one compact tool call or a concise final answer."
+              });
+            }
             await retryDraft();
+            await sleepWithAbort(delayMs, abortController.signal);
             continue;
           }
           if (
@@ -2972,6 +2981,7 @@ class ThreadSessionRuntime {
         modelTimeoutAttempts = 0;
         modelRateLimitAttempts = 0;
         networkErrorAttempts = 0;
+        providerStreamRecoveryAttempts = 0;
 
         if (abortController.signal.aborted) {
           throw new Error("Turn interrupted.");
@@ -3667,7 +3677,9 @@ class ThreadSessionRuntime {
           latestRequestedArtifactEvidence = await collectRequestedArtifactEvidence({
             outputDir: turnOutputDir,
             baseline: outputFilesBeforeTurn,
-            requestedExtensions: requestedDeliverableExtensions
+            requestedExtensions: requestedDeliverableExtensions,
+            candidatePaths: managedWriteCompletion.deliveredPaths,
+            candidateRoot: workspaceCwd
           });
           const artifactValidationReasons = validateRequestedArtifactAlignment({
             requestedExtensions: requestedDeliverableExtensions,
@@ -4322,7 +4334,6 @@ class ThreadSessionRuntime {
               this.services.persistence,
               this.threadId,
               turn.id,
-              turnOutputDir,
               latestRequestedArtifactEvidence
             );
             const verifiedPaths = successfulToolEvidence.flatMap((item) => item.verifiedPaths ?? []);
@@ -7286,23 +7297,46 @@ export async function collectRequestedArtifactEvidence(input: {
   outputDir: string;
   baseline: ReadonlyMap<string, string>;
   requestedExtensions: string[];
+  candidatePaths?: Iterable<string>;
+  candidateRoot?: string;
 }): Promise<RequestedArtifactEvidence[]> {
   if (input.requestedExtensions.length === 0) return [];
   const requested = new Set(input.requestedExtensions.map((extension) => extension.toLowerCase()));
   const evidence: RequestedArtifactEvidence[] = [];
+  const candidates = new Map<string, { baseDir: string; requireBaselineChange: boolean }>();
   for (const filePath of await listOutputFiles(input.outputDir)) {
-    const extension = path.extname(filePath).toLowerCase();
-    if (!requested.has(extension)) continue;
+    candidates.set(path.resolve(filePath), {
+      baseDir: input.outputDir,
+      requireBaselineChange: true
+    });
+  }
+  for (const filePath of input.candidatePaths ?? []) {
     const absolutePath = path.resolve(filePath);
+    candidates.set(absolutePath, {
+      baseDir: input.candidateRoot ?? input.outputDir,
+      requireBaselineChange: false
+    });
+  }
+  for (const [absolutePath, candidate] of candidates) {
+    const extension = path.extname(absolutePath).toLowerCase();
+    if (!requested.has(extension)) continue;
     try {
       const stats = await fs.stat(absolutePath);
+      if (!stats.isFile()) continue;
       const fingerprint = `${stats.size}:${stats.mtimeMs}`;
-      if (input.baseline.get(absolutePath) === fingerprint) continue;
+      if (candidate.requireBaselineChange && input.baseline.get(absolutePath) === fingerprint) continue;
       const buffer = await fs.readFile(absolutePath);
       const extracted = await extractArtifactPreview(absolutePath, extension);
+      const relativeToCandidateRoot = path.relative(candidate.baseDir, absolutePath);
+      const relativePath = relativeToCandidateRoot &&
+        relativeToCandidateRoot !== ".." &&
+        !relativeToCandidateRoot.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(relativeToCandidateRoot)
+        ? relativeToCandidateRoot
+        : path.basename(absolutePath);
       evidence.push({
         absolutePath,
-        relativePath: path.relative(input.outputDir, absolutePath),
+        relativePath,
         extension,
         mimeType: mimeTypeForExtension(extension),
         sizeBytes: stats.size,
@@ -7349,7 +7383,6 @@ async function registerRequestedArtifacts(
   persistence: RuntimePersistence,
   threadId: string,
   turnRunId: string,
-  outputDir: string,
   evidence: RequestedArtifactEvidence[]
 ): Promise<void> {
   const existing = await persistence.listThreadArtifacts(threadId);
@@ -7365,7 +7398,7 @@ async function registerRequestedArtifacts(
       artifactKind: artifact.extension === ".docx" ? "document" : "file",
       displayName: path.basename(artifact.absolutePath),
       absolutePath: artifact.absolutePath,
-      relativePath: path.relative(outputDir, artifact.absolutePath),
+      relativePath: artifact.relativePath,
       mimeType: artifact.mimeType,
       sizeBytes: artifact.sizeBytes,
       sha256: artifact.sha256,

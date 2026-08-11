@@ -113,7 +113,8 @@ import {
   replaceConversationMessagesFromEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
-  shouldShowRuntimeActivityPanel
+  shouldShowRuntimeActivityPanel,
+  type SkillNameMap
 } from "./lib/conversation-utils";
 import {
   ProjectFileEntry,
@@ -2400,8 +2401,19 @@ export function App() {
   useEffect(() => {
     if (isSettingsOpen && settingsTab === "capabilities") {
       void Promise.all([refreshSkills(), refreshUserSkills(), refreshPlugins()]);
+    } else {
+      void refreshSkills();
     }
   }, [isSettingsOpen, settingsTab, selectedThread?.cwd]);
+
+  const skillNames = useMemo<SkillNameMap>(() => {
+    const names = new Map<string, string>();
+    for (const skill of skills) {
+      const displayName = skill.displayName?.trim() || skill.qualifiedName?.trim() || skill.name?.trim();
+      if (displayName) names.set(skill.id, displayName);
+    }
+    return names;
+  }, [skills]);
 
   const skillUsageStatsByKey = useMemo(() => {
     const statsByKey = new Map<string, SkillUsageStats>();
@@ -2779,7 +2791,7 @@ export function App() {
       isWaitingForSubagents && subagentWaitLabel
         ? subagentWaitLabel
         : activeToolCall?.threadId === activeSnapshotThreadId
-        ? getToolProcessingLabel(activeToolCall.toolName, activeToolCall.argumentsJson)
+        ? getToolProcessingLabel(activeToolCall.toolName, activeToolCall.argumentsJson, skillNames)
         : activeAssistantDraft
           ? "正在生成回复"
           : isPreparingRuntime
@@ -2791,6 +2803,7 @@ export function App() {
       activeSnapshotThreadId,
       activeAssistantDraft,
       activeToolCall,
+      skillNames,
       isWaitingForSubagents,
       isPreparingRuntime,
       localRuntimeProgress?.phase,
@@ -5534,6 +5547,7 @@ export function App() {
                   taskProcessing={isTaskProcessing}
                   collapsedTurnIds={collapsedTurnIds}
                   deferredRuntimeToolGroup={deferredRuntimeToolGroup}
+                  skillNames={skillNames}
                   assistantLabel={activeAssistantLabel}
                   userMessageActions={transcriptUserMessageActions}
                   gpaPlanMessageId={gpaPlanMessageId}
@@ -5587,7 +5601,7 @@ export function App() {
                 {(completedDeferredRuntimeToolGroup || activeAssistantDraft || shouldRenderRuntimeTailPanel) ? (
                   <div className="runtime-tail">
                     {completedDeferredRuntimeToolGroup ? (
-                      <ToolActivityGroup toolCalls={completedDeferredRuntimeToolGroup} />
+                      <ToolActivityGroup toolCalls={completedDeferredRuntimeToolGroup} skillNames={skillNames} />
                     ) : null}
                     {activeAssistantDraft ? (
                       <AssistantDraftMessage
@@ -5607,6 +5621,7 @@ export function App() {
                         label={taskProcessingLabel}
                         entries={activeRuntimeActivity?.entries ?? []}
                         deferredToolCalls={completedDeferredRuntimeToolGroup ? [] : deferredRuntimeToolGroup ?? []}
+                        skillNames={skillNames}
                         preferLabel={isWaitingForSubagents}
                         hideCurrentStatus={Boolean(activeAssistantDraft)}
                         activeSubagents={activeSubagents}

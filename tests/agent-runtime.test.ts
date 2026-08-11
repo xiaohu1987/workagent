@@ -142,6 +142,7 @@ import {
   readLatestTurnContextMarkdown,
   resolveRequestedDeliverableExtensions,
   extractTaskTopicAnchors,
+  collectRequestedArtifactEvidence,
   validateRequestedArtifactAlignment,
   requiresStructuredTestCaseDeliverable,
   isExplicitMcpRequest,
@@ -607,6 +608,41 @@ describe("requested artifact semantic alignment", () => {
       evidence: [{ ...correctEvidence[0]!, extension: ".md", preview: "PRD 需求拆分 Skill" }],
       topicAnchors: ["PRD", "OA"]
     })).toEqual([]);
+  });
+
+  it("accepts a verified Markdown deliverable written in the project workspace", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-project-artifact-"));
+    const outputDir = path.join(root, "thread-output");
+    const projectDir = path.join(root, "project");
+    const artifactPath = path.join(projectDir, "AI-development-spec.md");
+    try {
+      await fs.mkdir(outputDir, { recursive: true });
+      await fs.mkdir(projectDir, { recursive: true });
+      await fs.writeFile(artifactPath, "# AI Development Specification\n\nDetailed requirements and acceptance criteria.", "utf8");
+
+      const evidence = await collectRequestedArtifactEvidence({
+        outputDir,
+        baseline: new Map(),
+        requestedExtensions: [".md"],
+        candidatePaths: [artifactPath],
+        candidateRoot: projectDir
+      });
+
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]).toMatchObject({
+        absolutePath: path.resolve(artifactPath),
+        relativePath: "AI-development-spec.md",
+        extension: ".md",
+        verified: true
+      });
+      expect(validateRequestedArtifactAlignment({
+        requestedExtensions: [".md"],
+        evidence,
+        topicAnchors: ["AI Development"]
+      })).toEqual([]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1534,7 +1570,7 @@ describe("provider output-limit recovery", () => {
     expect(isProviderResourceError(new Error("HTTP 500 insufficient_system_resource"))).toBe(true);
     expect(isProviderResourceError(new Error("Provider stream reached its output limit."))).toBe(false);
     expect(MAX_PROVIDER_RESOURCE_RETRIES).toBe(2);
-    expect(MAX_PROVIDER_STREAM_RECOVERY_RETRIES).toBe(1);
+    expect(MAX_PROVIDER_STREAM_RECOVERY_RETRIES).toBe(0);
   });
 });
 

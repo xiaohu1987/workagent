@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ApprovalRequest, AssistantDraftPhase, MessageAttachment, MessageRecord, ToolCallRecord, UserInputPrompt } from "@shared-types";
-import { getAssistantDraftPhaseLabel, getDisplayMessageContent, getFileWriteTarget, getMessageDisplayKind, getSelectedMessageContexts, getToolActivityPresentation, getToolActivityTarget, getToolProcessingLabel, isFileWriteTool, parseMessageEventBlocks, parseTimelineJson } from "../lib/conversation-utils";
+import { getAssistantDraftPhaseLabel, getDisplayMessageContent, getFileWriteTarget, getMessageDisplayKind, getSelectedMessageContexts, getToolActivityPresentation, getToolActivityTarget, getToolProcessingLabel, isFileWriteTool, parseMessageEventBlocks, parseTimelineJson, resolveSkillDisplayName, type SkillNameMap } from "../lib/conversation-utils";
 import type { ChatEventBlock, ChatEventType, SelectedMessageContext } from "../lib/conversation-utils";
 import { IconChart, IconCheck, IconChecklist, IconChevronDown, IconClose, IconCode, IconCompose, IconCopy, IconEye, IconFile, IconFileChanges, IconFolder, IconGlobe, IconGpa, IconHelpCircle, IconImage, IconKnowledge, IconMcp, IconNotebook, IconSearch, IconSkills, IconTerminal, IconVideo } from "../icons";
 import { CopyTextButton, MessageMediaLightbox, getFileLeafName, normalizeMarkdownImageSource, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
@@ -10,6 +10,7 @@ import { ApiCardThreadContext } from "../cards/api-card-message";
 
 type ToolActivityGroupProps = {
   toolCalls: ToolCallRecord[];
+  skillNames?: SkillNameMap;
 };
 
 type MessageKnowledgeSource = {
@@ -54,7 +55,8 @@ function formatRelativeTime(isoTime: string) {
 }
 
 export const ToolActivityGroup = memo(function ToolActivityGroup({
-  toolCalls
+  toolCalls,
+  skillNames
 }: ToolActivityGroupProps) {
   const toolPresentation = getToolActivityPresentation(toolCalls);
   const { runningCall } = toolPresentation;
@@ -63,8 +65,8 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
   const wasRunningRef = useRef(isRunning);
   const status = toolPresentation.status;
   const conciseLabel = runningCall
-    ? getToolProcessingLabel(runningCall.toolName, runningCall.argumentsJson)
-    : getConciseToolActivityLabel(toolCalls);
+    ? getToolProcessingLabel(runningCall.toolName, runningCall.argumentsJson, skillNames)
+    : getConciseToolActivityLabel(toolCalls, undefined, skillNames);
 
   useEffect(() => {
     if (isRunning) {
@@ -91,12 +93,12 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
       </summary>
       <div className="tool-activity-details-shell">
         <div className="tool-activity-details">
-          {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact />)}
+          {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact skillNames={skillNames} />)}
         </div>
       </div>
     </details>
   );
-}, (previous, next) => areToolActivityGroupsEqual(previous.toolCalls, next.toolCalls));
+}, (previous, next) => previous.skillNames === next.skillNames && areToolActivityGroupsEqual(previous.toolCalls, next.toolCalls));
 
 function areToolActivityGroupsEqual(previous: ToolCallRecord[], next: ToolCallRecord[]) {
   if (previous === next) return true;
@@ -112,10 +114,13 @@ function areToolActivityGroupsEqual(previous: ToolCallRecord[], next: ToolCallRe
   });
 }
 
-function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallRecord; compact?: boolean }) {
+function ToolActivityRow({ toolCall, compact = false, skillNames }: { toolCall: ToolCallRecord; compact?: boolean; skillNames?: SkillNameMap }) {
   const input = parseTimelineJson(toolCall.argumentsJson);
   const result = parseTimelineJson(toolCall.resultJson);
   const command = getTimelineCommand(toolCall.toolName, input);
+  const displayCommand = toolCall.toolName === "skills.load"
+    ? resolveSkillDisplayName(input.skill_id, skillNames) || command
+    : command;
   const isRunning = toolCall.status === "running" || toolCall.status === "pending";
   const blocked = toolCall.status === "blocked";
   const failed = toolCall.status === "failed" || toolCall.status === "denied";
@@ -125,7 +130,7 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
     : null;
   const output = getTimelineOutput(result);
   const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
-  const target = getToolActivityTarget(toolCall.toolName, input, command);
+  const target = getToolActivityTarget(toolCall.toolName, input, command, skillNames);
 
   if (compact) {
     return (
@@ -138,7 +143,7 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
           {duration !== null ? <time>{formatDuration(duration)}</time> : null}
         </summary>
         <div className="tool-activity-compact-details">
-          <code>$ {command}</code>
+          <code>$ {displayCommand}</code>
           {localUrl ? <LocalServerPreview url={localUrl} /> : null}
           {output ? (
             <details className="tool-activity-output" open>
@@ -161,7 +166,7 @@ function ToolActivityRow({ toolCall, compact = false }: { toolCall: ToolCallReco
           <span>{isRunning ? "正在执行" : blocked ? "执行前已拦截" : failed ? "执行失败" : "已完成"}</span>
           {duration !== null ? <time>{formatDuration(duration)}</time> : null}
         </div>
-        <code>{isFileWriteTool(toolCall.toolName) ? getFileWriteTarget(input) : `$ ${command}`}</code>
+        <code>{isFileWriteTool(toolCall.toolName) ? getFileWriteTarget(input) : `$ ${displayCommand}`}</code>
         {localUrl ? <LocalServerPreview url={localUrl} /> : null}
         {output ? (
           <details className="tool-activity-output" open={failed || blocked}>
@@ -194,9 +199,13 @@ export function ToolActivityIcon({ toolName }: { toolName: string }) {
   return <IconTerminal />;
 }
 
-export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord): string {
+export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord, skillNames?: SkillNameMap): string {
   if (runningCall) {
-    return getToolProcessingLabel(runningCall.toolName);
+    return getToolProcessingLabel(
+      runningCall.toolName,
+      runningCall.toolName === "skills.load" ? runningCall.argumentsJson : undefined,
+      skillNames
+    );
   }
 
   const has = (toolName: string) => toolCalls.some((toolCall) => toolCall.toolName === toolName);
@@ -211,6 +220,13 @@ export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], running
     toolCall.toolName === "fs.read_file" || toolCall.toolName === "fs.read_directory"
   );
   const browserOnly = toolCalls.some((toolCall) => toolCall.toolName.startsWith("browser."));
+  const loadedSkillIds = [...new Set(
+    toolCalls
+      .filter((toolCall) => toolCall.toolName === "skills.load")
+      .map((toolCall) => parseTimelineJson(toolCall.argumentsJson).skill_id)
+      .filter((skillId): skillId is string => typeof skillId === "string" && skillId.trim().length > 0)
+  )];
+  const loadedSkillNames = loadedSkillIds.map((skillId) => resolveSkillDisplayName(skillId, skillNames));
   const labels = [
     writeCount ? "编辑了文件" : "",
     commandCount ? (commandCount > 1 ? "运行了多个命令" : "运行了命令") : "",
@@ -229,7 +245,7 @@ export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], running
     has("video.generate") ? "生成视频" : "",
     hasPrefix("database.") ? "查询数据库" : "",
     hasPrefix("memories.") ? "搜索记忆" : "",
-    hasPrefix("skills.") ? "加载技能" : "",
+    hasPrefix("skills.") ? (loadedSkillNames.length ? `加载技能 ${loadedSkillNames.slice(0, 3).join("、")}` : "加载技能") : "",
     has("mcp.call") || has("mcp.list_tools") || has("list_mcp_resources") || has("list_mcp_resource_templates") ? "调用 MCP" : "",
     !has("web_search.search_query") && !has("web_search.open_page") && !has("web_search.find_in_page") && browserOnly ? "浏览了网页" : ""
   ].filter(Boolean);
@@ -530,7 +546,7 @@ export function UserInputPromptCard({
 }
 
 export function getTimelineCommand(toolName: string, input: Record<string, unknown>): string {
-  const command = input.command ?? input.filePath ?? input.path ?? input.query;
+  const command = input.command ?? input.filePath ?? input.path ?? input.query ?? input.skill_id;
   return typeof command === "string" && command.trim() ? command : toolName;
 }
 

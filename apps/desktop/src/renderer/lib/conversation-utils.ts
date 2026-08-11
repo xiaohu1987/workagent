@@ -982,8 +982,22 @@ export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): string {
+export type SkillNameMap = ReadonlyMap<string, string>;
+
+export function resolveSkillDisplayName(skillId: unknown, skillNames?: SkillNameMap): string {
+  if (typeof skillId !== "string") return "";
+  const normalizedId = skillId.trim();
+  if (!normalizedId) return "";
+  return skillNames?.get(normalizedId)?.trim() || normalizedId;
+}
+
+export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", skillNames?: SkillNameMap): string {
   const input = parseTimelineJson(argumentsJson);
+  if (toolName === "skills.load") {
+    const skillName = resolveSkillDisplayName(input.skill_id, skillNames);
+    const label = "\u6b63\u5728\u52a0\u8f7d\u6280\u80fd";
+    return skillName ? `${label} ${skillName}` : label;
+  }
   const rawTarget = input.command ?? input.path ?? input.filePath ?? input.query ?? input.pattern ?? input.url;
   const target = typeof rawTarget === "string" ? compactRuntimeTarget(rawTarget) : "";
   if (toolName === "apply_patch") {
@@ -1062,7 +1076,6 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}"): 
   }
   if (toolName === "memories.list") return "正在查看记忆";
   if (toolName === "memories.add_ad_hoc_note") return "正在记录记忆";
-  if (toolName === "skills.load") return "正在加载技能";
   if (toolName === "skills.install") return "正在安装技能";
   if (toolName === "mcp.call") return "正在调用 MCP";
   if (toolName === "mcp.list_tools") return "正在查看 MCP 工具";
@@ -1796,9 +1809,17 @@ export function getAssistantDraftDisplayContent(entry: Pick<AssistantDraft, "con
 export function getToolActivityTarget(
   toolName: string,
   input: Record<string, unknown>,
-  command: string
+  command: string,
+  skillNames?: SkillNameMap
 ): string {
   if (isFileWriteTool(toolName)) return getFileWriteTarget(input);
+  if (toolName === "skills.load" || toolName === "skills.install") {
+    const skillTarget = input.skill_id ?? input.source;
+    if (typeof skillTarget !== "string" || !skillTarget.trim()) return "";
+    return toolName === "skills.load"
+      ? resolveSkillDisplayName(skillTarget, skillNames)
+      : skillTarget;
+  }
   return command === toolName ? "" : command;
 }
 

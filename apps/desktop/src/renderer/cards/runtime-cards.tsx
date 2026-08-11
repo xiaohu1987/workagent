@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type { GpaStage, PendingResumeThread, QueuedMessageRecord, ThreadRecord, ToolCallRecord } from "@shared-types";
 import { IconChevronRight, IconClose, IconGuide, IconTerminal } from "../icons";
-import { getToolProcessingLabel } from "../lib/conversation-utils";
+import { getToolProcessingLabel, type SkillNameMap } from "../lib/conversation-utils";
 import { ToolActivityGroup, ToolActivityIcon, getConciseToolActivityLabel } from "../timeline/transcript";
 import type { ComposerSubmission, RuntimeActivity, RuntimeActivityEntry } from "../core/app-types";
 
@@ -247,6 +247,7 @@ export function RuntimeActivityPanel({
   label,
   entries,
   deferredToolCalls,
+  skillNames,
   preferLabel = false,
   hideCurrentStatus = false,
   activeSubagents,
@@ -257,6 +258,7 @@ export function RuntimeActivityPanel({
   label: string;
   entries: RuntimeActivityEntry[];
   deferredToolCalls: ToolCallRecord[];
+  skillNames?: SkillNameMap;
   preferLabel?: boolean;
   hideCurrentStatus?: boolean;
   activeSubagents: ThreadRecord[];
@@ -271,7 +273,7 @@ export function RuntimeActivityPanel({
   )?.toolCall ?? null;
   const displayLabel = preferLabel ? label : latestStatus?.label ?? label;
   const runningToolLabel = runningToolCall
-    ? getConciseToolActivityLabel([runningToolCall], runningToolCall)
+    ? getConciseToolActivityLabel([runningToolCall], runningToolCall, skillNames)
     : null;
   const runningToolDetail = runningToolLabel && !preferLabel && latestStatus?.label && latestStatus.label !== runningToolLabel
     ? latestStatus.label
@@ -303,7 +305,7 @@ export function RuntimeActivityPanel({
   return (
     <section className="runtime-activity-panel" aria-live="polite">
       {liveToolCalls.length > 0
-        ? <ToolActivityGroup toolCalls={liveToolCalls} />
+        ? <ToolActivityGroup toolCalls={liveToolCalls} skillNames={skillNames} />
         : hideCurrentStatus
           ? null
           : currentStatus}

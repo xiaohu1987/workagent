@@ -1,7 +1,7 @@
 import { Fragment, memo, useMemo } from "react";
 import type { RefObject } from "react";
 import type { ToolCallRecord } from "@shared-types";
-import { shouldKeepTimelineEntryWhenTurnCollapsed } from "../lib/conversation-utils";
+import { shouldKeepTimelineEntryWhenTurnCollapsed, type SkillNameMap } from "../lib/conversation-utils";
 import type { TimelineEntry } from "../lib/conversation-utils";
 import type { UserMessageActions } from "./transcript";
 import { TurnElapsedBanner } from "../cards/runtime-cards";
@@ -26,6 +26,7 @@ type Props = {
   taskProcessing: boolean;
   collapsedTurnIds: Set<string>;
   deferredRuntimeToolGroup: ToolCallRecord[] | null;
+  skillNames?: SkillNameMap;
   assistantLabel: string;
   userMessageActions: UserMessageActions;
   gpaPlanMessageId: string | null;
@@ -47,6 +48,7 @@ export const TimelineEntries = memo(function TimelineEntries({
   taskProcessing,
   collapsedTurnIds,
   deferredRuntimeToolGroup,
+  skillNames,
   assistantLabel,
   userMessageActions,
   gpaPlanMessageId,
@@ -97,7 +99,7 @@ export const TimelineEntries = memo(function TimelineEntries({
             ) : entry.kind === "user-input" ? (
               <UserInputPromptCard prompt={entry.prompt} resolving={false} canAnswer={false} onAnswer={() => undefined} />
             ) : (
-              <ToolActivityGroup toolCalls={entry.toolCalls} />
+              <ToolActivityGroup toolCalls={entry.toolCalls} skillNames={skillNames} />
             )}
             {entryTurn && entry.id === entryTurn.userEntryId ? (
               <TurnElapsedBanner
