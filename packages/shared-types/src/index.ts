@@ -976,6 +976,11 @@ export interface ProviderTurnInput {
   forceTextToolProtocol?: boolean;
   stream?: boolean;
   onTextDelta?: (delta: string) => void | Promise<void>;
+  /** Reports a native tool call as soon as its name is streamed by the provider. */
+  onToolCallPreparing?: (toolCall: {
+    name: string;
+    argumentsJson?: string;
+  }) => void | Promise<void>;
   onRequestMeasured?: (measurement: {
     requestBytes: number;
     maxRequestBytes: number;
@@ -1001,6 +1006,7 @@ export interface RuntimeEvent {
     | "assistant.execution_output"
     | "agent.retrying"
     | "agent.awaiting_model"
+    | "agent.tool_call_preparing"
     | "agent.context_compacted"
     | "agent.context_measured"
     | "agent.repository_exploration"

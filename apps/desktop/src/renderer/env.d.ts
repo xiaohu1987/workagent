@@ -22,6 +22,7 @@ type RendererRuntimeLogPage = import("@shared-types").RuntimeLogPage;
 declare global {
   interface Window {
     codexh: {
+      reportRendererError: (payload: { message: string; stack?: string; componentStack?: string; unhandledRejection?: boolean }) => void;
       getApplicationBackgrounds: () => Promise<{
         items: Array<{
           id: string;

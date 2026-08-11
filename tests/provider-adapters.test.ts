@@ -151,7 +151,7 @@ describe("provider transport limits", () => {
     expect(unlimited.tools).toHaveLength(4);
   });
 
-  it("counts final stream fields and rejects instead of deleting the current request", () => {
+  it("counts final stream fields and removes optional transport metadata before retrying", () => {
     const request = {
       model: deepseekModel.id,
       messages: [{ role: "user", content: "CURRENT_REQUEST_MUST_STAY" }],
@@ -160,11 +160,13 @@ describe("provider transport limits", () => {
     };
     const requestBytes = Buffer.byteLength(JSON.stringify(request), "utf8");
 
-    expect(() => applyProviderRequestLimits(
+    const limited = applyProviderRequestLimits(
       request,
       { id: "provider", type: "openai-compatible", maxRequestBytes: requestBytes - 1, maxTools: 0 },
       deepseekModel
-    )).toThrow(ProviderRequestLimitError);
+    );
+    expect(Buffer.byteLength(JSON.stringify(limited), "utf8")).toBeLessThanOrEqual(requestBytes - 1);
+    expect(limited).not.toHaveProperty("stream_options");
     expect(request.messages[0]?.content).toBe("CURRENT_REQUEST_MUST_STAY");
   });
 
@@ -341,6 +343,35 @@ describe("provider transport limits", () => {
     expect(serialized).toContain("SAFETY_RULES_MUST_STAY");
     expect(serialized).toContain("SYSTEM_TAIL_MUST_STAY");
     expect(serialized).toContain("Supplementary system context shortened");
+  });
+
+  it("drops optional transport fields when a request is only slightly over the hard limit", () => {
+    const request = {
+      model: deepseekModel.id,
+      messages: [{ role: "user", content: "CURRENT_REQUEST_MUST_STAY" }],
+      stream: true,
+      stream_options: { include_usage: true },
+      parallel_tool_calls: true,
+      tool_choice: "auto"
+    };
+    const requiredRequest = {
+      model: request.model,
+      messages: request.messages,
+      stream: request.stream
+    };
+    const maxRequestBytes = Buffer.byteLength(JSON.stringify(requiredRequest), "utf8");
+
+    const limited = applyProviderRequestLimits(
+      request,
+      { id: "provider", type: "openai-compatible", maxRequestBytes },
+      deepseekModel
+    );
+
+    expect(Buffer.byteLength(JSON.stringify(limited), "utf8")).toBeLessThanOrEqual(maxRequestBytes);
+    expect(limited).not.toHaveProperty("stream_options");
+    expect(limited).not.toHaveProperty("parallel_tool_calls");
+    expect(limited).not.toHaveProperty("tool_choice");
+    expect(JSON.stringify(limited)).toContain("CURRENT_REQUEST_MUST_STAY");
   });
 
   it("drops a large internal compaction summary before preserving the current request", () => {
@@ -733,6 +764,49 @@ describe("OpenAiCompatibleProvider", () => {
     expect(request).not.toHaveProperty("reasoning_effort");
   });
 
+  it("uses provider-enforced JSON when DeepSeek V4 recovers from native tools", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"继续执行","tool_calls":[],"end_turn":false,"goal_completed":false}' } }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Return the next Agent decision.",
+      transcript: [{ role: "user", content: "Continue the task." }],
+      availableTools: [{
+        name: "fs.read_directory",
+        description: "List files",
+        inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        riskLevel: "low"
+      }],
+      forceTextToolProtocol: true,
+      reasoningEffort: "high",
+      model: {
+        id: "deepseek-v4-flash-0731",
+        providerId: provider.id,
+        displayName: "DeepSeek V4 Flash",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 4096
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request).toMatchObject({
+      thinking: { type: "disabled" },
+      response_format: { type: "json_object" }
+    });
+    expect(request).not.toHaveProperty("tools");
+    expect(request).not.toHaveProperty("reasoning_effort");
+  });
+
   it("compacts oversized DeepSeek relay requests without dropping recent tool context", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
@@ -1094,6 +1168,13 @@ describe("OpenAiCompatibleProvider", () => {
     // A real decision envelope still routes through the GPT envelope extractor.
     const envelope = '{"assistant_message":"你好","tool_calls":[],"end_turn":true}';
     expect(compat.extractVisibleStreamText(envelope)).toBe("你好");
+  });
+
+  it("hides complete and partial internal tool markers from DeepSeek stream text", () => {
+    const compat = resolveModelCompat({ id: "deepseek-chat", displayName: "DeepSeek Chat" });
+
+    expect(compat.extractVisibleStreamText("read complete [Exec")).toBe("read complete");
+    expect(compat.extractVisibleStreamText("read complete [Executed tools: fs.read_file]")).toBe("read complete");
   });
 
   it("keeps Chinese replies stable for Kimi after English tool context", async () => {
@@ -3330,6 +3411,7 @@ describe("OpenAiCompatibleProvider", () => {
       supportsReasoningSummary: false
     };
     const visibleDeltas: string[] = [];
+    const preparingToolCalls: Array<{ name: string; argumentsJson?: string }> = [];
 
     const decision = await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Use tools when needed.",
@@ -3338,10 +3420,12 @@ describe("OpenAiCompatibleProvider", () => {
       model,
       provider,
       stream: true,
-      onTextDelta: async (delta) => { visibleDeltas.push(delta); }
+      onTextDelta: async (delta) => { visibleDeltas.push(delta); },
+      onToolCallPreparing: async (toolCall) => { preparingToolCalls.push(toolCall); }
     });
 
     expect(visibleDeltas).toEqual([]);
+    expect(preparingToolCalls).toEqual([{ name: "fs.read_file", argumentsJson: '{"path":"src/' }]);
     expect(decision).toMatchObject({
       toolCalls: [{ id: "call-1", name: "fs.read_file", arguments: { path: "src/App.tsx" } }],
       endTurn: false,

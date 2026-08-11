@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { NotificationNavigationTarget, RuntimeThreadSnapshotCursor } from "@shared-types";
 
 const api = {
+  reportRendererError: (payload: { message: string; stack?: string; componentStack?: string; unhandledRejection?: boolean }) =>
+    ipcRenderer.send("renderer:error", payload),
   getApplicationBackgrounds: () => ipcRenderer.invoke("appearance:background:get"),
   saveApplicationBackgrounds: (payload: {
     items: Array<{

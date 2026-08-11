@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ApprovalRequest, AssistantDraftPhase, MessageAttachment, MessageRecord, ToolCallRecord, UserInputPrompt } from "@shared-types";
-import { getAssistantDraftPhaseLabel, getDisplayMessageContent, getFileWriteTarget, getMessageDisplayKind, getSelectedMessageContexts, getToolActivityPresentation, getToolActivityTarget, getToolProcessingLabel, isFileWriteTool, parseMessageEventBlocks, parseTimelineJson, resolveSkillDisplayName, type SkillNameMap } from "../lib/conversation-utils";
+import { getDisplayMessageContent, getFileWriteTarget, getMessageDisplayKind, getSelectedMessageContexts, getToolActivityPresentation, getToolActivityTarget, getToolProcessingLabel, isFileWriteTool, parseMessageEventBlocks, parseTimelineJson, resolveSkillDisplayName, type SkillNameMap } from "../lib/conversation-utils";
 import type { ChatEventBlock, ChatEventType, SelectedMessageContext } from "../lib/conversation-utils";
 import { IconChart, IconCheck, IconChecklist, IconChevronDown, IconClose, IconCode, IconCompose, IconCopy, IconEye, IconFile, IconFileChanges, IconFolder, IconGlobe, IconGpa, IconHelpCircle, IconImage, IconKnowledge, IconMcp, IconNotebook, IconSearch, IconSkills, IconTerminal, IconVideo } from "../icons";
 import { CopyTextButton, MessageMediaLightbox, getFileLeafName, normalizeMarkdownImageSource, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
@@ -24,25 +24,6 @@ type MessageBrowserSource = {
   title: string;
   url: string;
 };
-
-function formatElapsedClock(durationMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(durationMs / 1_000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes}:${String(seconds).padStart(2, "0")}` : `${seconds}s`;
-}
-
-function useElapsedClock(startedAt: string | null | undefined, active: boolean, completedAt?: string | null) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active || !startedAt) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [active, startedAt]);
-  const endTime = completedAt ? Date.parse(completedAt) : now;
-  return startedAt ? Math.max(0, endTime - Date.parse(startedAt)) : 0;
-}
 
 function formatRelativeTime(isoTime: string) {
   const timestamp = Date.parse(isoTime);
@@ -603,10 +584,6 @@ type AssistantDraftMessageProps = {
   phase: AssistantDraftPhase;
   startedAt: string;
   completed: boolean;
-  /** Latest runtime status (e.g. retry reason). Shown instead of the generic
-   *  phase label while the draft is in a waiting phase, so users can see why
-   *  the draft is stalled (e.g. "模型响应超时，正在自动重试（第 2 次）"). */
-  statusLabel?: string | null;
 };
 
 export const AssistantDraftMessage = memo(function AssistantDraftMessage({
@@ -615,22 +592,10 @@ export const AssistantDraftMessage = memo(function AssistantDraftMessage({
   draftId,
   phase,
   startedAt,
-  completed,
-  statusLabel
+  completed
 }: AssistantDraftMessageProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
-  const elapsedMs = useElapsedClock(startedAt, !completed);
-  const diagnosticStatus = statusLabel && /重试|失败|错误|超时|受限|不兼容|回退/.test(statusLabel)
-    ? statusLabel
-    : null;
-  const stateLabel = completed
-    ? "正在发布回复"
-    : diagnosticStatus
-      ? diagnosticStatus
-      : phase === "generating" && !content
-    ? `模型正在生成 · 已等待 ${formatElapsedClock(elapsedMs)}`
-    : statusLabel ?? getAssistantDraftPhaseLabel(phase);
 
   useLayoutEffect(() => {
     const scrollElement = scrollRef.current;
@@ -638,30 +603,27 @@ export const AssistantDraftMessage = memo(function AssistantDraftMessage({
     scrollElement.scrollTop = scrollElement.scrollHeight;
   }, [content]);
 
+  // The runtime activity panel owns live execution status. Whitespace-only
+  // chunks should not create a duplicate, empty streaming message.
+  if (!content.trim()) return null;
+
   return (
     <article className={`message-card assistant streaming-assistant is-provisional phase-${phase}`} aria-live="polite" aria-busy={!completed}>
       <div className="message-header">
         <span className="message-author assistant">{assistantLabel}</span>
-        <span className="streaming-assistant-state">{stateLabel}</span>
       </div>
       <div className="message-flat-body streaming-assistant-body">
-        {content
-          ? (
-            <div
-              className="assistant-draft-scroll"
-              ref={scrollRef}
-              onScroll={(event) => {
-                const element = event.currentTarget;
-                followsLatestRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 4;
-              }}
-            >
-              <span className="streaming-assistant-plain-body" data-draft-id={draftId}>{content}</span>
-              {phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
-            </div>
-          )
-          : diagnosticStatus
-            ? <span className="assistant-draft-waiting-label" role="status">{diagnosticStatus}</span>
-            : <span className="assistant-draft-waiting" aria-hidden><i /><i /><i /></span>}
+        <div
+          className="assistant-draft-scroll"
+          ref={scrollRef}
+          onScroll={(event) => {
+            const element = event.currentTarget;
+            followsLatestRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 4;
+          }}
+        >
+          <span className="streaming-assistant-plain-body" data-draft-id={draftId}>{content}</span>
+          {phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
+        </div>
       </div>
     </article>
   );

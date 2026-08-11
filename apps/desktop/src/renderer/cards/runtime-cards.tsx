@@ -36,6 +36,17 @@ function getRuntimeEntryCreatedAt(entry: RuntimeActivityEntry): string {
     : entry.createdAt;
 }
 
+const transientDraftStatusLabels = new Set([
+  "正在起草回复",
+  "正在检查回复",
+  "正在确认回复完整性",
+  "正在补充回复"
+]);
+
+function isTransientDraftStatus(entry: RuntimeActivityEntry): boolean {
+  return entry.kind === "status" && transientDraftStatusLabels.has(entry.label);
+}
+
 function getRuntimeHistoryLabel(entry: RuntimeActivityEntry, skillNames?: SkillNameMap): string {
   if (entry.kind !== "tool") return entry.label;
   const action = getToolProcessingLabel(
@@ -300,13 +311,21 @@ export function RuntimeActivityPanel({
   runtimeActivities: Record<string, RuntimeActivity>;
   onInterruptSubagent: (agent: ThreadRecord) => void;
 }) {
-  const latestStatus = [...entries].reverse().find((entry) => entry.kind === "status");
-  const runningToolCalls = entries.filter(
+  // Older active tasks may already contain draft-phase events. They carry no
+  // execution detail, so keep them out of the timeline while preserving tools,
+  // retry reasons, and actual task-state transitions.
+  const visibleEntries = entries.filter((entry) => !isTransientDraftStatus(entry));
+  const latestStatus = [...visibleEntries].reverse().find((entry) => entry.kind === "status");
+  const isGenericModelDecisionStatus = latestStatus?.label === "正在请求模型决策" ||
+    latestStatus?.label === "正在重新请求模型决策";
+  const runningToolCalls = visibleEntries.filter(
     (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> =>
       entry.kind === "tool" && (entry.toolCall.status === "pending" || entry.toolCall.status === "running")
   ).map((entry) => entry.toolCall);
   const runningToolCall = runningToolCalls.at(-1) ?? null;
-  const displayLabel = preferLabel ? label : latestStatus?.label ?? label;
+  const displayLabel = preferLabel || isGenericModelDecisionStatus
+    ? label
+    : latestStatus?.label ?? label;
   const runningToolLabel = runningToolCall
     ? getToolProcessingLabel(runningToolCall.toolName, runningToolCall.argumentsJson, skillNames)
     : null;
@@ -316,15 +335,15 @@ export function RuntimeActivityPanel({
   const runningCommand = displayLabel.startsWith("正在运行 ")
     ? displayLabel.slice("正在运行 ".length)
     : null;
-  const activityStartedAt = startedAt ?? (entries[0] ? getRuntimeEntryCreatedAt(entries[0]) : null);
+  const activityStartedAt = startedAt ?? (visibleEntries[0] ? getRuntimeEntryCreatedAt(visibleEntries[0]) : null);
   const elapsedMs = useElapsedClock(activityStartedAt, true);
-  const latestEntry = entries.at(-1);
+  const latestEntry = visibleEntries.at(-1);
   const latestActivityAt = latestEntry ? getRuntimeEntryCreatedAt(latestEntry) : activityStartedAt;
   const unchangedMs = useElapsedClock(latestActivityAt, true);
   const primaryLabel = runningToolLabel ?? displayLabel;
   const waitingForExternalInput = /等待|审批|选择/.test(primaryLabel);
   const freshnessLabel = unchangedMs >= 10_000 && !waitingForExternalInput
-    ? `最近更新 ${formatElapsedClock(unchangedMs)} 前`
+    ? formatElapsedClock(unchangedMs)
     : null;
   const parallelToolLabel = runningToolCalls.length > 1 ? `另有 ${runningToolCalls.length - 1} 项操作正在执行` : null;
   const currentDetail = parallelToolLabel ?? runningToolDetail ?? freshnessLabel;
@@ -332,7 +351,7 @@ export function RuntimeActivityPanel({
     runningToolCall?.id,
     latestStatus?.id
   ].filter((id): id is string => Boolean(id)));
-  const historyItems = entries
+  const historyItems = visibleEntries
     .filter((entry) => !currentEntryIds.has(entry.kind === "tool" ? entry.toolCall.id : entry.id))
     .slice(-5)
     .reverse();

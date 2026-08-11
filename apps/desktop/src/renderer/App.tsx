@@ -85,7 +85,6 @@ import {
   getActivePlanTimelineItem,
   getActiveSubagents,
   getAssistantDraftDisplayContent,
-  getAssistantDraftPhaseLabel,
   getDefaultCollapsedConversationTurnIds,
   getDisplayMessageContent,
   getFileWriteTarget,
@@ -1398,6 +1397,37 @@ export function App() {
     });
   }
 
+  function appendRuntimeDecisionStatusAfterTool(threadId: string, createdAt = new Date().toISOString()) {
+    if (threadId !== selectedThreadIdRef.current) return;
+    setRuntimeActivities((current) => {
+      const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
+      const completedTools = activity.entries
+        .filter((entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> =>
+          entry.kind === "tool" && entry.toolCall.status === "completed"
+        );
+      const latestTool = completedTools.at(-1)?.toolCall;
+      const action = latestTool
+        ? getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "")
+        : "工具结果";
+      const label = completedTools.length > 1
+        ? `已完成 ${completedTools.length} 项操作，正在根据${action}决定下一步`
+        : `正在根据${action}决定下一步`;
+      const last = activity.entries.at(-1);
+      if (last?.kind === "status" && last.label === label) return current;
+      return {
+        ...current,
+        [threadId]: {
+          ...activity,
+          startedAt: activity.startedAt ?? createdAt,
+          entries: trimRuntimeActivityEntries([
+            ...activity.entries,
+            { id: `status-${createdAt}-${label}`, kind: "status", label, createdAt }
+          ])
+        }
+      };
+    });
+  }
+
   function clearRuntimeActivity(threadId: string) {
     let captured: RuntimeActivity | undefined;
     setRuntimeActivities((current) => {
@@ -1477,7 +1507,9 @@ export function App() {
           title?: string;
           attempt?: number;
           maxAttempts?: number;
+          overageBytes?: number;
           reason?: string;
+          detail?: string;
           messageId?: string;
           toolCallId?: string;
           toolName?: string;
@@ -1659,6 +1691,26 @@ export function App() {
         appendRuntimeStatus(typed.threadId, "页面截图已保存，正在检查视觉结果", typed.createdAt);
         return;
       }
+      if (typed.type === "agent.tool_call_preparing" && typed.threadId && typed.payload?.toolName) {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
+        const argumentsJson = typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}";
+        const preparingLabel = getToolProcessingLabel(typed.payload.toolName, argumentsJson, skillNames)
+          .replace(/^正在/, "准备");
+        if (typed.threadId !== selectedThreadIdRef.current) {
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, preparingLabel, typed.createdAt);
+          }
+          return;
+        }
+        appendRuntimeStatus(typed.threadId, preparingLabel, typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, preparingLabel, typed.createdAt);
+        }
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        return;
+      }
       if (
         typed.type === "tool.started" &&
         typed.threadId &&
@@ -1778,7 +1830,7 @@ export function App() {
             };
           });
           if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
-            appendRuntimeStatus(runtimeThreadId, "工具已完成，正在根据结果决策", typed.createdAt);
+            appendRuntimeDecisionStatusAfterTool(runtimeThreadId, typed.createdAt);
             if (notificationThreadId) {
               updateThreadNotification(notificationThreadId, "工具已完成，正在根据结果决策。", typed.createdAt);
             }
@@ -1796,19 +1848,32 @@ export function App() {
           return;
         }
         const reason = typeof typed.payload?.reason === "string" ? typed.payload.reason : "recovery";
-        const statusLabel = reason === "after_tools"
-          ? "正在根据工具结果决策"
-          : reason === "turn_start"
-            ? "正在请求模型决策"
-            : "正在重新请求模型决策";
+        const gpaTask = (typed.payload as { gpaTask?: { id?: unknown; title?: unknown } } | undefined)?.gpaTask;
+        const statusLabel = reason === "turn_start"
+          ? typeof gpaTask?.id === "string" && typeof gpaTask?.title === "string"
+            ? `正在执行 ${gpaTask.id}：${gpaTask.title}，等待模型生成下一项工具操作`
+            : "正在分析任务并规划下一步"
+          : null;
         if (typed.threadId !== selectedThreadIdRef.current) {
-          if (notificationThreadId) {
+          if (notificationThreadId && reason === "after_tools") {
+            updateThreadNotification(notificationThreadId, "正在根据工具结果决定下一步。", typed.createdAt);
+          } else if (notificationThreadId && statusLabel) {
             updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
           }
           return;
         }
-        appendRuntimeStatus(typed.threadId, statusLabel, typed.createdAt);
-        if (notificationThreadId) {
+        if (reason === "after_tools") {
+          appendRuntimeDecisionStatusAfterTool(typed.threadId, typed.createdAt);
+        } else if (statusLabel) {
+          appendRuntimeStatus(typed.threadId, statusLabel, typed.createdAt);
+        }
+        if (notificationThreadId && reason === "after_tools") {
+          updateThreadNotification(
+            notificationThreadId,
+            "正在根据工具结果决定下一步。",
+            typed.createdAt
+          );
+        } else if (notificationThreadId && statusLabel) {
           updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
         }
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
@@ -1837,16 +1902,6 @@ export function App() {
           startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
           completed: false
         });
-        const statusLabel = getAssistantDraftPhaseLabel(phase);
-        // Retry events provide a concrete reason (such as a 429 backoff) just
-        // before their draft update. Do not overwrite that visible status with
-        // the generic draft-phase label.
-        if (phase !== "retrying") {
-          appendRuntimeStatus(threadId, statusLabel, typed.createdAt);
-          if (notificationThreadId) {
-            updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
-          }
-        }
         setRuntimeProgress({ threadId, phase: "generating", runtimeObserved: true });
         return;
       }
@@ -1967,6 +2022,61 @@ export function App() {
           appendRuntimeStatus(typed.threadId, "模型服务工具调用不兼容，正在切换兼容模式重试", typed.createdAt);
           if (notificationThreadId) {
             updateThreadNotification(notificationThreadId, "正在切换兼容模式重试。", typed.createdAt);
+          }
+          setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        }
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "agent_decision_protocol") {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
+          const detail = typeof typed.payload.detail === "string" ? typed.payload.detail : "";
+          const status = `模型返回的 Agent 决策无法解析，正在自动重试（第 ${attempt} 次）${detail ? `：${detail}` : ""}`;
+          appendRuntimeStatus(typed.threadId, status, typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, `${status}。`, typed.createdAt);
+          }
+          setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        }
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "provider_request_limit") {
+        if (suppressRuntimeProgressRef.current[typed.threadId]) {
+          return;
+        }
+        const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
+        const overageBytes = typeof typed.payload.overageBytes === "number" ? typed.payload.overageBytes : 0;
+        const label = `模型请求超过限制 ${overageBytes} 字节，正在缩减上下文和工具后自动重试（第 ${attempt} 次）`;
+        appendRuntimeStatus(typed.threadId, label, typed.createdAt);
+        if (notificationThreadId) {
+          updateThreadNotification(notificationThreadId, label, typed.createdAt);
+        }
+        setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "native_tool_text_fallback") {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          const status = "模型返回的工具调用格式不兼容，已切换兼容模式后自动重试";
+          appendRuntimeStatus(typed.threadId, status, typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, `${status}。`, typed.createdAt);
+          }
+          setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
+        }
+        return;
+      }
+      if (typed.type === "agent.retrying" && typed.threadId && (
+        typed.payload?.reason === "tool_arguments_invalid" || typed.payload?.reason === "tool_arguments_truncated"
+      )) {
+        if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+          const toolName = typeof typed.payload.toolName === "string" ? typed.payload.toolName : "工具";
+          const truncated = typed.payload.reason === "tool_arguments_truncated";
+          const status = truncated
+            ? `模型返回的 ${toolName} 参数被截断，正在要求模型补全后重试`
+            : `模型返回的 ${toolName} 参数无法解析，正在要求模型修正后重试`;
+          appendRuntimeStatus(typed.threadId, status, typed.createdAt);
+          if (notificationThreadId) {
+            updateThreadNotification(notificationThreadId, `${status}。`, typed.createdAt);
           }
           setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         }
@@ -2676,6 +2786,30 @@ export function App() {
     isTaskProcessing
   );
   const latestConversationTurn = conversationTurnSections.at(-1) ?? null;
+  const completedCurrentTurnTools = useMemo(() => {
+    const currentTurnStartedAt = Date.parse(latestConversationTurn?.startedAt ?? "");
+    if (!activeRuntimeThreadId || !Number.isFinite(currentTurnStartedAt)) return [];
+    return (snapshot?.toolCalls ?? []).filter((toolCall) =>
+      toolCall.threadId === activeRuntimeThreadId &&
+      toolCall.status === "completed" &&
+      Date.parse(toolCall.completedAt ?? toolCall.startedAt) >= currentTurnStartedAt
+    );
+  }, [activeRuntimeThreadId, latestConversationTurn?.startedAt, snapshot?.toolCalls]);
+  const currentTurnDecisionLabel = useMemo(() => {
+    const latestTool = completedCurrentTurnTools.at(-1);
+    if (!latestTool) return "正在分析任务并规划下一步";
+    const action = getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "");
+    return completedCurrentTurnTools.length > 1
+      ? `已完成 ${completedCurrentTurnTools.length} 项操作，正在根据${action}决定下一步`
+      : `正在根据${action}决定下一步`;
+  }, [completedCurrentTurnTools, skillNames]);
+  const currentGpaTask = useMemo(
+    () => gpaState.planTasks.find((task) => !task.done) ?? null,
+    [gpaState.planTasks]
+  );
+  const currentGpaTaskLabel = currentGpaTask
+    ? `正在执行 ${currentGpaTask.id}：${currentGpaTask.title}，等待模型生成下一项工具操作`
+    : "正在分析任务并规划下一步";
   // Apply the default collapse synchronously on the very first render of a
   // thread. Previously the default was written by the effect below, so the
   // first paint after switching rendered EVERY turn expanded — full markdown
@@ -2736,12 +2870,6 @@ export function App() {
     )?.toolCall ?? null,
     [activeRuntimeActivity?.entries]
   );
-  const latestRuntimeStatusLabel = useMemo(
-    () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
-      (entry) => entry.kind === "status"
-    )?.label ?? null,
-    [activeRuntimeActivity?.entries]
-  );
   const deferredRuntimeToolGroup = useMemo(() => {
     if (!isTaskProcessing || !latestRootRuntimeTool) {
       return null;
@@ -2768,16 +2896,9 @@ export function App() {
     () => getActiveSubagents(currentSubagents, queuedSubagentIds),
     [currentSubagents, queuedSubagentIds]
   );
-  const hasLiveRuntimeTool = Boolean(
-    (activeToolCall?.threadId === activeSnapshotThreadId) ||
-    (latestRootRuntimeTool && (
-      latestRootRuntimeTool.status === "pending" || latestRootRuntimeTool.status === "running"
-    ))
-  );
   const shouldRenderRuntimeTailPanel = Boolean(
     showRuntimeActivityPanel &&
-    !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id)) &&
-    (!activeAssistantDraft || hasLiveRuntimeTool || activeSubagents.length > 0)
+    !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id))
   );
   const subagentWaitLabel = getSubagentWaitLabel(currentSubagents, queuedSubagentIds);
   const isWaitingForSubagents = Boolean(
@@ -2794,11 +2915,13 @@ export function App() {
         ? getToolProcessingLabel(activeToolCall.toolName, activeToolCall.argumentsJson, skillNames)
         : activeAssistantDraft
           ? "正在生成回复"
-          : isPreparingRuntime
+        : isPreparingRuntime
             ? "正在理解任务"
             : localRuntimeProgress?.phase === "thinking"
-              ? "正在根据工具结果决策"
-              : "正在请求模型决策",
+              ? currentGpaTask && completedCurrentTurnTools.length === 0
+                ? currentGpaTaskLabel
+                : currentTurnDecisionLabel
+              : "正在分析任务并规划下一步",
     [
       activeSnapshotThreadId,
       activeAssistantDraft,
@@ -2807,6 +2930,10 @@ export function App() {
       isWaitingForSubagents,
       isPreparingRuntime,
       localRuntimeProgress?.phase,
+      currentTurnDecisionLabel,
+      currentGpaTask,
+      currentGpaTaskLabel,
+      completedCurrentTurnTools.length,
       subagentWaitLabel
     ]
   );
@@ -2818,9 +2945,15 @@ export function App() {
     () => pendingResumeThreads.find((entry) => entry.threadId === activeSnapshotThreadId) ?? null,
     [pendingResumeThreads, activeSnapshotThreadId]
   );
+  const isGpaResumeFlow = Boolean(
+    gpaState.stage !== "off" ||
+    gpaPlanResumeRetryPrompt?.threadId === activeSnapshotThreadId ||
+    gpaPlanResumeDialog?.threadId === activeSnapshotThreadId
+  );
   const showPendingResumeCard = Boolean(
     pendingResumeThread &&
     !showWelcome &&
+    !isGpaResumeFlow &&
     activeSnapshotThreadStatus !== "running" &&
     activeSnapshotThreadStatus !== "waiting"
   );
@@ -3735,6 +3868,7 @@ export function App() {
       plan.pendingCount > 0;
     if (gpaPlanResumeRetryRequiredRef.current.has(threadId) || failedWithPendingGpaPlan) {
       gpaPlanResumeRetryRequiredRef.current.add(threadId);
+      setGpaPlanResumeDialog((current) => current?.threadId === threadId ? null : current);
       setGpaPlanResumeRetryPrompt({ threadId, plan });
       return true;
     }
@@ -3761,6 +3895,7 @@ export function App() {
         return;
       }
       gpaPlanResumeRetryRequiredRef.current.add(threadId);
+      setGpaPlanResumeDialog((current) => current?.threadId === threadId ? null : current);
       setGpaPlanResumeRetryPrompt({ threadId, plan });
     } catch {
       // Failure recovery must never hide the original runtime error.
@@ -5612,7 +5747,6 @@ export function App() {
                         phase={activeAssistantDraft.phase}
                         startedAt={activeAssistantDraft.startedAt}
                         completed={activeAssistantDraft.completed}
-                        statusLabel={latestRuntimeStatusLabel}
                       />
                     ) : null}
                     {shouldRenderRuntimeTailPanel ? (
@@ -5624,7 +5758,7 @@ export function App() {
                         phase={localRuntimeProgress?.phase ?? null}
                         skillNames={skillNames}
                         preferLabel={isWaitingForSubagents}
-                        hideCurrentStatus={Boolean(activeAssistantDraft)}
+                        hideCurrentStatus={false}
                         activeSubagents={activeSubagents}
                         queuedSubagentIds={queuedSubagentIds}
                         runtimeActivities={runtimeActivities}
@@ -6182,7 +6316,7 @@ export function App() {
         />
       ) : null}
 
-      {visibleGpaPlanResumeDialog ? (
+      {visibleGpaPlanResumeDialog && gpaPlanResumeRetryPrompt?.threadId !== visibleGpaPlanResumeDialog.threadId ? (
         <GpaPlanResumeSheet
           motionPhase={gpaPlanResumePresence.phase}
           dialog={visibleGpaPlanResumeDialog}

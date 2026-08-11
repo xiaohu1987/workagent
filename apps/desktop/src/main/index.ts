@@ -320,10 +320,24 @@ async function createWindow(): Promise<void> {
   mainWindow.on("show", () => liveEditPreview.show());
   registerIpc();
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    console.error("[renderer] Failed to load", { errorCode, errorDescription, validatedURL });
+    const payload = { errorCode, errorDescription, validatedURL };
+    console.error("[renderer] Failed to load", payload);
+    void backend.appendRuntimeLog("renderer.load_failed", payload);
+  });
+  mainWindow.webContents.on("did-finish-load", () => {
+    void backend.appendRuntimeLog("renderer.loaded", { url: mainWindow?.webContents.getURL() ?? "" });
   });
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[renderer] Render process gone", details);
+    void backend.appendRuntimeLog("renderer.process_gone", { ...details });
+    if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) void mainWindow.webContents.reload();
+      }, 500);
+    }
+  });
+  mainWindow.webContents.on("unresponsive", () => {
+    void backend.appendRuntimeLog("renderer.unresponsive", { url: mainWindow?.webContents.getURL() ?? "" });
   });
   mainWindow.webContents.on("console-message", (...args: unknown[]) => {
     const details = typeof args[1] === "object" && args[1] !== null
@@ -333,6 +347,11 @@ async function createWindow(): Promise<void> {
     const isError = details?.level === "error" || legacyLevel >= 2;
     if (!isError) return;
     console.error("[renderer] Console error", {
+      message: details?.message ?? String(args[2] ?? "Unknown renderer error"),
+      line: details?.lineNumber ?? (typeof args[3] === "number" ? args[3] : undefined),
+      sourceId: details?.sourceId ?? (typeof args[4] === "string" ? args[4] : undefined)
+    });
+    void backend.appendRuntimeLog("renderer.console_error", {
       message: details?.message ?? String(args[2] ?? "Unknown renderer error"),
       line: details?.lineNumber ?? (typeof args[3] === "number" ? args[3] : undefined),
       sourceId: details?.sourceId ?? (typeof args[4] === "string" ? args[4] : undefined)
@@ -364,6 +383,16 @@ function reportStartupError(error: unknown): void {
 }
 
 function registerIpc(): void {
+  ipcMain.on("renderer:error", (_event, payload: unknown) => {
+    const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+    const message = typeof record.message === "string" ? record.message : String(payload);
+    void backend.appendRuntimeLog("renderer.error", {
+      message: message.slice(0, 2_000),
+      ...(typeof record.stack === "string" ? { stack: record.stack.slice(0, 8_000) } : {}),
+      ...(typeof record.componentStack === "string" ? { componentStack: record.componentStack.slice(0, 8_000) } : {}),
+      ...(record.unhandledRejection === true ? { unhandledRejection: true } : {})
+    });
+  });
   ipcMain.handle("appearance:background:get", () => backend.getApplicationBackgrounds());
   ipcMain.handle("appearance:background:save", (_event, payload) => backend.saveApplicationBackgrounds(payload));
   ipcMain.handle("appearance:background:save-settings", (_event, settings) =>

@@ -360,6 +360,22 @@ function compactSystemContextToFit(
   return serializedRequestBytes(request) <= maxRequestBytes;
 }
 
+function removeOptionalRequestFieldsToFit(
+  request: Record<string, unknown>,
+  maxRequestBytes: number
+): Record<string, unknown> {
+  let next = { ...request };
+  // These fields affect transport hints only. Removing them preserves the
+  // user request and tool schemas when the provider envelope is just over its
+  // byte limit and gives the in-flight task one last automatic recovery path.
+  for (const field of ["stream_options", "parallel_tool_calls", "tool_choice"] as const) {
+    if (serializedRequestBytes(next) <= maxRequestBytes) return next;
+    if (!(field in next)) continue;
+    delete next[field];
+  }
+  return next;
+}
+
 interface ToolDescriptionCandidate {
   owner: Record<string, unknown>;
   value: string;
@@ -508,6 +524,7 @@ export function applyProviderRequestLimits(
     const messages = next.messages as WireMessage[];
     if (compactSystemContextToFit(next, messages, targetRequestBytes)) return next;
   }
+  next = removeOptionalRequestFieldsToFit(next, limits.maxRequestBytes);
   if (serializedRequestBytes(next) <= limits.maxRequestBytes) return next;
   throw new ProviderRequestLimitError(serializedRequestBytes(next), limits.maxRequestBytes);
 }
@@ -775,6 +792,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       let streamUsage: unknown;
       let finishReason: string | null = null;
       const streamedNativeCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
+      const reportedNativeCallIndexes = new Set<number>();
       for await (const chunk of stream) {
         if (chunk?.usage) {
           streamUsage = chunk.usage;
@@ -810,6 +828,16 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
             current.arguments += toolCall.function.arguments;
           }
           streamedNativeCalls.set(index, current);
+          if (!reportedNativeCallIndexes.has(index) && current.name) {
+            const name = originalToolName(current.name, input.availableTools);
+            if (name) {
+              reportedNativeCallIndexes.add(index);
+              await input.onToolCallPreparing?.({
+                name,
+                argumentsJson: current.arguments || undefined
+              });
+            }
+          }
         }
       }
       if (!finishReason) {

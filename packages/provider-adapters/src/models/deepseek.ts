@@ -36,6 +36,12 @@ function looksLikeDecisionEnvelope(accumulated: string): boolean {
     );
 }
 
+const INTERNAL_EXECUTED_TOOLS_MARKER = /\s*\[Executed tools:\s*[^\]\r\n]*(?:\]|$)|\s*\[E(?:x(?:e(?:c(?:u(?:t(?:e(?:d(?:\s*)?)?)?)?)?)?)?)?$/gi;
+
+function stripInternalExecutedToolsMarker(text: string): string {
+  return text.replace(INTERNAL_EXECUTED_TOOLS_MARKER, "");
+}
+
 /**
  * DeepSeek openai-compatible shell.
  *
@@ -116,9 +122,18 @@ export const deepseekCompat = defineCompat(gptCompat, {
     // temperature and can be rejected with an opaque HTTP 400 by compatible
     // gateways. A deliberate `none` effort disables thinking, so normal
     // sampling parameters remain meaningful in that mode.
-    const isThinkingRequest = isV4
+    // The text-tool fallback needs the provider to enforce its JSON envelope.
+    // DeepSeek V4 rejects response_format while thinking is enabled, which
+    // previously left this recovery path relying only on prompt compliance
+    // and led to repeated unparseable decisions. The fallback is entered only
+    // after native tool calling has already failed, so a one-request switch to
+    // non-thinking JSON mode is the reliable recovery transport.
+    const useStrictJsonRecovery = Boolean(
+      ctx.input.forceTextToolProtocol && ctx.model.supportsJsonOutput && isV4
+    );
+    const isThinkingRequest = !useStrictJsonRecovery && (isV4
       ? reasoningEffort !== "none"
-      : DEEPSEEK_REASONER_PATTERN.test(identity);
+      : DEEPSEEK_REASONER_PATTERN.test(identity));
 
     // 1. Reasoning models: strip fields the thinking API rejects (HTTP 400).
     let next: Record<string, unknown> = base;
@@ -153,9 +168,9 @@ export const deepseekCompat = defineCompat(gptCompat, {
       const isPro = /\bv4-pro\b/.test(identity);
       next = {
         ...next,
-        thinking: { type: reasoningEffort === "none" ? "disabled" : "enabled" }
+        thinking: { type: reasoningEffort === "none" || useStrictJsonRecovery ? "disabled" : "enabled" }
       };
-      const mappedEffort = reasoningEffort === "none"
+      const mappedEffort = reasoningEffort === "none" || useStrictJsonRecovery
         ? undefined
         : mapDeepSeekReasoningEffort(reasoningEffort, isPro);
       if (mappedEffort) {
@@ -190,7 +205,9 @@ export const deepseekCompat = defineCompat(gptCompat, {
     }
     // Surface inline <think> reasoning in the streaming draft so users can
     // watch the think process; final parsing still strips it.
-    return stripTaggedToolCalls(surfaceThinkBlocksInStream(accumulated));
+    return stripInternalExecutedToolsMarker(
+      stripTaggedToolCalls(surfaceThinkBlocksInStream(accumulated))
+    );
   },
   normalizeDecision(decision, ctx) {
     let next = decision;
