@@ -37,6 +37,8 @@ import type {
   QuickNoteRecord,
   ErrorSolutionRecord,
   RuntimeEvent,
+  RuntimeLogEntry,
+  RuntimeLogPage,
   RuntimeThreadSnapshotCursor,
   RuntimeThreadSnapshot,
   SkillLabEvent,
@@ -66,7 +68,7 @@ import {
 } from "@skills-runtime";
 import { ToolRuntime } from "@tool-runtime";
 import { DatabaseRuntime } from "@database-runtime";
-import { RuntimeLogWriter } from "./runtime-log";
+import { redactRuntimeLogPayload, RuntimeLogWriter } from "./runtime-log";
 import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime } from "./terminal-runtime";
 import { GitService } from "./git-service";
@@ -437,7 +439,15 @@ export class DesktopBackend {
       markModelAgentIncompatible: async (threadId, modelId, reason) =>
         this.markModelAgentIncompatible(threadId, modelId, reason),
       emit: async (event) => this.emit(event),
-      log: async (kind, threadId, payload) => this.#logs.append(kind, payload, threadId)
+      log: async (kind, threadId, payload) => {
+        await this.#logs.append(kind, payload, threadId);
+        this.emitLiveRuntimeLog({
+          timestamp: new Date().toISOString(),
+          kind,
+          threadId,
+          payload: redactRuntimeLogPayload(payload)
+        });
+      }
     });
     for (const approval of this.#db.listPendingApprovals()) {
       this.#scheduleApprovalTimeout(approval.id);
@@ -1808,6 +1818,22 @@ export class DesktopBackend {
     return enabled;
   }
 
+  public async setLlmLogViewerEnabled(enabled: boolean): Promise<boolean> {
+    const previous = this.#config.desktop.llmLogViewer;
+    const previousLiveEditPreview = this.#config.desktop.liveEditPreview;
+    this.#config.desktop.llmLogViewer = enabled;
+    if (enabled) this.#config.desktop.liveEditPreview = false;
+    try {
+      await saveConfig(this.#layout.configFile, this.#config);
+    } catch (error) {
+      this.#config.desktop.llmLogViewer = previous;
+      this.#config.desktop.liveEditPreview = previousLiveEditPreview;
+      throw error;
+    }
+    await this.#logs.append("config.llm_log_viewer_updated", { enabled });
+    return enabled;
+  }
+
   public async getApplicationBackgrounds(): Promise<ApplicationBackgroundCollectionPayload | null> {
     const appearanceDir = path.join(this.#layout.root, "appearance");
     try {
@@ -1960,6 +1986,11 @@ export class DesktopBackend {
       bytes: runtime.bytes + sqliteWalBytesCleared,
       fileCount: runtime.fileCount + (sqliteWalBytesCleared > 0 ? 1 : 0)
     };
+  }
+
+  public async getThreadRuntimeLogs(threadId: string, limit = 300): Promise<RuntimeLogPage> {
+    this.#db.getThread(threadId);
+    return this.#logs.readSessionPage(threadId, limit);
   }
 
   public appendRuntimeLog(kind: string, payload: Record<string, unknown>): Promise<void> {
@@ -4248,12 +4279,30 @@ export class DesktopBackend {
         } satisfies RuntimeEvent);
       }
     }
-    if (routedEvent.type !== "assistant.draft.updated") {
-      await this.#logs.append("runtime.event", { event: sanitizeRuntimeEventForLog(routedEvent) }, routedEvent.threadId);
+    const sanitizedEvent = sanitizeRuntimeEventForLog(routedEvent);
+    const runtimeLogEntry: RuntimeLogEntry = {
+      timestamp: routedEvent.createdAt,
+      kind: "runtime.event",
+      threadId: routedEvent.threadId,
+      payload: { event: sanitizedEvent }
+    };
+    if (routedEvent.type !== "assistant.draft.updated" || this.#config.desktop.llmLogViewer) {
+      await this.#logs.append("runtime.event", runtimeLogEntry.payload, routedEvent.threadId);
     }
+    this.emitLiveRuntimeLog(runtimeLogEntry);
     if (subject?.parentThreadId && (routedEvent.type === "thread.updated" || routedEvent.type === "queue.updated")) {
       this.schedulePendingSubagentDispatch(subject.rootThreadId);
     }
+  }
+
+  private emitLiveRuntimeLog(entry: RuntimeLogEntry): void {
+    if (!this.#config.desktop.llmLogViewer) return;
+    this.#events.emit("runtime-event", {
+      type: "runtime.log",
+      threadId: entry.threadId,
+      payload: { entry },
+      createdAt: entry.timestamp
+    } satisfies RuntimeEvent);
   }
 
   private async syncInstalledPlugins(): Promise<void> {
@@ -4562,7 +4611,8 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     desktop: {
       ...fallback.desktop,
       ...config.desktop,
-      liveEditPreview: config.desktop?.liveEditPreview === true
+      liveEditPreview: config.desktop?.liveEditPreview === true,
+      llmLogViewer: config.desktop?.llmLogViewer === true
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     multiAgent: {

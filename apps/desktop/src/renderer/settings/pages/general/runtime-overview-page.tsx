@@ -4,8 +4,8 @@ import { ComposerSelect } from "../../../workspace/composer-select";
 import { IconChart, IconChecklist, IconGear, IconGlobe, IconSkills } from "../../../icons";
 import { getProviderDisplayName, modelKey } from "../../../lib/config-utils";
 
-type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: () => Promise<void>; onSetLiveEditPreviewEnabled: (enabled: boolean) => void };
-export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave, onSetLiveEditPreviewEnabled }: Props) { return (
+type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: () => Promise<void>; onSetLlmLogViewerEnabled: (enabled: boolean) => void };
+export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave, onSetLlmLogViewerEnabled }: Props) { return (
       <div className="settings-section">
         <div className="general-overview">
           <div className="general-overview-heading">
@@ -67,13 +67,13 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
           <div className="config-block">
             <div className="section-copy section-copy-with-action">
               <div>
-                <strong>代码编辑预览</strong>
-                <span>任务写入代码文件时，在主窗口旁显示文件内容和写入过程。</span>
+                <strong>对话日志</strong>
+                <span>开启后打开独立日志窗口，实时查看当前对话的完整 LLM、工具和错误日志。</span>
               </div>
-              <label className={`mcp-enable-switch ${configDraft.desktop.liveEditPreview ? "is-on" : ""}`}>
-                <input type="checkbox" checked={configDraft.desktop.liveEditPreview} onChange={(event) => onSetLiveEditPreviewEnabled(event.target.checked)} />
+              <label className={`mcp-enable-switch ${configDraft.desktop.llmLogViewer ? "is-on" : ""}`}>
+                <input type="checkbox" checked={configDraft.desktop.llmLogViewer} onChange={(event) => onSetLlmLogViewerEnabled(event.target.checked)} />
                 <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
-                <span className="mcp-enable-label">{configDraft.desktop.liveEditPreview ? "启用" : "禁用"}</span>
+                <span className="mcp-enable-label">{configDraft.desktop.llmLogViewer ? "启用" : "禁用"}</span>
               </label>
             </div>
           </div>

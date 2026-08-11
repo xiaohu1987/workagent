@@ -74,14 +74,19 @@ export interface GeneratedImageResult {
 }
 
 export class ProviderStreamIncompleteError extends Error {
-  public constructor(reason: "missing_finish_reason" | "length" | "content_filter") {
+  public readonly reason: "missing_finish_reason" | "length" | "content_filter" | "insufficient_system_resource";
+
+  public constructor(reason: "missing_finish_reason" | "length" | "content_filter" | "insufficient_system_resource") {
     super(
       reason === "length"
         ? "Provider stream terminated because the response reached its output limit."
         : reason === "content_filter"
           ? "Provider stream terminated because its response was filtered."
-          : "Provider stream terminated before emitting a completion signal."
+          : reason === "insufficient_system_resource"
+            ? "Provider stream was interrupted because the upstream model service reported insufficient system resources."
+            : "Provider stream terminated before emitting a completion signal."
     );
+    this.reason = reason;
     this.name = "ProviderStreamIncompleteError";
   }
 }
@@ -105,7 +110,13 @@ export function resolveProviderRequestLimits(
   provider: ProviderDefinition,
   model: Pick<ModelProfile, "id" | "displayName">
 ): ProviderRequestLimits {
-  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  const identity = [
+    model.id,
+    model.displayName ?? "",
+    provider.id,
+    provider.name ?? "",
+    provider.baseUrl ?? ""
+  ].join(" ").toLowerCase();
   // DeepSeek's compatible chat endpoint accepts the normal 128 KiB request
   // envelope. Keep a 4 KiB compaction headroom below it while allowing
   // already-compacted requests that are only slightly above the old 120 KiB
@@ -431,7 +442,13 @@ export function applyProviderRequestLimits(
   model: Pick<ModelProfile, "id" | "displayName">
 ): Record<string, unknown> {
   const limits = resolveProviderRequestLimits(provider, model);
-  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  const identity = [
+    model.id,
+    model.displayName ?? "",
+    provider.id,
+    provider.name ?? "",
+    provider.baseUrl ?? ""
+  ].join(" ").toLowerCase();
   const targetRequestBytes = resolveProviderRequestTargetBytes(limits.maxRequestBytes);
   let next = request;
   if (limits.maxTools > 0 && Array.isArray(next.tools) && next.tools.length > limits.maxTools) {
@@ -507,6 +524,18 @@ async function reportProviderRequestMeasurement(
     maxTools: limits.maxTools,
     toolCount: Array.isArray(request.tools) ? request.tools.length : 0
   });
+}
+
+async function reportProviderTrace(
+  input: ProviderTurnInput,
+  phase: "request" | "response" | "error",
+  payload: Record<string, unknown>
+): Promise<void> {
+  try {
+    await input.onProviderTrace?.({ phase, payload });
+  } catch {
+    // Diagnostics must never interrupt the actual provider request.
+  }
 }
 
 export class ProviderFactory {
@@ -681,7 +710,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
-    const compat = resolveModelCompat(input.model);
+    const compat = resolveModelCompat(input.model, input.provider);
     const ctx: ModelCompatContext = { model: input.model, input };
     const toolCallMode = compat.resolveToolCallMode(ctx);
     const nativeTools = toolCallMode.useNativeTools
@@ -713,6 +742,11 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
         stream_options: { include_usage: true }
       }, this.provider, input.model);
       await reportProviderRequestMeasurement(input, streamRequest);
+      await reportProviderTrace(input, "request", {
+        transport: "chat.completions",
+        stream: true,
+        request: streamRequest
+      });
       let streamResponse: any;
       try {
         streamResponse = await this.#client.chat.completions.create(
@@ -720,6 +754,11 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           { signal: input.abortSignal }
         ) as any;
       } catch (error) {
+        await reportProviderTrace(input, "error", {
+          transport: "chat.completions",
+          stream: true,
+          error: error instanceof Error ? error.message : String(error)
+        });
         throw enrichProviderRequestError(error, streamRequest, input.model.id);
       }
       if (!isAsyncIterable(streamResponse)) {
@@ -782,6 +821,9 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       if (finishReason === "content_filter") {
         throw new ProviderStreamIncompleteError("content_filter");
       }
+      if (finishReason === "insufficient_system_resource") {
+        throw new ProviderStreamIncompleteError("insufficient_system_resource");
+      }
       const trimmedReasoning = reasoning.trim();
       const applyReasoning = (decision: ProviderTurnDecision): ProviderTurnDecision =>
         trimmedReasoning && !decision.reasoningSummary
@@ -798,6 +840,15 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
             arguments: parseNativeToolArguments(call.arguments)
           }];
         });
+      await reportProviderTrace(input, "response", {
+        transport: "chat.completions",
+        stream: true,
+        finishReason,
+        text,
+        reasoningContent: reasoning,
+        toolCalls: nativeCalls,
+        usage: streamUsage
+      });
       if (nativeCalls.length > 0) {
         // Strip inline <think> reasoning from the persisted message; the
         // reasoning already streamed into the draft via extractVisibleStreamText.
@@ -819,17 +870,35 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
 
     const request = applyProviderRequestLimits(normalizedRequest, this.provider, input.model);
     await reportProviderRequestMeasurement(input, request);
+    await reportProviderTrace(input, "request", {
+      transport: "chat.completions",
+      stream: false,
+      request
+    });
     let response: any;
     try {
       response = await this.#client.chat.completions.create(request as any, {
         signal: input.abortSignal
       });
     } catch (error) {
+      await reportProviderTrace(input, "error", {
+        transport: "chat.completions",
+        stream: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
       throw enrichProviderRequestError(error, request, input.model.id);
     }
+    await reportProviderTrace(input, "response", {
+      transport: "chat.completions",
+      stream: false,
+      response
+    });
     const finishReason = response?.choices?.[0]?.finish_reason;
     if (finishReason === "length") throw new ProviderStreamIncompleteError("length");
     if (finishReason === "content_filter") throw new ProviderStreamIncompleteError("content_filter");
+    if (finishReason === "insufficient_system_resource") {
+      throw new ProviderStreamIncompleteError("insufficient_system_resource");
+    }
     const nonStreamDecision = compat.parseResponse(response, ctx, Boolean(nativeTools));
     const nonStreamReasoning = compat.extractReasoningFromMessage(response?.choices?.[0]?.message);
     return compat.normalizeDecision(nonStreamReasoning
@@ -1061,8 +1130,31 @@ export function nativeToolName(name: string): string {
   return `tool_${createHash("sha256").update(name).digest("hex").slice(0, 24)}`;
 }
 
-function isDeepSeekModel(model: Pick<ModelProfile, "id" | "displayName">): boolean {
-  return `${model.id} ${model.displayName ?? ""}`.toLowerCase().includes("deepseek");
+function isDeepSeekModel(
+  model: Pick<ModelProfile, "id" | "displayName">,
+  provider?: Pick<ProviderDefinition, "id" | "name" | "baseUrl">
+): boolean {
+  return [
+    model.id,
+    model.displayName ?? "",
+    provider?.id ?? "",
+    provider?.name ?? "",
+    provider?.baseUrl ?? ""
+  ].join(" ").toLowerCase().includes("deepseek");
+}
+
+function isDeepSeekThinkingModel(
+  model: Pick<ModelProfile, "id" | "displayName">,
+  provider?: Pick<ProviderDefinition, "id" | "name" | "baseUrl">
+): boolean {
+  const identity = [
+    model.id,
+    model.displayName ?? "",
+    provider?.id ?? "",
+    provider?.name ?? "",
+    provider?.baseUrl ?? ""
+  ].join(" ").toLowerCase();
+  return isDeepSeekModel(model, provider) && /reasoner|\br1\b|thinking|\bv4-(?:flash|pro)\b/.test(identity);
 }
 
 function originalToolName(nativeName: string, availableTools: ProviderTurnInput["availableTools"]): string | null {
@@ -1086,6 +1178,7 @@ export function normalizeToolCallsForAvailableTools(
 }
 
 export const TOOL_ARGS_TRUNCATED_KEY = "__tool_args_truncated__";
+export const TOOL_ARGS_INVALID_KEY = "__tool_args_invalid__";
 
 export function parseNativeToolArguments(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -1111,14 +1204,43 @@ export function parseNativeToolArguments(value: unknown): Record<string, unknown
           : {};
       }
     } catch {
-      // repair didn't help — fall through to truncation marker
+      // repair didn't help — classify the remaining malformed payload below
     }
-    // JSON parse failed on non-empty input — the model's output was likely
-    // truncated by max_tokens or a mid-stream disconnect. Return a marker so
-    // the agent runtime can detect it and ask the model to retry with shorter
-    // output instead of silently passing empty arguments to the tool.
-    return { [TOOL_ARGS_TRUNCATED_KEY]: true, __raw_length__: value.length };
+    // A balanced but invalid payload is a model formatting error, not
+    // necessarily an output truncation. Keep the two cases distinct so the
+    // runtime does not switch protocols or blame max_tokens for bad JSON.
+    const marker = looksLikeTruncatedJson(value)
+      ? TOOL_ARGS_TRUNCATED_KEY
+      : TOOL_ARGS_INVALID_KEY;
+    return { [marker]: true, __raw_length__: value.length };
   }
+}
+
+function looksLikeTruncatedJson(raw: string): boolean {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const character of raw.trim()) {
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === "\"") {
+      inString = true;
+    } else if (character === "{" || character === "[") {
+      depth += 1;
+    } else if (character === "}" || character === "]") {
+      depth -= 1;
+      if (depth < 0) return false;
+    }
+  }
+  return inString || depth > 0;
 }
 
 /**
@@ -1895,9 +2017,9 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
     if (message.role === "assistant" && message.toolCalls?.length) {
       messages.push({
         role: "assistant",
-        content: isDeepSeekModel(input.model) ? (message.content || "") : (message.content || null),
-        ...(isDeepSeekModel(input.model) && message.reasoningContent
-          ? { reasoning_content: message.reasoningContent }
+        content: isDeepSeekModel(input.model, input.provider) ? (message.content || "") : (message.content || null),
+        ...(isDeepSeekThinkingModel(input.model, input.provider)
+          ? { reasoning_content: message.reasoningContent ?? "" }
           : {}),
         tool_calls: message.toolCalls.map((call) => ({
           id: call.id,

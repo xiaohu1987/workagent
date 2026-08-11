@@ -1041,6 +1041,11 @@ export function App() {
   }, [selectedThreadId]);
 
   useEffect(() => {
+    if (!config?.desktop.llmLogViewer) return;
+    void window.codexh.setConversationLogWindowThread(selectedThreadId);
+  }, [config?.desktop.llmLogViewer, selectedThreadId]);
+
+  useEffect(() => {
     window.localStorage.setItem("codexh.sidebar-width", String(sidebarWidth));
   }, [sidebarWidth]);
 
@@ -4794,19 +4799,36 @@ export function App() {
     }
   }
 
-  async function setLiveEditPreviewEnabled(enabled: boolean) {
+  async function setLlmLogViewerEnabled(enabled: boolean) {
     if (!config) return;
     const previousConfig = config;
     const previousDraft = configDraft;
-    const nextConfig = { ...config, desktop: { ...config.desktop, liveEditPreview: enabled } };
+    const nextConfig = {
+      ...config,
+      desktop: {
+        ...config.desktop,
+        llmLogViewer: enabled,
+        ...(enabled ? { liveEditPreview: false } : {})
+      }
+    };
     setConfig(nextConfig);
-    setConfigDraft((current) => current ? { ...current, desktop: { ...current.desktop, liveEditPreview: enabled } } : current);
+    setConfigDraft((current) => current ? {
+      ...current,
+      desktop: {
+        ...current.desktop,
+        llmLogViewer: enabled,
+        ...(enabled ? { liveEditPreview: false } : {})
+      }
+    } : current);
     try {
-      await window.codexh.setLiveEditPreviewEnabled(enabled);
+      await window.codexh.setLlmLogViewerEnabled(enabled);
+      if (enabled && selectedThreadId) {
+        await window.codexh.openConversationLogWindow(selectedThreadId);
+      }
     } catch (error) {
       setConfig(previousConfig);
       setConfigDraft(previousDraft);
-      showNotice("代码编辑预览设置失败。", { message: error instanceof Error ? error.message : String(error) });
+      showNotice("对话日志设置失败。", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -5956,7 +5978,17 @@ export function App() {
               ) : null}
 
               {settingsTab === "general" ? (
-                <RuntimeOverviewPage config={config} configDraft={configDraft} threadCount={threads.length} skillCount={skills.length} subagentDefaultModelValue={subagentDefaultModelValue} subagentDefaultModelOptions={subagentDefaultModelOptions} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} onSetLiveEditPreviewEnabled={(enabled) => void setLiveEditPreviewEnabled(enabled)} />
+                <RuntimeOverviewPage
+                  config={config}
+                  configDraft={configDraft}
+                  threadCount={threads.length}
+                  skillCount={skills.length}
+                  subagentDefaultModelValue={subagentDefaultModelValue}
+                  subagentDefaultModelOptions={subagentDefaultModelOptions}
+                  setConfigDraft={setConfigDraft}
+                  onSave={saveConfigDraft}
+                  onSetLlmLogViewerEnabled={(enabled) => void setLlmLogViewerEnabled(enabled)}
+                />
               ) : null}
 
     {settingsTab === "provider" ? (

@@ -17,6 +17,11 @@ const api = {
   clearApplicationBackground: () => ipcRenderer.invoke("appearance:background:clear"),
   getRuntimeLogStats: () => ipcRenderer.invoke("logs:stats"),
   clearRuntimeLogs: () => ipcRenderer.invoke("logs:clear"),
+  getThreadRuntimeLogs: (threadId: string, limit?: number) => ipcRenderer.invoke("logs:thread", threadId, limit),
+  openConversationLogWindow: (threadId: string) => ipcRenderer.invoke("conversation-log-window:open", threadId),
+  setConversationLogWindowThread: (threadId: string | null) => ipcRenderer.invoke("conversation-log-window:set-thread", threadId),
+  markConversationLogWindowReady: () => ipcRenderer.send("conversation-log-window:ready"),
+  closeConversationLogWindow: () => ipcRenderer.invoke("conversation-log-window:close"),
   setGlobalReasoningEffort: (reasoningEffort: import("@shared-types").GptReasoningEffort) =>
     ipcRenderer.invoke("config:set-reasoning-effort", reasoningEffort),
   listThreads: () => ipcRenderer.invoke("threads:list"),
@@ -176,6 +181,7 @@ const api = {
   },
   saveConfig: (config: unknown) => ipcRenderer.invoke("config:save", config),
   setLiveEditPreviewEnabled: (enabled: boolean) => ipcRenderer.invoke("config:set-live-edit-preview", enabled),
+  setLlmLogViewerEnabled: (enabled: boolean) => ipcRenderer.invoke("config:set-llm-log-viewer", enabled),
   listDatabases: () => ipcRenderer.invoke("databases:list"),
   listDatabaseCredentialConnectionIds: () => ipcRenderer.invoke("databases:credential-connection-ids"),
   testDatabase: (payload: { connection: unknown; password?: string }) => ipcRenderer.invoke("databases:test", payload),
@@ -284,6 +290,11 @@ const api = {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("runtime:event", wrapped);
     return () => ipcRenderer.off("runtime:event", wrapped);
+  },
+  onConversationLogWindowEvent: (listener: (event: unknown) => void) => {
+    const wrapped = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on("conversation-log-window:event", wrapped);
+    return () => ipcRenderer.off("conversation-log-window:event", wrapped);
   },
   onLiveEditPreviewEvent: (listener: (event: { kind: "show"; toolCallId: string; threadId: string; path: string; completed: boolean } | { kind: "complete"; toolCallId: string }) => void) => {
     const wrapped = (_event: unknown, payload: { kind: "show"; toolCallId: string; threadId: string; path: string; completed: boolean } | { kind: "complete"; toolCallId: string }) => listener(payload);

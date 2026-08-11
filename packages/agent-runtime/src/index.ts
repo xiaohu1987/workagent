@@ -38,7 +38,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, ProviderRequestLimitError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
@@ -197,7 +197,9 @@ export const MAX_NETWORK_ERROR_RETRIES = 0;
 export const NETWORK_ERROR_BASE_DELAY_MS = 1_000;
 export const NETWORK_ERROR_MAX_DELAY_MS = 10_000;
 export const MAX_UPSTREAM_SERVICE_RETRIES = 5;
-export const MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES = 0;
+export const MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES = 2;
+export const MAX_PROVIDER_RESOURCE_RETRIES = 2;
+export const MAX_PROVIDER_STREAM_RECOVERY_RETRIES = 1;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_BASE_TOKENS = 8_192;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_MAX_TOKENS = 32_768;
 
@@ -265,6 +267,13 @@ export function isNetworkError(error: unknown): boolean {
   if (error instanceof Error && /^abort/i.test(error.name)) {
     return false;
   }
+  if (
+    error instanceof ProviderStreamIncompleteError ||
+    error instanceof ProviderRequestLimitError ||
+    (error instanceof Error && error.name === "ProviderStreamIncompleteError")
+  ) {
+    return false;
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (!message) return false;
   if (isProviderOutputLimitError(error) || /response was filtered/i.test(message)) {
@@ -286,6 +295,11 @@ export function isNetworkError(error: unknown): boolean {
 export function isProviderOutputLimitError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /response reached its output limit|finish_reason\s*[:=]?\s*["']?length|stop_reason\s*[:=]?\s*["']?max_tokens|maximum output tokens|max_tokens.*(?:reached|exceeded)/i.test(message);
+}
+
+export function isProviderResourceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /insufficient[_\s]+system[_\s]+resource/i.test(message);
 }
 
 export interface ProviderRequestLimitDetails {
@@ -349,6 +363,15 @@ export function isToolArgsTruncated(argumentsValue: unknown): boolean {
     typeof argumentsValue === "object" &&
     !Array.isArray(argumentsValue) &&
     TOOL_ARGS_TRUNCATED_KEY in (argumentsValue as Record<string, unknown>)
+  );
+}
+
+export function isToolArgsInvalid(argumentsValue: unknown): boolean {
+  return Boolean(
+    argumentsValue &&
+    typeof argumentsValue === "object" &&
+    !Array.isArray(argumentsValue) &&
+    TOOL_ARGS_INVALID_KEY in (argumentsValue as Record<string, unknown>)
   );
 }
 
@@ -1355,6 +1378,9 @@ class ThreadSessionRuntime {
     mediaIntent: "image" | "video" | null = null,
     abortController: AbortController = new AbortController()
   ): Promise<void> {
+    // Function-call history compatibility is a one-turn recovery mode. Do
+    // not let a transient gateway error permanently change later turns.
+    this.#useFunctionCallCompatibilityTranscript = false;
     const thread = await this.services.persistence.getThread(this.threadId);
     const turnOutputDir = await this.services.getThreadOutputDir(this.threadId);
     const storedTurnContextMarkdown = await readLatestTurnContextMarkdown(turnOutputDir);
@@ -1791,6 +1817,8 @@ class ThreadSessionRuntime {
       let modelRateLimitAttempts = 0;
       let networkErrorAttempts = 0;
       let providerOutputLimitAttempts = 0;
+      let providerResourceAttempts = 0;
+      let providerStreamRecoveryAttempts = 0;
       let upstreamContextRecoveryAttempts = 0;
       let upstreamServiceErrorAttempts = 0;
       let functionCallProtocolRecoveryAttempts = 0;
@@ -2486,7 +2514,10 @@ class ThreadSessionRuntime {
           decision = await waitForAbortOrTimeout(
             adapter.runTurn({
               systemPrompt,
-              transcript: this.#useFunctionCallCompatibilityTranscript || useTextToolProtocol
+              transcript: (
+                (this.#useFunctionCallCompatibilityTranscript || useTextToolProtocol) &&
+                resolveModelCompat(model, provider).id !== "deepseek"
+              )
                 ? buildFunctionCallCompatibilityTranscript(transcript)
                 : transcript,
               availableTools: requestTools,
@@ -2524,6 +2555,16 @@ class ThreadSessionRuntime {
                   await this.services.log("provider.request_limit_recovered", this.threadId, recoveryPayload);
                 }
               },
+              onProviderTrace: this.services.config.desktop.llmLogViewer
+                ? ({ phase, payload }) => {
+                    void this.services.log(`llm.${phase}`, this.threadId, {
+                      turnRunId: turn.id,
+                      modelId: model.id,
+                      providerId: provider.id,
+                      ...payload
+                    }).catch(() => undefined);
+                  }
+                : undefined,
               abortSignal: modelTurnAbortController.signal
             }),
             abortController.signal,
@@ -2580,7 +2621,52 @@ class ThreadSessionRuntime {
               currentRequestPreserved: true
             });
           }
+          if (!abortController.signal.aborted && isProviderResourceError(error)) {
+            if (providerResourceAttempts >= MAX_PROVIDER_RESOURCE_RETRIES) {
+              await this.services.log("provider.resource_recovery_exhausted", this.threadId, {
+                turnRunId: turn.id,
+                attempt: providerResourceAttempts,
+                maxAttempts: MAX_PROVIDER_RESOURCE_RETRIES,
+                error: errorMessage
+              });
+              throw error;
+            }
+            providerResourceAttempts += 1;
+            await this.services.log("provider.resource_recovery", this.threadId, {
+              turnRunId: turn.id,
+              attempt: providerResourceAttempts,
+              maxAttempts: MAX_PROVIDER_RESOURCE_RETRIES,
+              error: errorMessage
+            });
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: providerResourceAttempts,
+                maxAttempts: MAX_PROVIDER_RESOURCE_RETRIES,
+                reason: "provider_insufficient_system_resource"
+              },
+              createdAt: new Date().toISOString()
+            });
+            transcript.push({
+              role: "user",
+              content:
+                "The provider temporarily ran out of inference resources. Retry the same task without repeating completed work. " +
+                "Use one compact next tool call or a concise final answer."
+            });
+            await retryDraft();
+            continue;
+          }
           if (!abortController.signal.aborted && isProviderOutputLimitError(error)) {
+            if (providerOutputLimitAttempts >= MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES) {
+              await this.services.log("provider.output_limit_recovery_exhausted", this.threadId, {
+                turnRunId: turn.id,
+                attempt: providerOutputLimitAttempts,
+                maxAttempts: MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES,
+                error: errorMessage
+              });
+              throw error;
+            }
             providerOutputLimitAttempts += 1;
             const retrying = true;
             const nextMaxOutputTokens = resolveProviderOutputLimitRecoveryTokens(
@@ -2600,7 +2686,7 @@ class ThreadSessionRuntime {
               threadId: this.threadId,
               payload: {
                 attempt: providerOutputLimitAttempts,
-                maxAttempts: 0,
+                maxAttempts: MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES,
                 reason: "provider_output_limit",
                 nextMaxOutputTokens
               },
@@ -2617,7 +2703,47 @@ class ThreadSessionRuntime {
           }
           if (
             !abortController.signal.aborted &&
+            error instanceof ProviderStreamIncompleteError &&
+            error.reason === "missing_finish_reason"
+          ) {
+            if (providerStreamRecoveryAttempts >= MAX_PROVIDER_STREAM_RECOVERY_RETRIES) {
+              await this.services.log("provider.stream_recovery_exhausted", this.threadId, {
+                turnRunId: turn.id,
+                attempt: providerStreamRecoveryAttempts,
+                maxAttempts: MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
+                reason: error.reason
+              });
+              throw error;
+            }
+            providerStreamRecoveryAttempts += 1;
+            await this.services.log("provider.stream_recovery", this.threadId, {
+              turnRunId: turn.id,
+              attempt: providerStreamRecoveryAttempts,
+              maxAttempts: MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
+              reason: error.reason
+            });
+            await this.services.emit({
+              type: "agent.retrying",
+              threadId: this.threadId,
+              payload: {
+                attempt: providerStreamRecoveryAttempts,
+                maxAttempts: MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
+                reason: "provider_missing_finish_reason"
+              },
+              createdAt: new Date().toISOString()
+            });
+            transcript.push({
+              role: "user",
+              content:
+                "The previous provider stream ended without a completion signal. Retry once without repeating completed work; return one compact tool call or a concise final answer."
+            });
+            await retryDraft();
+            continue;
+          }
+          if (
+            !abortController.signal.aborted &&
             functionCallProtocolRecoveryAttempts === 0 &&
+            resolveModelCompat(model, provider).id !== "deepseek" &&
             (
               isFunctionCallProtocolError(error) ||
               (
@@ -2731,8 +2857,17 @@ class ThreadSessionRuntime {
             continue;
           }
           if (!abortController.signal.aborted && isModelRateLimitError(error)) {
+            const rateLimitErrorMessage = error instanceof Error ? error.message : String(error);
+            if (modelRateLimitAttempts >= MAX_MODEL_RATE_LIMIT_RETRIES) {
+              await this.services.log("provider.rate_limit_recovery_exhausted", this.threadId, {
+                turnRunId: turn.id,
+                attempt: modelRateLimitAttempts,
+                maxAttempts: MAX_MODEL_RATE_LIMIT_RETRIES,
+                error: rateLimitErrorMessage
+              });
+              throw error;
+            }
             modelRateLimitAttempts += 1;
-            const errorMessage = error instanceof Error ? error.message : String(error);
             const delayMs = resolveModelRateLimitDelayMs(error, modelRateLimitAttempts);
             await this.services.log("provider.rate_limit", this.threadId, {
               turnRunId: turn.id,
@@ -2740,14 +2875,14 @@ class ThreadSessionRuntime {
               retryWindow: MAX_MODEL_RATE_LIMIT_RETRIES,
               delayMs,
               retrying: true,
-              error: errorMessage
+              error: rateLimitErrorMessage
             });
             await this.services.emit({
               type: "agent.retrying",
               threadId: this.threadId,
               payload: {
                 attempt: modelRateLimitAttempts,
-                maxAttempts: 0,
+                maxAttempts: MAX_MODEL_RATE_LIMIT_RETRIES,
                 reason: "model_rate_limit",
                 delayMs
               },
@@ -3520,7 +3655,7 @@ class ThreadSessionRuntime {
           modePolicy.mode === "project" ||
           isProjectFileMutationRequest(effectiveRequest) ||
           requestedDeliverableExtensions.length > 0;
-        const bypassStandardCompletionAudit = !auditRequired || resolveModelCompat(model)
+          const bypassStandardCompletionAudit = !auditRequired || resolveModelCompat(model, provider)
           .shouldBypassStandardCompletionAudit(model);
         const hasApiCardDeliverable = hasValidApiCardDeliverable(
           effectiveRequest,
@@ -4630,6 +4765,7 @@ class ThreadSessionRuntime {
           let result: ToolResult;
           let toolTimedOut = false;
           let toolArgsTruncated = false;
+          let toolArgsInvalid = false;
           let toolContext: Parameters<ToolRuntime["execute"]>[1] | null = null;
           const toolTimeoutMs = 0;
           try {
@@ -4898,6 +5034,20 @@ class ThreadSessionRuntime {
                 toolName: toolCall.name,
                 rawLength: (toolCall.arguments as Record<string, unknown>).__raw_length__ ?? null
               });
+            } else if (isToolArgsInvalid(toolCall.arguments)) {
+              // Keep the native protocol intact for a balanced but malformed
+              // JSON payload. It is a formatting error, not proof of
+              // truncation and should not force a text-protocol fallback.
+              toolArgsInvalid = true;
+              result = {
+                ok: false,
+                content: "Tool arguments were invalid JSON. Retry the same tool with a complete JSON object and do not change the tool name."
+              };
+              await this.services.log("tool.arguments_invalid", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                rawLength: (toolCall.arguments as Record<string, unknown>).__raw_length__ ?? null
+              });
             } else {
               const execution = this.services.toolRuntime.execute(toolCall, toolContext!);
               result = shouldApplyToolExecutionTimeout(toolCall.name)
@@ -5128,6 +5278,13 @@ class ThreadSessionRuntime {
                 "The previous tool call arguments were truncated because the model output exceeded the token limit. " +
                 "Retry the same operation with shorter, more focused output — for file writes, write in smaller " +
                 "patches or split large files into multiple calls."
+            });
+          }
+          if (toolArgsInvalid) {
+            transcript.push({
+              role: "user",
+              content:
+                "The previous tool call contained invalid JSON arguments. Retry the same operation with one complete JSON object; do not repeat the malformed payload."
             });
           }
           if (result.ok && result.attachments?.length && model.supportsMultimodalInput) {
@@ -9091,6 +9248,12 @@ function buildCompactedTranscriptSummary(
 function estimateRuntimeTranscriptTokens(transcript: ProviderTurnInput["transcript"]): number {
   return transcript.reduce((total, message) => {
     let tokens = estimateRuntimeTokens(message.content);
+    if (message.reasoningContent) {
+      tokens += estimateRuntimeTokens(message.reasoningContent);
+    }
+    if (message.toolCalls?.length) {
+      tokens += estimateRuntimeTokens(JSON.stringify(message.toolCalls));
+    }
     for (const attachment of message.attachments ?? []) {
       // Rough multimodal attachment cost so compaction triggers before the provider hard-fails.
       tokens += attachment.kind === "image" ? 1200 : attachment.kind === "video" ? 2400 : 200;
@@ -9469,12 +9632,10 @@ export function advanceManagedWriteRecovery(
     readPath?: string;
   }
 ): void {
-  // Skip recovery for truncated tool arguments — the model already received
-  // a truncation error and should retry with shorter output. Activating
-  // recovery here would create a dead-end because no target paths can be
-  // extracted from the truncated arguments, leaving the agent stuck in a
-  // "read" phase with nothing to read.
-  if (isToolArgsTruncated(input.argumentsJson)) {
+  // Skip recovery for malformed or truncated tool arguments — the model
+  // already received a retryable argument error. Activating file recovery
+  // here would create a dead-end because no target paths can be extracted.
+  if (isToolArgsTruncated(input.argumentsJson) || isToolArgsInvalid(input.argumentsJson)) {
     return;
   }
   if ((input.toolName === "apply_patch" || input.toolName === "fs.write_file") && !input.ok) {

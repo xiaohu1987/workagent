@@ -65,7 +65,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           main: path.resolve(root, "apps/desktop/src/renderer/index.html"),
-          "live-edit-preview": path.resolve(root, "apps/desktop/src/renderer/live-edit-preview.html")
+          "live-edit-preview": path.resolve(root, "apps/desktop/src/renderer/live-edit-preview.html"),
+          "conversation-log": path.resolve(root, "apps/desktop/src/renderer/conversation-log.html")
         }
       }
     }

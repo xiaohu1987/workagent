@@ -1,4 +1,4 @@
-import type { ModelProfile } from "@shared-types";
+import type { ModelProfile, ProviderDefinition } from "@shared-types";
 import type { ModelCompat } from "./types";
 import { gptCompat } from "./gpt";
 import { deepseekCompat } from "./deepseek";
@@ -79,9 +79,16 @@ const registry: readonly ModelCompat[] = [
  *  - "my-custom-model"    -> gptCompat (default)
  */
 export function resolveModelCompat(
-  model: Pick<ModelProfile, "id" | "displayName">
+  model: Pick<ModelProfile, "id" | "displayName">,
+  provider?: Pick<ProviderDefinition, "id" | "name" | "baseUrl">
 ): ModelCompat {
-  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  const identity = [
+    model.id,
+    model.displayName ?? "",
+    provider?.id ?? "",
+    provider?.name ?? "",
+    provider?.baseUrl ?? ""
+  ].join(" ").toLowerCase();
   for (const compat of registry) {
     if (compat.keywords.some((keyword) => identity.includes(keyword))) {
       return compat;

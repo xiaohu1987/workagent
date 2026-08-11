@@ -273,7 +273,8 @@ export function defaultConfig(): AppConfig {
       theme: "system",
       approvals: "prompt",
       inAppBrowser: true,
-      liveEditPreview: false
+      liveEditPreview: false,
+      llmLogViewer: false
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -428,7 +429,8 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       theme: parsed.desktop?.theme ?? 'system',
       approvals: parsed.desktop?.approvals ?? 'prompt',
       inAppBrowser: parsed.desktop?.inAppBrowser ?? true,
-      liveEditPreview: parsed.desktop?.liveEditPreview ?? false
+      liveEditPreview: parsed.desktop?.liveEditPreview ?? false,
+      llmLogViewer: parsed.desktop?.llmLogViewer ?? false
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),

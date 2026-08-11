@@ -22,6 +22,7 @@ import { UpdateService } from "./update-service";
 import { executeHttpRequest, type HttpProxyRequestPayload } from "./http-proxy";
 import { LiveEditPreviewWindow } from "./live-edit-preview-window";
 import { getLiveEditWriteTargets } from "./live-edit-preview-utils";
+import { ConversationLogWindow } from "./conversation-log-window";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -60,6 +61,12 @@ const liveEditPreview = new LiveEditPreviewWindow({
   getPreviewUrl: getLiveEditPreviewUrl,
   preloadPath: path.join(__dirname, "../preload/index.cjs")
 });
+const conversationLogWindow = new ConversationLogWindow({
+  getMainWindow: () => mainWindow,
+  getLogEntries: (threadId) => backend.getThreadRuntimeLogs(threadId),
+  getLogUrl: getConversationLogUrl,
+  preloadPath: path.join(__dirname, "../preload/index.cjs")
+});
 
 app.setPath("sessionData", sessionDataDir);
 
@@ -95,6 +102,7 @@ function showMainWindow(): void {
 function quitApplication(): void {
   isQuitting = true;
   liveEditPreview.destroy();
+  conversationLogWindow.destroy();
   tray?.destroy();
   tray = null;
   app.quit();
@@ -285,6 +293,7 @@ async function createWindow(): Promise<void> {
   backend.onEvent((event) => {
     notifyBackgroundRuntimeEvent(event);
     handleLiveEditPreviewRuntimeEvent(event);
+    conversationLogWindow.handleRuntimeEvent(event);
     mainWindow?.webContents.send("runtime:event", event);
   });
   backend.onSkillLabEvent((event) => {
@@ -363,6 +372,19 @@ function registerIpc(): void {
   ipcMain.handle("appearance:background:clear", () => backend.clearApplicationBackgrounds());
   ipcMain.handle("logs:stats", () => backend.getRuntimeLogStats());
   ipcMain.handle("logs:clear", () => backend.clearRuntimeLogs());
+  ipcMain.handle("logs:thread", (_event, threadId: string, limit?: number) => backend.getThreadRuntimeLogs(threadId, limit));
+  ipcMain.handle("conversation-log-window:open", (_event, threadId: string) => {
+    conversationLogWindow.show(typeof threadId === "string" ? threadId : null);
+  });
+  ipcMain.handle("conversation-log-window:set-thread", (_event, threadId: string | null) => {
+    conversationLogWindow.setActiveThread(typeof threadId === "string" ? threadId : null);
+  });
+  ipcMain.on("conversation-log-window:ready", () => {
+    conversationLogWindow.markReady();
+  });
+  ipcMain.handle("conversation-log-window:close", () => {
+    conversationLogWindow.close();
+  });
   ipcMain.handle("threads:list", () => backend.listThreads());
   ipcMain.handle("threads:token-usage", (_event, threadId: string) => backend.getThreadTokenUsage(threadId));
   ipcMain.handle("usage-analytics:get", (_event, input?: { rangeDays?: number | null; granularity?: "day" | "week" | "month" }) =>
@@ -607,10 +629,17 @@ function registerIpc(): void {
   ipcMain.handle("config:save", async (_event, config) => {
     await backend.saveConfig(config);
     if (!backend.getConfig().desktop.liveEditPreview) liveEditPreview.clear();
+    if (!backend.getConfig().desktop.llmLogViewer) conversationLogWindow.close();
   });
   ipcMain.handle("config:set-live-edit-preview", async (_event, enabled: boolean) => {
     const next = await backend.setLiveEditPreviewEnabled(enabled === true);
     if (!next) liveEditPreview.clear();
+    return next;
+  });
+  ipcMain.handle("config:set-llm-log-viewer", async (_event, enabled: boolean) => {
+    const next = await backend.setLlmLogViewerEnabled(enabled === true);
+    if (next) liveEditPreview.clear();
+    if (!next) conversationLogWindow.close();
     return next;
   });
   ipcMain.handle("config:set-reasoning-effort", (_event, reasoningEffort) =>
@@ -756,6 +785,13 @@ async function ensureRendererServerUrl(): Promise<string> {
 async function getLiveEditPreviewUrl(): Promise<string> {
   const baseUrl = process.env.VITE_DEV_SERVER_URL ?? await ensureRendererServerUrl();
   return new URL("live-edit-preview.html", baseUrl).toString();
+}
+
+async function getConversationLogUrl(threadId: string): Promise<string> {
+  const baseUrl = process.env.VITE_DEV_SERVER_URL ?? await ensureRendererServerUrl();
+  const url = new URL("conversation-log.html", baseUrl);
+  url.searchParams.set("threadId", threadId);
+  return url.toString();
 }
 
 function handleLiveEditPreviewRuntimeEvent(event: RuntimeEvent): void {

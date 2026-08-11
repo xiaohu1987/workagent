@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { RuntimeLogEntry, RuntimeLogPage } from "@shared-types";
 
 const DEFAULT_GLOBAL_LOG_LIMIT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_SESSION_LOG_LIMIT_BYTES = 2 * 1024 * 1024;
@@ -29,7 +30,13 @@ export class RuntimeLogWriter {
   private readonly logsDir: string;
 
   public append(kind: string, payload: Record<string, unknown>, threadId?: string): Promise<void> {
-    const line = `${JSON.stringify({ timestamp: new Date().toISOString(), kind, threadId, payload: redactSecrets(payload) })}\n`;
+    const entry: RuntimeLogEntry = {
+      timestamp: new Date().toISOString(),
+      kind,
+      threadId,
+      payload: redactRuntimeLogPayload(payload)
+    };
+    const line = `${JSON.stringify(entry)}\n`;
     const targets = [path.join(this.logsDir, "runtime.jsonl")];
     if (threadId) {
       targets.push(path.join(this.logsDir, "sessions", `${safeFileName(threadId)}.jsonl`));
@@ -49,6 +56,51 @@ export class RuntimeLogWriter {
         console.error("[runtime-log] Failed to append log entry", error);
       });
     return this.#tail;
+  }
+
+  public async readSessionPage(threadId: string, limit = 300): Promise<RuntimeLogPage> {
+    await this.#tail;
+    const filePath = path.join(this.logsDir, "sessions", `${safeFileName(threadId)}.jsonl`);
+    const raw = await fs.readFile(filePath, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    if (!raw.trim()) return { entries: [], total: 0, hasMore: false };
+    const entries = raw
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const parsed = JSON.parse(line) as Partial<RuntimeLogEntry>;
+          if (
+            typeof parsed.timestamp !== "string" ||
+            typeof parsed.kind !== "string" ||
+            !parsed.payload ||
+            typeof parsed.payload !== "object" ||
+            Array.isArray(parsed.payload)
+          ) {
+            return [];
+          }
+          return [{
+            timestamp: parsed.timestamp,
+            kind: parsed.kind,
+            threadId: typeof parsed.threadId === "string" ? parsed.threadId : undefined,
+            payload: parsed.payload as Record<string, unknown>
+          }];
+        } catch {
+          return [];
+        }
+      });
+    const normalizedLimit = Math.max(1, Math.floor(limit));
+    return {
+      entries: entries.slice(-normalizedLimit),
+      total: entries.length,
+      hasMore: entries.length > normalizedLimit
+    };
+  }
+
+  public async readSession(threadId: string, limit = 300): Promise<RuntimeLogEntry[]> {
+    return (await this.readSessionPage(threadId, limit)).entries;
   }
 
   public prune(): Promise<void> {
@@ -142,6 +194,13 @@ async function trimJsonlFile(filePath: string, maximumBytes: number): Promise<vo
   } finally {
     await handle.close();
   }
+}
+
+export function redactRuntimeLogPayload(value: unknown): Record<string, unknown> {
+  const redacted = redactSecrets(value);
+  return redacted && typeof redacted === "object" && !Array.isArray(redacted)
+    ? redacted as Record<string, unknown>
+    : { value: redacted };
 }
 
 function redactSecrets(value: unknown): unknown {

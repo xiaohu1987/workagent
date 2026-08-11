@@ -52,6 +52,20 @@ describe("RuntimeLogWriter", () => {
     expect((await fs.stat(path.join(logsDir, "sessions", "thread-1.jsonl"))).size).toBeLessThanOrEqual(1024);
   });
 
+  it("reads the current thread records in order and keeps secrets redacted", async () => {
+    const logsDir = await makeTempDir();
+    const writer = new RuntimeLogWriter(logsDir);
+    await writer.append("provider.request", { model: "deepseek", authorization: "Bearer secret" }, "thread-1");
+    await writer.append("provider.response", { content: "done" }, "thread-1");
+    await writer.append("other.thread", { ignored: true }, "thread-2");
+
+    const entries = await writer.readSession("thread-1");
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry) => entry.kind)).toEqual(["provider.request", "provider.response"]);
+    expect(entries[0]?.payload.authorization).toBe("[redacted]");
+    expect(entries[1]?.payload.content).toBe("done");
+  });
+
   it("prunes existing global and session logs after startup", async () => {
     const logsDir = await makeTempDir();
     const sessionsDir = path.join(logsDir, "sessions");

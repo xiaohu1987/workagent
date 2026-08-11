@@ -18485,6 +18485,308 @@ select option:checked {
   min-height: 0;
 }
 
+.conversation-log-window-panel {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(100, 180, 255, 0.27);
+  box-shadow:
+    0 0 0 1px rgba(93, 169, 255, 0.08),
+    0 0 34px rgba(65, 139, 232, 0.14);
+  background:
+    linear-gradient(135deg, rgba(55, 117, 180, 0.11), transparent 36%),
+    rgba(9, 13, 19, 0.94);
+}
+
+.conversation-log-window-panel .conversation-log-workspace {
+  height: 100%;
+  border-radius: 0;
+}
+
+.conversation-log-toolbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.conversation-log-close {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  color: rgba(211, 222, 236, 0.72);
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+}
+
+.conversation-log-close:hover {
+  color: #fff;
+  border-color: rgba(255, 125, 147, 0.4);
+  background: rgba(228, 82, 113, 0.16);
+}
+
+.conversation-log-close svg {
+  width: 14px;
+  height: 14px;
+}
+
+.conversation-log-workspace {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  color: #dce3ed;
+  background: #0a0c0f;
+}
+
+.conversation-log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(17, 20, 25, 0.95);
+}
+
+.conversation-log-heading {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.conversation-log-heading > svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  color: #8dbfff;
+}
+
+.conversation-log-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.conversation-log-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.conversation-log-heading span {
+  color: rgba(185, 194, 207, 0.62);
+  font-size: 10px;
+}
+
+.conversation-log-refresh {
+  display: grid;
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  color: #a9caff;
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+}
+
+.conversation-log-refresh:hover:not(:disabled) {
+  color: #fff;
+  border-color: rgba(125, 183, 255, 0.4);
+  background: rgba(92, 155, 232, 0.16);
+}
+
+.conversation-log-refresh:disabled {
+  cursor: wait;
+  opacity: 0.52;
+}
+
+.conversation-log-refresh svg {
+  width: 14px;
+  height: 14px;
+}
+
+.conversation-log-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: rgba(185, 194, 207, 0.62);
+  font-size: 10px;
+}
+
+.conversation-log-filter input {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 27px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  outline: none;
+  color: #e3e9f1;
+  background: rgba(255, 255, 255, 0.035);
+  font: inherit;
+}
+
+.conversation-log-filter input:focus {
+  border-color: rgba(125, 183, 255, 0.55);
+  box-shadow: 0 0 0 2px rgba(92, 155, 232, 0.12);
+}
+
+.conversation-log-load-more {
+  flex: 0 0 auto;
+  min-height: 29px;
+  margin: 7px 8px 0;
+  border: 1px solid rgba(100, 180, 255, 0.22);
+  border-radius: 7px;
+  color: #b9d9ff;
+  background: rgba(61, 132, 209, 0.1);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.conversation-log-load-more:hover:not(:disabled) {
+  border-color: rgba(139, 207, 255, 0.54);
+  color: #fff;
+  background: rgba(61, 132, 209, 0.2);
+}
+
+.conversation-log-load-more:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.conversation-log-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+}
+
+.conversation-log-entry {
+  margin: 0 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.conversation-log-entry.is-error {
+  border-color: rgba(255, 126, 126, 0.28);
+  background: rgba(255, 92, 92, 0.055);
+}
+
+.conversation-log-entry summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  padding: 6px 8px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.conversation-log-entry summary::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-log-entry summary::before {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid rgba(190, 202, 218, 0.65);
+  content: "";
+  transition: transform 140ms ease;
+}
+
+.conversation-log-entry[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.conversation-log-entry-time {
+  flex: 0 0 auto;
+  color: rgba(165, 179, 197, 0.58);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.conversation-log-entry summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #cbd9eb;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.conversation-log-entry summary code {
+  margin-left: auto;
+  color: rgba(165, 179, 197, 0.48);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.conversation-log-entry pre {
+  max-height: 360px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  color: #b9c9dc;
+  background: rgba(0, 0, 0, 0.18);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.conversation-log-empty {
+  display: grid;
+  height: 100%;
+  min-height: 180px;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  color: rgba(185, 194, 207, 0.62);
+  text-align: center;
+}
+
+.conversation-log-empty svg {
+  width: 25px;
+  height: 25px;
+  color: #7eaff2;
+}
+
+.conversation-log-empty strong {
+  color: #e0e7f0;
+  font-size: 12px;
+}
+
+.conversation-log-empty span {
+  max-width: 250px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .right-workspace-panel .right-workspace-hide-button {
   position: absolute;
   z-index: 2;

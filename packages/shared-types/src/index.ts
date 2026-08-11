@@ -854,6 +854,7 @@ export interface AppConfig {
     approvals: ApprovalMode;
     inAppBrowser: boolean;
     liveEditPreview: boolean;
+    llmLogViewer: boolean;
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;
@@ -982,6 +983,10 @@ export interface ProviderTurnInput {
     maxTools: number;
     toolCount: number;
   }) => void | Promise<void>;
+  onProviderTrace?: (trace: {
+    phase: "request" | "response" | "error";
+    payload: Record<string, unknown>;
+  }) => void | Promise<void>;
   abortSignal?: AbortSignal;
 }
 
@@ -1016,7 +1021,8 @@ export interface RuntimeEvent {
     | "browser.verification_completed"
     | "gpa.updated"
     | "model.capability.updated"
-    | "terminal.output";
+    | "terminal.output"
+    | "runtime.log";
   threadId?: string;
   /** Root task used by global notifications while preserving the event's subject thread. */
   notificationThreadId?: string;
@@ -1024,6 +1030,19 @@ export interface RuntimeEvent {
   notificationChildThreadId?: string;
   payload: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface RuntimeLogEntry {
+  timestamp: string;
+  kind: string;
+  threadId?: string;
+  payload: Record<string, unknown>;
+}
+
+export interface RuntimeLogPage {
+  entries: RuntimeLogEntry[];
+  total: number;
+  hasMore: boolean;
 }
 
 export interface SkillLabProgress {

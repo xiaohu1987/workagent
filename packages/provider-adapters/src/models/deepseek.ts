@@ -10,6 +10,32 @@ import type { ModelCompatContext } from "./types";
 import { gptCompat } from "./gpt";
 import { preserveChineseOutputLanguage } from "./output-language";
 
+const DEEPSEEK_V4_PATTERN = /\bv4-(?:flash|pro)\b/;
+const DEEPSEEK_REASONER_PATTERN = /reasoner|\br1\b|thinking/;
+
+function isDeepSeekV4Model(identity: string): boolean {
+  return DEEPSEEK_V4_PATTERN.test(identity);
+}
+
+function mapDeepSeekReasoningEffort(value: unknown, isPro: boolean): "low" | "high" | "max" | undefined {
+  if (value === "none") return undefined;
+  if (value === "minimal" || value === "low") return isPro ? "high" : "low";
+  if (value === "medium" || value === "high") return "high";
+  if (value === "xhigh" || value === "max") return "max";
+  return undefined;
+}
+
+function looksLikeDecisionEnvelope(accumulated: string): boolean {
+  const trimmed = stripThinkBlocks(accumulated).trimStart();
+  return /^(?:```(?:json)?\s*)?\{\s*"assistant_message"\s*:/i.test(trimmed) ||
+    (
+      /^(?:```(?:json)?\s*)?\{/i.test(trimmed) &&
+      /"tool_calls"\s*:/i.test(trimmed) &&
+      /"end_turn"\s*:/i.test(trimmed) &&
+      /"goal_completed"\s*:/i.test(trimmed)
+    );
+}
+
 /**
  * DeepSeek openai-compatible shell.
  *
@@ -74,8 +100,15 @@ export const deepseekCompat = defineCompat(gptCompat, {
     ctx: ModelCompatContext,
     base: Record<string, unknown>
   ): Record<string, unknown> {
-    const identity = `${ctx.model.id} ${ctx.model.displayName ?? ""}`.toLowerCase();
-    const isReasoner = /reasoner|\br1\b|thinking/.test(identity);
+    const identity = [
+      ctx.model.id,
+      ctx.model.displayName ?? "",
+      ctx.input.provider.id,
+      ctx.input.provider.name ?? "",
+      ctx.input.provider.baseUrl ?? ""
+    ].join(" ").toLowerCase();
+    const isV4 = isDeepSeekV4Model(identity);
+    const isReasoner = DEEPSEEK_REASONER_PATTERN.test(identity);
 
     // 1. Reasoning models: strip fields the thinking API rejects (HTTP 400).
     let next: Record<string, unknown> = base;
@@ -103,12 +136,37 @@ export const deepseekCompat = defineCompat(gptCompat, {
       next = rest;
     }
 
-    // 2. Raise max_tokens floor to 8192 to prevent mid-stream truncation
-    //    (finish_reason: length) that breaks apply_patch arguments and
-    //    truncates long replies. Larger configured values are preserved.
+    // DeepSeek V4 defaults to thinking mode, but compatible gateways do not
+    // always apply that default consistently. Make the mode explicit and map
+    // the app's reasoning levels to the V4 API's low/high/max values.
+    if (isV4) {
+      const isPro = /\bv4-pro\b/.test(identity);
+      const reasoningEffort = ctx.input.reasoningEffort;
+      next = {
+        ...next,
+        thinking: { type: reasoningEffort === "none" ? "disabled" : "enabled" }
+      };
+      const mappedEffort = reasoningEffort === "none"
+        ? undefined
+        : mapDeepSeekReasoningEffort(reasoningEffort, isPro);
+      if (mappedEffort) {
+        next = { ...next, reasoning_effort: mappedEffort };
+      } else {
+        const { reasoning_effort, ...withoutReasoningEffort } = next;
+        next = withoutReasoningEffort;
+      }
+    }
+
+    // 2. Raise small output caps to prevent mid-stream truncation, but keep
+    //    the floor within a quarter of unusually small model context windows.
+    //    Larger configured values are preserved.
     const currentMax = next.max_tokens;
-    if (typeof currentMax !== "number" || currentMax < 8192) {
-      next = { ...next, max_tokens: 8192 };
+    const maxTokensFloor = Math.min(
+      8_192,
+      Math.max(1_024, Math.floor(ctx.model.contextWindow / 4))
+    );
+    if (typeof currentMax !== "number" || currentMax < maxTokensFloor) {
+      next = { ...next, max_tokens: maxTokensFloor };
     }
 
     return preserveChineseOutputLanguage(ctx, next);
@@ -118,7 +176,7 @@ export const deepseekCompat = defineCompat(gptCompat, {
     // decision envelope; otherwise pass content through verbatim so deepseek's
     // native-tool-call replies (including code/JSON blocks starting with `{`)
     // are not swallowed.
-    if (accumulated.includes('"assistant_message"')) {
+    if (looksLikeDecisionEnvelope(accumulated)) {
       return gptCompat.extractVisibleStreamText(accumulated);
     }
     // Surface inline <think> reasoning in the streaming draft so users can
@@ -128,10 +186,10 @@ export const deepseekCompat = defineCompat(gptCompat, {
   normalizeDecision(decision, ctx) {
     let next = decision;
     const reasoning = stripThinkBlocks(decision.reasoningSummary ?? "").trim();
-    if (!next.assistantMessage?.trim() && next.toolCalls.length === 0 && reasoning) {
-      // Some DeepSeek relays put the DSML/tool payload in reasoning_content
-      // while leaving message.content empty. Re-run the same text parser over
-      // that field before treating it as ordinary reasoning.
+    if (next.toolCalls.length === 0 && reasoning) {
+      // Some DeepSeek relays put the DSML/tool payload in reasoning_content,
+      // sometimes after a visible preamble. Re-run the parser over that field
+      // before treating it as ordinary private reasoning.
       const recovered = parseDecisionFromText(reasoning);
       if (
         recovered.isStructured &&
@@ -144,6 +202,7 @@ export const deepseekCompat = defineCompat(gptCompat, {
         next = {
           ...next,
           ...recovered,
+          assistantMessage: next.assistantMessage?.trim() || recovered.assistantMessage,
           toolCalls,
           reasoningSummary: decision.reasoningSummary
         };
@@ -165,16 +224,8 @@ export const deepseekCompat = defineCompat(gptCompat, {
     if (hasMessage || next.toolCalls.length > 0) {
       return next;
     }
-    // The turn produced no visible text and no tool calls.
-    if (reasoning) {
-      // The reply landed entirely in reasoning_content: promote it so
-      // GOAL/PLAN can parse the analysis and chat threads show the answer
-      // instead of a blank end-of-turn.
-      return { ...next, assistantMessage: reasoning };
-    }
-    // Truly empty response: mark the decision unstructured and keep the turn
-    // open so the runtime re-samples with an explicit correction instead of
-    // accepting a blank end-of-turn.
+    // The turn produced no visible final text and no tool calls. Keep raw
+    // reasoning private and let the runtime perform bounded recovery.
     return {
       ...next,
       assistantMessage: undefined,

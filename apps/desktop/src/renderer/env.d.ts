@@ -17,6 +17,7 @@ type UpdateState = {
 type RendererSkillLabEvent = import("@shared-types").SkillLabEvent;
 type RendererNotificationNavigationTarget = import("@shared-types").NotificationNavigationTarget;
 type RendererPendingResumeThread = import("@shared-types").PendingResumeThread;
+type RendererRuntimeLogPage = import("@shared-types").RuntimeLogPage;
 
 declare global {
   interface Window {
@@ -43,6 +44,11 @@ declare global {
       clearApplicationBackground: () => Promise<void>;
       getRuntimeLogStats: () => Promise<{ bytes: number; fileCount: number }>;
       clearRuntimeLogs: () => Promise<{ bytes: number; fileCount: number }>;
+      getThreadRuntimeLogs: (threadId: string, limit?: number) => Promise<RendererRuntimeLogPage>;
+      openConversationLogWindow: (threadId: string) => Promise<void>;
+      setConversationLogWindowThread: (threadId: string | null) => Promise<void>;
+      markConversationLogWindowReady: () => void;
+      closeConversationLogWindow: () => Promise<void>;
       listThreads: () => Promise<any[]>;
       getThreadTokenUsage: (threadId: string) => Promise<{
         turn: import("@shared-types").TokenUsage;
@@ -76,6 +82,7 @@ declare global {
       readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
       writeProjectFile: (payload: { threadId: string; path: string; content: string }) => Promise<{ path: string }>;
       setLiveEditPreviewEnabled: (enabled: boolean) => Promise<boolean>;
+      setLlmLogViewerEnabled: (enabled: boolean) => Promise<boolean>;
       setLiveEditPreviewActiveThread: (threadId: string | null) => Promise<void>;
       acknowledgeLiveEditPreviewPath: (payload: { toolCallId: string; path: string }) => Promise<void>;
       markLiveEditPreviewReady: () => Promise<void>;
@@ -296,6 +303,7 @@ declare global {
       setGpaFullAccess: (payload: { threadId: string; fullAccess: boolean }) => Promise<void>;
       setKnowledgeEnabled: (payload: { threadId: string; knowledgeEnabled: boolean }) => Promise<void>;
       onRuntimeEvent: (listener: (event: unknown) => void) => () => void;
+      onConversationLogWindowEvent: (listener: (event: unknown) => void) => () => void;
       onLiveEditPreviewEvent: (listener: (event: { kind: "show"; toolCallId: string; threadId: string; path: string; completed: boolean } | { kind: "complete"; toolCallId: string }) => void) => () => void;
     };
   }

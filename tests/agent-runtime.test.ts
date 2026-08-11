@@ -76,15 +76,19 @@ import {
   resolveModelRateLimitDelayMs,
   isNetworkError,
   isProviderOutputLimitError,
+  isProviderResourceError,
   readProviderRequestLimitDetails,
   shouldRecoverProviderRequestLimit,
   resolveNetworkErrorDelayMs,
   resolveProviderOutputLimitRecoveryTokens,
   MAX_NETWORK_ERROR_RETRIES,
   MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES,
+  MAX_PROVIDER_RESOURCE_RETRIES,
+  MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
   NETWORK_ERROR_BASE_DELAY_MS,
   NETWORK_ERROR_MAX_DELAY_MS,
   isToolArgsTruncated,
+  isToolArgsInvalid,
   buildFunctionCallCompatibilityTranscript,
   isInternalToolCompatibilityMarker,
   stripInternalToolCompatibilityMarkers,
@@ -1482,6 +1486,9 @@ describe("network error retries", () => {
     expect(isNetworkError(new Error("HTTP 400 invalid API key"))).toBe(false);
     expect(isNetworkError(new Error("Provider stream terminated because the response reached its output limit."))).toBe(false);
     expect(isNetworkError(new Error("Provider stream terminated because its response was filtered."))).toBe(false);
+    const incomplete = new Error("Provider stream terminated before emitting a completion signal.");
+    incomplete.name = "ProviderStreamIncompleteError";
+    expect(isNetworkError(incomplete)).toBe(false);
   });
 
   it("uses exponential back-off capped at the max delay", () => {
@@ -1512,12 +1519,22 @@ describe("provider output-limit recovery", () => {
     expect(isProviderOutputLimitError(new Error("Connection error: stream terminated"))).toBe(false);
   });
 
-  it("keeps output-limit recovery unbounded while increasing output budgets", () => {
-    expect(MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES).toBe(0);
+  it("bounds output-limit recovery while increasing output budgets", () => {
+    expect(MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES).toBe(2);
     expect(resolveProviderOutputLimitRecoveryTokens(4_096, 1)).toBe(16_384);
     expect(resolveProviderOutputLimitRecoveryTokens(4_096, 2)).toBe(32_768);
     expect(resolveProviderOutputLimitRecoveryTokens(16_384, 1)).toBe(32_768);
     expect(resolveProviderOutputLimitRecoveryTokens(64_000, 1)).toBe(64_000);
+  });
+
+  it("recognizes DeepSeek upstream resource interruptions", () => {
+    expect(isProviderResourceError(new Error(
+      "Provider stream was interrupted because the upstream model service reported insufficient system resources."
+    ))).toBe(true);
+    expect(isProviderResourceError(new Error("HTTP 500 insufficient_system_resource"))).toBe(true);
+    expect(isProviderResourceError(new Error("Provider stream reached its output limit."))).toBe(false);
+    expect(MAX_PROVIDER_RESOURCE_RETRIES).toBe(2);
+    expect(MAX_PROVIDER_STREAM_RECOVERY_RETRIES).toBe(1);
   });
 });
 
@@ -1532,6 +1549,12 @@ describe("tool argument truncation detection", () => {
     expect(isToolArgsTruncated(null)).toBe(false);
     expect(isToolArgsTruncated("string-args")).toBe(false);
     expect(isToolArgsTruncated(undefined)).toBe(false);
+  });
+
+  it("keeps malformed JSON distinct from truncated JSON", () => {
+    expect(isToolArgsInvalid({ __tool_args_invalid__: true, __raw_length__: 12 })).toBe(true);
+    expect(isToolArgsInvalid({ __tool_args_truncated__: true, __raw_length__: 12 })).toBe(false);
+    expect(isToolArgsInvalid({ path: "src/app.ts" })).toBe(false);
   });
 });
 

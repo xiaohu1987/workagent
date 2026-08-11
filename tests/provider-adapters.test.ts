@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { applyProviderRequestLimits, buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { applyProviderRequestLimits, buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -474,6 +474,13 @@ describe("OpenAiCompatibleProvider", () => {
     expect(resolveModelCompat({ id: "moonshot-v1-8k", displayName: "Moonshot v1" }).id).toBe("kimi");
     expect(resolveModelCompat({ id: "kimi-thinking-preview", displayName: "" }).id).toBe("kimi");
     expect(resolveModelCompat({ id: "my-custom-model", displayName: "" }).id).toBe("gpt");
+  });
+
+  it("routes custom model ids through a DeepSeek provider identity", () => {
+    expect(resolveModelCompat(
+      { id: "custom-v4-flash", displayName: "Reasoning model" },
+      { id: "deepseek-provider", baseUrl: "https://api.deepseek.com/v1" }
+    ).id).toBe("deepseek");
   });
 
   it("bypasses the optional completion audit only for Kimi K3", () => {
@@ -1450,6 +1457,12 @@ describe("OpenAiCompatibleProvider", () => {
       }
     });
 
+    it("does not treat nested assistant_message JSON as a decision envelope", () => {
+      const compat = resolveModelCompat({ id: "deepseek-chat", displayName: "" });
+      const content = '{"metadata":{"assistant_message":"a data field"},"value":1}';
+      expect(compat.extractVisibleStreamText(content)).toBe(content);
+    });
+
     it("surfaceThinkBlocksInStream hides tags and holds back partial tag fragments", () => {
       // Partial close tag must not leak raw markup into the draft.
       expect(surfaceThinkBlocksInStream("<think>reason</thi")).toBe("reason");
@@ -1479,11 +1492,11 @@ describe("OpenAiCompatibleProvider", () => {
       expect(decision.isStructured).toBe(true);
     });
 
-    it("deepseek compat promotes reasoning_content when the reply is empty", () => {
+    it("keeps reasoning-only DeepSeek replies private and retryable", () => {
       const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "" });
-      // Observed incident: the model ends the turn with an empty
-      // assistant_message and no tool calls, while the whole reply sits in
-      // reasoning_content. GPA PLAN then has nothing to parse.
+      // The model ended the turn with an empty assistant_message and no tool
+      // calls while the whole reply sat in reasoning_content. Do not expose
+      // that private reasoning as a final answer.
       const decision = compat.normalizeDecision(
         {
           toolCalls: [],
@@ -1494,9 +1507,38 @@ describe("OpenAiCompatibleProvider", () => {
         },
         {} as never
       );
-      expect(decision.assistantMessage).toBe("### T1: 搭建页面骨架\n\n验收标准：页面可打开运行。");
-      expect(decision.endTurn).toBe(true);
-      expect(decision.isStructured).toBe(true);
+      expect(decision.assistantMessage).toBeUndefined();
+      expect(decision.endTurn).toBe(false);
+      expect(decision.goalCompleted).toBe(false);
+      expect(decision.isStructured).toBe(false);
+    });
+
+    it("recovers DSML tool calls from reasoning_content after visible preamble text", () => {
+      const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "" });
+      const decision = compat.normalizeDecision(
+        {
+          assistantMessage: "我先读取目标文件。",
+          toolCalls: [],
+          endTurn: true,
+          goalCompleted: true,
+          isStructured: true,
+          reasoningSummary: [
+            "<｜DSML｜tool_calls>",
+            '<｜DSML｜invoke name="fs.read_file">',
+            '<｜DSML｜parameter name="path" string="true">src/app.ts</｜DSML｜parameter>',
+            "</｜DSML｜invoke>",
+            "</｜DSML｜tool_calls>"
+          ].join("\n")
+        },
+        { input: { availableTools: [{ name: "fs.read_file", description: "Read a file.", inputSchema: { type: "object" }, riskLevel: "low" }] } } as never
+      );
+
+      expect(decision).toMatchObject({
+        assistantMessage: "我先读取目标文件。",
+        toolCalls: [{ name: "fs.read_file", arguments: { path: "src/app.ts" } }],
+        endTurn: false,
+        goalCompleted: false
+      });
     });
 
     it("deepseek compat recovers DSML tool calls misplaced in reasoning_content", () => {
@@ -2328,6 +2370,7 @@ describe("OpenAiCompatibleProvider", () => {
         // mid-stream truncation (finish_reason: length) that breaks long
         // replies and apply_patch arguments.
         max_tokens: 8192,
+        thinking: { type: "enabled" },
         response_format: { type: "json_object" }
       },
       {
@@ -2342,6 +2385,41 @@ describe("OpenAiCompatibleProvider", () => {
       isStructured: true,
       reasoningSummary: undefined
     });
+  });
+
+  it("emits provider request and response traces when diagnostics are enabled", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "done" } }]
+    });
+    const traces: Array<{ phase: string; payload: Record<string, unknown> }> = [];
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "deepseek-chat",
+      providerId: provider.id,
+      displayName: "DeepSeek Chat",
+      contextWindow: 8_192,
+      supportsStreaming: false,
+      supportsToolCalling: false,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: false,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      model,
+      provider,
+      onProviderTrace: async (trace) => {
+        traces.push(trace);
+      }
+    });
+
+    expect(traces.map((trace) => trace.phase)).toEqual(["request", "response"]);
+    expect(traces[0]?.payload).toHaveProperty("request");
+    expect(traces[1]?.payload).toHaveProperty("response");
   });
 
   it("uses native function calls when tools are available", async () => {
@@ -2625,6 +2703,62 @@ describe("OpenAiCompatibleProvider", () => {
       role: "assistant",
       content: "",
       reasoning_content: "我需要先读取文件。",
+      tool_calls: expect.any(Array)
+    }));
+  });
+
+  it("enables DeepSeek V4 thinking and preserves an empty reasoning field for tool history", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "done" } }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "deepseek-v4-flash-0731",
+      providerId: provider.id,
+      displayName: "DeepSeek V4 Flash",
+      contextWindow: 128_000,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: true
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Continue with the tool result.",
+      transcript: [
+        { role: "user", content: "读取文件" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-1", name: "fs.read_file", arguments: { path: "src/app.ts" } }]
+        },
+        {
+          role: "tool",
+          content: "fs.read_file\nfile content",
+          toolCallId: "call-1",
+          toolResultOk: true
+        }
+      ],
+      availableTools: [{
+        name: "fs.read_file",
+        description: "Read a file.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } } },
+        riskLevel: "low"
+      }],
+      model,
+      provider,
+      reasoningEffort: "xhigh"
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request.thinking).toEqual({ type: "enabled" });
+    expect(request.reasoning_effort).toBe("max");
+    expect(request.messages).toContainEqual(expect.objectContaining({
+      role: "assistant",
+      content: "",
+      reasoning_content: "",
       tool_calls: expect.any(Array)
     }));
   });
@@ -2989,6 +3123,41 @@ describe("OpenAiCompatibleProvider", () => {
       provider,
       stream: true
     })).rejects.toBeInstanceOf(ProviderStreamIncompleteError);
+  });
+
+  it("treats DeepSeek insufficient_system_resource as an interrupted stream", async () => {
+    async function* resourceLimitedStream() {
+      yield {
+        choices: [{
+          finish_reason: "insufficient_system_resource",
+          delta: { content: "partial" }
+        }]
+      };
+    }
+
+    mocks.chatCreate.mockResolvedValue(resourceLimitedStream());
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const model: ModelProfile = {
+      id: "deepseek-v4-flash",
+      providerId: provider.id,
+      displayName: "DeepSeek V4 Flash",
+      contextWindow: 128_000,
+      supportsStreaming: true,
+      supportsToolCalling: false,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: true
+    };
+
+    await expect(new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "Finish" }],
+      availableTools: [],
+      model,
+      provider,
+      stream: true
+    })).rejects.toThrow(/insufficient system resources/i);
   });
 
   it("streams a final assistant_message when native tools are available but unused", async () => {
@@ -3928,6 +4097,12 @@ describe("parseNativeToolArguments JSON repair", () => {
     const raw = '{"patch": "*** Begin Patch\n*** Update File: app.ts\n@@\n-old\n+new';  // no closing
     const parsed = parseNativeToolArguments(raw);
     expect(TOOL_ARGS_TRUNCATED_KEY in parsed).toBe(true);
+  });
+
+  it("returns an invalid marker for balanced but malformed JSON", () => {
+    const parsed = parseNativeToolArguments('{"path":}');
+    expect(TOOL_ARGS_INVALID_KEY in parsed).toBe(true);
+    expect(TOOL_ARGS_TRUNCATED_KEY in parsed).toBe(false);
   });
 
   it("handles mixed escaped and literal newlines", () => {
