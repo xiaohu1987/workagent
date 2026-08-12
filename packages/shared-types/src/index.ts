@@ -482,6 +482,19 @@ export interface QueuedMessageRecord {
   attachments: MessageAttachment[];
   /** Explicit image/video generation request chosen from the composer "+" menu. */
   mediaIntent?: "image" | "video" | null;
+  /** Runtime-created continuation; it starts a new turn without a chat bubble. */
+  internalKind?: "agent_protocol_recovery" | null;
+  /** Zero-based number of automatic protocol-recovery continuations already used. */
+  protocolRecoveryBatch?: number;
+  /** Successful execution evidence carried across an internal recovery turn. */
+  protocolRecoveryEvidence?: Array<{
+    toolCallId: string;
+    toolRecordId?: string;
+    toolName: string;
+    kinds: CompletionEvidenceKind[];
+    verifiedPaths?: string[];
+    resultPreview?: string;
+  }>;
   userMessageId: string | null;
   status: "queued" | "dispatching";
   createdAt: string;

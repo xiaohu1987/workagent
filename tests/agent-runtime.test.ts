@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import * as XLSX from "xlsx";
 import type { AppConfig, MessageRecord, ModelProfile, SkillMetadata, ToolSpecDefinition } from "@shared-types";
 import {
   createToolCallFingerprint,
@@ -52,6 +53,8 @@ import {
   validateActCompletion,
   buildActCompletionRecoveryInstruction,
   isProgressOnlyAssistantMessage,
+  shouldRecoverUnboundAssistantMessage,
+  buildUnboundAssistantMessageRecoveryInstruction,
   buildProgressOnlyCompletionRecoveryInstruction,
   buildExecutionRecoveryInstruction,
   buildStrategySwitchInstruction,
@@ -99,6 +102,10 @@ import {
   isReusableSuccessfulToolCall,
   MAX_AGENT_PROTOCOL_FAILURES,
   MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES,
+  AGENT_PROTOCOL_RECOVERY_TOOL_NAME,
+  AGENT_PROTOCOL_RECOVERY_TOOL_SPEC,
+  buildAgentProtocolContinuationInstruction,
+  sanitizeProtocolRecoveryEvidence,
   AGENT_PROTOCOL_RECOVERY_QUESTION_ID,
   MAX_MODEL_RATE_LIMIT_RETRIES,
   MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID,
@@ -496,6 +503,32 @@ describe("referential follow-up source continuity", () => {
       toolCall: { name: "mcp.call", arguments: { server: "ISS.IPSA.Project.Api", tool: "search" } }
     })).toEqual({ allowed: true });
   });
+
+  it("does not join a follow-up to an assistant response from another turn", () => {
+    const mismatched = [
+      ...messages,
+      {
+        id: "user-2",
+        threadId: "thread-1",
+        turnRunId: "turn-2",
+        role: "user",
+        content: "继续整理刚才的结果",
+        metadataJson: null,
+        createdAt: "2026-08-04T07:20:00.000Z"
+      },
+      {
+        id: "assistant-old",
+        threadId: "thread-1",
+        turnRunId: "turn-1",
+        role: "assistant",
+        content: "旧任务结果",
+        metadataJson: null,
+        createdAt: "2026-08-04T07:21:00.000Z"
+      }
+    ] as MessageRecord[];
+
+    expect(resolveFollowUpSourceContext(mismatched, "继续生成文档")).toBeNull();
+  });
 });
 
 describe("turn context Markdown capsules", () => {
@@ -645,6 +678,51 @@ describe("requested artifact semantic alignment", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("revalidates an inherited XLSX project artifact even when it predates the recovery turn", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-recovery-xlsx-"));
+    const outputDir = path.join(root, "thread-output");
+    const projectDir = path.join(root, "project");
+    const artifactPath = path.join(projectDir, "monthly-report.xlsx");
+    try {
+      await fs.mkdir(outputDir, { recursive: true });
+      await fs.mkdir(projectDir, { recursive: true });
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+        ["Sales report"],
+        ["Revenue", 1200]
+      ]), "Summary");
+      XLSX.writeFile(workbook, artifactPath);
+      const stats = await fs.stat(artifactPath);
+
+      const evidence = await collectRequestedArtifactEvidence({
+        outputDir,
+        baseline: new Map(),
+        requestedExtensions: [".xlsx"],
+        // Recovery evidence is a candidate rather than a new output, so the
+        // prior baseline must not suppress its read-only revalidation.
+        candidatePaths: [artifactPath],
+        candidateRoot: projectDir
+      });
+
+      expect(stats.size).toBeGreaterThan(0);
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]).toMatchObject({
+        absolutePath: path.resolve(artifactPath),
+        relativePath: "monthly-report.xlsx",
+        extension: ".xlsx",
+        verified: true
+      });
+      expect(evidence[0]?.preview).toContain("Sales report");
+      expect(validateRequestedArtifactAlignment({
+        requestedExtensions: [".xlsx"],
+        evidence,
+        topicAnchors: ["Sales"]
+      })).toEqual([]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("project workspace MCP priority", () => {
@@ -777,6 +855,14 @@ describe("ordinary and project runtime isolation", () => {
       request: "把结果生成 Word 文档",
       requestedDeliverableExtensions: [".docx"]
     })).toBe("write");
+    expect(resolveChatLocalAccess({
+      request: "这个方案能不能导出 Excel？",
+      requestedDeliverableExtensions: [".xlsx"]
+    })).toBe("none");
+    expect(resolveChatLocalAccess({
+      request: "把这份数据导出为 xlsx 文件",
+      requestedDeliverableExtensions: [".xlsx"]
+    })).toBe("write");
     expect(resolveChatLocalAccess({ request: "运行这个脚本并告诉我输出" })).toBe("execute");
 
     const writePolicy = createChatRuntimePolicy({
@@ -801,6 +887,12 @@ describe("ordinary and project runtime isolation", () => {
       request: "运行这个脚本并告诉我输出"
     });
     expect(executePolicy.filterTools(tools).map((entry) => entry.name)).toContain("shell.exec");
+    expect(executePolicy.filterTools(tools).map((entry) => entry.name)).not.toContain("fs.write_file");
+    expect(executePolicy.filterTools(tools).map((entry) => entry.name)).not.toContain("apply_patch");
+    expect(executePolicy.validateToolCall({
+      toolName: "fs.write_file",
+      localWorkspaceInspectedBeforeDecision: false
+    })).toMatchObject({ allowed: false });
     expect(executePolicy.validateToolCall({
       toolName: "git.status",
       localWorkspaceInspectedBeforeDecision: false
@@ -1018,11 +1110,46 @@ describe("premature completion recovery", () => {
     expect(instruction).toContain("exactly one new, targeted tool");
     expect(instruction).toContain("Do not repeat a completed tool call");
   });
+
+  it("suppresses visible prose that is neither a tool step nor a final answer", () => {
+    expect(shouldRecoverUnboundAssistantMessage({
+      gpaStage: "off",
+      assistantMessage: "I have reviewed the configuration and will prepare the checklist next.",
+      toolCallCount: 0,
+      endTurn: false
+    })).toBe(true);
+    expect(shouldRecoverUnboundAssistantMessage({
+      gpaStage: "off",
+      assistantMessage: "I will inspect the configuration first.",
+      toolCallCount: 1,
+      endTurn: false
+    })).toBe(false);
+    expect(shouldRecoverUnboundAssistantMessage({
+      gpaStage: "off",
+      assistantMessage: "The requested checklist is ready.",
+      toolCallCount: 0,
+      endTurn: true
+    })).toBe(false);
+    expect(shouldRecoverUnboundAssistantMessage({
+      gpaStage: "plan",
+      assistantMessage: "Here is the complete plan.",
+      toolCallCount: 0,
+      endTurn: false
+    })).toBe(false);
+  });
+
+  it("forces the next decision to choose one executable path", () => {
+    const instruction = buildUnboundAssistantMessageRecoveryInstruction();
+
+    expect(instruction).toContain("neither a real tool call nor end_turn: true");
+    expect(instruction).toContain("Do not repeat, paraphrase");
+    expect(instruction).toContain("exactly one new, targeted tool call");
+  });
 });
 
 describe("standard completion validation", () => {
-  it("keeps retrying incomplete final answers instead of using the two-attempt protocol limit", () => {
-    expect(MAX_STANDARD_COMPLETION_RECOVERIES).toBeGreaterThan(MAX_AGENT_PROTOCOL_FAILURES);
+  it("caps evidence recovery at five attempts instead of running indefinitely", () => {
+    expect(MAX_STANDARD_COMPLETION_RECOVERIES).toBe(5);
   });
 
   it("limits model-based completion audits and gives them a finite timeout", () => {
@@ -1219,6 +1346,40 @@ describe("standard completion validation", () => {
     });
 
     expect(result.valid).toBe(true);
+  });
+
+  it("accepts a completed ordinary-chat text draft without project file evidence", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "以下是可直接使用的实施清单和验收标准。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: false
+      },
+      requiresGoalCompletion: false,
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(result).toMatchObject({
+      valid: true,
+      missingDelivery: false,
+      missingVerification: false
+    });
+  });
+
+  it("does not run the project-style completion audit for an ordinary text draft", () => {
+    expect(shouldRunStandardCompletionAudit({
+      mode: "chat",
+      request: "请创建一份可直接发送给团队的发布说明",
+      requestedDeliverableExtensions: []
+    })).toBe(false);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "chat",
+      request: "请生成 xlsx 报表",
+      requestedDeliverableExtensions: [".xlsx"]
+    })).toBe(true);
   });
 
   it("accepts only an explicit no-tool completion-audit approval", () => {
@@ -1427,6 +1588,39 @@ describe("Agent model compatibility failures", () => {
 });
 
 describe("Agent decision protocol recovery", () => {
+  it("exposes a silent fresh-turn recovery function to the model", () => {
+    expect(AGENT_PROTOCOL_RECOVERY_TOOL_SPEC).toMatchObject({
+      name: AGENT_PROTOCOL_RECOVERY_TOOL_NAME,
+      riskLevel: "low",
+      source: "dynamic"
+    });
+    expect(AGENT_PROTOCOL_RECOVERY_TOOL_SPEC.inputSchema).toMatchObject({
+      type: "object",
+      properties: { reason: { type: "string" } }
+    });
+  });
+
+  it("keeps automatic continuation instructions internal and bounded", () => {
+    const instruction = buildAgentProtocolContinuationInstruction(1);
+
+    expect(instruction).toContain("Do not display or quote");
+    expect(instruction).toContain(String(MAX_AGENT_PROTOCOL_FAILURES));
+    expect(instruction).toContain(String(MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES));
+    expect(instruction).toContain("unfinished work");
+  });
+
+  it("carries only valid deduplicated execution evidence into a fresh turn", () => {
+    expect(sanitizeProtocolRecoveryEvidence([
+      { toolCallId: "call-1", toolName: "fs.write_file", kinds: ["delivery"], verifiedPaths: ["D:/out.txt"] },
+      { toolCallId: "call-1", toolName: "fs.write_file", kinds: ["delivery"] },
+      { toolCallId: "call-2", toolName: "fs.read_file", kinds: ["invalid" as any] },
+      { toolCallId: 3 as any, toolName: "fs.read_file", kinds: ["observation"] }
+    ])).toEqual([
+      { toolCallId: "call-1", toolName: "fs.write_file", kinds: ["delivery"], verifiedPaths: ["D:/out.txt"], resultPreview: undefined },
+      { toolCallId: "call-2", toolName: "fs.read_file", kinds: [], verifiedPaths: undefined, resultPreview: undefined }
+    ]);
+  });
+
   it("offers another five recovery batches and defaults to continuing", () => {
     const question = buildAgentProtocolRecoveryQuestion("invalid JSON decision envelope");
 
@@ -1557,7 +1751,7 @@ describe("provider output-limit recovery", () => {
   });
 
   it("bounds output-limit recovery while increasing output budgets", () => {
-    expect(MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES).toBe(2);
+    expect(MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES).toBe(5);
     expect(resolveProviderOutputLimitRecoveryTokens(4_096, 1)).toBe(16_384);
     expect(resolveProviderOutputLimitRecoveryTokens(4_096, 2)).toBe(32_768);
     expect(resolveProviderOutputLimitRecoveryTokens(16_384, 1)).toBe(32_768);

@@ -2,7 +2,7 @@ import type { GpaState, ThreadRecord } from "@shared-types";
 
 const RENDERER_DEFAULT_GPA_STATE: GpaState = {
   stage: "off",
-  fullAccess: true,
+  fullAccess: false,
   knowledgeEnabled: false,
   awaitingConfirmation: null,
   confirmationExpiresAt: null,

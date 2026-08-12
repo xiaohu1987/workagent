@@ -39,7 +39,7 @@ const CHAT_WRITE_TOOLS = new Set([
 ]);
 
 const CHAT_EXECUTE_TOOLS = new Set([
-  ...CHAT_WRITE_TOOLS,
+  ...CHAT_READ_TOOLS,
   "shell.exec",
   "shell.cancel_active"
 ]);
@@ -50,11 +50,10 @@ function isProjectOnlyTool(toolName: string): boolean {
 
 function requiredChatAccess(toolName: string): ChatLocalAccess | "project" | null {
   if (isProjectOnlyTool(toolName)) return "project";
+  if (CHAT_WRITE_TOOLS.has(toolName) && !CHAT_READ_TOOLS.has(toolName)) return "write";
+  if (CHAT_READ_TOOLS.has(toolName)) return "read";
   if (CHAT_EXECUTE_TOOLS.has(toolName)) {
-    // File-delivery Skills may need a renderer or converter subprocess.
-    if (toolName === "shell.exec" || toolName === "shell.cancel_active") return "write";
-    if (CHAT_WRITE_TOOLS.has(toolName) && !CHAT_READ_TOOLS.has(toolName)) return "write";
-    return "read";
+    if (toolName === "shell.exec" || toolName === "shell.cancel_active") return "execute";
   }
   return null;
 }
@@ -62,6 +61,10 @@ function requiredChatAccess(toolName: string): ChatLocalAccess | "project" | nul
 function accessAllows(actual: ChatLocalAccess, required: ChatLocalAccess | "project" | null): boolean {
   if (required === null) return true;
   if (required === "project") return false;
+  // Execution is not an implicit file-write grant. A normal chat must ask to
+  // create or save a file before any mutating filesystem tool is exposed.
+  if (required === "write") return actual === "write";
+  if (required === "execute") return actual === "write" || actual === "execute";
   const levels: Record<ChatLocalAccess, number> = { none: 0, read: 1, write: 2, execute: 3 };
   return levels[actual] >= levels[required];
 }
@@ -82,10 +85,20 @@ function isExplicitReadRequest(request: string): boolean {
 }
 
 function isExplicitWriteRequest(request: string, requestedDeliverableExtensions: string[]): boolean {
-  if (requestedDeliverableExtensions.length > 0) return true;
-  const chinese = /(?:^|[，。！？；\n])(?:请|请你|帮我|给我|麻烦|直接)?\s*(?:把.{0,48})?\s*(?:创建|新建|生成|导出|保存|修改|编辑|写入|更新).{0,24}(?:文件|文档|报告|代码|脚本|网页|网站|应用)/;
-  const english = /(?:^|[.!?;\n])(?:please\s+|can you\s+|could you\s+|would you\s+)?(?:create|generate|export|save|modify|edit|write|update|build)\b.{0,48}\b(?:file|document|report|code|script|page|website|app)\b/i;
-  return chinese.test(request) || english.test(request);
+  const hasExplicitFormat = requestedDeliverableExtensions.length > 0;
+  const chineseAction = /(?:^|[，。！？；\n])(?:请|请你|帮我|给我|麻烦|直接)?\s*(?:把.{0,48})?\s*(?:创建|新建|生成|导出|保存|写入)/;
+  const chineseFileTarget = /(?:文件|文档|附件|表格|工作簿|\.?(?:md|markdown|xlsx?|excel|docx?|word|pdf|pptx?|csv)\b)/i;
+  const englishAction = /(?:^|[.!?;\n])(?:please\s+|can you\s+|could you\s+|would you\s+)?(?:create|generate|export|save|write)\b/i;
+  const englishFileTarget = /\b(?:file|document|attachment|workbook|spreadsheet|\.?(?:md|markdown|xlsx?|excel|docx?|word|pdf|pptx?|csv))\b/i;
+
+  // Mentioning a format is not authorization. Ordinary chat writes only when
+  // the user asks to persist a concrete file/document, with a format or name.
+  if (hasExplicitFormat) {
+    return (chineseAction.test(request) && chineseFileTarget.test(request)) ||
+      (englishAction.test(request) && englishFileTarget.test(request));
+  }
+  return (chineseAction.test(request) && /(?:文件|文档|附件|路径|[A-Za-z]:\\|\/[\w.-]+\.[A-Za-z0-9]{1,8})/.test(request)) ||
+    (englishAction.test(request) && /\b(?:file|document|attachment|path)\b|(?:[A-Za-z]:\\|\/)[^\s]+\.[A-Za-z0-9]{1,8}/i.test(request));
 }
 
 function isExplicitExecuteRequest(request: string): boolean {
@@ -101,8 +114,8 @@ export function resolveChatLocalAccess(input: {
 }): ChatLocalAccess {
   const request = input.request.trim();
   const attachments = input.attachments ?? [];
-  if (isExplicitExecuteRequest(request)) return "execute";
   if (isExplicitWriteRequest(request, input.requestedDeliverableExtensions ?? [])) return "write";
+  if (isExplicitExecuteRequest(request)) return "execute";
   if (
     containsAttachedLocalContext(request, attachments) ||
     (containsExplicitLocalPath(request) && isExplicitReadRequest(request)) ||
@@ -120,7 +133,7 @@ export function buildChatRuntimePrompt(localAccess: ChatLocalAccess): string {
       ? "The user explicitly requested local reading. Read only the named or attached files and folders; do not treat them as a project repository."
       : localAccess === "write"
         ? "The user explicitly requested a file deliverable or edit. Use the task output directory for new deliverables and access only files relevant to that request."
-        : "The user explicitly requested local execution. Commands run from the task output directory; this still does not create project or Git semantics.";
+        : "The user explicitly requested local execution. Commands run from the task output directory; do not create, edit, rename, or delete files unless the request also explicitly asks for a file deliverable.";
   return [
     "## Ordinary Chat Runtime",
     "This is an ordinary chat without a project workspace. The local working directory is only this task's output directory.",

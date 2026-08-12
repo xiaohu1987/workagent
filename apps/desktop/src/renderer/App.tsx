@@ -1088,6 +1088,14 @@ export function App() {
   }, [resizingPane, rightWorkspaceWidth, sidebarWidth]);
 
   function selectThreadId(nextThreadId: string | null) {
+    const previousThreadId = selectedThreadIdRef.current;
+    if (previousThreadId !== nextThreadId) {
+      // A slow response for the previous transcript must never win after the
+      // sidebar selection has moved. The next thread reloads from a full
+      // snapshot so a stale incremental cursor cannot hide its history.
+      if (previousThreadId) invalidateSnapshotRequest(previousThreadId);
+      if (nextThreadId) delete snapshotCursorByThreadRef.current[nextThreadId];
+    }
     const select = () => {
       selectedThreadIdRef.current = nextThreadId;
       setSelectedThreadId(nextThreadId);
@@ -1159,7 +1167,9 @@ export function App() {
     // sidebar stay responsive while React renders the (potentially large)
     // message list, and the render can be interrupted by a newer switch.
     startTransition(() => {
-      setSnapshot(() => reconcileSnapshotWithRuntimeEvents(cached));
+      setSnapshot((current) => selectedThreadIdRef.current === threadId
+        ? reconcileSnapshotWithRuntimeEvents(cached)
+        : current);
       setBrowserTabsByThread((current) => ({ ...current, [threadId]: cached.browserTabs }));
       if (selectedThreadIdRef.current === threadId) {
         const cachedGpa = normalizeGpaStateForThread(cached.thread.mode, cached.gpa);
@@ -1410,8 +1420,8 @@ export function App() {
         ? getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "")
         : "工具结果";
       const label = completedTools.length > 1
-        ? `已完成 ${completedTools.length} 项操作，正在根据${action}决定下一步`
-        : `正在根据${action}决定下一步`;
+        ? `已完成 ${completedTools.length} 项操作，正在${action}`
+        : `正在${action}`;
       const last = activity.entries.at(-1);
       if (last?.kind === "status" && last.label === label) return current;
       return {
@@ -1796,7 +1806,7 @@ export function App() {
       if (typed.type === "tool.completed" && typed.payload?.toolCallId) {
         if (typed.threadId && typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
-            updateThreadNotification(notificationThreadId, "工具已完成，正在根据结果决策。", typed.createdAt);
+            updateThreadNotification(notificationThreadId, "工具已完成，正在继续处理。", typed.createdAt);
           }
           return;
         }
@@ -1832,7 +1842,7 @@ export function App() {
           if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
             appendRuntimeDecisionStatusAfterTool(runtimeThreadId, typed.createdAt);
             if (notificationThreadId) {
-              updateThreadNotification(notificationThreadId, "工具已完成，正在根据结果决策。", typed.createdAt);
+              updateThreadNotification(notificationThreadId, "工具已完成，正在继续处理。", typed.createdAt);
             }
             setRuntimeProgress((current) =>
               current?.threadId === runtimeThreadId
@@ -1856,7 +1866,7 @@ export function App() {
           : null;
         if (typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId && reason === "after_tools") {
-            updateThreadNotification(notificationThreadId, "正在根据工具结果决定下一步。", typed.createdAt);
+            updateThreadNotification(notificationThreadId, "工具已完成，正在继续处理。", typed.createdAt);
           } else if (notificationThreadId && statusLabel) {
             updateThreadNotification(notificationThreadId, `${statusLabel}。`, typed.createdAt);
           }
@@ -1870,7 +1880,7 @@ export function App() {
         if (notificationThreadId && reason === "after_tools") {
           updateThreadNotification(
             notificationThreadId,
-            "正在根据工具结果决定下一步。",
+            "工具已完成，正在继续处理。",
             typed.createdAt
           );
         } else if (notificationThreadId && statusLabel) {
@@ -2800,8 +2810,8 @@ export function App() {
     if (!latestTool) return "正在分析任务并规划下一步";
     const action = getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "");
     return completedCurrentTurnTools.length > 1
-      ? `已完成 ${completedCurrentTurnTools.length} 项操作，正在根据${action}决定下一步`
-      : `正在根据${action}决定下一步`;
+      ? `已完成 ${completedCurrentTurnTools.length} 项操作，正在${action}`
+      : `正在${action}`;
   }, [completedCurrentTurnTools, skillNames]);
   const currentGpaTask = useMemo(
     () => gpaState.planTasks.find((task) => !task.done) ?? null,
@@ -3585,7 +3595,10 @@ export function App() {
         // transition so urgent interactions (clicks, another switch) are not
         // blocked behind the transcript render.
         startTransition(() => {
-          setSnapshot(() => reconcileSnapshotWithRuntimeEvents(mergedSnapshot));
+          setSnapshot((current) => selectedThreadIdRef.current === threadId
+            ? reconcileSnapshotWithRuntimeEvents(mergedSnapshot)
+            : current);
+          if (selectedThreadIdRef.current !== threadId) return;
           const gpa = normalizeGpaStateForThread(mergedSnapshot.thread.mode, mergedSnapshot.gpa);
           setGpaState(gpa);
           setGpaComposerSelected(gpa.stage !== "off");

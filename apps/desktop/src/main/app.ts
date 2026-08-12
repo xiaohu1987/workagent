@@ -326,6 +326,7 @@ export class DesktopBackend {
         updateThread: async (threadId, patch) => this.#db.updateThread(threadId, patch),
         listMessages: async (threadId) => this.#db.listMessages(threadId),
         listQueuedMessages: async (threadId) => this.#db.listQueuedMessages(threadId),
+        enqueueQueuedMessage: async (input) => this.#db.enqueueQueuedMessage(input),
         claimNextQueuedMessage: async (threadId) => this.#db.claimNextQueuedMessage(threadId),
         completeQueuedMessage: async (id) => this.#db.completeQueuedMessage(id),
         createMessage: async (input) => this.#db.createMessage(input),
@@ -684,9 +685,9 @@ export class DesktopBackend {
       cwd: input.cwd,
       modelId: selection.modelId,
       providerId: selection.providerId,
-      // Persist the default instead of relying on a renderer-only highlight.
-      // A later manual removal writes false and remains respected.
-      gpaStateJson: JSON.stringify({ fullAccess: true }),
+      // Ordinary conversations start with least privilege. Project tasks keep
+      // their existing explicit default; a user may still change either mode.
+      gpaStateJson: JSON.stringify({ fullAccess: input.mode === "project" }),
       multiAgentMode: "proactive"
     });
     this.refreshSkillsInBackground(thread.cwd);

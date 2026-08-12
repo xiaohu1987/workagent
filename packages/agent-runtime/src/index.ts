@@ -43,6 +43,7 @@ import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
 import * as mammoth from "mammoth";
+import * as XLSX from "xlsx";
 import {
   applyCompletedPlanTasks,
   buildGpaRiskClarificationQuestions,
@@ -165,11 +166,33 @@ export const MAX_BLOCKED_IDENTICAL_TOOL_RETRIES = 3;
 /** Zero disables wall-clock aborts. The user can stop an active task explicitly. */
 export const MODEL_DECISION_TIMEOUT_MS = 0;
 export const MAX_MODEL_TIMEOUT_RETRIES = 5;
-export const MAX_AGENT_PROTOCOL_FAILURES = 2;
-export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 6;
+export const MAX_AGENT_PROTOCOL_FAILURES = 5;
+/** Number of fresh turns the runtime may start after a five-attempt protocol batch. */
+export const MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES = 5;
+export const AGENT_PROTOCOL_RECOVERY_TOOL_NAME = "agent.recover_protocol";
+/** @deprecated Protocol recovery now continues silently through a fresh turn. */
+export const AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS = 30_000;
+/** @deprecated Retained for settings and test compatibility. */
+export const AGENT_PROTOCOL_RECOVERY_QUESTION_ID = "agent_protocol_recovery";
+
+export const AGENT_PROTOCOL_RECOVERY_TOOL_SPEC: ToolSpecDefinition = {
+  name: AGENT_PROTOCOL_RECOVERY_TOOL_NAME,
+  description: "Internally restart the current task in a fresh Agent turn when the current decision protocol cannot be recovered. This is silent and preserves the inherited task context.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      reason: { type: "string", description: "Short internal reason for restarting the Agent turn." }
+    },
+    additionalProperties: false
+  },
+  riskLevel: "low",
+  parallelSafe: false,
+  source: "dynamic"
+};
+export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 10;
 // Explicit audit rejections may revise a base-valid candidate, but the audit
 // itself must never create an unbounded completion loop.
-export const MAX_STANDARD_COMPLETION_RECOVERIES = 6;
+export const MAX_STANDARD_COMPLETION_RECOVERIES = 5;
 export const MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES = 1;
 export const STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS = 2;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 30_000;
@@ -180,12 +203,16 @@ export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
 export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
   return blockedAttempts >= MAX_BLOCKED_IDENTICAL_TOOL_RETRIES;
 }
-export const MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES = 5;
-export const AGENT_PROTOCOL_RECOVERY_TIMEOUT_MS = 30_000;
-export const AGENT_PROTOCOL_RECOVERY_QUESTION_ID = "agent_protocol_recovery";
 export const MAX_REPOSITORY_COMPLETION_REJECTIONS = 2;
 export const LEGACY_MCP_OVERSIZED_FOLLOW_UP =
   "The MCP server returned an oversized legacy response that was shortened.";
+
+class AgentProtocolContinuationRequested extends Error {
+  public constructor(readonly reason: string) {
+    super(`Agent protocol continuation requested: ${reason}`);
+    this.name = "AgentProtocolContinuationRequested";
+  }
+}
 export const MAX_MODEL_RATE_LIMIT_RETRIES = 5;
 export const MODEL_RATE_LIMIT_RECOVERY_TIMEOUT_MS = 30_000;
 export const MODEL_RATE_LIMIT_RECOVERY_QUESTION_ID = "model_rate_limit_recovery";
@@ -196,7 +223,7 @@ export const MAX_NETWORK_ERROR_RETRIES = 0;
 export const NETWORK_ERROR_BASE_DELAY_MS = 1_000;
 export const NETWORK_ERROR_MAX_DELAY_MS = 10_000;
 export const MAX_UPSTREAM_SERVICE_RETRIES = 5;
-export const MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES = 2;
+export const MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES = 5;
 export const MAX_PROVIDER_RESOURCE_RETRIES = 2;
 /** Zero denotes unbounded automatic recovery. */
 export const MAX_PROVIDER_STREAM_RECOVERY_RETRIES = 0;
@@ -611,6 +638,9 @@ interface RuntimePersistence {
   updateThread(threadId: string, patch: Partial<ThreadRecord>): Promise<ThreadRecord>;
   listMessages(threadId: string): Promise<MessageRecord[]>;
   listQueuedMessages(threadId: string): Promise<QueuedMessageRecord[]>;
+  enqueueQueuedMessage(
+    input: Omit<QueuedMessageRecord, "id" | "userMessageId" | "status" | "createdAt"> & { userMessageId?: string | null }
+  ): Promise<QueuedMessageRecord>;
   claimNextQueuedMessage(threadId: string): Promise<QueuedMessageRecord | null>;
   completeQueuedMessage(id: string): Promise<void>;
   createMessage(input: Omit<MessageRecord, "id" | "createdAt">): Promise<MessageRecord>;
@@ -1307,7 +1337,10 @@ class ThreadSessionRuntime {
             queued.attachments,
             queued.displayContent,
             queued.mediaIntent ?? null,
-            abortController
+            abortController,
+            queued.internalKind ?? null,
+            queued.protocolRecoveryBatch ?? 0,
+            queued.protocolRecoveryEvidence ?? []
           );
         } catch (error) {
           console.error(`[runtime] Failed to run thread ${this.threadId}`, error);
@@ -1390,7 +1423,10 @@ class ThreadSessionRuntime {
     attachments: MessageAttachment[] = [],
     displayContent?: string,
     mediaIntent: "image" | "video" | null = null,
-    abortController: AbortController = new AbortController()
+    abortController: AbortController = new AbortController(),
+    internalKind: QueuedMessageRecord["internalKind"] = null,
+    protocolRecoveryBatch = 0,
+    protocolRecoveryEvidence: SuccessfulToolEvidence[] = []
   ): Promise<void> {
     // Function-call history compatibility is a one-turn recovery mode. Do
     // not let a transient gateway error permanently change later turns.
@@ -1429,6 +1465,16 @@ class ThreadSessionRuntime {
           requestedDeliverableExtensions
         });
     const workspaceCwd = modePolicy.workspaceRoot;
+    // Spreadsheets and other artifacts are commonly produced by scripts rather
+    // than managed write tools, so retain a narrow, requested-format baseline.
+    const workspaceRequestedArtifactsBeforeTurn = modePolicy.mode === "project"
+      ? await snapshotRequestedArtifactFiles(workspaceCwd, requestedDeliverableExtensions)
+      : new Map<string, string>();
+    const persistedRequestedArtifactPaths = (internalKind === "agent_protocol_recovery" || followUpSourceContext !== null)
+      ? (await this.services.persistence.listThreadArtifacts(this.threadId))
+          .map((artifact) => artifact.absolutePath)
+          .filter((filePath) => requestedDeliverableExtensions.includes(path.extname(filePath).toLowerCase()))
+      : [];
     const accessibleDatabaseConnectionIds = await this.services.getAccessibleDatabaseConnectionIdsForThread(this.threadId);
     const selectedDatabaseConnectionIds = extractSelectedDatabaseConnectionIds(initialInput).filter((id) => accessibleDatabaseConnectionIds.includes(id));
     const activeDatabaseConnectionIds = selectedDatabaseConnectionIds.length > 0 ? selectedDatabaseConnectionIds : accessibleDatabaseConnectionIds;
@@ -1503,14 +1549,18 @@ class ThreadSessionRuntime {
       thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
       selectedMcpServerIds.length > 0 || explicitlyRequestedMcp
     );
-    const tools = modePolicy.filterTools(visibleToolSet.tools);
+    const tools = [...modePolicy.filterTools(visibleToolSet.tools), AGENT_PROTOCOL_RECOVERY_TOOL_SPEC];
     const mcpTools = visibleToolSet.mcpTools;
     const visibleModeToolNames = new Set(tools.map((tool) => tool.name));
     const modeHiddenToolNames = visibleToolSet.tools
       .filter((tool) => !visibleModeToolNames.has(tool.name))
       .map((tool) => tool.name);
     const selectedMcpToolsOnly = selectedMcpServerIds.length > 0
-      ? tools.filter((tool) => tool.name === "mcp.list_tools" || tool.name === "mcp.call")
+      ? tools.filter((tool) =>
+          tool.name === "mcp.list_tools" ||
+          tool.name === "mcp.call" ||
+          tool.name === AGENT_PROTOCOL_RECOVERY_TOOL_NAME
+        )
       : this.services.config.selfImprovement.dedicatedTools ? tools : tools.filter((tool) => !tool.name.startsWith("memories."));
     const turn = await this.services.persistence.startTurn({
       threadId: this.threadId,
@@ -1564,29 +1614,27 @@ class ThreadSessionRuntime {
         createdAt: runningThread.updatedAt
       });
       const priorMessages = priorMessagesBeforeTurn;
-      const userMessageMetadata = buildUserMessageMetadata(initialInput, displayContent, attachments);
-      const queuedUserMessage = await this.services.persistence.createQueuedUserMessage(queueItemId, {
-        threadId: this.threadId,
-        turnRunId: turn.id,
-        role: "user",
-        content: initialInput,
-        metadataJson: userMessageMetadata ? JSON.stringify(userMessageMetadata) : null
-      });
-      if (queuedUserMessage.created) {
-        await this.services.emit({
-          type: "message.created",
+      if (!internalKind) {
+        const userMessageMetadata = buildUserMessageMetadata(initialInput, displayContent, attachments);
+        const queuedUserMessage = await this.services.persistence.createQueuedUserMessage(queueItemId, {
           threadId: this.threadId,
-          payload: { message: queuedUserMessage.message },
-          createdAt: queuedUserMessage.message.createdAt
+          turnRunId: turn.id,
+          role: "user",
+          content: initialInput,
+          metadataJson: userMessageMetadata ? JSON.stringify(userMessageMetadata) : null
         });
+        if (queuedUserMessage.created) {
+          await this.services.emit({
+            type: "message.created",
+            threadId: this.threadId,
+            payload: { message: queuedUserMessage.message },
+            createdAt: queuedUserMessage.message.createdAt
+          });
+        }
       }
       if (abortController.signal.aborted) {
         throw new Error("Turn interrupted.");
       }
-      const priorMessagesBeforeCurrentInput = queuedUserMessage.created
-        ? priorMessages
-        : priorMessages.filter((message) => message.id !== queuedUserMessage.message.id);
-
       let multimodalInputRecognition:
         | { modelId: string; description: string }
         | null = null;
@@ -1751,6 +1799,12 @@ class ThreadSessionRuntime {
         }
         const retainedHistoryTurnRunIds = selectedHistory.retainedTurnRunIds;
         let transcript = selectedHistory.transcript;
+        if (internalKind === "agent_protocol_recovery") {
+          transcript.push({
+            role: "user",
+            content: buildAgentProtocolContinuationInstruction(protocolRecoveryBatch)
+          });
+        }
       if (multimodalInputRecognition) {
         transcript = applyMultimodalInputRecognitionToTranscript(
           transcript,
@@ -1767,7 +1821,12 @@ class ThreadSessionRuntime {
       let hasInspectedLocalWorkspace = false;
       const repositoryExploration = createRepositoryExplorationState();
       const successfulToolCallFingerprints = new Set<string>();
-      const successfulToolEvidence: SuccessfulToolEvidence[] = [];
+      const successfulToolEvidence: SuccessfulToolEvidence[] = sanitizeProtocolRecoveryEvidence(
+        protocolRecoveryEvidence
+      );
+      const inheritedVerifiedArtifactPaths = successfulToolEvidence
+        .flatMap((item) => item.verifiedPaths ?? [])
+        .filter((filePath) => requestedDeliverableExtensions.includes(path.extname(filePath).toLowerCase()));
       const managedWriteCompletion = createManagedWriteCompletionState();
       const managedWriteRecovery = createManagedWriteRecoveryState();
       let pendingFileReadRecovery: RuntimeToolCall | null = null;
@@ -1841,8 +1900,6 @@ class ThreadSessionRuntime {
       let providerRequestLimitRecoveryAttempts = 0;
       let pendingProviderRequestLimitRecovery: (ProviderRequestLimitDetails & { attempt: number }) | null = null;
       let agentProtocolFailureAttempts = 0;
-      let agentProtocolAutoRecoveryBatches = 0;
-      let agentProtocolRetryAttempts = 0;
       let gpaAnalysisValidationAttempts = 0;
       let gpaPlanProgressReminderIssued = false;
       let gpaPlanProgressCheckpointTaskId: string | null = null;
@@ -1880,9 +1937,50 @@ class ThreadSessionRuntime {
         );
       }
 
+      const requestAgentProtocolContinuation = async (reason: string, source: "runtime" | "model") => {
+        if (protocolRecoveryBatch >= MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES) {
+          throw new Error(
+            `Agent decision protocol failed after ${MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES + 1} batches: ${reason}`
+          );
+        }
+        const nextBatch = protocolRecoveryBatch + 1;
+        await this.services.persistence.enqueueQueuedMessage({
+          threadId: this.threadId,
+          content: initialInput,
+          displayContent: initialInput,
+          attachments,
+          mediaIntent: null,
+          internalKind: "agent_protocol_recovery",
+          protocolRecoveryBatch: nextBatch,
+          protocolRecoveryEvidence: successfulToolEvidence
+        });
+        await this.services.log("agent.model_protocol_continuation_queued", this.threadId, {
+          turnRunId: turn.id,
+          modelId: model.id,
+          source,
+          completedBatch: protocolRecoveryBatch,
+          nextBatch,
+          maxAutomaticBatches: MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES,
+          reason
+        });
+        throw new AgentProtocolContinuationRequested(reason);
+      };
+
       const registerAgentProtocolFailure = async (reason: string) => {
         agentProtocolFailureAttempts += 1;
-        agentProtocolRetryAttempts += 1;
+        if (agentProtocolFailureAttempts === 1) {
+          // Do not spend the whole retry budget replaying the same malformed
+          // native response. The first failure switches to one strict,
+          // compact JSON tool protocol for the remaining attempts in this turn.
+          useTextToolProtocol = true;
+          this.#useFunctionCallCompatibilityTranscript = true;
+          await this.services.log("agent.model_protocol_strategy_switched", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            strategy: "strict_text_tool_protocol",
+            reason
+          });
+        }
         const exhausted = agentProtocolFailureAttempts >= MAX_AGENT_PROTOCOL_FAILURES;
         await this.services.log("agent.model_protocol_failure", this.threadId, {
           turnRunId: turn.id,
@@ -1898,8 +1996,8 @@ class ThreadSessionRuntime {
           type: "agent.retrying",
           threadId: this.threadId,
           payload: {
-            attempt: agentProtocolRetryAttempts,
-            maxAttempts: 0,
+            attempt: agentProtocolFailureAttempts,
+            maxAttempts: MAX_AGENT_PROTOCOL_FAILURES,
             reason: "agent_decision_protocol",
             detail: reason
           },
@@ -1909,22 +2007,8 @@ class ThreadSessionRuntime {
           return;
         }
 
-        // Keep malformed model output recoverable until the user explicitly
-        // stops the task. The batch counter is retained for diagnostics only.
-        if (agentProtocolAutoRecoveryBatches >= 0) {
-          agentProtocolAutoRecoveryBatches += 1;
-          agentProtocolFailureAttempts = 0;
-          await this.services.log("agent.model_protocol_auto_retry", this.threadId, {
-            turnRunId: turn.id,
-            modelId: model.id,
-            batch: agentProtocolAutoRecoveryBatches,
-            maxBatches: 0,
-            reason
-          });
-          return;
-        }
-
-        const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+        await requestAgentProtocolContinuation(reason, "runtime");
+        /*
           title: "模型决策连续失败",
           kind: "generic",
           allowSkip: false,
@@ -1947,7 +2031,7 @@ class ThreadSessionRuntime {
           return;
         }
 
-        throw new Error(`Agent decision protocol failed repeatedly: ${reason}`);
+        */
       };
 
       const registerTargetFailure = async (targetKey: string, lastError: string, logKind?: string) => {
@@ -2219,7 +2303,7 @@ class ThreadSessionRuntime {
             reason,
             bootstrapWorkspace,
             currentTask: [
-              initialInput,
+              executionRecoveryAttempts === 1 ? initialInput : "",
               currentPlanTask ? `Current PLAN task: ${currentPlanTask.id} ${currentPlanTask.title}` : ""
             ].filter(Boolean).join("\n")
           })
@@ -2563,7 +2647,7 @@ class ThreadSessionRuntime {
                 await updateDraft("generating", `${streamedVisibleContent}${delta}`);
               },
               onToolCallPreparing: async ({ name, argumentsJson }) => {
-                if (abortController.signal.aborted) {
+                if (abortController.signal.aborted || canonicalizeToolName(name) === AGENT_PROTOCOL_RECOVERY_TOOL_NAME) {
                   return;
                 }
                 await this.services.emit({
@@ -3722,7 +3806,7 @@ class ThreadSessionRuntime {
           modePolicy.mode === "project" ||
           isProjectFileMutationRequest(effectiveRequest) ||
           requestedDeliverableExtensions.length > 0;
-          const bypassStandardCompletionAudit = !auditRequired || resolveModelCompat(model, provider)
+          let bypassStandardCompletionAudit = !auditRequired || resolveModelCompat(model, provider)
           .shouldBypassStandardCompletionAudit(model);
         const hasApiCardDeliverable = hasValidApiCardDeliverable(
           effectiveRequest,
@@ -3733,17 +3817,45 @@ class ThreadSessionRuntime {
           decision.toolCalls.length === 0 &&
           decision.endTurn
         ) {
+          const changedWorkspaceArtifactPaths = modePolicy.mode === "project"
+            ? await findChangedRequestedArtifactPaths({
+                root: workspaceCwd,
+                baseline: workspaceRequestedArtifactsBeforeTurn,
+                requestedExtensions: requestedDeliverableExtensions
+              })
+            : [];
+          // An internal recovery starts after a prior interrupted turn. Its
+          // artifact may already exist even when the prior tool only reported
+          // command output, so deterministically revalidate matching files.
+          const recoveryWorkspaceArtifactPaths = modePolicy.mode === "project" && internalKind === "agent_protocol_recovery"
+            ? await listRequestedArtifactFiles(workspaceCwd, requestedDeliverableExtensions)
+            : [];
           latestRequestedArtifactEvidence = await collectRequestedArtifactEvidence({
             outputDir: turnOutputDir,
             baseline: outputFilesBeforeTurn,
             requestedExtensions: requestedDeliverableExtensions,
-            candidatePaths: managedWriteCompletion.deliveredPaths,
+            candidatePaths: [
+              ...managedWriteCompletion.deliveredPaths,
+              ...inheritedVerifiedArtifactPaths,
+              ...persistedRequestedArtifactPaths,
+              ...changedWorkspaceArtifactPaths,
+              ...recoveryWorkspaceArtifactPaths,
+              // In ordinary chat the output directory is already scanned for
+              // new files. Supplying it as a recovery candidate bypasses only
+              // the new-file baseline, then performs the same read-only check.
+              ...(modePolicy.mode === "chat" && internalKind === "agent_protocol_recovery"
+                ? await listRequestedArtifactFiles(turnOutputDir, requestedDeliverableExtensions)
+                : [])
+            ],
             candidateRoot: workspaceCwd
           });
           const artifactValidationReasons = validateRequestedArtifactAlignment({
             requestedExtensions: requestedDeliverableExtensions,
             evidence: latestRequestedArtifactEvidence,
-            topicAnchors: extractTaskTopicAnchors(followUpSourceContext?.previousRequest ?? effectiveRequest)
+            // Validate against the structured effective task (source request
+            // plus the current follow-up), never against an unrelated history
+            // response selected by a loose text heuristic.
+            topicAnchors: extractTaskTopicAnchors(effectiveRequest)
           });
           const deliveredPaths = [...new Set([
             ...managedWriteCompletion.deliveredPaths,
@@ -3753,7 +3865,13 @@ class ThreadSessionRuntime {
             decision,
             originalRequest: effectiveRequest,
             requiresGoalCompletion,
-            requiresFileDelivery: isProjectFileMutationRequest(initialInput) || requestedDeliverableExtensions.length > 0,
+            // Ordinary chat may ask for an explanation, draft, checklist, or
+            // other text that happens to use verbs such as "create" or
+            // "modify". Only an explicit file format needs on-disk proof
+            // there; project work retains the strict mutation requirement.
+            requiresFileDelivery: modePolicy.mode === "project"
+              ? isProjectFileMutationRequest(effectiveRequest) || requestedDeliverableExtensions.length > 0
+              : requestedDeliverableExtensions.length > 0,
             deliveredPaths,
             successfulEvidence: successfulToolEvidence,
             verifiedArtifactPaths: latestRequestedArtifactEvidence.filter((artifact) => artifact.verified).map((artifact) => artifact.absolutePath),
@@ -3775,7 +3893,6 @@ class ThreadSessionRuntime {
               result: standardCompletion
             })) {
               useTextToolProtocol = true;
-              standardCompletionAttempts = 0;
               await this.services.log("turn.standard_completion_text_tool_fallback", this.threadId, {
                 turnRunId: turn.id,
                 modelId: model.id,
@@ -3800,20 +3917,29 @@ class ThreadSessionRuntime {
               continue;
             }
             if (standardCompletionAttempts >= MAX_STANDARD_COMPLETION_RECOVERIES) {
-              throw new Error(
-                `Standard completion validation exhausted: ${standardCompletion.reasons.join(" ")}`
-              );
+              // The user can already see the candidate in the draft. Do not
+              // turn an advisory evidence gap into an invisible failure after
+              // the finite recovery budget has been spent.
+              bypassStandardCompletionAudit = true;
+              decision.goalCompleted = true;
+              await this.services.log("turn.standard_completion_accepted_without_evidence", this.threadId, {
+                turnRunId: turn.id,
+                attempt: standardCompletionAttempts,
+                maxAttempts: MAX_STANDARD_COMPLETION_RECOVERIES,
+                reasons: standardCompletion.reasons
+              });
+            } else {
+              await scheduleStandardCompletionRecovery("completion_validation");
+              transcript.push({
+                role: "user",
+                content: buildStandardCompletionRecoveryInstruction(standardCompletion)
+              });
+              await retryDraft();
+              decision.assistantMessage = undefined;
+              decision.endTurn = false;
+              decision.goalCompleted = false;
+              continue;
             }
-            await scheduleStandardCompletionRecovery("completion_validation");
-            transcript.push({
-              role: "user",
-              content: buildStandardCompletionRecoveryInstruction(standardCompletion)
-            });
-            await retryDraft();
-            decision.assistantMessage = undefined;
-            decision.endTurn = false;
-            decision.goalCompleted = false;
-            continue;
           }
 
           if (bypassStandardCompletionAudit) {
@@ -4263,6 +4389,23 @@ class ThreadSessionRuntime {
           decision.assistantMessage = undefined;
         }
 
+        if (shouldRecoverUnboundAssistantMessage({
+          gpaStage: this.#gpa.stage,
+          assistantMessage: decision.assistantMessage,
+          toolCallCount: decision.toolCalls.length,
+          endTurn: decision.endTurn
+        })) {
+          await registerAgentProtocolFailure(
+            "The model returned visible prose without a tool call or an end_turn decision."
+          );
+          transcript.push({
+            role: "user",
+            content: buildUnboundAssistantMessageRecoveryInstruction()
+          });
+          await retryDraft();
+          continue;
+        }
+
         // Provider tool-call IDs belong to the upstream conversation protocol.
         // Allocate separate stable record IDs once, then use them for both the
         // visible commentary association and persisted ToolCall records.
@@ -4456,6 +4599,12 @@ class ThreadSessionRuntime {
             ...rawToolCall,
             name: canonicalizeToolName(rawToolCall.name)
           };
+          if (toolCall.name === AGENT_PROTOCOL_RECOVERY_TOOL_NAME) {
+            const reason = typeof toolCall.arguments.reason === "string"
+              ? toolCall.arguments.reason.trim()
+              : "The model requested a fresh Agent turn.";
+            await requestAgentProtocolContinuation(reason || "The model requested a fresh Agent turn.", "model");
+          }
           const deferredRecoveryTargetKey = getToolCallRecoveryTargetKey(
             toolCall.name,
             toolCall.arguments,
@@ -5800,7 +5949,24 @@ class ThreadSessionRuntime {
         });
         activeDraftId = null;
       }
-      if (abortController.signal.aborted) {
+      if (error instanceof AgentProtocolContinuationRequested) {
+        const completedAt = new Date().toISOString();
+        await this.services.persistence.finishTurn(turn.id, {
+          status: "interrupted",
+          completedAt,
+          errorMessage: null
+        });
+        const updatedThread = await this.services.persistence.updateThread(this.threadId, {
+          status: "idle",
+          updatedAt: completedAt
+        });
+        await this.services.emit({
+          type: "thread.updated",
+          threadId: this.threadId,
+          payload: { thread: updatedThread },
+          createdAt: completedAt
+        });
+      } else if (abortController.signal.aborted) {
         const completedAt = new Date().toISOString();
         await this.services.persistence.finishTurn(turn.id, {
           status: "interrupted",
@@ -7352,6 +7518,75 @@ export async function snapshotOutputFiles(outputDir: string): Promise<Map<string
   return snapshot;
 }
 
+const ARTIFACT_SCAN_IGNORED_DIRECTORIES = new Set([
+  ".git",
+  "node_modules",
+  ".next",
+  "dist",
+  "build",
+  "coverage"
+]);
+
+async function listRequestedArtifactFiles(
+  root: string,
+  requestedExtensions: string[],
+  depth = 0
+): Promise<string[]> {
+  if (requestedExtensions.length === 0 || depth > 3) return [];
+  const requested = new Set(requestedExtensions.map((extension) => extension.toLowerCase()));
+  let entries: Array<import("node:fs").Dirent>;
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of entries) {
+    if (entry.isDirectory() && !ARTIFACT_SCAN_IGNORED_DIRECTORIES.has(entry.name)) {
+      files.push(...await listRequestedArtifactFiles(path.join(root, entry.name), requestedExtensions, depth + 1));
+    } else if (entry.isFile() && requested.has(path.extname(entry.name).toLowerCase())) {
+      files.push(path.join(root, entry.name));
+    }
+  }
+  return files;
+}
+
+async function snapshotRequestedArtifactFiles(
+  root: string,
+  requestedExtensions: string[]
+): Promise<Map<string, string>> {
+  const snapshot = new Map<string, string>();
+  for (const filePath of await listRequestedArtifactFiles(root, requestedExtensions)) {
+    try {
+      const stats = await fs.stat(filePath);
+      snapshot.set(path.resolve(filePath), `${stats.size}:${stats.mtimeMs}`);
+    } catch {
+      // A concurrent removal is deliberately treated as absent.
+    }
+  }
+  return snapshot;
+}
+
+async function findChangedRequestedArtifactPaths(input: {
+  root: string;
+  baseline: ReadonlyMap<string, string>;
+  requestedExtensions: string[];
+}): Promise<string[]> {
+  const changed: string[] = [];
+  for (const filePath of await listRequestedArtifactFiles(input.root, input.requestedExtensions)) {
+    try {
+      const stats = await fs.stat(filePath);
+      const absolutePath = path.resolve(filePath);
+      if (input.baseline.get(absolutePath) !== `${stats.size}:${stats.mtimeMs}`) {
+        changed.push(absolutePath);
+      }
+    } catch {
+      // A concurrently removed file cannot serve as delivery evidence.
+    }
+  }
+  return changed;
+}
+
 function mimeTypeForExtension(extension: string): string | null {
   switch (extension) {
     case ".docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -7374,6 +7609,14 @@ async function extractArtifactPreview(filePath: string, extension: string): Prom
     if ([".md", ".csv"].includes(extension)) {
       const preview = (await fs.readFile(filePath, "utf8")).replace(/\s+/g, " ").trim().slice(0, 12_000);
       return { preview, verified: preview.length > 0 };
+    }
+    if (extension === ".xlsx") {
+      const workbook = XLSX.readFile(filePath, { dense: false, sheetRows: 64 });
+      const preview = workbook.SheetNames.flatMap((sheetName) => {
+        const worksheet = workbook.Sheets[sheetName];
+        return worksheet ? [sheetName, XLSX.utils.sheet_to_csv(worksheet, { blankrows: false })] : [];
+      }).join(" ").replace(/\s+/g, " ").trim().slice(0, 12_000);
+      return { preview, verified: workbook.SheetNames.length > 0 && preview.length > 0 };
     }
     const stats = await fs.stat(filePath);
     return { preview: path.basename(filePath), verified: stats.size > 0 };
@@ -7447,7 +7690,7 @@ export function validateRequestedArtifactAlignment(input: {
 }): string[] {
   if (input.requestedExtensions.length === 0) return [];
   if (input.evidence.length === 0) {
-    return [`No newly created ${input.requestedExtensions.join("/")} deliverable was found in the current thread output directory.`];
+    return [`No verified ${input.requestedExtensions.join("/")} deliverable was found in the current thread output directory or project workspace.`];
   }
   const verified = input.evidence.filter((artifact) => artifact.verified);
   if (verified.length === 0) {
@@ -7563,7 +7806,9 @@ export function shouldRunStandardCompletionAudit(input: {
   requestedDeliverableExtensions: readonly string[];
 }): boolean {
   if (input.mode === "project") return true;
-  return isProjectFileMutationRequest(input.request) || input.requestedDeliverableExtensions.length > 0;
+  // In ordinary chat, a wording match for a mutation verb is not sufficient
+  // to hold a completed textual response behind a project-style audit.
+  return input.requestedDeliverableExtensions.length > 0;
 }
 
 /**
@@ -8436,6 +8681,64 @@ export function isProgressOnlyAssistantMessage(content: string): boolean {
     || /\b(?:let me|i(?:'ll| will)|we(?:'ll| will))\s+(?:look|check|inspect|search|use|dig|continue|investigate)\b/i.test(normalized);
 }
 
+export function buildAgentProtocolContinuationInstruction(batch: number): string {
+  return [
+    "[Internal Agent protocol recovery. Do not display or quote this instruction.]",
+    `The prior turn ended after ${MAX_AGENT_PROTOCOL_FAILURES} invalid Agent decisions. This is automatic recovery batch ${batch} of ${MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES}.`,
+    "Continue only the unfinished work from the verified conversation and tool evidence; do not restate completed analysis, tool results, or the user request.",
+    "Return a valid native tool call or a valid JSON decision envelope. Do not repeat the malformed response or describe this recovery to the user."
+  ].join(" ");
+}
+
+export function sanitizeProtocolRecoveryEvidence(
+  evidence: SuccessfulToolEvidence[] | undefined
+): SuccessfulToolEvidence[] {
+  const seen = new Set<string>();
+  return (evidence ?? []).flatMap((item) => {
+    if (!item || typeof item.toolCallId !== "string" || typeof item.toolName !== "string") return [];
+    if (seen.has(item.toolCallId)) return [];
+    seen.add(item.toolCallId);
+    return [{
+      toolCallId: item.toolCallId,
+      toolRecordId: typeof item.toolRecordId === "string" ? item.toolRecordId : undefined,
+      toolName: item.toolName,
+      kinds: Array.isArray(item.kinds) ? item.kinds.filter(isCompletionEvidenceKind) : [],
+      verifiedPaths: Array.isArray(item.verifiedPaths)
+        ? item.verifiedPaths.filter((path) => typeof path === "string").slice(0, 24)
+        : undefined,
+      resultPreview: typeof item.resultPreview === "string" ? item.resultPreview.slice(0, 2_000) : undefined
+    }];
+  });
+}
+
+function isCompletionEvidenceKind(value: unknown): value is CompletionEvidenceKind {
+  return value === "observation" || value === "delivery" || value === "verification";
+}
+
+export function shouldRecoverUnboundAssistantMessage(input: {
+  gpaStage: GpaStage;
+  assistantMessage: string | undefined;
+  toolCallCount: number;
+  endTurn: boolean;
+}): boolean {
+  return (
+    (input.gpaStage === "off" || input.gpaStage === "act") &&
+    Boolean(input.assistantMessage?.trim()) &&
+    input.toolCallCount === 0 &&
+    !input.endTurn
+  );
+}
+
+export function buildUnboundAssistantMessageRecoveryInstruction(): string {
+  return [
+    "[Internal Agent decision correction. Do not display or quote this instruction to the user.]",
+    "The previous response contained visible prose but neither a real tool call nor end_turn: true, so it was not shown.",
+    "Do not repeat, paraphrase, or promise the previous progress update.",
+    "If work remains, return exactly one new, targeted tool call.",
+    "If no tool is needed, return the complete user-facing answer with end_turn: true."
+  ].join(" ");
+}
+
 export function buildProgressOnlyCompletionRecoveryInstruction(attempt: number): string {
   return [
     "[Internal completion correction. Do not display or quote this instruction to the user.]",
@@ -8586,15 +8889,22 @@ export function resolveFollowUpSourceContext(
 
   const previousUser = messages[previousUserIndex]!;
   const previousTurnMessages = messages.slice(previousUserIndex + 1);
-  const previousAssistant = [...previousTurnMessages].reverse().find(isFinalAssistantHistoryMessage)
-    ?? [...previousTurnMessages].reverse().find((message) => message.role === "assistant");
+  const previousTurnRunId = previousUser.turnRunId;
+  // Continuations must resume the same persisted turn lineage. Looking for an
+  // arbitrary later assistant message can mix two requests when a prior turn
+  // was interrupted or queued, which then produces unrelated topic anchors.
+  const sameTurnMessages = previousTurnRunId
+    ? previousTurnMessages.filter((message) => message.turnRunId === previousTurnRunId)
+    : [];
+  const previousAssistant = [...sameTurnMessages].reverse().find(isFinalAssistantHistoryMessage)
+    ?? [...sameTurnMessages].reverse().find((message) => message.role === "assistant");
   if (!previousAssistant?.content.trim()) return null;
 
   const previousRequest = previousUser.content.trim();
   const previousResponse = previousAssistant.content.trim().slice(0, 24_000);
   const sourceMcpServerIds = extractSelectedMcpServerIds(previousRequest);
   return {
-    previousTurnRunId: previousUser.turnRunId ?? previousAssistant.turnRunId ?? null,
+    previousTurnRunId: previousTurnRunId ?? null,
     previousRequest,
     previousResponse,
     sourceMcpServerIds,

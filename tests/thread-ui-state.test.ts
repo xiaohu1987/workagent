@@ -114,7 +114,7 @@ describe("thread UI state helpers", () => {
   it("provides a clean thread-scoped GPA state when no snapshot exists", () => {
     expect(normalizeGpaStateForThread("project", null)).toMatchObject({
       stage: "off",
-      fullAccess: true,
+      fullAccess: false,
       knowledgeEnabled: false,
       awaitingConfirmation: null,
       planTasks: []

@@ -613,6 +613,9 @@ export class DatabaseService {
         display_content TEXT NOT NULL,
         attachments_json TEXT NOT NULL,
         media_intent TEXT,
+        internal_kind TEXT,
+        protocol_recovery_batch INTEGER NOT NULL DEFAULT 0,
+        protocol_recovery_evidence_json TEXT,
         user_message_id TEXT,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL
@@ -914,6 +917,9 @@ export class DatabaseService {
     this.ensureColumn("turn_runs", "usage_json", "TEXT");
     this.ensureColumn("queued_messages", "user_message_id", "TEXT");
     this.ensureColumn("queued_messages", "media_intent", "TEXT");
+    this.ensureColumn("queued_messages", "internal_kind", "TEXT");
+    this.ensureColumn("queued_messages", "protocol_recovery_batch", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("queued_messages", "protocol_recovery_evidence_json", "TEXT");
     this.ensureColumn("error_solutions", "model_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("error_solutions", "memory_kind", "TEXT NOT NULL DEFAULT 'recovered'");
     this.ensureColumn("error_solutions", "scope_mode", "TEXT NOT NULL DEFAULT 'model'");
@@ -1476,8 +1482,8 @@ export class DatabaseService {
     };
     this.#db
       .prepare(
-        `INSERT INTO queued_messages (id, thread_id, content, display_content, attachments_json, media_intent, user_message_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO queued_messages (id, thread_id, content, display_content, attachments_json, media_intent, internal_kind, protocol_recovery_batch, protocol_recovery_evidence_json, user_message_id, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -1486,6 +1492,9 @@ export class DatabaseService {
         record.displayContent,
         JSON.stringify(record.attachments),
         record.mediaIntent ?? null,
+        record.internalKind ?? null,
+        record.protocolRecoveryBatch ?? 0,
+        JSON.stringify(record.protocolRecoveryEvidence ?? []),
         record.userMessageId,
         record.status,
         record.createdAt
@@ -3577,11 +3586,18 @@ function mapSelfImprovementMemoryRow(row: any): SelfImprovementMemoryRecord {
 
 function mapQueuedMessageRow(row: any): QueuedMessageRecord {
   let attachments: MessageAttachment[] = [];
+  let protocolRecoveryEvidence: QueuedMessageRecord["protocolRecoveryEvidence"] = [];
   try {
     const parsed = JSON.parse(row.attachments_json ?? "[]");
     attachments = Array.isArray(parsed) ? parsed as MessageAttachment[] : [];
   } catch {
     attachments = [];
+  }
+  try {
+    const parsed = JSON.parse(row.protocol_recovery_evidence_json ?? "[]");
+    protocolRecoveryEvidence = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    protocolRecoveryEvidence = [];
   }
   return {
     id: row.id,
@@ -3590,6 +3606,9 @@ function mapQueuedMessageRow(row: any): QueuedMessageRecord {
     displayContent: row.display_content,
     attachments,
     mediaIntent: row.media_intent === "image" || row.media_intent === "video" ? row.media_intent : null,
+    internalKind: row.internal_kind === "agent_protocol_recovery" ? "agent_protocol_recovery" : null,
+    protocolRecoveryBatch: Math.max(0, Number(row.protocol_recovery_batch ?? 0)),
+    protocolRecoveryEvidence,
     userMessageId: row.user_message_id ?? null,
     status: row.status === "dispatching" ? "dispatching" : "queued",
     createdAt: row.created_at
