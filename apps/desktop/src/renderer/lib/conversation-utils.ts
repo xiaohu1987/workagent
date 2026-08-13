@@ -471,6 +471,22 @@ export function getDefaultCollapsedConversationTurnIds(
     .map((section) => section.id);
 }
 
+/** A newly submitted task is the only conversation process that should open. */
+export function getConversationTurnIdsToCollapseForNewSubmission(
+  sections: Array<{ id: string }>
+): string[] {
+  return sections.map((section) => section.id);
+}
+
+/** Collapse the just-finished process once, without overriding a later manual expand. */
+export function getConversationTurnIdToCollapseAfterExecution(
+  previousTurnId: string | null,
+  wasProcessing: boolean,
+  isProcessing: boolean
+): string | null {
+  return wasProcessing && !isProcessing ? previousTurnId : null;
+}
+
 export function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[], messages: MessageRecord[]): TimelineEntry[] {
   const callsById = new Map(toolCalls.map((toolCall) => [toolCall.id, toolCall]));
   const assignedCallIds = new Set<string>();

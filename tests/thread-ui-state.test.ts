@@ -13,6 +13,8 @@ import {
 import {
   buildTimelineEntries,
   buildConversationTurnSections,
+  getConversationTurnIdToCollapseAfterExecution,
+  getConversationTurnIdsToCollapseForNewSubmission,
   getDefaultCollapsedConversationTurnIds,
   createOptimisticThreadSnapshot,
   getThreadDeleteFailureMessage,
@@ -42,6 +44,7 @@ import {
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
 import { getSidebarUpdateReminder } from "../apps/desktop/src/renderer/App";
+import { hasRecognizedGitRepository } from "../apps/desktop/src/renderer/workspace/right-workspace";
 import type { MessageRecord, ThreadRecord, ToolCallRecord } from "../packages/shared-types/src";
 
 function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
@@ -92,6 +95,14 @@ function makeThread(overrides: Partial<ThreadRecord> = {}): ThreadRecord {
 }
 
 describe("thread UI state helpers", () => {
+  it("shows the Git workspace only after the current project is identified as a Git repository", () => {
+    expect(hasRecognizedGitRepository(null, "E:\\project")).toBe(false);
+    expect(hasRecognizedGitRepository({ available: false, ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(false);
+    expect(hasRecognizedGitRepository({ available: true, ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(false);
+    expect(hasRecognizedGitRepository({ available: true, root: "E:\\project", ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(true);
+    expect(hasRecognizedGitRepository({ available: true, root: "E:\\project", ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project\\src")).toBe(false);
+  });
+
   it("isolates GPA stages from non-project chats", () => {
     const state = normalizeGpaStateForThread("chat", {
       stage: "plan",
@@ -569,6 +580,19 @@ describe("tool timeline grouping", () => {
 
     expect(getDefaultCollapsedConversationTurnIds(sections, "turn-3", true)).toEqual(["turn-1", "turn-2"]);
     expect(getDefaultCollapsedConversationTurnIds(sections, "turn-3", false)).toEqual(["turn-1", "turn-2", "turn-3"]);
+  });
+
+  it("closes every existing process as soon as a new task is submitted", () => {
+    expect(getConversationTurnIdsToCollapseForNewSubmission([
+      { id: "turn-1" },
+      { id: "turn-2" }
+    ])).toEqual(["turn-1", "turn-2"]);
+  });
+
+  it("closes only the process that just transitioned from running to finished", () => {
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, false)).toBe("turn-2");
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", false, false)).toBeNull();
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, true)).toBeNull();
   });
 
   it("keeps the file summary visible when a completed turn is collapsed", () => {

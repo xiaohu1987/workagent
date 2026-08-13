@@ -2960,7 +2960,13 @@ async function runProjectVerification(ctx: ToolRuntimeContext): Promise<ToolResu
     return {
       ok: true,
       content: "No safe project verification command is configured or discoverable. The change remains unverified.",
-      json: { commands, passed: false, unverified: true, output: "No safe verification command found." }
+      json: {
+        commands,
+        passed: false,
+        unverified: true,
+        executed: false,
+        output: "No safe verification command found."
+      }
     };
   }
 

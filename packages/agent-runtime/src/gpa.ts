@@ -194,7 +194,8 @@ export function buildGpaSystemDirective(
       "6) 停止并上报：需求变更/范围蔓延、技术方案不可行/阻塞、自检未通过且无法自行修复、需要用户做选型/优先级决策。",
       "7) 每一轮 ACT decision 都必须包含 completed_task_ids：未完成新任务时返回 []；完成任务时返回累计已完成的全部任务 ID（不要攒到最后才一次性提交）。",
       "8) 当前计划项通过验收后，必须先提交包含该 ID 的 decision，才可以开始后续计划项。每个 decision 只能新增完成当前最早未完成的一个任务；不得跳过中间任务、提前标记收尾或验收任务完成。不要让文件操作或进度文案替代计划状态更新。",
-      "9) 最终完成时必须返回 completed_task_ids，覆盖已确认 PLAN 的全部任务；completion_evidence 必须按任务引用真实成功的 tool_call_id，并区分 observation、delivery、verification。没有交付和验证证据时不得声明 goal_completed。"
+      "9) 最终完成时必须返回 completed_task_ids，覆盖已确认 PLAN 的全部任务；completion_evidence 必须按任务引用真实成功的 tool_call_id，并区分 observation、delivery、verification。没有交付和验证证据时不得声明 goal_completed。",
+      "10) 项目级开发任务一旦修改源码，完成前必须实际运行并通过相关单元测试；最终汇总必须给出测试报告（命令、通过状态、结果摘要）。构建、类型检查、文件回读或口头声明不能代替单元测试。"
     ].join("\n")
   };
 

@@ -27,6 +27,7 @@ import type {
   KnowledgeImportSource,
   MessageRecord,
   MessageAttachment,
+  QueuedMessageRecord,
   McpServerConfig,
   ModelProfile,
   PendingResumeThread,
@@ -1048,11 +1049,14 @@ export class DesktopBackend {
     displayContent?: string,
     dispatch = true,
     mediaIntent?: "image" | "video" | null
-  ): Promise<void> {
+  ): Promise<{ queued: QueuedMessageRecord; queuedBehindActiveTask: boolean }> {
     // Queue first so cold-start maintenance (plugin discovery, skill indexing,
     // MCP refresh) never delays visible message submission.
     void this.initializeDeferredServices();
     const thread = this.#db.getThread(threadId);
+    const queuedBehindActiveTask = this.#runtime.isProcessingTurn(threadId)
+      || thread.status === "running"
+      || thread.status === "waiting";
     // Use COUNT instead of loading every message row just to test emptiness —
     // listMessages materializes hundreds of large content/metadata rows
     // synchronously on the main process for long conversations.
@@ -1090,6 +1094,7 @@ export class DesktopBackend {
     // Skill discovery walks user, project, and plugin directories. It must not
     // hold up a message that can run using the current catalog.
     this.refreshSkillsInBackground(thread.cwd);
+    return { queued, queuedBehindActiveTask };
   }
 
   public async guideActiveThread(threadId: string, content: string): Promise<{ accepted: boolean }> {

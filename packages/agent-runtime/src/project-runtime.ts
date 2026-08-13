@@ -83,7 +83,7 @@ export function createProjectRuntimePolicy(input: {
     mode: "project",
     cwd: workspaceRoot,
     localWorkspaceFirst: !input.explicitlySelectedMcp && !input.explicitlyRequestedMcp
-  })!;
+  })! + "\n\nProject completion policy: when this task changes source code, run the relevant unit tests and wait for a successful result before claiming completion. The final summary must include a test report stating the command, pass status, and concise result. Builds, typechecks, file read-back, and claimed tests do not replace successful unit-test evidence.";
   return {
     mode: "project",
     workspaceRoot,

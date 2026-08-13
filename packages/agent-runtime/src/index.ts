@@ -199,6 +199,20 @@ export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 30_000;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
 export const CONTEXT_COMPACTION_TARGET = 0.45;
 export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
+/** Bound every persisted tool result before it is replayed into a model request. */
+export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 8_000;
+/** Keep desktop provider requests responsive even when a model advertises a huge context window. */
+export const MAX_RAW_HISTORY_TOKENS_PER_REQUEST = 48_000;
+/** Limit full-text draft snapshots so long streamed replies do not starve the desktop renderer. */
+export const ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS = 100;
+
+export function shouldPublishAssistantDraftUpdate(
+  lastPublishedAtMs: number,
+  nowMs: number,
+  force = false
+): boolean {
+  return force || nowMs - lastPublishedAtMs >= ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS;
+}
 
 export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
   return blockedAttempts >= MAX_BLOCKED_IDENTICAL_TOOL_RETRIES;
@@ -538,6 +552,7 @@ export interface SuccessfulToolEvidence {
   toolRecordId?: string;
   toolName: string;
   kinds: CompletionEvidenceKind[];
+  unitTestPassed?: boolean;
   verifiedPaths?: string[];
   resultPreview?: string;
 }
@@ -558,6 +573,8 @@ export interface ActCompletionValidationResult {
   invalidEvidenceToolCallIds: string[];
   missingDelivery: boolean;
   missingVerification: boolean;
+  missingUnitTest: boolean;
+  missingTestReport: boolean;
   missingBrowserVerification?: string[];
 }
 
@@ -583,6 +600,8 @@ export interface StandardCompletionValidationResult {
   reasons: string[];
   missingDelivery: boolean;
   missingVerification: boolean;
+  missingUnitTest: boolean;
+  missingTestReport: boolean;
   missingRequestedDeliverable: boolean;
 }
 
@@ -983,6 +1002,10 @@ class ThreadSessionRuntime {
     }
     this.#pendingGuidance.push(guidance);
     return this.#activeTurnRunId;
+  }
+
+  public isProcessingTurn(): boolean {
+    return this.#activeTurnRunId !== null || this.#busy;
   }
 
   public interrupt(): boolean {
@@ -1534,6 +1557,7 @@ class ThreadSessionRuntime {
     const selfImprovementContext = selfImprovementMemories.length
       ? ["[Internal self-improvement context. Do not quote it verbatim.]", ...selfImprovementMemories.map((memory) => `- ${memory.title}: ${memory.content}`)].join("\n")
       : "";
+    const gitMutationRequested = isExplicitGitMutationRequest(initialInput);
     // Detect after we have history later; provisional from input + plan titles.
     let webFrontendGuard =
       this.#gpa.stage === "act" &&
@@ -1549,7 +1573,12 @@ class ThreadSessionRuntime {
       thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
       selectedMcpServerIds.length > 0 || explicitlyRequestedMcp
     );
-    const tools = [...modePolicy.filterTools(visibleToolSet.tools), AGENT_PROTOCOL_RECOVERY_TOOL_SPEC];
+    const tools = [
+      ...modePolicy.filterTools(visibleToolSet.tools).filter((tool) =>
+        gitMutationRequested || !GIT_MUTATION_TOOL_NAMES.has(tool.name)
+      ),
+      AGENT_PROTOCOL_RECOVERY_TOOL_SPEC
+    ];
     const mcpTools = visibleToolSet.mcpTools;
     const visibleModeToolNames = new Set(tools.map((tool) => tool.name));
     const modeHiddenToolNames = visibleToolSet.tools
@@ -1774,7 +1803,11 @@ class ThreadSessionRuntime {
       let latestRequestedArtifactEvidence: RequestedArtifactEvidence[] = [];
 
       try {
-        let selectedHistory = selectBudgetedHistory(history, contextBudgetPlan.rawHistoryBudgetTokens);
+        const rawHistoryTokenBudget = Math.min(
+          contextBudgetPlan.rawHistoryBudgetTokens,
+          MAX_RAW_HISTORY_TOKENS_PER_REQUEST
+        );
+        let selectedHistory = selectBudgetedHistory(history, rawHistoryTokenBudget);
         const preliminaryCapsules = buildStoredTurnContextPrompt(storedTurnContextMarkdown, model.contextWindow, {
           skipNewest: followUpSourceContext !== null,
           maxBudgetTokens: contextBudgetPlan.capsuleBudgetTokens,
@@ -1787,7 +1820,7 @@ class ThreadSessionRuntime {
         if (unusedCapsuleTokens > 0) {
           selectedHistory = selectBudgetedHistory(
             history,
-            contextBudgetPlan.rawHistoryBudgetTokens + unusedCapsuleTokens
+            Math.min(MAX_RAW_HISTORY_TOKENS_PER_REQUEST, rawHistoryTokenBudget + unusedCapsuleTokens)
           );
         }
         if (selectedHistory.newestTurnTokens > contextBudgetPlan.maxInputTokens) {
@@ -2430,10 +2463,26 @@ class ThreadSessionRuntime {
         const draftStartedAt = new Date().toISOString();
         let streamedVisibleContent = "";
         let draftSettled = suppressStreamingForActiveSubagents;
+        let lastPublishedDraftAtMs = Number.NEGATIVE_INFINITY;
+        let publishedDraftPhase: AssistantDraftPhase | null = null;
         activeDraftId = suppressStreamingForActiveSubagents ? null : draftId;
-        const updateDraft = async (phase: AssistantDraftPhase, content = streamedVisibleContent) => {
+        const updateDraft = async (
+          phase: AssistantDraftPhase,
+          content = streamedVisibleContent,
+          force = false
+        ) => {
           if (draftSettled || suppressStreamingForActiveSubagents) return;
           streamedVisibleContent = content;
+          const nowMs = Date.now();
+          if (!shouldPublishAssistantDraftUpdate(
+            lastPublishedDraftAtMs,
+            nowMs,
+            force || publishedDraftPhase !== phase
+          )) {
+            return;
+          }
+          lastPublishedDraftAtMs = nowMs;
+          publishedDraftPhase = phase;
           await this.services.emit({
             type: "assistant.draft.updated",
             threadId: this.threadId,
@@ -2443,7 +2492,7 @@ class ThreadSessionRuntime {
         };
         const retryDraft = async () => {
           streamedVisibleContent = "";
-          await updateDraft("retrying", "");
+          await updateDraft("retrying", "", true);
         };
         const settleDraft = async (input: { messageId?: string; discarded?: boolean }) => {
           if (draftSettled || suppressStreamingForActiveSubagents) return;
@@ -2456,7 +2505,7 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
         };
-        await updateDraft("generating", "");
+        await updateDraft("generating", "", true);
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const borrowedCapsuleTokens = Math.max(
           0,
@@ -2476,7 +2525,7 @@ class ThreadSessionRuntime {
         });
         let systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}${
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${buildGitMutationPolicyPrompt(gitMutationRequested)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}${
           useTextToolProtocol
             ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
             : ""
@@ -3861,6 +3910,8 @@ class ThreadSessionRuntime {
             ...managedWriteCompletion.deliveredPaths,
             ...latestRequestedArtifactEvidence.map((artifact) => artifact.absolutePath)
           ])];
+          const requiresUnitTest = modePolicy.mode === "project" &&
+            deliveredPaths.some(isProjectSourceCodePath);
           const standardCompletion = validateStandardCompletion({
             decision,
             originalRequest: effectiveRequest,
@@ -3872,6 +3923,7 @@ class ThreadSessionRuntime {
             requiresFileDelivery: modePolicy.mode === "project"
               ? isProjectFileMutationRequest(effectiveRequest) || requestedDeliverableExtensions.length > 0
               : requestedDeliverableExtensions.length > 0,
+            requiresUnitTest,
             deliveredPaths,
             successfulEvidence: successfulToolEvidence,
             verifiedArtifactPaths: latestRequestedArtifactEvidence.filter((artifact) => artifact.verified).map((artifact) => artifact.absolutePath),
@@ -3885,6 +3937,8 @@ class ThreadSessionRuntime {
               reasons: standardCompletion.reasons,
               missingDelivery: standardCompletion.missingDelivery,
               missingVerification: standardCompletion.missingVerification,
+              missingUnitTest: standardCompletion.missingUnitTest,
+              missingTestReport: standardCompletion.missingTestReport,
               missingRequestedDeliverable: standardCompletion.missingRequestedDeliverable
             });
             if (shouldSwitchStandardCompletionToTextToolProtocol({
@@ -3917,6 +3971,20 @@ class ThreadSessionRuntime {
               continue;
             }
             if (standardCompletionAttempts >= MAX_STANDARD_COMPLETION_RECOVERIES) {
+              if (requiresUnitTest && (standardCompletion.missingUnitTest || standardCompletion.missingTestReport)) {
+                repeatedTaskFailure = {
+                  taskKey: "project-code-unit-test",
+                  attempts: standardCompletionAttempts,
+                  lastError: standardCompletion.reasons.join(" ")
+                };
+                await this.services.log("turn.project_code_unit_test_required", this.threadId, {
+                  turnRunId: turn.id,
+                  attempt: standardCompletionAttempts,
+                  reasons: standardCompletion.reasons
+                });
+                await settleDraft({ discarded: true });
+                break;
+              }
               // The user can already see the candidate in the draft. Do not
               // turn an advisory evidence gap into an invisible failure after
               // the finite recovery budget has been spent.
@@ -4154,6 +4222,9 @@ class ThreadSessionRuntime {
             decision,
             planTasks: this.#gpa.planTasks,
             successfulEvidence: successfulToolEvidence,
+            requiresUnitTest: modePolicy.mode === "project" && successfulToolEvidence
+              .flatMap((item) => item.verifiedPaths ?? [])
+              .some(isProjectSourceCodePath),
             browserVerification: browserVerificationEvidence.required ? {
               skippedByUser: browserVerificationEvidence.testChoice === "skip",
               fastPathEligible:
@@ -4599,6 +4670,17 @@ class ThreadSessionRuntime {
             ...rawToolCall,
             name: canonicalizeToolName(rawToolCall.name)
           };
+          const gitMutationBlock = validateGitMutationToolCall(toolCall, gitMutationRequested);
+          if (gitMutationBlock) {
+            appendBlockedToolCallResult(toolCall, gitMutationBlock);
+            await persistBlockedToolCall(toolCall, gitMutationBlock, "git_mutation_requires_explicit_request");
+            transcript.push({ role: "user", content: gitMutationBlock });
+            await this.services.log("agent.git_mutation_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name
+            });
+            continue;
+          }
           if (toolCall.name === AGENT_PROTOCOL_RECOVERY_TOOL_NAME) {
             const reason = typeof toolCall.arguments.reason === "string"
               ? toolCall.arguments.reason.trim()
@@ -5576,6 +5658,10 @@ class ThreadSessionRuntime {
               toolRecordId: toolRecord.id,
               toolName: toolCall.name,
               hasPriorDelivery: successfulToolEvidence.some((item) => item.kinds.includes("delivery")),
+              verificationPassed: toolCall.name === "project.verify"
+                ? result.json?.passed === true && Array.isArray(result.json?.commands) && result.json.commands.length > 0
+                : undefined,
+              unitTestPassed: result.ok && hasSuccessfulUnitTestResult(toolCall, result),
               verifiedPaths: pathVerification?.verifiedPaths,
               requiresVerifiedPath: pathVerification?.requiresVerifiedPath,
               resultPreview: modelContent
@@ -5755,7 +5841,10 @@ class ThreadSessionRuntime {
                   toolCallId: verificationCall.id,
                   toolRecordId: verificationRecord.id,
                   toolName: verificationCall.name,
-                  hasPriorDelivery: true
+                  hasPriorDelivery: true,
+                  verificationPassed: verificationResult.json?.passed === true &&
+                    Array.isArray(verificationResult.json?.commands) && verificationResult.json.commands.length > 0,
+                  unitTestPassed: hasSuccessfulUnitTestResult(verificationCall, verificationResult)
                 }));
               } else if (!verificationResult.ok) {
                 await registerTargetFailure(
@@ -7102,7 +7191,6 @@ export function isReusableSuccessfulToolCall(toolName: string): boolean {
 const DELIVERY_TOOL_NAMES = new Set([
   "apply_patch",
   "fs.write_file",
-  "git.commit",
   "git.worktree_add",
   "git.worktree_remove",
   "browser.click",
@@ -7116,6 +7204,45 @@ const MANAGED_WRITE_TOOL_NAMES = new Set([
   "apply_patch",
   "fs.write_file"
 ]);
+
+const GIT_MUTATION_TOOL_NAMES = new Set([
+  "git.stage_file",
+  "git.stage_all",
+  "git.unstage_file",
+  "git.revert_file",
+  "git.apply_hunk",
+  "git.commit",
+  "git.push",
+  "git.pull",
+  "git.create_pr",
+  "git.worktree_add",
+  "git.worktree_remove"
+]);
+
+const GIT_MUTATION_SHELL_PATTERN = /\bgit\s+(?:add|restore|reset|clean|commit|push|pull|fetch|merge|rebase|cherry-pick|worktree)\b/i;
+const EXPLICIT_GIT_MUTATION_PATTERN = /(?:\bgit\s+(?:add|stage|unstage|restore|reset|clean|commit|push|pull|fetch|merge|rebase|cherry-pick|worktree)\b|(?:暂存|取消暂存|撤销(?:[\s\S]{0,12})修改|清理(?:[\s\S]{0,12})git|提交(?:代码|改动|更改|commit)?|推送(?:代码|分支)?|拉取(?:代码|分支|远端)?|创建(?:pull request|pr|合并请求)))/i;
+
+export function isExplicitGitMutationRequest(input: string): boolean {
+  return EXPLICIT_GIT_MUTATION_PATTERN.test(input);
+}
+
+export function validateGitMutationToolCall(
+  toolCall: Pick<RuntimeToolCall, "name" | "arguments">,
+  explicitlyRequested: boolean
+): string | null {
+  if (explicitlyRequested) return null;
+  const shellCommand = toolCall.name === "shell.exec" && typeof toolCall.arguments.command === "string"
+    ? toolCall.arguments.command
+    : "";
+  if (!GIT_MUTATION_TOOL_NAMES.has(toolCall.name) && !GIT_MUTATION_SHELL_PATTERN.test(shellCommand)) return null;
+  return "Git-changing operations require an explicit user request to stage, revert, commit, push, pull, create a PR, or manage worktrees. Read-only git.status and git.diff remain available for verification.";
+}
+
+export function buildGitMutationPolicyPrompt(explicitlyRequested: boolean): string {
+  return explicitlyRequested
+    ? "[Git mutation policy] The user explicitly requested a Git-changing operation. Limit Git changes to that request and do not infer other Git actions."
+    : "[Git mutation policy] The user did not explicitly request a Git-changing operation. Do not stage, revert, commit, push, pull, create a PR, or manage worktrees, including through shell commands. You may use only read-only Git inspection when needed.";
+}
 
 const SELF_VERIFYING_ARTIFACT_TOOLS = new Set([
   "image.generate",
@@ -7337,6 +7464,8 @@ export function classifySuccessfulToolEvidence(input: {
   toolRecordId?: string;
   toolName: string;
   hasPriorDelivery: boolean;
+  verificationPassed?: boolean;
+  unitTestPassed?: boolean;
   verifiedPaths?: string[];
   requiresVerifiedPath?: boolean;
   resultPreview?: string;
@@ -7355,7 +7484,11 @@ export function classifySuccessfulToolEvidence(input: {
     kinds.add("delivery");
     kinds.add("verification");
   }
-  if (input.hasPriorDelivery && POST_DELIVERY_VERIFICATION_TOOLS.has(input.toolName)) {
+  if (
+    input.hasPriorDelivery &&
+    POST_DELIVERY_VERIFICATION_TOOLS.has(input.toolName) &&
+    (input.toolName !== "project.verify" || input.verificationPassed === true)
+  ) {
     kinds.add("verification");
   }
   return {
@@ -7363,6 +7496,7 @@ export function classifySuccessfulToolEvidence(input: {
     toolRecordId: input.toolRecordId,
     toolName: input.toolName,
     kinds: [...kinds],
+    unitTestPassed: input.unitTestPassed === true || undefined,
     verifiedPaths: input.verifiedPaths,
     resultPreview: input.resultPreview?.trim().slice(0, 2_000) || undefined
   };
@@ -7746,6 +7880,7 @@ export function validateStandardCompletion(input: {
   originalRequest?: string;
   requiresGoalCompletion?: boolean;
   requiresFileDelivery: boolean;
+  requiresUnitTest?: boolean;
   deliveredPaths: string[];
   successfulEvidence: SuccessfulToolEvidence[];
   verifiedArtifactPaths?: string[];
@@ -7757,6 +7892,10 @@ export function validateStandardCompletion(input: {
   const missingVerification = input.requiresFileDelivery &&
     (input.verifiedArtifactPaths?.length ?? 0) === 0 &&
     !input.successfulEvidence.some((item) => item.kinds.includes("verification"));
+  const missingUnitTest = input.requiresUnitTest === true &&
+    !input.successfulEvidence.some((item) => item.unitTestPassed === true);
+  const missingTestReport = input.requiresUnitTest === true &&
+    !hasUnitTestReport(assistantMessage);
   const missingRequestedDeliverable = requiresStructuredTestCaseDeliverable(input.originalRequest ?? "") &&
     !hasSubstantiveTestCaseDeliverable(assistantMessage);
 
@@ -7774,6 +7913,8 @@ export function validateStandardCompletion(input: {
   }
   if (missingDelivery) reasons.push("The requested project file change has no verified file delivery.");
   if (missingVerification) reasons.push("The requested project file change has no post-delivery verification.");
+  if (missingUnitTest) reasons.push("The project code change has no successful unit-test evidence.");
+  if (missingTestReport) reasons.push("The final summary does not include the required unit-test report.");
   if (missingRequestedDeliverable) {
     reasons.push("The requested test-case deliverable does not contain actual structured test cases.");
   }
@@ -7784,6 +7925,8 @@ export function validateStandardCompletion(input: {
     reasons,
     missingDelivery,
     missingVerification,
+    missingUnitTest,
+    missingTestReport,
     missingRequestedDeliverable
   };
 }
@@ -7913,7 +8056,7 @@ export function buildStandardCompletionAuditInstruction(input: {
     .filter((item) => item.kinds.length > 0)
     .slice(0, 24)
     .map((item) => [
-      `- ${item.toolCallId}: ${item.toolName} (${item.kinds.join(", ")})`,
+      `- ${item.toolCallId}: ${item.toolName} (${item.kinds.join(", ")})${item.unitTestPassed ? "; unit-test passed" : ""}`,
       item.resultPreview ? `  Result preview: ${item.resultPreview}` : ""
     ].filter(Boolean).join("\n"));
   const artifacts = (input.artifactEvidence ?? []).map((artifact) => [
@@ -8007,6 +8150,12 @@ export function buildStandardCompletionRecoveryInstruction(
     ...(result.missingVerification
       ? ["After the file change, run a targeted read-back, diff, build, or test and require it to succeed."]
       : []),
+    ...(result.missingUnitTest
+      ? ["Run the relevant unit-test command now and wait for a successful tool result; a build, typecheck, or read-back cannot substitute for it."]
+      : []),
+    ...(result.missingTestReport
+      ? ["Include a unit-test report in the final summary with the command, passing status, and result summary."]
+      : []),
     ...(result.missingRequestedDeliverable
       ? ["Provide the actual test cases now. Include identifiable cases with test steps and expected results; do not return only an introduction, scope note, or promise to provide them."]
       : []),
@@ -8022,7 +8171,7 @@ export function shouldSwitchStandardCompletionToTextToolProtocol(input: {
 }): boolean {
   return !input.alreadyUsingTextToolProtocol &&
     input.attempt >= STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS &&
-    (input.result.missingDelivery || input.result.missingVerification);
+    (input.result.missingDelivery || input.result.missingVerification || input.result.missingUnitTest);
 }
 
 export function buildStandardCompletionTextToolFallbackInstruction(
@@ -8030,6 +8179,8 @@ export function buildStandardCompletionTextToolFallbackInstruction(
 ): string {
   const requiredAction = result.missingDelivery
     ? "Your next decision must contain exactly one apply_patch or fs.write_file call that performs the requested file change."
+    : result.missingUnitTest
+      ? "Your next decision must contain exactly one shell.exec or project.verify call that runs the relevant unit tests."
     : "Your next decision must contain exactly one targeted fs.read_file, shell.exec, or other listed verification tool call.";
   return [
     "[Internal tool-call compatibility recovery. Do not display or quote this instruction to the user.]",
@@ -8049,6 +8200,7 @@ export function validateActCompletion(input: {
   >;
   planTasks: GpaState["planTasks"];
   successfulEvidence: SuccessfulToolEvidence[];
+  requiresUnitTest?: boolean;
   browserVerification?: BrowserCompletionRequirement;
 }): ActCompletionValidationResult {
   const reasons: string[] = [];
@@ -8085,6 +8237,10 @@ export function validateActCompletion(input: {
   const referencedEvidence = [...validEvidenceByTask.values()].flat();
   const missingDelivery = !referencedEvidence.some((item) => item.kinds.includes("delivery"));
   const missingVerification = !referencedEvidence.some((item) => item.kinds.includes("verification"));
+  const missingUnitTest = input.requiresUnitTest === true &&
+    !referencedEvidence.some((item) => item.unitTestPassed === true);
+  const missingTestReport = input.requiresUnitTest === true &&
+    !hasUnitTestReport(input.decision.assistantMessage ?? "");
   const missingBrowserVerification: string[] = [];
   const browser = input.browserVerification;
   if (browser && !browser.skippedByUser && !browser.fastPathEligible) {
@@ -8129,6 +8285,8 @@ export function validateActCompletion(input: {
   }
   if (missingDelivery) reasons.push("No verified delivery evidence was referenced.");
   if (missingVerification) reasons.push("No post-delivery verification evidence was referenced.");
+  if (missingUnitTest) reasons.push("No successful unit-test evidence was referenced for the project code change.");
+  if (missingTestReport) reasons.push("The final summary does not include the required unit-test report.");
   if (missingBrowserVerification.length > 0) {
     reasons.push(`Frontend browser verification is incomplete: ${missingBrowserVerification.join(", ")}.`);
   }
@@ -8141,6 +8299,8 @@ export function validateActCompletion(input: {
     invalidEvidenceToolCallIds: [...invalidEvidenceToolCallIds],
     missingDelivery,
     missingVerification,
+    missingUnitTest,
+    missingTestReport,
     missingBrowserVerification
   };
 }
@@ -8152,6 +8312,10 @@ export function buildActCompletionRecoveryInstruction(
 ): string {
   const nextAction = result.missingDelivery
     ? "Call the next delivery tool now. For file work, use apply_patch or fs.write_file and wait for its successful result."
+    : result.missingUnitTest
+      ? "Run the project's focused unit-test command now and wait for its successful result."
+      : result.missingTestReport
+        ? "Return a final summary that includes a unit-test report with the command and passing result."
     : result.missingVerification
       ? "Call a verification tool now, such as a test/build command or a read-back of the changed files."
       : (result.missingBrowserVerification?.length ?? 0) > 0
@@ -8171,7 +8335,7 @@ export function buildActCompletionRecoveryInstruction(
   if (attempt >= 2) {
     return [
       "[Internal completion validation. Do not display or quote this instruction to the user.]",
-      `Missing: delivery=${result.missingDelivery}; verification=${result.missingVerification}; tasks=${result.missingTaskIds.join(",") || "none"}; evidenceTasks=${result.missingEvidenceTaskIds.join(",") || "none"}; browser=${(result.missingBrowserVerification ?? []).join(",") || "none"}.`,
+      `Missing: delivery=${result.missingDelivery}; verification=${result.missingVerification}; unitTest=${result.missingUnitTest}; testReport=${result.missingTestReport}; tasks=${result.missingTaskIds.join(",") || "none"}; evidenceTasks=${result.missingEvidenceTaskIds.join(",") || "none"}; browser=${(result.missingBrowserVerification ?? []).join(",") || "none"}.`,
       evidenceBlock,
       nextAction
     ].join("\n");
@@ -8592,6 +8756,10 @@ export class AgentRuntimeService {
     return this.#sessions.get(threadId)?.guideActiveTurn(content) ?? null;
   }
 
+  public isProcessingTurn(threadId: string): boolean {
+    return this.#sessions.get(threadId)?.isProcessingTurn() ?? false;
+  }
+
   public interrupt(threadId: string): boolean {
     return this.ensureThread(threadId).interrupt();
   }
@@ -8703,6 +8871,7 @@ export function sanitizeProtocolRecoveryEvidence(
       toolRecordId: typeof item.toolRecordId === "string" ? item.toolRecordId : undefined,
       toolName: item.toolName,
       kinds: Array.isArray(item.kinds) ? item.kinds.filter(isCompletionEvidenceKind) : [],
+      unitTestPassed: item.unitTestPassed === true || undefined,
       verifiedPaths: Array.isArray(item.verifiedPaths)
         ? item.verifiedPaths.filter((path) => typeof path === "string").slice(0, 24)
         : undefined,
@@ -8795,6 +8964,39 @@ export function isProjectFileMutationRequest(content: string): boolean {
   return /^(?:(?:please|can you|could you|would you)\s+)?(?:fix|implement|add|remove|delete|update|modify|change|replace|refactor|create|build)\b/i.test(
     normalized
   );
+}
+
+const PROJECT_SOURCE_CODE_EXTENSIONS = new Set([
+  ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".java", ".js", ".jsx",
+  ".kt", ".kts", ".mjs", ".php", ".py", ".rb", ".rs", ".scss", ".svelte",
+  ".swift", ".ts", ".tsx", ".vue"
+]);
+
+export function isProjectSourceCodePath(filePath: string): boolean {
+  return PROJECT_SOURCE_CODE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+export function hasSuccessfulUnitTestResult(
+  toolCall: Pick<RuntimeToolCall, "name" | "arguments">,
+  result: Pick<ToolResult, "json">
+): boolean {
+  if (toolCall.name === "project.verify") {
+    const commands = Array.isArray(result.json?.commands) ? result.json.commands : [];
+    return result.json?.passed === true && commands.some(
+      (command) => typeof command === "string" && isUnitTestCommand(command)
+    );
+  }
+  if (toolCall.name !== "shell.exec") return false;
+  const command = typeof toolCall.arguments.command === "string" ? toolCall.arguments.command : "";
+  return isUnitTestCommand(command);
+}
+
+export function isUnitTestCommand(command: string): boolean {
+  return /(?:^|[;&|]\s*)(?:pnpm|npm|yarn|bun)\s+(?:(?:run\s+)?test(?:[:\w-]+)?|exec\s+(?:vitest|jest|mocha|ava)|(?:vitest|jest|mocha|ava)\b)|(?:^|[;&|]\s*)(?:vitest|jest|mocha|ava|pytest|phpunit|rspec)\b|(?:^|[;&|]\s*)(?:go\s+test|cargo\s+test|dotnet\s+test|python(?:3)?\s+-m\s+pytest)\b/i.test(command);
+}
+
+export function hasUnitTestReport(content: string): boolean {
+  return /(?:单元测试|测试报告|unit tests?|test report|测试结果)[\s\S]{0,160}(?:通过|passed|成功|0\s+failed|failures?\s*[:=]\s*0)/i.test(content);
 }
 
 export function getAddedPatchFiles(argumentsJson: Record<string, unknown>): string[] {
@@ -9518,7 +9720,7 @@ export function selectBudgetedHistory(
   return {
     transcript: selected.map((message) => ({
       role: message.role,
-      content: message.content,
+      content: compactPersistedToolMessageForModel(message),
       attachments: getMessageAttachments(message)
     })),
     retainedTurnRunIds: new Set(selected.flatMap((message) => message.turnRunId ? [message.turnRunId] : [])),
@@ -9531,9 +9733,19 @@ export function selectBudgetedHistory(
 function estimatePersistedMessageTokens(message: MessageRecord): number {
   return estimateRuntimeTranscriptTokens([{
     role: message.role,
-    content: message.content,
+    content: compactPersistedToolMessageForModel(message),
     attachments: getMessageAttachments(message)
   }]);
+}
+
+function compactPersistedToolMessageForModel(message: MessageRecord): string {
+  if (message.role !== "tool") return message.content;
+  const content = message.content;
+  if (content.length <= MAX_MODEL_TOOL_RESULT_CHARACTERS) return content;
+  const prefixEnd = content.indexOf("\n");
+  const toolName = prefixEnd > 0 ? content.slice(0, prefixEnd) : "tool";
+  const body = prefixEnd > 0 ? content.slice(prefixEnd + 1) : content;
+  return `${toolName}\nTool result was shortened before it entered model context. Use a focused read, diff, or search if more detail is needed.\n${truncateCharacters(body, MAX_MODEL_TOOL_RESULT_CHARACTERS - toolName.length - 140)}`;
 }
 
 function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {
@@ -10425,11 +10637,17 @@ export function summarizeToolResultForModel(
           ].join("\n");
     }
   }
-  return truncateToRuntimeTokenBudget(summarized, resolveModelToolResultTokenBudget(
+  const budgeted = truncateToRuntimeTokenBudget(summarized, resolveModelToolResultTokenBudget(
     options.contextWindow,
     options.remainingInputTokens,
     options.providerMaxRequestBytes
   ));
+  if (budgeted.length <= MAX_MODEL_TOOL_RESULT_CHARACTERS) return budgeted;
+  return [
+    "Tool result was shortened before it entered model context.",
+    "Use a focused read, diff, or search if more detail is needed.",
+    truncateCharacters(budgeted, MAX_MODEL_TOOL_RESULT_CHARACTERS - 130)
+  ].join("\n");
 }
 
 function summarizeDatabaseToolResultForPersistence(result: ToolResult): ToolResult {

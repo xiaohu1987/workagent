@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { NotificationNavigationTarget, RuntimeThreadSnapshotCursor } from "@shared-types";
+import type { NotificationNavigationTarget, QueuedMessageRecord, RuntimeThreadSnapshotCursor } from "@shared-types";
 
 const api = {
   reportRendererError: (payload: { message: string; stack?: string; componentStack?: string; unhandledRejection?: boolean }) =>
@@ -83,7 +83,7 @@ const api = {
   getThreadSnapshot: (threadId: string, cursor?: RuntimeThreadSnapshotCursor) =>
     ipcRenderer.invoke("threads:snapshot", threadId, cursor),
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[]; mediaIntent?: "image" | "video" | null }) =>
-    ipcRenderer.invoke("threads:send", payload),
+    ipcRenderer.invoke("threads:send", payload) as Promise<{ queued: QueuedMessageRecord; queuedBehindActiveTask: boolean }>,
   requestHttp: (payload: {
     threadId: string;
     method: string;

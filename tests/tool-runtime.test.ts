@@ -588,6 +588,26 @@ describe("ToolRuntime", () => {
     expect(runTerminalCommand).toHaveBeenNthCalledWith(2, "pnpm run test");
   });
 
+  it("reports project.verify as unexecuted when no verification command is available", async () => {
+    const runTerminalCommand = vi.fn();
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "verify-empty", name: "project.verify", arguments: {} },
+      {
+        cwd: "C:\\workspace",
+        readFile: vi.fn().mockRejectedValue(new Error("package.json not found")),
+        runTerminalCommand
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      json: { commands: [], passed: false, unverified: true, executed: false }
+    });
+    expect(result.content).toContain("remains unverified");
+    expect(runTerminalCommand).not.toHaveBeenCalled();
+  });
+
   it("accepts numeric browser scroll deltas and rejects string values", async () => {
     const scrollBrowserPage = vi.fn().mockResolvedValue({ title: "Page", url: "https://example.com" });
     const runtime = new ToolRuntime();

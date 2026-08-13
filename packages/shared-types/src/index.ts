@@ -492,6 +492,7 @@ export interface QueuedMessageRecord {
     toolRecordId?: string;
     toolName: string;
     kinds: CompletionEvidenceKind[];
+    unitTestPassed?: boolean;
     verifiedPaths?: string[];
     resultPreview?: string;
   }>;

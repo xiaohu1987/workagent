@@ -9,6 +9,12 @@ import { WorkspaceAccordionSection, WorkspaceEmptyState } from "./panels";
 import { ProjectFilesWorkspace } from "./project-files";
 
 export type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
+
+export function hasRecognizedGitRepository(snapshot: GitSnapshot | null, projectRoot: string): boolean {
+  if (snapshot?.available !== true || !snapshot.root?.trim() || !projectRoot.trim()) return false;
+  return normalizeWorkspacePath(snapshot.root) === normalizeWorkspacePath(projectRoot);
+}
+
 export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   hidden,
   activeTab,
@@ -60,28 +66,31 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
   threadId: string | null;
 }) {
+  const showGitWorkspace = hasRecognizedGitRepository(gitSnapshot, projectRoot);
   return (
     <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="Right workspace" aria-hidden={hidden}>
       <div className="right-workspace-accordion">
-        <WorkspaceAccordionSection
-          active={expandedTab === "changes"}
-          id="git"
-          label="Git"
-          badge={gitSnapshot?.files.length ?? 0}
-          icon={<IconFileChanges />}
-          onClick={() => toggleWorkspaceSection("changes", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
-        >
-          <GitChangesWorkspace
-            threadId={threadId}
-            snapshot={gitSnapshot}
-            loading={gitLoading}
-            busy={gitActionBusy}
-            message={gitActionMessage}
-            onRefresh={onGitRefresh}
-            onAction={onGitAction}
-            onComment={onGitComment}
-          />
-        </WorkspaceAccordionSection>
+        {showGitWorkspace ? (
+          <WorkspaceAccordionSection
+            active={expandedTab === "changes"}
+            id="git"
+            label="Git"
+            badge={gitSnapshot.files.length}
+            icon={<IconFileChanges />}
+            onClick={() => toggleWorkspaceSection("changes", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
+          >
+            <GitChangesWorkspace
+              threadId={threadId}
+              snapshot={gitSnapshot}
+              loading={gitLoading}
+              busy={gitActionBusy}
+              message={gitActionMessage}
+              onRefresh={onGitRefresh}
+              onAction={onGitAction}
+              onComment={onGitComment}
+            />
+          </WorkspaceAccordionSection>
+        ) : null}
         <WorkspaceAccordionSection
           active={expandedTab === "files"}
           id="files"
@@ -149,5 +158,9 @@ function toggleWorkspaceSection(
     onTabChange(tab);
   }
   onExpandedTabChange(tab);
+}
+
+function normalizeWorkspacePath(value: string): string {
+  return value.replace(/\//g, "\\").replace(/\\+$/, "").toLocaleLowerCase();
 }
 

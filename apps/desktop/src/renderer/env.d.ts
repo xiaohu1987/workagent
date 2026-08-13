@@ -106,7 +106,10 @@ declare global {
       deleteThread: (threadId: string) => Promise<void>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
       getThreadSnapshot: (threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) => Promise<any>;
-      sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[]; mediaIntent?: "image" | "video" | null }) => Promise<void>;
+      sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[]; mediaIntent?: "image" | "video" | null }) => Promise<{
+        queued: QueuedMessageRecord;
+        queuedBehindActiveTask: boolean;
+      }>;
       requestHttp: (payload: {
         threadId: string;
         method: string;

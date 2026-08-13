@@ -42,3 +42,25 @@
 - 将泛化的“正在请求模型决策”替换为本轮工具上下文：显示已完成操作数量和最近工具结果；首轮无工具时显示“正在分析任务并规划下一步”，并兼容已在执行中的旧状态。
 - 继续审计并移除兼容层隐式输出阈值：DeepSeek、Kimi、Agnes、Gemini 不再强制把 `max_tokens` 提升到 8192 或按上下文窗口计算下限，统一原样使用模型的 `defaultMaxOutputTokens`；Provider 请求体和工具数量仍仅按显式 `maxRequestBytes`、`maxTools` 配置限制。
 - 阈值审计结论：Provider 请求链路不再写死请求字节上限、工具数量上限、请求压缩安全余量或协议恢复字节上限；剩余固定数字仅用于重试次数、上下文压缩比例、工具结果/日志预览等运行安全策略，不会改变未配置 Provider 的请求体上限。
+
+## 2026-08-13
+
+- Fix long-thread freezes caused by oversized tool history: all tool results, including `git.diff`, code search, file reads, and database output, are now limited to 8,000 characters before persistence into model context; old persisted tool messages are compacted again while history is assembled. Raw replay is also capped at 48,000 tokens per request even for models that advertise a million-token context window. Full raw tool records remain available in execution details, but they no longer inflate every later provider request or renderer update.
+
+- Fix queued-message visibility during active tasks: message submission now receives the live runtime's authoritative queue result instead of inferring it from a potentially stale thread snapshot. When a message is accepted behind an active task, the renderer immediately displays the persisted queue item and reconciles it on the next snapshot; normal sends still become conversation messages and no send is converted into guidance or an interruption.
+
+- Add file-tree diff snapshot preview: changed file nodes in the right-side project folder now reuse the existing `apply_patch` snapshots. Hovering a file with a snapshot for 3 seconds opens a syntax-highlighted diff popover with added/deleted counts; moving into the popover keeps it open, and files without a snapshot remain unchanged.
+
+- Enforce project-code completion with unit tests: after a project task delivers source-code changes, completion now requires successful unit-test evidence and a final test report that states the command, pass status, and result summary. Builds, typechecks, file read-back, empty `project.verify`, and unsubstantiated prose cannot satisfy this gate. The requirement is carried through GPA ACT evidence and protocol-recovery state; unlike advisory completion auditing, it cannot be bypassed when recovery attempts are exhausted.
+
+- Fix false GPA/project-task completion after an empty `project.verify`: when no configured or discoverable verification command exists, the tool now explicitly reports `executed: false`; the agent runtime excludes that result from post-delivery verification evidence. A project task can therefore complete only after real verification command success (or other valid read-back/test/build evidence), instead of treating a no-op verification call as proof.
+
+- Fix conversation process visibility: submitting a new task immediately collapses every prior turn in that thread; when a running task reaches a terminal state, its process is collapsed once while retaining the user request and final answer. Historical threads therefore open with conclusions visible and execution details collapsed, and switching threads does not leak disclosure state.
+- Fix queued submissions being treated as interruptions: realtime presentation no longer replaces its live scene for a message that belongs behind an active task. These messages remain FIFO queued; only the empty composer exposes the explicit stop action.
+- Diagnose database password decryption behavior: database credentials remain in `credentials.json` as Electron `safeStorage` ciphertext and are protected by the current Windows user profile (DPAPI). The inspected configuration still contains both database credential records and matching references; the app must be run under the same Windows account/profile that saved them. No plaintext or app-defined fallback encryption was introduced.
+
+- Fix desktop freezes during long streamed responses: ordinary draft snapshots now publish at most once every 100ms, while start, retry, and phase changes publish immediately. This removes per-token full-text IPC, renderer stalls, and excessive runtime log writes.
+- Fix stale Git changes in the right workspace: Git snapshots are now bound to their source thread. Switching chats immediately hides the prior repository's branch and diff, and stale snapshot/action responses cannot overwrite the newly selected project.
+- Restrict GPA Git mutations to explicit user requests: staging, reverting, committing, pushing, pulling, PR creation, and worktree changes are hidden and blocked by default, including equivalent shell commands. Read-only Git inspection remains available for verification.
+- Hide the right-side Git workspace until the current task directory is successfully identified as a Git repository with a resolved repository root. Unknown, non-Git, and stale snapshots no longer display a branch or change list.
+- Tighten Git panel ownership further: the resolved Git root must exactly match the selected task's project directory. A repository detected only above or below that directory is treated as unrecognized and is hidden.

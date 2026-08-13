@@ -85,6 +85,8 @@ import {
   getActivePlanTimelineItem,
   getActiveSubagents,
   getAssistantDraftDisplayContent,
+  getConversationTurnIdToCollapseAfterExecution,
+  getConversationTurnIdsToCollapseForNewSubmission,
   getDefaultCollapsedConversationTurnIds,
   getDisplayMessageContent,
   getFileWriteTarget,
@@ -438,6 +440,7 @@ export function App() {
   >({});
   const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
   const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
+  const [gitSnapshotThreadId, setGitSnapshotThreadId] = useState<string | null>(null);
   const [gitLoading, setGitLoading] = useState(false);
   const [gitActionBusy, setGitActionBusy] = useState(false);
   const [gitActionMessage, setGitActionMessage] = useState<string | null>(null);
@@ -551,6 +554,7 @@ export function App() {
   const [editingUserMessage, setEditingUserMessage] = useState<{ id: string; content: string } | null>(null);
   const [collapsedConversationTurns, setCollapsedConversationTurns] = useState<Record<string, Set<string>>>({});
   const initializedConversationTurnsByThreadRef = useRef<Record<string, Set<string>>>({});
+  const conversationExecutionStateByThreadRef = useRef<Record<string, { turnId: string | null; isProcessing: boolean }>>({});
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [removingComposerAttachmentId, setRemovingComposerAttachmentId] = useState<string | null>(null);
   const [isContextReportOpen, setIsContextReportOpen] = useState(false);
@@ -2373,18 +2377,21 @@ export function App() {
   }, [clearSelectedFile, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThreadId]);
 
   useEffect(() => {
-    if (!isRightWorkspaceOpen || rightWorkspaceTab !== "changes" || !selectedThreadId) {
+    if (!isRightWorkspaceOpen || !selectedThreadId) {
       return;
     }
     let cancelled = false;
+    setGitSnapshotThreadId(null);
+    setGitActionMessage(null);
     const timer = window.setTimeout(() => {
       setGitLoading(true);
       void window.codexh.getGitSnapshot(selectedThreadId).then((next) => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
           setGitSnapshot(next as GitSnapshot);
+          setGitSnapshotThreadId(selectedThreadId);
         }
       }).catch((error: unknown) => {
-        if (!cancelled) {
+        if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
           setGitSnapshot({
             available: false,
             message: error instanceof Error ? error.message : String(error),
@@ -2393,9 +2400,10 @@ export function App() {
             canCreatePullRequest: false,
             files: []
           });
+          setGitSnapshotThreadId(selectedThreadId);
         }
       }).finally(() => {
-        if (!cancelled) setGitLoading(false);
+        if (!cancelled && selectedThreadIdRef.current === selectedThreadId) setGitLoading(false);
       });
     }, 180);
     return () => {
@@ -2874,6 +2882,28 @@ export function App() {
       return { ...current, [activeSnapshotThreadId]: nextIds };
     });
   }, [activeSnapshotThreadId, isTaskProcessing, latestConversationTurn]);
+  useEffect(() => {
+    if (!activeSnapshotThreadId) return;
+    const previous = conversationExecutionStateByThreadRef.current[activeSnapshotThreadId];
+    conversationExecutionStateByThreadRef.current[activeSnapshotThreadId] = {
+      turnId: latestConversationTurn?.id ?? null,
+      isProcessing: isTaskProcessing
+    };
+    const turnIdToCollapse = getConversationTurnIdToCollapseAfterExecution(
+      previous?.turnId ?? null,
+      previous?.isProcessing === true,
+      isTaskProcessing
+    );
+    if (!turnIdToCollapse) return;
+    setCollapsedConversationTurns((current) => {
+      const currentIds = current[activeSnapshotThreadId] ?? new Set<string>();
+      if (currentIds.has(turnIdToCollapse)) return current;
+      return {
+        ...current,
+        [activeSnapshotThreadId]: new Set([...currentIds, turnIdToCollapse])
+      };
+    });
+  }, [activeSnapshotThreadId, isTaskProcessing, latestConversationTurn?.id]);
   const latestRootRuntimeTool = useMemo(
     () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
       (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
@@ -3732,6 +3762,19 @@ export function App() {
     );
   }
 
+  function appendOptimisticQueuedMessage(threadId: string, message: QueuedMessageRecord) {
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      return {
+        ...current,
+        queuedMessages: [
+          ...current.queuedMessages.filter((item) => item.id !== message.id),
+          message
+        ]
+      };
+    });
+  }
+
   function updateOptimisticUserMessageAttachments(
     threadId: string,
     messageId: string,
@@ -4238,22 +4281,11 @@ export function App() {
       return;
     }
 
-    let realtimeInterruptedForSubmission = false;
-    const shouldInterruptForRealtime = realtimeEnhancement.enabled &&
-      !options?.internal &&
-      threadId === (activeSnapshotThreadId ?? selectedThreadId) &&
-      (isThreadExecutionInProgress(selectedThreadStatus) || realtimeEnhancement.controller.isActive);
-    if (shouldInterruptForRealtime) {
-      await realtimeEnhancement.interrupt();
-      realtimeInterruptedForSubmission = true;
-    }
-
     const displayContent = options?.displayContent
       ?? (options?.internal && (forcedContent ?? inputContent).trim().startsWith("[internal:")
         ? "继续"
         : forcedContent ?? inputContent);
     const queueingBehindActiveTask =
-      !realtimeInterruptedForSubmission &&
       !interruptingThreadIdsRef.current.has(threadId) && (
         isThreadExecutionInProgress(selectedThreadStatus) ||
         isPreparingRuntime ||
@@ -4266,6 +4298,7 @@ export function App() {
     // Start the under-message heartbeat immediately so send never looks like a
     // silent no-op while attachments/skills/runtime wake are still in flight.
     if (!options?.internal && !queueingBehindActiveTask) {
+      collapseConversationTurnsForNewSubmission(threadId);
       suppressRuntimeProgressRef.current[threadId] = false;
       pendingRuntimeStartsRef.current.add(threadId);
       startRuntimeActivity(threadId);
@@ -4357,11 +4390,26 @@ export function App() {
     }
     let realtimeSubmissionStarted = false;
     try {
-      if (realtimeEnhancement.enabled) {
+      // submitText intentionally interrupts a live realtime scene before it
+      // starts a replacement. A queued message must leave that scene and its
+      // backing task untouched.
+      if (realtimeEnhancement.enabled && !queueingBehindActiveTask) {
         await realtimeEnhancement.submitText(inputContent, threadId);
         realtimeSubmissionStarted = true;
       }
-      await window.codexh.sendMessage({ threadId, content: raw, displayContent, attachments: importedAttachments, mediaIntent: submittedMediaIntent });
+      const submission = await window.codexh.sendMessage({
+        threadId,
+        content: raw,
+        displayContent,
+        attachments: importedAttachments,
+        mediaIntent: submittedMediaIntent
+      });
+      if (!options?.internal && submission.queuedBehindActiveTask) {
+        if (optimisticMessage) {
+          removeOptimisticUserMessage(threadId, optimisticMessage.id);
+        }
+        appendOptimisticQueuedMessage(threadId, submission.queued);
+      }
     } catch (error) {
       if (realtimeSubmissionStarted) realtimeEnhancement.reset();
       if (optimisticMessage) {
@@ -5284,18 +5332,37 @@ export function App() {
   }
 
   async function runGitAction(action: () => Promise<GitActionResult>) {
-    if (gitActionBusy) return;
+    const actionThreadId = selectedThreadIdRef.current;
+    if (gitActionBusy || !actionThreadId) return;
     setGitActionBusy(true);
     setGitActionMessage(null);
     try {
       const result = await action();
-      setGitSnapshot(result.snapshot);
-      setGitActionMessage(result.message);
+      if (selectedThreadIdRef.current === actionThreadId) {
+        setGitSnapshot(result.snapshot);
+        setGitSnapshotThreadId(actionThreadId);
+        setGitActionMessage(result.message);
+      }
     } catch (error) {
-      setGitActionMessage(error instanceof Error ? error.message : String(error));
+      if (selectedThreadIdRef.current === actionThreadId) {
+        setGitActionMessage(error instanceof Error ? error.message : String(error));
+      }
     } finally {
       setGitActionBusy(false);
     }
+  }
+
+  function collapseConversationTurnsForNewSubmission(threadId: string) {
+    if (threadId !== activeSnapshotThreadId) return;
+    const turnIds = getConversationTurnIdsToCollapseForNewSubmission(conversationTurnSections);
+    if (turnIds.length === 0) return;
+    const initialized = initializedConversationTurnsByThreadRef.current[threadId] ?? new Set<string>();
+    initializedConversationTurnsByThreadRef.current[threadId] = new Set([...initialized, ...turnIds]);
+    setCollapsedConversationTurns((current) => {
+      const currentIds = current[threadId] ?? new Set<string>();
+      const nextIds = new Set([...currentIds, ...turnIds]);
+      return nextIds.size === currentIds.size ? current : { ...current, [threadId]: nextIds };
+    });
   }
 
   useEffect(() => {
@@ -5483,6 +5550,7 @@ export function App() {
     if (!selectedThreadId || gitLoading) return;
     setGitRefreshRevision((current) => current + 1);
   });
+  const visibleGitSnapshot = gitSnapshotThreadId === selectedThreadId ? gitSnapshot : null;
   const runGitActionEvent = useStableEvent(runGitAction);
   const sendGitCommentEvent = useStableEvent((content: string) => { void sendMessage(content); });
   const selectProjectFileEvent = useStableEvent(selectProjectFile);
@@ -6077,7 +6145,7 @@ export function App() {
           onAddAttachment={addComposerAttachmentEvent}
           projectFiles={projectFiles}
           projectFilesLoading={isProjectFilesLoading}
-          gitSnapshot={gitSnapshot}
+          gitSnapshot={visibleGitSnapshot}
           gitLoading={gitLoading}
           gitActionBusy={gitActionBusy}
           gitActionMessage={gitActionMessage}

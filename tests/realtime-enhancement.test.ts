@@ -111,6 +111,30 @@ describe("realtime enhancement controller", () => {
     expect(controller.getState()).toMatchObject({ phase: "thinking", turnRunId: "turn-new", assistantText: "new response" });
   });
 
+  it("can keep an active scene unchanged while a message is queued", async () => {
+    let interruptCount = 0;
+    const controller = new RealtimeEnhancementController(
+      { enabled: true, threadId: "thread-1" },
+      { interrupt: () => { interruptCount += 1; } }
+    );
+
+    await controller.submitText("active request");
+    controller.handleRuntimeEvent(event("assistant.draft.updated", {
+      turnRunId: "turn-active",
+      content: "working"
+    }));
+
+    // Queued submissions do not call submitText(), which is the only path
+    // that replaces the realtime scene and invokes its interrupt callback.
+    expect(interruptCount).toBe(0);
+    expect(controller.getState()).toMatchObject({
+      phase: "thinking",
+      turnRunId: "turn-active",
+      userText: "active request",
+      assistantText: "working"
+    });
+  });
+
   it("keeps a turn open when an assistant output is followed by a tool call", async () => {
     const controller = new RealtimeEnhancementController({ enabled: true, threadId: "thread-1" });
     await controller.submitText("search the web");

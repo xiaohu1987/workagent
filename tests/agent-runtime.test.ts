@@ -44,6 +44,10 @@ import {
   shouldSwitchStandardCompletionToTextToolProtocol,
   isDeferredExecutionPayload,
   isProjectFileMutationRequest,
+  isProjectSourceCodePath,
+  hasSuccessfulUnitTestResult,
+  isUnitTestCommand,
+  hasUnitTestReport,
   createManagedWriteRecoveryState,
   createManagedWriteRecoveryReadToolCall,
   validateManagedWriteRecoveryToolCall,
@@ -117,6 +121,8 @@ import {
   RECOVERY_MODEL_DECISION_TIMEOUT_MS,
   STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
   MAX_REPOSITORY_COMPLETION_REJECTIONS,
+  MAX_MODEL_TOOL_RESULT_CHARACTERS,
+  MAX_RAW_HISTORY_TOKENS_PER_REQUEST,
   LEGACY_MCP_OVERSIZED_FOLLOW_UP,
   createRepositoryExplorationState,
   applyLegacyMcpResultToRepositoryExploration,
@@ -166,6 +172,10 @@ import {
   MAX_BLOCKED_IDENTICAL_TOOL_RETRIES,
   shouldStopAfterBlockedIdenticalToolRetry,
   MAX_MODEL_TIMEOUT_RETRIES,
+  ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS,
+  shouldPublishAssistantDraftUpdate,
+  isExplicitGitMutationRequest,
+  validateGitMutationToolCall,
   parseGpaState,
   normalizeSequentialPlanTasks,
   parseGpaCompletedTaskDeclarations,
@@ -210,6 +220,29 @@ describe("visible assistant response fallback", () => {
 
   it("prefers the terminal decision message when it is present", () => {
     expect(resolveVisibleAssistantContent("Final response", "Draft response")).toBe("Final response");
+  });
+});
+
+describe("assistant draft stream throttling", () => {
+  it("limits ordinary full-text draft snapshots to ten updates per second", () => {
+    expect(ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS).toBe(100);
+    expect(shouldPublishAssistantDraftUpdate(1_000, 1_099)).toBe(false);
+    expect(shouldPublishAssistantDraftUpdate(1_000, 1_100)).toBe(true);
+  });
+
+  it("publishes phase changes immediately so status and final content are not delayed", () => {
+    expect(shouldPublishAssistantDraftUpdate(1_000, 1_001, true)).toBe(true);
+  });
+});
+
+describe("Git mutation authorization", () => {
+  it("requires an explicit user request before Git-changing actions are available", () => {
+    expect(isExplicitGitMutationRequest("修复这个接口并运行测试")).toBe(false);
+    expect(isExplicitGitMutationRequest("请提交当前改动并推送分支")).toBe(true);
+    expect(validateGitMutationToolCall({ name: "git.commit", arguments: {} }, false)).toContain("explicit user request");
+    expect(validateGitMutationToolCall({ name: "shell.exec", arguments: { command: "git commit -m fix" } }, false)).toContain("explicit user request");
+    expect(validateGitMutationToolCall({ name: "git.status", arguments: {} }, false)).toBeNull();
+    expect(validateGitMutationToolCall({ name: "git.commit", arguments: {} }, true)).toBeNull();
   });
 });
 
@@ -1295,6 +1328,92 @@ describe("standard completion validation", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("recognizes source code deliveries, successful unit tests, and test reports", () => {
+    expect(isProjectSourceCodePath("D:\\project\\src\\App.tsx")).toBe(true);
+    expect(isProjectSourceCodePath("D:\\project\\README.md")).toBe(false);
+    expect(hasSuccessfulUnitTestResult(
+      { name: "shell.exec", arguments: { command: "pnpm vitest run tests/app.test.ts" } },
+      { json: {} }
+    )).toBe(true);
+    expect(hasSuccessfulUnitTestResult(
+      { name: "project.verify", arguments: {} },
+      { json: { passed: true, commands: ["pnpm run typecheck"] } }
+    )).toBe(false);
+    expect(isUnitTestCommand("echo test")).toBe(false);
+    expect(hasUnitTestReport("测试报告：单元测试 pnpm test 通过，12 passed，0 failed。")).toBe(true);
+    expect(hasUnitTestReport("构建通过。")).toBe(false);
+  });
+
+  it("does not treat an unexecuted project.verify call as post-delivery verification", () => {
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "verify-1",
+      toolName: "project.verify",
+      hasPriorDelivery: true,
+      verificationPassed: false,
+      resultPreview: "No safe project verification command is configured or discoverable. The change remains unverified."
+    });
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "Updated the source and ran project verification.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      deliveredPaths: ["D:\\project\\src\\voice.ts"],
+      successfulEvidence: [
+        { toolCallId: "write-1", toolName: "apply_patch", kinds: ["delivery"] },
+        verification
+      ]
+    });
+
+    expect(verification.kinds).not.toContain("verification");
+    expect(result.valid).toBe(false);
+    expect(result.missingVerification).toBe(true);
+  });
+
+  it("requires a passing unit test and test report for delivered project source code", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "Updated src/voice.ts and verified the build.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      requiresUnitTest: true,
+      deliveredPaths: ["D:\\project\\src\\voice.ts"],
+      successfulEvidence: [
+        { toolCallId: "write-1", toolName: "apply_patch", kinds: ["delivery"] },
+        { toolCallId: "build-1", toolName: "shell.exec", kinds: ["verification"] }
+      ]
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.missingUnitTest).toBe(true);
+    expect(result.missingTestReport).toBe(true);
+  });
+
+  it("accepts a project code completion only with a successful unit test and report", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "测试报告：单元测试 `pnpm vitest run tests/voice.test.ts` 通过，12 passed，0 failed。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      requiresUnitTest: true,
+      deliveredPaths: ["D:\\project\\src\\voice.ts"],
+      successfulEvidence: [
+        { toolCallId: "write-1", toolName: "apply_patch", kinds: ["delivery"] },
+        { toolCallId: "test-1", toolName: "shell.exec", kinds: ["verification"], unitTestPassed: true }
+      ]
+    });
+
+    expect(result.valid).toBe(true);
+  });
+
   it("includes successful database query output in completion audit evidence", () => {
     const evidence = classifySuccessfulToolEvidence({
       toolCallId: "query-1",
@@ -2200,6 +2319,77 @@ describe("GPA ACT completion evidence", () => {
     });
   });
 
+  it("rejects a claimed GPA completion when project.verify ran no command", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-1",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\src\\App.tsx"]
+    });
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "verify-1",
+      toolName: "project.verify",
+      hasPriorDelivery: true,
+      verificationPassed: false
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "The project changes are complete.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-1", kind: "delivery" },
+          { taskId: "T1", toolCallId: "verify-1", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, verification]
+    });
+
+    expect(verification.kinds).not.toContain("verification");
+    expect(result.valid).toBe(false);
+    expect(result.invalidEvidenceToolCallIds).toContain("verify-1");
+    expect(result.missingVerification).toBe(true);
+  });
+
+  it("requires unit-test evidence and report before a GPA code task can complete", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-1",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\src\\App.tsx"]
+    });
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "build-1",
+      toolName: "shell.exec",
+      hasPriorDelivery: true
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "The project changes passed the build.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-1", kind: "delivery" },
+          { taskId: "T1", toolCallId: "build-1", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, verification],
+      requiresUnitTest: true
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.missingUnitTest).toBe(true);
+    expect(result.missingTestReport).toBe(true);
+  });
+
   it("requires desktop and mobile browser evidence for frontend GPA work", () => {
     const delivery = classifySuccessfulToolEvidence({
       toolCallId: "patch-ui",
@@ -2775,8 +2965,27 @@ describe("context overflow recovery", () => {
       content: "binary-like-output\n".repeat(100_000)
     });
 
-    expect(estimateRuntimeTokens(summarized)).toBeLessThanOrEqual(resolveModelToolResultTokenBudget(128_000));
-    expect(summarized).toContain("context compacted");
+    expect(summarized.length).toBeLessThanOrEqual(MAX_MODEL_TOOL_RESULT_CHARACTERS);
+    expect(summarized).toContain("Tool result was shortened");
+  });
+
+  it("keeps raw history bounded when the model advertises a very large context window", () => {
+    const messages = Array.from({ length: 40 }, (_, index) => ({
+      id: `tool-${index}`,
+      threadId: "thread-1",
+      turnRunId: `turn-${index}`,
+      role: "tool" as const,
+      content: `code.search\n${"result\n".repeat(8_000)}`,
+      metadataJson: null,
+      createdAt: new Date(2026, 0, index + 1).toISOString()
+    })) as MessageRecord[];
+    const selected = selectBudgetedHistory(
+      messages,
+      Math.min(createContextBudgetPlan(1_024_000).rawHistoryBudgetTokens, MAX_RAW_HISTORY_TOKENS_PER_REQUEST)
+    );
+
+    expect(selected.estimatedTokens).toBeLessThanOrEqual(MAX_RAW_HISTORY_TOKENS_PER_REQUEST);
+    expect(selected.transcript.length).toBeLessThan(messages.length);
   });
 
   it("uses a tighter context budget for large MCP responses", () => {
