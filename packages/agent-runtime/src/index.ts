@@ -3744,7 +3744,8 @@ class ThreadSessionRuntime {
             role: "assistant",
             content: assistantMessage && isSafeCommentaryMessage(assistantMessage) ? assistantMessage : "",
             toolCalls: decision.toolCalls,
-            reasoningContent: decision.reasoningSummary
+            reasoningContent: decision.reasoningSummary,
+            responseReasoningItem: decision.responseReasoningItem
           });
         }
 
@@ -8692,8 +8693,7 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error);
   return [
     "任务暂时停止：运行时遇到了无法自动恢复的异常。",
-    `原因：${detail}`,
-    "建议：根据原因修正项目路径、权限、工具配置或模型配置后重试。已有执行记录已保留；重新提交时 agent 会从当前项目状态继续，而不是假设未完成的修改已经成功。"
+    `原因：${detail}`
   ].join("\n");
 }
 

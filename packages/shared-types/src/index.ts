@@ -312,6 +312,32 @@ export interface ToolCallRecord {
   completedAt: string | null;
 }
 
+/** Bounded tool data used by conversation pages and runtime events. */
+export interface ToolCallSummary extends Omit<ToolCallRecord, "resultJson"> {
+  resultJson: string | null;
+  resultSize: number;
+  hasFullResult: boolean;
+}
+
+export interface ToolCallDetail {
+  toolCallId: string;
+  resultJson: string | null;
+  resultSize: number;
+  available: boolean;
+}
+
+export interface ConversationPageCursor {
+  createdAt: string;
+  id: string;
+}
+
+export interface ConversationPage {
+  messages: MessageRecord[];
+  toolCalls: ToolCallSummary[];
+  previousCursor: ConversationPageCursor | null;
+  hasMore: boolean;
+}
+
 export interface ToolResult {
   ok: boolean;
   content: string;
@@ -903,6 +929,8 @@ export interface ProviderTurnDecision {
   /** The provider returned an off-protocol response and needs a JSON tool-protocol retry. */
   requestTextToolProtocol?: boolean;
   reasoningSummary?: string;
+  /** Opaque Responses API reasoning item required for a later tool-result request. */
+  responseReasoningItem?: unknown;
 }
 
 export type CompletionEvidenceKind = "observation" | "delivery" | "verification";
@@ -979,6 +1007,8 @@ export interface ProviderTurnInput {
     toolCalls?: RuntimeToolCall[];
     /** Internal reasoning echoed back to providers that require it for tool turns. */
     reasoningContent?: string;
+    /** Opaque Responses API reasoning item retained until its tool calls receive results. */
+    responseReasoningItem?: unknown;
     toolCallId?: string;
     toolResultOk?: boolean;
   }>;
@@ -1174,7 +1204,7 @@ export interface RuntimeThreadSnapshot {
     plugin: PluginRecord;
     binding: ProjectPluginBinding | null;
   }>;
-  toolCalls: ToolCallRecord[];
+  toolCalls: ToolCallSummary[];
   contextCompaction: ContextCompactionRecord | null;
   contextMeasurement?: ContextMeasurementRecord | null;
   gpa: GpaState | null;

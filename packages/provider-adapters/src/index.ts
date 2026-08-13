@@ -1104,7 +1104,16 @@ class OpenAiResponsesProvider implements ProviderAdapter {
           strict: false
         }))
       : undefined;
-    const reasoningEffort = input.reasoningEffort ?? input.model.defaultReasoningEffort;
+    const requestedReasoningEffort = input.reasoningEffort ?? input.model.defaultReasoningEffort;
+    // A resumed tool turn must include the exact preceding reasoning item. Older
+    // transcripts cannot supply it, so continuing in thinking mode would produce
+    // a deterministic 400 from Responses-compatible gateways.
+    const hasIncompleteReasoningHistory = input.transcript.some(
+      (message) => message.role === "assistant" &&
+        Boolean(message.toolCalls?.length) &&
+        !message.responseReasoningItem
+    );
+    const reasoningEffort = hasIncompleteReasoningHistory ? "none" : requestedReasoningEffort;
     const request: Record<string, unknown> = {
       model: input.model.id,
       instructions: input.systemPrompt || undefined,
@@ -2109,6 +2118,10 @@ async function buildResponsesInput(input: ProviderTurnInput): Promise<any[]> {
       if (message.content) {
         items.push({ role: "assistant", content: [{ type: "output_text", text: message.content }] });
       }
+      if (isResponsesReasoningItem(message.responseReasoningItem)) {
+        // Responses requires this item before the function calls it produced.
+        items.push(message.responseReasoningItem);
+      }
       for (const call of message.toolCalls) {
         calls.set(call.id, call);
         items.push({
@@ -2161,9 +2174,11 @@ function parseResponsesResponse(response: any, input: ProviderTurnInput): Provid
       }
     : nativeTextDecision(text);
   const withUsage = withTokenUsage(decision, response?.usage);
-  return reasoning && !withUsage.reasoningSummary
+  const withReasoning = reasoning && !withUsage.reasoningSummary
     ? { ...withUsage, reasoningSummary: reasoning }
     : withUsage;
+  const responseReasoningItem = extractResponsesReasoningItem(response?.output);
+  return responseReasoningItem ? { ...withReasoning, responseReasoningItem } : withReasoning;
 }
 
 async function consumeResponsesStream(stream: AsyncIterable<any>, input: ProviderTurnInput): Promise<ProviderTurnDecision> {
@@ -2229,7 +2244,14 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
     ? { assistantMessage: text || undefined, toolCalls: streamedCalls, endTurn: false, goalCompleted: false, isStructured: true }
     : nativeTextDecision(text);
   const withUsage = withTokenUsage(decision, terminalResponse.usage);
-  return reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
+  const withReasoning = reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
+  const responseReasoningItem = extractResponsesReasoningItem(terminalResponse?.output);
+  return responseReasoningItem ? { ...withReasoning, responseReasoningItem } : withReasoning;
+}
+
+function isResponsesReasoningItem(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" &&
+    (value as { type?: unknown }).type === "reasoning";
 }
 
 function extractResponsesText(output: unknown): string {
@@ -2246,6 +2268,12 @@ function extractResponsesReasoning(output: unknown): string {
     if (item?.type !== "reasoning" || !Array.isArray(item.summary)) return [];
     return item.summary.flatMap((part: any) => typeof part?.text === "string" ? [part.text] : []);
   }).join("\n").trim();
+}
+
+function extractResponsesReasoningItem(output: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(output)) return undefined;
+  const item = output.find((candidate: any) => candidate?.type === "reasoning");
+  return isResponsesReasoningItem(item) ? item : undefined;
 }
 
 function extractResponsesToolCalls(output: unknown, input: ProviderTurnInput): RuntimeToolCall[] {

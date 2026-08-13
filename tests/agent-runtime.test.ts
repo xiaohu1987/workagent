@@ -3198,6 +3198,38 @@ describe("GPA plan validation", () => {
     ).toEqual([]);
   });
 
+  it("promotes clarification questions without confirmation keywords", () => {
+    const content = [
+      "### 还缺少几个决定",
+      "1. 你偏好简洁版还是完整功能版？",
+      "2. 请指定需要支持的登录方式？",
+      "3. 数据保留多少天？",
+      "4. 如何处理历史导入数据？"
+    ].join("\n");
+
+    expect(buildGpaTextClarificationQuestions("goal", content).map((question) => question.prompt)).toEqual([
+      "你偏好简洁版还是完整功能版？",
+      "请指定需要支持的登录方式？",
+      "数据保留多少天？",
+      "如何处理历史导入数据？"
+    ]);
+  });
+
+  it("promotes numbered clarification questions with bold labels", () => {
+    const content = [
+      "### 4) 澄清问题",
+      "1 | **接口粒度：** 一个接口一次返回【基础信息 + 销售合同 + 销售订单 + 采购合同 + BizCase 附件 + 字段显隐】？还是只返回基础信息字段与显隐规则，四块关联数据由前端各自调用已有接口？",
+      "2 | **显示控制依据：** 老 sheet 页字段显示/隐藏规则是什么（固定字段集 / 权限 / 项目类型），是否以 `ProjectInfo.ascx` 逐字段核对为准？",
+      "3 | **字段命名与包装：** 返回字段用老页面列头（PI_PrjCode）还是前端驼峰命名？是否沿用现有统一响应包装结构？"
+    ].join("\n");
+
+    expect(buildGpaTextClarificationQuestions("plan", content).map((question) => question.prompt)).toEqual([
+      "一个接口一次返回【基础信息 + 销售合同 + 销售订单 + 采购合同 + BizCase 附件 + 字段显隐】？还是只返回基础信息字段与显隐规则，四块关联数据由前端各自调用已有接口？",
+      "老 sheet 页字段显示/隐藏规则是什么（固定字段集 / 权限 / 项目类型），是否以 `ProjectInfo.ascx` 逐字段核对为准？",
+      "返回字段用老页面列头（PI_PrjCode）还是前端驼峰命名？是否沿用现有统一响应包装结构？"
+    ]);
+  });
+
   it("parses embedded request_user_input XML from GOAL prose", () => {
     const content = [
       "### 4. 需要您确认的澄清问题",
@@ -3733,11 +3765,12 @@ describe("failure recovery messages", () => {
     expect(message).toContain("重新发送任务");
   });
 
-  it("gives an actionable recovery path for runtime errors", () => {
+  it("keeps runtime errors focused on the reported cause", () => {
     const message = buildRuntimeFailureRecoveryMessage(new Error("Invalid workspace path"));
 
-    expect(message).toContain("项目路径");
-    expect(message).toContain("重新提交");
+    expect(message).toContain("Invalid workspace path");
+    expect(message).not.toContain("建议：");
+    expect(message).not.toContain("重新提交");
   });
 });
 

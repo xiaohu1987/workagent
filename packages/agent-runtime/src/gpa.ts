@@ -566,7 +566,7 @@ function tryParseRequestUserInputJson(jsonContent: string): { title: string; que
   return { title, questions };
 }
 
-/** Promotes numbered questions embedded in GOAL/PLAN prose into input cards. */
+/** Promotes standalone GOAL/PLAN questions embedded in prose into input cards. */
 export function buildGpaTextClarificationQuestions(
   stage: GpaStage,
   assistantMessage: string | undefined
@@ -574,15 +574,18 @@ export function buildGpaTextClarificationQuestions(
   if ((stage !== "goal" && stage !== "plan") || !assistantMessage) {
     return [];
   }
-  if (!/(?:特别需要确认|需要确认|请确认以下|待确认|需要你确认|需要您确认)/i.test(assistantMessage)) {
-    return [];
-  }
 
   const questions = assistantMessage
     .split(/\r?\n/)
     .flatMap((line) => {
-      const match = line.match(/^\s*(?:[-*+]\s*)?(?:\d+[.、)]\s*)?(.{3,}?[？?])\s*$/);
-      return match ? [match[1].trim()] : [];
+      const match = line.match(/^\s*(?:[-*+]\s*)?(?:\d+(?:[.、)]\s*|\s*[|｜]\s*))?(?:(?:\*\*|__)[^*_]+?(?:\*\*|__)\s*)?(.{3,}?[？?])\s*$/);
+      if (!match) return [];
+      const question = match[1].trim();
+      // "请确认计划，确认后进入执行阶段" is a stage-control sentence, not
+      // a missing decision. Require an interrogative or a request for input.
+      return /(?:是否|能否|可否|要不要|需不需要|哪个|哪种|哪些|多少|几[个种项]|如何|怎么|什么|谁|何时|哪里|还是|或者|请(?:选择|指定|提供|补充|告知)|希望|偏好|倾向|决定|确认以下|待确认|需要.{0,8}(?:确认|提供|选择|指定|补充))/i.test(question)
+        ? [question]
+        : [];
     })
     .slice(0, 4);
 

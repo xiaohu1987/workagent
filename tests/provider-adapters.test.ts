@@ -3704,6 +3704,81 @@ describe("native provider tool protocols", () => {
     });
   });
 
+  it("preserves Responses reasoning items for the next tool-result request", async () => {
+    const provider: ProviderDefinition = {
+      id: "responses", type: "openai-compatible", transport: "responses", apiKey: "secret"
+    };
+    const reasoningItem = {
+      id: "rs_123",
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "Inspecting the workspace." }],
+      content: [{ type: "reasoning_text", text: "I need to list files first." }]
+    };
+    const reasoningModel = { ...model, id: "gpt-5.6-terra", providerId: provider.id, role: "reasoning" as const };
+    mocks.responsesCreate
+      .mockResolvedValueOnce({
+        status: "completed",
+        output: [
+          reasoningItem,
+          { type: "function_call", call_id: "response-call", name: nativeToolName(tool.name), arguments: '{"path":"."}' }
+        ]
+      })
+      .mockResolvedValueOnce({
+        status: "completed",
+        output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
+      });
+    const adapter = new ProviderFactory().create(provider);
+
+    const decision = await adapter.runTurn({
+      systemPrompt: "Use tools.", transcript: [{ role: "user", content: "Inspect." }], availableTools: [tool],
+      model: reasoningModel, provider, reasoningEffort: "high"
+    });
+    expect(decision.responseReasoningItem).toEqual(reasoningItem);
+
+    await adapter.runTurn({
+      systemPrompt: "Use tools.",
+      transcript: [
+        { role: "user", content: "Inspect." },
+        { role: "assistant", content: "", toolCalls: decision.toolCalls, responseReasoningItem: decision.responseReasoningItem },
+        { role: "tool", content: "Directory listing", toolCallId: "response-call" }
+      ],
+      availableTools: [tool], model: reasoningModel, provider, reasoningEffort: "high"
+    });
+
+    const request = mocks.responsesCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request.reasoning).toEqual({ effort: "high", summary: "concise" });
+    expect(request.input).toEqual(expect.arrayContaining([
+      reasoningItem,
+      expect.objectContaining({ type: "function_call", call_id: "response-call" }),
+      expect.objectContaining({ type: "function_call_output", call_id: "response-call" })
+    ]));
+  });
+
+  it("disables Responses thinking when resumed tool history lacks its original reasoning item", async () => {
+    mocks.responsesCreate.mockResolvedValue({
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
+    });
+    const provider: ProviderDefinition = {
+      id: "responses", type: "openai-compatible", transport: "responses", apiKey: "secret"
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use tools.",
+      transcript: [
+        { role: "user", content: "Inspect." },
+        { role: "assistant", content: "", toolCalls: [{ id: "old-call", name: tool.name, arguments: { path: "." } }] },
+        { role: "tool", content: "Directory listing", toolCallId: "old-call" }
+      ],
+      availableTools: [tool],
+      model: { ...model, id: "gpt-5.6-terra", providerId: provider.id, role: "reasoning" },
+      provider,
+      reasoningEffort: "high"
+    });
+
+    expect(mocks.responsesCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("reasoning");
+  });
+
   it("streams Responses text and function arguments without exposing tool JSON", async () => {
     async function* events() {
       yield { type: "response.output_text.delta", delta: "Inspecting" };

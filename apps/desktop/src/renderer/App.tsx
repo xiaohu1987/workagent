@@ -1997,9 +1997,9 @@ export function App() {
           const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
           const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 0;
           const attemptLabel = maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : "";
-          appendRuntimeStatus(typed.threadId, `模型输出被截断，正在请求精简结果${attemptLabel}`, typed.createdAt);
+          appendRuntimeStatus(typed.threadId, `回答内容过长，正在精简后继续生成${attemptLabel}`, typed.createdAt);
           if (notificationThreadId) {
-            updateThreadNotification(notificationThreadId, `模型输出被截断，正在请求精简结果${attemptLabel}。`, typed.createdAt);
+            updateThreadNotification(notificationThreadId, `回答内容过长，正在精简后继续生成${attemptLabel}。`, typed.createdAt);
           }
           setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         }
