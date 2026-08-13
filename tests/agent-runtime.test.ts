@@ -3169,7 +3169,7 @@ describe("GPA plan validation", () => {
 
   it("promotes numbered unresolved PLAN questions into four input-card questions", () => {
     const content = [
-      "⏳ 请确认计划：特别需要确认：",
+      "### 特别需要确认",
       "1. 技术栈是否同意使用纯前端 HTML/CSS/JS？",
       "2. 数据范围是否只限初代 151 只？",
       "3. 队伍选择是「玩家 vs AI」还是「玩家 vs 玩家（同屏）」？",
@@ -3198,9 +3198,9 @@ describe("GPA plan validation", () => {
     ).toEqual([]);
   });
 
-  it("promotes clarification questions without confirmation keywords", () => {
+  it("promotes questions from an explicit clarification section without confirmation keywords", () => {
     const content = [
-      "### 还缺少几个决定",
+      "### 待补充的信息",
       "1. 你偏好简洁版还是完整功能版？",
       "2. 请指定需要支持的登录方式？",
       "3. 数据保留多少天？",
@@ -3213,6 +3213,16 @@ describe("GPA plan validation", () => {
       "数据保留多少天？",
       "如何处理历史导入数据？"
     ]);
+  });
+
+  it("does not promote ordinary questions outside a clarification section", () => {
+    const content = [
+      "### 实施说明",
+      "1. 数据保留多少天？",
+      "2. 如何处理历史导入数据？"
+    ].join("\n");
+
+    expect(buildGpaTextClarificationQuestions("plan", content)).toEqual([]);
   });
 
   it("promotes numbered clarification questions with bold labels", () => {

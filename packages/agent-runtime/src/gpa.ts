@@ -566,7 +566,35 @@ function tryParseRequestUserInputJson(jsonContent: string): { title: string; que
   return { title, questions };
 }
 
-/** Promotes standalone GOAL/PLAN questions embedded in prose into input cards. */
+function isGpaClarificationSectionHeading(line: string): boolean {
+  const heading = line.match(/^\s*(?:#{1,6}\s+|\d+\s*[.、)]\s+)(.+?)\s*$/)?.[1];
+  if (!heading) return false;
+  const title = heading.replace(/(?:\*\*|__|`)/g, "").trim();
+  return /(?:澄清|待确认|需要确认|需确认|待补充|需要补充|需补充|待决策|需要决策|需决策|待定)/i.test(title);
+}
+
+function extractGpaClarificationSectionQuestions(assistantMessage: string): string[] {
+  const lines = assistantMessage.split(/\r?\n/);
+  const questions: string[] = [];
+
+  for (let index = 0; index < lines.length && questions.length < 4; index += 1) {
+    if (!isGpaClarificationSectionHeading(lines[index])) continue;
+    for (let cursor = index + 1; cursor < lines.length && questions.length < 4; cursor += 1) {
+      const line = lines[cursor];
+      if (/^\s*#{1,6}\s+/.test(line) || isGpaClarificationSectionHeading(line)) break;
+      const match = line.match(/^\s*(?:[-*+]\s*)?(?:\d+(?:[.、)]\s*|\s*[|｜]\s*))?(?:(?:\*\*|__)[^*_]+?(?:\*\*|__)\s*)?(.{3,}?[？?])\s*$/);
+      if (match) questions.push(match[1].trim());
+    }
+  }
+
+  return questions;
+}
+
+/**
+ * Compatibility fallback for providers that put questions in prose instead of
+ * calling request_user_input. Only explicit clarification sections qualify;
+ * ordinary questions elsewhere remain assistant text.
+ */
 export function buildGpaTextClarificationQuestions(
   stage: GpaStage,
   assistantMessage: string | undefined
@@ -575,19 +603,7 @@ export function buildGpaTextClarificationQuestions(
     return [];
   }
 
-  const questions = assistantMessage
-    .split(/\r?\n/)
-    .flatMap((line) => {
-      const match = line.match(/^\s*(?:[-*+]\s*)?(?:\d+(?:[.、)]\s*|\s*[|｜]\s*))?(?:(?:\*\*|__)[^*_]+?(?:\*\*|__)\s*)?(.{3,}?[？?])\s*$/);
-      if (!match) return [];
-      const question = match[1].trim();
-      // "请确认计划，确认后进入执行阶段" is a stage-control sentence, not
-      // a missing decision. Require an interrogative or a request for input.
-      return /(?:是否|能否|可否|要不要|需不需要|哪个|哪种|哪些|多少|几[个种项]|如何|怎么|什么|谁|何时|哪里|还是|或者|请(?:选择|指定|提供|补充|告知)|希望|偏好|倾向|决定|确认以下|待确认|需要.{0,8}(?:确认|提供|选择|指定|补充))/i.test(question)
-        ? [question]
-        : [];
-    })
-    .slice(0, 4);
+  const questions = extractGpaClarificationSectionQuestions(assistantMessage);
 
   return questions.map((question, index) => ({
     id: `gpa_text_clarification_${index + 1}`,

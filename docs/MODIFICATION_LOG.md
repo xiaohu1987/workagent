@@ -45,7 +45,7 @@
 
 ## 2026-08-13
 
-- 扩展 GPA 澄清卡片的文本兜底匹配：不再依赖“需要确认 / 请确认 / 待确认”等少量标题关键词，而是识别 GOAL、PLAN 回复中带问号且具有可回答意图的独立问句，覆盖偏好、选择、指定、补充、数量、处理方式及“还是 / 或者”选项等表达；支持 `1 | **字段：** 问题？` 这类编号与加粗标签组合的 Markdown 写法。同时继续排除“请确认计划，确认后进入执行阶段”等纯流程提示，避免误显示澄清卡片。新增无“确认”关键词和带加粗标签澄清问句的回归测试。
+- 调整 GPA 澄清卡片的文本兼容解析，向 OpenAI function calling 的结构化调用方式对齐：`request_user_input` 仍是唯一权威入口；仅在模型未调用工具且文本使用“澄清 / 待确认 / 待补充 / 待决策”等明确 Markdown 标题区块时，才将其中的编号问句提升为卡片。支持 `1 | **字段：** 问题？` 这类编号与加粗标签组合写法；区块外的普通问句不再按语义词猜测并触发卡片。新增对应正反例回归测试。
 
 - Fix long-thread freezes caused by oversized tool history: all tool results, including `git.diff`, code search, file reads, and database output, are now limited to 8,000 characters before persistence into model context; old persisted tool messages are compacted again while history is assembled. Raw replay is also capped at 48,000 tokens per request even for models that advertise a million-token context window. Full raw tool records remain available in execution details, but they no longer inflate every later provider request or renderer update.
 
