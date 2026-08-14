@@ -109,6 +109,7 @@ export const deepseekCompat = defineCompat(gptCompat, {
       ctx.input.provider.baseUrl ?? ""
     ].join(" ").toLowerCase();
     const isV4 = isDeepSeekV4Model(identity);
+    const usesNativeProtocol = ctx.input.provider.deepseekProtocol !== "openai-compatible";
     const reasoningEffort = ctx.input.reasoningEffort;
     // V4 is a thinking model even when the catalog display name does not
     // include the word "thinking" (for example, deepseek-v4-flash-0731).
@@ -123,10 +124,10 @@ export const deepseekCompat = defineCompat(gptCompat, {
     // and led to repeated unparseable decisions. The fallback is entered only
     // after native tool calling has already failed, so a one-request switch to
     // non-thinking JSON mode is the reliable recovery transport.
-    const useStrictJsonRecovery = Boolean(
+    const useStrictJsonRecovery = usesNativeProtocol && Boolean(
       ctx.input.forceTextToolProtocol && ctx.model.supportsJsonOutput && isV4
     );
-    const isThinkingRequest = !useStrictJsonRecovery && (isV4
+    const isThinkingRequest = usesNativeProtocol && !useStrictJsonRecovery && (isV4
       ? reasoningEffort !== "none"
       : DEEPSEEK_REASONER_PATTERN.test(identity));
 
@@ -159,7 +160,7 @@ export const deepseekCompat = defineCompat(gptCompat, {
     // DeepSeek V4 defaults to thinking mode, but compatible gateways do not
     // always apply that default consistently. Make the mode explicit and map
     // the app's reasoning levels to the V4 API's low/high/max values.
-    if (isV4) {
+    if (usesNativeProtocol && isV4) {
       const isPro = /\bv4-pro\b/.test(identity);
       next = {
         ...next,

@@ -46,6 +46,7 @@ import type {
   SkillMetadata,
   SubagentResultEnvelope,
   SubagentWaitResult,
+  SubagentWatchdogDiagnostic,
   ThreadRecord,
   ToolCallRecord,
   ToolSpecDefinition,
@@ -54,7 +55,13 @@ import type {
 } from "@shared-types";
 import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy } from "./subagent-assignment";
 import { isGptReasoningEffort, normalizeResponseTone, withGptReasoningCapabilities } from "@shared-types";
-import { AgentRuntimeService, parseGpaState, toGpaPlanResumePreview } from "@agent-runtime";
+import {
+  AgentRuntimeService,
+  isUnitTestCommand,
+  parseGpaState,
+  resolveSubagentWatchdogDecision,
+  toGpaPlanResumePreview
+} from "@agent-runtime";
 import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
@@ -71,7 +78,7 @@ import { ToolRuntime } from "@tool-runtime";
 import { DatabaseRuntime } from "@database-runtime";
 import { redactRuntimeLogPayload, RuntimeLogWriter } from "./runtime-log";
 import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
-import { TerminalRuntime } from "./terminal-runtime";
+import { TerminalRuntime, type TerminalOutputHeartbeat } from "./terminal-runtime";
 import { GitService } from "./git-service";
 import { SkillLabService } from "./skill-lab";
 import { parseEditableMessageMetadata } from "./message-metadata";
@@ -86,6 +93,14 @@ import {
 } from "./storage";
 
 type ResolverMap<T> = Map<string, (value: T) => void>;
+type SubagentProgress = {
+  lastProgressAt: string;
+  lastToolEventAt: string | null;
+  currentTool: string | null;
+  isShellOrTest: boolean;
+  phase: "starting" | "awaiting_model" | "executing_shell_test" | "retrying";
+  interruptionReason?: string;
+};
 const INTERACTION_TIMEOUT_MS = 30_000;
 const MAX_APPLICATION_BACKGROUND_BYTES = 40 * 1024 * 1024;
 const APPLICATION_BACKGROUND_MIME_TYPES = new Set([
@@ -265,6 +280,7 @@ export class DesktopBackend {
   #deferredServices: Promise<void> | null = null;
   #backgroundSkillRefresh: Promise<void> | null = null;
   readonly #subagentDispatches = new Map<string, Promise<void>>();
+  readonly #subagentProgress = new Map<string, SubagentProgress>();
 
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
@@ -379,8 +395,8 @@ export class DesktopBackend {
         await fs.writeFile(filePath, content, "utf8");
       },
       runTerminalCommand: async (threadId, cwd, command, input) =>
-        this.#terminal.execute(threadId, cwd, command, (data) => {
-          void this.emitTerminalOutput(threadId, data);
+        this.#terminal.execute(threadId, cwd, command, (data, heartbeat) => {
+          void this.emitTerminalOutput(threadId, data, "default", heartbeat);
         }, (url) => {
           void this.openLocalServerUrl(threadId, url);
         }, "default", input?.onIdle),
@@ -766,8 +782,8 @@ export class DesktopBackend {
     return this.#terminal.open(
       threadId,
       cwd,
-      (data) => {
-        void this.emitTerminalOutput(threadId, data, sessionId);
+      (data, heartbeat) => {
+        void this.emitTerminalOutput(threadId, data, sessionId, heartbeat);
       },
       sessionId
     );
@@ -780,8 +796,8 @@ export class DesktopBackend {
       threadId,
       cwd,
       input,
-      (data) => {
-        void this.emitTerminalOutput(threadId, data, sessionId);
+      (data, heartbeat) => {
+        void this.emitTerminalOutput(threadId, data, sessionId, heartbeat);
       },
       sessionId
     );
@@ -3925,7 +3941,10 @@ export class DesktopBackend {
     const latestTurn = this.#db.getLatestTurnRun(thread.id);
     const hasQueuedMessage = this.#db.listQueuedMessages(thread.id)
       .some((message) => message.status === "queued" || message.status === "dispatching");
-    const status = thread.status === "running" || thread.status === "waiting"
+    const watchdog = this.#subagentProgress.get(thread.id);
+    const status = watchdog?.interruptionReason
+      ? "interrupted"
+      : thread.status === "running" || thread.status === "waiting"
       ? thread.status
       : hasQueuedMessage
         ? "queued"
@@ -3935,6 +3954,7 @@ export class DesktopBackend {
           ? "queued"
           : thread.status;
     const errors = [
+      ...(watchdog?.interruptionReason ? [watchdog.interruptionReason] : []),
       ...(latestTurn?.errorMessage ? [latestTurn.errorMessage] : []),
       ...(thread.status === "failed" && !latestTurn?.errorMessage ? [summary] : [])
     ];
@@ -3946,6 +3966,97 @@ export class DesktopBackend {
       agentPath: thread.agentPath,
       threadId: thread.id
     };
+  }
+
+  private getSubagentBaseState(thread: ThreadRecord, currentTool: string | null, progress?: SubagentProgress): SubagentWatchdogDiagnostic["state"] {
+    if (progress?.interruptionReason) return "auto_interrupted";
+    if (!this.isSubagentActive(thread)) return "completed";
+    if (this.#db.isSubagentPendingDispatch(thread.id)) return "queued";
+    if (currentTool && progress?.isShellOrTest) return "executing_shell_test";
+    if (progress?.phase === "retrying") return "retrying";
+    if (progress?.phase === "awaiting_model") return "awaiting_model";
+    return "starting";
+  }
+
+  private buildSubagentWatchdogDiagnostic(thread: ThreadRecord, nowMs = Date.now()): SubagentWatchdogDiagnostic {
+    const progress = this.#subagentProgress.get(thread.id);
+    const toolCalls = this.#db.listToolCalls(thread.id);
+    const runningTool = [...toolCalls].reverse().find((call) => call.status === "running" || call.status === "pending") ?? null;
+    const latestTool = [...toolCalls].reverse().find(Boolean) ?? null;
+    const latestToolEventAt = latestTool
+      ? (latestTool.completedAt && Date.parse(latestTool.completedAt) > Date.parse(latestTool.startedAt)
+        ? latestTool.completedAt
+        : latestTool.startedAt)
+      : progress?.lastToolEventAt ?? null;
+    const currentTool = runningTool?.toolName ?? progress?.currentTool ?? null;
+    const command = runningTool ? (() => {
+      try {
+        const parsed = JSON.parse(runningTool.argumentsJson) as { command?: unknown };
+        return typeof parsed.command === "string" ? parsed.command : "";
+      } catch {
+        return "";
+      }
+    })() : "";
+    const isShellOrTest = currentTool === "shell.exec"
+      || currentTool === "project.verify"
+      || (Boolean(command) && isUnitTestCommand(command))
+      || Boolean(progress?.isShellOrTest);
+    const lastProgressAt = progress?.lastProgressAt ?? latestToolEventAt ?? thread.createdAt;
+    const baseState = this.getSubagentBaseState(thread, currentTool, progress);
+    const decision = progress?.interruptionReason && !this.isSubagentActive(thread)
+      ? {
+          action: "continue" as const,
+          state: "auto_interrupted" as const,
+          nextInspectionAt: null,
+          automaticInterruptAt: null,
+          reason: progress.interruptionReason
+        }
+      : resolveSubagentWatchdogDecision({
+      nowMs,
+      startedAt: thread.createdAt,
+      lastProgressAt,
+      currentTool,
+      isShellOrTest,
+      active: this.isSubagentActive(thread),
+      baseState: baseState === "stalled" || baseState === "auto_interrupted" || baseState === "completed" ? "starting" : baseState
+    });
+    const startedAtMs = Date.parse(thread.createdAt);
+    const progressAtMs = Date.parse(lastProgressAt);
+    return {
+      threadId: thread.id,
+      agentPath: thread.agentPath,
+      state: decision.state,
+      lastToolEventAt: latestToolEventAt,
+      currentTool,
+      isShellOrTest,
+      lastProgressAt,
+      startedAt: thread.createdAt,
+      runtimeMs: Math.max(0, nowMs - (Number.isFinite(startedAtMs) ? startedAtMs : nowMs)),
+      idleForMs: Math.max(0, nowMs - (Number.isFinite(progressAtMs) ? progressAtMs : nowMs)),
+      nextInspectionAt: decision.nextInspectionAt,
+      automaticInterruptAt: decision.automaticInterruptAt,
+      interruptionReason: progress?.interruptionReason ?? decision.reason
+    };
+  }
+
+  private async interruptSubagentForWatchdog(thread: ThreadRecord, reason: string): Promise<void> {
+    const now = new Date().toISOString();
+    const progress = this.#subagentProgress.get(thread.id) ?? {
+      lastProgressAt: now,
+      lastToolEventAt: null,
+      currentTool: null,
+      isShellOrTest: false,
+      phase: "starting" as const
+    };
+    this.#subagentProgress.set(thread.id, { ...progress, interruptionReason: reason, lastProgressAt: now });
+    await this.emit({
+      type: "agent.watchdog",
+      threadId: thread.id,
+      payload: { state: "auto_interrupted", reason, automatic: true },
+      createdAt: now
+    });
+    await this.#logs.append("subagent.watchdog_interrupted", { threadId: thread.id, agentPath: thread.agentPath, reason }, thread.id);
+    await this.interruptThread(thread.id);
   }
 
   private async sendAgentMessage(parentThreadId: string, input: { agent: string; message: string }): Promise<SubagentResultEnvelope> {
@@ -3974,22 +4085,27 @@ export class DesktopBackend {
     parentThreadId: string,
     input: { agents?: string[]; timeoutMs?: number; abortSignal?: AbortSignal }
   ): Promise<SubagentWaitResult> {
-    const parent = this.#db.getThread(parentThreadId);
     const timeoutMs = Math.min(30_000, Math.max(250, Math.round(input.timeoutMs ?? 30_000)));
     const targetIds = input.agents?.length
       ? input.agents.map((agent) => this.resolveAgent(parentThreadId, agent).id)
       : (await this.listSubagents(parentThreadId)).map((item) => item.id);
-    if (targetIds.length === 0) return { agents: [], timedOut: false };
+    if (targetIds.length === 0) return { agents: [], timedOut: false, diagnostics: [] };
     const getTargets = () => targetIds.map((id) => this.#db.getThread(id));
     const allFinished = (agents: ThreadRecord[]) => agents.every((agent) => !this.isSubagentActive(agent));
     const initial = getTargets();
-    if (allFinished(initial)) return { agents: initial.map((item) => this.buildSubagentEnvelope(item)), timedOut: false };
+    if (allFinished(initial)) {
+      return {
+        agents: initial.map((item) => this.buildSubagentEnvelope(item)),
+        timedOut: false,
+        diagnostics: initial.map((item) => this.buildSubagentWatchdogDiagnostic(item))
+      };
+    }
 
     return new Promise<SubagentWaitResult>((resolve) => {
       let settled = false;
       let timer: ReturnType<typeof setInterval> | undefined;
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const onAbort = () => finish({ agents: [], timedOut: false });
+      const onAbort = () => finish({ agents: [], timedOut: false, diagnostics: [] });
       const finish = (value: SubagentWaitResult) => {
         if (settled) return;
         settled = true;
@@ -3998,16 +4114,46 @@ export class DesktopBackend {
         input.abortSignal?.removeEventListener("abort", onAbort);
         resolve(value);
       };
-      const poll = () => {
+      let inspecting = false;
+      const snapshot = async (timedOut: boolean) => {
         const agents = getTargets();
-        if (allFinished(agents)) finish({ agents: agents.map((item) => this.buildSubagentEnvelope(item)), timedOut: false });
+        const diagnostics = agents.map((agent) => this.buildSubagentWatchdogDiagnostic(agent));
+        return { agents, diagnostics, timedOut };
       };
-      timer = setInterval(poll, 250);
+      const poll = async () => {
+        if (settled || inspecting) return;
+        inspecting = true;
+        try {
+          const observed = await snapshot(false);
+          for (const diagnostic of observed.diagnostics) {
+            if (diagnostic.state !== "stalled" && diagnostic.state !== "auto_interrupted") continue;
+            const child = observed.agents.find((agent) => agent.id === diagnostic.threadId);
+            if (child && this.isSubagentActive(child)) {
+              await this.interruptSubagentForWatchdog(child, diagnostic.interruptionReason ?? "Subagent watchdog interrupted the task.");
+            }
+          }
+          const final = await snapshot(false);
+          if (allFinished(final.agents)) {
+            finish({
+              agents: final.agents.map((item) => this.buildSubagentEnvelope(item)),
+              timedOut: false,
+              diagnostics: final.diagnostics
+            });
+          }
+        } finally {
+          inspecting = false;
+        }
+      };
+      timer = setInterval(() => void poll(), 250);
       timeout = setTimeout(() => {
-        const agents = getTargets();
-        finish({ agents: agents.map((item) => this.buildSubagentEnvelope(item)), timedOut: true });
+        void snapshot(true).then((result) => finish({
+          agents: result.agents.map((item) => this.buildSubagentEnvelope(item)),
+          timedOut: true,
+          diagnostics: result.diagnostics
+        }));
       }, timeoutMs);
       input.abortSignal?.addEventListener("abort", onAbort, { once: true });
+      void poll();
     });
   }
 
@@ -4021,10 +4167,25 @@ export class DesktopBackend {
     if (this.#subagentDispatches.has(rootThreadId)) return;
     const dispatch = this.dispatchPendingSubagents(rootThreadId)
       .catch(async (error) => {
+        const reason = `Subagent dispatch failed: ${error instanceof Error ? error.message : String(error)}`;
         await this.#logs.append("subagent.pending_dispatch_failed", {
           rootThreadId,
-          error: error instanceof Error ? error.message : String(error)
+          error: reason
         }, rootThreadId);
+        // A failed scheduler must not leave children in a permanently queued
+        // or running-looking state. Preserve their prompts and prior evidence,
+        // then converge each pending child through the normal interruption path.
+        for (const pending of this.#db.listSubagentPendingDispatches(rootThreadId)) {
+          try {
+            await this.interruptSubagentForWatchdog(this.#db.getThread(pending.threadId), reason);
+          } catch (interruptError) {
+            await this.#logs.append("subagent.pending_dispatch_interrupt_failed", {
+              rootThreadId,
+              threadId: pending.threadId,
+              error: interruptError instanceof Error ? interruptError.message : String(interruptError)
+            }, rootThreadId);
+          }
+        }
       })
       .finally(() => this.#subagentDispatches.delete(rootThreadId));
     this.#subagentDispatches.set(rootThreadId, dispatch);
@@ -4255,6 +4416,64 @@ export class DesktopBackend {
     return lines.filter((line) => line.toLowerCase().includes(pattern.toLowerCase())).slice(0, 20);
   }
 
+  private observeSubagentRuntimeEvent(event: RuntimeEvent, subject: ThreadRecord | null): void {
+    if (!subject?.parentThreadId) return;
+    const now = event.createdAt;
+    const previous = this.#subagentProgress.get(subject.id) ?? {
+      lastProgressAt: subject.createdAt,
+      lastToolEventAt: null,
+      currentTool: null,
+      isShellOrTest: false,
+      phase: "starting" as const
+    };
+    if (previous.interruptionReason && event.type !== "agent.watchdog") return;
+
+    const next: SubagentProgress = { ...previous };
+    const toolName = typeof event.payload.toolName === "string" ? event.payload.toolName : null;
+    if (event.type === "tool.started" && toolName) {
+      let command = "";
+      if (typeof event.payload.argumentsJson === "string") {
+        try {
+          const parsed = JSON.parse(event.payload.argumentsJson) as { command?: unknown };
+          command = typeof parsed.command === "string" ? parsed.command : "";
+        } catch {
+          // Malformed tool arguments are still a real tool event.
+        }
+      }
+      next.lastProgressAt = now;
+      next.lastToolEventAt = now;
+      next.currentTool = toolName;
+      next.isShellOrTest = toolName === "shell.exec" || toolName === "project.verify" || isUnitTestCommand(command);
+      next.phase = next.isShellOrTest ? "executing_shell_test" : "starting";
+    } else if (event.type === "tool.completed") {
+      next.lastProgressAt = now;
+      next.lastToolEventAt = now;
+      next.currentTool = null;
+      next.isShellOrTest = false;
+      next.phase = "awaiting_model";
+    } else if (event.type === "terminal.output") {
+      // Output is deliberately not persisted again here. Its timestamp is
+      // enough to prove that a shell/test process made observable progress.
+      next.lastProgressAt = now;
+    } else if (event.type === "agent.awaiting_model") {
+      next.lastProgressAt = now;
+      next.currentTool = null;
+      next.isShellOrTest = false;
+      next.phase = "awaiting_model";
+    } else if (event.type === "agent.retrying") {
+      next.lastProgressAt = now;
+      next.phase = "retrying";
+    } else if (event.type === "agent.watchdog") {
+      next.lastProgressAt = now;
+      next.interruptionReason = typeof event.payload.reason === "string"
+        ? event.payload.reason
+        : previous.interruptionReason;
+    } else {
+      return;
+    }
+    this.#subagentProgress.set(subject.id, next);
+  }
+
   private async emit(event: RuntimeEvent): Promise<void> {
     let subject: ThreadRecord | null = null;
     if (event.threadId) {
@@ -4264,6 +4483,7 @@ export class DesktopBackend {
         subject = null;
       }
     }
+    this.observeSubagentRuntimeEvent(event, subject);
     const routedEvent: RuntimeEvent = subject?.parentThreadId
       ? {
           ...event,
@@ -4504,12 +4724,19 @@ export class DesktopBackend {
     });
   }
 
-  private async emitTerminalOutput(threadId: string, data: string, sessionId = "default"): Promise<void> {
+  private async emitTerminalOutput(
+    threadId: string,
+    data: string,
+    sessionId = "default",
+    heartbeat?: TerminalOutputHeartbeat
+  ): Promise<void> {
     await this.emit({
       type: "terminal.output",
       threadId,
-      payload: { data, sessionId },
-      createdAt: new Date().toISOString()
+      // This is also a heartbeat for the subagent watchdog. Keep the visible
+      // output behavior intact while exposing only compact progress metadata.
+      payload: { data, sessionId, progress: true, byteLength: heartbeat?.byteLength ?? Buffer.byteLength(data, "utf8") },
+      createdAt: heartbeat?.occurredAt ?? new Date().toISOString()
     });
   }
 

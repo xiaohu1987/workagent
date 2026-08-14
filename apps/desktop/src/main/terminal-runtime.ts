@@ -7,7 +7,7 @@ type TerminalSession = {
   child: ChildProcessWithoutNullStreams;
   cwd: string;
   output: string;
-  onOutput: (data: string) => void;
+  onOutput: (data: string, heartbeat: TerminalOutputHeartbeat) => void;
   stdoutDecoder: TextDecoder | null;
   stderrDecoder: TextDecoder | null;
 };
@@ -29,6 +29,11 @@ export type TerminalCommandResult = {
   diagnosis?: string;
 };
 
+export type TerminalOutputHeartbeat = {
+  occurredAt: string;
+  byteLength: number;
+};
+
 /** Maintains one interactive shell process per task. */
 export class TerminalRuntime {
   readonly #sessions = new Map<string, TerminalSession>();
@@ -36,7 +41,7 @@ export class TerminalRuntime {
 
   public constructor(private readonly commandIdleObservationMs = DEFAULT_COMMAND_IDLE_OBSERVATION_MS) {}
 
-  public open(threadId: string, cwd: string, onOutput: (data: string) => void, sessionId = "default") {
+  public open(threadId: string, cwd: string, onOutput: (data: string, heartbeat: TerminalOutputHeartbeat) => void, sessionId = "default") {
     const key = this.#sessionKey(threadId, sessionId);
     const existing = this.#sessions.get(key);
     if (existing && !existing.child.killed) {
@@ -102,7 +107,7 @@ export class TerminalRuntime {
     threadId: string,
     cwd: string,
     command: string,
-    onOutput: (data: string) => void,
+    onOutput: (data: string, heartbeat: TerminalOutputHeartbeat) => void,
     onLocalUrl?: (url: string) => void,
     sessionId = "default",
     onIdle?: () => Promise<string | null>
@@ -277,7 +282,7 @@ export class TerminalRuntime {
     threadId: string,
     cwd: string,
     input: string,
-    onOutput: (data: string) => void,
+    onOutput: (data: string, heartbeat: TerminalOutputHeartbeat) => void,
     sessionId = "default"
   ): void {
     const key = this.#sessionKey(threadId, sessionId);
@@ -341,7 +346,7 @@ export class TerminalRuntime {
       return;
     }
     session.output = `${session.output}${data}`.slice(-MAX_BUFFER_LENGTH);
-    session.onOutput(data);
+    session.onOutput(data, { occurredAt: new Date().toISOString(), byteLength: Buffer.byteLength(data, "utf8") });
   }
 
   #sessionKey(threadId: string, sessionId: string): string {

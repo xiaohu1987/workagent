@@ -1317,9 +1317,8 @@ export function App() {
   }
 
   function appendRuntimeStatus(threadId: string, label: string, createdAt = new Date().toISOString()) {
-    // Background tasks can emit many recovery events. Their detail is persisted
-    // in the snapshot; only the visible task needs live transcript activity.
-    if (threadId !== selectedThreadIdRef.current) return;
+    // Keep child activity while its root task is selected so subagent cards can
+    // distinguish startup, model wait, shell progress, and watchdog outcomes.
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       const last = activity.entries.at(-1);
@@ -1344,7 +1343,6 @@ export function App() {
     content: string,
     createdAt = new Date().toISOString()
   ) {
-    if (threadId !== selectedThreadIdRef.current) return;
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       return {
@@ -1362,7 +1360,6 @@ export function App() {
   }
 
   function upsertRuntimeTool(threadId: string, toolCall: ToolCallRecord) {
-    if (threadId !== selectedThreadIdRef.current) return;
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? {
         threadId,
@@ -1394,7 +1391,6 @@ export function App() {
     resultJson: string | null,
     completedAt: string
   ) {
-    if (threadId !== selectedThreadIdRef.current) return;
     setRuntimeActivities((current) => {
       const activity = current[threadId];
       if (!activity) return current;
@@ -1412,7 +1408,6 @@ export function App() {
   }
 
   function appendRuntimeDecisionStatusAfterTool(threadId: string, createdAt = new Date().toISOString()) {
-    if (threadId !== selectedThreadIdRef.current) return;
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       const completedTools = activity.entries
@@ -1554,6 +1549,7 @@ export function App() {
           messagesAfter?: number;
           viewport?: { width?: number; height?: number };
           passed?: boolean;
+          automatic?: boolean;
           tabs?: RuntimeThreadSnapshot["browserTabs"];
         };
       };
@@ -1561,12 +1557,19 @@ export function App() {
       const currentSelectedThreadId = selectedThreadIdRef.current;
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
       if (typed.type === "terminal.output" && typed.threadId) {
+        appendRuntimeOutput(typed.threadId, "终端输出", typed.payload?.data ?? "", typed.createdAt);
         if (typed.threadId !== selectedThreadIdRef.current) {
           return;
         }
         const sessionId = typeof typed.payload?.sessionId === "string" ? typed.payload.sessionId : "default";
         ensureTerminalTab(typed.threadId, sessionId);
         queueTerminalOutput(typed.threadId, sessionId, typed.payload?.data ?? "");
+        return;
+      }
+      if (typed.type === "agent.watchdog" && typed.threadId) {
+        const automatic = typed.payload?.automatic === true;
+        const reason = typeof typed.payload?.reason === "string" ? typed.payload.reason : "子智能体状态已检查";
+        appendRuntimeStatus(typed.threadId, automatic ? `已自动中断: ${reason}` : reason, typed.createdAt);
         return;
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
@@ -1734,6 +1737,20 @@ export function App() {
         if (suppressRuntimeProgressRef.current[typed.threadId]) {
           return;
         }
+        const startedToolForActivity: ToolCallRecord = {
+          id: typed.payload.toolCallId,
+          threadId: typed.threadId,
+          turnRunId: typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : "",
+          toolName: typed.payload.toolName,
+          argumentsJson: typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}",
+          resultJson: null,
+          status: "running",
+          riskLevel: typed.payload.riskLevel ?? "medium",
+          approvalMode: typed.payload.approvalMode ?? "prompt",
+          startedAt: typeof typed.payload.startedAt === "string" ? typed.payload.startedAt : typed.createdAt ?? new Date().toISOString(),
+          completedAt: null
+        };
+        upsertRuntimeTool(typed.threadId, startedToolForActivity);
         if (typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
             updateThreadNotification(
@@ -1752,19 +1769,6 @@ export function App() {
           toolCallId: typed.payload.toolCallId,
           toolName: typed.payload.toolName,
           argumentsJson: typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}"
-        });
-        upsertRuntimeTool(typed.threadId, {
-          id: typed.payload.toolCallId,
-          threadId: typed.threadId,
-          turnRunId: typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : "",
-          toolName: typed.payload.toolName,
-          argumentsJson: typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}",
-          resultJson: null,
-          status: "running",
-          riskLevel: typed.payload.riskLevel ?? "medium",
-          approvalMode: typed.payload.approvalMode ?? "prompt",
-          startedAt: typeof typed.payload.startedAt === "string" ? typed.payload.startedAt : typed.createdAt ?? new Date().toISOString(),
-          completedAt: null
         });
         setSnapshot((current) => {
           if (!current || current.thread.id !== typed.threadId) return current;
@@ -1808,6 +1812,15 @@ export function App() {
         return;
       }
       if (typed.type === "tool.completed" && typed.payload?.toolCallId) {
+        if (typed.threadId) {
+          completeRuntimeTool(
+            typed.threadId,
+            typed.payload.toolCallId,
+            typed.payload.status === "failed" ? "failed" : typed.payload.status === "blocked" ? "blocked" : "completed",
+            typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null,
+            typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString()
+          );
+        }
         if (typed.threadId && typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
             updateThreadNotification(notificationThreadId, "工具已完成，正在继续处理。", typed.createdAt);
@@ -1819,13 +1832,6 @@ export function App() {
         );
         if (typed.threadId) {
           const runtimeThreadId = typed.threadId;
-          completeRuntimeTool(
-            runtimeThreadId,
-            typed.payload.toolCallId,
-            typed.payload.status === "failed" ? "failed" : typed.payload.status === "blocked" ? "blocked" : "completed",
-            typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null,
-            typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString()
-          );
           setSnapshot((current) => {
             if (!current || current.thread.id !== runtimeThreadId) return current;
             return {
@@ -1869,6 +1875,11 @@ export function App() {
             : "正在分析任务并规划下一步"
           : null;
         if (typed.threadId !== selectedThreadIdRef.current) {
+          appendRuntimeStatus(
+            typed.threadId,
+            reason === "after_tools" ? "等待模型响应" : statusLabel ?? "等待模型响应",
+            typed.createdAt
+          );
           if (notificationThreadId && reason === "after_tools") {
             updateThreadNotification(notificationThreadId, "工具已完成，正在继续处理。", typed.createdAt);
           } else if (notificationThreadId && statusLabel) {

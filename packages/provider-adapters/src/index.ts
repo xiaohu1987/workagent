@@ -1177,7 +1177,7 @@ function isDeepSeekModel(
 
 function isDeepSeekThinkingModel(
   model: Pick<ModelProfile, "id" | "displayName">,
-  provider?: Pick<ProviderDefinition, "id" | "name" | "baseUrl">
+  provider?: Pick<ProviderDefinition, "id" | "name" | "baseUrl" | "deepseekProtocol">
 ): boolean {
   const identity = [
     model.id,
@@ -1186,7 +1186,8 @@ function isDeepSeekThinkingModel(
     provider?.name ?? "",
     provider?.baseUrl ?? ""
   ].join(" ").toLowerCase();
-  return isDeepSeekModel(model, provider) && /reasoner|\br1\b|thinking|\bv4-(?:flash|pro)\b/.test(identity);
+  return provider?.deepseekProtocol !== "openai-compatible" &&
+    isDeepSeekModel(model, provider) && /reasoner|\br1\b|thinking|\bv4-(?:flash|pro)\b/.test(identity);
 }
 
 function originalToolName(nativeName: string, availableTools: ProviderTurnInput["availableTools"]): string | null {

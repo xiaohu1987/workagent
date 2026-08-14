@@ -2942,6 +2942,69 @@ describe("OpenAiCompatibleProvider", () => {
     }));
   });
 
+  it("uses standard OpenAI fields for DeepSeek models behind a compatible gateway", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "done" } }]
+    });
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      deepseekProtocol: "openai-compatible",
+      apiKey: "secret"
+    };
+    const model: ModelProfile = {
+      id: "deepseek-v4-flash-0731",
+      providerId: provider.id,
+      displayName: "DeepSeek V4 Flash",
+      contextWindow: 128_000,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: true
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Continue with the tool result.",
+      transcript: [
+        { role: "user", content: "Read the file" },
+        {
+          role: "assistant",
+          content: "",
+          reasoningContent: "I need to read the file first.",
+          toolCalls: [{ id: "call-1", name: "fs.read_file", arguments: { path: "src/app.ts" } }]
+        },
+        {
+          role: "tool",
+          content: "fs.read_file\nfile content",
+          toolCallId: "call-1",
+          toolResultOk: true
+        }
+      ],
+      availableTools: [{
+        name: "fs.read_file",
+        description: "Read a file.",
+        inputSchema: { type: "object", properties: { path: { type: "string" } } },
+        riskLevel: "low"
+      }],
+      model,
+      provider,
+      reasoningEffort: "xhigh"
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request).not.toHaveProperty("thinking");
+    expect(request).not.toHaveProperty("reasoning_effort");
+    const messages = request.messages as Array<Record<string, unknown>>;
+    expect(messages).toContainEqual(expect.objectContaining({
+      role: "assistant",
+      content: "",
+      tool_calls: expect.any(Array)
+    }));
+    expect(messages.some((message) => "reasoning_content" in message)).toBe(false);
+  });
+
   it("does not treat an unstructured progress message as a completed decision", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [

@@ -66,6 +66,61 @@ function formatRuntimeEventOffset(createdAt: string, startedAt?: string | null):
   return Number.isFinite(offset) ? `+${formatElapsedClock(Math.max(0, offset))}` : "";
 }
 
+function isShellOrTestTool(toolName: string, argumentsJson: string): boolean {
+  if (toolName === "project.verify") return true;
+  if (toolName === "shell.exec") return true;
+  return /\b(?:test|vitest|jest|mocha|ava|pytest|go\s+test|cargo\s+test|dotnet\s+test)\b/i.test(argumentsJson);
+}
+
+function getSubagentActivityLabel(
+  agent: ThreadRecord,
+  queued: boolean,
+  activity: RuntimeActivity | undefined,
+  skillNames?: SkillNameMap
+): string {
+  if (queued) return "排队中";
+  if (agent.status === "completed") return "已完成";
+  if (agent.status === "failed") return "失败";
+  const activeTool = [...(activity?.entries ?? [])].reverse().find(
+    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool" && entry.toolCall.status === "running"
+  );
+  if (activeTool) {
+    return isShellOrTestTool(activeTool.toolCall.toolName, activeTool.toolCall.argumentsJson)
+      ? "执行 shell/test"
+      : getToolProcessingLabel(activeTool.toolCall.toolName, activeTool.toolCall.argumentsJson, skillNames);
+  }
+  const latest = activity?.entries.at(-1);
+  if (latest?.kind === "status") {
+    if (/自动中断/.test(latest.label)) return "已自动中断";
+    if (/重试|retry/i.test(latest.label)) return "重试中";
+  }
+  if (agent.status === "waiting") return "等待模型响应";
+  return activity ? "等待模型响应" : "启动中";
+}
+
+function SubagentWatchdogMeta({
+  agent,
+  activity,
+  queued,
+  terminal
+}: {
+  agent: ThreadRecord;
+  activity: RuntimeActivity | undefined;
+  queued: boolean;
+  terminal: boolean;
+}) {
+  const latestEntry = activity?.entries.at(-1);
+  const progressAt = latestEntry ? getRuntimeEntryCreatedAt(latestEntry) : agent.createdAt;
+  const sinceProgressMs = useElapsedClock(progressAt, !terminal);
+  const runtimeMs = useElapsedClock(activity?.startedAt ?? agent.createdAt, !terminal);
+  const automaticInterruptInMs = Math.max(0, Math.min(120_000 - sinceProgressMs, 1_800_000 - runtimeMs));
+  const stalled = !queued && !terminal && sinceProgressMs >= 120_000;
+  return <>
+    <span>{stalled ? "已停滞" : `最近进度 ${formatElapsedClock(sinceProgressMs)} 前`}</span>
+    {!terminal ? <span>{`自动中断倒计时 ${formatElapsedClock(automaticInterruptInMs)}`}</span> : null}
+  </>;
+}
+
 function ActiveSubagentLines({
   agents,
   queuedAgentIds,
@@ -92,7 +147,6 @@ function ActiveSubagentLines({
               : agent.status;
         const terminal = !queued && agent.status !== "running" && agent.status !== "waiting";
         const runtimeActivity = runtimeActivities[agent.id];
-        const runtimeLabel = getSubagentRuntimeLabel(runtimeActivity, skillNames);
         const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity, skillNames);
         const title = getSubagentTitle(agent);
         const statusLabel = queued
@@ -105,18 +159,8 @@ function ActiveSubagentLines({
                 ? "已完成"
                 : agent.status === "failed"
                   ? "失败"
-                  : agent.status === "interrupted"
-                    ? "已中断"
-                    : "已创建";
-        const activityLabel = queued
-          ? "等待可用名额"
-          : runtimeLabel ?? (
-            agent.status === "waiting"
-              ? "等待处理中"
-              : agent.status === "running"
-                ? "正在准备任务"
-                : statusLabel
-          );
+                : "已创建";
+        const activityLabel = getSubagentActivityLabel(agent, queued, runtimeActivity, skillNames);
         return (
           <details key={agent.id} className={`active-subagent-line ${state}`}>
             <summary title="展开子智能体详情">
@@ -133,6 +177,12 @@ function ActiveSubagentLines({
                   startedAt={runtimeActivity?.startedAt ?? agent.createdAt}
                   active={!terminal}
                   completedAt={terminal ? agent.updatedAt : null}
+                />
+                <SubagentWatchdogMeta
+                  agent={agent}
+                  activity={runtimeActivity}
+                  queued={queued}
+                  terminal={terminal}
                 />
                 {!terminal ? (
                   <button type="button" className="active-subagent-stop" onClick={() => onInterrupt(agent)}>

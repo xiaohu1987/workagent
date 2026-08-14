@@ -89,6 +89,22 @@ describe("model configuration storage", () => {
     });
   });
 
+  it("persists the DeepSeek protocol dialect for OpenAI-compatible providers", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-deepseek-protocol-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    const config = defaultConfig();
+    const provider = config.providers.find((entry) => entry.id === "openai")!;
+    provider.deepseekProtocol = "openai-compatible";
+
+    await saveConfig(configFile, config);
+    const loaded = await loadConfig(configFile);
+
+    expect(loaded.providers.find((entry) => entry.id === "openai")).toMatchObject({
+      deepseekProtocol: "openai-compatible"
+    });
+  });
+
   it("removes legacy timeout settings while loading the configuration", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-autonomous-runtime-"));
     temporaryDirectories.push(directory);

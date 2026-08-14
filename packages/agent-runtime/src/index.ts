@@ -31,6 +31,7 @@ import type {
   ThreadRecord,
   SubagentResultEnvelope,
   SubagentWaitResult,
+  SubagentWatchdogDiagnostic,
   TokenUsage,
   ToolCallRecord,
   ToolResult,
@@ -165,6 +166,84 @@ export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
 export const MAX_BLOCKED_IDENTICAL_TOOL_RETRIES = 3;
 /** Zero disables wall-clock aborts. The user can stop an active task explicitly. */
 export const MODEL_DECISION_TIMEOUT_MS = 0;
+/** Parent tasks remain user-cancellable; child model calls must converge. */
+export const SUBAGENT_MODEL_DECISION_TIMEOUT_MS = 120_000;
+export const SUBAGENT_INSPECTION_DELAY_MS = 60_000;
+export const SUBAGENT_IDLE_TIMEOUT_MS = 120_000;
+export const SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS = 600_000;
+export const SUBAGENT_SHELL_TEST_REINSPECTION_MS = 300_000;
+export const SUBAGENT_MAX_RUNTIME_MS = 1_800_000;
+
+export type SubagentWatchdogDecision = {
+  action: "continue" | "interrupt";
+  state: SubagentWatchdogDiagnostic["state"];
+  nextInspectionAt: string | null;
+  automaticInterruptAt: string | null;
+  reason?: string;
+};
+
+/**
+ * Keep watchdog policy deterministic and independent from Electron/database
+ * state. The desktop host supplies the activity timestamps it observes.
+ */
+export function resolveSubagentWatchdogDecision(input: {
+  nowMs: number;
+  startedAt: string;
+  lastProgressAt: string | null;
+  currentTool: string | null;
+  isShellOrTest: boolean;
+  active: boolean;
+  baseState: Exclude<SubagentWatchdogDiagnostic["state"], "stalled" | "auto_interrupted" | "completed">;
+}): SubagentWatchdogDecision {
+  const startedAtMs = Date.parse(input.startedAt);
+  const safeStartedAtMs = Number.isFinite(startedAtMs) ? startedAtMs : input.nowMs;
+  const progressAtMs = input.lastProgressAt ? Date.parse(input.lastProgressAt) : Number.NaN;
+  const lastProgressAtMs = Number.isFinite(progressAtMs) ? progressAtMs : safeStartedAtMs;
+  const runtimeMs = Math.max(0, input.nowMs - safeStartedAtMs);
+  const idleForMs = Math.max(0, input.nowMs - lastProgressAtMs);
+  const absoluteDeadlineMs = safeStartedAtMs + SUBAGENT_MAX_RUNTIME_MS;
+  const idleDeadlineMs = lastProgressAtMs + SUBAGENT_IDLE_TIMEOUT_MS;
+
+  if (!input.active) {
+    return { action: "continue", state: "completed", nextInspectionAt: null, automaticInterruptAt: null };
+  }
+  if (runtimeMs >= SUBAGENT_MAX_RUNTIME_MS) {
+    return {
+      action: "interrupt",
+      state: "auto_interrupted",
+      nextInspectionAt: null,
+      automaticInterruptAt: new Date(absoluteDeadlineMs).toISOString(),
+      reason: "Subagent reached the 30 minute watchdog runtime limit."
+    };
+  }
+  if (runtimeMs < SUBAGENT_INSPECTION_DELAY_MS) {
+    return {
+      action: "continue",
+      state: input.baseState,
+      nextInspectionAt: new Date(safeStartedAtMs + SUBAGENT_INSPECTION_DELAY_MS).toISOString(),
+      automaticInterruptAt: new Date(Math.min(idleDeadlineMs, absoluteDeadlineMs)).toISOString()
+    };
+  }
+  if (idleForMs >= SUBAGENT_IDLE_TIMEOUT_MS) {
+    return {
+      action: "interrupt",
+      state: "stalled",
+      nextInspectionAt: null,
+      automaticInterruptAt: new Date(Math.min(idleDeadlineMs, absoluteDeadlineMs)).toISOString(),
+      reason: "Subagent made no tool, output, or process-state progress for 2 minutes."
+    };
+  }
+
+  const nextInspectionMs = input.isShellOrTest && runtimeMs >= SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS
+    ? Math.min(absoluteDeadlineMs, input.nowMs + SUBAGENT_SHELL_TEST_REINSPECTION_MS)
+    : Math.min(absoluteDeadlineMs, Math.min(idleDeadlineMs, input.nowMs + SUBAGENT_INSPECTION_DELAY_MS));
+  return {
+    action: "continue",
+    state: input.baseState,
+    nextInspectionAt: new Date(nextInspectionMs).toISOString(),
+    automaticInterruptAt: new Date(Math.min(idleDeadlineMs, absoluteDeadlineMs)).toISOString()
+  };
+}
 export const MAX_MODEL_TIMEOUT_RETRIES = 5;
 export const MAX_AGENT_PROTOCOL_FAILURES = 5;
 /** Number of fresh turns the runtime may start after a five-attempt protocol batch. */
@@ -2641,7 +2720,12 @@ class ThreadSessionRuntime {
         });
         const timeoutRecoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
         const timeoutRecoveryMultiplier = Math.min(3, 1 + Math.floor(modelTimeoutAttempts / timeoutRecoveryWindow));
-        const decisionTimeoutMs = MODEL_DECISION_TIMEOUT_MS * timeoutRecoveryMultiplier;
+        // Root turns retain the existing user-controlled unlimited request. A
+        // delegated turn must not hold its parent indefinitely when a provider
+        // accepts a request but never responds.
+        const decisionTimeoutMs = (thread.parentThreadId
+          ? SUBAGENT_MODEL_DECISION_TIMEOUT_MS
+          : MODEL_DECISION_TIMEOUT_MS) * timeoutRecoveryMultiplier;
         const activeGpaTask = this.#gpa.planTasks.find((task) => !task.done);
         const awaitingModelPayload = {
           turnRunId: turn.id,
@@ -6345,6 +6429,7 @@ class ThreadSessionRuntime {
     try {
       const adapter = this.services.providerFactory.create(input.provider);
       const recognizeAbort = createChildAbortController(input.abortController.signal);
+      const thread = await this.services.persistence.getThread(this.threadId);
       const decision = await waitForAbortOrTimeout(
         adapter.runTurn({
           systemPrompt: buildMultimodalInputRecognizeSystemPrompt(),
@@ -6359,7 +6444,7 @@ class ThreadSessionRuntime {
           abortSignal: recognizeAbort.signal
         }),
         input.abortController.signal,
-        MODEL_DECISION_TIMEOUT_MS,
+        thread.parentThreadId ? SUBAGENT_MODEL_DECISION_TIMEOUT_MS : MODEL_DECISION_TIMEOUT_MS,
         () => recognizeAbort.abort()
       );
 

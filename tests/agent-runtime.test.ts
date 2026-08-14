@@ -119,6 +119,12 @@ import {
   MAX_STANDARD_COMPLETION_RECOVERIES,
   MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES,
   RECOVERY_MODEL_DECISION_TIMEOUT_MS,
+  SUBAGENT_INSPECTION_DELAY_MS,
+  SUBAGENT_IDLE_TIMEOUT_MS,
+  SUBAGENT_MAX_RUNTIME_MS,
+  SUBAGENT_MODEL_DECISION_TIMEOUT_MS,
+  SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS,
+  resolveSubagentWatchdogDecision,
   STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
   MAX_REPOSITORY_COMPLETION_REJECTIONS,
   MAX_MODEL_TOOL_RESULT_CHARACTERS,
@@ -232,6 +238,61 @@ describe("assistant draft stream throttling", () => {
 
   it("publishes phase changes immediately so status and final content are not delayed", () => {
     expect(shouldPublishAssistantDraftUpdate(1_000, 1_001, true)).toBe(true);
+  });
+});
+
+describe("subagent watchdog policy", () => {
+  const startedAt = "2026-08-14T00:00:00.000Z";
+  const at = (offsetMs: number) => new Date(Date.parse(startedAt) + offsetMs).getTime();
+
+  it("uses the documented inspection, idle, soft, and absolute limits", () => {
+    expect(SUBAGENT_INSPECTION_DELAY_MS).toBe(60_000);
+    expect(SUBAGENT_IDLE_TIMEOUT_MS).toBe(120_000);
+    expect(SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS).toBe(600_000);
+    expect(SUBAGENT_MAX_RUNTIME_MS).toBe(1_800_000);
+    expect(SUBAGENT_MODEL_DECISION_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it("interrupts a child with no progress after two minutes", () => {
+    const result = resolveSubagentWatchdogDecision({
+      nowMs: at(120_000),
+      startedAt,
+      lastProgressAt: startedAt,
+      currentTool: null,
+      isShellOrTest: false,
+      active: true,
+      baseState: "awaiting_model"
+    });
+    expect(result.action).toBe("interrupt");
+    expect(result.state).toBe("stalled");
+  });
+
+  it("allows progressing shell/test work beyond the soft limit", () => {
+    const progressAt = new Date(at(899_000)).toISOString();
+    const result = resolveSubagentWatchdogDecision({
+      nowMs: at(900_000),
+      startedAt,
+      lastProgressAt: progressAt,
+      currentTool: "shell.exec",
+      isShellOrTest: true,
+      active: true,
+      baseState: "executing_shell_test"
+    });
+    expect(result.action).toBe("continue");
+  });
+
+  it("always interrupts at the absolute thirty minute limit", () => {
+    const result = resolveSubagentWatchdogDecision({
+      nowMs: at(SUBAGENT_MAX_RUNTIME_MS),
+      startedAt,
+      lastProgressAt: new Date(at(SUBAGENT_MAX_RUNTIME_MS - 1_000)).toISOString(),
+      currentTool: "shell.exec",
+      isShellOrTest: true,
+      active: true,
+      baseState: "executing_shell_test"
+    });
+    expect(result.action).toBe("interrupt");
+    expect(result.state).toBe("auto_interrupted");
   });
 });
 

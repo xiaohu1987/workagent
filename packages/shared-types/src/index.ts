@@ -145,9 +145,41 @@ export interface SubagentResultEnvelope {
   threadId: string;
 }
 
+export type SubagentRuntimeState =
+  | "queued"
+  | "starting"
+  | "awaiting_model"
+  | "executing_shell_test"
+  | "retrying"
+  | "stalled"
+  | "auto_interrupted"
+  | "completed";
+
+/**
+ * A point-in-time activity summary used by the parent-task watchdog and the
+ * child-task UI. All timestamps are ISO strings so the desktop process and
+ * renderer can calculate their own clocks without sharing mutable state.
+ */
+export interface SubagentWatchdogDiagnostic {
+  threadId: string;
+  agentPath: string;
+  state: SubagentRuntimeState;
+  lastToolEventAt: string | null;
+  currentTool: string | null;
+  isShellOrTest: boolean;
+  lastProgressAt: string | null;
+  startedAt: string;
+  runtimeMs: number;
+  idleForMs: number;
+  nextInspectionAt: string | null;
+  automaticInterruptAt: string | null;
+  interruptionReason?: string;
+}
+
 export interface SubagentWaitResult {
   agents: SubagentResultEnvelope[];
   timedOut: boolean;
+  diagnostics: SubagentWatchdogDiagnostic[];
 }
 
 export interface MessageRecord {
@@ -765,6 +797,8 @@ export interface ProviderDefinition {
    * API. Existing openai-compatible providers continue to use chat-completions.
    */
   transport?: "chat-completions" | "responses" | "messages";
+  /** DeepSeek model dialect used by an OpenAI-compatible provider. */
+  deepseekProtocol?: "native" | "openai-compatible";
   baseUrl?: string;
   apiKeyEnv?: string;
   apiKey?: string;
@@ -1050,6 +1084,7 @@ export interface RuntimeEvent {
     | "assistant.execution_output"
     | "agent.retrying"
     | "agent.awaiting_model"
+    | "agent.watchdog"
     | "agent.tool_call_preparing"
     | "agent.context_compacted"
     | "agent.context_measured"
