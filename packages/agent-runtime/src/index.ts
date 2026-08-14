@@ -296,6 +296,30 @@ export function shouldPublishAssistantDraftUpdate(
 export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
   return blockedAttempts >= MAX_BLOCKED_IDENTICAL_TOOL_RETRIES;
 }
+
+export function buildIdenticalToolRetryError(input: {
+  toolName: string;
+  failedAttempts: number;
+  originalFailure?: string;
+}): string {
+  const summary = `The identical tool call ${input.toolName} already failed ${input.failedAttempts} times.`;
+  const originalFailure = input.originalFailure?.trim();
+  return originalFailure
+    ? `${summary}\nOriginal execution failure:\n${originalFailure}`
+    : summary;
+}
+
+export function resetFailedToolCallTrackingAfterWorkspaceMutation(
+  failedFingerprints: Map<string, number>,
+  blockedFingerprints: Map<string, number>,
+  originalFailures: Map<string, string>
+): number {
+  const clearedFailures = failedFingerprints.size;
+  failedFingerprints.clear();
+  blockedFingerprints.clear();
+  originalFailures.clear();
+  return clearedFailures;
+}
 export const MAX_REPOSITORY_COMPLETION_REJECTIONS = 2;
 export const LEGACY_MCP_OVERSIZED_FOLLOW_UP =
   "The MCP server returned an oversized legacy response that was shortened.";
@@ -1969,6 +1993,7 @@ class ThreadSessionRuntime {
       const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
       const failedToolCallFingerprints = new Map<string, number>();
       const blockedToolCallFingerprints = new Map<string, number>();
+      const originalToolCallFailures = new Map<string, string>();
       const successfullyCreatedFiles = new Set<string>();
       const successfulReusableToolResults = new Map<string, string>();
       const recoveryEpisodes = new Map<string, RecoveryEpisode>();
@@ -5007,8 +5032,11 @@ class ThreadSessionRuntime {
           }
           const failedCallAttempts = failedToolCallFingerprints.get(toolCallFingerprint) ?? 0;
           if (!isRepeatableCoordinationTool && failedCallAttempts >= 1) {
-            const lastError =
-              `The identical tool call ${toolCall.name} already failed ${failedCallAttempts} times.`;
+            const lastError = buildIdenticalToolRetryError({
+              toolName: toolCall.name,
+              failedAttempts: failedCallAttempts,
+              originalFailure: originalToolCallFailures.get(toolCallFingerprint)
+            });
             appendBlockedToolCallResult(toolCall, lastError);
             await persistBlockedToolCall(toolCall, lastError, "identical_retry");
             const blockedAttempts = (blockedToolCallFingerprints.get(toolCallFingerprint) ?? 0) + 1;
@@ -5868,6 +5896,8 @@ class ThreadSessionRuntime {
               successfulReusableToolResults.set(toolCallFingerprint, modelContent);
             }
             failedToolCallFingerprints.delete(toolCallFingerprint);
+            blockedToolCallFingerprints.delete(toolCallFingerprint);
+            originalToolCallFailures.delete(toolCallFingerprint);
             if (
               toolCall.name === "browser.navigate" ||
               toolCall.name === "browser.reload" ||
@@ -5878,6 +5908,18 @@ class ThreadSessionRuntime {
             if (evidence.kinds.includes("delivery")) {
               clearReusableObservationFingerprints(successfulToolCallFingerprints);
               successfulReusableToolResults.clear();
+              const clearedFailedCalls = resetFailedToolCallTrackingAfterWorkspaceMutation(
+                failedToolCallFingerprints,
+                blockedToolCallFingerprints,
+                originalToolCallFailures
+              );
+              if (clearedFailedCalls > 0) {
+                await this.services.log("turn.failed_tool_calls_reset_after_delivery", this.threadId, {
+                  turnRunId: turn.id,
+                  toolName: toolCall.name,
+                  clearedFailedCalls
+                });
+              }
             }
             if (toolCall.name === "skills.load") {
               const skillId = String(toolCall.arguments.skill_id ?? "");
@@ -6044,6 +6086,9 @@ class ThreadSessionRuntime {
             }
             const attempts = (failedToolCallFingerprints.get(toolCallFingerprint) ?? 0) + 1;
             failedToolCallFingerprints.set(toolCallFingerprint, attempts);
+            if (!originalToolCallFailures.has(toolCallFingerprint)) {
+              originalToolCallFailures.set(toolCallFingerprint, result.content);
+            }
             const recoveryEpisode = await rememberRecoveryFailure(
               toolCall.name,
               toolTaskKey,
@@ -9191,7 +9236,9 @@ export function hasSuccessfulUnitTestResult(
 }
 
 export function isUnitTestCommand(command: string): boolean {
-  return /(?:^|[;&|]\s*)(?:pnpm|npm|yarn|bun)\s+(?:(?:run\s+)?test(?:[:\w-]+)?|exec\s+(?:vitest|jest|mocha|ava)|(?:vitest|jest|mocha|ava)\b)|(?:^|[;&|]\s*)(?:vitest|jest|mocha|ava|pytest|phpunit|rspec)\b|(?:^|[;&|]\s*)(?:go\s+test|cargo\s+test|dotnet\s+test|python(?:3)?\s+-m\s+pytest)\b/i.test(command);
+  const knownRunner = /(?:^|[;&|]\s*)(?:pnpm|npm|yarn|bun)\s+(?:(?:run\s+)?test(?:[:\w-]+)?|exec\s+(?:vitest|jest|mocha|ava)|(?:vitest|jest|mocha|ava)\b)|(?:^|[;&|]\s*)(?:vitest|jest|mocha|ava|pytest|phpunit|rspec)\b|(?:^|[;&|]\s*)(?:go\s+test|cargo\s+test|dotnet\s+test|python(?:3)?\s+-m\s+pytest)\b/i;
+  const nodeTestScript = /(?:^|[;&|]\s*)node(?:\.exe)?\s+(?:["'])?(?:\.?[\\/])?(?:tests?|__tests__)[\\/][^"';&|\s]+\.(?:[cm]?js|ts)(?:["'])?(?=\s|[;&|]|$)/i;
+  return knownRunner.test(command) || nodeTestScript.test(command);
 }
 
 export function hasUnitTestReport(content: string): boolean {

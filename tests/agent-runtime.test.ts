@@ -103,7 +103,9 @@ import {
   stripInternalToolCompatibilityMarkers,
   buildActiveTurnGuidanceInstruction,
   buildBlockedToolCallTranscriptResult,
+  buildIdenticalToolRetryError,
   clearReusableObservationFingerprints,
+  resetFailedToolCallTrackingAfterWorkspaceMutation,
   isReusableSuccessfulToolCall,
   MAX_AGENT_PROTOCOL_FAILURES,
   MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES,
@@ -503,6 +505,36 @@ describe("blocked identical tool retries", () => {
   it("ends a turn after a bounded number of rejected duplicate calls", () => {
     expect(shouldStopAfterBlockedIdenticalToolRetry(MAX_BLOCKED_IDENTICAL_TOOL_RETRIES - 1)).toBe(false);
     expect(shouldStopAfterBlockedIdenticalToolRetry(MAX_BLOCKED_IDENTICAL_TOOL_RETRIES)).toBe(true);
+  });
+
+  it("preserves the original execution failure in duplicate retry errors", () => {
+    const error = buildIdenticalToolRetryError({
+      toolName: "shell.exec",
+      failedAttempts: 1,
+      originalFailure: "FAIL: panel gap expected 14px"
+    });
+
+    expect(error).toContain("already failed 1 times");
+    expect(error).toContain("Original execution failure");
+    expect(error).toContain("panel gap expected 14px");
+  });
+
+  it("allows a fresh verification attempt after a successful workspace mutation", () => {
+    const fingerprint = createToolCallFingerprint("shell.exec", {
+      command: "node tests/panel-layout-check.js"
+    });
+    const failed = new Map([[fingerprint, 1]]);
+    const blocked = new Map([[fingerprint, 2]]);
+    const originalFailures = new Map([[fingerprint, "3 assertions failed"]]);
+
+    expect(resetFailedToolCallTrackingAfterWorkspaceMutation(
+      failed,
+      blocked,
+      originalFailures
+    )).toBe(1);
+    expect(failed.size).toBe(0);
+    expect(blocked.size).toBe(0);
+    expect(originalFailures.size).toBe(0);
   });
 });
 
@@ -1433,6 +1465,13 @@ describe("standard completion validation", () => {
       { name: "project.verify", arguments: {} },
       { json: { passed: true, commands: ["pnpm run typecheck"] } }
     )).toBe(false);
+    expect(hasSuccessfulUnitTestResult(
+      { name: "shell.exec", arguments: { command: "node tests/panel-layout-check.js; node --check js/game.js" } },
+      { json: {} }
+    )).toBe(true);
+    expect(isUnitTestCommand("node tests/panel-layout-check.js; node --check js/game.js")).toBe(true);
+    expect(isUnitTestCommand("node .\\tests\\panel-layout-check.js")).toBe(true);
+    expect(isUnitTestCommand("node scripts/build.js")).toBe(false);
     expect(isUnitTestCommand("echo test")).toBe(false);
     expect(hasUnitTestReport("测试报告：单元测试 pnpm test 通过，12 passed，0 failed。")).toBe(true);
     expect(hasUnitTestReport("构建通过。")).toBe(false);
