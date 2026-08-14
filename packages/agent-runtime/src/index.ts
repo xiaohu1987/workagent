@@ -2042,7 +2042,6 @@ class ThreadSessionRuntime {
       let gpaPlanProgressReminderIssued = false;
       let gpaPlanProgressCheckpointTaskId: string | null = null;
       let gpaActCompletedSuccessfully = false;
-      let gpaFinalizationToolBatches = 0;
       let rootSummaryDeferredForSubagents = false;
       const requiresAgentDecisionProtocol = () => this.#gpa.stage === "off" || this.#gpa.stage === "act";
 
@@ -3483,34 +3482,26 @@ class ThreadSessionRuntime {
           && this.#gpa.planTasks.length > 0
           && this.#gpa.planTasks.every((task) => task.done);
         if (gpaPlanFinished && decision.toolCalls.length > 0) {
-          const containsProjectWrite = decision.toolCalls.some((call) =>
-            MANAGED_WRITE_TOOL_NAMES.has(canonicalizeToolName(call.name))
-          );
           const blockedToolNames = decision.toolCalls.map((call) => call.name);
-          gpaFinalizationToolBatches += 1;
-          if (containsProjectWrite || gpaFinalizationToolBatches > 2) {
-            decision.assistantMessage = undefined;
-            decision.toolCalls = [];
-            decision.endTurn = false;
-            decision.goalCompleted = false;
-            transcript.push({
-              role: "user",
-              content: [
-                "[Internal GPA finalization gate. Do not display this instruction to the user.]",
-                "All PLAN tasks are already complete. Do not modify project files or create evidence/marker files.",
-                "Use the successful tool results already available as completion_evidence and return the final structured decision now.",
-                "At most two read-only verification batches are allowed after the final task completes."
-              ].join(" ")
-            });
-            await this.services.log("gpa.finalization_tool_blocked", this.threadId, {
-              turnRunId: turn.id,
-              toolNames: blockedToolNames,
-              containsProjectWrite,
-              finalizationToolBatches: gpaFinalizationToolBatches
-            });
-            await retryDraft();
-            continue;
-          }
+          decision.assistantMessage = undefined;
+          decision.toolCalls = [];
+          decision.endTurn = false;
+          decision.goalCompleted = false;
+          transcript.push({
+            role: "user",
+            content: [
+              "[Internal GPA finalization gate. Do not display this instruction to the user.]",
+              "All PLAN tasks are already complete. Do not call more tools or perform another verification pass.",
+              "Summarize the completed work, the verification already performed, and any remaining caveats.",
+              "Return the final structured decision now with completed_task_ids covering the full PLAN."
+            ].join(" ")
+          });
+          await this.services.log("gpa.finalization_tool_blocked", this.threadId, {
+            turnRunId: turn.id,
+            toolNames: blockedToolNames
+          });
+          await retryDraft();
+          continue;
         }
 
         const currentPlanTask = this.#gpa.stage === "act"
@@ -4338,6 +4329,7 @@ class ThreadSessionRuntime {
           );
           if (
             verificationSkill &&
+            !gpaPlanFinished &&
             !loadedSkillIds.has(verificationSkill.id) &&
             !loadedSkillIds.has(verificationSkill.name)
           ) {
@@ -4360,6 +4352,7 @@ class ThreadSessionRuntime {
             decision,
             planTasks: this.#gpa.planTasks,
             successfulEvidence: successfulToolEvidence,
+            summaryOnly: gpaPlanFinished,
             requiresUnitTest: modePolicy.mode === "project" && successfulToolEvidence
               .flatMap((item) => item.verifiedPaths ?? [])
               .some(isProjectSourceCodePath),
@@ -8407,6 +8400,7 @@ export function validateActCompletion(input: {
   >;
   planTasks: GpaState["planTasks"];
   successfulEvidence: SuccessfulToolEvidence[];
+  summaryOnly?: boolean;
   requiresUnitTest?: boolean;
   browserVerification?: BrowserCompletionRequirement;
 }): ActCompletionValidationResult {
@@ -8438,19 +8432,21 @@ export function validateActCompletion(input: {
     validEvidenceByTask.set(taskId, current);
   }
 
-  const missingEvidenceTaskIds = planTaskIds.filter(
-    (id) => (validEvidenceByTask.get(id)?.length ?? 0) === 0
-  );
+  const missingEvidenceTaskIds = input.summaryOnly
+    ? []
+    : planTaskIds.filter((id) => (validEvidenceByTask.get(id)?.length ?? 0) === 0);
   const referencedEvidence = [...validEvidenceByTask.values()].flat();
-  const missingDelivery = !referencedEvidence.some((item) => item.kinds.includes("delivery"));
-  const missingVerification = !referencedEvidence.some((item) => item.kinds.includes("verification"));
-  const missingUnitTest = input.requiresUnitTest === true &&
+  const missingDelivery = !input.summaryOnly &&
+    !referencedEvidence.some((item) => item.kinds.includes("delivery"));
+  const missingVerification = !input.summaryOnly &&
+    !referencedEvidence.some((item) => item.kinds.includes("verification"));
+  const missingUnitTest = !input.summaryOnly && input.requiresUnitTest === true &&
     !referencedEvidence.some((item) => item.unitTestPassed === true);
-  const missingTestReport = input.requiresUnitTest === true &&
+  const missingTestReport = !input.summaryOnly && input.requiresUnitTest === true &&
     !hasUnitTestReport(input.decision.assistantMessage ?? "");
   const missingBrowserVerification: string[] = [];
   const browser = input.browserVerification;
-  if (browser && !browser.skippedByUser && !browser.fastPathEligible) {
+  if (!input.summaryOnly && browser && !browser.skippedByUser && !browser.fastPathEligible) {
     if (browser.desktopAssertionCount === 0) missingBrowserVerification.push("desktop page assertions");
     if (browser.desktopScreenshotCount === 0) missingBrowserVerification.push("desktop screenshot");
     if (!browser.desktopOnly && browser.mobileAssertionCount === 0) missingBrowserVerification.push("mobile page assertions");
@@ -8487,7 +8483,7 @@ export function validateActCompletion(input: {
   if (missingEvidenceTaskIds.length > 0) {
     reasons.push(`Plan tasks have no valid tool evidence: ${missingEvidenceTaskIds.join(", ")}.`);
   }
-  if (invalidEvidenceToolCallIds.size > 0) {
+  if (!input.summaryOnly && invalidEvidenceToolCallIds.size > 0) {
     reasons.push(`Completion evidence references unknown or mismatched tool calls: ${[...invalidEvidenceToolCallIds].join(", ")}.`);
   }
   if (missingDelivery) reasons.push("No verified delivery evidence was referenced.");

@@ -2416,6 +2416,43 @@ describe("GPA ACT completion evidence", () => {
     });
   });
 
+  it("accepts a final summary without another verification pass after every plan task is done", () => {
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "实现已经完成。已执行的检查通过，剩余限制已在总结中说明。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: []
+      },
+      planTasks: [{ ...planTasks[0], done: true }],
+      successfulEvidence: [],
+      summaryOnly: true,
+      requiresUnitTest: true,
+      browserVerification: {
+        desktopOnly: false,
+        canvasRequired: false,
+        desktopAssertionCount: 0,
+        mobileAssertionCount: 0,
+        desktopScreenshotCount: 0,
+        mobileScreenshotCount: 0,
+        screenshotAttachmentCount: 0,
+        modelSupportsMultimodalInput: true
+      }
+    });
+
+    expect(result).toMatchObject({
+      valid: true,
+      missingTaskIds: [],
+      missingEvidenceTaskIds: [],
+      missingDelivery: false,
+      missingVerification: false,
+      missingUnitTest: false,
+      missingBrowserVerification: []
+    });
+  });
+
   it("rejects a claimed GPA completion when project.verify ran no command", () => {
     const delivery = classifySuccessfulToolEvidence({
       toolCallId: "patch-1",

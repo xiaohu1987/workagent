@@ -12,7 +12,7 @@ export function PlanTimeline({ state, isRunning }: { state: GpaState; isRunning:
   const currentItem = getActivePlanTimelineItem(items) ?? (isFinalizing ? {
     id: "finalizing",
     label: isRunning
-      ? `计划 ${completedCount}/${items.length} 已完成，正在最终验证`
+      ? `计划 ${completedCount}/${items.length} 已完成，正在生成完成总结`
       : `计划 ${completedCount}/${items.length} 已完成`,
     status: isRunning ? "in_progress" as const : "completed" as const
   } : null);
