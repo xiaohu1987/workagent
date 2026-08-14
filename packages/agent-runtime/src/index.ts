@@ -2543,6 +2543,8 @@ class ThreadSessionRuntime {
         let streamedVisibleContent = "";
         let draftSettled = suppressStreamingForActiveSubagents;
         let lastPublishedDraftAtMs = Number.NEGATIVE_INFINITY;
+        let lastPublishedDraftContent = "";
+        let draftDeltaSequence = 0;
         let publishedDraftPhase: AssistantDraftPhase | null = null;
         activeDraftId = suppressStreamingForActiveSubagents ? null : draftId;
         const updateDraft = async (
@@ -2562,15 +2564,31 @@ class ThreadSessionRuntime {
           }
           lastPublishedDraftAtMs = nowMs;
           publishedDraftPhase = phase;
+          const delta = content.startsWith(lastPublishedDraftContent)
+            ? content.slice(lastPublishedDraftContent.length)
+            : undefined;
+          draftDeltaSequence += 1;
+          const includeCheckpoint = force || delta === undefined || draftDeltaSequence % 20 === 0;
+          lastPublishedDraftContent = content;
           await this.services.emit({
             type: "assistant.draft.updated",
             threadId: this.threadId,
-            payload: { turnRunId: turn.id, draftId, sequence, phase, content, startedAt: draftStartedAt },
+            payload: {
+              turnRunId: turn.id,
+              draftId,
+              sequence,
+              deltaSequence: draftDeltaSequence,
+              phase,
+              ...(includeCheckpoint ? { content } : {}),
+              ...(delta !== undefined ? { delta } : {}),
+              startedAt: draftStartedAt
+            },
             createdAt: new Date().toISOString()
           });
         };
         const retryDraft = async () => {
           streamedVisibleContent = "";
+          lastPublishedDraftContent = "";
           await updateDraft("retrying", "", true);
         };
         const settleDraft = async (input: { messageId?: string; discarded?: boolean }) => {

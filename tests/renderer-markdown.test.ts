@@ -17,10 +17,28 @@ import {
   retainPersistentComposerContexts
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { extractMessageMediaReferences, isGeneratedUserSkill } from "../apps/desktop/src/renderer/App";
-import { highlightMarkdownCode, normalizeMarkdownImageSource, parseMarkdownBlocks } from "../apps/desktop/src/renderer/markdown";
+import {
+  clearMarkdownRenderCache,
+  getMarkdownRenderCacheStats,
+  highlightMarkdownCode,
+  normalizeMarkdownImageSource,
+  parseMarkdownBlocks,
+  renderMarkdownDocument
+} from "../apps/desktop/src/renderer/markdown";
 import { ECHARTS_CONFIG_MAX_BYTES, parseEChartsConfig } from "../apps/desktop/src/renderer/charts/echarts-message-chart";
 
 describe("parseMarkdownBlocks", () => {
+  it("keeps rendered markdown cache within its byte budget", () => {
+    clearMarkdownRenderCache();
+    renderMarkdownDocument("x".repeat(300_000), "large", "message-markdown");
+    expect(getMarkdownRenderCacheStats()).toEqual({ entries: 0, bytes: 0 });
+
+    for (let index = 0; index < 200; index += 1) {
+      renderMarkdownDocument(`message-${index}\n${"x".repeat(100_000)}`, `message-${index}`, "message-markdown");
+    }
+    expect(getMarkdownRenderCacheStats().bytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+  });
+
   it("recognizes user skills generated from chat drafts", () => {
     expect(isGeneratedUserSkill({
       pluginId: undefined,

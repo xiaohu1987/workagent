@@ -64,6 +64,7 @@ import {
 import {
   ActiveToolCall,
   AssistantDraft,
+  AssistantDraftStreamBuffer,
   ChatEventBlock,
   ChatEventType,
   ComposerAttachment,
@@ -73,10 +74,11 @@ import {
   ConversationTurnItem,
   FileChangeSummaryItem,
   TimelineEntry,
+  TimelineIncrementalCache,
   buildContextUsage,
   buildConversationTurnSections,
   buildPlanTimelineItems,
-  buildTimelineEntries,
+  buildTimelineEntriesIncremental,
   collectFileChangesByTurn,
   composerAttachmentKey,
   createOptimisticThreadSnapshot,
@@ -107,6 +109,7 @@ import {
   mergeSnapshotRecords,
   parseMessageEventBlocks,
   reconcileAssistantDraftCompletion,
+  reconcileAssistantDraftStreamUpdate,
   reconcileAssistantDraftUpdate,
   reconcilePendingUserMessages,
   reconcilePendingUserMessagesDetailed,
@@ -438,6 +441,7 @@ export function App() {
   const assistantDraftFramesRef = useRef<
     Record<string, { draft: AssistantDraft; frame: number }>
   >({});
+  const assistantDraftBuffersRef = useRef<Record<string, AssistantDraftStreamBuffer>>({});
   const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
   const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
   const [gitSnapshotThreadId, setGitSnapshotThreadId] = useState<string | null>(null);
@@ -473,6 +477,7 @@ export function App() {
   const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
+  const timelineBuildCacheRef = useRef<TimelineIncrementalCache | null>(null);
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
   const snapshotCursorByThreadRef = useRef<Record<string, RuntimeThreadSnapshotCursor>>({});
@@ -1200,14 +1205,17 @@ export function App() {
 
     window.cancelAnimationFrame(pending.frame);
     delete assistantDraftFramesRef.current[draftId];
+    delete assistantDraftBuffersRef.current[draftId];
     setAssistantDrafts((current) => reconcileAssistantDraftUpdate(current, pending.draft));
   }
 
   function discardQueuedAssistantDraft(draftId: string) {
     const pending = assistantDraftFramesRef.current[draftId];
-    if (!pending) return;
-    window.cancelAnimationFrame(pending.frame);
-    delete assistantDraftFramesRef.current[draftId];
+    if (pending) {
+      window.cancelAnimationFrame(pending.frame);
+      delete assistantDraftFramesRef.current[draftId];
+    }
+    delete assistantDraftBuffersRef.current[draftId];
   }
 
   function discardQueuedAssistantDraftsForThread(threadId: string) {
@@ -1509,6 +1517,7 @@ export function App() {
           turnRunId?: string;
           draftId?: string;
           sequence?: number;
+          deltaSequence?: number;
           phase?: AssistantDraftPhase;
           discarded?: boolean;
           delta?: string;
@@ -1917,12 +1926,24 @@ export function App() {
         if (threadId !== selectedThreadIdRef.current) {
           return;
         }
+        const rawContent = typeof payload.content === "string" ? payload.content : undefined;
+        const delta = typeof payload.delta === "string" ? payload.delta : undefined;
+        const deltaSequence = typeof payload.deltaSequence === "number" ? payload.deltaSequence : undefined;
+        const streamUpdate = reconcileAssistantDraftStreamUpdate(
+          assistantDraftBuffersRef.current[draftId],
+          { content: rawContent, delta, deltaSequence }
+        );
+        if (!streamUpdate) return;
+        if (streamUpdate.buffer) assistantDraftBuffersRef.current[draftId] = streamUpdate.buffer;
+        else delete assistantDraftBuffersRef.current[draftId];
         queueAssistantDraft({
           draftId,
           sequence: typeof payload.sequence === "number" ? payload.sequence : 0,
           threadId,
           turnRunId,
-          content: typeof payload.content === "string" ? payload.content : "",
+          content: streamUpdate.content,
+          chunks: streamUpdate.chunks,
+          deltaSequence,
           phase,
           startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
           completed: false
@@ -2738,16 +2759,19 @@ export function App() {
     [gpaState, visibleMessages]
   );
   const timelineEntries = useMemo(
-    () =>
-      buildTimelineEntries(
-        visibleMessages,
-        snapshot?.toolCalls ?? [],
-        snapshot?.artifacts ?? [],
-        snapshotWorkspaceRoot,
-        selectedThreadStatus,
-        timelinePrompts,
-        snapshot?.contextCompaction
-      ),
+    () => {
+      const result = buildTimelineEntriesIncremental({
+        messages: visibleMessages,
+        toolCalls: snapshot?.toolCalls ?? [],
+        artifacts: snapshot?.artifacts ?? [],
+        workspaceRoot: snapshotWorkspaceRoot,
+        threadStatus: selectedThreadStatus,
+        prompts: timelinePrompts,
+        contextCompaction: snapshot?.contextCompaction
+      }, timelineBuildCacheRef.current);
+      timelineBuildCacheRef.current = result.cache;
+      return result.entries;
+    },
     [
       snapshotWorkspaceRoot,
       selectedThreadStatus,
@@ -3460,6 +3484,7 @@ export function App() {
     activeSnapshotThreadId,
     activeSnapshotThreadStatus,
     activeAssistantDraft?.content,
+    activeAssistantDraft?.chunks?.length,
     latestVisibleMessageId,
     showRuntimeActivityPanel,
     showWelcome,
@@ -5835,6 +5860,7 @@ export function App() {
                         key={`draft-${activeAssistantDraft.draftId}`}
                         assistantLabel={activeAssistantLabel}
                         content={activeDraftContent}
+                        chunks={activeAssistantDraft.chunks}
                         draftId={activeAssistantDraft.draftId}
                         phase={activeAssistantDraft.phase}
                         startedAt={activeAssistantDraft.startedAt}

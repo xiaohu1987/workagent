@@ -2019,6 +2019,10 @@ export class DesktopBackend {
     return this.#logs.append(kind, payload);
   }
 
+  public flushRuntimeLogs(): Promise<void> {
+    return this.#logs ? this.#logs.flush() : Promise.resolve();
+  }
+
   public async saveModelAgentCapability(input: {
     providerId: string;
     modelId: string;
@@ -3978,9 +3982,13 @@ export class DesktopBackend {
     return "starting";
   }
 
-  private buildSubagentWatchdogDiagnostic(thread: ThreadRecord, nowMs = Date.now()): SubagentWatchdogDiagnostic {
-    const progress = this.#subagentProgress.get(thread.id);
-    const toolCalls = this.#db.listToolCalls(thread.id);
+  private buildSubagentWatchdogDiagnostic(
+    thread: ThreadRecord,
+    nowMs = Date.now(),
+    allowDatabaseFallback = true
+  ): SubagentWatchdogDiagnostic {
+    let progress = this.#subagentProgress.get(thread.id);
+    const toolCalls = !progress && allowDatabaseFallback ? this.#db.listToolCalls(thread.id) : [];
     const runningTool = [...toolCalls].reverse().find((call) => call.status === "running" || call.status === "pending") ?? null;
     const latestTool = [...toolCalls].reverse().find(Boolean) ?? null;
     const latestToolEventAt = latestTool
@@ -3988,7 +3996,7 @@ export class DesktopBackend {
         ? latestTool.completedAt
         : latestTool.startedAt)
       : progress?.lastToolEventAt ?? null;
-    const currentTool = runningTool?.toolName ?? progress?.currentTool ?? null;
+    const currentTool = progress?.currentTool ?? runningTool?.toolName ?? null;
     const command = runningTool ? (() => {
       try {
         const parsed = JSON.parse(runningTool.argumentsJson) as { command?: unknown };
@@ -3997,10 +4005,21 @@ export class DesktopBackend {
         return "";
       }
     })() : "";
-    const isShellOrTest = currentTool === "shell.exec"
+    const isShellOrTest = progress?.isShellOrTest === true || currentTool === "shell.exec"
       || currentTool === "project.verify"
-      || (Boolean(command) && isUnitTestCommand(command))
-      || Boolean(progress?.isShellOrTest);
+      || (Boolean(command) && isUnitTestCommand(command));
+    if (!progress && allowDatabaseFallback) {
+      progress = {
+        lastProgressAt: latestToolEventAt ?? thread.createdAt,
+        lastToolEventAt: latestToolEventAt,
+        currentTool,
+        isShellOrTest,
+        phase: currentTool
+          ? (isShellOrTest ? "executing_shell_test" : "starting")
+          : "awaiting_model"
+      };
+      this.#subagentProgress.set(thread.id, progress);
+    }
     const lastProgressAt = progress?.lastProgressAt ?? latestToolEventAt ?? thread.createdAt;
     const baseState = this.getSubagentBaseState(thread, currentTool, progress);
     const decision = progress?.interruptionReason && !this.isSubagentActive(thread)
@@ -4089,6 +4108,7 @@ export class DesktopBackend {
     const targetIds = input.agents?.length
       ? input.agents.map((agent) => this.resolveAgent(parentThreadId, agent).id)
       : (await this.listSubagents(parentThreadId)).map((item) => item.id);
+    const targetIdSet = new Set(targetIds);
     if (targetIds.length === 0) return { agents: [], timedOut: false, diagnostics: [] };
     const getTargets = () => targetIds.map((id) => this.#db.getThread(id));
     const allFinished = (agents: ThreadRecord[]) => agents.every((agent) => !this.isSubagentActive(agent));
@@ -4103,28 +4123,53 @@ export class DesktopBackend {
 
     return new Promise<SubagentWaitResult>((resolve) => {
       let settled = false;
-      let timer: ReturnType<typeof setInterval> | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const onAbort = () => finish({ agents: [], timedOut: false, diagnostics: [] });
+      const onRuntimeEvent = (event: RuntimeEvent) => {
+        if (event.threadId && targetIdSet.has(event.threadId)) void poll();
+      };
       const finish = (value: SubagentWaitResult) => {
         if (settled) return;
         settled = true;
-        if (timer) clearInterval(timer);
+        if (timer) clearTimeout(timer);
         if (timeout) clearTimeout(timeout);
         input.abortSignal?.removeEventListener("abort", onAbort);
+        this.#events.off("runtime-event", onRuntimeEvent);
         resolve(value);
       };
       let inspecting = false;
-      const snapshot = async (timedOut: boolean) => {
+      let allowDatabaseFallback = true;
+      const snapshot = async (timedOut: boolean, useDatabaseFallback: boolean) => {
         const agents = getTargets();
-        const diagnostics = agents.map((agent) => this.buildSubagentWatchdogDiagnostic(agent));
+        const diagnostics = agents.map((agent) => this.buildSubagentWatchdogDiagnostic(
+          agent,
+          Date.now(),
+          useDatabaseFallback
+        ));
         return { agents, diagnostics, timedOut };
+      };
+      const scheduleNextPoll = (diagnostics: SubagentWatchdogDiagnostic[]) => {
+        if (settled) return;
+        const nextInspectionAt = diagnostics
+          .map((diagnostic) => Date.parse(diagnostic.nextInspectionAt ?? ""))
+          .filter((value) => Number.isFinite(value))
+          .sort((left, right) => left - right)[0];
+        const delay = Number.isFinite(nextInspectionAt)
+          ? Math.max(250, nextInspectionAt - Date.now())
+          : 1_000;
+        timer = setTimeout(() => void poll(), delay);
       };
       const poll = async () => {
         if (settled || inspecting) return;
         inspecting = true;
         try {
-          const observed = await snapshot(false);
+          if (timer) {
+            clearTimeout(timer);
+            timer = undefined;
+          }
+          const observed = await snapshot(false, allowDatabaseFallback);
+          allowDatabaseFallback = false;
           for (const diagnostic of observed.diagnostics) {
             if (diagnostic.state !== "stalled" && diagnostic.state !== "auto_interrupted") continue;
             const child = observed.agents.find((agent) => agent.id === diagnostic.threadId);
@@ -4132,27 +4177,29 @@ export class DesktopBackend {
               await this.interruptSubagentForWatchdog(child, diagnostic.interruptionReason ?? "Subagent watchdog interrupted the task.");
             }
           }
-          const final = await snapshot(false);
+          const final = await snapshot(false, false);
           if (allFinished(final.agents)) {
             finish({
               agents: final.agents.map((item) => this.buildSubagentEnvelope(item)),
               timedOut: false,
               diagnostics: final.diagnostics
             });
+          } else {
+            scheduleNextPoll(final.diagnostics);
           }
         } finally {
           inspecting = false;
         }
       };
-      timer = setInterval(() => void poll(), 250);
       timeout = setTimeout(() => {
-        void snapshot(true).then((result) => finish({
+        void snapshot(true, false).then((result) => finish({
           agents: result.agents.map((item) => this.buildSubagentEnvelope(item)),
           timedOut: true,
           diagnostics: result.diagnostics
         }));
       }, timeoutMs);
       input.abortSignal?.addEventListener("abort", onAbort, { once: true });
+      this.#events.on("runtime-event", onRuntimeEvent);
       void poll();
     });
   }
@@ -4513,7 +4560,9 @@ export class DesktopBackend {
       payload: { event: sanitizedEvent }
     };
     if (routedEvent.type !== "assistant.draft.updated" || this.#config.desktop.llmLogViewer) {
-      await this.#logs.append("runtime.event", runtimeLogEntry.payload, routedEvent.threadId);
+      // Runtime delivery must not wait for disk I/O. RuntimeLogWriter keeps
+      // ordering and flushes the batch before readers or shutdown continue.
+      void this.#logs.append("runtime.event", runtimeLogEntry.payload, routedEvent.threadId);
     }
     this.emitLiveRuntimeLog(runtimeLogEntry);
     if (subject?.parentThreadId && (routedEvent.type === "thread.updated" || routedEvent.type === "queue.updated")) {

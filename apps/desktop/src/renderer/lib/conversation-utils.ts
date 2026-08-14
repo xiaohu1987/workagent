@@ -143,6 +143,9 @@ export type AssistantDraft = {
   threadId: string;
   turnRunId: string;
   content: string;
+  /** Optional chunked representation used by the incremental stream path. */
+  chunks?: string[];
+  deltaSequence?: number;
   phase: AssistantDraftPhase;
   startedAt: string;
   completed: boolean;
@@ -401,6 +404,118 @@ export function buildTimelineEntries(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
   );
   return collapseDirectoryReadMessages(sortedEntries);
+}
+
+export type TimelineIncrementalInput = {
+  messages: MessageRecord[];
+  toolCalls: ToolCallRecord[];
+  artifacts: ArtifactRecord[];
+  workspaceRoot?: string | null;
+  threadStatus?: ThreadRecord["status"] | null;
+  prompts?: UserInputPrompt[];
+  contextCompaction?: ContextCompactionRecord | null;
+};
+
+export type TimelineIncrementalCache = TimelineIncrementalInput & {
+  entries: TimelineEntry[];
+};
+
+function hasStableMessagePrefix(previous: MessageRecord[], next: MessageRecord[]): boolean {
+  if (previous.length > next.length) return false;
+  return previous.every((message, index) => message === next[index]);
+}
+
+function hasStableOptionalArray<T>(previous: T[], next: T[]): boolean {
+  return previous === next || (previous.length === 0 && next.length === 0);
+}
+
+function canAppendMessageEntriesSafely(
+  previous: TimelineIncrementalCache,
+  normalized: TimelineIncrementalInput & { prompts: UserInputPrompt[]; contextCompaction: ContextCompactionRecord | null }
+): boolean {
+  // Tool groups and file summaries derive from the complete message set. A
+  // new message can change their anchor or timestamp even when those arrays
+  // themselves are reference-identical, so keep the fast path message-only.
+  if (
+    previous.toolCalls.length > 0 ||
+    previous.artifacts.length > 0 ||
+    normalized.toolCalls.length > 0 ||
+    normalized.artifacts.length > 0 ||
+    normalized.prompts.length > 0 ||
+    normalized.contextCompaction !== null
+  ) return false;
+
+  // Reusing already-collapsed entries cannot safely handle a directory-read
+  // group crossing the old/new boundary. Fall back before such content is
+  // introduced rather than trying to reverse the previous collapse.
+  if (previous.messages.some((message) => getReadDirectory(message) !== null)) return false;
+  const suffix = normalized.messages.slice(previous.messages.length);
+  if (suffix.some((message) => getReadDirectory(message) !== null)) return false;
+
+  const previousLatest = previous.messages.reduce((latest, message) => {
+    const timestamp = Date.parse(message.createdAt);
+    return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
+  }, Number.NEGATIVE_INFINITY);
+  return suffix.every((message) => {
+    const timestamp = Date.parse(message.createdAt);
+    return !Number.isFinite(timestamp) || timestamp >= previousLatest;
+  });
+}
+
+/**
+ * Fast path for the common append-only runtime update. Any input that could
+ * alter an existing grouping or sort order falls back to the canonical full
+ * timeline builder.
+ */
+export function buildTimelineEntriesIncremental(
+  input: TimelineIncrementalInput,
+  previous: TimelineIncrementalCache | null
+): { entries: TimelineEntry[]; cache: TimelineIncrementalCache; usedIncremental: boolean } {
+  const normalized = {
+    ...input,
+    prompts: input.prompts ?? [],
+    contextCompaction: input.contextCompaction ?? null
+  };
+  const canAppend = Boolean(
+    previous &&
+    hasStableMessagePrefix(previous.messages, normalized.messages) &&
+    previous.messages.length < normalized.messages.length &&
+    previous.toolCalls === normalized.toolCalls &&
+    previous.artifacts === normalized.artifacts &&
+    hasStableOptionalArray(previous.prompts ?? [], normalized.prompts) &&
+    previous.contextCompaction === normalized.contextCompaction &&
+    previous.workspaceRoot === normalized.workspaceRoot &&
+    previous.threadStatus === normalized.threadStatus &&
+    canAppendMessageEntriesSafely(previous, normalized)
+  );
+
+  if (!canAppend || !previous) {
+    const entries = buildTimelineEntries(
+      normalized.messages,
+      normalized.toolCalls,
+      normalized.artifacts,
+      normalized.workspaceRoot,
+      normalized.threadStatus,
+      normalized.prompts,
+      normalized.contextCompaction
+    );
+    return { entries, cache: { ...normalized, entries }, usedIncremental: false };
+  }
+
+  const suffix = normalized.messages.slice(previous.messages.length);
+  const appended = buildTimelineEntries(
+    suffix,
+    [],
+    [],
+    normalized.workspaceRoot,
+    normalized.threadStatus,
+    [],
+    null
+  );
+  const entries = [...previous.entries, ...appended].sort(
+    (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
+  );
+  return { entries, cache: { ...normalized, entries }, usedIncremental: true };
 }
 
 export function buildConversationTurnSections(entries: TimelineEntry[]): ConversationTurnSection[] {
@@ -1727,6 +1842,54 @@ export function createOptimisticThreadSnapshot(thread: ThreadRecord): RuntimeThr
 
 export function isAssistantDraftPhase(value: unknown): value is AssistantDraftPhase {
   return value === "generating" || value === "validating" || value === "auditing" || value === "retrying";
+}
+
+export type AssistantDraftStreamBuffer = {
+  chunks: string[];
+  checkpoint: string;
+  nextDeltaSequence: number;
+  usesMarkup: boolean;
+};
+
+export function reconcileAssistantDraftStreamUpdate(
+  previous: AssistantDraftStreamBuffer | undefined,
+  input: { content?: string; delta?: string; deltaSequence?: number }
+): { buffer?: AssistantDraftStreamBuffer; content: string; chunks?: string[] } | null {
+  const { content, delta, deltaSequence } = input;
+  if (deltaSequence === undefined || delta === undefined) {
+    return content === undefined ? null : { content };
+  }
+
+  const isNext = previous
+    ? deltaSequence === previous.nextDeltaSequence
+    : content !== undefined || deltaSequence === 1;
+  if (!isNext) {
+    if (content === undefined) return null;
+    const usesMarkup = /<\/?tool_(?:calls|result)\b/i.test(content);
+    const buffer = {
+      chunks: [content],
+      checkpoint: content,
+      nextDeltaSequence: deltaSequence + 1,
+      usesMarkup
+    };
+    return { buffer, content, chunks: usesMarkup ? undefined : buffer.chunks };
+  }
+
+  const chunks = content !== undefined
+    ? [content]
+    : [...(previous?.chunks ?? []), delta];
+  const usesMarkup = previous?.usesMarkup === true || /<\/?tool_(?:calls|result)\b/i.test(`${content ?? ""}${delta}`);
+  const buffer = {
+    chunks,
+    checkpoint: content ?? previous?.checkpoint ?? "",
+    nextDeltaSequence: deltaSequence + 1,
+    usesMarkup
+  };
+  return {
+    buffer,
+    content: usesMarkup ? chunks.join("") : buffer.checkpoint,
+    chunks: usesMarkup ? undefined : chunks
+  };
 }
 
 export function getAssistantDraftPhaseLabel(phase: AssistantDraftPhase): string {

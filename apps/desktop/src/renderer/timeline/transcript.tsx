@@ -580,6 +580,7 @@ type TranscriptMessageProps = {
 type AssistantDraftMessageProps = {
   assistantLabel: string;
   content: string;
+  chunks?: string[];
   draftId: string;
   phase: AssistantDraftPhase;
   startedAt: string;
@@ -589,6 +590,7 @@ type AssistantDraftMessageProps = {
 export const AssistantDraftMessage = memo(function AssistantDraftMessage({
   assistantLabel,
   content,
+  chunks,
   draftId,
   phase,
   startedAt,
@@ -621,7 +623,9 @@ export const AssistantDraftMessage = memo(function AssistantDraftMessage({
             followsLatestRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 4;
           }}
         >
-          <span className="streaming-assistant-plain-body" data-draft-id={draftId}>{content}</span>
+          <span className="streaming-assistant-plain-body" data-draft-id={draftId}>
+            {chunks?.length ? chunks.map((chunk, index) => <span key={`${draftId}-${index}`}>{chunk}</span>) : content}
+          </span>
           {phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
         </div>
       </div>

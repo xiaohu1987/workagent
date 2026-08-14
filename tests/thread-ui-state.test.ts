@@ -12,6 +12,7 @@ import {
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
 import {
   buildTimelineEntries,
+  buildTimelineEntriesIncremental,
   buildConversationTurnSections,
   getConversationTurnIdToCollapseAfterExecution,
   getConversationTurnIdsToCollapseForNewSubmission,
@@ -35,6 +36,7 @@ import {
   reconcilePendingUserMessages,
   reconcilePendingUserMessagesDetailed,
   reconcileAssistantDraftCompletion,
+  reconcileAssistantDraftStreamUpdate,
   reconcileAssistantDraftUpdate,
   resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
@@ -575,6 +577,56 @@ describe("tool activity summaries", () => {
 });
 
 describe("tool timeline grouping", () => {
+  it("uses the append-only timeline fast path without changing canonical entries", () => {
+    const makeMessage = (id: string, createdAt: string): MessageRecord => ({
+      id,
+      threadId: "thread-1",
+      turnRunId: `turn-${id}`,
+      role: id.startsWith("user") ? "user" : "assistant",
+      content: id,
+      metadataJson: null,
+      createdAt
+    });
+    const firstMessages = [makeMessage("user-1", "2026-07-15T00:00:00.000Z")];
+    const prompts: never[] = [];
+    const firstInput = { messages: firstMessages, toolCalls: [], artifacts: [], prompts };
+    const first = buildTimelineEntriesIncremental(firstInput, null);
+    const nextMessages = [...firstMessages, makeMessage("assistant-1", "2026-07-15T00:00:01.000Z")];
+    const nextInput = { ...firstInput, messages: nextMessages };
+    const next = buildTimelineEntriesIncremental(nextInput, first.cache);
+
+    expect(next.usedIncremental).toBe(true);
+    expect(next.entries).toEqual(buildTimelineEntries(nextMessages, [], [], undefined, undefined, prompts));
+
+    const editedMessages = [{ ...firstMessages[0] }, nextMessages[1]];
+    const edited = buildTimelineEntriesIncremental({ ...nextInput, messages: editedMessages }, next.cache);
+    expect(edited.usedIncremental).toBe(false);
+
+    const outOfOrder = buildTimelineEntriesIncremental({
+      ...nextInput,
+      messages: [...nextMessages, makeMessage("assistant-old", "2026-07-14T23:59:59.000Z")]
+    }, next.cache);
+    expect(outOfOrder.usedIncremental).toBe(false);
+
+    const toolCall = {
+      id: "tool-1",
+      threadId: "thread-1",
+      turnRunId: "turn-user-1",
+      toolName: "shell.exec",
+      argumentsJson: "{}",
+      resultJson: "{}",
+      status: "completed",
+      riskLevel: "low",
+      approvalMode: "auto",
+      startedAt: "2026-07-15T00:00:00.500Z",
+      completedAt: "2026-07-15T00:00:00.600Z"
+    } as const;
+    expect(buildTimelineEntriesIncremental({
+      ...nextInput,
+      toolCalls: [toolCall]
+    }, next.cache).usedIncremental).toBe(false);
+  });
+
   it("collapses every completed history turn while leaving only the live turn open", () => {
     const sections = [{ id: "turn-1" }, { id: "turn-2" }, { id: "turn-3" }];
 
@@ -1192,6 +1244,31 @@ describe("assistant draft lifecycle", () => {
     };
 
     expect(selectActiveAssistantDraft([draft], "thread-1", "running", [])).toEqual(draft);
+  });
+
+  it("reconciles incremental draft checkpoints and rejects uncheckpointed gaps", () => {
+    expect(reconcileAssistantDraftStreamUpdate(undefined, { content: "legacy" })).toEqual({ content: "legacy" });
+
+    const first = reconcileAssistantDraftStreamUpdate(undefined, {
+      content: "Hello",
+      delta: "Hello",
+      deltaSequence: 1
+    });
+    expect(first?.chunks).toEqual(["Hello"]);
+    const second = reconcileAssistantDraftStreamUpdate(first?.buffer, {
+      delta: " world",
+      deltaSequence: 2
+    });
+    expect(second?.chunks).toEqual(["Hello", " world"]);
+    expect(reconcileAssistantDraftStreamUpdate(second?.buffer, {
+      delta: " skipped",
+      deltaSequence: 4
+    })).toBeNull();
+    expect(reconcileAssistantDraftStreamUpdate(second?.buffer, {
+      content: "Hello world restored",
+      delta: " restored",
+      deltaSequence: 20
+    })?.chunks).toEqual(["Hello world restored"]);
   });
 
   it("ignores late updates from an older model request in the same turn", () => {

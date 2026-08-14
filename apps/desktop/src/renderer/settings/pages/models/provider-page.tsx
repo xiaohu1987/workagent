@@ -18,6 +18,15 @@ type ProviderSettingsPageProps = {
 };
 
 export function ProviderSettingsPage({ configDraft, config, settingsProvider, settingsProviderModels, providerSecretDrafts, setProviderSecretDrafts, isFetchingModels, newModelId, newModelDisplayName, modelTestResults, testingModelKey, onSetProviderId, onSetNewModelId, onSetNewModelDisplayName, onAddCustomProvider, onRemoveProvider, onUpdateProvider, onFetchModels, onUpdateModel, onCheckModel, onRemoveModel, onAddModel, onSave, onRefresh, onShowNotice, formatLatency, formatTokensPerSecond }: ProviderSettingsPageProps) {
+  const normalizedProviderType = settingsProvider ? normalizeProviderProtocol(settingsProvider.type) : null;
+  const providerProtocolValue = normalizedProviderType === "openai-compatible" && settingsProvider?.deepseekProtocol === "native"
+    ? "deepseek-native"
+    : normalizedProviderType ?? "";
+  const providerProtocolOptions = [
+    ...PROVIDER_TYPE_OPTIONS,
+    { value: "deepseek-native", label: "DeepSeek 原生扩展" }
+  ];
+
   return (
       <div className="settings-section provider-settings-section">
         {configDraft ? (
@@ -74,39 +83,25 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
                       <ComposerSelect
                         className="form-select provider-type-select"
                         ariaLabel="接口协议"
-                        value={normalizeProviderProtocol(settingsProvider.type)}
-                        onChange={(type) =>
+                        value={providerProtocolValue}
+                        onChange={(value) => {
+                          if (value === "deepseek-native") {
+                            onUpdateProvider(settingsProvider.id, {
+                              type: "openai-compatible",
+                              deepseekProtocol: "native"
+                            });
+                            return;
+                          }
                           onUpdateProvider(settingsProvider.id, {
-                            type: type as ProviderType
-                          })
-                        }
-                        options={PROVIDER_TYPE_OPTIONS}
+                            type: value as ProviderType,
+                            deepseekProtocol: value === "openai-compatible" ? "openai-compatible" : undefined
+                          });
+                        }}
+                        options={providerProtocolOptions}
                         placeholder="选择接口协议"
                       />
                       <small className="settings-field-hint">仅决定聊天与推理模型的请求格式；图片/视频模型始终使用模型自身的生成协议，且要求供应商为 OpenAI 兼容接口</small>
                     </label>
-
-                    {settingsProvider.type === "openai-compatible" ? (
-                      <label className="settings-field full">
-                        <span>DeepSeek 协议</span>
-                        <ComposerSelect
-                          className="form-select provider-type-select"
-                          ariaLabel="DeepSeek 协议"
-                          value={settingsProvider.deepseekProtocol ?? "native"}
-                          onChange={(value) =>
-                            onUpdateProvider(settingsProvider.id, {
-                              deepseekProtocol: value as ProviderDefinition["deepseekProtocol"]
-                            })
-                          }
-                          options={[
-                            { value: "native", label: "DeepSeek 原生扩展" },
-                            { value: "openai-compatible", label: "标准 OpenAI 兼容" }
-                          ]}
-                          placeholder="选择 DeepSeek 协议"
-                        />
-                        <small className="settings-field-hint">标准兼容模式不会发送 thinking、reasoning_effort 或 reasoning_content。</small>
-                      </label>
-                    ) : null}
 
                     <label className="settings-field">
                       <span>调用 URL</span>

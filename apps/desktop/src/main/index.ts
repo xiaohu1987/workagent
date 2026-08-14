@@ -920,9 +920,15 @@ function stopActiveThreadsBeforeQuit(): Promise<void> {
   if (!shutdownTasksPromise) {
     shutdownTasksPromise = (async () => {
       try {
-        await backend.interruptActiveThreads();
+        if (backend.hasActiveThreads()) {
+          await backend.interruptActiveThreads();
+        }
       } catch (error) {
         console.error("[shutdown] Failed to interrupt active threads", error);
+      } finally {
+        await backend.flushRuntimeLogs().catch((error) => {
+          console.error("[shutdown] Failed to flush runtime logs", error);
+        });
       }
     })();
   }
@@ -931,13 +937,7 @@ function stopActiveThreadsBeforeQuit(): Promise<void> {
 
 app.on("before-quit", (event) => {
   isQuitting = true;
-  try {
-    if (shutdownTasksPromise || !backend.hasActiveThreads()) {
-      return;
-    }
-  } catch {
-    return;
-  }
+  if (shutdownTasksPromise) return;
   // Abort in-flight model runs before the process exits. Interrupting persists
   // the turn as interrupted, so the elapsed clock freezes instead of resuming
   // from the stale startedAt on the next launch.

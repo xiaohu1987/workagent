@@ -4,6 +4,8 @@ import type { RuntimeLogEntry, RuntimeLogPage } from "@shared-types";
 
 const DEFAULT_GLOBAL_LOG_LIMIT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_SESSION_LOG_LIMIT_BYTES = 2 * 1024 * 1024;
+const LOG_FLUSH_DELAY_MS = 40;
+const LOG_FLUSH_BATCH_SIZE = 64;
 
 export interface RuntimeLogLimits {
   globalBytes: number;
@@ -17,6 +19,8 @@ export interface RuntimeLogStats {
 
 export class RuntimeLogWriter {
   #tail: Promise<void> = Promise.resolve();
+  #pending: Array<{ line: string; targets: string[]; resolve: () => void }> = [];
+  #flushTimer: ReturnType<typeof setTimeout> | null = null;
   readonly #limits: RuntimeLogLimits;
 
   public constructor(logsDir: string, limits: Partial<RuntimeLogLimits> = {}) {
@@ -42,11 +46,40 @@ export class RuntimeLogWriter {
       targets.push(path.join(this.logsDir, "sessions", `${safeFileName(threadId)}.jsonl`));
     }
 
-    this.#tail = this.#tail
+    const completion = new Promise<void>((resolve) => {
+      this.#pending.push({ line, targets, resolve });
+    });
+    if (this.#pending.length >= LOG_FLUSH_BATCH_SIZE) {
+      void this.flush();
+    } else if (this.#flushTimer === null) {
+      this.#flushTimer = setTimeout(() => {
+        this.#flushTimer = null;
+        void this.flush();
+      }, LOG_FLUSH_DELAY_MS);
+    }
+    return completion;
+  }
+
+  public flush(): Promise<void> {
+    if (this.#flushTimer !== null) {
+      clearTimeout(this.#flushTimer);
+      this.#flushTimer = null;
+    }
+    if (this.#pending.length === 0) return this.#tail;
+    const batch = this.#pending.splice(0);
+    const operation = this.#tail
       .then(async () => {
         await fs.mkdir(path.join(this.logsDir, "sessions"), { recursive: true });
-        await Promise.all(targets.map(async (target) => {
-          await fs.appendFile(target, line, "utf8");
+        const linesByTarget = new Map<string, string[]>();
+        for (const item of batch) {
+          for (const target of item.targets) {
+            const lines = linesByTarget.get(target) ?? [];
+            lines.push(item.line);
+            linesByTarget.set(target, lines);
+          }
+        }
+        await Promise.all([...linesByTarget.entries()].map(async ([target, lines]) => {
+          await fs.appendFile(target, lines.join(""), "utf8");
           await trimJsonlFile(target, target.includes(`${path.sep}sessions${path.sep}`)
             ? this.#limits.sessionBytes
             : this.#limits.globalBytes);
@@ -55,11 +88,16 @@ export class RuntimeLogWriter {
       .catch((error) => {
         console.error("[runtime-log] Failed to append log entry", error);
       });
-    return this.#tail;
+    this.#tail = operation;
+    void operation.then(() => {
+      for (const item of batch) item.resolve();
+      if (this.#pending.length > 0) void this.flush();
+    });
+    return operation;
   }
 
   public async readSessionPage(threadId: string, limit = 300): Promise<RuntimeLogPage> {
-    await this.#tail;
+    await this.flush();
     const filePath = path.join(this.logsDir, "sessions", `${safeFileName(threadId)}.jsonl`);
     const raw = await fs.readFile(filePath, "utf8").catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return "";
@@ -104,6 +142,7 @@ export class RuntimeLogWriter {
   }
 
   public prune(): Promise<void> {
+    void this.flush();
     this.#tail = this.#tail
       .then(async () => {
         await trimJsonlFile(path.join(this.logsDir, "runtime.jsonl"), this.#limits.globalBytes);
@@ -123,6 +162,7 @@ export class RuntimeLogWriter {
   }
 
   public getStats(): Promise<RuntimeLogStats> {
+    void this.flush();
     const operation = this.#tail.then(() => summarizeDirectory(this.logsDir));
     this.#tail = operation.then(
       () => undefined,
@@ -132,6 +172,7 @@ export class RuntimeLogWriter {
   }
 
   public clear(): Promise<RuntimeLogStats> {
+    void this.flush();
     const operation = this.#tail.then(async () => {
       const stats = await summarizeDirectory(this.logsDir);
       const entries = await fs.readdir(this.logsDir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {

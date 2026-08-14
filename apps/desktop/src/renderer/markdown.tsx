@@ -590,8 +590,19 @@ function isFileReferenceLink(href: string) {
 // are immutable descriptions, so sharing them across threads/mounts is safe —
 // component state (e.g. CopyTextButton) is scoped by React to each mount
 // position, not to the element object.
-const MARKDOWN_RENDER_CACHE_LIMIT = 300;
-const markdownRenderCache = new Map<string, ReactNode>();
+const MARKDOWN_RENDER_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const MARKDOWN_RENDER_CACHE_MAX_ENTRY_BYTES = 256 * 1024;
+const markdownRenderCache = new Map<string, { node: ReactNode; bytes: number }>();
+let markdownRenderCacheBytes = 0;
+
+export function clearMarkdownRenderCache(): void {
+  markdownRenderCache.clear();
+  markdownRenderCacheBytes = 0;
+}
+
+export function getMarkdownRenderCacheStats(): { entries: number; bytes: number } {
+  return { entries: markdownRenderCache.size, bytes: markdownRenderCacheBytes };
+}
 
 export function renderMarkdownDocument(content: string, keyPrefix: string, className: string) {
   if (!content) {
@@ -599,20 +610,26 @@ export function renderMarkdownDocument(content: string, keyPrefix: string, class
   }
   const cacheKey = `${className}${content}`;
   const cached = markdownRenderCache.get(cacheKey);
-  if (cached !== undefined) {
+  if (cached) {
     // Refresh recency (LRU).
     markdownRenderCache.delete(cacheKey);
     markdownRenderCache.set(cacheKey, cached);
-    return cached;
+    return cached.node;
   }
   // Block keys inside the cached subtree only need to be unique among their
   // siblings, so a fixed prefix is safe for shared cached elements.
   const rendered = renderMarkdownDocumentUncached(content, `mdc-${content.length}`, className);
-  markdownRenderCache.set(cacheKey, rendered);
-  if (markdownRenderCache.size > MARKDOWN_RENDER_CACHE_LIMIT) {
-    const oldestKey = markdownRenderCache.keys().next().value;
-    if (oldestKey !== undefined) {
-      markdownRenderCache.delete(oldestKey);
+  // Large documents are expensive to retain and are unlikely to be reused
+  // often enough to justify their memory footprint.
+  const entryBytes = content.length * 2;
+  if (entryBytes <= MARKDOWN_RENDER_CACHE_MAX_ENTRY_BYTES) {
+    markdownRenderCache.set(cacheKey, { node: rendered, bytes: entryBytes });
+    markdownRenderCacheBytes += entryBytes;
+    while (markdownRenderCacheBytes > MARKDOWN_RENDER_CACHE_MAX_BYTES) {
+      const oldest = markdownRenderCache.entries().next().value as [string, { node: ReactNode; bytes: number }] | undefined;
+      if (!oldest) break;
+      markdownRenderCache.delete(oldest[0]);
+      markdownRenderCacheBytes -= oldest[1].bytes;
     }
   }
   return rendered;

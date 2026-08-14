@@ -7,6 +7,7 @@
 - 新增子任务等待 watchdog：父任务在等待子任务时按 30 秒轮询，子任务运行 60 秒后开始巡检；连续 120 秒没有新的工具事件、shell stdout/stderr 增量、测试输出或进程状态变化时自动中断，并将终态标记为 `interrupted`，保留已有消息、工具结果和中断原因。shell/test 有持续进展时可在 10 分钟后按 5 分钟窗口继续检查，但单个子任务总运行时间达到 30 分钟一定中断。子任务模型请求改为有限超时，主任务仍可由用户手动停止。终端输出事件现携带进度 heartbeat，子任务卡片会区分排队、启动、等待模型、执行 shell/test、重试、停滞和自动中断，并显示最近进度及自动中断倒计时。新增 watchdog 判定测试；`tests/agent-runtime.test.ts` 与 `tests/thread-ui-state.test.ts` 共 323 项通过。
 
 - 优化主项目的 DeepSeek 兼容层，并仅将 `deepseek-harness` 作为实现参考：Provider 新增可持久化的 `deepseekProtocol` 配置。未配置或选择 `native` 时保持原有 DeepSeek 原生扩展行为；OpenAI 兼容 Provider 可在设置页选择“标准 OpenAI 兼容”，此模式不再发送 `thinking`、`reasoning_effort` 或工具调用历史中的 `reasoning_content`，以兼容拒绝 DeepSeek 私有字段的标准 Chat Completions 网关。DeepSeek 原生请求参数处理保留在 `packages/provider-adapters/src/models/deepseek.ts`，共享工具历史序列化在 `packages/provider-adapters/src/index.ts` 按该配置处理。新增 Provider 配置往返持久化和标准兼容协议回归测试；`tests/provider-adapters.test.ts`（147 项）与 `tests/model-storage.test.ts`（12 项）通过。
+- 将设置页的“接口协议”和“DeepSeek 协议”合并为一个选择器：保留 OpenAI 兼容接口、Anthropic、Gemini、Mock 等原有平级选项，并新增平级的“DeepSeek 原生扩展”选项；选择 DeepSeek 原生扩展时使用 OpenAI Chat Completions 传输并开启 DeepSeek 原生字段。
 
 ## 2026-08-11
 

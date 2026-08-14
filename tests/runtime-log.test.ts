@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -64,6 +64,33 @@ describe("RuntimeLogWriter", () => {
     expect(entries.map((entry) => entry.kind)).toEqual(["provider.request", "provider.response"]);
     expect(entries[0]?.payload.authorization).toBe("[redacted]");
     expect(entries[1]?.payload.content).toBe("done");
+  });
+
+  it("preserves event order when many records are queued in one batch", async () => {
+    const logsDir = await makeTempDir();
+    const writer = new RuntimeLogWriter(logsDir);
+
+    await Promise.all(Array.from({ length: 100 }, (_, index) =>
+      writer.append("runtime.event", { index }, "thread-batch")
+    ));
+
+    const entries = await writer.readSession("thread-batch", 200);
+    expect(entries.map((entry) => entry.payload.index)).toEqual(
+      Array.from({ length: 100 }, (_, index) => index)
+    );
+  });
+
+  it("continues draining later records after a batch write fails", async () => {
+    const logsDir = await makeTempDir();
+    const writer = new RuntimeLogWriter(logsDir);
+    const appendFile = vi.spyOn(fs, "appendFile").mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(writer.append("runtime.event", { index: 1 }, "thread-failure")).resolves.toBeUndefined();
+    appendFile.mockRestore();
+    await writer.append("runtime.event", { index: 2 }, "thread-failure");
+
+    const entries = await writer.readSession("thread-failure", 10);
+    expect(entries.at(-1)?.payload.index).toBe(2);
   });
 
   it("prunes existing global and session logs after startup", async () => {
