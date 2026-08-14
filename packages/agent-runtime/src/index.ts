@@ -345,7 +345,13 @@ export function isUpstreamServiceUnavailableError(error: unknown): boolean {
 
 export function isFunctionCallProtocolError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /\b400\b.*\bno tool (?:call|output) found for function call\b/i.test(message);
+  if (!/\b(?:HTTP\s*)?400\b/i.test(message)) {
+    return false;
+  }
+  return /\bno tool (?:call|output) found for (?:function|tool) call\b/i.test(message) ||
+    /\btool_call_id\b.*\b(?:missing|not found|unknown|invalid|must match)\b/i.test(message) ||
+    /\b(?:missing|no)\s+tool (?:result|output)\b/i.test(message) ||
+    /\btool_calls?\b.*\bmust be followed by\b.*\btool\b/i.test(message);
 }
 
 export function isEmptyProviderBadRequestError(error: unknown): boolean {
@@ -415,6 +421,24 @@ export function isNetworkError(error: unknown): boolean {
 export function isProviderOutputLimitError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /response reached its output limit|finish_reason\s*[:=]?\s*["']?length|stop_reason\s*[:=]?\s*["']?max_tokens|maximum output tokens|max_tokens.*(?:reached|exceeded)/i.test(message);
+}
+
+/**
+ * Recover an output-limit interruption without silently downgrading a long
+ * requested answer into a short final summary. The partial draft is supplied
+ * as model context rather than persisted as a second visible assistant reply.
+ */
+export function buildProviderOutputLimitRecoveryInstruction(partialDraft = ""): string {
+  const draft = partialDraft.trim();
+  const draftContext = draft
+    ? `\n\nThe visible answer was interrupted after this partial draft. Continue from its last point; do not restart or summarize it:\n<partial_draft>\n${draft.slice(-12_000)}\n</partial_draft>`
+    : "";
+  return (
+    "The previous response reached the provider output limit. Continue the original answer from the existing verified context. " +
+    "Preserve the user's requested level of detail and do not replace the answer with a brief summary. " +
+    "Do not repeat analysis, logs, source text, or completed work. Return only the remaining answer, one compact next tool call, or a final answer when the original response is complete." +
+    draftContext
+  );
 }
 
 export function isProviderResourceError(error: unknown): boolean {
@@ -832,6 +856,7 @@ interface RuntimeServices {
   ): Promise<{ output: string; localUrl?: string; running?: boolean; idleForMs?: number; diagnosis?: string }>;
   cancelTerminalCommands(threadId: string, reason?: string): Promise<void> | void;
   requestApproval(threadId: string, turnRunId: string, input: {
+    kind?: "permission" | "explicit_authorization";
     title: string;
     description: string;
     riskLevel: "low" | "medium" | "high";
@@ -1653,9 +1678,7 @@ class ThreadSessionRuntime {
       selectedMcpServerIds.length > 0 || explicitlyRequestedMcp
     );
     const tools = [
-      ...modePolicy.filterTools(visibleToolSet.tools).filter((tool) =>
-        gitMutationRequested || !GIT_MUTATION_TOOL_NAMES.has(tool.name)
-      ),
+      ...modePolicy.filterTools(visibleToolSet.tools),
       AGENT_PROTOCOL_RECOVERY_TOOL_SPEC
     ];
     const mcpTools = visibleToolSet.mcpTools;
@@ -2002,6 +2025,9 @@ class ThreadSessionRuntime {
       let modelRateLimitAttempts = 0;
       let networkErrorAttempts = 0;
       let providerOutputLimitAttempts = 0;
+      // Keep the turn outcome honest when a later recovery response finishes
+      // normally after an earlier response was cut off by max_tokens.
+      let providerOutputLimitEncountered = false;
       let providerResourceAttempts = 0;
       let providerStreamRecoveryAttempts = 0;
       let forceNonStreamingAfterIncompleteStream = false;
@@ -2336,7 +2362,7 @@ class ThreadSessionRuntime {
       const persistBlockedToolCall = async (
         toolCall: RuntimeToolCall,
         reason: string,
-        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope"
+        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope" | "explicit_authorization_denied"
       ) => {
         const toolRecord = await this.services.persistence.recordToolCall({
           threadId: this.threadId,
@@ -2962,6 +2988,7 @@ class ThreadSessionRuntime {
               throw error;
             }
             providerOutputLimitAttempts += 1;
+            providerOutputLimitEncountered = true;
             const retrying = true;
             const nextMaxOutputTokens = resolveProviderOutputLimitRecoveryTokens(
               model.defaultMaxOutputTokens,
@@ -2986,11 +3013,19 @@ class ThreadSessionRuntime {
               },
               createdAt: new Date().toISOString()
             });
+            const partialDraft = streamedVisibleContent.trim();
+            // Native streaming already gives us a valid assistant text block;
+            // preserve it with the correct role so the next request can append
+            // to it. Text-protocol retries may contain an incomplete JSON
+            // envelope, so those remain in the recovery instruction only.
+            if (partialDraft && !useTextToolProtocol && !this.#useFunctionCallCompatibilityTranscript) {
+              transcript.push({ role: "assistant", content: partialDraft });
+            }
             transcript.push({
               role: "user",
-              content:
-                "The previous response reached the provider output limit. Do not repeat analysis, logs, source text, or completed work. " +
-                "Use the verified tool results already in the transcript. Return only one compact next tool call, or a concise final answer under 500 words."
+              content: buildProviderOutputLimitRecoveryInstruction(
+                partialDraft && (useTextToolProtocol || this.#useFunctionCallCompatibilityTranscript) ? partialDraft : ""
+              )
             });
             await retryDraft();
             continue;
@@ -4074,7 +4109,7 @@ class ThreadSessionRuntime {
               continue;
             }
             if (standardCompletionAttempts >= MAX_STANDARD_COMPLETION_RECOVERIES) {
-              if (requiresUnitTest && (standardCompletion.missingUnitTest || standardCompletion.missingTestReport)) {
+              if (requiresUnitTest && standardCompletion.missingUnitTest) {
                 repeatedTaskFailure = {
                   taskKey: "project-code-unit-test",
                   attempts: standardCompletionAttempts,
@@ -4705,7 +4740,7 @@ class ThreadSessionRuntime {
           if (terminalDisposition === "continue") {
             throw new Error("Terminal turn was not accepted by the runtime completion state machine.");
           }
-          if (terminalDisposition === "complete_task") {
+          if (terminalDisposition === "complete_task" && !providerOutputLimitEncountered) {
             await compactContext("task_completed", true);
           }
           await persistRecoveredEpisodes();
@@ -4752,7 +4787,9 @@ class ThreadSessionRuntime {
           terminalThread = await this.services.persistence.updateThread(this.threadId, {
             // GOAL and PLAN end a response, not the user task. The confirmed
             // workflow remains available for the next explicit user action.
-            status: terminalDisposition === "awaiting_user_confirmation" ? "idle" : "completed",
+            status: terminalDisposition === "awaiting_user_confirmation" || providerOutputLimitEncountered
+              ? "idle"
+              : "completed",
             updatedAt: new Date().toISOString()
           });
           await settleDraft({ discarded: true });
@@ -4773,16 +4810,37 @@ class ThreadSessionRuntime {
             ...rawToolCall,
             name: canonicalizeToolName(rawToolCall.name)
           };
-          const gitMutationBlock = validateGitMutationToolCall(toolCall, gitMutationRequested);
-          if (gitMutationBlock) {
-            appendBlockedToolCallResult(toolCall, gitMutationBlock);
-            await persistBlockedToolCall(toolCall, gitMutationBlock, "git_mutation_requires_explicit_request");
-            transcript.push({ role: "user", content: gitMutationBlock });
-            await this.services.log("agent.git_mutation_blocked", this.threadId, {
+          const explicitAuthorization = buildExplicitAuthorizationRequirement(toolCall, gitMutationRequested);
+          let consumeExplicitAuthorization = false;
+          if (explicitAuthorization) {
+            await this.services.log("agent.explicit_authorization_requested", this.threadId, {
               turnRunId: turn.id,
-              toolName: toolCall.name
+              toolName: toolCall.name,
+              authorizationKind: explicitAuthorization.kind
             });
-            continue;
+            const approved = await this.services.requestApproval(this.threadId, turn.id, {
+              kind: "explicit_authorization",
+              title: explicitAuthorization.title,
+              description: explicitAuthorization.description,
+              riskLevel: explicitAuthorization.riskLevel,
+              payload: explicitAuthorization.payload
+            });
+            await this.services.log("agent.explicit_authorization_resolved", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              authorizationKind: explicitAuthorization.kind,
+              approved
+            });
+            if (!approved) {
+              appendBlockedToolCallResult(toolCall, explicitAuthorization.deniedMessage);
+              await persistBlockedToolCall(toolCall, explicitAuthorization.deniedMessage, "explicit_authorization_denied");
+              transcript.push({
+                role: "user",
+                content: `${explicitAuthorization.deniedMessage} Do not retry or claim that the operation ran unless the user explicitly requests it later.`
+              });
+              continue;
+            }
+            consumeExplicitAuthorization = true;
           }
           if (toolCall.name === AGENT_PROTOCOL_RECOVERY_TOOL_NAME) {
             const reason = typeof toolCall.arguments.reason === "string"
@@ -5230,7 +5288,13 @@ class ThreadSessionRuntime {
                 });
               },
               cancelActiveTerminalCommands: (reason) => this.services.cancelTerminalCommands(this.threadId, reason),
-              requestApproval: (input) => this.services.requestApproval(this.threadId, turn.id, input),
+              requestApproval: (input) => {
+                if (consumeExplicitAuthorization) {
+                  consumeExplicitAuthorization = false;
+                  return Promise.resolve(true);
+                }
+                return this.services.requestApproval(this.threadId, turn.id, input);
+              },
               requestUserInput: (input) => {
                 const isGpaClarification = this.#gpa.stage !== "off";
                 return this.services.requestUserInput(this.threadId, turn.id, {
@@ -7323,8 +7387,20 @@ const GIT_MUTATION_TOOL_NAMES = new Set([
   "git.worktree_remove"
 ]);
 
-const GIT_MUTATION_SHELL_PATTERN = /\bgit\s+(?:add|restore|reset|clean|commit|push|pull|fetch|merge|rebase|cherry-pick|worktree)\b/i;
+// Git accepts global options before the subcommand, e.g. `git -C repo pull`.
+// Recognize those forms as well so they receive the same explicit approval.
+const GIT_MUTATION_SHELL_PATTERN = /\bgit(?:\s+--?[A-Za-z][\w-]*(?:[=\s]+[^\s;&|]+)?)*\s+(?:add|restore|reset|clean|commit|push|pull|fetch|merge|rebase|cherry-pick|worktree)\b/i;
 const EXPLICIT_GIT_MUTATION_PATTERN = /(?:\bgit\s+(?:add|stage|unstage|restore|reset|clean|commit|push|pull|fetch|merge|rebase|cherry-pick|worktree)\b|(?:暂存|取消暂存|撤销(?:[\s\S]{0,12})修改|清理(?:[\s\S]{0,12})git|提交(?:代码|改动|更改|commit)?|推送(?:代码|分支)?|拉取(?:代码|分支|远端)?|创建(?:pull request|pr|合并请求)))/i;
+const EXPLICIT_AUTHORIZATION_OPERATION_LIMIT = 2_000;
+
+export interface ExplicitAuthorizationRequirement {
+  kind: "git_mutation";
+  title: string;
+  description: string;
+  riskLevel: "high";
+  payload: Record<string, unknown>;
+  deniedMessage: string;
+}
 
 export function isExplicitGitMutationRequest(input: string): boolean {
   return EXPLICIT_GIT_MUTATION_PATTERN.test(input);
@@ -7339,13 +7415,44 @@ export function validateGitMutationToolCall(
     ? toolCall.arguments.command
     : "";
   if (!GIT_MUTATION_TOOL_NAMES.has(toolCall.name) && !GIT_MUTATION_SHELL_PATTERN.test(shellCommand)) return null;
-  return "Git-changing operations require an explicit user request to stage, revert, commit, push, pull, create a PR, or manage worktrees. Read-only git.status and git.diff remain available for verification.";
+  return "用户未授权该 Git 写操作，命令未执行。";
+}
+
+export function buildExplicitAuthorizationRequirement(
+  toolCall: Pick<RuntimeToolCall, "name" | "arguments">,
+  explicitlyRequested: boolean
+): ExplicitAuthorizationRequirement | null {
+  if (!validateGitMutationToolCall(toolCall, explicitlyRequested)) return null;
+
+  const rawOperation = toolCall.name === "shell.exec" && typeof toolCall.arguments.command === "string"
+    ? toolCall.arguments.command
+    : `${toolCall.name}\n${JSON.stringify(toolCall.arguments, null, 2)}`;
+  const operation = truncateCharacters(
+    redactSensitiveText(rawOperation).trim() || toolCall.name,
+    EXPLICIT_AUTHORIZATION_OPERATION_LIMIT
+  );
+  return {
+    kind: "git_mutation",
+    title: "Git 操作需要明确授权",
+    description: [
+      "程序准备执行以下会修改 Git 仓库的操作：",
+      operation,
+      "该操作可能访问网络，并修改分支引用、暂存区或工作区。只有当前展示的操作会获得一次性授权。"
+    ].join("\n\n"),
+    riskLevel: "high",
+    payload: {
+      authorizationKind: "git_mutation",
+      toolName: toolCall.name,
+      operation
+    },
+    deniedMessage: "用户未授权该 Git 写操作，命令未执行。"
+  };
 }
 
 export function buildGitMutationPolicyPrompt(explicitlyRequested: boolean): string {
   return explicitlyRequested
     ? "[Git mutation policy] The user explicitly requested a Git-changing operation. Limit Git changes to that request and do not infer other Git actions."
-    : "[Git mutation policy] The user did not explicitly request a Git-changing operation. Do not stage, revert, commit, push, pull, create a PR, or manage worktrees, including through shell commands. You may use only read-only Git inspection when needed.";
+    : "[Git mutation policy] The user did not explicitly request a Git-changing operation. Do not assume authorization. If a Git-changing operation becomes necessary, submit the exact tool call so the runtime can request explicit user authorization; never claim it ran before approval. Read-only Git inspection remains available without this authorization.";
 }
 
 const SELF_VERIFYING_ARTIFACT_TOOLS = new Set([
@@ -8018,7 +8125,6 @@ export function validateStandardCompletion(input: {
   if (missingDelivery) reasons.push("The requested project file change has no verified file delivery.");
   if (missingVerification) reasons.push("The requested project file change has no post-delivery verification.");
   if (missingUnitTest) reasons.push("The project code change has no successful unit-test evidence.");
-  if (missingTestReport) reasons.push("The final summary does not include the required unit-test report.");
   if (missingRequestedDeliverable) {
     reasons.push("The requested test-case deliverable does not contain actual structured test cases.");
   }
@@ -8257,9 +8363,6 @@ export function buildStandardCompletionRecoveryInstruction(
     ...(result.missingUnitTest
       ? ["Run the relevant unit-test command now and wait for a successful tool result; a build, typecheck, or read-back cannot substitute for it."]
       : []),
-    ...(result.missingTestReport
-      ? ["Include a unit-test report in the final summary with the command, passing status, and result summary."]
-      : []),
     ...(result.missingRequestedDeliverable
       ? ["Provide the actual test cases now. Include identifiable cases with test steps and expected results; do not return only an introduction, scope note, or promise to provide them."]
       : []),
@@ -8390,7 +8493,6 @@ export function validateActCompletion(input: {
   if (missingDelivery) reasons.push("No verified delivery evidence was referenced.");
   if (missingVerification) reasons.push("No post-delivery verification evidence was referenced.");
   if (missingUnitTest) reasons.push("No successful unit-test evidence was referenced for the project code change.");
-  if (missingTestReport) reasons.push("The final summary does not include the required unit-test report.");
   if (missingBrowserVerification.length > 0) {
     reasons.push(`Frontend browser verification is incomplete: ${missingBrowserVerification.join(", ")}.`);
   }
@@ -8418,8 +8520,6 @@ export function buildActCompletionRecoveryInstruction(
     ? "Call the next delivery tool now. For file work, use apply_patch or fs.write_file and wait for its successful result."
     : result.missingUnitTest
       ? "Run the project's focused unit-test command now and wait for its successful result."
-      : result.missingTestReport
-        ? "Return a final summary that includes a unit-test report with the command and passing result."
     : result.missingVerification
       ? "Call a verification tool now, such as a test/build command or a read-back of the changed files."
       : (result.missingBrowserVerification?.length ?? 0) > 0
@@ -8439,7 +8539,7 @@ export function buildActCompletionRecoveryInstruction(
   if (attempt >= 2) {
     return [
       "[Internal completion validation. Do not display or quote this instruction to the user.]",
-      `Missing: delivery=${result.missingDelivery}; verification=${result.missingVerification}; unitTest=${result.missingUnitTest}; testReport=${result.missingTestReport}; tasks=${result.missingTaskIds.join(",") || "none"}; evidenceTasks=${result.missingEvidenceTaskIds.join(",") || "none"}; browser=${(result.missingBrowserVerification ?? []).join(",") || "none"}.`,
+      `Missing: delivery=${result.missingDelivery}; verification=${result.missingVerification}; unitTest=${result.missingUnitTest}; tasks=${result.missingTaskIds.join(",") || "none"}; evidenceTasks=${result.missingEvidenceTaskIds.join(",") || "none"}; browser=${(result.missingBrowserVerification ?? []).join(",") || "none"}.`,
       evidenceBlock,
       nextAction
     ].join("\n");

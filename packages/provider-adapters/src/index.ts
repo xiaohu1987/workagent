@@ -2038,20 +2038,22 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
     reasoning_content?: string;
     tool_call_id?: string;
   }> = [];
-  const pendingToolCallIds = new Set<string>();
-  const deferredUserMessages: ProviderTurnInput["transcript"] = [];
+  const toolResultIndices = new Map<string, number[]>();
+  const claimedToolResultIndices = new Set<number>();
+
+  for (let index = 0; index < input.transcript.length; index += 1) {
+    const message = input.transcript[index];
+    if (message.role !== "tool" || !message.toolCallId) continue;
+    const indices = toolResultIndices.get(message.toolCallId) ?? [];
+    indices.push(index);
+    toolResultIndices.set(message.toolCallId, indices);
+  }
 
   const appendTranscriptMessage = async (message: ProviderTurnInput["transcript"][number]) => {
     messages.push({
       role: normalizeOpenAiCompatibleRole(message.role),
       content: await buildOpenAiContent(contentWithFileAttachments(message.content, message.attachments), message.attachments)
     });
-  };
-
-  const flushDeferredUserMessages = async () => {
-    for (const message of deferredUserMessages.splice(0)) {
-      await appendTranscriptMessage(message);
-    }
   };
 
   if (input.systemPrompt.trim()) {
@@ -2061,15 +2063,27 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
     });
   }
 
-  for (const message of input.transcript) {
+  for (let index = 0; index < input.transcript.length; index += 1) {
+    const message = input.transcript[index];
     if (message.role === "assistant" && message.toolCalls?.length) {
-      // Some runtime recovery branches add an internal user instruction after
-      // one blocked tool result while the remaining calls from the same
-      // assistant batch are still being appended. OpenAI-compatible tool
-      // protocols require every result for one assistant tool-call envelope
-      // to be contiguous, so defer those instructions until the batch closes.
-      if (pendingToolCallIds.size > 0) {
-        await flushDeferredUserMessages();
+      const matchedCalls = message.toolCalls.flatMap((call) => {
+        const resultIndex = toolResultIndices.get(call.id)?.find(
+          (candidate) => candidate > index && !claimedToolResultIndices.has(candidate)
+        );
+        if (resultIndex === undefined) return [];
+        claimedToolResultIndices.add(resultIndex);
+        return [{ call, resultIndex }];
+      });
+
+      // Interrupted, compacted, and legacy histories can retain only one
+      // side of a native tool exchange. Strict OpenAI-compatible gateways
+      // reject the entire request when any tool_calls entry lacks its result,
+      // so emit only complete pairs and keep each result directly adjacent.
+      if (matchedCalls.length === 0) {
+        if (message.content || message.attachments?.length) {
+          await appendTranscriptMessage(message);
+        }
+        continue;
       }
       messages.push({
         role: "assistant",
@@ -2077,7 +2091,7 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
         ...(isDeepSeekThinkingModel(input.model, input.provider)
           ? { reasoning_content: message.reasoningContent ?? "" }
           : {}),
-        tool_calls: message.toolCalls.map((call) => ({
+        tool_calls: matchedCalls.map(({ call }) => ({
           id: call.id,
           type: "function",
           function: {
@@ -2086,26 +2100,29 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
           }
         }))
       });
-      pendingToolCallIds.clear();
-      for (const call of message.toolCalls) pendingToolCallIds.add(call.id);
-      continue;
-    }
-    if (message.role === "tool" && message.toolCallId) {
-      messages.push({ role: "tool", tool_call_id: message.toolCallId, content: message.content });
-      pendingToolCallIds.delete(message.toolCallId);
-      if (pendingToolCallIds.size === 0) {
-        await flushDeferredUserMessages();
+      for (const { call, resultIndex } of matchedCalls) {
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: input.transcript[resultIndex].content
+        });
       }
       continue;
     }
-    if (message.role === "user" && pendingToolCallIds.size > 0) {
-      deferredUserMessages.push(message);
+    if (message.role === "tool") {
+      if (!message.toolCallId) {
+        await appendTranscriptMessage(message);
+        continue;
+      }
+      if (claimedToolResultIndices.has(index)) continue;
+      messages.push({
+        role: "user",
+        content: `(earlier tool result without a matching tool call: ${message.toolCallId ?? "unknown"})\n${message.content}`
+      });
       continue;
     }
     await appendTranscriptMessage(message);
   }
-
-  await flushDeferredUserMessages();
 
   return mergeAdjacentProviderMessages(messages, "content");
 }

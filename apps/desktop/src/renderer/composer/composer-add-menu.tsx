@@ -149,7 +149,7 @@ export function ComposerAddMenu({
         </>
         <button className={`gpa-popover-item gpa-popover-item-full-access ${gpaState.fullAccess ? "is-active" : ""}`} role="menuitem" onMouseEnter={resetToRoot} disabled={gpaState.fullAccess} onClick={() => void onSetFullAccess(true)}>
           <span className="gpa-popover-item-icon" aria-hidden><IconShield /></span>
-          <span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">完全访问</span><span className="gpa-popover-item-hint">最大权限，执行时无需确认</span></span>
+          <span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">完全访问</span><span className="gpa-popover-item-hint">文件和网络无需常规审批，明确授权仍会询问</span></span>
           {gpaState.fullAccess ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
         </button>
         <button className={`gpa-popover-item gpa-popover-item-knowledge ${gpaState.knowledgeEnabled ? "is-active" : ""}`} role="menuitem" onMouseEnter={resetToRoot} disabled={gpaState.knowledgeEnabled} onClick={() => void onSetKnowledgeEnabled(true)}>

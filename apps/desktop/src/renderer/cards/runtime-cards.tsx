@@ -435,10 +435,22 @@ export function RuntimeActivityPanel({
         {historyItems.map((entry) => {
           const toolName = entry.kind === "tool" ? entry.toolCall.toolName : null;
           const eventAt = getRuntimeEntryCreatedAt(entry);
+          if (entry.kind === "output") {
+            return (
+              <details key={entry.id} className="runtime-activity-history-output">
+                <summary className="runtime-activity-history-item" title="点击查看终端输出">
+                  <span className="runtime-activity-history-icon" aria-hidden><IconTerminal /></span>
+                  <span>{getRuntimeHistoryLabel(entry, skillNames)}</span>
+                  <time>{formatRuntimeEventOffset(eventAt, activityStartedAt)}</time>
+                </summary>
+                <pre>{entry.content}</pre>
+              </details>
+            );
+          }
           return (
             <div key={entry.kind === "tool" ? entry.toolCall.id : entry.id} className="runtime-activity-history-item">
               <span className="runtime-activity-history-icon" aria-hidden>
-                {toolName ? <ToolActivityIcon toolName={toolName} /> : entry.kind === "output" ? <IconTerminal /> : <IconBolt />}
+                {toolName ? <ToolActivityIcon toolName={toolName} /> : <IconBolt />}
               </span>
               <span>{getRuntimeHistoryLabel(entry, skillNames)}</span>
               <time>{formatRuntimeEventOffset(eventAt, activityStartedAt)}</time>

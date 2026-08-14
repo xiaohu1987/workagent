@@ -4,10 +4,14 @@
 
 ## 2026-08-14
 
+- 优化 Git 写操作的明确授权体验：未在用户消息中明确要求的暂存、还原、提交、推送、拉取、合并、变基、worktree 与对应 shell 命令不再直接显示英文策略错误，而是暂停任务并展示脱敏后的操作、可能影响及“拒绝 / 授权并继续”卡片。明确授权仅覆盖当前工具调用，不受完全访问、自动审批、会话审批或记住审批影响，也不会自动超时；批准后复用该次授权跳过当前命令的一次常规审批，拒绝或停止任务时均保证命令未执行。审批记录新增 `explicit_authorization` 类型，旧记录兼容为普通审批；完全访问提示同步说明必须由用户明确决定的操作仍会询问。
+
 - 新增子任务等待 watchdog：父任务在等待子任务时按 30 秒轮询，子任务运行 60 秒后开始巡检；连续 120 秒没有新的工具事件、shell stdout/stderr 增量、测试输出或进程状态变化时自动中断，并将终态标记为 `interrupted`，保留已有消息、工具结果和中断原因。shell/test 有持续进展时可在 10 分钟后按 5 分钟窗口继续检查，但单个子任务总运行时间达到 30 分钟一定中断。子任务模型请求改为有限超时，主任务仍可由用户手动停止。终端输出事件现携带进度 heartbeat，子任务卡片会区分排队、启动、等待模型、执行 shell/test、重试、停滞和自动中断，并显示最近进度及自动中断倒计时。新增 watchdog 判定测试；`tests/agent-runtime.test.ts` 与 `tests/thread-ui-state.test.ts` 共 323 项通过。
 
 - 优化主项目的 DeepSeek 兼容层，并仅将 `deepseek-harness` 作为实现参考：Provider 新增可持久化的 `deepseekProtocol` 配置。未配置或选择 `native` 时保持原有 DeepSeek 原生扩展行为；OpenAI 兼容 Provider 可在设置页选择“标准 OpenAI 兼容”，此模式不再发送 `thinking`、`reasoning_effort` 或工具调用历史中的 `reasoning_content`，以兼容拒绝 DeepSeek 私有字段的标准 Chat Completions 网关。DeepSeek 原生请求参数处理保留在 `packages/provider-adapters/src/models/deepseek.ts`，共享工具历史序列化在 `packages/provider-adapters/src/index.ts` 按该配置处理。新增 Provider 配置往返持久化和标准兼容协议回归测试；`tests/provider-adapters.test.ts`（147 项）与 `tests/model-storage.test.ts`（12 项）通过。
 - 将设置页的“接口协议”和“DeepSeek 协议”合并为一个选择器：保留 OpenAI 兼容接口、Anthropic、Gemini、Mock 等原有平级选项，并新增平级的“DeepSeek 原生扩展”选项；选择 DeepSeek 原生扩展时使用 OpenAI Chat Completions 传输并开启 DeepSeek 原生字段。
+- 优化带聊天背景时的运行过程显示：每条终端活动保持独立记录，但优先用经过单行压缩和长度限制的 `$ 输入命令` 替代重复的“终端输出”标签；点击命令摘要可在原位置展开或收起该条终端输出；运行活动面板增加半透明底和模糊，避免状态、终端记录和计时文字直接叠在背景图片上。
+- 修复 DeepSeek 在工具执行后偶发 `400 No tool output found for tool call` 并直接停止任务：OpenAI 兼容消息在发送前会校验每个工具调用与结果的配对，只发送结果完整的调用批次并保持调用/结果连续，丢失结果的中断调用不再进入请求，孤立结果降级为普通上下文；运行时同时识别 DeepSeek 的 `tool call` 错误文案及常见 `tool_call_id` 配对错误，首次遇到时自动切换文本工具历史并重试，不再误判为不可恢复异常。新增缺失结果、部分配对、孤立结果与消息交错回归测试；完整测试共 809 项通过。
 
 ## 2026-08-11
 
@@ -46,7 +50,7 @@
 - 移除流式草稿阶段写入的通用活动记录，并在展示层隐藏旧任务中遗留的草稿阶段文案；统一实时状态为单行展示，避免“模型正在生成”和活动面板重复显示。
 - 修复 DeepSeek V4 原生工具调用失败后的文本协议兜底：临时关闭 thinking 并保留 `response_format: json_object`，使接口强制返回可解析的 Agent 决策 JSON，而非仅依赖提示词约束。
 - 将运行状态中的“最近更新 X 前”精简为纯计时 `X`，减少执行信息的文字冗余。
-- 将泛化的“正在请求模型决策”替换为本轮工具上下文：显示已完成操作数量和最近工具结果；首轮无工具时显示“正在分析任务并规划下一步”，并兼容已在执行中的旧状态。
+- 将泛化的“正在请求模型决策”替换为本轮工具上下文：显示已完成操作数量和最近工具结果；首轮无工具时显示“正在思考”，并兼容已在执行中的旧状态。
 - 继续审计并移除兼容层隐式输出阈值：DeepSeek、Kimi、Agnes、Gemini 不再强制把 `max_tokens` 提升到 8192 或按上下文窗口计算下限，统一原样使用模型的 `defaultMaxOutputTokens`；Provider 请求体和工具数量仍仅按显式 `maxRequestBytes`、`maxTools` 配置限制。
 - 阈值审计结论：Provider 请求链路不再写死请求字节上限、工具数量上限、请求压缩安全余量或协议恢复字节上限；剩余固定数字仅用于重试次数、上下文压缩比例、工具结果/日志预览等运行安全策略，不会改变未配置 Provider 的请求体上限。
 

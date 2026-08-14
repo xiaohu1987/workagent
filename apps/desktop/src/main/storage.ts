@@ -9,6 +9,7 @@ import type {
   AppConfig,
   ApprovalResolutionMode,
   ApprovalRequest,
+  InteractionResolutionSource,
   ArtifactRecord,
   BrowserTabRecord,
   ContextCompactionRecord,
@@ -36,10 +37,43 @@ import type {
   ProviderDefinition,
   RuntimeEvent,
   ThreadRecord,
+  ToolCallDetail,
   ToolCallRecord,
+  ToolCallSummary,
   TurnRunRecord,
   UserInputPrompt
 } from "@shared-types";
+
+const TOOL_CALL_SUMMARY_RESULT_LIMIT_BYTES = 4_096;
+const toolCallSummarySelectSql = `
+  SELECT
+    id, thread_id, turn_run_id, tool_name, arguments_json,
+    CASE
+      WHEN result_json IS NULL OR length(CAST(result_json AS BLOB)) <= ? THEN result_json
+      ELSE NULL
+    END AS result_json,
+    COALESCE(length(CAST(result_json AS BLOB)), 0) AS result_size,
+    status, risk_level, approval_mode, started_at, completed_at
+  FROM tool_calls`;
+
+function mapToolCallSummaryRow(row: any): ToolCallSummary {
+  const resultSize = Number(row.result_size ?? 0);
+  return {
+    id: row.id,
+    threadId: row.thread_id,
+    turnRunId: row.turn_run_id,
+    toolName: row.tool_name,
+    argumentsJson: row.arguments_json,
+    resultJson: typeof row.result_json === "string" ? row.result_json : null,
+    resultSize,
+    hasFullResult: resultSize === 0 || typeof row.result_json === "string",
+    status: row.status,
+    riskLevel: row.risk_level,
+    approvalMode: row.approval_mode,
+    startedAt: row.started_at,
+    completedAt: row.completed_at
+  };
+}
 
 function normalizeMultiAgentSettings(value?: Partial<MultiAgentSettings> | null): MultiAgentSettings {
   const source = value ?? {};
@@ -656,6 +690,7 @@ export class DatabaseService {
         turn_run_id TEXT NOT NULL,
         tool_call_id TEXT,
         project_id TEXT,
+        kind TEXT NOT NULL DEFAULT 'permission',
         title TEXT NOT NULL,
         description TEXT NOT NULL,
         scope TEXT NOT NULL,
@@ -891,6 +926,7 @@ export class DatabaseService {
 
   private ensureColumns(): void {
     this.ensureColumn("approval_records", "project_id", "TEXT");
+    this.ensureColumn("approval_records", "kind", "TEXT NOT NULL DEFAULT 'permission'");
     this.ensureColumn("approval_records", "approval_key", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("approval_records", "resolution_mode", "TEXT");
     this.ensureColumn("approval_records", "resolved_at", "TEXT");
@@ -1919,6 +1955,17 @@ export class DatabaseService {
       }));
   }
 
+  public listToolCallSummaries(threadId: string, startedAt?: string): ToolCallSummary[] {
+    const rows = startedAt
+      ? this.#db
+          .prepare(`${toolCallSummarySelectSql} WHERE thread_id = ? AND started_at >= ? ORDER BY started_at ASC`)
+          .all(TOOL_CALL_SUMMARY_RESULT_LIMIT_BYTES, threadId, startedAt)
+      : this.#db
+          .prepare(`${toolCallSummarySelectSql} WHERE thread_id = ? ORDER BY started_at ASC`)
+          .all(TOOL_CALL_SUMMARY_RESULT_LIMIT_BYTES, threadId);
+    return rows.map(mapToolCallSummaryRow);
+  }
+
   public listToolCallsChangedSince(threadId: string, observedAt: string): ToolCallRecord[] {
     return this.#db
       .prepare(
@@ -1938,6 +1985,33 @@ export class DatabaseService {
         startedAt: row.started_at,
         completedAt: row.completed_at
       }));
+  }
+
+  public listToolCallSummariesChangedSince(threadId: string, observedAt: string): ToolCallSummary[] {
+    return this.#db
+      .prepare(
+        `${toolCallSummarySelectSql}
+         WHERE thread_id = ? AND (started_at >= ? OR completed_at >= ?)
+         ORDER BY started_at ASC`
+      )
+      .all(TOOL_CALL_SUMMARY_RESULT_LIMIT_BYTES, threadId, observedAt, observedAt)
+      .map(mapToolCallSummaryRow);
+  }
+
+  public getToolCallDetails(threadId: string, toolCallIds: string[]): ToolCallDetail[] {
+    const statement = this.#db.prepare(
+      "SELECT result_json FROM tool_calls WHERE id = ? AND thread_id = ?"
+    );
+    return [...new Set(toolCallIds)].map((toolCallId) => {
+      const row = statement.get(toolCallId, threadId) as { result_json?: string | null } | undefined;
+      const resultJson = typeof row?.result_json === "string" ? row.result_json : null;
+      return {
+        toolCallId,
+        resultJson,
+        resultSize: resultJson ? Buffer.byteLength(resultJson, "utf8") : 0,
+        available: Boolean(row)
+      };
+    });
   }
 
   public countToolCalls(threadId: string): number {
@@ -1997,11 +2071,15 @@ export class DatabaseService {
   }
 
   public createApproval(
-    input: Omit<ApprovalRequest, "id" | "createdAt" | "resolutionMode" | "resolvedAt" | "expiresAt" | "resolutionSource"> & { expiresAt?: string | null }
+    input: Omit<ApprovalRequest, "id" | "kind" | "createdAt" | "resolutionMode" | "resolvedAt" | "expiresAt" | "resolutionSource"> & {
+      kind?: ApprovalRequest["kind"];
+      expiresAt?: string | null;
+    }
   ): ApprovalRequest {
     const record: ApprovalRequest = {
       ...input,
       id: randomUUID(),
+      kind: input.kind ?? "permission",
       resolutionMode: null,
       expiresAt: input.expiresAt ?? null,
       resolutionSource: null,
@@ -2011,9 +2089,9 @@ export class DatabaseService {
     this.#db
       .prepare(
         `INSERT INTO approval_records (
-          id, thread_id, turn_run_id, tool_call_id, project_id, title, description, scope, risk_level,
+          id, thread_id, turn_run_id, tool_call_id, project_id, kind, title, description, scope, risk_level,
           approval_key, payload_json, status, resolution_mode, expires_at, resolution_source, created_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -2021,6 +2099,7 @@ export class DatabaseService {
         record.turnRunId,
         record.toolCallId,
         record.projectId,
+        record.kind,
         record.title,
         record.description,
         record.scope,
@@ -2039,7 +2118,7 @@ export class DatabaseService {
 
   public resolveApproval(
     id: string,
-    input: { approved: boolean; resolutionMode?: ApprovalResolutionMode | null; resolutionSource?: "user" | "timeout" }
+    input: { approved: boolean; resolutionMode?: ApprovalResolutionMode | null; resolutionSource?: InteractionResolutionSource }
   ): void {
     this.#db
       .prepare("UPDATE approval_records SET status = ?, resolution_mode = ?, resolution_source = ?, resolved_at = ? WHERE id = ?")
@@ -3491,6 +3570,7 @@ function mapApprovalRow(row: any): ApprovalRequest {
     turnRunId: row.turn_run_id,
     toolCallId: row.tool_call_id,
     projectId: row.project_id,
+    kind: row.kind === "explicit_authorization" ? "explicit_authorization" : "permission",
     title: row.title,
     description: row.description,
     scope: row.scope,
@@ -3500,7 +3580,9 @@ function mapApprovalRow(row: any): ApprovalRequest {
     status: row.status,
     resolutionMode: row.resolution_mode,
     expiresAt: row.expires_at ?? null,
-    resolutionSource: row.resolution_source === "timeout" ? "timeout" : row.resolution_source === "user" ? "user" : null,
+    resolutionSource: row.resolution_source === "timeout" || row.resolution_source === "interrupted" || row.resolution_source === "user"
+      ? row.resolution_source
+      : null,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at
   };
@@ -3626,7 +3708,9 @@ function mapUserInputPromptRow(row: any): UserInputPrompt {
     allowSkip: Boolean(row.allow_skip),
     expiresAt: row.expires_at ?? null,
     defaultAnswers: row.default_answers_json ? JSON.parse(row.default_answers_json) : null,
-    resolutionSource: row.resolution_source === "timeout" ? "timeout" : row.resolution_source === "user" ? "user" : null,
+    resolutionSource: row.resolution_source === "timeout" || row.resolution_source === "interrupted" || row.resolution_source === "user"
+      ? row.resolution_source
+      : null,
     questions: rawQuestions.map((question, questionIndex) => ({
       id: String(question?.id ?? `q${questionIndex + 1}`),
       label: String(question?.label ?? `问题 ${questionIndex + 1}`),

@@ -70,4 +70,58 @@ describe("DatabaseService.recordToolCall", () => {
     expect(record.id).toBe("runtime-tool-id");
     expect(database.listToolCalls("thread-1")[0]?.id).toBe("runtime-tool-id");
   });
+
+  it("keeps large results out of history summaries and loads them on demand", async () => {
+    const database = await createDatabase();
+    const largeResult = JSON.stringify({ ok: true, content: "x".repeat(8_000) });
+    const record = database.recordToolCall({
+      id: "large-tool-result",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "shell.exec",
+      argumentsJson: JSON.stringify({ command: "build" }),
+      resultJson: largeResult,
+      status: "completed",
+      riskLevel: "low",
+      approvalMode: "auto"
+    });
+
+    expect(database.listToolCallSummaries("thread-1")).toEqual([
+      expect.objectContaining({
+        id: record.id,
+        resultJson: null,
+        resultSize: Buffer.byteLength(largeResult, "utf8"),
+        hasFullResult: false
+      })
+    ]);
+    expect(database.getToolCallDetails("thread-1", [record.id])).toEqual([{
+      toolCallId: record.id,
+      resultJson: largeResult,
+      resultSize: Buffer.byteLength(largeResult, "utf8"),
+      available: true
+    }]);
+    expect(database.getToolCallDetails("another-thread", [record.id])[0]).toEqual(
+      expect.objectContaining({ toolCallId: record.id, resultJson: null, available: false })
+    );
+  });
+
+  it("reuses small complete results without a detail request", async () => {
+    const database = await createDatabase();
+    const smallResult = JSON.stringify({ ok: true, content: "done" });
+    database.recordToolCall({
+      id: "small-tool-result",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "shell.exec",
+      argumentsJson: JSON.stringify({ command: "test" }),
+      resultJson: smallResult,
+      status: "completed",
+      riskLevel: "low",
+      approvalMode: "auto"
+    });
+
+    expect(database.listToolCallSummaries("thread-1")[0]).toEqual(
+      expect.objectContaining({ resultJson: smallResult, hasFullResult: true })
+    );
+  });
 });

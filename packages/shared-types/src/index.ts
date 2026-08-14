@@ -40,7 +40,8 @@ export type ToolExposure = "direct" | "deferred";
 export type ApprovalMode = "auto" | "prompt" | "session" | "remembered";
 export type ApprovalDecision = "approved" | "denied";
 export type ApprovalResolutionMode = "once" | "session" | "remember";
-export type InteractionResolutionSource = "user" | "timeout";
+export type ApprovalRequestKind = "permission" | "explicit_authorization";
+export type InteractionResolutionSource = "user" | "timeout" | "interrupted";
 export type SkillScope = "repo" | "user" | "system" | "admin";
 export type KnowledgeScope = "global" | "project" | "imported";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -458,6 +459,7 @@ export interface ApprovalRequest {
   turnRunId: string;
   toolCallId: string | null;
   projectId: string | null;
+  kind: ApprovalRequestKind;
   title: string;
   description: string;
   scope: ApprovalMode;

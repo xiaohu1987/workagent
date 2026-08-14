@@ -45,6 +45,22 @@ export type ComposerPrimaryActionState = {
   disabled: boolean;
 };
 
+export type ThreadContentView = "switching" | "welcome" | "transcript";
+
+export function getThreadContentView(
+  selectedThreadId: string | null,
+  snapshotThreadId: string | null,
+  timelineEntryCount: number
+): ThreadContentView {
+  if (!selectedThreadId) {
+    return "welcome";
+  }
+  if (snapshotThreadId !== selectedThreadId) {
+    return "switching";
+  }
+  return timelineEntryCount === 0 ? "welcome" : "transcript";
+}
+
 export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRuntimeMessages>(
   threadId: string,
   state: {

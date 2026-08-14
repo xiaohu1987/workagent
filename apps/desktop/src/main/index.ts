@@ -514,6 +514,9 @@ function registerIpc(): void {
   ipcMain.handle("threads:snapshot", (_event, threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) =>
     backend.getThreadSnapshot(threadId, cursor)
   );
+  ipcMain.handle("tool-calls:details", (_event, payload: { threadId: string; toolCallIds: string[] }) =>
+    backend.getToolCallDetails(payload.threadId, payload.toolCallIds)
+  );
   ipcMain.handle("threads:send", (_event, payload) =>
     backend.sendMessage(payload.threadId, payload.content, payload.attachments ?? [], payload.displayContent, true, payload.mediaIntent ?? null)
   );

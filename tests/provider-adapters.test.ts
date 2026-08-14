@@ -860,7 +860,7 @@ describe("OpenAiCompatibleProvider", () => {
     const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     const messages = request.messages as Array<Record<string, unknown>>;
     expect(Buffer.byteLength(JSON.stringify(request), "utf8")).toBeLessThanOrEqual(120 * 1024);
-    expect(messages.some((message) => message.content === "Recent tool output")).toBe(true);
+    expect(messages.some((message) => String(message.content).includes("Recent tool output"))).toBe(true);
     expect(messages.some((message) => String(message.content).includes("Earlier assistant progress omitted"))).toBe(true);
     expect(String(messages[0]?.content)).not.toContain("OLD_DUPLICATED_CAPSULE");
     expect(String(messages[0]?.content)).toContain("SOURCE_LOCK_PAYLOAD");
@@ -1006,7 +1006,76 @@ describe("OpenAiCompatibleProvider", () => {
     expect(messages[1].content).toBe("first progress\n\nsecond progress\n\nthird progress");
   });
 
-  it("synthesizes placeholder results for tool calls whose results were lost", async () => {
+  it("sends DeepSeek only complete contiguous tool-call pairs", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: "done" } }]
+    });
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      apiKey: "secret",
+      deepseekProtocol: "native"
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Complete the requested task.",
+      transcript: [
+        { role: "user", content: "Inspect the workspace." },
+        {
+          role: "assistant",
+          content: "Inspecting.",
+          toolCalls: [
+            { id: "call-complete", name: "fs.read_file", arguments: { path: "README.md" } },
+            { id: "call-missing", name: "fs.read_file", arguments: { path: "missing.md" } }
+          ]
+        },
+        { role: "assistant", content: "Waiting for the results." },
+        { role: "user", content: "Continue after the completed read." },
+        { role: "tool", content: "README contents", toolCallId: "call-complete", toolResultOk: true },
+        { role: "tool", content: "Earlier result", toolCallId: "call-orphan", toolResultOk: true },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-missing-2", name: "fs.read_file", arguments: { path: "lost.md" } }]
+        },
+        { role: "user", content: "Resume." }
+      ],
+      availableTools: [],
+      model: {
+        id: "deepseek-chat",
+        providerId: provider.id,
+        displayName: "DeepSeek Chat",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: false,
+        defaultTemperature: 0.2,
+        defaultMaxOutputTokens: 8192
+      },
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const messages = request.messages as Array<Record<string, any>>;
+    const toolEnvelopeIndex = messages.findIndex((message) => Array.isArray(message.tool_calls));
+    expect(messages[toolEnvelopeIndex].tool_calls.map((call: { id: string }) => call.id)).toEqual(["call-complete"]);
+    expect(messages[toolEnvelopeIndex + 1]).toMatchObject({
+      role: "tool",
+      tool_call_id: "call-complete",
+      content: "README contents"
+    });
+    expect(JSON.stringify(messages)).not.toContain("call-missing");
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "user", content: expect.stringContaining("call-orphan") }),
+      expect.objectContaining({ role: "user", content: "Continue after the completed read." }),
+      expect.objectContaining({ role: "user", content: "Resume." })
+    ]));
+  });
+
+  it("omits tool calls whose results were lost", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
@@ -1040,12 +1109,15 @@ describe("OpenAiCompatibleProvider", () => {
 
     const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     const messages = request.messages as Array<Record<string, unknown>>;
-    // An unfulfilled tool_calls message is rejected by the gateway; a
-    // placeholder result is synthesized immediately after it.
-    expect(messages[2].role).toBe("assistant");
-    expect(messages[3]).toMatchObject({ role: "tool", tool_call_id: "call-lost" });
-    expect(String(messages[3].content)).toContain("unavailable");
-    expect(messages[4]).toMatchObject({ role: "user", content: "继续" });
+    // An unfulfilled tool_calls message is rejected by strict gateways. The
+    // incomplete empty envelope is omitted and the recovery request remains.
+    expect(messages).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool_call_id: "call-lost" })
+    ]));
+    expect(messages).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool_calls: expect.any(Array) })
+    ]));
+    expect(messages.some((message) => message.role === "user" && String(message.content).includes("继续"))).toBe(true);
   });
 
   it("demotes orphan tool results to user messages for Kimi", async () => {

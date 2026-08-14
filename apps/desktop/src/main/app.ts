@@ -10,6 +10,7 @@ import type {
   AttachmentImportInput,
   AppConfig,
   ArtifactRecord,
+  ApprovalRequest,
   BrowserAssertionCheck,
   BrowserAssertionResult,
   BrowserTabRecord,
@@ -48,6 +49,7 @@ import type {
   SubagentWaitResult,
   SubagentWatchdogDiagnostic,
   ThreadRecord,
+  ToolCallDetail,
   ToolCallRecord,
   ToolSpecDefinition,
   UserInputQuestion,
@@ -102,6 +104,7 @@ type SubagentProgress = {
   interruptionReason?: string;
 };
 const INTERACTION_TIMEOUT_MS = 30_000;
+const RUNTIME_TOOL_RESULT_LIMIT_BYTES = 4_096;
 const MAX_APPLICATION_BACKGROUND_BYTES = 40 * 1024 * 1024;
 const APPLICATION_BACKGROUND_MIME_TYPES = new Set([
   "image/png",
@@ -136,6 +139,24 @@ async function getFileSize(filePath: string): Promise<number> {
     throw error;
   });
   return stats?.size ?? 0;
+}
+
+function compactTerminalInput(input: string | undefined): string | undefined {
+  const normalized = input?.replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized.length > 96 ? `${normalized.slice(0, 95)}…` : normalized;
+}
+
+function compactRuntimeToolResult(event: RuntimeEvent): RuntimeEvent {
+  if (event.type !== "tool.completed" || typeof event.payload.resultJson !== "string") return event;
+  const resultSize = Buffer.byteLength(event.payload.resultJson, "utf8");
+  if (resultSize <= RUNTIME_TOOL_RESULT_LIMIT_BYTES) {
+    return { ...event, payload: { ...event.payload, resultSize, hasFullResult: true } };
+  }
+  return {
+    ...event,
+    payload: { ...event.payload, resultJson: null, resultSize, hasFullResult: false }
+  };
 }
 
 type LegacyApplicationBackgroundMetadata = {
@@ -396,7 +417,7 @@ export class DesktopBackend {
       },
       runTerminalCommand: async (threadId, cwd, command, input) =>
         this.#terminal.execute(threadId, cwd, command, (data, heartbeat) => {
-          void this.emitTerminalOutput(threadId, data, "default", heartbeat);
+          void this.emitTerminalOutput(threadId, data, "default", heartbeat, command);
         }, (url) => {
           void this.openLocalServerUrl(threadId, url);
         }, "default", input?.onIdle),
@@ -783,7 +804,7 @@ export class DesktopBackend {
       threadId,
       cwd,
       (data, heartbeat) => {
-        void this.emitTerminalOutput(threadId, data, sessionId, heartbeat);
+        void this.emitTerminalOutput(threadId, data, sessionId, heartbeat, input);
       },
       sessionId
     );
@@ -907,8 +928,8 @@ export class DesktopBackend {
       ? this.#db.listMessagesCreatedSince(threadId, cursor.observedAt)
       : this.#db.listRecentMessages(threadId, Math.max(1, messageCount));
     const toolCalls = canUseDelta && cursor
-      ? this.#db.listToolCallsChangedSince(threadId, cursor.observedAt)
-      : this.#db.listToolCalls(threadId);
+      ? this.#db.listToolCallSummariesChangedSince(threadId, cursor.observedAt)
+      : this.#db.listToolCallSummaries(threadId);
     const artifacts = canUseDelta && cursor
       ? this.#db.listArtifactsCreatedSince(threadId, cursor.observedAt)
       : this.#db.listArtifacts(threadId);
@@ -1512,6 +1533,14 @@ export class DesktopBackend {
 
   private async finishInterruptThread(threadId: string, cancelledQueueItemIds: string[]): Promise<void> {
     try {
+      // Explicit authorizations have no timeout. Resolve every pending approval
+      // before waiting so a stopped task can release its suspended tool call.
+      for (const approvalId of [...this.#approvalResolvers.keys()]) {
+        const approval = this.#db.getApproval(approvalId);
+        if (approval?.threadId === threadId && approval.status === "pending") {
+          this.resolveApproval(approvalId, { decision: "denied", source: "interrupted" });
+        }
+      }
       // Let the aborted turn finish its persistence/finally cleanup before a
       // caller deletes or clears this thread and its descendants.
       await this.#runtime.waitForIdle(threadId, 5000);
@@ -1523,13 +1552,6 @@ export class DesktopBackend {
         if (record?.threadId === threadId) {
           this.#clearPromptTimeout(promptId);
           this.#promptResolvers.delete(promptId);
-        }
-      }
-      for (const [approvalId] of [...this.#approvalTimeouts.entries()]) {
-        if (this.#db.getApproval(approvalId)?.threadId === threadId) {
-          this.#clearApprovalTimeout(approvalId);
-          this.#approvalResolvers.get(approvalId)?.(false);
-          this.#approvalResolvers.delete(approvalId);
         }
       }
       const updated = this.#db.interruptThreadExecution(threadId);
@@ -3605,7 +3627,7 @@ export class DesktopBackend {
     resolution: {
       decision: "approved" | "denied";
       mode?: "once" | "session" | "remember";
-      source?: "user" | "timeout";
+      source?: "user" | "timeout" | "interrupted";
     }
   ): void {
     const approval = this.#db.getApproval(id);
@@ -3614,12 +3636,14 @@ export class DesktopBackend {
     }
 
     const approved = resolution.decision === "approved";
-    const resolutionMode = approved ? (resolution.mode ?? "once") : null;
+    const resolutionMode = approved
+      ? (approval.kind === "explicit_authorization" ? "once" : (resolution.mode ?? "once"))
+      : null;
     const source = resolution.source ?? "user";
     this.#clearApprovalTimeout(id);
     this.#db.resolveApproval(id, { approved, resolutionMode, resolutionSource: source });
 
-    if (approved) {
+    if (approved && approval.kind === "permission") {
       if (resolutionMode === "session") {
         this.#sessionApprovedThreadIds.add(approval.threadId);
       }
@@ -3640,6 +3664,7 @@ export class DesktopBackend {
       threadId: approval.threadId,
       payload: {
         approvalId: approval.id,
+        kind: approval.kind,
         approved,
         mode: resolutionMode,
         source
@@ -3688,6 +3713,7 @@ export class DesktopBackend {
     threadId: string,
     turnRunId: string,
     input: {
+      kind?: ApprovalRequest["kind"];
       title: string;
       description: string;
       riskLevel: "low" | "medium" | "high";
@@ -3695,26 +3721,29 @@ export class DesktopBackend {
     }
   ): Promise<boolean> {
     const thread = this.#db.getThread(threadId);
-    if (this.getGpaState(threadId).fullAccess) {
+    const kind = input.kind ?? "permission";
+    const requiresExplicitAuthorization = kind === "explicit_authorization";
+    if (!requiresExplicitAuthorization && this.getGpaState(threadId).fullAccess) {
       return true;
     }
     const approvalKey = hashApprovalPayload({
+      kind,
       title: input.title,
       description: input.description,
       riskLevel: input.riskLevel,
       payload: getApprovalScopePayload(input.payload)
     });
-    if (this.#config.desktop.approvals === "auto" && input.riskLevel === "low") {
+    if (!requiresExplicitAuthorization && this.#config.desktop.approvals === "auto" && input.riskLevel === "low") {
       return true;
     }
 
     // A session approval intentionally covers later operations in this chat,
     // including commands whose arguments differ from the first request.
-    if (this.#sessionApprovedThreadIds.has(threadId)) {
+    if (!requiresExplicitAuthorization && this.#sessionApprovedThreadIds.has(threadId)) {
       return true;
     }
 
-    if (this.#db.findRememberedApproval(thread.projectId, approvalKey)) {
+    if (!requiresExplicitAuthorization && this.#db.findRememberedApproval(thread.projectId, approvalKey)) {
       return true;
     }
 
@@ -3723,6 +3752,7 @@ export class DesktopBackend {
       turnRunId,
       toolCallId: null,
       projectId: thread.projectId,
+      kind,
       title: input.title,
       description: input.description,
       scope: this.#config.desktop.approvals,
@@ -3730,7 +3760,7 @@ export class DesktopBackend {
       approvalKey,
       payloadJson: JSON.stringify(input.payload),
       status: "pending",
-      expiresAt: new Date(Date.now() + INTERACTION_TIMEOUT_MS).toISOString()
+      expiresAt: requiresExplicitAuthorization ? null : new Date(Date.now() + INTERACTION_TIMEOUT_MS).toISOString()
     });
 
     await this.emit({
@@ -3970,6 +4000,14 @@ export class DesktopBackend {
       agentPath: thread.agentPath,
       threadId: thread.id
     };
+  }
+
+  public getToolCallDetails(threadId: string, toolCallIds: string[]): ToolCallDetail[] {
+    this.#db.getThread(threadId);
+    const normalizedIds = toolCallIds
+      .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      .slice(0, 200);
+    return this.#db.getToolCallDetails(threadId, normalizedIds);
   }
 
   private getSubagentBaseState(thread: ThreadRecord, currentTool: string | null, progress?: SubagentProgress): SubagentWatchdogDiagnostic["state"] {
@@ -4539,9 +4577,10 @@ export class DesktopBackend {
         }
       : event;
 
-    this.#db.addRuntimeEvent(routedEvent);
-    this.#events.emit("runtime-event", routedEvent);
-    if (routedEvent.type === "thread.updated") {
+    const boundedEvent = compactRuntimeToolResult(routedEvent);
+    this.#db.addRuntimeEvent(boundedEvent);
+    this.#events.emit("runtime-event", boundedEvent);
+    if (boundedEvent.type === "thread.updated") {
       if (subject?.parentThreadId) {
         const root = this.#db.getThread(subject.rootThreadId);
         this.#events.emit("runtime-event", {
@@ -4552,20 +4591,20 @@ export class DesktopBackend {
         } satisfies RuntimeEvent);
       }
     }
-    const sanitizedEvent = sanitizeRuntimeEventForLog(routedEvent);
+    const sanitizedEvent = sanitizeRuntimeEventForLog(boundedEvent);
     const runtimeLogEntry: RuntimeLogEntry = {
-      timestamp: routedEvent.createdAt,
+      timestamp: boundedEvent.createdAt,
       kind: "runtime.event",
-      threadId: routedEvent.threadId,
+      threadId: boundedEvent.threadId,
       payload: { event: sanitizedEvent }
     };
-    if (routedEvent.type !== "assistant.draft.updated" || this.#config.desktop.llmLogViewer) {
+    if (boundedEvent.type !== "assistant.draft.updated" || this.#config.desktop.llmLogViewer) {
       // Runtime delivery must not wait for disk I/O. RuntimeLogWriter keeps
       // ordering and flushes the batch before readers or shutdown continue.
-      void this.#logs.append("runtime.event", runtimeLogEntry.payload, routedEvent.threadId);
+      void this.#logs.append("runtime.event", runtimeLogEntry.payload, boundedEvent.threadId);
     }
     this.emitLiveRuntimeLog(runtimeLogEntry);
-    if (subject?.parentThreadId && (routedEvent.type === "thread.updated" || routedEvent.type === "queue.updated")) {
+    if (subject?.parentThreadId && (boundedEvent.type === "thread.updated" || boundedEvent.type === "queue.updated")) {
       this.schedulePendingSubagentDispatch(subject.rootThreadId);
     }
   }
@@ -4777,14 +4816,21 @@ export class DesktopBackend {
     threadId: string,
     data: string,
     sessionId = "default",
-    heartbeat?: TerminalOutputHeartbeat
+    heartbeat?: TerminalOutputHeartbeat,
+    input?: string
   ): Promise<void> {
     await this.emit({
       type: "terminal.output",
       threadId,
       // This is also a heartbeat for the subagent watchdog. Keep the visible
       // output behavior intact while exposing only compact progress metadata.
-      payload: { data, sessionId, progress: true, byteLength: heartbeat?.byteLength ?? Buffer.byteLength(data, "utf8") },
+      payload: {
+        data,
+        sessionId,
+        progress: true,
+        byteLength: heartbeat?.byteLength ?? Buffer.byteLength(data, "utf8"),
+        inputPreview: compactTerminalInput(input)
+      },
       createdAt: heartbeat?.occurredAt ?? new Date().toISOString()
     });
   }
@@ -5212,6 +5258,7 @@ function buildPromptDefaultAnswers(questions: UserInputQuestion[]): Record<strin
 }
 
 function hashApprovalPayload(input: {
+  kind?: ApprovalRequest["kind"];
   title: string;
   description: string;
   riskLevel: string;

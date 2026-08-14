@@ -4,6 +4,7 @@ import {
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
   getHistoryItemAffordance,
+  getThreadContentView,
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
   normalizeGpaStateForThread,
@@ -98,6 +99,17 @@ function makeThread(overrides: Partial<ThreadRecord> = {}): ThreadRecord {
 }
 
 describe("thread UI state helpers", () => {
+  it("keeps the loading view visible until the selected thread snapshot is ready", () => {
+    expect(getThreadContentView("thread-2", null, 0)).toBe("switching");
+    expect(getThreadContentView("thread-2", "thread-1", 3)).toBe("switching");
+  });
+
+  it("shows welcome only for home or a genuinely empty selected thread", () => {
+    expect(getThreadContentView(null, null, 0)).toBe("welcome");
+    expect(getThreadContentView("thread-2", "thread-2", 0)).toBe("welcome");
+    expect(getThreadContentView("thread-2", "thread-2", 3)).toBe("transcript");
+  });
+
   it("shows the Git workspace only after the current project is identified as a Git repository", () => {
     expect(hasRecognizedGitRepository(null, "E:\\project")).toBe(false);
     expect(hasRecognizedGitRepository({ available: false, ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(false);

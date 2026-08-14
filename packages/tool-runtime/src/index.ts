@@ -67,6 +67,7 @@ export interface ToolRuntimeContext {
   runTerminalCommand?: (command: string) => Promise<TerminalCommandResult>;
   cancelActiveTerminalCommands?: (reason?: string) => Promise<void> | void;
   requestApproval: (input: {
+    kind?: "permission" | "explicit_authorization";
     title: string;
     description: string;
     riskLevel: "low" | "medium" | "high";

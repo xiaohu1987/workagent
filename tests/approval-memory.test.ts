@@ -21,6 +21,43 @@ afterEach(async () => {
 });
 
 describe("approval persistence", () => {
+  it("defaults legacy approval creation to permission and persists explicit authorization", async () => {
+    const tempDir = await makeTempDir();
+    const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));
+    databases.push(db);
+
+    const legacyCompatible = db.createApproval({
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolCallId: null,
+      projectId: null,
+      title: "Run command",
+      description: "pnpm test",
+      scope: "prompt",
+      riskLevel: "high",
+      approvalKey: "approval-key-default",
+      payloadJson: "{}",
+      status: "pending"
+    });
+    const explicit = db.createApproval({
+      threadId: "thread-1",
+      turnRunId: "turn-2",
+      toolCallId: null,
+      projectId: null,
+      kind: "explicit_authorization",
+      title: "Git 操作需要明确授权",
+      description: "git pull origin test",
+      scope: "prompt",
+      riskLevel: "high",
+      approvalKey: "approval-key-explicit",
+      payloadJson: "{}",
+      status: "pending"
+    });
+
+    expect(db.getApproval(legacyCompatible.id)?.kind).toBe("permission");
+    expect(db.getApproval(explicit.id)).toMatchObject({ kind: "explicit_authorization", expiresAt: null });
+  });
+
   it("stores approval resolution modes and remembered approvals", async () => {
     const tempDir = await makeTempDir();
     const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));

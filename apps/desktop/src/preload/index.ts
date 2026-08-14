@@ -82,6 +82,8 @@ const api = {
   clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),
   getThreadSnapshot: (threadId: string, cursor?: RuntimeThreadSnapshotCursor) =>
     ipcRenderer.invoke("threads:snapshot", threadId, cursor),
+  getToolCallDetails: (payload: { threadId: string; toolCallIds: string[] }) =>
+    ipcRenderer.invoke("tool-calls:details", payload),
   sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: unknown[]; mediaIntent?: "image" | "video" | null }) =>
     ipcRenderer.invoke("threads:send", payload) as Promise<{ queued: QueuedMessageRecord; queuedBehindActiveTask: boolean }>,
   requestHttp: (payload: {

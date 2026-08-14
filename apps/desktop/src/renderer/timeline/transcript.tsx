@@ -1,9 +1,9 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { ApprovalRequest, AssistantDraftPhase, MessageAttachment, MessageRecord, ToolCallRecord, UserInputPrompt } from "@shared-types";
+import type { ApprovalRequest, AssistantDraftPhase, MessageAttachment, MessageRecord, ToolCallRecord, ToolCallSummary, UserInputPrompt } from "@shared-types";
 import { getDisplayMessageContent, getFileWriteTarget, getMessageDisplayKind, getSelectedMessageContexts, getToolActivityPresentation, getToolActivityTarget, getToolProcessingLabel, isFileWriteTool, parseMessageEventBlocks, parseTimelineJson, resolveSkillDisplayName, type SkillNameMap } from "../lib/conversation-utils";
 import type { ChatEventBlock, ChatEventType, SelectedMessageContext } from "../lib/conversation-utils";
-import { IconChart, IconCheck, IconChecklist, IconChevronDown, IconClose, IconCode, IconCompose, IconCopy, IconEye, IconFile, IconFileChanges, IconFolder, IconGlobe, IconGpa, IconHelpCircle, IconImage, IconKnowledge, IconMcp, IconNotebook, IconSearch, IconSkills, IconTerminal, IconVideo } from "../icons";
+import { IconChart, IconCheck, IconChecklist, IconChevronDown, IconClose, IconCode, IconCompose, IconCopy, IconEye, IconFile, IconFileChanges, IconFolder, IconGlobe, IconGpa, IconHelpCircle, IconImage, IconKnowledge, IconMcp, IconNotebook, IconSearch, IconShield, IconSkills, IconTerminal, IconVideo } from "../icons";
 import { CopyTextButton, MessageMediaLightbox, getFileLeafName, normalizeMarkdownImageSource, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
 import { ApiCardThreadContext } from "../cards/api-card-message";
@@ -42,7 +42,10 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
   const toolPresentation = getToolActivityPresentation(toolCalls);
   const { runningCall } = toolPresentation;
   const isRunning = Boolean(runningCall);
-  const groupRef = useRef<HTMLDetailsElement>(null);
+  const [isOpen, setIsOpen] = useState(false);
+  const [loadedResults, setLoadedResults] = useState<Map<string, string | null>>(() => new Map());
+  const [detailLoadState, setDetailLoadState] = useState<"idle" | "loading" | "error">("idle");
+  const [detailLoadAttempt, setDetailLoadAttempt] = useState(0);
   const wasRunningRef = useRef(isRunning);
   const status = toolPresentation.status;
   const conciseLabel = runningCall
@@ -56,12 +59,52 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
     }
     if (wasRunningRef.current) {
       wasRunningRef.current = false;
-      groupRef.current?.removeAttribute("open");
+      setIsOpen(false);
     }
   }, [isRunning, runningCall?.id]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const missingCalls = toolCalls.filter((toolCall) =>
+      isToolCallSummary(toolCall) && !toolCall.hasFullResult && !loadedResults.has(toolCall.id)
+    ).slice(0, 200);
+    if (missingCalls.length === 0) {
+      setDetailLoadState("idle");
+      return;
+    }
+
+    let cancelled = false;
+    setDetailLoadState("loading");
+    void window.codexh.getToolCallDetails({
+      threadId: missingCalls[0]!.threadId,
+      toolCallIds: missingCalls.map((toolCall) => toolCall.id)
+    }).then((details) => {
+      if (cancelled) return;
+      setLoadedResults((current) => {
+        const next = new Map(current);
+        for (const toolCall of missingCalls) {
+          next.set(toolCall.id, null);
+        }
+        for (const detail of details) {
+          next.set(detail.toolCallId, detail.available ? detail.resultJson : null);
+        }
+        return next;
+      });
+      setDetailLoadState("idle");
+    }).catch(() => {
+      if (!cancelled) setDetailLoadState("error");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [detailLoadAttempt, isOpen, loadedResults, toolCalls]);
+
   return (
-    <details ref={groupRef} className={`tool-activity-group ${status}`}>
+    <details
+      className={`tool-activity-group ${status}`}
+      open={isOpen}
+      onToggle={(event) => setIsOpen(event.currentTarget.open)}
+    >
       <summary
         className="tool-activity-summary"
         aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}，${toolCalls.length} 项`}
@@ -72,14 +115,35 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
         <span className="tool-activity-summary-count">{toolCalls.length} 项</span>
         <span className="tool-activity-chevron" aria-hidden />
       </summary>
-      <div className="tool-activity-details-shell">
-        <div className="tool-activity-details">
-          {toolCalls.map((toolCall) => <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact skillNames={skillNames} />)}
+      {isOpen ? (
+        <div className="tool-activity-details-shell">
+          <div className="tool-activity-details">
+            {detailLoadState === "loading" ? <div className="tool-activity-detail-load-state">正在加载工具详情...</div> : null}
+            {detailLoadState === "error" ? (
+              <div className="tool-activity-detail-load-state error">
+                <span>工具详情加载失败</span>
+                <button type="button" onClick={() => setDetailLoadAttempt((current) => current + 1)}>重试</button>
+              </div>
+            ) : null}
+            {toolCalls.map((toolCall) => {
+              const resultJson = loadedResults.has(toolCall.id)
+                ? loadedResults.get(toolCall.id) ?? null
+                : toolCall.resultJson;
+              const resolvedToolCall = resultJson === toolCall.resultJson
+                ? toolCall
+                : { ...toolCall, resultJson };
+              return <ToolActivityRow key={toolCall.id} toolCall={resolvedToolCall} compact skillNames={skillNames} />;
+            })}
+          </div>
         </div>
-      </div>
+      ) : null}
     </details>
   );
 }, (previous, next) => previous.skillNames === next.skillNames && areToolActivityGroupsEqual(previous.toolCalls, next.toolCalls));
+
+function isToolCallSummary(toolCall: ToolCallRecord): toolCall is ToolCallSummary {
+  return "hasFullResult" in toolCall;
+}
 
 function areToolActivityGroupsEqual(previous: ToolCallRecord[], next: ToolCallRecord[]) {
   if (previous === next) return true;
@@ -91,7 +155,12 @@ function areToolActivityGroupsEqual(previous: ToolCallRecord[], next: ToolCallRe
       && candidate.startedAt === call.startedAt
       && candidate.completedAt === call.completedAt
       && candidate.argumentsJson === call.argumentsJson
-      && candidate.resultJson === call.resultJson;
+      && candidate.resultJson === call.resultJson
+      && (!isToolCallSummary(call) || (
+        isToolCallSummary(candidate)
+        && candidate.resultSize === call.resultSize
+        && candidate.hasFullResult === call.hasFullResult
+      ));
   });
 }
 
@@ -344,10 +413,18 @@ export function ApprovalCard({
   resolving: boolean;
   onResolve: (decision: "approved" | "denied", mode?: "once" | "session" | "remember") => void;
 }) {
+  const requiresExplicitAuthorization = approval.kind === "explicit_authorization";
   return (
-    <section id={`approval-card-${approval.id}`} className="approval-card" aria-label={`审批请求: ${approval.title}`}>
+    <section
+      id={`approval-card-${approval.id}`}
+      className={`approval-card ${requiresExplicitAuthorization ? "explicit-authorization" : ""}`}
+      aria-label={`${requiresExplicitAuthorization ? "明确授权" : "审批请求"}: ${approval.title}`}
+    >
       <div className="approval-card-copy">
-        <span className="approval-card-label">需要审批</span>
+        <span className="approval-card-label">
+          {requiresExplicitAuthorization ? <span className="approval-card-label-icon" aria-hidden><IconShield /></span> : null}
+          {requiresExplicitAuthorization ? "需要明确授权" : "需要审批"}
+        </span>
         <strong>{approval.title}</strong>
         <p>{approval.description}</p>
         <InteractionCountdown expiresAt={approval.expiresAt} timeoutLabel="后将自动拒绝" />
@@ -356,14 +433,18 @@ export function ApprovalCard({
         <button type="button" className="approval-deny-button" disabled={resolving} onClick={() => onResolve("denied")}>
           拒绝
         </button>
-        <button type="button" className="approval-session-button" disabled={resolving} onClick={() => onResolve("approved", "session")}>
-          本会话允许
-        </button>
-        <button type="button" className="approval-remember-button" disabled={resolving} onClick={() => onResolve("approved", "remember")}>
-          允许且不再询问
-        </button>
+        {!requiresExplicitAuthorization ? (
+          <>
+            <button type="button" className="approval-session-button" disabled={resolving} onClick={() => onResolve("approved", "session")}>
+              本会话允许
+            </button>
+            <button type="button" className="approval-remember-button" disabled={resolving} onClick={() => onResolve("approved", "remember")}>
+              允许且不再询问
+            </button>
+          </>
+        ) : null}
         <button type="button" className="approval-allow-button" disabled={resolving} onClick={() => onResolve("approved", "once")}>
-          {resolving ? "处理中..." : "允许并继续"}
+          {resolving ? "处理中..." : requiresExplicitAuthorization ? "授权并继续" : "允许并继续"}
         </button>
       </div>
     </section>

@@ -847,6 +847,34 @@
   background: rgba(15, 18, 22, 0.54);
 }
 
+.tool-activity-detail-load-state {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  gap: 8px;
+  padding: 4px 12px;
+  color: #8fc5ff;
+  font-size: 11px;
+}
+
+.tool-activity-detail-load-state.error {
+  color: #ff9c9c;
+}
+
+.tool-activity-detail-load-state button {
+  padding: 2px 7px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tool-activity-detail-load-state button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .active-subagent-lines {
   display: grid;
   min-width: 0;

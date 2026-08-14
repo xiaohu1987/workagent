@@ -106,6 +106,8 @@ declare global {
       deleteThread: (threadId: string) => Promise<void>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
       getThreadSnapshot: (threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) => Promise<any>;
+      getToolCallDetails: (payload: { threadId: string; toolCallIds: string[] }) =>
+        Promise<import("@shared-types").ToolCallDetail[]>;
       sendMessage: (payload: { threadId: string; content: string; displayContent?: string; attachments?: any[]; mediaIntent?: "image" | "video" | null }) => Promise<{
         queued: QueuedMessageRecord;
         queuedBehindActiveTask: boolean;

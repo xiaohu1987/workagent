@@ -83,6 +83,7 @@ import {
   resolveModelRateLimitDelayMs,
   isNetworkError,
   isProviderOutputLimitError,
+  buildProviderOutputLimitRecoveryInstruction,
   isProviderResourceError,
   readProviderRequestLimitDetails,
   shouldRecoverProviderRequestLimit,
@@ -182,6 +183,7 @@ import {
   shouldPublishAssistantDraftUpdate,
   isExplicitGitMutationRequest,
   validateGitMutationToolCall,
+  buildExplicitAuthorizationRequirement,
   parseGpaState,
   normalizeSequentialPlanTasks,
   parseGpaCompletedTaskDeclarations,
@@ -297,13 +299,39 @@ describe("subagent watchdog policy", () => {
 });
 
 describe("Git mutation authorization", () => {
-  it("requires an explicit user request before Git-changing actions are available", () => {
+  it("builds a one-time authorization requirement for unrequested Git writes", () => {
     expect(isExplicitGitMutationRequest("修复这个接口并运行测试")).toBe(false);
     expect(isExplicitGitMutationRequest("请提交当前改动并推送分支")).toBe(true);
-    expect(validateGitMutationToolCall({ name: "git.commit", arguments: {} }, false)).toContain("explicit user request");
-    expect(validateGitMutationToolCall({ name: "shell.exec", arguments: { command: "git commit -m fix" } }, false)).toContain("explicit user request");
+    expect(validateGitMutationToolCall({ name: "git.commit", arguments: {} }, false)).toBe("用户未授权该 Git 写操作，命令未执行。");
+    expect(validateGitMutationToolCall({ name: "shell.exec", arguments: { command: "git commit -m fix" } }, false)).toBe("用户未授权该 Git 写操作，命令未执行。");
+    expect(validateGitMutationToolCall({ name: "shell.exec", arguments: { command: "git -C repo pull origin test" } }, false)).toBe("用户未授权该 Git 写操作，命令未执行。");
     expect(validateGitMutationToolCall({ name: "git.status", arguments: {} }, false)).toBeNull();
     expect(validateGitMutationToolCall({ name: "git.commit", arguments: {} }, true)).toBeNull();
+
+    const requirement = buildExplicitAuthorizationRequirement({
+      name: "shell.exec",
+      arguments: { command: "git pull origin test --token=secret-value" }
+    }, false);
+    expect(requirement).toMatchObject({
+      kind: "git_mutation",
+      title: "Git 操作需要明确授权",
+      riskLevel: "high",
+      deniedMessage: "用户未授权该 Git 写操作，命令未执行。"
+    });
+    expect(requirement?.description).toContain("git pull origin test --token=[REDACTED]");
+    expect(requirement?.payload).toMatchObject({ toolName: "shell.exec" });
+    expect(buildExplicitAuthorizationRequirement({ name: "git.status", arguments: {} }, false)).toBeNull();
+    expect(buildExplicitAuthorizationRequirement({ name: "git.commit", arguments: {} }, true)).toBeNull();
+  });
+
+  it("redacts and bounds the displayed operation", () => {
+    const requirement = buildExplicitAuthorizationRequirement({
+      name: "shell.exec",
+      arguments: { command: `git merge origin/test --api_key=top-secret ${"x".repeat(2_100)}` }
+    }, false);
+
+    expect(requirement?.description).toContain("api_key=[REDACTED]");
+    expect(requirement?.description).toContain("[truncated");
   });
 });
 
@@ -321,11 +349,14 @@ describe("active turn guidance", () => {
 describe("function-call protocol failures", () => {
   it("recognizes missing function call and tool output pairs without treating them as context overflow", () => {
     const missingOutput = new Error("400 No tool output found for function call fc_abc.");
+    const deepSeekMissingOutput = new Error("400 No tool output found for tool call call_00_test.");
     const missingCall = new Error("400 No tool call found for function call output with call_id fc_abc.");
 
     expect(isFunctionCallProtocolError(missingOutput)).toBe(true);
+    expect(isFunctionCallProtocolError(deepSeekMissingOutput)).toBe(true);
     expect(isFunctionCallProtocolError(missingCall)).toBe(true);
     expect(isUpstreamContextOverflowError(missingOutput)).toBe(false);
+    expect(isUpstreamContextOverflowError(deepSeekMissingOutput)).toBe(false);
   });
 });
 
@@ -1007,6 +1038,8 @@ describe("ordinary and project runtime isolation", () => {
     expect(policy.workspaceRoot).toBe("D:\\workspace\\project");
     expect(policy.filterTools(tools)).toEqual(tools);
     expect(policy.systemPrompt).toContain("authoritative source");
+    expect(policy.systemPrompt).toContain("Base completion on the executed test evidence");
+    expect(policy.systemPrompt).not.toContain("must include a test report");
     expect(() => createProjectRuntimePolicy({
       cwd: null,
       explicitlySelectedMcp: false,
@@ -1433,7 +1466,7 @@ describe("standard completion validation", () => {
     expect(result.missingVerification).toBe(true);
   });
 
-  it("requires a passing unit test and test report for delivered project source code", () => {
+  it("requires passing unit-test evidence for delivered project source code", () => {
     const result = validateStandardCompletion({
       decision: {
         assistantMessage: "Updated src/voice.ts and verified the build.",
@@ -1455,10 +1488,10 @@ describe("standard completion validation", () => {
     expect(result.missingTestReport).toBe(true);
   });
 
-  it("accepts a project code completion only with a successful unit test and report", () => {
+  it("accepts successful unit-test evidence without requiring a report phrase", () => {
     const result = validateStandardCompletion({
       decision: {
-        assistantMessage: "测试报告：单元测试 `pnpm vitest run tests/voice.test.ts` 通过，12 passed，0 failed。",
+        assistantMessage: "Updated src/voice.ts and completed the requested change.",
         toolCalls: [],
         endTurn: true,
         goalCompleted: true
@@ -1473,6 +1506,9 @@ describe("standard completion validation", () => {
     });
 
     expect(result.valid).toBe(true);
+    expect(result.missingUnitTest).toBe(false);
+    expect(result.missingTestReport).toBe(true);
+    expect(result.reasons).not.toContain("The final summary does not include the required unit-test report.");
   });
 
   it("includes successful database query output in completion audit evidence", () => {
@@ -2416,7 +2452,7 @@ describe("GPA ACT completion evidence", () => {
     expect(result.missingVerification).toBe(true);
   });
 
-  it("requires unit-test evidence and report before a GPA code task can complete", () => {
+  it("requires unit-test evidence before a GPA code task can complete", () => {
     const delivery = classifySuccessfulToolEvidence({
       toolCallId: "patch-1",
       toolName: "apply_patch",
@@ -2449,6 +2485,52 @@ describe("GPA ACT completion evidence", () => {
     expect(result.valid).toBe(false);
     expect(result.missingUnitTest).toBe(true);
     expect(result.missingTestReport).toBe(true);
+  });
+
+  it("continues from the partial draft instead of forcing a short completed summary", () => {
+    const instruction = buildProviderOutputLimitRecoveryInstruction("第一部分已经生成，最后一句被截断");
+    expect(instruction).toContain("Preserve the user's requested level of detail");
+    expect(instruction).toContain("第一部分已经生成，最后一句被截断");
+    expect(instruction).not.toContain("under 500 words");
+  });
+
+  it("accepts GPA unit-test evidence without requiring a report phrase", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-1",
+      toolName: "apply_patch",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\src\\App.tsx"]
+    });
+    const unitTest = {
+      ...classifySuccessfulToolEvidence({
+        toolCallId: "test-1",
+        toolName: "shell.exec",
+        hasPriorDelivery: true
+      }),
+      unitTestPassed: true
+    };
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "The project changes are complete.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-1", kind: "delivery" },
+          { taskId: "T1", toolCallId: "test-1", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, unitTest],
+      requiresUnitTest: true
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.missingUnitTest).toBe(false);
+    expect(result.missingTestReport).toBe(true);
+    expect(result.reasons).not.toContain("The final summary does not include the required unit-test report.");
   });
 
   it("requires desktop and mobile browser evidence for frontend GPA work", () => {

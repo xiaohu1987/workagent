@@ -30,6 +30,7 @@ import type {
   SkillUsageStats,
   ThreadRecord,
   ToolCallRecord,
+  ToolCallSummary,
   UserInputPrompt
 } from "@shared-types";
 import { DEFAULT_RESPONSE_TONE, GPT_REASONING_EFFORTS, createEmptyTokenUsage, isConfigurableGptReasoningModel, withGptReasoningCapabilities } from "@shared-types";
@@ -38,6 +39,7 @@ import {
   canDeleteThread,
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
+  getThreadContentView,
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
   normalizeGpaStateForThread,
@@ -205,7 +207,6 @@ import {
   IconShield,
   IconSidebar,
   IconSkills,
-  IconSpinner,
   IconSplitPanel,
   IconStop,
   IconTerminal,
@@ -473,6 +474,7 @@ export function App() {
   const persistedRuntimeMessagesRef = useRef<Record<string, Map<string, MessageRecord>>>({});
   const snapshotRefreshInFlightRef = useRef<Record<string, Promise<void>>>({});
   const snapshotRefreshPendingRef = useRef<Record<string, boolean>>({});
+  const cachedSnapshotFallbackTimerRef = useRef<number | null>(null);
   /** After Stop, ignore late runtime events that would revive the "执行中" UI. */
   const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
@@ -1171,7 +1173,9 @@ export function App() {
     const cached = snapshotCacheByThreadRef.current.get(threadId);
     if (!cached) return false;
     cacheThreadSnapshot(cached);
-    snapshotThreadIdRef.current = threadId;
+    if (cachedSnapshotFallbackTimerRef.current !== null) {
+      window.clearTimeout(cachedSnapshotFallbackTimerRef.current);
+    }
     // Mount the cached transcript as a transition: the selection highlight and
     // sidebar stay responsive while React renders the (potentially large)
     // message list, and the render can be interrupted by a newer switch.
@@ -1187,8 +1191,32 @@ export function App() {
         setIsThreadSwitching(false);
       }
     });
+    // Runtime events can repeatedly interrupt a large low-priority transcript
+    // render. Escalate only when the cached snapshot still has not committed,
+    // so switching cannot remain on the loading state indefinitely.
+    cachedSnapshotFallbackTimerRef.current = window.setTimeout(() => {
+      cachedSnapshotFallbackTimerRef.current = null;
+      if (
+        selectedThreadIdRef.current !== threadId ||
+        snapshotThreadIdRef.current === threadId
+      ) return;
+      setSnapshot((current) => selectedThreadIdRef.current === threadId
+        ? reconcileSnapshotWithRuntimeEvents(cached)
+        : current);
+      setBrowserTabsByThread((current) => ({ ...current, [threadId]: cached.browserTabs }));
+      const cachedGpa = normalizeGpaStateForThread(cached.thread.mode, cached.gpa);
+      setGpaState(cachedGpa);
+      setGpaComposerSelected(cachedGpa.stage !== "off");
+      setIsThreadSwitching(false);
+    }, 1_200);
     return true;
   }
+
+  useEffect(() => () => {
+    if (cachedSnapshotFallbackTimerRef.current !== null) {
+      window.clearTimeout(cachedSnapshotFallbackTimerRef.current);
+    }
+  }, []);
 
   const selectedProjectFile = selectedThreadId ? selectedProjectFileByThread[selectedThreadId] ?? null : null;
   const filePreviewPresence = useMotionPresence(filePreviewPath, 180);
@@ -1397,7 +1425,9 @@ export function App() {
     toolCallId: string,
     status: Extract<ToolCallRecord["status"], "completed" | "failed" | "blocked">,
     resultJson: string | null,
-    completedAt: string
+    completedAt: string,
+    resultSize: number,
+    hasFullResult: boolean
   ) {
     setRuntimeActivities((current) => {
       const activity = current[threadId];
@@ -1407,7 +1437,7 @@ export function App() {
         [threadId]: {
           ...activity,
           entries: trimRuntimeActivityEntries(activity.entries.map((entry) => entry.kind === "tool" && entry.toolCall.id === toolCallId
-            ? { ...entry, toolCall: { ...entry.toolCall, status, resultJson, completedAt } }
+            ? { ...entry, toolCall: { ...entry.toolCall, status, resultJson, completedAt, resultSize, hasFullResult } }
             : entry
           ))
         }
@@ -1533,6 +1563,8 @@ export function App() {
           toolName?: string;
           argumentsJson?: string;
           resultJson?: string;
+          resultSize?: number;
+          hasFullResult?: boolean;
           prompt?: UserInputPrompt;
           approval?: ApprovalRequest;
           riskLevel?: ToolCallRecord["riskLevel"];
@@ -1566,7 +1598,15 @@ export function App() {
       const currentSelectedThreadId = selectedThreadIdRef.current;
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
       if (typed.type === "terminal.output" && typed.threadId) {
-        appendRuntimeOutput(typed.threadId, "终端输出", typed.payload?.data ?? "", typed.createdAt);
+        const inputPreview = typeof typed.payload?.inputPreview === "string"
+          ? typed.payload.inputPreview.trim()
+          : "";
+        appendRuntimeOutput(
+          typed.threadId,
+          inputPreview ? `$ ${inputPreview}` : "终端输出",
+          typed.payload?.data ?? "",
+          typed.createdAt
+        );
         if (typed.threadId !== selectedThreadIdRef.current) {
           return;
         }
@@ -1678,8 +1718,9 @@ export function App() {
       if (typed.type === "approval.resolved" && typed.threadId) {
         const approvalPayload = typed.payload as unknown as {
           approvalId?: string;
+          kind?: ApprovalRequest["kind"];
           approved?: boolean;
-          source?: "user" | "timeout";
+          source?: "user" | "timeout" | "interrupted";
         };
         if (approvalPayload.approvalId) {
           setSnapshot((current) => {
@@ -1696,14 +1737,20 @@ export function App() {
                 : approval)
             };
           });
-          if (approvalPayload.source === "timeout" && !suppressRuntimeProgressRef.current[typed.threadId]) {
-            appendRuntimeStatus(typed.threadId, "审批超时，已自动拒绝", typed.createdAt);
+          if (!suppressRuntimeProgressRef.current[typed.threadId]) {
+            if (approvalPayload.source === "timeout") {
+              appendRuntimeStatus(typed.threadId, "审批超时，已自动拒绝", typed.createdAt);
+            } else if (approvalPayload.source === "interrupted") {
+              appendRuntimeStatus(typed.threadId, "任务已停止，待决授权已拒绝", typed.createdAt);
+            }
           }
         }
         if (notificationThreadId) {
           resumeThreadNotification(
             notificationThreadId,
-            approvalPayload.approved ? "操作已确认，任务继续运行。" : "操作已拒绝，任务继续处理。",
+            approvalPayload.kind === "explicit_authorization"
+              ? (approvalPayload.approved ? "授权已确认，任务继续运行。" : "授权已拒绝，操作未执行。")
+              : (approvalPayload.approved ? "操作已确认，任务继续运行。" : "操作已拒绝，任务继续处理。"),
             typed.createdAt
           );
         }
@@ -1746,13 +1793,15 @@ export function App() {
         if (suppressRuntimeProgressRef.current[typed.threadId]) {
           return;
         }
-        const startedToolForActivity: ToolCallRecord = {
+        const startedToolForActivity: ToolCallSummary = {
           id: typed.payload.toolCallId,
           threadId: typed.threadId,
           turnRunId: typeof typed.payload.turnRunId === "string" ? typed.payload.turnRunId : "",
           toolName: typed.payload.toolName,
           argumentsJson: typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}",
           resultJson: null,
+          resultSize: 0,
+          hasFullResult: true,
           status: "running",
           riskLevel: typed.payload.riskLevel ?? "medium",
           approvalMode: typed.payload.approvalMode ?? "prompt",
@@ -1781,13 +1830,15 @@ export function App() {
         });
         setSnapshot((current) => {
           if (!current || current.thread.id !== typed.threadId) return current;
-          const startedTool: ToolCallRecord = {
+          const startedTool: ToolCallSummary = {
             id: typed.payload?.toolCallId ?? "",
             threadId: typed.threadId ?? "",
             turnRunId: typeof typed.payload?.turnRunId === "string" ? typed.payload.turnRunId : "",
             toolName: typed.payload?.toolName ?? "",
             argumentsJson: typeof typed.payload?.argumentsJson === "string" ? typed.payload.argumentsJson : "{}",
             resultJson: null,
+            resultSize: 0,
+            hasFullResult: true,
             status: "running",
             riskLevel: typed.payload?.riskLevel ?? "medium",
             approvalMode: typed.payload?.approvalMode ?? "prompt",
@@ -1827,7 +1878,9 @@ export function App() {
             typed.payload.toolCallId,
             typed.payload.status === "failed" ? "failed" : typed.payload.status === "blocked" ? "blocked" : "completed",
             typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null,
-            typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString()
+            typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString(),
+            typeof typed.payload.resultSize === "number" ? typed.payload.resultSize : typed.payload.resultJson?.length ?? 0,
+            typed.payload.hasFullResult !== false
           );
         }
         if (typed.threadId && typed.threadId !== selectedThreadIdRef.current) {
@@ -1850,6 +1903,10 @@ export function App() {
                     ...tool,
                     status: typed.payload?.status === "failed" ? "failed" : typed.payload?.status === "blocked" ? "blocked" : "completed",
                     resultJson: typeof typed.payload?.resultJson === "string" ? typed.payload.resultJson : null,
+                    resultSize: typeof typed.payload?.resultSize === "number"
+                      ? typed.payload.resultSize
+                      : typeof typed.payload?.resultJson === "string" ? typed.payload.resultJson.length : 0,
+                    hasFullResult: typed.payload?.hasFullResult !== false,
                     completedAt: typeof typed.payload?.completedAt === "string"
                       ? typed.payload.completedAt
                       : typed.createdAt ?? new Date().toISOString()
@@ -1881,7 +1938,7 @@ export function App() {
         const statusLabel = reason === "turn_start"
           ? typeof gpaTask?.id === "string" && typeof gpaTask?.title === "string"
             ? `正在执行 ${gpaTask.id}：${gpaTask.title}，等待模型生成下一项工具操作`
-            : "正在分析任务并规划下一步"
+            : "正在思考"
           : null;
         if (typed.threadId !== selectedThreadIdRef.current) {
           appendRuntimeStatus(
@@ -2026,12 +2083,9 @@ export function App() {
       }
       if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "provider_output_limit") {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
-          const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
-          const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 0;
-          const attemptLabel = maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : "";
-          appendRuntimeStatus(typed.threadId, `回答内容过长，正在精简后继续生成${attemptLabel}`, typed.createdAt);
+          appendRuntimeStatus(typed.threadId, "正在精简回复", typed.createdAt);
           if (notificationThreadId) {
-            updateThreadNotification(notificationThreadId, `回答内容过长，正在精简后继续生成${attemptLabel}。`, typed.createdAt);
+            updateThreadNotification(notificationThreadId, "正在精简回复。", typed.createdAt);
           }
           setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         }
@@ -2534,7 +2588,7 @@ export function App() {
       threads.find((thread) => thread.id === selectedThreadId) ?? null,
     [threads, selectedThreadId, snapshot?.thread]
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
     snapshotThreadIdRef.current = snapshot?.thread.id ?? null;
   }, [snapshot?.thread.id]);
   const selectedProjectCwd = selectedThread?.mode === "project" ? selectedThread.cwd ?? null : null;
@@ -2850,7 +2904,7 @@ export function App() {
   }, [activeRuntimeThreadId, latestConversationTurn?.startedAt, snapshot?.toolCalls]);
   const currentTurnDecisionLabel = useMemo(() => {
     const latestTool = completedCurrentTurnTools.at(-1);
-    if (!latestTool) return "正在分析任务并规划下一步";
+    if (!latestTool) return "正在思考";
     const action = getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "");
     return completedCurrentTurnTools.length > 1
       ? `已完成 ${completedCurrentTurnTools.length} 项操作，正在${action}`
@@ -2862,7 +2916,7 @@ export function App() {
   );
   const currentGpaTaskLabel = currentGpaTask
     ? `正在执行 ${currentGpaTask.id}：${currentGpaTask.title}，等待模型生成下一项工具操作`
-    : "正在分析任务并规划下一步";
+    : "正在思考";
   // Apply the default collapse synchronously on the very first render of a
   // thread. Previously the default was written by the effect below, so the
   // first paint after switching rendered EVERY turn expanded — full markdown
@@ -2996,7 +3050,7 @@ export function App() {
               ? currentGpaTask && completedCurrentTurnTools.length === 0
                 ? currentGpaTaskLabel
                 : currentTurnDecisionLabel
-              : "正在分析任务并规划下一步",
+              : "正在思考",
     [
       activeSnapshotThreadId,
       activeAssistantDraft,
@@ -3013,9 +3067,14 @@ export function App() {
     ]
   );
   const workspaceLabel = useMemo(() => getWorkspaceLabel(selectedThread), [selectedThread]);
-  const showWelcome = timelineEntries.length === 0;
+  const threadContentView = getThreadContentView(
+    selectedThreadId,
+    activeSnapshotThreadId,
+    timelineEntries.length
+  );
+  const showWelcome = threadContentView === "welcome";
   const showDefaultHome = !selectedThreadId;
-  const isThreadSwitchPlaceholderVisible = isThreadSwitching && selectedThreadId !== activeSnapshotThreadId;
+  const isThreadSwitchPlaceholderVisible = threadContentView === "switching";
   const pendingResumeThread = useMemo(
     () => pendingResumeThreads.find((entry) => entry.threadId === activeSnapshotThreadId) ?? null,
     [pendingResumeThreads, activeSnapshotThreadId]
@@ -5748,10 +5807,14 @@ export function App() {
         {pendingInteractionsPresence.value ? (
           <div className="pending-strip" data-motion={pendingInteractionsPresence.phase}>
             {visiblePendingApprovalCount > 0 ? (
-              <div className="pending-pill">
+              <button
+                type="button"
+                className="pending-pill"
+                onClick={() => document.getElementById(`approval-card-${pendingApprovals[0]?.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+              >
                 <span className="pending-count">{visiblePendingApprovalCount}</span>
-                <span>待审批</span>
-              </div>
+                <span>{pendingApprovals.some((approval) => approval.kind === "explicit_authorization") ? "需要授权" : "待审批"}</span>
+              </button>
             ) : null}
             {visiblePendingPromptCount > 0 ? (
               <button
@@ -5779,9 +5842,19 @@ export function App() {
             ) : null}
             {isThreadSwitchPlaceholderVisible ? (
               <div className="thread-switch-placeholder" aria-busy="true" aria-label="加载聊天记录">
-                <span className="thread-switch-placeholder-line short" />
-                <span className="thread-switch-placeholder-line" />
-                <span className="thread-switch-placeholder-line medium" />
+                <div className="thread-switch-loading" role="status" aria-live="polite">
+                  <div className="thread-switch-loading-mark" aria-hidden="true">
+                    <IconCodexMark />
+                  </div>
+                  <div className="thread-switch-loading-copy">
+                    <strong>正在载入对话</strong>
+                    <span>
+                      请稍候
+                      <i className="thread-switch-loading-dots" aria-hidden="true"><b /><b /><b /></i>
+                    </span>
+                  </div>
+                  <span className="thread-switch-loading-track" aria-hidden="true"><i /></span>
+                </div>
               </div>
             ) : showWelcome ? (
               <ChatWelcome
@@ -6038,7 +6111,7 @@ export function App() {
                     </button>
                   </div>
                   {gpaState.fullAccess ? (
-                    <span className="composer-mode-chip composer-mode-chip-full-access" title="完全访问：执行时不再请求确认">
+                    <span className="composer-mode-chip composer-mode-chip-full-access" title="完全访问：文件和网络操作无需常规审批；必须由你明确决定的操作仍会询问">
                       <IconShield />
                       <span>完全访问</span>
                       <button
