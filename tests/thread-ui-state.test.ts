@@ -40,6 +40,7 @@ import {
   reconcileAssistantDraftUpdate,
   resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
+  rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
   shouldKeepTimelineEntryWhenTurnCollapsed
@@ -47,7 +48,7 @@ import {
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
 import { getSidebarUpdateReminder } from "../apps/desktop/src/renderer/App";
 import { hasRecognizedGitRepository } from "../apps/desktop/src/renderer/workspace/right-workspace";
-import type { MessageRecord, ThreadRecord, ToolCallRecord } from "../packages/shared-types/src";
+import type { MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord } from "../packages/shared-types/src";
 
 function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
   return {
@@ -188,6 +189,60 @@ describe("thread UI state helpers", () => {
     };
 
     expect(replaceConversationMessagesFromEdit(messages, "user-1", replacement)).toEqual([replacement]);
+  });
+
+  it("rewinds timeline-dependent snapshot records with an edited message", () => {
+    const thread = makeThread({ id: "thread-1" });
+    const messages: MessageRecord[] = [
+      { id: "user-keep", threadId: thread.id, turnRunId: "turn-keep", role: "user", content: "keep", metadataJson: null, createdAt: "2026-07-28T00:00:00.000Z" },
+      { id: "user-edit", threadId: thread.id, turnRunId: "turn-edit", role: "user", content: "old", metadataJson: null, createdAt: "2026-07-28T00:00:01.000Z" },
+      { id: "assistant-old", threadId: thread.id, turnRunId: "turn-edit", role: "assistant", content: "old answer", metadataJson: null, createdAt: "2026-07-28T00:00:02.000Z" }
+    ];
+    const replacement: MessageRecord = {
+      id: "optimistic-replacement",
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: "edited",
+      metadataJson: null,
+      createdAt: "2026-07-28T00:00:03.000Z"
+    };
+    const snapshot = {
+      ...createOptimisticThreadSnapshot(thread),
+      messages,
+      messageCount: messages.length,
+      toolCalls: [
+        { id: "tool-keep", threadId: thread.id, turnRunId: "turn-keep" },
+        { id: "tool-old", threadId: thread.id, turnRunId: "turn-edit" }
+      ],
+      artifacts: [
+        { id: "artifact-keep", threadId: thread.id, turnRunId: "turn-keep", messageId: null },
+        { id: "artifact-old", threadId: thread.id, turnRunId: null, messageId: "assistant-old" }
+      ],
+      approvals: [
+        { id: "approval-keep", turnRunId: "turn-keep" },
+        { id: "approval-old", turnRunId: "turn-edit" }
+      ],
+      prompts: [
+        { id: "prompt-keep", turnRunId: "turn-keep" },
+        { id: "prompt-old", turnRunId: "turn-edit" }
+      ],
+      contextCompaction: { turnRunId: "turn-edit" },
+      contextMeasurement: { turnRunId: "turn-edit" },
+      queuedMessages: [{ id: "queued-old" }]
+    } as unknown as RuntimeThreadSnapshot;
+
+    const rewound = rewindThreadSnapshotForMessageEdit(snapshot, "user-edit", replacement);
+
+    expect(rewound.messages).toEqual([messages[0], replacement]);
+    expect(rewound.messageCount).toBe(2);
+    expect(rewound.toolCalls.map((toolCall) => toolCall.id)).toEqual(["tool-keep"]);
+    expect(rewound.artifacts.map((artifact) => artifact.id)).toEqual(["artifact-keep"]);
+    expect(rewound.approvals.map((approval) => approval.id)).toEqual(["approval-keep"]);
+    expect(rewound.prompts.map((prompt) => prompt.id)).toEqual(["prompt-keep"]);
+    expect(rewound.queuedMessages).toEqual([]);
+    expect(rewound.contextCompaction).toBeNull();
+    expect(rewound.contextMeasurement).toBeNull();
   });
 
   it("hides incomplete agent decision JSON from the chat transcript", () => {

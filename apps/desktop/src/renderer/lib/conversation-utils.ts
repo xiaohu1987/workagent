@@ -1818,6 +1818,48 @@ export function replaceConversationMessagesFromEdit(
   return [...messages.slice(0, messageIndex), replacement];
 }
 
+export function rewindThreadSnapshotForMessageEdit(
+  snapshot: RuntimeThreadSnapshot,
+  messageId: string,
+  replacement: MessageRecord
+): RuntimeThreadSnapshot {
+  const messageIndex = snapshot.messages.findIndex((message) => message.id === messageId);
+  if (messageIndex < 0) {
+    const messages = [...snapshot.messages, replacement];
+    return { ...snapshot, messages, messageCount: Math.max(snapshot.messageCount + 1, messages.length) };
+  }
+
+  const affectedMessages = snapshot.messages.slice(messageIndex);
+  const affectedMessageIds = new Set(affectedMessages.map((message) => message.id));
+  const affectedTurnIds = new Set(
+    affectedMessages
+      .map((message) => message.turnRunId)
+      .filter((turnRunId): turnRunId is string => Boolean(turnRunId))
+  );
+  const messages = [...snapshot.messages.slice(0, messageIndex), replacement];
+  const isAffectedTurn = (turnRunId: string | null | undefined) => Boolean(turnRunId && affectedTurnIds.has(turnRunId));
+
+  return {
+    ...snapshot,
+    messages,
+    messageCount: messages.length,
+    toolCalls: snapshot.toolCalls.filter((toolCall) => !isAffectedTurn(toolCall.turnRunId)),
+    artifacts: snapshot.artifacts.filter((artifact) =>
+      !isAffectedTurn(artifact.turnRunId) &&
+      !(artifact.messageId && affectedMessageIds.has(artifact.messageId))
+    ),
+    approvals: snapshot.approvals.filter((approval) => !isAffectedTurn(approval.turnRunId)),
+    prompts: snapshot.prompts.filter((prompt) => !isAffectedTurn(prompt.turnRunId)),
+    queuedMessages: [],
+    contextCompaction: isAffectedTurn(snapshot.contextCompaction?.turnRunId)
+      ? null
+      : snapshot.contextCompaction,
+    contextMeasurement: isAffectedTurn(snapshot.contextMeasurement?.turnRunId)
+      ? null
+      : snapshot.contextMeasurement
+  };
+}
+
 export function createOptimisticThreadSnapshot(thread: ThreadRecord): RuntimeThreadSnapshot {
   return {
     snapshotMode: "full",

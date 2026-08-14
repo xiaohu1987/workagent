@@ -114,7 +114,7 @@ import {
   reconcilePendingUserMessages,
   reconcilePendingUserMessagesDetailed,
   resolveLatestThreadRecord,
-  replaceConversationMessagesFromEdit,
+  rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
   shouldShowRuntimeActivityPanel,
@@ -3773,13 +3773,7 @@ export function App() {
     pendingUserMessagesRef.current[threadId] = [optimisticMessage];
     setSnapshot((current) => {
       if (!current || current.thread.id !== threadId) return current;
-      return {
-        ...current,
-        messages: replaceConversationMessagesFromEdit(current.messages, messageId, optimisticMessage),
-        queuedMessages: [],
-        approvals: [],
-        prompts: []
-      };
+      return rewindThreadSnapshotForMessageEdit(current, messageId, optimisticMessage);
     });
     return optimisticMessage;
   }
@@ -4534,10 +4528,19 @@ export function App() {
     // state before the main process finishes truncating a potentially long
     // conversation history.
     setEditingUserMessage(null);
-    delete snapshotCursorByThreadRef.current[threadId];
-    snapshotCacheByThreadRef.current.delete(threadId);
+    invalidateThreadSnapshotForFullRefresh(threadId, {
+      cursorByThread: snapshotCursorByThreadRef.current,
+      requestIdsByThread: snapshotRequestIdsRef.current,
+      cacheByThread: snapshotCacheByThreadRef.current,
+      runtimeMessagesByThread: persistedRuntimeMessagesRef.current
+    });
+    timelineBuildCacheRef.current = null;
     delete latestRuntimeThreadsRef.current[threadId];
-    delete persistedRuntimeMessagesRef.current[threadId];
+    discardQueuedAssistantDraftsForThread(threadId);
+    setAssistantDrafts((current) => Object.fromEntries(
+      Object.entries(current).filter(([, draft]) => draft.threadId !== threadId)
+    ));
+    setActiveToolCall((current) => current?.threadId === threadId ? null : current);
     const optimisticMessage = replaceConversationTailWithOptimisticUserMessage(
       threadId,
       messageId,
