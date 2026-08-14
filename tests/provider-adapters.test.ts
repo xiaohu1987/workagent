@@ -3889,6 +3889,113 @@ describe("native provider tool protocols", () => {
     ]));
   });
 
+  it("preserves streamed Responses reasoning when the completed event omits it", async () => {
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      transport: "responses",
+      deepseekProtocol: "native",
+      apiKey: "secret"
+    };
+    const reasoningItem = {
+      id: "rs_streamed",
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "Inspecting the workspace." }],
+      content: [{ type: "reasoning_text", text: "I need to list files first." }]
+    };
+    const reasoningModel = {
+      ...model,
+      id: "deepseek-v4-flash-0731",
+      providerId: provider.id,
+      role: "reasoning" as const,
+      supportsStreaming: true
+    };
+    async function* firstTurnEvents() {
+      yield {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { id: reasoningItem.id, type: "reasoning", summary: reasoningItem.summary, content: [] }
+      };
+      yield {
+        type: "response.reasoning_text.delta",
+        output_index: 0,
+        content_index: 0,
+        delta: "I need to list "
+      };
+      yield {
+        type: "response.reasoning_text.done",
+        output_index: 0,
+        content_index: 0,
+        text: "I need to list files first."
+      };
+      yield {
+        type: "response.output_item.added",
+        output_index: 1,
+        item: {
+          id: "fc_streamed",
+          type: "function_call",
+          call_id: "response-call",
+          name: nativeToolName(tool.name),
+          arguments: '{"path":"."}'
+        }
+      };
+      yield {
+        type: "response.completed",
+        response: {
+          status: "completed",
+          output: [
+            { id: reasoningItem.id, type: "reasoning", summary: reasoningItem.summary, content: [] },
+            {
+              id: "fc_streamed",
+              type: "function_call",
+              call_id: "response-call",
+              name: nativeToolName(tool.name),
+              arguments: '{"path":"."}'
+            }
+          ]
+        }
+      };
+    }
+    mocks.responsesCreate
+      .mockResolvedValueOnce(firstTurnEvents())
+      .mockResolvedValueOnce({
+        status: "completed",
+        output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
+      });
+    const adapter = new ProviderFactory().create(provider);
+
+    const decision = await adapter.runTurn({
+      systemPrompt: "Use tools.",
+      transcript: [{ role: "user", content: "Inspect." }],
+      availableTools: [tool],
+      model: reasoningModel,
+      provider,
+      reasoningEffort: "high",
+      stream: true
+    });
+    expect(decision.responseReasoningItem).toEqual(reasoningItem);
+
+    await adapter.runTurn({
+      systemPrompt: "Use tools.",
+      transcript: [
+        { role: "user", content: "Inspect." },
+        { role: "assistant", content: "", toolCalls: decision.toolCalls, responseReasoningItem: decision.responseReasoningItem },
+        { role: "tool", content: "Directory listing", toolCallId: "response-call" }
+      ],
+      availableTools: [tool],
+      model: { ...reasoningModel, supportsStreaming: false },
+      provider,
+      reasoningEffort: "high"
+    });
+
+    const request = mocks.responsesCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request.input).toEqual(expect.arrayContaining([
+      reasoningItem,
+      expect.objectContaining({ type: "function_call", call_id: "response-call" }),
+      expect.objectContaining({ type: "function_call_output", call_id: "response-call" })
+    ]));
+  });
+
   it("disables Responses thinking when resumed tool history lacks its original reasoning item", async () => {
     mocks.responsesCreate.mockResolvedValue({
       status: "completed",
@@ -3912,6 +4019,47 @@ describe("native provider tool protocols", () => {
     });
 
     expect(mocks.responsesCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("reasoning");
+  });
+
+  it("demotes incomplete DeepSeek Responses tool history instead of replaying an invalid call", async () => {
+    mocks.responsesCreate.mockResolvedValue({
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
+    });
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      transport: "responses",
+      deepseekProtocol: "native",
+      apiKey: "secret"
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use tools.",
+      transcript: [
+        { role: "user", content: "Inspect." },
+        { role: "assistant", content: "Inspecting.", toolCalls: [{ id: "old-call", name: tool.name, arguments: { path: "." } }] },
+        { role: "tool", content: "Directory listing", toolCallId: "old-call" }
+      ],
+      availableTools: [tool],
+      model: { ...model, id: "deepseek-v4-flash-0731", providerId: provider.id, role: "reasoning" },
+      provider,
+      reasoningEffort: "high"
+    });
+
+    const request = mocks.responsesCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(request.reasoning).toEqual({ effort: "high", summary: "concise" });
+    expect(request.input).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "assistant" }),
+      expect.objectContaining({
+        role: "user",
+        content: [expect.objectContaining({ type: "input_text", text: "Directory listing" })]
+      })
+    ]));
+    expect(request.input).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "function_call", call_id: "old-call" }),
+      expect.objectContaining({ type: "function_call_output", call_id: "old-call" })
+    ]));
   });
 
   it("streams Responses text and function arguments without exposing tool JSON", async () => {

@@ -4,6 +4,7 @@
 
 ## 2026-08-14
 
+- 修复 DeepSeek Responses 思考模式在工具调用后偶发 `400 The reasoning_text ... must be passed back` 并中止长任务的问题：流式适配器现在从 `response.output_item.added/done` 和 `response.reasoning_text.delta/done` 持续保留完整 reasoning item，即使网关在最终 `response.completed` 中省略该项，下一次工具结果请求仍会原样回传；旧任务或异常恢复历史确实缺少 reasoning item 时，不再重放必然被拒绝的原生函数调用，而是将已有工具结果降级为普通上下文后继续执行。新增流式缺失终态和旧历史恢复回归测试，`tests/provider-adapters.test.ts` 共 150 项通过，生产构建通过。
 - 优化 Git 写操作的明确授权体验：未在用户消息中明确要求的暂存、还原、提交、推送、拉取、合并、变基、worktree 与对应 shell 命令不再直接显示英文策略错误，而是暂停任务并展示脱敏后的操作、可能影响及“拒绝 / 授权并继续”卡片。明确授权仅覆盖当前工具调用，不受完全访问、自动审批、会话审批或记住审批影响，也不会自动超时；批准后复用该次授权跳过当前命令的一次常规审批，拒绝或停止任务时均保证命令未执行。审批记录新增 `explicit_authorization` 类型，旧记录兼容为普通审批；完全访问提示同步说明必须由用户明确决定的操作仍会询问。
 
 - 新增子任务等待 watchdog：父任务在等待子任务时按 30 秒轮询，子任务运行 60 秒后开始巡检；连续 120 秒没有新的工具事件、shell stdout/stderr 增量、测试输出或进程状态变化时自动中断，并将终态标记为 `interrupted`，保留已有消息、工具结果和中断原因。shell/test 有持续进展时可在 10 分钟后按 5 分钟窗口继续检查，但单个子任务总运行时间达到 30 分钟一定中断。子任务模型请求改为有限超时，主任务仍可由用户手动停止。终端输出事件现携带进度 heartbeat，子任务卡片会区分排队、启动、等待模型、执行 shell/test、重试、停滞和自动中断，并显示最近进度及自动中断倒计时。新增 watchdog 判定测试；`tests/agent-runtime.test.ts` 与 `tests/thread-ui-state.test.ts` 共 323 项通过。

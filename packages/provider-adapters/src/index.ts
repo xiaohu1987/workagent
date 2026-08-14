@@ -1108,11 +1108,12 @@ class OpenAiResponsesProvider implements ProviderAdapter {
     // A resumed tool turn must include the exact preceding reasoning item. Older
     // transcripts cannot supply it, so continuing in thinking mode would produce
     // a deterministic 400 from Responses-compatible gateways.
-    const hasIncompleteReasoningHistory = input.transcript.some(
-      (message) => message.role === "assistant" &&
-        Boolean(message.toolCalls?.length) &&
-        !message.responseReasoningItem
-    );
+    const hasIncompleteReasoningHistory = !isDeepSeekThinkingModel(input.model, input.provider) &&
+      input.transcript.some(
+        (message) => message.role === "assistant" &&
+          Boolean(message.toolCalls?.length) &&
+          !message.responseReasoningItem
+      );
     const reasoningEffort = hasIncompleteReasoningHistory ? "none" : requestedReasoningEffort;
     const request: Record<string, unknown> = {
       model: input.model.id,
@@ -2130,15 +2131,24 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
 async function buildResponsesInput(input: ProviderTurnInput): Promise<any[]> {
   const items: any[] = [];
   const calls = new Map<string, RuntimeToolCall>();
+  const requiresDeepSeekReasoningPassback = isDeepSeekThinkingModel(input.model, input.provider);
   for (const message of input.transcript) {
     if (message.role === "system") continue;
     if (message.role === "assistant" && message.toolCalls?.length) {
       if (message.content) {
         items.push({ role: "assistant", content: [{ type: "output_text", text: message.content }] });
       }
-      if (isResponsesReasoningItem(message.responseReasoningItem)) {
+      const reasoningItem = isResponsesReasoningItem(message.responseReasoningItem)
+        ? message.responseReasoningItem
+        : undefined;
+      if (reasoningItem) {
         // Responses requires this item before the function calls it produced.
-        items.push(message.responseReasoningItem);
+        items.push(reasoningItem);
+      } else if (requiresDeepSeekReasoningPassback) {
+        // A DeepSeek thinking-mode function call is invalid without the exact
+        // reasoning item that produced it. Preserve later tool output as user
+        // context instead of replaying a request the gateway must reject.
+        continue;
       }
       for (const call of message.toolCalls) {
         calls.set(call.id, call);
@@ -2204,6 +2214,7 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
   let visibleText = "";
   let reasoning = "";
   let terminalResponse: any;
+  let streamedReasoningItem: Record<string, unknown> | undefined;
   const calls = new Map<number, { id?: string; name?: string; arguments: string }>();
   const itemToIndex = new Map<string, number>();
   for await (const event of stream) {
@@ -2219,6 +2230,25 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
     }
     if (event?.type === "response.reasoning_summary_text.delta" && typeof event.delta === "string") {
       reasoning += event.delta;
+      continue;
+    }
+    if (
+      (event?.type === "response.output_item.added" || event?.type === "response.output_item.done") &&
+      isResponsesReasoningItem(event.item)
+    ) {
+      streamedReasoningItem = structuredClone(event.item);
+      continue;
+    }
+    if (
+      (event?.type === "response.reasoning_text.delta" || event?.type === "response.reasoning_text.done") &&
+      typeof (event.delta ?? event.text) === "string"
+    ) {
+      streamedReasoningItem = updateResponsesReasoningText(
+        streamedReasoningItem,
+        typeof event.content_index === "number" ? event.content_index : 0,
+        event.type === "response.reasoning_text.done" ? event.text : event.delta,
+        event.type === "response.reasoning_text.done"
+      );
       continue;
     }
     if (event?.type === "response.output_item.added" && event.item?.type === "function_call") {
@@ -2263,13 +2293,50 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
     : nativeTextDecision(text);
   const withUsage = withTokenUsage(decision, terminalResponse.usage);
   const withReasoning = reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
-  const responseReasoningItem = extractResponsesReasoningItem(terminalResponse?.output);
+  const responseReasoningItem = selectCompleteResponsesReasoningItem(
+    extractResponsesReasoningItem(terminalResponse?.output),
+    streamedReasoningItem
+  );
   return responseReasoningItem ? { ...withReasoning, responseReasoningItem } : withReasoning;
 }
 
 function isResponsesReasoningItem(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" &&
     (value as { type?: unknown }).type === "reasoning";
+}
+
+function updateResponsesReasoningText(
+  item: Record<string, unknown> | undefined,
+  contentIndex: number,
+  text: string,
+  replace: boolean
+): Record<string, unknown> {
+  const next = item ? structuredClone(item) : { type: "reasoning" };
+  const content = Array.isArray(next.content) ? [...next.content] : [];
+  const previous = content[contentIndex];
+  const previousText = isRecord(previous) && typeof previous.text === "string" ? previous.text : "";
+  content[contentIndex] = {
+    ...(isRecord(previous) ? previous : {}),
+    type: "reasoning_text",
+    text: replace ? text : previousText + text
+  };
+  next.content = content;
+  return next;
+}
+
+function selectCompleteResponsesReasoningItem(
+  terminalItem: Record<string, unknown> | undefined,
+  streamedItem: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  const score = (item: Record<string, unknown> | undefined): number => {
+    if (!item) return -1;
+    const contentScore = Array.isArray(item.content) && item.content.some(
+      (part) => isRecord(part) && part.type === "reasoning_text" && typeof part.text === "string"
+    ) ? 2 : 0;
+    const encryptedScore = typeof item.encrypted_content === "string" && item.encrypted_content ? 1 : 0;
+    return contentScore + encryptedScore;
+  };
+  return score(streamedItem) > score(terminalItem) ? streamedItem : terminalItem ?? streamedItem;
 }
 
 function extractResponsesText(output: unknown): string {
