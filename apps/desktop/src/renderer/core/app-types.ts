@@ -3,6 +3,7 @@ import type {
   GpaState,
   KnowledgeImportSource,
   McpServerConfig,
+  OpenAiApiFormat,
   PluginRecord,
   SkillMetadata,
   ThreadRecord,
@@ -81,6 +82,9 @@ export type ModelTestResult = {
   tokensPerSecond: number;
   agentCapability: "verified" | "unsupported";
   agentCapabilityReason?: string;
+  verifiedApiFormats?: OpenAiApiFormat[];
+  preferredApiFormat?: OpenAiApiFormat;
+  apiFormatCheckedAt?: string;
 };
 
 export type RuntimeProgress = {

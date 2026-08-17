@@ -1,3 +1,4 @@
+import { memo, useCallback, useMemo, useState } from "react";
 import { IconClose } from "../icons";
 import type { AppConfig, ModelProfile } from "@shared-types";
 import { getProviderDisplayName, modelKey } from "../lib/config-utils";
@@ -8,10 +9,8 @@ type Props = {
   motionPhase: string;
   role: MultimodalPickerRole;
   configDraft: AppConfig;
-  selected: string[];
-  setSelected: (selected: string[]) => void;
   onClose: () => void;
-  onApply: () => void;
+  onApply: (selected: string[]) => void;
   onSetDefault: (kind: "input", providerId: string, modelId: string) => void;
 };
 
@@ -42,15 +41,36 @@ export function MultimodalPickerDialog({
   motionPhase,
   role,
   configDraft,
-  selected,
-  setSelected,
   onClose,
   onApply,
   onSetDefault
 }: Props) {
-  const candidates = configDraft.models.filter((model) =>
-    role === "input" ? model.supportsMultimodalInput : model.role !== role
-  );
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => {
+    const providerId = configDraft.multimodal.input.defaultProviderId;
+    const modelId = configDraft.multimodal.input.defaultModelId;
+    return role === "input" && providerId && modelId ? new Set([modelKey(providerId, modelId)]) : new Set();
+  });
+  const candidates = useMemo(() => configDraft.models
+    .filter((model) => role === "input" ? model.supportsMultimodalInput : model.role !== role)
+    .map((model) => ({
+      key: modelKey(model.providerId, model.id),
+      model,
+      providerLabel: getModelProviderLabel(configDraft, model)
+    })), [configDraft, role]);
+
+  const selectModel = useCallback((key: string, providerId: string, modelId: string) => {
+    if (role === "input") {
+      onSetDefault("input", providerId, modelId);
+      onClose();
+      return;
+    }
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, [onClose, onSetDefault, role]);
 
   return (
     <div className="fetch-models-overlay motion-overlay" data-motion={motionPhase}>
@@ -62,41 +82,55 @@ export function MultimodalPickerDialog({
           </button>
         </div>
         <div className="fetch-models-list multimodal-picker-list">
-          {candidates.map((model) => {
-            const key = modelKey(model.providerId, model.id);
-            const checked = selected.includes(key);
-            const providerLabel = getModelProviderLabel(configDraft, model);
-
-            return (
-              <label key={key} className={`fetch-models-item multimodal-picker-item ${checked ? "is-checked" : ""}`}>
-                <input
-                  type={role === "input" ? "radio" : "checkbox"}
-                  checked={checked}
-                  onChange={() => {
-                    if (role === "input") {
-                      setSelected([key]);
-                      onSetDefault("input", model.providerId, model.id);
-                      onClose();
-                      return;
-                    }
-                    setSelected(checked ? selected.filter((value) => value !== key) : [...selected, key]);
-                  }}
-                />
-                <div className="fetch-models-copy">
-                  <strong>{model.displayName}</strong>
-                  <span>{providerLabel}</span>
-                </div>
-              </label>
-            );
-          })}
+          {candidates.map(({ key, model, providerLabel }) => (
+            <MultimodalPickerRow
+              key={key}
+              modelKey={key}
+              model={model}
+              providerLabel={providerLabel}
+              checked={selectedIds.has(key)}
+              single={role === "input"}
+              onSelect={selectModel}
+            />
+          ))}
         </div>
         <div className="fetch-models-actions">
           <button className="button ghost" onClick={onClose}>取消</button>
           {role !== "input" ? (
-            <button className="button warm" onClick={onApply} disabled={!selected.length}>添加</button>
+            <button className="button warm" onClick={() => onApply([...selectedIds])} disabled={selectedIds.size === 0}>添加</button>
           ) : null}
         </div>
       </div>
     </div>
   );
 }
+
+const MultimodalPickerRow = memo(function MultimodalPickerRow({
+  modelKey: key,
+  model,
+  providerLabel,
+  checked,
+  single,
+  onSelect
+}: {
+  modelKey: string;
+  model: ModelProfile;
+  providerLabel: string;
+  checked: boolean;
+  single: boolean;
+  onSelect: (key: string, providerId: string, modelId: string) => void;
+}) {
+  return (
+    <label className={`fetch-models-item multimodal-picker-item ${checked ? "is-checked" : ""}`}>
+      <input
+        type={single ? "radio" : "checkbox"}
+        checked={checked}
+        onChange={() => onSelect(key, model.providerId, model.id)}
+      />
+      <div className="fetch-models-copy">
+        <strong>{model.displayName}</strong>
+        <span>{providerLabel}</span>
+      </div>
+    </label>
+  );
+});

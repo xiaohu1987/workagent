@@ -1,4 +1,4 @@
-import type { ToolCallRecord } from "@shared-types";
+import type { GitFileChange, GitSnapshot, ToolCallRecord } from "@shared-types";
 import { parseTimelineJson } from "./conversation-utils";
 
 export type ProjectFileEntry = {
@@ -59,6 +59,80 @@ export function buildProjectFileTree(files: ProjectFileEntry[]): ProjectFileTree
       });
 
   return sortNodes(root.children);
+}
+
+export function mergeProjectFileEntries(
+  current: ProjectFileEntry[],
+  incoming: ProjectFileEntry[]
+): ProjectFileEntry[] {
+  const entriesByPath = new Map<string, ProjectFileEntry>();
+  for (const entry of [...current, ...incoming]) {
+    const normalized = { ...entry, path: entry.path.replace(/\\/g, "/") };
+    const existing = entriesByPath.get(normalized.path);
+    if (existing?.kind === "directory" && normalized.kind === "file") continue;
+    entriesByPath.set(normalized.path, normalized);
+  }
+  return [...entriesByPath.values()];
+}
+
+export function getProjectRelativeGitFiles(
+  snapshot: GitSnapshot | null,
+  projectRoot: string
+): GitFileChange[] {
+  if (snapshot?.available !== true || !snapshot.root?.trim() || !projectRoot.trim()) return [];
+
+  const gitRoot = normalizeAbsolutePath(snapshot.root);
+  const normalizedProjectRoot = normalizeAbsolutePath(projectRoot);
+  if (!gitRoot || !normalizedProjectRoot) return [];
+
+  const gitRootKey = gitRoot.toLocaleLowerCase();
+  const projectRootKey = normalizedProjectRoot.toLocaleLowerCase();
+  if (gitRootKey === projectRootKey) {
+    return snapshot.files.filter((file) => normalizeRelativeGitPath(file.path) !== null);
+  }
+  if (!projectRootKey.startsWith(`${gitRootKey}/`)) return [];
+
+  const projectPrefix = normalizedProjectRoot.slice(gitRoot.length + 1);
+  const projectPrefixKey = `${projectPrefix.toLocaleLowerCase()}/`;
+  return snapshot.files.flatMap((file) => {
+    const path = normalizeRelativeGitPath(file.path);
+    if (!path || !path.toLocaleLowerCase().startsWith(projectPrefixKey)) return [];
+
+    const projectPath = path.slice(projectPrefix.length + 1);
+    if (!projectPath) return [];
+    const originalPath = file.originalPath
+      ? normalizeRelativeGitPath(file.originalPath)
+      : null;
+    const projectOriginalPath = originalPath?.toLocaleLowerCase().startsWith(projectPrefixKey)
+      ? originalPath.slice(projectPrefix.length + 1)
+      : undefined;
+    return [{
+      ...file,
+      path: projectPath,
+      ...(projectOriginalPath ? { originalPath: projectOriginalPath } : { originalPath: undefined })
+    }];
+  });
+}
+
+function normalizeAbsolutePath(value: string): string {
+  return value.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function normalizeRelativeGitPath(value: string): string | null {
+  const normalized = value.trim().replace(/\\/g, "/");
+  if (!normalized || normalized.startsWith("/") || /^[a-z]:\//i.test(normalized)) return null;
+
+  const segments: string[] = [];
+  for (const segment of normalized.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length === 0) return null;
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return segments.join("/") || null;
 }
 
 export function projectFileNodeMatches(node: ProjectFileTreeNode, query: string): boolean {
@@ -224,6 +298,22 @@ export function getProjectFileChangeKinds(toolCalls: ToolCallRecord[]): Map<stri
       if (!value.before && value.after) changes.set(path, "added");
       else if (value.before && !value.after) changes.set(path, "deleted");
       else if (value.before !== value.after) changes.set(path, "modified");
+    }
+  }
+  return changes;
+}
+
+export function getGitProjectFileChangeKinds(files: GitFileChange[]): Map<string, ProjectFileChangeKind> {
+  const changes = new Map<string, ProjectFileChangeKind>();
+  for (const file of files) {
+    const path = file.path.replace(/\\/g, "/");
+    if (!path) continue;
+    if (file.untracked || file.indexStatus === "A" || file.worktreeStatus === "A") {
+      changes.set(path, "added");
+    } else if (file.indexStatus === "D" || file.worktreeStatus === "D") {
+      changes.set(path, "deleted");
+    } else {
+      changes.set(path, "modified");
     }
   }
   return changes;

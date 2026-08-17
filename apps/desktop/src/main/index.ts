@@ -466,7 +466,9 @@ function registerIpc(): void {
     const result = await dialog.showOpenDialog({ properties: ["openDirectory", "multiSelections"] });
     return result.canceled ? [] : result.filePaths;
   });
-  ipcMain.handle("projects:list-files", (_event, threadId: string) => backend.listProjectFiles(threadId));
+  ipcMain.handle("projects:list-files", (_event, threadId: string, relativeDirectory?: string) =>
+    backend.listProjectFiles(threadId, relativeDirectory)
+  );
   ipcMain.handle("projects:read-file", (_event, payload: { threadId: string; path: string }) =>
     backend.readProjectFile(payload.threadId, payload.path)
   );

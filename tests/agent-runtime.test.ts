@@ -36,6 +36,7 @@ import {
   buildStandardCompletionAuditSystemPrompt,
   buildStandardCompletionAuditInstruction,
   buildStandardCompletionAuditRecoveryInstruction,
+  buildStandardCompletionAuditStatusMessage,
   resolveStandardCompletionAuditResult,
   resolveStandardCompletionAuditDisposition,
   shouldRunStandardCompletionAudit,
@@ -1645,11 +1646,15 @@ describe("standard completion validation", () => {
       goalCompleted: true
     })).toEqual({ accepted: true, gaps: [] });
     expect(resolveStandardCompletionAuditResult({
-      assistantMessage: "NEEDS_USER_INPUT",
+      assistantMessage: "NEEDS_USER_INPUT: 请提供生产环境地址和测试账号。",
       toolCalls: [],
-      endTurn: true,
-      goalCompleted: true
-    })).toEqual({ accepted: true, gaps: [], needsUserInput: true });
+      endTurn: false,
+      goalCompleted: false
+    })).toEqual({
+      accepted: false,
+      gaps: ["请提供生产环境地址和测试账号。"],
+      needsUserInput: true
+    });
     expect(resolveStandardCompletionAuditResult({
       assistantMessage: "Load a test skill first.",
       toolCalls: [{ id: "skill-1", name: "skills.load", arguments: { skill_id: "test" } }],
@@ -1658,24 +1663,19 @@ describe("standard completion validation", () => {
     })).toEqual({ accepted: false, gaps: ["Load a test skill first."] });
   });
 
-  it("cannot let an unavailable or repeatedly rejecting audit block a valid candidate forever", () => {
+  it("retries a rejected audit but never records an explicitly rejected candidate as complete", () => {
     expect(resolveStandardCompletionAuditDisposition({
       outcome: "unavailable",
       attempt: 1
     })).toBe("accept_candidate");
     expect(resolveStandardCompletionAuditDisposition({
       outcome: "rejected",
-      attempt: MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES - 1
+      attempt: MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES
     })).toBe("retry");
     expect(resolveStandardCompletionAuditDisposition({
       outcome: "rejected",
-      attempt: MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES
-    })).toBe("accept_candidate");
-    expect(resolveStandardCompletionAuditDisposition({
-      outcome: "rejected",
-      attempt: 1,
-      candidateHasStructuredDeliverable: true
-    })).toBe("accept_candidate");
+      attempt: MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES + 1
+    })).toBe("reject_candidate");
   });
 
   it("requires concrete execution instead of another intention after an audit rejection", () => {
@@ -1686,6 +1686,19 @@ describe("standard completion validation", () => {
     expect(instruction).toContain("Do not state an intention to inspect, open, search, call, or verify anything.");
     expect(instruction).toContain("make the concrete tool call");
     expect(instruction).toContain("Do not substitute a plan");
+
+    expect(buildStandardCompletionAuditStatusMessage({
+      gaps: ["尚未启动前端，也没有可访问地址。"],
+      nextStep: "continue"
+    })).toContain("接下来：我会继续执行原始任务");
+    expect(buildStandardCompletionAuditStatusMessage({
+      gaps: ["缺少只能由用户提供的测试账号。"],
+      nextStep: "request_user_input"
+    })).toContain("这些材料只能由你提供");
+    expect(buildStandardCompletionAuditStatusMessage({
+      gaps: ["启动状态仍未验证。"],
+      nextStep: "request_retry_confirmation"
+    })).toContain("选择继续处理或停止任务");
   });
 
   it("builds a no-tool audit that compares the original task with delivery evidence", () => {
@@ -1704,8 +1717,14 @@ describe("standard completion validation", () => {
     expect(instruction).toContain("修改登录页并运行测试");
     expect(instruction).toContain("D:\\project\\Login.tsx");
     expect(instruction).toContain("test-1: shell.exec (verification)");
+    expect(instruction).toContain("Original user request");
+    expect(instruction).toContain("fully closed-loop");
     expect(instruction).toContain("Do not write a replacement answer");
     expect(systemPrompt).toContain("no tools, no Skills, no MCP access");
+    expect(systemPrompt).toContain("close the loop on the user's original request");
+    expect(systemPrompt).toContain("successful tool evidence proves the requested end state was reached");
+    expect(systemPrompt).toContain("NEEDS_USER_INPUT:");
+    expect(systemPrompt).toContain("the next concrete action needed to close it");
     expect(systemPrompt).toContain("assistant_message exactly APPROVED");
     expect(buildStandardCompletionAuditRecoveryInstruction(["Expected results are missing."]))
       .toContain("Expected results are missing.");

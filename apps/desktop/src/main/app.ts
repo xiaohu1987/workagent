@@ -31,6 +31,7 @@ import type {
   QueuedMessageRecord,
   McpServerConfig,
   ModelProfile,
+  OpenAiApiFormat,
   PendingResumeThread,
   ReasoningEffort,
   PluginRecord,
@@ -68,7 +69,7 @@ import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } fr
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
 import { hashDirectory, PluginRuntime, type PluginInstallProgress } from "@plugin-runtime";
-import { ProviderFactory } from "@provider-adapters";
+import { classifyResponsesFallback, ProviderFactory } from "@provider-adapters";
 import {
   SkillsManager,
   buildUserWorkflowPrompt,
@@ -76,6 +77,7 @@ import {
   parseUserWorkflowDraft,
   renderUserWorkflowSkill
 } from "@skills-runtime";
+import { listProjectDirectoryEntries, type ProjectFileEntry } from "./project-files";
 import { ToolRuntime } from "@tool-runtime";
 import { DatabaseRuntime } from "@database-runtime";
 import { redactRuntimeLogPayload, RuntimeLogWriter } from "./runtime-log";
@@ -272,7 +274,12 @@ export class DesktopBackend {
   readonly #toolRuntime = new ToolRuntime();
   readonly #providerFactory = new ProviderFactory({
     // Use Chromium networking so media CDN downloads follow the same system proxy as the browser.
-    fetch: (input, init) => net.fetch(input as string | GlobalRequest, init)
+    fetch: (input, init) => net.fetch(input as string | GlobalRequest, init),
+    onApiFormatResolved: async (providerId, model) => {
+      const stored = this.#config?.models.find((entry) => entry.providerId === providerId && entry.id === model.id);
+      if (!stored || stored !== model || !this.#layout?.configFile) return;
+      await saveConfig(this.#layout.configFile, this.#config);
+    }
   });
   // The right-side browser is rendered by Chromium. Use the same engine for tool
   // extraction so sites that block raw HTTP clients do not return a challenge page.
@@ -828,37 +835,9 @@ export class DesktopBackend {
     await this.#terminal.close(threadId, sessionId);
   }
 
-  public async listProjectFiles(threadId: string): Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>> {
+  public async listProjectFiles(threadId: string, relativeDirectory = ""): Promise<ProjectFileEntry[]> {
     const root = this.getProjectDirectory(threadId);
-    const files: Array<{ path: string; kind: "file" | "directory"; size?: number }> = [];
-    const ignored = new Set([".git", "node_modules", ".next", "dist", "build"]);
-
-    const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
-      const entries = await fs.readdir(directory, { withFileTypes: true });
-      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-        if (ignored.has(entry.name) || entry.isSymbolicLink() || files.length >= 2_000) {
-          continue;
-        }
-        // The renderer stores tree paths with forward slashes on every platform.
-        // Returning the same canonical form prevents a refresh from losing selection on Windows.
-        const relativePath = (relativeDirectory ? path.join(relativeDirectory, entry.name) : entry.name)
-          .split(path.sep)
-          .join("/");
-        const absolutePath = path.join(directory, entry.name);
-        if (entry.isDirectory()) {
-          files.push({ path: relativePath, kind: "directory" });
-          await visit(absolutePath, relativePath);
-          continue;
-        }
-        if (entry.isFile()) {
-          const stats = await fs.stat(absolutePath);
-          files.push({ path: relativePath, kind: "file", size: stats.size });
-        }
-      }
-    };
-
-    await visit(root, "");
-    return files;
+    return listProjectDirectoryEntries(root, relativeDirectory);
   }
 
   public async readProjectFile(threadId: string, relativePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
@@ -1713,13 +1692,18 @@ export class DesktopBackend {
     tokensPerSecond: number;
     agentCapability: "verified" | "unsupported";
     agentCapabilityReason?: string;
+    verifiedApiFormats?: OpenAiApiFormat[];
+    preferredApiFormat?: OpenAiApiFormat;
+    apiFormatCheckedAt?: string;
   }> {
-    const startedAt = performance.now();
-    const adapter = this.#providerFactory.create(input.provider);
+    if (input.provider.type !== "mock" && !input.provider.baseUrl?.trim()) {
+      throw new Error("请先填写调用 URL，模型测试不会使用隐式默认地址。");
+    }
     const timeout = new AbortController();
-
-    try {
-      if (input.model.supportsImageGeneration) {
+    if (input.model.supportsImageGeneration) {
+      const startedAt = performance.now();
+      const adapter = this.#providerFactory.create(input.provider);
+      try {
         if (!adapter.generateImage) {
           throw new Error("当前供应商不支持 OpenAI 兼容图片生成接口。请使用 OpenAI Chat Completions 或 Gateway，并确认中转提供 /images/generations。");
         }
@@ -1737,14 +1721,42 @@ export class DesktopBackend {
           agentCapability: "unsupported",
           agentCapabilityReason: "Image-generation models do not run Agent tools."
         };
+      } catch (error) {
+        throw error;
       }
+    }
+
+    const formats: Array<OpenAiApiFormat | "anthropic" | "gemini"> = input.provider.apiFormat === "auto"
+      ? ["openai_responses", "openai_chat"]
+      : input.provider.apiFormat === "openai_responses" || input.provider.apiFormat === "openai_chat"
+        ? [input.provider.apiFormat]
+        : input.provider.apiFormat === "anthropic" || input.provider.apiFormat === "gemini"
+          ? [input.provider.apiFormat]
+          : input.provider.type === "anthropic" ? ["anthropic"]
+            : input.provider.type === "gemini" ? ["gemini"]
+              : ["openai_chat"];
+    const successes: Array<{
+      format: OpenAiApiFormat | "anthropic" | "gemini";
+      latencyMs: number;
+      outputTokens: number;
+      agentCapability: "verified" | "unsupported";
+      agentCapabilityReason?: string;
+    }> = [];
+    const failures: string[] = [];
+    let responsesTemporarilyUnavailable = false;
+
+    for (const format of formats) {
+      const provider = { ...input.provider, apiFormat: format };
+      const adapter = this.#providerFactory.create(provider);
+      const startedAt = performance.now();
+      try {
       const decision = await adapter.runTurn({
         systemPrompt:
           "You are testing a model connection. Return one compact JSON object with no tool calls.",
         transcript: [{ role: "user", content: "Return a short connection-test JSON response." }],
         availableTools: [],
         model: { ...input.model, supportsStreaming: false },
-        provider: input.provider,
+        provider,
         stream: false,
         abortSignal: timeout.signal
       });
@@ -1775,7 +1787,7 @@ export class DesktopBackend {
             transcript: [{ role: "user", content: "Run the Agent protocol test now." }],
             availableTools: [probeTool],
             model: { ...input.model, supportsStreaming: false },
-            provider: input.provider,
+            provider,
             stream: false,
             abortSignal: timeout.signal
           });
@@ -1795,7 +1807,7 @@ export class DesktopBackend {
               ],
               availableTools: [probeTool],
               model: { ...input.model, supportsStreaming: false },
-              provider: input.provider,
+              provider,
               stream: false,
               abortSignal: timeout.signal
             });
@@ -1817,16 +1829,41 @@ export class DesktopBackend {
         }
       }
 
-      return {
-        latencyMs,
-        outputTokens,
-        tokensPerSecond: Number((outputTokens / (latencyMs / 1_000)).toFixed(2)),
-        agentCapability,
-        agentCapabilityReason
-      };
-    } catch (error) {
-      throw error;
+        successes.push({ format, latencyMs, outputTokens, agentCapability, agentCapabilityReason });
+      } catch (error) {
+        const label = format === "openai_responses" ? "Responses" : format === "openai_chat" ? "Chat Completions" : format;
+        if (format === "openai_responses" && classifyResponsesFallback(error) === "temporary") {
+          responsesTemporarilyUnavailable = true;
+        }
+        failures.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
+
+    if (successes.length === 0) {
+      throw new Error(`所有可用的上游格式均检测失败。技术详情：${failures.join("；")}`);
+    }
+    const verifiedApiFormats = successes
+      .filter((entry): entry is typeof entry & { format: OpenAiApiFormat } =>
+        entry.agentCapability === "verified" && (entry.format === "openai_responses" || entry.format === "openai_chat"))
+      .map((entry) => entry.format);
+    const preferred = successes.find((entry) => entry.agentCapability === "verified" && entry.format === "openai_responses")
+      ?? successes.find((entry) => entry.agentCapability === "verified" && entry.format === "openai_chat")
+      ?? successes.find((entry) => entry.format === "openai_responses")
+      ?? successes[0]!;
+    const preferredApiFormat = !responsesTemporarilyUnavailable && (preferred.format === "openai_responses" || preferred.format === "openai_chat")
+      ? preferred.format
+      : undefined;
+    const apiFormatCheckedAt = preferredApiFormat ? new Date().toISOString() : undefined;
+    return {
+      latencyMs: preferred.latencyMs,
+      outputTokens: preferred.outputTokens,
+      tokensPerSecond: Number((preferred.outputTokens / (preferred.latencyMs / 1_000)).toFixed(2)),
+      agentCapability: verifiedApiFormats.length > 0 ? "verified" : "unsupported",
+      agentCapabilityReason: verifiedApiFormats.length > 0 ? undefined : preferred.agentCapabilityReason,
+      verifiedApiFormats,
+      preferredApiFormat,
+      apiFormatCheckedAt
+    };
   }
 
   public getConfig(): AppConfig {
@@ -2051,6 +2088,9 @@ export class DesktopBackend {
     agentCapability: "verified" | "unsupported";
     agentCapabilityReason?: string;
     contextWindow?: number;
+    verifiedApiFormats?: OpenAiApiFormat[];
+    preferredApiFormat?: OpenAiApiFormat;
+    apiFormatCheckedAt?: string;
   }): Promise<ModelProfile> {
     const model = this.#config.models.find(
       (entry) => entry.id === input.modelId && entry.providerId === input.providerId
@@ -2062,6 +2102,9 @@ export class DesktopBackend {
     model.agentCapability = input.agentCapability;
     model.agentCapabilityCheckedAt = new Date().toISOString();
     model.agentCapabilityReason = input.agentCapabilityReason;
+    model.verifiedApiFormats = input.verifiedApiFormats;
+    model.preferredApiFormat = input.preferredApiFormat;
+    model.apiFormatCheckedAt = input.apiFormatCheckedAt;
     if (Number.isFinite(input.contextWindow) && (input.contextWindow ?? 0) >= 1_024) {
       model.contextWindow = Math.floor(input.contextWindow!);
     }
@@ -2071,6 +2114,9 @@ export class DesktopBackend {
       providerId: model.providerId,
       agentCapability: model.agentCapability,
       agentCapabilityReason: model.agentCapabilityReason,
+      verifiedApiFormats: model.verifiedApiFormats,
+      preferredApiFormat: model.preferredApiFormat,
+      apiFormatCheckedAt: model.apiFormatCheckedAt,
       contextWindow: input.contextWindow
     });
     return { ...model };

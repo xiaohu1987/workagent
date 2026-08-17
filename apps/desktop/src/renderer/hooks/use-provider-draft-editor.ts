@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from
 import type { AppConfig, ModelProfile, ProviderDefinition } from "@shared-types";
 import {
   cloneConfig,
+  clearModelVerificationCache,
   createEmptyProvider,
   createModelProfile,
   getModelsForProvider,
   normalizeDraftConfig,
+  providerTemplatePatch,
   resolveSettingsProviderId
 } from "../lib/config-utils";
 
@@ -54,7 +56,24 @@ export function useProviderDraftEditor({ configDraft, setConfigDraft, showNotice
     setConfigDraft((current) => {
       if (!current) return current;
       const next = cloneConfig(current);
-      next.providers = next.providers.map((provider) => provider.id === providerId ? { ...provider, ...patch } : provider);
+      const currentProvider = next.providers.find((provider) => provider.id === providerId);
+      if (!currentProvider) return current;
+      const templatePatch = patch.providerTemplate ? providerTemplatePatch(patch.providerTemplate) : {};
+      const mergedPatch = { ...templatePatch, ...patch };
+      const invalidatesVerificationCache = Boolean(
+        (mergedPatch.providerTemplate !== undefined && mergedPatch.providerTemplate !== currentProvider.providerTemplate) ||
+        (mergedPatch.baseUrl !== undefined && mergedPatch.baseUrl !== currentProvider.baseUrl) ||
+        (mergedPatch.apiFormat !== undefined && mergedPatch.apiFormat !== currentProvider.apiFormat) ||
+        (mergedPatch.compatibilityProfile !== undefined && mergedPatch.compatibilityProfile !== currentProvider.compatibilityProfile) ||
+        (mergedPatch.headers !== undefined && JSON.stringify(mergedPatch.headers) !== JSON.stringify(currentProvider.headers)) ||
+        (mergedPatch.organization !== undefined && mergedPatch.organization !== currentProvider.organization) ||
+        (mergedPatch.maxTools !== undefined && mergedPatch.maxTools !== currentProvider.maxTools) ||
+        (mergedPatch.maxRequestBytes !== undefined && mergedPatch.maxRequestBytes !== currentProvider.maxRequestBytes)
+      );
+      next.providers = next.providers.map((provider) => provider.id === providerId ? { ...provider, ...mergedPatch } : provider);
+      if (invalidatesVerificationCache) {
+        next.models = next.models.map((model) => model.providerId === providerId ? clearModelVerificationCache(model) : model);
+      }
       return normalizeDraftConfig(next);
     });
   }

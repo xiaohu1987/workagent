@@ -1,4 +1,4 @@
-import type { ArtifactRecord, AssistantDraftPhase, ContextCompactionRecord, ContextMeasurementRecord, GpaStage, GpaState, MessageAttachment, MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, UserInputPrompt } from "@shared-types";
+import type { ArtifactRecord, AssistantDraftPhase, ContextCompactionRecord, ContextMeasurementRecord, GpaStage, GpaState, MessageAttachment, MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, ToolCallSummary, UserInputPrompt } from "@shared-types";
 import { isThreadExecutionInProgress } from "../core/thread-ui-state";
 import { FileSnapshot } from "./project-files";
 
@@ -821,6 +821,37 @@ export function collectFileChangesByTurn(
   );
 }
 
+export function getLatestTurnRunId(
+  messages: MessageRecord[],
+  toolCalls: ToolCallRecord[]
+): string | null {
+  let latestTurnRunId: string | null = null;
+  let latestTimestamp = Number.NEGATIVE_INFINITY;
+  let latestOrder = -1;
+  let order = 0;
+
+  const consider = (turnRunId: string | null | undefined, createdAt: string | null | undefined) => {
+    order += 1;
+    if (!turnRunId) return;
+    const parsedTimestamp = Date.parse(createdAt ?? "");
+    const timestamp = Number.isFinite(parsedTimestamp) ? parsedTimestamp : Number.NEGATIVE_INFINITY;
+    if (latestTurnRunId === null || timestamp > latestTimestamp || (timestamp === latestTimestamp && order > latestOrder)) {
+      latestTurnRunId = turnRunId;
+      latestTimestamp = timestamp;
+      latestOrder = order;
+    }
+  };
+
+  for (const message of messages) {
+    consider(message.turnRunId, message.createdAt);
+  }
+  for (const toolCall of toolCalls) {
+    consider(toolCall.turnRunId, toolCall.startedAt);
+  }
+
+  return latestTurnRunId;
+}
+
 export function toolCallSucceeded(toolCall: ToolCallRecord) {
   if (toolCall.status !== "completed") {
     return false;
@@ -1421,6 +1452,47 @@ export function mergeSnapshotRecords<T extends { id: string }>(
 
   const multiplier = direction === "ascending" ? 1 : -1;
   return merged.sort((left, right) => multiplier * getCreatedAt(left).localeCompare(getCreatedAt(right)));
+}
+
+export function upsertRuntimeToolCallSummary(
+  toolCalls: ToolCallSummary[],
+  toolCall: ToolCallSummary
+): ToolCallSummary[] {
+  return mergeSnapshotRecords(toolCalls, [toolCall], (item) => item.startedAt);
+}
+
+export type RuntimeToolCallCompletion = Omit<Pick<
+  ToolCallSummary,
+  "id" | "threadId" | "status" | "resultJson" | "resultSize" | "hasFullResult" | "completedAt"
+>, "status" | "completedAt"> & {
+  status: Extract<ToolCallSummary["status"], "completed" | "failed" | "blocked" | "denied">;
+  completedAt: string;
+} & Partial<Pick<
+  ToolCallSummary,
+  "turnRunId" | "toolName" | "argumentsJson" | "riskLevel" | "approvalMode" | "startedAt"
+>>;
+
+export function completeRuntimeToolCallSummary(
+  toolCalls: ToolCallSummary[],
+  completion: RuntimeToolCallCompletion
+): ToolCallSummary[] {
+  const existing = toolCalls.find((toolCall) => toolCall.id === completion.id);
+  const completedToolCall: ToolCallSummary = {
+    id: completion.id,
+    threadId: completion.threadId,
+    turnRunId: existing?.turnRunId ?? completion.turnRunId ?? "",
+    toolName: existing?.toolName ?? completion.toolName ?? "unknown",
+    argumentsJson: existing?.argumentsJson ?? completion.argumentsJson ?? "{}",
+    riskLevel: existing?.riskLevel ?? completion.riskLevel ?? "medium",
+    approvalMode: existing?.approvalMode ?? completion.approvalMode ?? "prompt",
+    startedAt: existing?.startedAt ?? completion.startedAt ?? completion.completedAt,
+    status: completion.status,
+    resultJson: completion.resultJson,
+    resultSize: completion.resultSize,
+    hasFullResult: completion.hasFullResult,
+    completedAt: completion.completedAt
+  };
+  return upsertRuntimeToolCallSummary(toolCalls, completedToolCall);
 }
 
 export function resolveLatestThreadRecord(current: ThreadRecord, incoming: ThreadRecord): ThreadRecord {

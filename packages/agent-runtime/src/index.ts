@@ -2042,6 +2042,7 @@ class ThreadSessionRuntime {
       let prematureCompletionAttempts = 0;
       let managedWriteCompletionAttempts = 0;
       let standardCompletionAttempts = 0;
+      let standardCompletionAuditAttempts = 0;
       let modelAwaitReason: "turn_start" | "after_tools" | "recovery" = "turn_start";
       let draftSequence = 0;
       let useTextToolProtocol = false;
@@ -2476,7 +2477,9 @@ class ThreadSessionRuntime {
       const scheduleStandardCompletionRecovery = async (
         reason: "completion_validation" | "completion_audit"
       ) => {
-        const attempt = standardCompletionAttempts;
+        const attempt = reason === "completion_audit"
+          ? standardCompletionAuditAttempts
+          : standardCompletionAttempts;
         const maxAttempts = reason === "completion_audit"
           ? MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES
           : MAX_STANDARD_COMPLETION_RECOVERIES;
@@ -4011,10 +4014,6 @@ class ThreadSessionRuntime {
           requestedDeliverableExtensions.length > 0;
           let bypassStandardCompletionAudit = !auditRequired || resolveModelCompat(model, provider)
           .shouldBypassStandardCompletionAudit(model);
-        const hasApiCardDeliverable = hasValidApiCardDeliverable(
-          effectiveRequest,
-          decision.assistantMessage ?? ""
-        );
         if (
           this.#gpa.stage === "off" &&
           decision.toolCalls.length === 0 &&
@@ -4251,17 +4250,58 @@ class ThreadSessionRuntime {
             }
 
             const auditResult = resolveStandardCompletionAuditResult(auditDecision);
+            if (auditResult.needsUserInput) {
+              const statusMessage = buildStandardCompletionAuditStatusMessage({
+                gaps: auditResult.gaps,
+                nextStep: "request_user_input"
+              });
+              await this.recordMessage("assistant", statusMessage, turn.id, {
+                kind: "completion_audit_status",
+                needsUserInput: true
+              });
+              const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+                title: "完成审计需要补充材料",
+                kind: "generic",
+                allowSkip: false,
+                questions: [{
+                  id: "completion_materials",
+                  label: "补充所需材料",
+                  prompt: auditResult.gaps.join("\n"),
+                  allowFreeText: true
+                }]
+              });
+              const suppliedMaterials = answers.completion_materials?.trim();
+              transcript.push({
+                role: "user",
+                content: [
+                  "[User-provided material requested by completion audit]",
+                  suppliedMaterials || "The user did not provide additional material."
+                ].join("\n")
+              });
+              standardCompletionAuditAttempts = 0;
+              await retryDraft();
+              decision.assistantMessage = undefined;
+              decision.endTurn = false;
+              decision.goalCompleted = false;
+              continue;
+            }
             if (!auditResult.accepted) {
-              standardCompletionAttempts += 1;
+              standardCompletionAuditAttempts += 1;
               await this.services.log("turn.standard_completion_audit_rejected", this.threadId, {
                 turnRunId: turn.id,
-                attempt: standardCompletionAttempts,
+                attempt: standardCompletionAuditAttempts,
                 gaps: auditResult.gaps
               });
               const disposition = resolveStandardCompletionAuditDisposition({
                 outcome: "rejected",
-                attempt: standardCompletionAttempts,
-                candidateHasStructuredDeliverable: hasApiCardDeliverable
+                attempt: standardCompletionAuditAttempts
+              });
+              await this.recordMessage("assistant", buildStandardCompletionAuditStatusMessage({
+                gaps: auditResult.gaps,
+                nextStep: disposition === "retry" ? "continue" : "request_retry_confirmation"
+              }), turn.id, {
+                kind: "completion_audit_status",
+                attempt: standardCompletionAuditAttempts
               });
               if (disposition === "retry") {
                 await scheduleStandardCompletionRecovery("completion_audit");
@@ -4275,12 +4315,51 @@ class ThreadSessionRuntime {
                 decision.goalCompleted = false;
                 continue;
               }
-              await this.services.log("turn.standard_completion_audit_bypassed", this.threadId, {
+              const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+                title: "任务仍未完成闭环",
+                kind: "generic",
+                allowSkip: false,
+                questions: [{
+                  id: "completion_audit_recovery",
+                  label: "是否继续处理？",
+                  prompt: auditResult.gaps.join("\n"),
+                  options: [{
+                    id: "continue",
+                    label: "继续处理",
+                    description: "保留现有执行结果，并要求模型继续补齐缺口后重新审计。",
+                    recommended: true
+                  }, {
+                    id: "stop",
+                    label: "停止任务",
+                    description: "停止当前任务，并保留未闭环原因。"
+                  }]
+                }]
+              });
+              if (answers.completion_audit_recovery === "continue") {
+                standardCompletionAuditAttempts = 0;
+                transcript.push({
+                  role: "user",
+                  content: buildStandardCompletionAuditRecoveryInstruction(auditResult.gaps)
+                });
+                await retryDraft();
+                decision.assistantMessage = undefined;
+                decision.endTurn = false;
+                decision.goalCompleted = false;
+                continue;
+              }
+              repeatedTaskFailure = {
+                taskKey: "completion-audit",
+                attempts: standardCompletionAuditAttempts,
+                lastError: auditResult.gaps.join(" ")
+              };
+              await this.services.log("turn.standard_completion_audit_failed", this.threadId, {
                 turnRunId: turn.id,
-                reason: hasApiCardDeliverable ? "structured_deliverable" : "recovery_limit",
-                attempt: standardCompletionAttempts,
+                reason: "recovery_limit",
+                attempt: standardCompletionAuditAttempts,
                 gaps: auditResult.gaps
               });
+              await settleDraft({ discarded: true });
+              break;
             } else {
               await this.services.log("turn.standard_completion_audit_accepted", this.threadId, {
                 turnRunId: turn.id,
@@ -8245,11 +8324,14 @@ export function buildStandardCompletionAuditSystemPrompt(model: ModelProfile): s
   return [
     "You are a completion auditor for a desktop agent. You are not the user-facing assistant.",
     "You have no tools, no Skills, no MCP access, and must not propose or perform additional work.",
-    "Assess only whether the candidate response completely satisfies the original request using the supplied evidence.",
+    "Assess whether the candidate and supplied evidence close the loop on the user's original request, including every requested action, deliverable, constraint, and verification requirement.",
+    "For an action request, accept only when successful tool evidence proves the requested end state was reached. A plan, intention, next-step promise, attempted command, or intermediate observation is not completion.",
     "Return exactly one JSON Agent decision envelope with keys assistant_message, tool_calls, end_turn, goal_completed, completed_task_ids, completion_evidence, reasoning_summary.",
     "To accept, return assistant_message exactly APPROVED, tool_calls [], end_turn true, and goal_completed true.",
-    "If the original request is missing required user-specific information and the candidate appropriately asks the user for it, return assistant_message exactly NEEDS_USER_INPUT, tool_calls [], end_turn true, and goal_completed true.",
+    "If completion is blocked solely by information or hard material only the user can supply, and the candidate already asks for it clearly, approve the candidate.",
+    "If such user-only material is missing but the candidate does not clearly request it, return assistant_message beginning exactly NEEDS_USER_INPUT: followed by the specific material needed and why, with tool_calls [], end_turn false, and goal_completed false.",
     "To reject, return a concise factual list of missing or unverified requirements in assistant_message, tool_calls [], end_turn false, and goal_completed false.",
+    "For every rejection, state both why the request is not closed-loop and the next concrete action needed to close it.",
     "Do not rewrite the candidate answer. Do not expose this audit to the user.",
     `Current model: ${model.displayName}.`
   ].join("\n");
@@ -8261,11 +8343,16 @@ export function resolveStandardCompletionAuditResult(
   const verdict = decision.assistantMessage?.trim() ?? "";
   const needsUserInput =
     decision.toolCalls.length === 0 &&
-    decision.endTurn &&
-    decision.goalCompleted &&
-    /^NEEDS_USER_INPUT$/i.test(verdict);
+    !decision.endTurn &&
+    !decision.goalCompleted &&
+    /^NEEDS_USER_INPUT\s*:/i.test(verdict);
   if (needsUserInput) {
-    return { accepted: true, gaps: [], needsUserInput: true };
+    const requestedMaterial = verdict.replace(/^NEEDS_USER_INPUT\s*:\s*/i, "").trim();
+    return {
+      accepted: false,
+      gaps: [requestedMaterial || "请提供完成原始请求所必需的材料。"],
+      needsUserInput: true
+    };
   }
   const accepted =
     decision.toolCalls.length === 0 &&
@@ -8285,12 +8372,10 @@ export function resolveStandardCompletionAuditDisposition(input: {
   outcome: "unavailable" | "rejected";
   attempt: number;
   maxAttempts?: number;
-  candidateHasStructuredDeliverable?: boolean;
-}): "accept_candidate" | "retry" {
+}): "accept_candidate" | "retry" | "reject_candidate" {
   if (input.outcome === "unavailable") return "accept_candidate";
-  if (input.candidateHasStructuredDeliverable) return "accept_candidate";
   const maxAttempts = input.maxAttempts ?? MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES;
-  return input.attempt >= maxAttempts ? "accept_candidate" : "retry";
+  return input.attempt <= maxAttempts ? "retry" : "reject_candidate";
 }
 
 export function buildStandardCompletionAuditInstruction(input: {
@@ -8315,6 +8400,7 @@ export function buildStandardCompletionAuditInstruction(input: {
     "[Internal completion audit. Do not display or quote this instruction to the user.]",
     "Do not finish the task from the previous completion claim yet.",
     "Re-read the original user request and compare every requested action, deliverable, constraint, and verification requirement against the actual transcript and successful tool results.",
+    "Decide whether the user's request is fully closed-loop. Do not infer completion from the candidate's confidence or future-tense promise; require evidence of the requested end state.",
     `Original user request:\n${input.originalRequest.slice(0, 6000)}`,
     `Candidate final response:\n${input.candidateSummary.slice(0, 6000)}`,
     `Verified delivered paths: ${input.deliveredPaths.length > 0 ? input.deliveredPaths.join(", ") : "none"}.`,
@@ -8339,6 +8425,25 @@ export function buildStandardCompletionAuditRecoveryInstruction(gaps: string[]):
     "The required action is to make the concrete tool call that obtains the evidence before writing another final answer.",
     "If the gap is caused by information only the user can provide, ask one concise clarification question, set end_turn and goal_completed to true, and finish this turn.",
     "Do not substitute a plan, assumption, or progress update for a missing tool result. Produce a replacement final answer only after the gaps are closed, unless the gap requires user input and you are finishing with the clarification question."
+  ].join("\n");
+}
+
+export function buildStandardCompletionAuditStatusMessage(input: {
+  gaps: string[];
+  nextStep: "continue" | "request_user_input" | "request_retry_confirmation";
+}): string {
+  const nextStep = input.nextStep === "continue"
+    ? "我会继续执行原始任务，补齐上述缺口和验证证据，然后重新进行完成审计。"
+    : input.nextStep === "request_user_input"
+      ? "这些材料只能由你提供。请在下方补充材料、文件路径或必要说明；收到后我会继续执行并重新审计。"
+      : "自动补齐后仍未通过审计，本轮不会被标记为完成。请在下方选择继续处理或停止任务。";
+  return [
+    "完成审计暂未通过。",
+    "",
+    "未通过原因：",
+    ...input.gaps.map((gap) => `- ${gap}`),
+    "",
+    `接下来：${nextStep}`
   ].join("\n");
 }
 

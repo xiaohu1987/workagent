@@ -10,7 +10,6 @@ type MultimodalKind = "image" | "video" | "input";
 type MultimodalSettingsPageProps = {
   configDraft: AppConfig | null;
   setPickerRole: Dispatch<SetStateAction<MultimodalPickerRole>>;
-  setPickerSelected: Dispatch<SetStateAction<string[]>>;
   setMultimodalEnabled: (kind: MultimodalKind, enabled: boolean) => void;
   setMultimodalDefault: (kind: "image" | "video", providerId: string, modelId: string) => void;
   setReasoningDefault: (providerId: string, modelId: string) => void;
@@ -21,7 +20,6 @@ type MultimodalSettingsPageProps = {
 export function MultimodalSettingsPage({
   configDraft,
   setPickerRole,
-  setPickerSelected,
   setMultimodalEnabled,
   setMultimodalDefault,
   setReasoningDefault,
@@ -50,7 +48,6 @@ export function MultimodalSettingsPage({
                     </div>
                     <button className="model-add-button" onClick={() => {
                       setPickerRole(role);
-                      setPickerSelected([]);
                     }} title={`添加${title}`}><IconPlus /></button>
                   </div>
                   {kind ? (
@@ -136,11 +133,6 @@ export function MultimodalSettingsPage({
                         type="button"
                         onClick={() => {
                           setPickerRole("input");
-                          setPickerSelected(
-                            configDraft.multimodal.input.defaultProviderId && configDraft.multimodal.input.defaultModelId
-                              ? [modelKey(configDraft.multimodal.input.defaultProviderId, configDraft.multimodal.input.defaultModelId)]
-                              : []
-                          );
                         }}
                         title="选择多模态识别模型"
                       >

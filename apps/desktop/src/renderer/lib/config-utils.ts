@@ -1,5 +1,5 @@
 import { DEFAULT_RESPONSE_TONE, withGptReasoningCapabilities } from "@shared-types";
-import type { AppConfig, McpServerConfig, ModelProfile, ProviderDefinition, ProviderType } from "@shared-types";
+import type { ApiFormat, AppConfig, McpServerConfig, ModelProfile, ProviderDefinition, ProviderTemplate, ProviderType } from "@shared-types";
 
 export type ProviderTypeOption = {
   value: ProviderType;
@@ -12,6 +12,45 @@ export const PROVIDER_TYPE_OPTIONS: ProviderTypeOption[] = [
   { value: "gemini", label: "Google Gemini" },
   { value: "mock", label: "Mock（仅测试）" }
 ];
+
+export const PROVIDER_TEMPLATE_OPTIONS: Array<{ value: ProviderTemplate; label: string }> = [
+  { value: "deepseek", label: "DeepSeek" },
+  { value: "openai_compatible", label: "OpenAI 兼容" },
+  { value: "anthropic", label: "Anthropic" },
+  { value: "gemini", label: "Gemini" }
+];
+
+export const OPENAI_API_FORMAT_OPTIONS: Array<{ value: ApiFormat; label: string }> = [
+  { value: "auto", label: "自动检测（推荐）" },
+  { value: "openai_responses", label: "Responses API" },
+  { value: "openai_chat", label: "Chat Completions" }
+];
+
+export function providerTemplatePatch(template: ProviderTemplate): Partial<ProviderDefinition> {
+  switch (template) {
+    case "deepseek":
+      return { providerTemplate: template, type: "openai-compatible", baseUrl: "https://api.deepseek.com", apiFormat: "openai_responses", compatibilityProfile: "deepseek", transport: undefined, deepseekProtocol: undefined };
+    case "anthropic":
+      return { providerTemplate: template, type: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiFormat: "anthropic", compatibilityProfile: "standard", transport: undefined, deepseekProtocol: undefined };
+    case "gemini":
+      return { providerTemplate: template, type: "gemini", apiFormat: "gemini", compatibilityProfile: "standard", transport: undefined, deepseekProtocol: undefined };
+    case "openai_compatible":
+      return { providerTemplate: template, type: "openai-compatible", apiFormat: "auto", compatibilityProfile: "standard", transport: undefined, deepseekProtocol: undefined };
+  }
+}
+
+export function clearModelVerificationCache(model: ModelProfile): ModelProfile {
+  const {
+    verifiedApiFormats: _verified,
+    preferredApiFormat: _preferred,
+    apiFormatCheckedAt: _formatCheckedAt,
+    agentCapability: _agentCapability,
+    agentCapabilityCheckedAt: _agentCheckedAt,
+    agentCapabilityReason: _agentReason,
+    ...rest
+  } = model;
+  return rest as ModelProfile;
+}
 
 export function cloneConfig(config: AppConfig): AppConfig {
   const multimodal = config.multimodal ?? {
@@ -377,6 +416,10 @@ export function hasStoredSecret(provider: ProviderDefinition): boolean {
   return Boolean(provider.apiKey || provider.apiKeyEnv);
 }
 
+export function hasProviderTestEndpoint(provider: ProviderDefinition): boolean {
+  return provider.type === "mock" || Boolean(provider.baseUrl?.trim());
+}
+
 export function createEmptyProvider(existingProviders: ProviderDefinition[]): ProviderDefinition {
   let index = existingProviders.length + 1;
   let id = `provider-${index}`;
@@ -388,8 +431,11 @@ export function createEmptyProvider(existingProviders: ProviderDefinition[]): Pr
 
   return {
     id,
-    name: `自定义供应商 ${index}`,
+    name: `OpenAI 兼容 ${index}`,
     type: "openai-compatible",
+    providerTemplate: "openai_compatible",
+    apiFormat: "auto",
+    compatibilityProfile: "standard",
     baseUrl: ""
   };
 }
@@ -450,8 +496,24 @@ export function buildConfigToSave(
     };
   });
 
+  const invalidatedProviderIds = new Set(next.providers.flatMap((provider) => {
+    const original = source.providers.find((item) => item.id === provider.id);
+    const hasNewSecret = Boolean(providerSecretDrafts[provider.id]?.trim());
+    const changed = !original || hasNewSecret ||
+      original.baseUrl?.trim() !== provider.baseUrl?.trim() ||
+      original.providerTemplate !== provider.providerTemplate ||
+      original.apiFormat !== provider.apiFormat ||
+      original.compatibilityProfile !== provider.compatibilityProfile ||
+      original.apiKeyEnv !== provider.apiKeyEnv ||
+      original.organization !== provider.organization ||
+      original.maxTools !== provider.maxTools ||
+      original.maxRequestBytes !== provider.maxRequestBytes ||
+      JSON.stringify(original.headers) !== JSON.stringify(provider.headers);
+    return changed ? [provider.id] : [];
+  }));
+
   next.models = next.models.map((model) => ({
-    ...model,
+    ...(invalidatedProviderIds.has(model.providerId) ? clearModelVerificationCache(model) : model),
     id: model.id.trim(),
     displayName: model.displayName.trim() || model.id.trim()
   }));

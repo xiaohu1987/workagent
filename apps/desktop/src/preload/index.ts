@@ -51,7 +51,8 @@ const api = {
     ipcRenderer.invoke("attachments:choose-files", payload),
   chooseKnowledgeFiles: () => ipcRenderer.invoke("knowledge:choose-files"),
   chooseKnowledgeFolders: () => ipcRenderer.invoke("knowledge:choose-folders"),
-  listProjectFiles: (threadId: string) => ipcRenderer.invoke("projects:list-files", threadId),
+  listProjectFiles: (threadId: string, relativeDirectory = "") =>
+    ipcRenderer.invoke("projects:list-files", threadId, relativeDirectory),
   readProjectFile: (payload: { threadId: string; path: string }) =>
     ipcRenderer.invoke("projects:read-file", payload),
   writeProjectFile: (payload: { threadId: string; path: string; content: string }) =>
@@ -280,6 +281,9 @@ const api = {
     modelId: string;
     agentCapability: "verified" | "unsupported";
     agentCapabilityReason?: string;
+    verifiedApiFormats?: import("@shared-types").OpenAiApiFormat[];
+    preferredApiFormat?: import("@shared-types").OpenAiApiFormat;
+    apiFormatCheckedAt?: string;
   }) => ipcRenderer.invoke("models:save-capability", payload),
   getUpdateState: () => ipcRenderer.invoke("updates:state"),
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),

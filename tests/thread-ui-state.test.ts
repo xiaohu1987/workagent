@@ -15,6 +15,7 @@ import {
   buildTimelineEntries,
   buildTimelineEntriesIncremental,
   buildConversationTurnSections,
+  completeRuntimeToolCallSummary,
   getConversationTurnIdToCollapseAfterExecution,
   getConversationTurnIdsToCollapseForNewSubmission,
   getDefaultCollapsedConversationTurnIds,
@@ -44,12 +45,39 @@ import {
   rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
-  shouldKeepTimelineEntryWhenTurnCollapsed
+  shouldKeepTimelineEntryWhenTurnCollapsed,
+  upsertRuntimeToolCallSummary
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
-import { getSidebarUpdateReminder } from "../apps/desktop/src/renderer/App";
+import { didTranscriptScrollUpWithoutContentShrink, getSidebarUpdateReminder, removeQueuedMessageById, shouldFollowLatestAfterTranscriptScroll } from "../apps/desktop/src/renderer/App";
 import { hasRecognizedGitRepository } from "../apps/desktop/src/renderer/workspace/right-workspace";
-import type { MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord } from "../packages/shared-types/src";
+import type { MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, ToolCallSummary } from "../packages/shared-types/src";
+
+it("removes a guided queue item without disturbing the remaining queue", () => {
+  const messages = [
+    { id: "queue-1", displayContent: "first" },
+    { id: "queue-2", displayContent: "guided" },
+    { id: "queue-3", displayContent: "last" }
+  ] as RuntimeThreadSnapshot["queuedMessages"];
+
+  expect(removeQueuedMessageById(messages, "queue-2").map((message) => message.id))
+    .toEqual(["queue-1", "queue-3"]);
+  expect(removeQueuedMessageById(messages, "missing")).toBe(messages);
+});
+
+it("does not re-enable transcript auto-scroll during a manual drag near the bottom", () => {
+  expect(shouldFollowLatestAfterTranscriptScroll(24, false)).toBe(true);
+  expect(shouldFollowLatestAfterTranscriptScroll(24, true)).toBe(false);
+  expect(shouldFollowLatestAfterTranscriptScroll(0, true)).toBe(true);
+  expect(didTranscriptScrollUpWithoutContentShrink(
+    { scrollTop: 800, scrollHeight: 1_400 },
+    { scrollTop: 760, scrollHeight: 1_400 }
+  )).toBe(true);
+  expect(didTranscriptScrollUpWithoutContentShrink(
+    { scrollTop: 800, scrollHeight: 1_400 },
+    { scrollTop: 760, scrollHeight: 1_300 }
+  )).toBe(false);
+});
 
 function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
   return {
@@ -1475,6 +1503,73 @@ describe("incremental snapshot merging", () => {
 
     expect(mergeSnapshotRecords(existing, changes, (item) => item.createdAt, "descending"))
       .toEqual([{ id: "artifact-2", createdAt: "2026-07-15T01:02:00.000Z" }, existing[0]]);
+  });
+
+  it("keeps live tool calls ordered while replacing stale snapshot records", () => {
+    const older: ToolCallSummary = {
+      ...makeToolCall({ id: "tool-older", startedAt: "2026-07-15T00:00:00.000Z" }),
+      resultSize: 2,
+      hasFullResult: true
+    };
+    const running: ToolCallSummary = {
+      ...makeToolCall({
+        id: "tool-live",
+        status: "running",
+        resultJson: null,
+        startedAt: "2026-07-15T00:00:02.000Z",
+        completedAt: null
+      }),
+      resultSize: 0,
+      hasFullResult: true
+    };
+
+    expect(upsertRuntimeToolCallSummary([older], running)).toEqual([older, running]);
+  });
+
+  it("completes an existing live tool without losing its arguments", () => {
+    const running: ToolCallSummary = {
+      ...makeToolCall({ status: "running", resultJson: null, completedAt: null }),
+      resultSize: 0,
+      hasFullResult: true
+    };
+
+    const [completed] = completeRuntimeToolCallSummary([running], {
+      id: running.id,
+      threadId: running.threadId,
+      status: "completed",
+      resultJson: "{\"ok\":true}",
+      resultSize: 11,
+      hasFullResult: true,
+      completedAt: "2026-07-15T00:00:03.000Z"
+    });
+
+    expect(completed).toMatchObject({
+      argumentsJson: running.argumentsJson,
+      toolName: running.toolName,
+      status: "completed",
+      completedAt: "2026-07-15T00:00:03.000Z"
+    });
+  });
+
+  it("creates a completed tool record when the start event was missed", () => {
+    const [completed] = completeRuntimeToolCallSummary([], {
+      id: "tool-recovered",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "code.search",
+      status: "completed",
+      resultJson: "{}",
+      resultSize: 2,
+      hasFullResult: true,
+      completedAt: "2026-07-15T00:00:03.000Z"
+    });
+
+    expect(completed).toMatchObject({
+      id: "tool-recovered",
+      toolName: "code.search",
+      status: "completed",
+      startedAt: "2026-07-15T00:00:03.000Z"
+    });
   });
 
   it("merges a persisted user message into a queued-turn snapshot immediately", () => {

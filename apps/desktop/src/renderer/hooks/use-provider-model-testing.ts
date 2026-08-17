@@ -1,7 +1,7 @@
 import { useState, type Dispatch, type SetStateAction } from "react";
 import type { AppConfig, ModelProfile, ProviderDefinition } from "@shared-types";
 import type { ModelTestResult } from "../core/app-types";
-import { getModelProfileKey } from "../lib/config-utils";
+import { getModelProfileKey, hasProviderTestEndpoint } from "../lib/config-utils";
 
 type Notice = (title: string, options?: { tone?: "success" | "warning"; message?: string }) => void;
 
@@ -24,6 +24,10 @@ export function useProviderModelTesting({
   const [modelTestResults, setModelTestResults] = useState<Record<string, ModelTestResult>>({});
 
   async function checkProviderModel(provider: ProviderDefinition, model: ModelProfile) {
+    if (!hasProviderTestEndpoint(provider)) {
+      showNotice("请先填写调用 URL。", { message: "模型测试需要明确的供应商接口地址。" });
+      return;
+    }
     const secretDraft = providerSecretDrafts[provider.id]?.trim();
     const hasSecret = Boolean(secretDraft || provider.apiKey || provider.apiKeyEnv) || provider.type === "mock" || provider.type === "ollama";
     if (!hasSecret) {
@@ -44,7 +48,10 @@ export function useProviderModelTesting({
       const capabilityPatch = {
         agentCapability: result.agentCapability,
         agentCapabilityCheckedAt: new Date().toISOString(),
-        agentCapabilityReason: result.agentCapabilityReason
+        agentCapabilityReason: result.agentCapabilityReason,
+        verifiedApiFormats: result.verifiedApiFormats,
+        preferredApiFormat: result.preferredApiFormat,
+        apiFormatCheckedAt: result.apiFormatCheckedAt
       };
       updateModelDraft(provider.id, model.id, capabilityPatch);
       try {
@@ -52,7 +59,10 @@ export function useProviderModelTesting({
           providerId: provider.id,
           modelId: model.id,
           agentCapability: result.agentCapability,
-          agentCapabilityReason: result.agentCapabilityReason
+          agentCapabilityReason: result.agentCapabilityReason,
+          verifiedApiFormats: result.verifiedApiFormats,
+          preferredApiFormat: result.preferredApiFormat,
+          apiFormatCheckedAt: result.apiFormatCheckedAt
         });
         setConfig((current) => current
           ? {

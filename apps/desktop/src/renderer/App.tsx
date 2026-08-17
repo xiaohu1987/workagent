@@ -83,6 +83,7 @@ import {
   buildTimelineEntriesIncremental,
   collectFileChangesByTurn,
   composerAttachmentKey,
+  completeRuntimeToolCallSummary,
   createOptimisticThreadSnapshot,
   filterTranscriptMessages,
   formatComposerAttachments,
@@ -96,6 +97,7 @@ import {
   getFileWriteTarget,
   getGeneratedFileDescription,
   getGpaPlanMessageId,
+  getLatestTurnRunId,
   getMessageDisplayKind,
   getSubagentWaitLabel,
   getThreadDeleteFailureMessage,
@@ -106,6 +108,7 @@ import {
   isAssistantDraftPhase,
   isFileWriteTool,
   isInternalAgentProtocolMessage,
+  isPatchAssistantMessage,
   isPersistentComposerContextKind,
   isSubagentWaitTool,
   mergeSnapshotRecords,
@@ -120,12 +123,14 @@ import {
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
   shouldShowRuntimeActivityPanel,
+  upsertRuntimeToolCallSummary,
   type SkillNameMap
 } from "./lib/conversation-utils";
 import {
   ProjectFileEntry,
   buildFileSnapshotDiffPreview,
-  getFileSnapshotDiffMarker
+  getFileSnapshotDiffMarker,
+  mergeProjectFileEntries
 } from "./lib/project-files";
 import {
   ComposerSelect,
@@ -301,7 +306,7 @@ import { WorkspaceControls } from "./workspace/workspace-controls";
 import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEffortPicker, type ComposerModelGroup } from "./composer/model-controls";
 import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
-import { buildConversationTurnItems, ConversationTurnRail } from "./timeline/conversation-rail";
+import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
 import { TimelineEntries } from "./timeline/timeline-entries";
 import { ApprovalCard, AssistantDraftMessage, getConciseToolActivityLabel, getMessageAttachments, reuseEquivalentRecordArray, ToolActivityGroup, ToolActivityIcon, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
@@ -329,6 +334,31 @@ import {
 
 const MAX_RUNTIME_ACTIVITY_ENTRIES = 120;
 
+export function removeQueuedMessageById(
+  messages: QueuedMessageRecord[],
+  queueItemId: string
+): QueuedMessageRecord[] {
+  const index = messages.findIndex((message) => message.id === queueItemId);
+  if (index < 0) return messages;
+  return [...messages.slice(0, index), ...messages.slice(index + 1)];
+}
+
+export function shouldFollowLatestAfterTranscriptScroll(
+  distanceFromLatest: number,
+  manualScrollActive: boolean
+): boolean {
+  const normalizedDistance = Math.max(0, distanceFromLatest);
+  return manualScrollActive ? normalizedDistance <= 1 : normalizedDistance <= 48;
+}
+
+export function didTranscriptScrollUpWithoutContentShrink(
+  previous: { scrollTop: number; scrollHeight: number },
+  current: { scrollTop: number; scrollHeight: number }
+): boolean {
+  return current.scrollHeight >= previous.scrollHeight - 1 &&
+    current.scrollTop < previous.scrollTop - 1;
+}
+
 function trimRuntimeActivityEntries(entries: RuntimeActivityEntry[]): RuntimeActivityEntry[] {
   if (entries.length <= MAX_RUNTIME_ACTIVITY_ENTRIES) return entries;
   const recentEntries = entries.slice(-MAX_RUNTIME_ACTIVITY_ENTRIES);
@@ -339,6 +369,42 @@ function trimRuntimeActivityEntries(entries: RuntimeActivityEntry[]): RuntimeAct
     }
   }
   return entries.filter((entry) => retainedIds.has(entry.id));
+}
+
+function getRuntimeActivityEntryCreatedAt(entry: RuntimeActivityEntry): string {
+  return entry.kind === "tool" ? entry.toolCall.startedAt : entry.createdAt;
+}
+
+export function segmentRuntimeActivityAfterMessage(
+  activity: RuntimeActivity,
+  messageCreatedAt: string
+): RuntimeActivity {
+  const boundaryTimestamp = Date.parse(messageCreatedAt);
+  if (!Number.isFinite(boundaryTimestamp)) return activity;
+
+  const currentBoundaryTimestamp = Date.parse(activity.startedAt);
+  if (Number.isFinite(currentBoundaryTimestamp) && currentBoundaryTimestamp >= boundaryTimestamp) {
+    return activity;
+  }
+
+  return {
+    ...activity,
+    startedAt: messageCreatedAt,
+    entries: activity.entries.filter((entry) => {
+      const entryTimestamp = Date.parse(getRuntimeActivityEntryCreatedAt(entry));
+      return !Number.isFinite(entryTimestamp) || entryTimestamp >= boundaryTimestamp;
+    })
+  };
+}
+
+export function isRuntimeActivityBoundaryMessage(message: MessageRecord): boolean {
+  if (message.role !== "user" && message.role !== "assistant") return false;
+  if (message.content.trimStart().startsWith("[internal:")) return false;
+  if (getMessageDisplayKind(message) === "tool_batch") return false;
+  if (isPatchAssistantMessage(message.content)) return false;
+  if (message.role === "assistant" && isInternalAgentProtocolMessage(message.content)) return false;
+  if (message.role === "assistant" && /\[Executed tools:\s*[^\]\r\n]+\]/i.test(message.content)) return false;
+  return true;
 }
 import {
   formatKnowledgeBytes,
@@ -444,6 +510,8 @@ export function App() {
   >({});
   const assistantDraftBuffersRef = useRef<Record<string, AssistantDraftStreamBuffer>>({});
   const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
+  const [projectFilesRevision, setProjectFilesRevision] = useState(0);
+  const projectFilesRevisionRef = useRef(0);
   const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
   const [gitSnapshotThreadId, setGitSnapshotThreadId] = useState<string | null>(null);
   const [gitLoading, setGitLoading] = useState(false);
@@ -914,6 +982,8 @@ export function App() {
   const selfImprovementMemoryListRef = useRef<HTMLDivElement | null>(null);
   const errorSolutionListRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
+  const manualTranscriptScrollRef = useRef(false);
+  const transcriptScrollMetricsRef = useRef({ scrollTop: 0, scrollHeight: 0 });
   const pendingLatestScrollThreadIdRef = useRef<string | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollReleaseTimerRef = useRef<number | null>(null);
@@ -1133,6 +1203,44 @@ export function App() {
 
   function invalidateSnapshotRequest(threadId: string) {
     snapshotRequestIdsRef.current[threadId] = (snapshotRequestIdsRef.current[threadId] ?? 0) + 1;
+  }
+
+  function updateRuntimeToolSnapshots(
+    threadId: string,
+    updateToolCalls: (toolCalls: ToolCallSummary[]) => ToolCallSummary[]
+  ) {
+    // Runtime events are newer than any snapshot request already in flight.
+    // Update both sources so a later message/delta merge cannot restore stale tool data.
+    invalidateSnapshotRequest(threadId);
+    const cached = snapshotCacheByThreadRef.current.get(threadId);
+    if (cached) {
+      cacheThreadSnapshot({ ...cached, toolCalls: updateToolCalls(cached.toolCalls) });
+    }
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      return { ...current, toolCalls: updateToolCalls(current.toolCalls) };
+    });
+  }
+
+  function removeQueuedMessageFromSnapshots(threadId: string, queueItemId: string) {
+    // Queue events are newer than any snapshot already in flight. Invalidate
+    // that request and update both snapshot sources so a stale response or a
+    // thread switch cannot restore a message that was guided or dispatched.
+    invalidateSnapshotRequest(threadId);
+    const cached = snapshotCacheByThreadRef.current.get(threadId);
+    if (cached) {
+      cacheThreadSnapshot({
+        ...cached,
+        queuedMessages: removeQueuedMessageById(cached.queuedMessages, queueItemId)
+      });
+    }
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      return {
+        ...current,
+        queuedMessages: removeQueuedMessageById(current.queuedMessages, queueItemId)
+      };
+    });
   }
 
   function reconcileSnapshotWithRuntimeEvents(
@@ -1592,11 +1700,21 @@ export function App() {
           passed?: boolean;
           automatic?: boolean;
           tabs?: RuntimeThreadSnapshot["browserTabs"];
+          queueItemId?: string;
+          action?: "queued" | "dispatching" | "dispatched" | "deleted";
         };
       };
       const notificationThreadId = resolveRuntimeNotificationThreadId(runtimeEvent);
       const currentSelectedThreadId = selectedThreadIdRef.current;
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
+      if (
+        typed.type === "queue.updated" &&
+        typed.threadId &&
+        typeof typed.payload?.queueItemId === "string" &&
+        typed.payload.action !== "queued"
+      ) {
+        removeQueuedMessageFromSnapshots(typed.threadId, typed.payload.queueItemId);
+      }
       if (typed.type === "terminal.output" && typed.threadId) {
         const inputPreview = typeof typed.payload?.inputPreview === "string"
           ? typed.payload.inputPreview.trim()
@@ -1809,6 +1927,10 @@ export function App() {
           completedAt: null
         };
         upsertRuntimeTool(typed.threadId, startedToolForActivity);
+        updateRuntimeToolSnapshots(
+          typed.threadId,
+          (toolCalls) => upsertRuntimeToolCallSummary(toolCalls, startedToolForActivity)
+        );
         if (typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
             updateThreadNotification(
@@ -1827,28 +1949,6 @@ export function App() {
           toolCallId: typed.payload.toolCallId,
           toolName: typed.payload.toolName,
           argumentsJson: typeof typed.payload.argumentsJson === "string" ? typed.payload.argumentsJson : "{}"
-        });
-        setSnapshot((current) => {
-          if (!current || current.thread.id !== typed.threadId) return current;
-          const startedTool: ToolCallSummary = {
-            id: typed.payload?.toolCallId ?? "",
-            threadId: typed.threadId ?? "",
-            turnRunId: typeof typed.payload?.turnRunId === "string" ? typed.payload.turnRunId : "",
-            toolName: typed.payload?.toolName ?? "",
-            argumentsJson: typeof typed.payload?.argumentsJson === "string" ? typed.payload.argumentsJson : "{}",
-            resultJson: null,
-            resultSize: 0,
-            hasFullResult: true,
-            status: "running",
-            riskLevel: typed.payload?.riskLevel ?? "medium",
-            approvalMode: typed.payload?.approvalMode ?? "prompt",
-            startedAt: typeof typed.payload?.startedAt === "string" ? typed.payload.startedAt : typed.createdAt ?? new Date().toISOString(),
-            completedAt: null
-          };
-          return {
-            ...current,
-            toolCalls: [...current.toolCalls.filter((tool) => tool.id !== startedTool.id), startedTool]
-          };
         });
         appendRuntimeStatus(
           typed.threadId,
@@ -1872,16 +1972,43 @@ export function App() {
         return;
       }
       if (typed.type === "tool.completed" && typed.payload?.toolCallId) {
+        const runtimeThreadId = typed.threadId;
+        const completedAt = typeof typed.payload.completedAt === "string"
+          ? typed.payload.completedAt
+          : typed.createdAt ?? new Date().toISOString();
+        const completedStatus = typed.payload.status === "failed"
+          ? "failed"
+          : typed.payload.status === "blocked" ? "blocked" : "completed";
+        const resultJson = typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null;
+        const resultSize = typeof typed.payload.resultSize === "number"
+          ? typed.payload.resultSize
+          : resultJson?.length ?? 0;
+        const hasFullResult = typed.payload.hasFullResult !== false;
         if (typed.threadId) {
           completeRuntimeTool(
             typed.threadId,
             typed.payload.toolCallId,
-            typed.payload.status === "failed" ? "failed" : typed.payload.status === "blocked" ? "blocked" : "completed",
-            typeof typed.payload.resultJson === "string" ? typed.payload.resultJson : null,
-            typeof typed.payload.completedAt === "string" ? typed.payload.completedAt : typed.createdAt ?? new Date().toISOString(),
-            typeof typed.payload.resultSize === "number" ? typed.payload.resultSize : typed.payload.resultJson?.length ?? 0,
-            typed.payload.hasFullResult !== false
+            completedStatus,
+            resultJson,
+            completedAt,
+            resultSize,
+            hasFullResult
           );
+          updateRuntimeToolSnapshots(typed.threadId, (toolCalls) => completeRuntimeToolCallSummary(toolCalls, {
+            id: typed.payload?.toolCallId ?? "",
+            threadId: typed.threadId ?? "",
+            turnRunId: typeof typed.payload?.turnRunId === "string" ? typed.payload.turnRunId : undefined,
+            toolName: typeof typed.payload?.toolName === "string" ? typed.payload.toolName : undefined,
+            argumentsJson: typeof typed.payload?.argumentsJson === "string" ? typed.payload.argumentsJson : undefined,
+            riskLevel: typed.payload?.riskLevel,
+            approvalMode: typed.payload?.approvalMode,
+            startedAt: typeof typed.payload?.startedAt === "string" ? typed.payload.startedAt : undefined,
+            status: completedStatus,
+            resultJson,
+            resultSize,
+            hasFullResult,
+            completedAt
+          }));
         }
         if (typed.threadId && typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
@@ -1892,29 +2019,7 @@ export function App() {
         setActiveToolCall((current) =>
           current?.toolCallId === typed.payload?.toolCallId ? null : current
         );
-        if (typed.threadId) {
-          const runtimeThreadId = typed.threadId;
-          setSnapshot((current) => {
-            if (!current || current.thread.id !== runtimeThreadId) return current;
-            return {
-              ...current,
-              toolCalls: current.toolCalls.map((tool) => tool.id === typed.payload?.toolCallId
-                ? {
-                    ...tool,
-                    status: typed.payload?.status === "failed" ? "failed" : typed.payload?.status === "blocked" ? "blocked" : "completed",
-                    resultJson: typeof typed.payload?.resultJson === "string" ? typed.payload.resultJson : null,
-                    resultSize: typeof typed.payload?.resultSize === "number"
-                      ? typed.payload.resultSize
-                      : typeof typed.payload?.resultJson === "string" ? typed.payload.resultJson.length : 0,
-                    hasFullResult: typed.payload?.hasFullResult !== false,
-                    completedAt: typeof typed.payload?.completedAt === "string"
-                      ? typed.payload.completedAt
-                      : typed.createdAt ?? new Date().toISOString()
-                  }
-                : tool
-              )
-            };
-          });
+        if (runtimeThreadId) {
           if (!suppressRuntimeProgressRef.current[runtimeThreadId]) {
             appendRuntimeDecisionStatusAfterTool(runtimeThreadId, typed.createdAt);
             if (notificationThreadId) {
@@ -2236,6 +2341,15 @@ export function App() {
         // for the next snapshot refresh leaves a blank transcript until reload.
         const runtimeThreadId = typed.threadId;
         const message = typed.payload.message as MessageRecord;
+        if (isRuntimeActivityBoundaryMessage(message)) {
+          setRuntimeActivities((current) => {
+            const activity = current[runtimeThreadId];
+            if (!activity) return current;
+            const segmented = segmentRuntimeActivityAfterMessage(activity, message.createdAt);
+            if (segmented === activity) return current;
+            return { ...current, [runtimeThreadId]: segmented };
+          });
+        }
         let consumedOptimisticIds: ReadonlySet<string> | undefined;
         if (message.role === "user") {
           const pending = pendingUserMessagesRef.current[runtimeThreadId] ?? [];
@@ -2439,8 +2553,12 @@ export function App() {
     }
 
     let cancelled = false;
+    const revision = projectFilesRevisionRef.current + 1;
+    projectFilesRevisionRef.current = revision;
+    setProjectFilesRevision(revision);
+    setProjectFiles([]);
     setIsProjectFilesLoading(true);
-    void window.codexh.listProjectFiles(selectedThreadId).then((entries) => {
+    void window.codexh.listProjectFiles(selectedThreadId, "").then((entries) => {
       if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
         return;
       }
@@ -2462,8 +2580,25 @@ export function App() {
     };
   }, [clearSelectedFile, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThreadId]);
 
+  const loadProjectDirectory = useCallback(async (relativeDirectory: string): Promise<boolean> => {
+    const threadId = selectedThreadId;
+    const revision = projectFilesRevisionRef.current;
+    if (!threadId) return false;
+    try {
+      const entries = await window.codexh.listProjectFiles(threadId, relativeDirectory);
+      if (selectedThreadIdRef.current !== threadId || projectFilesRevisionRef.current !== revision) {
+        return false;
+      }
+      setProjectFiles((current) => mergeProjectFileEntries(current, entries));
+      return true;
+    } catch (error) {
+      showNotice("无法读取文件夹", { message: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
+  }, [selectedThreadId, showNotice]);
+
   useEffect(() => {
-    if (!isRightWorkspaceOpen || !selectedThreadId) {
+    if (!selectedThreadId) {
       return;
     }
     let cancelled = false;
@@ -2496,7 +2631,7 @@ export function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [gitRefreshRevision, isRightWorkspaceOpen, rightWorkspaceTab, selectedThreadId]);
+  }, [gitRefreshRevision, selectedThreadId]);
 
   useEffect(() => {
     if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
@@ -2879,6 +3014,22 @@ export function App() {
   const activeRuntimeActivity = activeRuntimeThreadId ? runtimeActivities[activeRuntimeThreadId] ?? null : null;
   const completedTurnTimer = activeRuntimeThreadId ? completedTurnTimers[activeRuntimeThreadId] ?? null : null;
   const isPreparingRuntime = !!localRuntimeProgress && !localRuntimeProgress.runtimeObserved;
+  const currentTaskTurnRunId = useMemo(
+    () => isPreparingRuntime
+      ? null
+      : getLatestTurnRunId(selectedMessages, snapshot?.toolCalls ?? []),
+    [isPreparingRuntime, selectedMessages, snapshot?.toolCalls]
+  );
+  const taskFileChanges = useMemo(() => {
+    if (!currentTaskTurnRunId) return [];
+    return (collectFileChangesByTurn(snapshot?.toolCalls ?? [], snapshotWorkspaceRoot).get(currentTaskTurnRunId) ?? [])
+      .filter((file) =>
+        file.snapshot?.beforeTruncated === true ||
+        file.snapshot?.afterTruncated === true ||
+        file.snapshot === undefined ||
+        file.snapshot.before !== file.snapshot.after
+      );
+  }, [currentTaskTurnRunId, snapshotWorkspaceRoot, snapshot?.toolCalls]);
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
   // Active-task submissions stay in the queue until the runtime reaches the
@@ -3122,13 +3273,10 @@ export function App() {
   });
   const {
     fetchedModels,
-    selectedFetchedModelIds,
-    setSelectedFetchedModelIds,
     showFetchedModels,
     setShowFetchedModels,
     isFetchingModels,
     fetchAndShowProviderModels,
-    toggleFetchedModelSelection,
     applyFetchedModels
   } = fetchedProviderModels;
   const multimodalSettings = useMultimodalSettings({
@@ -3144,8 +3292,6 @@ export function App() {
   const {
     pickerRole: multimodalPickerRole,
     setPickerRole: setMultimodalPickerRole,
-    pickerSelected: multimodalPickerSelected,
-    setPickerSelected: setMultimodalPickerSelected,
     resetPicker: resetMultimodalPicker,
     setMultimodalDefault,
     setReasoningDefault,
@@ -3419,6 +3565,7 @@ export function App() {
       return;
     }
 
+    manualTranscriptScrollRef.current = false;
     shouldAutoScrollRef.current = true;
     setIsTranscriptAtLatest(true);
     cancelPendingAutoScrollFrame();
@@ -3442,9 +3589,48 @@ export function App() {
       return;
     }
 
-    const atLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 48;
-    shouldAutoScrollRef.current = atLatest;
+    const currentMetrics = { scrollTop: node.scrollTop, scrollHeight: node.scrollHeight };
+    if (didTranscriptScrollUpWithoutContentShrink(
+      transcriptScrollMetricsRef.current,
+      currentMetrics
+    )) {
+      beginManualTranscriptScroll();
+    }
+    transcriptScrollMetricsRef.current = currentMetrics;
+    const distanceFromLatest = Math.max(0, node.scrollHeight - node.scrollTop - node.clientHeight);
+    const atLatest = distanceFromLatest <= 48;
+    const shouldFollowLatest = shouldFollowLatestAfterTranscriptScroll(
+      distanceFromLatest,
+      manualTranscriptScrollRef.current
+    );
+    if (manualTranscriptScrollRef.current && distanceFromLatest <= 1) {
+      manualTranscriptScrollRef.current = false;
+    }
+    shouldAutoScrollRef.current = shouldFollowLatest;
     setIsTranscriptAtLatest((current) => current === atLatest ? current : atLatest);
+  }
+
+  function beginManualTranscriptScroll() {
+    manualTranscriptScrollRef.current = true;
+    shouldAutoScrollRef.current = false;
+    cancelPendingAutoScrollFrame();
+    clearAutoScrollReleaseTimer();
+  }
+
+  function handleTranscriptWheel(deltaY: number) {
+    if (deltaY < 0) {
+      beginManualTranscriptScroll();
+    }
+  }
+
+  function handleTranscriptPointerDown(clientX: number) {
+    const node = chatScrollRef.current;
+    if (!node) return;
+    const bounds = node.getBoundingClientRect();
+    const scrollbarWidth = Math.max(10, node.offsetWidth - node.clientWidth);
+    if (clientX >= bounds.right - scrollbarWidth) {
+      beginManualTranscriptScroll();
+    }
   }
 
   useEffect(() => {
@@ -4924,6 +5110,7 @@ export function App() {
     setDeletingQueuedMessageId(id);
     try {
       await window.codexh.deleteQueuedMessage({ threadId: selectedThreadId, id });
+      removeQueuedMessageFromSnapshots(selectedThreadId, id);
       await refreshSnapshot(selectedThreadId);
     } catch (error) {
       showNotice("删除排队消息失败", { message: error instanceof Error ? error.message : String(error) });
@@ -4962,6 +5149,7 @@ export function App() {
       // Remove the queued copy first so the instruction cannot run twice.
       await window.codexh.deleteQueuedMessage({ threadId, id: message.id });
       removedFromQueue = true;
+      removeQueuedMessageFromSnapshots(threadId, message.id);
       const result = await window.codexh.guideActiveThread({ threadId, content: message.content });
       if (result.accepted) {
         showNotice("已引导当前任务", {
@@ -5649,10 +5837,14 @@ export function App() {
     setGitRefreshRevision((current) => current + 1);
   });
   const visibleGitSnapshot = gitSnapshotThreadId === selectedThreadId ? gitSnapshot : null;
+  const selectedProjectBranch = visibleGitSnapshot?.available
+    ? visibleGitSnapshot.branch?.trim() || null
+    : null;
   const runGitActionEvent = useStableEvent(runGitAction);
   const sendGitCommentEvent = useStableEvent((content: string) => { void sendMessage(content); });
   const selectProjectFileEvent = useStableEvent(selectProjectFile);
   const openProjectPreviewEvent = useStableEvent(openProjectPreview);
+  const loadProjectDirectoryEvent = useStableEvent(loadProjectDirectory);
   const closeBrowserTabEvent = useStableEvent((threadId: string, tabId: string) => {
     void window.codexh.closeBrowserTab({ threadId, tabId });
   });
@@ -5834,6 +6026,8 @@ export function App() {
             ref={chatScrollRef}
             className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""}`}
             onScroll={handleTranscriptScroll}
+            onWheel={(event) => handleTranscriptWheel(event.deltaY)}
+            onPointerDown={(event) => handleTranscriptPointerDown(event.clientX)}
           >
             {!showWelcome && !isThreadSwitchPlaceholderVisible ? (
               <div className="conversation-turn-rail-shell">
@@ -6020,20 +6214,31 @@ export function App() {
                 <IconChevronDown />
               </button>
             ) : null}
-            {selectedProjectCwd || gpaState.stage !== "off" ? (
+            {selectedProjectCwd || gpaState.stage !== "off" || taskFileChanges.length > 0 ? (
               <div className="composer-meta-row">
                 {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} isRunning={isThreadExecutionInProgress(selectedThreadStatus)} /> : null}
-                {selectedProjectCwd ? (
-                  <button
-                    type="button"
-                    className="composer-project-pill"
-                    title={`打开文件夹：${selectedProjectCwd}`}
-                    onClick={() => void openProjectFolder(selectedProjectCwd)}
-                  >
-                    <IconFolder />
-                    <span>{getFileLeafName(selectedProjectCwd)}</span>
-                  </button>
-                ) : null}
+                <div className="composer-meta-actions">
+                  <ComposerTaskChanges files={taskFileChanges} />
+                  {selectedProjectCwd ? (
+                    <button
+                      type="button"
+                      className="composer-project-pill"
+                      title={selectedProjectBranch
+                        ? `${selectedProjectBranch} / ${selectedProjectCwd}`
+                        : `打开文件夹：${selectedProjectCwd}`}
+                      onClick={() => void openProjectFolder(selectedProjectCwd)}
+                    >
+                      <IconFolder />
+                      {selectedProjectBranch ? (
+                        <>
+                          <span className="composer-project-branch">{selectedProjectBranch}</span>
+                          <span className="composer-project-separator" aria-hidden>/</span>
+                        </>
+                      ) : null}
+                      <span className="composer-project-name">{getFileLeafName(selectedProjectCwd)}</span>
+                    </button>
+                  ) : null}
+                </div>
               </div>
             ) : null}
             <div className="chat-composer">
@@ -6258,6 +6463,7 @@ export function App() {
           onAddAttachment={addComposerAttachmentEvent}
           projectFiles={projectFiles}
           projectFilesLoading={isProjectFilesLoading}
+          projectFilesRevision={projectFilesRevision}
           gitSnapshot={visibleGitSnapshot}
           gitLoading={gitLoading}
           gitActionBusy={gitActionBusy}
@@ -6269,6 +6475,7 @@ export function App() {
           projectToolCalls={projectToolCalls}
           onSelectProjectFile={selectProjectFileEvent}
           onOpenProjectFile={openProjectPreviewEvent}
+          onLoadProjectDirectory={loadProjectDirectoryEvent}
           browserTabsByThread={browserTabsByThread}
           onCloseBrowserTab={closeBrowserTabEvent}
           threadId={selectedThreadId}
@@ -6351,7 +6558,6 @@ export function App() {
       <MultimodalSettingsPage
         configDraft={configDraft}
         setPickerRole={setMultimodalPickerRole}
-        setPickerSelected={setMultimodalPickerSelected}
         setMultimodalEnabled={setMultimodalEnabled}
         setMultimodalDefault={setMultimodalDefault}
         setReasoningDefault={setReasoningDefault}
@@ -6642,8 +6848,8 @@ export function App() {
         </div>
       ) : null}
 
-      {fetchedModelsPresence.value ? <FetchedModelsDialog {...{ motionPhase: fetchedModelsPresence.phase, fetchedModels, selectedFetchedModelIds, configDraft, settingsProvider, setSelectedFetchedModelIds, setShowFetchedModels, toggleFetchedModelSelection, applyFetchedModels }} /> : null}
-      {visibleMultimodalPickerRole && configDraft ? <MultimodalPickerDialog {...{ motionPhase: multimodalPickerPresence.phase, role: visibleMultimodalPickerRole, configDraft, selected: multimodalPickerSelected, setSelected: setMultimodalPickerSelected, onClose: resetMultimodalPicker, onApply: applyMultimodalPicker, onSetDefault: setMultimodalDefault }} /> : null}
+      {fetchedModelsPresence.value ? <FetchedModelsDialog {...{ motionPhase: fetchedModelsPresence.phase, fetchedModels, configDraft, settingsProvider, setShowFetchedModels, applyFetchedModels }} /> : null}
+      {visibleMultimodalPickerRole && configDraft ? <MultimodalPickerDialog key={visibleMultimodalPickerRole} {...{ motionPhase: multimodalPickerPresence.phase, role: visibleMultimodalPickerRole, configDraft, onClose: resetMultimodalPicker, onApply: applyMultimodalPicker, onSetDefault: setMultimodalDefault }} /> : null}
       {visibleGpaMenuPos ? (
         <ComposerAddMenu
           position={visibleGpaMenuPos}

@@ -5,18 +5,29 @@ import {
   buildFileSnapshotDiff,
   buildFileSnapshotDiffPreview,
   getFileSnapshotDiffMarker,
+  getGitProjectFileChangeKinds,
+  getProjectRelativeGitFiles,
   getProjectFileChangeKinds,
+  mergeProjectFileEntries,
   resolveProjectFilePath
 } from "../apps/desktop/src/renderer/lib/project-files";
 import {
   buildContextUsage,
   buildPlanTimelineItems,
+  collectFileChangesByTurn,
   getActivePlanTimelineItem,
   getGpaPlanMessageId,
+  getLatestTurnRunId,
   formatComposerAttachments,
   retainPersistentComposerContexts
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
-import { extractMessageMediaReferences, isGeneratedUserSkill } from "../apps/desktop/src/renderer/App";
+import { getFileChangeLineCounts } from "../apps/desktop/src/renderer/timeline/conversation-rail";
+import {
+  extractMessageMediaReferences,
+  isGeneratedUserSkill,
+  isRuntimeActivityBoundaryMessage,
+  segmentRuntimeActivityAfterMessage
+} from "../apps/desktop/src/renderer/App";
 import {
   clearMarkdownRenderCache,
   getMarkdownRenderCacheStats,
@@ -239,6 +250,54 @@ describe("parseMarkdownBlocks", () => {
     ]);
   });
 
+  it("merges lazily loaded directory entries without duplicating existing paths", () => {
+    expect(mergeProjectFileEntries(
+      [{ path: "src", kind: "directory" }, { path: "README.md", kind: "file", size: 10 }],
+      [{ path: "src\\app.ts", kind: "file", size: 20 }, { path: "README.md", kind: "file", size: 12 }]
+    )).toEqual([
+      { path: "src", kind: "directory" },
+      { path: "README.md", kind: "file", size: 12 },
+      { path: "src/app.ts", kind: "file", size: 20 }
+    ]);
+  });
+
+  it("keeps a real directory when Git also reports the same path", () => {
+    expect(mergeProjectFileEntries(
+      [{ path: "ISS.IPSA.Project.Web", kind: "directory" }],
+      [{ path: "ISS.IPSA.Project.Web", kind: "file" }]
+    )).toEqual([{ path: "ISS.IPSA.Project.Web", kind: "directory" }]);
+  });
+
+  it("scopes parent-repository Git files to the selected project folder", () => {
+    const gitFile = (path: string, originalPath?: string) => ({ path, originalPath }) as any;
+    const files = getProjectRelativeGitFiles({
+      available: true,
+      root: "E:\\开发代码",
+      files: [
+        gitFile("Project/ISS.IPSA.Project.Web/src/App.vue"),
+        gitFile("Project/softstone-webpmp/src/main.ts", "Project/softstone-webpmp/src/old.ts"),
+        gitFile("python-code/foo.py"),
+        gitFile("../Dockerfile"),
+        gitFile("Project/../Dockerfile")
+      ]
+    } as any, "E:\\开发代码\\Project");
+
+    expect(files.map((file) => file.path)).toEqual([
+      "ISS.IPSA.Project.Web/src/App.vue",
+      "softstone-webpmp/src/main.ts"
+    ]);
+    expect(files[1]?.originalPath).toBe("softstone-webpmp/src/old.ts");
+  });
+
+  it("retains safe Git paths when the Git and project roots match", () => {
+    const inside = { path: "src/App.tsx" } as any;
+    expect(getProjectRelativeGitFiles({
+      available: true,
+      root: "E:/开发代码/Project/",
+      files: [inside, { path: "../Dockerfile" }]
+    } as any, "e:\\开发代码\\project")).toEqual([inside]);
+  });
+
   it("resolves file-tree paths against the selected project folder", () => {
     expect(resolveProjectFilePath("D:\\project", "src/app.ts")).toBe("D:\\project\\src\\app.ts");
     expect(resolveProjectFilePath("/workspace/project/", "src/app.ts")).toBe("/workspace/project/src/app.ts");
@@ -432,6 +491,132 @@ describe("parseMarkdownBlocks", () => {
     expect(preview.length).toBeLessThan(20);
   });
 
+  it("counts the current task's net snapshot changes", () => {
+    expect(getFileChangeLineCounts({
+      path: "src/App.tsx",
+      action: "modified",
+      additions: 20,
+      deletions: 10,
+      snapshot: {
+        path: "src/App.tsx",
+        before: "first\nold",
+        after: "first\nnew\nlast",
+        beforeTruncated: false,
+        afterTruncated: false
+      }
+    })).toEqual({ additions: 2, deletions: 1 });
+  });
+
+  it("selects only the latest one-shot task, including an internal GPA continuation", () => {
+    const patchCall = (
+      turnRunId: string,
+      path: string,
+      before: string,
+      after: string,
+      status: "completed" | "failed" = "completed",
+      startedAt = "2026-08-17T10:00:00.000Z"
+    ) => ({
+      id: `${turnRunId}-${path}`,
+      threadId: "thread-1",
+      turnRunId,
+      toolName: "apply_patch",
+      status,
+      argumentsJson: JSON.stringify({ patch: `*** Begin Patch\n*** Update File: ${path}\n-old\n+new\n*** End Patch` }),
+      resultJson: JSON.stringify({
+        ok: status === "completed",
+        json: {
+          changes: [{ path, action: "update", additions: 1, deletions: 1 }],
+          snapshots: [{ path, before, after, beforeTruncated: false, afterTruncated: false }]
+        }
+      }),
+      riskLevel: "medium",
+      approvalMode: "prompt",
+      startedAt,
+      completedAt: startedAt
+    }) as any;
+
+    const toolCalls = [
+      patchCall("turn-1", "src/old.ts", "old", "first", "completed", "2026-08-17T10:00:01.000Z"),
+      patchCall("turn-gpa-resume", "src/current.ts", "before", "after", "completed", "2026-08-17T10:01:01.000Z")
+    ];
+    const messages = [
+      { turnRunId: "turn-1", content: "visible request", createdAt: "2026-08-17T10:00:00.000Z" },
+      { turnRunId: "turn-gpa-resume", content: "[internal:gpa-resume]", createdAt: "2026-08-17T10:01:00.000Z" }
+    ] as any;
+    const latestTurnRunId = getLatestTurnRunId(messages, toolCalls);
+    const changes = collectFileChangesByTurn(toolCalls, "D:\\project").get(latestTurnRunId ?? "") ?? [];
+
+    expect(latestTurnRunId).toBe("turn-gpa-resume");
+    expect(changes.map((file) => file.path)).toEqual(["src/current.ts"]);
+  });
+
+  it("merges repeated edits within one turn and excludes failed writes", () => {
+    const patchCall = (path: string, before: string, after: string, status: "completed" | "failed" = "completed") => ({
+      id: `${path}-${before}`,
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "apply_patch",
+      status,
+      argumentsJson: JSON.stringify({ patch: `*** Begin Patch\n*** Update File: ${path}\n-old\n+new\n*** End Patch` }),
+      resultJson: JSON.stringify({
+        ok: status === "completed",
+        json: {
+          changes: [{ path, action: "update", additions: 1, deletions: 1 }],
+          snapshots: [{ path, before, after, beforeTruncated: false, afterTruncated: false }]
+        }
+      }),
+      riskLevel: "medium",
+      approvalMode: "prompt",
+      startedAt: "2026-08-17T10:00:00.000Z",
+      completedAt: "2026-08-17T10:00:01.000Z"
+    }) as any;
+
+    const changes = collectFileChangesByTurn([
+      patchCall("src/App.tsx", "old", "first"),
+      patchCall("src/App.tsx", "first", "latest"),
+      patchCall("src/failed.ts", "before", "after", "failed")
+    ], "D:\\project").get("turn-1") ?? [];
+
+    expect(changes.map((file) => file.path)).toEqual(["src/App.tsx"]);
+    expect(changes[0]?.snapshot).toMatchObject({ before: "old", after: "latest" });
+  });
+
+  it("shows runtime activity only after the latest visible message", () => {
+    const activity = {
+      threadId: "thread-1",
+      startedAt: "2026-08-17T10:00:00.000Z",
+      entries: [
+        { id: "old-status", kind: "status", label: "旧状态", createdAt: "2026-08-17T10:00:01.000Z" },
+        {
+          id: "new-tool",
+          kind: "tool",
+          toolCall: { id: "tool-1", startedAt: "2026-08-17T10:01:01.000Z" }
+        },
+        { id: "new-status", kind: "status", label: "新状态", createdAt: "2026-08-17T10:01:02.000Z" }
+      ]
+    } as any;
+
+    const segmented = segmentRuntimeActivityAfterMessage(activity, "2026-08-17T10:01:00.000Z");
+
+    expect(segmented.startedAt).toBe("2026-08-17T10:01:00.000Z");
+    expect(segmented.entries.map((entry) => entry.id)).toEqual(["new-tool", "new-status"]);
+    expect(segmentRuntimeActivityAfterMessage(segmented, "2026-08-17T10:00:30.000Z")).toBe(segmented);
+  });
+
+  it("uses only visible user and assistant messages as runtime activity boundaries", () => {
+    const message = (role: "user" | "assistant", content: string, metadataJson: string | null = null) => ({
+      role,
+      content,
+      metadataJson
+    }) as any;
+
+    expect(isRuntimeActivityBoundaryMessage(message("assistant", "继续检查文件"))).toBe(true);
+    expect(isRuntimeActivityBoundaryMessage(message("user", "补充一个要求"))).toBe(true);
+    expect(isRuntimeActivityBoundaryMessage(message("user", "[internal:gpa-resume] continue"))).toBe(false);
+    expect(isRuntimeActivityBoundaryMessage(message("assistant", "工具批次", JSON.stringify({ displayKind: "tool_batch" })))).toBe(false);
+    expect(isRuntimeActivityBoundaryMessage(message("assistant", "[Executed tools: exec_command]"))).toBe(false);
+  });
+
   it("uses Git-like file states from task snapshots", () => {
     const changes = getProjectFileChangeKinds([
       {
@@ -451,6 +636,20 @@ describe("parseMarkdownBlocks", () => {
     expect(changes.get("new.ts")).toBe("added");
     expect(changes.get("src/app.ts")).toBe("modified");
     expect(changes.get("old.ts")).toBe("deleted");
+  });
+
+  it("keeps repository changes visible when the Git workspace tab is hidden", () => {
+    const changes = getGitProjectFileChangeKinds([
+      { path: "new.ts", untracked: true, indexStatus: "?", worktreeStatus: "?" },
+      { path: "staged.ts", untracked: false, indexStatus: "A", worktreeStatus: " " },
+      { path: "src/removed.ts", untracked: false, indexStatus: " ", worktreeStatus: "D" },
+      { path: "src/app.ts", untracked: false, indexStatus: " ", worktreeStatus: "M" }
+    ] as any);
+
+    expect(changes.get("new.ts")).toBe("added");
+    expect(changes.get("staged.ts")).toBe("added");
+    expect(changes.get("src/removed.ts")).toBe("deleted");
+    expect(changes.get("src/app.ts")).toBe("modified");
   });
 
   it("keeps the compacted baseline after a later turn is added", () => {

@@ -89,14 +89,6 @@ function stripInternalExecutedToolsMarker(text: string): string {
 export const deepseekCompat = defineCompat(gptCompat, {
   id: "deepseek",
   keywords: ["deepseek"],
-  shouldBypassStandardCompletionAudit(model): boolean {
-    const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
-    // DeepSeek reasoning calls can spend another minute on the optional,
-    // tool-free audit even after the runtime's deterministic evidence check
-    // has already accepted the candidate. Limit this optimization to the
-    // affected reasoning families; ordinary deepseek-chat keeps the audit.
-    return /reasoner|\br1\b|thinking|v4-(?:flash|pro)/.test(identity);
-  },
   normalizeRequestParams(
     ctx: ModelCompatContext,
     base: Record<string, unknown>
@@ -109,7 +101,7 @@ export const deepseekCompat = defineCompat(gptCompat, {
       ctx.input.provider.baseUrl ?? ""
     ].join(" ").toLowerCase();
     const isV4 = isDeepSeekV4Model(identity);
-    const usesNativeProtocol = ctx.input.provider.deepseekProtocol !== "openai-compatible";
+    const usesNativeProtocol = ctx.input.provider.compatibilityProfile === "deepseek";
     const reasoningEffort = ctx.input.reasoningEffort;
     // V4 is a thinking model even when the catalog display name does not
     // include the word "thinking" (for example, deepseek-v4-flash-0731).

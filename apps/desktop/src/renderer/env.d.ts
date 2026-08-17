@@ -79,7 +79,7 @@ declare global {
       saveQuickNote: (payload: { id?: string; title?: string; content: string }) => Promise<{ id: string; title: string; content: string; knowledgeBaseId: string; knowledgeSourcePath: string; createdAt: string; updatedAt: string }>;
       deleteQuickNote: (id: string) => Promise<void>;
       createQuickNoteWithAi: (payload: { prompt: string; context: string }) => Promise<string>;
-      listProjectFiles: (threadId: string) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
+      listProjectFiles: (threadId: string, relativeDirectory?: string) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
       readProjectFile: (payload: { threadId: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
       writeProjectFile: (payload: { threadId: string; path: string; content: string }) => Promise<{ path: string }>;
       setLiveEditPreviewEnabled: (enabled: boolean) => Promise<boolean>;
@@ -236,6 +236,9 @@ declare global {
         tokensPerSecond: number;
         agentCapability: "verified" | "unsupported";
         agentCapabilityReason?: string;
+        verifiedApiFormats?: import("@shared-types").OpenAiApiFormat[];
+        preferredApiFormat?: import("@shared-types").OpenAiApiFormat;
+        apiFormatCheckedAt?: string;
       }>;
       saveModelAgentCapability: (payload: {
         providerId: string;
@@ -243,6 +246,9 @@ declare global {
         agentCapability: "verified" | "unsupported";
         agentCapabilityReason?: string;
         contextWindow?: number;
+        verifiedApiFormats?: import("@shared-types").OpenAiApiFormat[];
+        preferredApiFormat?: import("@shared-types").OpenAiApiFormat;
+        apiFormatCheckedAt?: string;
       }) => Promise<ModelProfile>;
       getUpdateState: () => Promise<UpdateState | null>;
       checkForUpdates: () => Promise<UpdateState>;

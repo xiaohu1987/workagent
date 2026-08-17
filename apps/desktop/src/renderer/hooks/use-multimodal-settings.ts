@@ -51,11 +51,9 @@ export function useMultimodalSettings({
   showNotice
 }: Options) {
   const [pickerRole, setPickerRole] = useState<PickerRole>(null);
-  const [pickerSelected, setPickerSelected] = useState<string[]>([]);
 
   function resetPicker() {
     setPickerRole(null);
-    setPickerSelected([]);
   }
 
   async function persistChange(mutate: (draft: AppConfig) => void, successTitle = "多模态配置已保存") {
@@ -111,10 +109,9 @@ export function useMultimodalSettings({
     setModelRole(providerId, modelId, null);
   }
 
-  function applyPicker() {
-    if (!pickerRole || pickerSelected.length === 0) return;
+  function applyPicker(selected: string[]) {
+    if (!pickerRole || selected.length === 0) return;
     const role = pickerRole;
-    const selected = [...pickerSelected];
     resetPicker();
     if (role === "input") {
       const key = selected[0];
@@ -144,8 +141,6 @@ export function useMultimodalSettings({
   return {
     pickerRole,
     setPickerRole,
-    pickerSelected,
-    setPickerSelected,
     resetPicker,
     setMultimodalDefault,
     setReasoningDefault,

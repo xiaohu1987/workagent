@@ -35,6 +35,7 @@ import type {
   TokenUsage,
   QueuedMessageRecord,
   ProviderDefinition,
+  ProviderTemplate,
   RuntimeEvent,
   ThreadRecord,
   ToolCallDetail,
@@ -187,15 +188,21 @@ export async function ensureHomeLayout(): Promise<HomeLayout> {
 
 export function defaultConfig(): AppConfig {
   const providers: ProviderDefinition[] = [
-    { id: "mock", type: "mock" },
+    { id: "mock", type: "mock", providerTemplate: "openai_compatible", apiFormat: "openai_chat", compatibilityProfile: "standard" },
     {
       id: "openai",
       type: "openai-compatible",
+      providerTemplate: "openai_compatible",
+      apiFormat: "openai_responses",
+      compatibilityProfile: "standard",
       apiKeyEnv: "OPENAI_API_KEY"
     },
     {
       id: "anthropic",
       type: "anthropic",
+      providerTemplate: "anthropic",
+      apiFormat: "anthropic",
+      compatibilityProfile: "standard",
       baseUrl: "https://api.anthropic.com/v1",
       apiKeyEnv: "ANTHROPIC_API_KEY"
     },
@@ -203,13 +210,18 @@ export function defaultConfig(): AppConfig {
       id: "xai",
       name: "xAI",
       type: "openai-compatible",
-      transport: "responses",
+      providerTemplate: "openai_compatible",
+      apiFormat: "openai_responses",
+      compatibilityProfile: "standard",
       baseUrl: "https://api.x.ai/v1",
       apiKeyEnv: "XAI_API_KEY"
     },
     {
       id: "gemini",
       type: "gemini",
+      providerTemplate: "gemini",
+      apiFormat: "gemini",
+      compatibilityProfile: "standard",
       apiKeyEnv: "GEMINI_API_KEY"
     }
   ];
@@ -326,6 +338,36 @@ export function defaultConfig(): AppConfig {
   };
 }
 
+function migrateProvider(provider: ProviderDefinition): { provider: ProviderDefinition; changed: boolean } {
+  const legacyTransport = provider.transport;
+  const legacyProtocol = provider.deepseekProtocol;
+  const rawProviderTemplate = (provider as { providerTemplate?: unknown }).providerTemplate;
+  const baseUrl = provider.baseUrl?.trim().replace(/\/+$/, "").toLowerCase();
+  const isDeepSeekOfficial = baseUrl === "https://api.deepseek.com" || baseUrl === "https://api.deepseek.com/v1";
+  const isBuiltInOpenAi = provider.id === "openai";
+  const isBuiltInXai = provider.id === "xai";
+  const inferredProviderTemplate: ProviderTemplate = isDeepSeekOfficial ? "deepseek"
+      : provider.type === "anthropic" ? "anthropic"
+        : provider.type === "gemini" ? "gemini"
+          : "openai_compatible";
+  const providerTemplate: ProviderTemplate =
+    rawProviderTemplate === "deepseek" || rawProviderTemplate === "openai_compatible" || rawProviderTemplate === "anthropic" || rawProviderTemplate === "gemini"
+      ? rawProviderTemplate
+      : inferredProviderTemplate;
+  const apiFormat = provider.apiFormat
+    ?? (provider.type === "anthropic" ? "anthropic"
+      : provider.type === "gemini" ? "gemini"
+        : isDeepSeekOfficial || isBuiltInOpenAi || isBuiltInXai ? "openai_responses"
+          : "auto");
+  const compatibilityProfile = provider.compatibilityProfile
+    ?? (legacyProtocol === "native" || (legacyProtocol === undefined && isDeepSeekOfficial) ? "deepseek" : "standard");
+  const { transport: _transport, deepseekProtocol: _deepseekProtocol, ...current } = provider;
+  return {
+    provider: { ...current, providerTemplate, apiFormat, compatibilityProfile },
+    changed: rawProviderTemplate !== providerTemplate || !provider.apiFormat || !provider.compatibilityProfile || legacyTransport !== undefined || legacyProtocol !== undefined
+  };
+}
+
 function readMultimodalModels(value: unknown): Array<{ id: string; displayName?: string }> {
   if (!Array.isArray(value)) return [];
   const models: Array<{ id: string; displayName?: string }> = [];
@@ -429,21 +471,33 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
   const parsed = TOML.parse(raw) as any;
   const needsReasoningEffortMigration = !isGptReasoningEffort(parsed.reasoningEffort);
   const needsAutonomousRuntimeMigration = Object.prototype.hasOwnProperty.call(parsed, "timeouts");
-  const providers = Object.entries(parsed.providers ?? {}).map(([id, value]) => ({
+  const migratedProviders = Object.entries(parsed.providers ?? {}).map(([id, value]) => migrateProvider({
     id,
     ...(value as Record<string, unknown>)
-  })) as ProviderDefinition[];
+  } as ProviderDefinition));
+  const providers = migratedProviders.map((entry) => entry.provider);
+  const legacyFormatPriority = new Map(
+    Object.entries(parsed.providers ?? {}).flatMap(([id, value]) => {
+      const transport = (value as Record<string, unknown>).transport;
+      return transport === "responses" || transport === "chat-completions"
+        ? [[id, transport === "responses" ? "openai_responses" : "openai_chat"] as const]
+        : [];
+    })
+  );
   const models = Object.entries(parsed.models ?? {}).map(([id, value]) => {
     const entry = value as Record<string, unknown>;
     const role =
       entry.role === 'image' || entry.role === 'video' || entry.role === 'reasoning'
         ? entry.role
         : undefined;
-    return withGptReasoningCapabilities({
+    const model = withGptReasoningCapabilities({
       id,
       ...entry,
       role
     } as ModelProfile);
+    const legacyPreferred = legacyFormatPriority.get(model.providerId);
+    if (!model.preferredApiFormat && legacyPreferred) model.preferredApiFormat = legacyPreferred;
+    return model;
   }) as ModelProfile[];
 
   const image = readModalityDefaults(parsed.multimodal?.image, 'image', models);
@@ -487,7 +541,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     })) satisfies McpServerConfig[],
     databaseConnections: normalizeDatabaseConnections(parsed.databaseConnections)
   };
-  if (needsReasoningEffortMigration || needsAutonomousRuntimeMigration) {
+  if (needsReasoningEffortMigration || needsAutonomousRuntimeMigration || migratedProviders.some((entry) => entry.changed)) {
     await saveConfig(configFile, config);
   }
   return config;
@@ -505,7 +559,10 @@ export async function saveConfig(configFile: string, config: AppConfig): Promise
     multiAgent: normalizeMultiAgentSettings(config.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(config.selfImprovement),
     projectExecutionPolicies: normalizeProjectExecutionPolicies(config.projectExecutionPolicies),
-    providers: Object.fromEntries(config.providers.map((provider) => [provider.id, provider])),
+    providers: Object.fromEntries(config.providers.map((provider) => {
+      const { transport: _transport, deepseekProtocol: _deepseekProtocol, ...persisted } = migrateProvider(provider).provider;
+      return [provider.id, persisted];
+    })),
     // Model IDs are only unique within a provider. The TOML table key must retain
     // that scope so models with the same upstream ID are not overwritten on save.
     models: Object.fromEntries(config.models.map((model) => [modelStorageKey(model), model])),

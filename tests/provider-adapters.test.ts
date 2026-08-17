@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { applyProviderRequestLimits, buildDecisionSystemPrompt, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -526,12 +526,15 @@ describe("OpenAiCompatibleProvider", () => {
       .toBe(false);
   });
 
-  it("bypasses the optional completion audit for DeepSeek after deterministic validation", () => {
+  it("keeps model-based completion auditing enabled for DeepSeek", () => {
     const compat = resolveModelCompat({ id: "deepseek-v4-flash-0731", displayName: "DeepSeek V4 Flash" });
     expect(compat.shouldBypassStandardCompletionAudit({
       id: "deepseek-v4-flash-0731",
       displayName: "DeepSeek V4 Flash"
-    })).toBe(true);
+    })).toBe(false);
+    expect(resolveModelCompat({ id: "deepseek-v4-pro-0813", displayName: "DeepSeek V4 Pro" })
+      .shouldBypassStandardCompletionAudit({ id: "deepseek-v4-pro-0813", displayName: "DeepSeek V4 Pro" }))
+      .toBe(false);
     expect(resolveModelCompat({ id: "deepseek-chat", displayName: "DeepSeek Chat" })
       .shouldBypassStandardCompletionAudit({ id: "deepseek-chat", displayName: "DeepSeek Chat" }))
       .toBe(false);
@@ -729,7 +732,7 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", compatibilityProfile: "deepseek", apiKey: "secret" };
 
     await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Return JSON only.",
@@ -767,7 +770,7 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"继续执行","tool_calls":[],"end_turn":false,"goal_completed":false}' } }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret", maxTools: 50 };
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", compatibilityProfile: "deepseek", apiKey: "secret", maxTools: 50 };
 
     await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Return the next Agent decision.",
@@ -1014,7 +1017,7 @@ describe("OpenAiCompatibleProvider", () => {
       id: "deepseek-gateway",
       type: "openai-compatible",
       apiKey: "secret",
-      deepseekProtocol: "native"
+      compatibilityProfile: "deepseek"
     };
 
     await new ProviderFactory().create(provider).runTurn({
@@ -2511,6 +2514,7 @@ describe("OpenAiCompatibleProvider", () => {
     const provider: ProviderDefinition = {
       id: "company-gateway",
       type: "openai-compatible",
+      compatibilityProfile: "deepseek",
       baseUrl: "https://gateway.example/v1",
       apiKey: "secret"
     };
@@ -2582,7 +2586,7 @@ describe("OpenAiCompatibleProvider", () => {
       choices: [{ message: { content: "done" } }]
     });
     const traces: Array<{ phase: string; payload: Record<string, unknown> }> = [];
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", compatibilityProfile: "deepseek", apiKey: "secret" };
     const model: ModelProfile = {
       id: "deepseek-chat",
       providerId: provider.id,
@@ -2778,7 +2782,7 @@ describe("OpenAiCompatibleProvider", () => {
         }
       }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", compatibilityProfile: "deepseek", apiKey: "secret" };
     const model: ModelProfile = {
       id: "deepseek-v4-flash",
       providerId: provider.id,
@@ -2907,7 +2911,7 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: "done" } }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", compatibilityProfile: "deepseek", apiKey: "secret" };
     const model: ModelProfile = {
       id: "deepseek-reasoner",
       providerId: provider.id,
@@ -2962,7 +2966,7 @@ describe("OpenAiCompatibleProvider", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: "done" } }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", compatibilityProfile: "deepseek", apiKey: "secret" };
     const model: ModelProfile = {
       id: "deepseek-v4-flash-0731",
       providerId: provider.id,
@@ -3021,7 +3025,7 @@ describe("OpenAiCompatibleProvider", () => {
     const provider: ProviderDefinition = {
       id: "deepseek-gateway",
       type: "openai-compatible",
-      deepseekProtocol: "openai-compatible",
+      compatibilityProfile: "standard",
       apiKey: "secret"
     };
     const model: ModelProfile = {
@@ -3809,7 +3813,7 @@ describe("native provider tool protocols", () => {
       usage: { input_tokens: 4, output_tokens: 5 }
     });
     const responsesProvider: ProviderDefinition = {
-      id: "xai", type: "openai-compatible", transport: "responses", apiKey: "secret"
+      id: "xai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret"
     };
     const decision = await new ProviderFactory().create(responsesProvider).runTurn({
       systemPrompt: "Use tools.", transcript: [{ role: "user", content: "Inspect." }], availableTools: [tool], model: {
@@ -3826,7 +3830,7 @@ describe("native provider tool protocols", () => {
   it("sends the selected GPT reasoning effort through the Responses request", async () => {
     mocks.responsesCreate.mockResolvedValue({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }] });
     const provider: ProviderDefinition = {
-      id: "openai", type: "openai-compatible", transport: "responses", apiKey: "secret"
+      id: "openai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret"
     };
     await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
@@ -3841,7 +3845,7 @@ describe("native provider tool protocols", () => {
 
   it("preserves Responses reasoning items for the next tool-result request", async () => {
     const provider: ProviderDefinition = {
-      id: "responses", type: "openai-compatible", transport: "responses", apiKey: "secret"
+      id: "responses", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret"
     };
     const reasoningItem = {
       id: "rs_123",
@@ -3893,8 +3897,8 @@ describe("native provider tool protocols", () => {
     const provider: ProviderDefinition = {
       id: "deepseek-gateway",
       type: "openai-compatible",
-      transport: "responses",
-      deepseekProtocol: "native",
+      apiFormat: "openai_responses",
+      compatibilityProfile: "deepseek",
       apiKey: "secret"
     };
     const reasoningItem = {
@@ -4002,7 +4006,7 @@ describe("native provider tool protocols", () => {
       output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
     });
     const provider: ProviderDefinition = {
-      id: "responses", type: "openai-compatible", transport: "responses", apiKey: "secret"
+      id: "responses", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret"
     };
 
     await new ProviderFactory().create(provider).runTurn({
@@ -4029,8 +4033,8 @@ describe("native provider tool protocols", () => {
     const provider: ProviderDefinition = {
       id: "deepseek-gateway",
       type: "openai-compatible",
-      transport: "responses",
-      deepseekProtocol: "native",
+      apiFormat: "openai_responses",
+      compatibilityProfile: "deepseek",
       apiKey: "secret"
     };
 
@@ -4075,7 +4079,7 @@ describe("native provider tool protocols", () => {
       yield { type: "response.completed", response: { status: "completed", usage: { input_tokens: 4, output_tokens: 6 } } };
     }
     mocks.responsesCreate.mockResolvedValue(events());
-    const provider: ProviderDefinition = { id: "xai", type: "openai-compatible", transport: "responses", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "xai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret" };
     const deltas: string[] = [];
 
     const decision = await new ProviderFactory().create(provider).runTurn({
@@ -4099,7 +4103,7 @@ describe("native provider tool protocols", () => {
       yield { type: "response.completed", response: { status: "completed", usage: { input_tokens: 4, output_tokens: 8 } } };
     }
     mocks.responsesCreate.mockResolvedValue(events());
-    const provider: ProviderDefinition = { id: "openai", type: "openai-compatible", transport: "responses", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "openai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret" };
     const deltas: string[] = [];
 
     const decision = await new ProviderFactory().create(provider).runTurn({
@@ -4117,7 +4121,7 @@ describe("native provider tool protocols", () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"Done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
-    const provider: ProviderDefinition = { id: "xai", type: "openai-compatible", transport: "responses", apiKey: "secret" };
+    const provider: ProviderDefinition = { id: "xai", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
     const responseCallCount = mocks.responsesCreate.mock.calls.length;
     const chatCallCount = mocks.chatCreate.mock.calls.length;
 
@@ -4129,6 +4133,98 @@ describe("native provider tool protocols", () => {
     expect(mocks.responsesCreate).toHaveBeenCalledTimes(responseCallCount + 1);
     expect(mocks.chatCreate).toHaveBeenCalledTimes(chatCallCount + 1);
     expect(decision).toMatchObject({ assistantMessage: "Done", endTurn: true });
+  });
+
+  it("keeps automatic format caches independent for 0731 and 0813 models", async () => {
+    mocks.responsesCreate
+      .mockResolvedValueOnce({
+        status: "completed",
+        output: [{ type: "message", content: [{ type: "output_text", text: "Responses ok" }] }]
+      })
+      .mockRejectedValueOnce({ status: 400, code: "RESPONSES_MODEL_NOT_SUPPORTED" });
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"Chat ok","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
+    const flash = { ...model, id: "deepseek-v4-flash-0731", providerId: provider.id };
+    const pro = { ...model, id: "deepseek-v4-pro-0813", providerId: provider.id };
+    const adapter = new ProviderFactory().create(provider);
+
+    await adapter.runTurn({ systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: flash, provider });
+    await adapter.runTurn({ systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: pro, provider });
+
+    expect(flash.preferredApiFormat).toBe("openai_responses");
+    expect(pro.preferredApiFormat).toBe("openai_chat");
+    expect(flash.apiFormatCheckedAt).toBeTruthy();
+    expect(pro.apiFormatCheckedAt).toBeTruthy();
+  });
+
+  it("does not hide a manual Responses failure or switch on non-fallback errors", async () => {
+    mocks.responsesCreate.mockRejectedValue({ status: 404, code: "NOT_FOUND" });
+    const manualProvider: ProviderDefinition = { id: "manual", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret" };
+    const chatCallCount = mocks.chatCreate.mock.calls.length;
+    await expect(new ProviderFactory().create(manualProvider).runTurn({
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model, provider: manualProvider
+    })).rejects.toMatchObject({ status: 404 });
+    expect(mocks.chatCreate).toHaveBeenCalledTimes(chatCallCount);
+
+    for (const error of [{ status: 429 }, { status: 401, code: "invalid_api_key" }, { status: 400, code: "invalid_parameter" }]) {
+      mocks.responsesCreate.mockRejectedValueOnce(error);
+      const autoProvider: ProviderDefinition = { id: "auto", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
+      await expect(new ProviderFactory().create(autoProvider).runTurn({
+        systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: { ...model }, provider: autoProvider
+      })).rejects.toMatchObject({ status: error.status });
+    }
+    expect(mocks.chatCreate).toHaveBeenCalledTimes(chatCallCount);
+  });
+
+  it("uses 503 maintenance as a temporary fallback without caching Chat", async () => {
+    mocks.responsesCreate.mockRejectedValue({ status: 503, code: "SERVICE_BUSY", message: "Responses capability under maintenance" });
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"Done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
+    const temporaryModel = { ...model };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: temporaryModel, provider
+    });
+    expect(temporaryModel.preferredApiFormat).toBeUndefined();
+    expect(temporaryModel.apiFormatCheckedAt).toBeUndefined();
+  });
+
+  it("reports both endpoints when automatic mode cannot recover", async () => {
+    mocks.responsesCreate.mockRejectedValue({ status: 400, code: "RESPONSES_MODEL_NOT_SUPPORTED" });
+    mocks.chatCreate.mockRejectedValue({ status: 502, code: "UPSTREAM_FAILED" });
+    const provider: ProviderDefinition = {
+      id: "gateway", type: "openai-compatible", apiFormat: "auto", baseUrl: "https://gateway.example/v1", apiKey: "secret"
+    };
+    await expect(new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: { ...model }, provider
+    })).rejects.toThrow(/技术详情：Responses .*endpoint=https:\/\/gateway\.example\/v1\/responses；Chat/);
+  });
+
+  it("does not retry through Chat after Responses streaming output has started", async () => {
+    async function* interruptedStream() {
+      yield { type: "response.output_text.delta", delta: "Partial" };
+      throw { status: 404, code: "RESPONSES_MODEL_NOT_SUPPORTED" };
+    }
+    mocks.responsesCreate.mockResolvedValue(interruptedStream());
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
+    const chatCallCount = mocks.chatCreate.mock.calls.length;
+    await expect(new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [],
+      model: { ...model, supportsStreaming: true }, provider, stream: true, onTextDelta: () => undefined
+    })).rejects.toMatchObject({ status: 404 });
+    expect(mocks.chatCreate).toHaveBeenCalledTimes(chatCallCount);
+  });
+
+  it("classifies only documented Responses fallback errors", () => {
+    expect(classifyResponsesFallback({ status: 400, error: { code: "RESPONSES_MODEL_NOT_SUPPORTED" } })).toBe("permanent");
+    expect(classifyResponsesFallback({ status: 405 })).toBe("permanent");
+    expect(classifyResponsesFallback({ status: 503, code: "SERVICE_BUSY" })).toBe("temporary");
+    expect(classifyResponsesFallback({ status: 503, message: "Responses capability under maintenance" })).toBe("temporary");
+    expect(classifyResponsesFallback({ status: 429 })).toBeNull();
+    expect(classifyResponsesFallback({ status: 401 })).toBeNull();
   });
 
   it("uses Gemini functionCall blocks instead of text JSON", async () => {

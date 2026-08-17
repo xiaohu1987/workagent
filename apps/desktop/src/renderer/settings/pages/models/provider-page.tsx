@@ -1,9 +1,9 @@
 import type { Dispatch, SetStateAction } from "react";
-import type { AppConfig, ModelProfile, ProviderDefinition, ProviderType } from "@shared-types";
+import type { AppConfig, ModelProfile, ProviderDefinition, ProviderTemplate } from "@shared-types";
 import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../../../../packages/provider-adapters/src/models/media-protocol";
-import { PROVIDER_TYPE_OPTIONS, getModelProfileKey, getProviderDisplayName, hasStoredSecret, normalizeProviderProtocol } from "../../../lib/config-utils";
+import { OPENAI_API_FORMAT_OPTIONS, PROVIDER_TEMPLATE_OPTIONS, getModelProfileKey, getProviderDisplayName, hasProviderTestEndpoint, hasStoredSecret } from "../../../lib/config-utils";
 import { ComposerSelect } from "../../../workspace/composer-select";
-import { IconClose, IconPlus } from "../../../icons";
+import { IconCheck, IconClose, IconPlus } from "../../../icons";
 import type { ModelTestResult } from "../../../core/app-types";
 
 type ProviderSettingsPageProps = {
@@ -18,14 +18,17 @@ type ProviderSettingsPageProps = {
 };
 
 export function ProviderSettingsPage({ configDraft, config, settingsProvider, settingsProviderModels, providerSecretDrafts, setProviderSecretDrafts, isFetchingModels, newModelId, newModelDisplayName, modelTestResults, testingModelKey, onSetProviderId, onSetNewModelId, onSetNewModelDisplayName, onAddCustomProvider, onRemoveProvider, onUpdateProvider, onFetchModels, onUpdateModel, onCheckModel, onRemoveModel, onAddModel, onSave, onRefresh, onShowNotice, formatLatency, formatTokensPerSecond }: ProviderSettingsPageProps) {
-  const normalizedProviderType = settingsProvider ? normalizeProviderProtocol(settingsProvider.type) : null;
-  const providerProtocolValue = normalizedProviderType === "openai-compatible" && settingsProvider?.deepseekProtocol === "native"
-    ? "deepseek-native"
-    : normalizedProviderType ?? "";
-  const providerProtocolOptions = [
-    ...PROVIDER_TYPE_OPTIONS,
-    { value: "deepseek-native", label: "DeepSeek 原生扩展" }
-  ];
+  const template = settingsProvider?.providerTemplate ?? "openai_compatible";
+  const isOpenAiFormat = settingsProvider?.apiFormat === "auto" || settingsProvider?.apiFormat === "openai_responses" || settingsProvider?.apiFormat === "openai_chat";
+  const canTestModels = settingsProvider ? hasProviderTestEndpoint(settingsProvider) : false;
+
+  function formatStatus(model: ModelProfile): string {
+    if (!model.preferredApiFormat && model.verifiedApiFormats?.includes("openai_chat")) return "Responses 暂时不可用，已使用 Chat";
+    if (!model.apiFormatCheckedAt || !model.preferredApiFormat) return "未检测";
+    if (model.preferredApiFormat === "openai_responses") return "已验证：Responses";
+    if (settingsProvider?.apiFormat === "auto") return "Responses 暂时不可用，已使用 Chat";
+    return "已验证：Chat Completions";
+  }
 
   return (
       <div className="settings-section provider-settings-section">
@@ -35,7 +38,7 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
               <div className="provider-list-header">
                 <strong className="provider-list-title">提供商</strong>
                 <button className="settings-add-provider" onClick={onAddCustomProvider}>
-                  + 自定义
+                  + 供应商
                 </button>
               </div>
               <div className="provider-list-scroll">
@@ -67,8 +70,8 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
               {settingsProvider ? (
                 <>
                   <div className="provider-detail-grid">
-                    <label className="settings-field full">
-                      <span>供应商</span>
+                    <label className="settings-field">
+                      <span>供应商名称</span>
                       <input
                         value={settingsProvider.name ?? ""}
                         onChange={(event) =>
@@ -78,29 +81,35 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
                       />
                     </label>
 
-                    <label className="settings-field full">
-                      <span>接口协议</span>
+                    <label className="settings-field">
+                      <span>供应商模板</span>
                       <ComposerSelect
                         className="form-select provider-type-select"
-                        ariaLabel="接口协议"
-                        value={providerProtocolValue}
-                        onChange={(value) => {
-                          if (value === "deepseek-native") {
-                            onUpdateProvider(settingsProvider.id, {
-                              type: "openai-compatible",
-                              deepseekProtocol: "native"
-                            });
-                            return;
-                          }
-                          onUpdateProvider(settingsProvider.id, {
-                            type: value as ProviderType,
-                            deepseekProtocol: value === "openai-compatible" ? "openai-compatible" : undefined
-                          });
-                        }}
-                        options={providerProtocolOptions}
-                        placeholder="选择接口协议"
+                        ariaLabel="供应商模板"
+                        value={template}
+                        onChange={(value) => onUpdateProvider(settingsProvider.id, { providerTemplate: value as ProviderTemplate })}
+                        options={PROVIDER_TEMPLATE_OPTIONS}
+                        placeholder="选择供应商模板"
                       />
-                      <small className="settings-field-hint">仅决定聊天与推理模型的请求格式；图片/视频模型始终使用模型自身的生成协议，且要求供应商为 OpenAI 兼容接口</small>
+                    </label>
+
+                    <label className="settings-field full">
+                      <span>上游格式</span>
+                      {isOpenAiFormat ? (
+                        <ComposerSelect
+                          className="form-select provider-type-select"
+                          ariaLabel="上游格式"
+                          value={settingsProvider.apiFormat ?? "auto"}
+                          onChange={(value) => onUpdateProvider(settingsProvider.id, { apiFormat: value as ProviderDefinition["apiFormat"] })}
+                          options={OPENAI_API_FORMAT_OPTIONS}
+                          placeholder="选择上游格式"
+                        />
+                      ) : (
+                        <div className="provider-fixed-format">
+                          {settingsProvider.apiFormat === "anthropic" ? "Anthropic Messages" : "Google Gemini"}
+                        </div>
+                      )}
+                      <small className="settings-field-hint">自动检测会按每个模型分别验证，检测结果缓存 24 小时。</small>
                     </label>
 
                     <label className="settings-field">
@@ -126,15 +135,72 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
                         autoComplete="off"
                         value={providerSecretDrafts[settingsProvider.id] ?? ""}
                         onChange={(event) =>
-                          setProviderSecretDrafts((current) => ({
-                            ...current,
-                            [settingsProvider.id]: event.target.value
-                          }))
+                          {
+                            setProviderSecretDrafts((current) => ({
+                              ...current,
+                              [settingsProvider.id]: event.target.value
+                            }));
+                            for (const model of settingsProviderModels) {
+                              onUpdateModel(settingsProvider.id, model.id, {
+                                verifiedApiFormats: undefined,
+                                preferredApiFormat: undefined,
+                                apiFormatCheckedAt: undefined,
+                                agentCapability: undefined,
+                                agentCapabilityCheckedAt: undefined,
+                                agentCapabilityReason: undefined
+                              });
+                            }
+                          }
                         }
                         placeholder="输入 API Key，留空则保留当前值"
                       />
                     </label>
                   </div>
+
+                  <details className="provider-advanced-settings">
+                    <summary>高级设置</summary>
+                    <div className="provider-detail-grid">
+                      <label className="settings-field full">
+                        <span>兼容模式</span>
+                        <ComposerSelect
+                          className="form-select"
+                          ariaLabel="兼容模式"
+                          value={settingsProvider.compatibilityProfile ?? "standard"}
+                          onChange={(value) => onUpdateProvider(settingsProvider.id, { compatibilityProfile: value as ProviderDefinition["compatibilityProfile"] })}
+                          options={[
+                            { value: "standard", label: "标准" },
+                            { value: "deepseek", label: "DeepSeek 扩展" }
+                          ]}
+                          placeholder="选择兼容模式"
+                        />
+                      </label>
+                      <label className="settings-field">
+                        <span>最大工具数量</span>
+                        <input type="number" min={0} value={settingsProvider.maxTools ?? 0} onChange={(event) => onUpdateProvider(settingsProvider.id, { maxTools: Math.max(0, Number(event.target.value) || 0) })} />
+                      </label>
+                      <label className="settings-field">
+                        <span>最大请求字节</span>
+                        <input type="number" min={0} value={settingsProvider.maxRequestBytes ?? 0} onChange={(event) => onUpdateProvider(settingsProvider.id, { maxRequestBytes: Math.max(0, Number(event.target.value) || 0) })} />
+                      </label>
+                      <label className="settings-field full">
+                        <span>附加请求头（JSON）</span>
+                        <textarea
+                          key={`${settingsProvider.id}:${JSON.stringify(settingsProvider.headers ?? {})}`}
+                          defaultValue={JSON.stringify(settingsProvider.headers ?? {}, null, 2)}
+                          onBlur={(event) => {
+                            try {
+                              const parsed = JSON.parse(event.target.value || "{}");
+                              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+                                !Object.values(parsed).every((value) => typeof value === "string")) throw new Error();
+                              onUpdateProvider(settingsProvider.id, { headers: parsed as Record<string, string> });
+                            } catch {
+                              onShowNotice("请求头 JSON 格式无效。");
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+                  </details>
 
                   <div className="provider-model-section">
                     <div className="section-copy section-copy-with-action">
@@ -160,7 +226,18 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
                           return (
                           <div key={model.id} className="provider-model-row">
                             <div className="provider-model-copy">
-                              <strong>{model.id}</strong>
+                              <div className="provider-model-title">
+                                <strong>{model.id}</strong>
+                                {model.agentCapability === "verified" && model.apiFormatCheckedAt ? (
+                                  <span
+                                    className="model-agent-verified"
+                                    title="Agent 已验证"
+                                    aria-label="Agent 已验证"
+                                  >
+                                    <IconCheck />
+                                  </span>
+                                ) : null}
+                              </div>
                               {model.displayName !== model.id ? <span>{model.displayName}</span> : null}
                               {isMediaModel ? (
                                 <span
@@ -184,22 +261,7 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
                                 </span>
                               ) : null}
                               {!isMediaModel ? (
-                              <span
-                                className={`model-agent-capability ${model.agentCapability ?? "unknown"}`}
-                                title={
-                                  model.agentCapability === "verified"
-                                    ? "已验证连接、原生工具调用、工具结果回传和最终回复。"
-                                    : model.agentCapability === "unsupported"
-                                      ? model.agentCapabilityReason ?? "该模型不适合 Agent 工具调用。"
-                                      : "请先运行模型测试，验证 Agent 工具协议。"
-                                }
-                              >
-                                {model.agentCapability === "verified"
-                                  ? "Agent 已验证"
-                                  : model.agentCapability === "unsupported"
-                                    ? "仅聊天"
-                                    : "未验证 Agent"}
-                              </span>
+                              <span className="model-api-format-status">{formatStatus(model)}</span>
                               ) : null}
                             </div>
                             <div className="provider-model-actions">
@@ -233,8 +295,9 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
                                   <button
                                     className={`settings-mini-button model-test-button${isTesting ? " is-testing" : ""}`}
                                     onClick={() => void onCheckModel(settingsProvider, model)}
-                                    disabled={isTesting}
+                                    disabled={isTesting || !canTestModels}
                                     aria-busy={isTesting}
+                                    title={canTestModels ? "测试模型连接与 Agent 工具协议" : "请先填写调用 URL"}
                                   >
                                     <span className="model-test-label">
                                       {isTesting ? "测试中" : "测试"}

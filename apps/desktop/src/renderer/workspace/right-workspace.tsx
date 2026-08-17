@@ -1,7 +1,7 @@
-import { memo } from "react";
+import { memo, useMemo } from "react";
 import type { GitActionResult, GitSnapshot, RuntimeThreadSnapshot, ToolCallRecord } from "@shared-types";
 import type { ComposerAttachmentInput } from "../lib/conversation-utils";
-import type { ProjectFileEntry } from "../lib/project-files";
+import { getProjectRelativeGitFiles, type ProjectFileEntry } from "../lib/project-files";
 import { IconChevronRight, IconFileChanges, IconFolder, IconGlobe } from "../icons";
 import { BrowserWorkspace } from "./browser-workspace";
 import { GitChangesWorkspace } from "./git-changes";
@@ -9,6 +9,7 @@ import { WorkspaceAccordionSection, WorkspaceEmptyState } from "./panels";
 import { ProjectFilesWorkspace } from "./project-files";
 
 export type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
+const SHOW_GIT_WORKSPACE = false;
 
 export function hasRecognizedGitRepository(snapshot: GitSnapshot | null, projectRoot: string): boolean {
   if (snapshot?.available !== true || !snapshot.root?.trim() || !projectRoot.trim()) return false;
@@ -26,6 +27,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onAddAttachment,
   projectFiles,
   projectFilesLoading,
+  projectFilesRevision,
   gitSnapshot,
   gitLoading,
   gitActionBusy,
@@ -37,6 +39,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   projectToolCalls,
   onSelectProjectFile,
   onOpenProjectFile,
+  onLoadProjectDirectory,
   browserTabsByThread,
   onCloseBrowserTab,
   threadId
@@ -51,6 +54,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
   projectFiles: ProjectFileEntry[];
   projectFilesLoading: boolean;
+  projectFilesRevision: number;
   gitSnapshot: GitSnapshot | null;
   gitLoading: boolean;
   gitActionBusy: boolean;
@@ -62,11 +66,16 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   projectToolCalls: ToolCallRecord[];
   onSelectProjectFile: (path: string) => void;
   onOpenProjectFile: (path: string) => void;
+  onLoadProjectDirectory: (path: string) => Promise<boolean>;
   browserTabsByThread: Record<string, RuntimeThreadSnapshot["browserTabs"]>;
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
   threadId: string | null;
 }) {
-  const showGitWorkspace = hasRecognizedGitRepository(gitSnapshot, projectRoot);
+  const showGitWorkspace = SHOW_GIT_WORKSPACE && hasRecognizedGitRepository(gitSnapshot, projectRoot);
+  const projectGitFiles = useMemo(
+    () => getProjectRelativeGitFiles(gitSnapshot, projectRoot),
+    [gitSnapshot, projectRoot]
+  );
   return (
     <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="Right workspace" aria-hidden={hidden}>
       <div className="right-workspace-accordion">
@@ -75,7 +84,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
             active={expandedTab === "changes"}
             id="git"
             label="Git"
-            badge={gitSnapshot.files.length}
+            badge={gitSnapshot?.files.length ?? 0}
             icon={<IconFileChanges />}
             onClick={() => toggleWorkspaceSection("changes", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
           >
@@ -99,12 +108,16 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
           onClick={() => toggleWorkspaceSection("files", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
         >
           <ProjectFilesWorkspace
+            key={projectFilesRevision}
             files={projectFiles}
             toolCalls={projectToolCalls}
+            gitFiles={projectGitFiles}
             loading={projectFilesLoading}
+            loadRevision={projectFilesRevision}
             selectedPath={selectedProjectFile}
             onSelect={onSelectProjectFile}
             onOpen={onOpenProjectFile}
+            onLoadDirectory={onLoadProjectDirectory}
             projectRoot={projectRoot}
             onAddAttachment={onAddAttachment}
           />

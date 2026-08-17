@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { finalizeTokenUsage, modelJsonCandidates, tryParseModelJson } from "@shared-types";
 import type {
+  OpenAiApiFormat,
   MessageAttachment,
   ModelProfile,
   ProviderDefinition,
@@ -552,30 +553,40 @@ async function reportProviderTrace(
 
 export class ProviderFactory {
   readonly #fetch: ProviderFetch;
+  readonly #onApiFormatResolved?: (providerId: string, model: ModelProfile) => void | Promise<void>;
 
-  public constructor(options?: { fetch?: ProviderFetch }) {
+  public constructor(options?: {
+    fetch?: ProviderFetch;
+    onApiFormatResolved?: (providerId: string, model: ModelProfile) => void | Promise<void>;
+  }) {
     this.#fetch = options?.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    this.#onApiFormatResolved = options?.onApiFormatResolved;
   }
 
   public create(provider: ProviderDefinition): ProviderAdapter {
-    switch (provider.type) {
-      case "mock":
-        return new MockProvider();
+    if (provider.type === "mock") return new MockProvider();
+    switch (provider.apiFormat) {
       case "anthropic":
         return new AnthropicProvider(provider);
       case "gemini":
         return new GeminiProvider(provider);
-      case "openrouter":
-      case "ollama":
-      case "vllm":
-      case "gateway":
-      case "openai-compatible":
-        if (provider.transport === "responses") {
-          return new OpenAiResponsesProvider(provider, { fetch: this.#fetch });
-        }
+      case "openai_responses":
+        return new OpenAiResponsesProvider(provider, { fetch: this.#fetch });
+      case "auto":
+        return new AutoOpenAiProvider(provider, {
+          fetch: this.#fetch,
+          onApiFormatResolved: this.#onApiFormatResolved
+        });
+      case "openai_chat":
+        return new OpenAiCompatibleProvider(provider, { fetch: this.#fetch });
+      case undefined:
+        // Unsaved programmatic providers predate apiFormat. Persisted configs
+        // are migrated on load, and legacy transport is intentionally ignored.
+        if (provider.type === "anthropic") return new AnthropicProvider(provider);
+        if (provider.type === "gemini") return new GeminiProvider(provider);
         return new OpenAiCompatibleProvider(provider, { fetch: this.#fetch });
       default:
-        return assertNever(provider.type);
+        return assertNever(provider.apiFormat);
     }
   }
 }
@@ -1080,7 +1091,6 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
  */
 class OpenAiResponsesProvider implements ProviderAdapter {
   readonly #client: OpenAI;
-  readonly #chatFallback: OpenAiCompatibleProvider;
 
   public constructor(
     private readonly provider: ProviderDefinition,
@@ -1091,10 +1101,11 @@ class OpenAiResponsesProvider implements ProviderAdapter {
       baseURL: provider.baseUrl,
       defaultHeaders: provider.headers
     });
-    this.#chatFallback = new OpenAiCompatibleProvider(provider, options);
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    const compat = resolveModelCompat(input.model, input.provider);
+    const compatContext: ModelCompatContext = { model: input.model, input };
     const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
       ? input.availableTools.map((tool) => ({
           type: "function" as const,
@@ -1115,7 +1126,7 @@ class OpenAiResponsesProvider implements ProviderAdapter {
           !message.responseReasoningItem
       );
     const reasoningEffort = hasIncompleteReasoningHistory ? "none" : requestedReasoningEffort;
-    const request: Record<string, unknown> = {
+    const baseRequest: Record<string, unknown> = {
       model: input.model.id,
       instructions: input.systemPrompt || undefined,
       input: await buildResponsesInput(input),
@@ -1125,6 +1136,7 @@ class OpenAiResponsesProvider implements ProviderAdapter {
         ? { reasoning: { effort: reasoningEffort, summary: "concise" } }
         : {})
     };
+    const request = compat.normalizeRequestParams(compatContext, baseRequest);
 
     try {
       if (input.stream && input.model.supportsStreaming) {
@@ -1143,17 +1155,160 @@ class OpenAiResponsesProvider implements ProviderAdapter {
       const response = await this.#client.responses.create(limitedRequest as any, { signal: input.abortSignal });
       return parseResponsesResponse(response, input);
     } catch (error) {
-      if (supportsChatCompletionsFallback(error)) {
-        return this.#chatFallback.runTurn(input);
-      }
-      throw error;
+      throw createApiFormatRequestError("Responses API", this.provider, "/responses", error);
     }
   }
 }
 
-function supportsChatCompletionsFallback(error: unknown): boolean {
-  const status = isRecord(error) ? error.status : undefined;
-  return status === 404 || status === 405 || status === 501;
+const API_FORMAT_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
+
+type ResponsesFallbackKind = "permanent" | "temporary" | null;
+
+function errorField(error: unknown, key: string): unknown {
+  if (!isRecord(error)) return undefined;
+  if (error[key] !== undefined) return error[key];
+  if (isRecord(error.error) && error.error[key] !== undefined) return error.error[key];
+  if (isRecord(error.cause)) return errorField(error.cause, key);
+  return undefined;
+}
+
+export function classifyResponsesFallback(error: unknown): ResponsesFallbackKind {
+  const status = Number(errorField(error, "status"));
+  const code = String(errorField(error, "code") ?? "").toUpperCase();
+  const message = String(errorField(error, "message") ?? (error instanceof Error ? error.message : error ?? ""));
+  if (status === 404 || status === 405 || status === 501 || code === "RESPONSES_MODEL_NOT_SUPPORTED") {
+    return "permanent";
+  }
+  if (status === 503 && (code === "SERVICE_BUSY" || /maintenan|维护|service\s+busy/i.test(message))) {
+    return "temporary";
+  }
+  return null;
+}
+
+function isFreshApiFormatCache(model: ModelProfile): boolean {
+  if (!model.apiFormatCheckedAt || !model.preferredApiFormat) return false;
+  const checkedAt = Date.parse(model.apiFormatCheckedAt);
+  return Number.isFinite(checkedAt) && Date.now() - checkedAt < API_FORMAT_CACHE_TTL_MS;
+}
+
+function rememberApiFormat(model: ModelProfile, format: OpenAiApiFormat): boolean {
+  const changed = model.preferredApiFormat !== format || !isFreshApiFormatCache(model);
+  if (!changed) return false;
+  model.preferredApiFormat = format;
+  model.apiFormatCheckedAt = new Date().toISOString();
+  return true;
+}
+
+function technicalErrorSummary(error: unknown): string {
+  const status = errorField(error, "status");
+  const code = errorField(error, "code");
+  const message = error instanceof Error ? error.message : String(error);
+  return [status ? `HTTP ${String(status)}` : "", code ? String(code) : "", message].filter(Boolean).join(" · ");
+}
+
+function createApiFormatRequestError(
+  label: string,
+  provider: ProviderDefinition,
+  path: string,
+  cause: unknown
+): Error & { status?: number; code?: string } {
+  const statusValue = errorField(cause, "status");
+  const status = Number.isFinite(Number(statusValue)) ? Number(statusValue) : undefined;
+  const codeValue = errorField(cause, "code");
+  const code = codeValue == null ? undefined : String(codeValue);
+  const fallbackKind = classifyResponsesFallback(cause);
+  const reason = status === 401 || status === 403
+    ? "API Key 无效或没有访问权限。"
+    : status === 429
+      ? "请求过于频繁，请稍后再试。"
+      : fallbackKind === "permanent"
+        ? "当前模型或服务不支持这个上游格式。"
+        : fallbackKind === "temporary"
+          ? "上游服务正在维护或暂时繁忙。"
+          : "上游请求失败。";
+  const endpoint = `${provider.baseUrl?.replace(/\/+$/, "") ?? "默认地址"}${path}`;
+  const error = new Error(`${label}：${reason} 技术详情：${technicalErrorSummary(cause)} · endpoint=${endpoint}`, { cause });
+  error.name = "ProviderApiFormatRequestError";
+  return Object.assign(error, { status, code });
+}
+
+class AutoOpenAiProvider implements ProviderAdapter {
+  readonly #responses: OpenAiResponsesProvider;
+  readonly #chat: OpenAiCompatibleProvider;
+
+  public constructor(
+    private readonly provider: ProviderDefinition,
+    private readonly options?: {
+      fetch?: ProviderFetch;
+      onApiFormatResolved?: (providerId: string, model: ModelProfile) => void | Promise<void>;
+    }
+  ) {
+    this.#responses = new OpenAiResponsesProvider(provider, options);
+    this.#chat = new OpenAiCompatibleProvider(provider, options);
+  }
+
+  async #remember(model: ModelProfile, format: OpenAiApiFormat): Promise<void> {
+    if (!rememberApiFormat(model, format)) return;
+    try {
+      await this.options?.onApiFormatResolved?.(this.provider.id, model);
+    } catch {
+      // Capability persistence must not turn a successful model response into a failed turn.
+    }
+  }
+
+  public generateImage(input: { model: ModelProfile; prompt: string; abortSignal?: AbortSignal }): Promise<GeneratedImageResult> {
+    return this.#chat.generateImage(input);
+  }
+
+  public generateVideo(input: {
+    model: ModelProfile;
+    prompt: string;
+    abortSignal?: AbortSignal;
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+  }): Promise<{ data: Uint8Array; mimeType: string }> {
+    return this.#chat.generateVideo(input);
+  }
+
+  public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    if (input.model.preferredApiFormat === "openai_chat" &&
+      (!input.model.apiFormatCheckedAt || isFreshApiFormatCache(input.model))) {
+      const decision = await this.#chat.runTurn(input);
+      await this.#remember(input.model, "openai_chat");
+      return decision;
+    }
+
+    let outputStarted = false;
+    const responsesInput: ProviderTurnInput = {
+      ...input,
+      onTextDelta: async (delta) => {
+        outputStarted = true;
+        await input.onTextDelta?.(delta);
+      },
+      onToolCallPreparing: async (call) => {
+        outputStarted = true;
+        await input.onToolCallPreparing?.(call);
+      }
+    };
+    try {
+      const decision = await this.#responses.runTurn(responsesInput);
+      await this.#remember(input.model, "openai_responses");
+      return decision;
+    } catch (responsesError) {
+      const fallbackKind = outputStarted ? null : classifyResponsesFallback(responsesError);
+      if (!fallbackKind) throw responsesError;
+      try {
+        const decision = await this.#chat.runTurn(input);
+        if (fallbackKind === "permanent") await this.#remember(input.model, "openai_chat");
+        return decision;
+      } catch (chatError) {
+        throw new Error(
+          `Responses API 不可用，自动切换 Chat Completions 后仍然失败。技术详情：Responses ${technicalErrorSummary(responsesError)}；Chat ${technicalErrorSummary(chatError)}`,
+          { cause: chatError }
+        );
+      }
+    }
+  }
 }
 
 export function nativeToolName(name: string): string {
@@ -1178,7 +1333,7 @@ function isDeepSeekModel(
 
 function isDeepSeekThinkingModel(
   model: Pick<ModelProfile, "id" | "displayName">,
-  provider?: Pick<ProviderDefinition, "id" | "name" | "baseUrl" | "deepseekProtocol">
+  provider?: Pick<ProviderDefinition, "id" | "name" | "baseUrl" | "compatibilityProfile">
 ): boolean {
   const identity = [
     model.id,
@@ -1187,7 +1342,7 @@ function isDeepSeekThinkingModel(
     provider?.name ?? "",
     provider?.baseUrl ?? ""
   ].join(" ").toLowerCase();
-  return provider?.deepseekProtocol !== "openai-compatible" &&
+  return provider?.compatibilityProfile === "deepseek" &&
     isDeepSeekModel(model, provider) && /reasoner|\br1\b|thinking|\bv4-(?:flash|pro)\b/.test(identity);
 }
 

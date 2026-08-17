@@ -1,10 +1,10 @@
-import type { ToolCallRecord } from "@shared-types";
+import type { GitFileChange, ToolCallRecord } from "@shared-types";
 import { useMotionPresence } from "../core/motion-presence";
 import { createPortal } from "react-dom";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { IconChevronRight, IconSearch, IconCompose, IconCopy, IconFolder, IconFile, IconEye, IconSpinner } from "../icons";
-import { ProjectFileChangeKind, ProjectFileEntry, ProjectFileTreeNode, buildFileSnapshotDiffPreview, buildProjectFileTree, buildProjectFolderManifest, getFileSnapshotDiffMarker, getLatestFileSnapshot, getProjectFileChangeKinds, getProjectFileGlyphClass, getProjectFileNodeChangeKind, projectFileChangeBadge, projectFileChangeLabel, projectFileNodeMatches, resolveProjectFilePath } from "../lib/project-files";
+import { ProjectFileChangeKind, ProjectFileEntry, ProjectFileTreeNode, buildFileSnapshotDiffPreview, buildProjectFileTree, buildProjectFolderManifest, getFileSnapshotDiffMarker, getGitProjectFileChangeKinds, getLatestFileSnapshot, getProjectFileChangeKinds, getProjectFileGlyphClass, getProjectFileNodeChangeKind, mergeProjectFileEntries, projectFileChangeBadge, projectFileChangeLabel, projectFileNodeMatches, resolveProjectFilePath } from "../lib/project-files";
 import { ComposerAttachmentInput } from "../lib/conversation-utils";
 import { WorkspaceContextMenu, WorkspaceEmptyState } from "./panels";
 import { renderCodePreviewLine } from "./file-preview";
@@ -12,39 +12,90 @@ import { renderCodePreviewLine } from "./file-preview";
 export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
   files,
   toolCalls,
+  gitFiles,
   loading,
+  loadRevision,
   selectedPath,
   onSelect,
   onOpen,
+  onLoadDirectory,
   projectRoot,
   onAddAttachment
 }: {
   files: ProjectFileEntry[];
   toolCalls: ToolCallRecord[];
+  gitFiles: GitFileChange[];
   loading: boolean;
+  loadRevision: number;
   selectedPath: string | null;
   onSelect: (path: string) => void;
   onOpen: (path: string) => void;
+  onLoadDirectory: (path: string) => Promise<boolean>;
   projectRoot: string;
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
 }) {
   const [query, setQuery] = useState("");
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
+  const [loadedDirectoryPaths, setLoadedDirectoryPaths] = useState<Set<string>>(() => new Set());
+  const [loadingDirectoryPaths, setLoadingDirectoryPaths] = useState<Set<string>>(() => new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: ProjectFileTreeNode } | null>(null);
-  const [diffPreview, setDiffPreview] = useState<{ node: ProjectFileTreeNode; snapshot: NonNullable<ReturnType<typeof getLatestFileSnapshot>>; anchor: DOMRect } | null>(null);
+  const [diffPreview, setDiffPreview] = useState<{
+    node: ProjectFileTreeNode;
+    snapshot: ReturnType<typeof getLatestFileSnapshot>;
+    gitFile: GitFileChange | null;
+    anchor: DOMRect;
+  } | null>(null);
   const contextMenuPresence = useMotionPresence(contextMenu, 140);
   const visibleContextMenu = contextMenu ?? contextMenuPresence.value;
   const diffPreviewPresence = useMotionPresence(diffPreview, 140);
   const visibleDiffPreview = diffPreview ?? diffPreviewPresence.value;
   const hoverTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
-  const tree = useMemo(() => buildProjectFileTree(files), [files]);
-  const changeKinds = useMemo(() => getProjectFileChangeKinds(toolCalls), [toolCalls]);
+  const gitFilesByPath = useMemo(
+    () => new Map(gitFiles.map((file) => [file.path.replace(/\\/g, "/"), file])),
+    [gitFiles]
+  );
+  const tree = useMemo(() => buildProjectFileTree(mergeProjectFileEntries(
+    files,
+    gitFiles.map((file) => ({ path: file.path, kind: "file" as const }))
+  )), [files, gitFiles]);
+  const changeKinds = useMemo(() => new Map([
+    ...getGitProjectFileChangeKinds(gitFiles),
+    ...getProjectFileChangeKinds(toolCalls)
+  ]), [gitFiles, toolCalls]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
 
   useEffect(() => {
-    setExpandedPaths(new Set(tree.filter((node) => node.kind === "directory").map((node) => node.path)));
-  }, [tree]);
+    setExpandedPaths(new Set());
+    setLoadedDirectoryPaths(new Set());
+    setLoadingDirectoryPaths(new Set());
+  }, [loadRevision]);
+
+  const toggleDirectory = async (path: string) => {
+    if (expandedPaths.has(path)) {
+      setExpandedPaths((current) => {
+        const next = new Set(current);
+        next.delete(path);
+        return next;
+      });
+      return;
+    }
+
+    setExpandedPaths((current) => new Set(current).add(path));
+    if (loadedDirectoryPaths.has(path) || loadingDirectoryPaths.has(path)) return;
+    setLoadingDirectoryPaths((current) => new Set(current).add(path));
+    try {
+      if (await onLoadDirectory(path)) {
+        setLoadedDirectoryPaths((current) => new Set(current).add(path));
+      }
+    } finally {
+      setLoadingDirectoryPaths((current) => {
+        const next = new Set(current);
+        next.delete(path);
+        return next;
+      });
+    }
+  };
 
   useEffect(() => () => {
     if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
@@ -60,11 +111,12 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
   const startDiffPreviewTimer = (node: ProjectFileTreeNode, anchor: DOMRect) => {
     if (node.kind !== "file") return;
     const snapshot = getLatestFileSnapshot(toolCalls, node.path);
-    if (!snapshot) return;
+    const gitFile = gitFilesByPath.get(node.path.replace(/\\/g, "/")) ?? null;
+    if (!snapshot && !gitFile) return;
     clearDiffPreviewCloseTimer();
     if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = window.setTimeout(() => {
-      setDiffPreview({ node, snapshot, anchor });
+      setDiffPreview({ node, snapshot, gitFile, anchor });
       hoverTimerRef.current = null;
     }, 3_000);
   };
@@ -106,16 +158,10 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
           depth={0}
           query={normalizedQuery}
           expandedPaths={expandedPaths}
+          loadingDirectoryPaths={loadingDirectoryPaths}
           selectedPath={selectedPath}
           changeKinds={changeKinds}
-          onToggle={(path) => {
-            setExpandedPaths((current) => {
-              const next = new Set(current);
-              if (next.has(path)) next.delete(path);
-              else next.add(path);
-              return next;
-            });
-          }}
+          onToggle={(path) => void toggleDirectory(path)}
           onSelect={onSelect}
           onOpen={onOpen}
           onHover={startDiffPreviewTimer}
@@ -130,6 +176,7 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
         <ProjectFileDiffPopover
           node={visibleDiffPreview.node}
           snapshot={visibleDiffPreview.snapshot}
+          gitFile={visibleDiffPreview.gitFile}
           anchor={visibleDiffPreview.anchor}
           motionPhase={diffPreviewPresence.phase}
           onMouseEnter={clearDiffPreviewCloseTimer}
@@ -187,6 +234,7 @@ export function ProjectFileTreeRows({
   depth,
   query,
   expandedPaths,
+  loadingDirectoryPaths,
   selectedPath,
   changeKinds,
   onToggle,
@@ -200,6 +248,7 @@ export function ProjectFileTreeRows({
   depth: number;
   query: string;
   expandedPaths: Set<string>;
+  loadingDirectoryPaths: Set<string>;
   selectedPath: string | null;
   changeKinds: Map<string, ProjectFileChangeKind>;
   onToggle: (path: string) => void;
@@ -216,7 +265,8 @@ export function ProjectFileTreeRows({
     }
 
     const isDirectory = node.kind === "directory";
-    const isExpanded = query.length > 0 || expandedPaths.has(node.path);
+    const isExpanded = expandedPaths.has(node.path);
+    const isLoading = isDirectory && loadingDirectoryPaths.has(node.path);
     const changeKind = getProjectFileNodeChangeKind(node, changeKinds);
     return (
       <div key={`${node.kind}:${node.path}`} className="project-file-tree-item">
@@ -227,6 +277,7 @@ export function ProjectFileTreeRows({
           role="treeitem"
           aria-level={depth + 1}
           aria-expanded={isDirectory ? isExpanded : undefined}
+          aria-busy={isLoading || undefined}
           aria-selected={isDirectory ? undefined : selectedPath === node.path}
           title={isDirectory ? node.path : `${node.path}（双击查看）`}
           onClick={() => {
@@ -249,7 +300,7 @@ export function ProjectFileTreeRows({
             <span className={`project-file-disclosure ${isExpanded ? "is-expanded" : ""}`} aria-hidden><IconChevronRight /></span>
           ) : <span className="project-file-disclosure-placeholder" aria-hidden />}
           <span className={`project-file-glyph ${getProjectFileGlyphClass(node)}`} aria-hidden>
-            {isDirectory ? <IconFolder /> : <IconFile />}
+            {isLoading ? <IconSpinner /> : isDirectory ? <IconFolder /> : <IconFile />}
           </span>
           <span>{node.name}</span>
           {changeKind ? <em className="project-file-change-badge" aria-label={projectFileChangeLabel(changeKind)}>{projectFileChangeBadge(changeKind)}</em> : null}
@@ -260,6 +311,7 @@ export function ProjectFileTreeRows({
             depth={depth + 1}
             query={query}
             expandedPaths={expandedPaths}
+            loadingDirectoryPaths={loadingDirectoryPaths}
             selectedPath={selectedPath}
             changeKinds={changeKinds}
             onToggle={onToggle}
@@ -278,21 +330,33 @@ export function ProjectFileTreeRows({
 function ProjectFileDiffPopover({
   node,
   snapshot,
+  gitFile,
   anchor,
   motionPhase,
   onMouseEnter,
   onMouseLeave
 }: {
   node: ProjectFileTreeNode;
-  snapshot: NonNullable<ReturnType<typeof getLatestFileSnapshot>>;
+  snapshot: ReturnType<typeof getLatestFileSnapshot>;
+  gitFile: GitFileChange | null;
   anchor: DOMRect;
   motionPhase?: string;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
-  const lines = buildFileSnapshotDiffPreview(snapshot.before, snapshot.after);
-  const additions = lines.filter((line) => line.kind === "added").length;
-  const deletions = lines.filter((line) => line.kind === "removed").length;
+  const lines = snapshot
+    ? buildFileSnapshotDiffPreview(snapshot.before, snapshot.after)
+    : (gitFile ? [...gitFile.stagedHunks, ...gitFile.unstagedHunks].flatMap((hunk) => [
+        { kind: "context" as const, content: hunk.header, lineNumber: null, omitted: true },
+        ...hunk.lines.map((line) => ({
+          kind: line.kind === "added" || line.kind === "removed" ? line.kind : "context" as const,
+          content: line.content,
+          lineNumber: line.newLine ?? line.oldLine,
+          omitted: line.kind === "meta"
+        }))
+      ]) : []);
+  const additions = snapshot ? lines.filter((line) => line.kind === "added").length : gitFile?.additions ?? 0;
+  const deletions = snapshot ? lines.filter((line) => line.kind === "removed").length : gitFile?.deletions ?? 0;
   const width = Math.min(720, window.innerWidth - 32);
   const left = Math.max(16, Math.min(anchor.left, window.innerWidth - width - 16));
   const placeAbove = anchor.top > Math.min(440, window.innerHeight * 0.56);
@@ -310,7 +374,7 @@ function ProjectFileDiffPopover({
       onMouseLeave={onMouseLeave}
     >
       <header className="generated-file-diff-head">
-        <span title={node.path}>{node.path}</span>
+        <span title={node.path}>{node.path}{snapshot ? " · 任务快照" : " · Git Diff"}</span>
         <div><b>+{additions}</b><i>-{deletions}</i></div>
       </header>
       <div className="generated-file-diff-code">
@@ -322,7 +386,13 @@ function ProjectFileDiffPopover({
           </div>
         ))}
       </div>
-      {snapshot.beforeTruncated || snapshot.afterTruncated ? (
+      {!snapshot && gitFile?.binary ? (
+        <footer className="generated-file-diff-note">二进制文件不支持文本差异预览。</footer>
+      ) : null}
+      {!snapshot && gitFile && !gitFile.binary && lines.length === 0 ? (
+        <footer className="generated-file-diff-note">当前 Git 快照没有可显示的文本差异。</footer>
+      ) : null}
+      {snapshot && (snapshot.beforeTruncated || snapshot.afterTruncated) ? (
         <footer className="generated-file-diff-note">快照内容过长，仅显示已保存的部分。</footer>
       ) : null}
     </aside>,

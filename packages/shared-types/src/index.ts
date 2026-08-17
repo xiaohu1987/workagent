@@ -72,6 +72,11 @@ export type ProviderType =
   | "vllm"
   | "gateway";
 
+export type ProviderTemplate = "deepseek" | "openai_compatible" | "anthropic" | "gemini";
+export type ApiFormat = "auto" | "openai_responses" | "openai_chat" | "anthropic" | "gemini";
+export type OpenAiApiFormat = Extract<ApiFormat, "openai_responses" | "openai_chat">;
+export type CompatibilityProfile = "standard" | "deepseek";
+
 export interface ThreadRecord {
   id: string;
   title: string;
@@ -794,12 +799,17 @@ export interface ProviderDefinition {
   id: string;
   name?: string;
   type: ProviderType;
+  /** User-facing preset. It supplies defaults but never selects the runtime adapter by itself. */
+  providerTemplate?: ProviderTemplate;
+  /** The real upstream wire format and the sole runtime adapter selector. */
+  apiFormat?: ApiFormat;
+  /** Request-shape compatibility applied independently from the upstream format. */
+  compatibilityProfile?: CompatibilityProfile;
   /**
-   * Optional wire protocol override for providers that expose more than one
-   * API. Existing openai-compatible providers continue to use chat-completions.
+   * @deprecated Read only while migrating legacy configuration. Never use at runtime.
    */
   transport?: "chat-completions" | "responses" | "messages";
-  /** DeepSeek model dialect used by an OpenAI-compatible provider. */
+  /** @deprecated Read only while migrating legacy configuration. */
   deepseekProtocol?: "native" | "openai-compatible";
   baseUrl?: string;
   apiKeyEnv?: string;
@@ -832,6 +842,11 @@ export interface ModelProfile {
   agentCapability?: "unknown" | "verified" | "unsupported";
   agentCapabilityCheckedAt?: string;
   agentCapabilityReason?: string;
+  /** OpenAI-compatible formats that completed the connection and native tool roundtrip probe. */
+  verifiedApiFormats?: OpenAiApiFormat[];
+  /** Preferred format for this specific provider/model pair while apiFormat is auto. */
+  preferredApiFormat?: OpenAiApiFormat;
+  apiFormatCheckedAt?: string;
   supportsReasoningSummary: boolean;
   /** Provider-supported reasoning effort values. Omitted keeps the provider default. */
   supportedReasoningEfforts?: ReasoningEffort[];

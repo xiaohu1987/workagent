@@ -1,14 +1,145 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import type { MessageRecord, ToolCallRecord } from "@shared-types";
 import { collectFileChangesByTurn, getGeneratedFileDescription } from "../lib/conversation-utils";
 import type { ConversationTurnItem, FileChangeSummaryItem } from "../lib/conversation-utils";
-import { buildFileSnapshotDiffPreview, getFileSnapshotDiffMarker } from "../lib/project-files";
+import { buildFileSnapshotDiff, buildFileSnapshotDiffPreview, getFileSnapshotDiffMarker } from "../lib/project-files";
 import { IconChevronDown, IconFileChanges } from "../icons";
 import { getFileLeafName } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
 import { renderCodePreviewLine } from "../workspace/file-preview";
+
+export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] }) {
+  const [open, setOpen] = useState(false);
+  const [diffPreview, setDiffPreview] = useState<{ file: FileChangeSummaryItem; anchor: DOMRect } | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const hoverTimerRef = useRef<number | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
+  const diffPreviewPresence = useMotionPresence(diffPreview, 140);
+  const visibleDiffPreview = diffPreview ?? diffPreviewPresence.value;
+  const fileChanges = useMemo(
+    () => files.map((file) => ({ file, ...getFileChangeLineCounts(file) })),
+    [files]
+  );
+  const additions = fileChanges.reduce((total, file) => total + file.additions, 0);
+  const deletions = fileChanges.reduce((total, file) => total + file.deletions, 0);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setDiffPreview(null);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      setDiffPreview(null);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => () => {
+    if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+  }, []);
+
+  if (files.length === 0) return null;
+
+  const clearPreviewCloseTimer = () => {
+    if (closeTimerRef.current === null) return;
+    window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  };
+  const startDiffPreviewTimer = (file: FileChangeSummaryItem, anchor: DOMRect) => {
+    if (!file.snapshot) return;
+    clearPreviewCloseTimer();
+    if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = window.setTimeout(() => {
+      setDiffPreview({ file, anchor });
+      hoverTimerRef.current = null;
+    }, 3_000);
+  };
+  const scheduleDiffPreviewClose = () => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+    clearPreviewCloseTimer();
+    closeTimerRef.current = window.setTimeout(() => {
+      setDiffPreview(null);
+      closeTimerRef.current = null;
+    }, 140);
+  };
+
+  return (
+    <div ref={rootRef} className="composer-task-changes">
+      <button
+        type="button"
+        className="composer-task-changes-trigger"
+        aria-expanded={open}
+        title={`本次任务修改 ${files.length} 个文件，新增 ${additions} 行，删除 ${deletions} 行`}
+        onClick={() => {
+          setOpen((current) => !current);
+          setDiffPreview(null);
+        }}
+      >
+        <span className="composer-task-changes-icon" aria-hidden><IconFileChanges /></span>
+        <span className="composer-task-changes-label">{files.length} 个文件已更改</span>
+        <span className="is-added">+{additions}</span>
+        <span className="is-removed">-{deletions}</span>
+      </button>
+      {open ? (
+        <section className="composer-task-changes-popover" aria-label="本次任务修改的文件">
+          <div className="composer-task-changes-list">
+            {fileChanges.map(({ file, additions: fileAdditions, deletions: fileDeletions }) => (
+              <div
+                key={file.path}
+                className={`composer-task-change-file ${file.snapshot ? "has-diff-preview" : ""}`}
+                title={file.snapshot ? `${file.path}；停留 3 秒查看 Diff 快照` : file.path}
+                onMouseEnter={(event) => startDiffPreviewTimer(file, event.currentTarget.getBoundingClientRect())}
+                onMouseLeave={scheduleDiffPreviewClose}
+              >
+                <span>{getFileLeafName(file.path)}</span>
+                <div>
+                  <b>+{fileAdditions}</b>
+                  <i>-{fileDeletions}</i>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+      {visibleDiffPreview?.file.snapshot ? (
+        <FileSnapshotDiffPopover
+          file={visibleDiffPreview.file}
+          anchor={visibleDiffPreview.anchor}
+          motionPhase={diffPreviewPresence.phase}
+          onMouseEnter={clearPreviewCloseTimer}
+          onMouseLeave={scheduleDiffPreviewClose}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+export function getFileChangeLineCounts(file: FileChangeSummaryItem): { additions: number; deletions: number } {
+  if (!file.snapshot || file.snapshot.beforeTruncated || file.snapshot.afterTruncated) {
+    return { additions: file.additions, deletions: file.deletions };
+  }
+  const lines = buildFileSnapshotDiff(file.snapshot.before, file.snapshot.after);
+  return {
+    additions: lines.filter((line) => line.kind === "added").length,
+    deletions: lines.filter((line) => line.kind === "removed").length
+  };
+}
 
 export function FileChangeSummary({
   files,

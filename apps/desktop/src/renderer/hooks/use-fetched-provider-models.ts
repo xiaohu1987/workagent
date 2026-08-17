@@ -21,7 +21,6 @@ export function useFetchedProviderModels({
   showNotice
 }: Options) {
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
-  const [selectedFetchedModelIds, setSelectedFetchedModelIds] = useState<string[]>([]);
   const [showFetchedModels, setShowFetchedModels] = useState(false);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
@@ -51,7 +50,6 @@ export function useFetchedProviderModels({
         id: provider.id
       });
       setFetchedModels(list);
-      setSelectedFetchedModelIds([]);
       setShowFetchedModels(true);
     } catch (error) {
       showNotice("获取模型失败。", { message: error instanceof Error ? error.message : String(error) });
@@ -60,15 +58,10 @@ export function useFetchedProviderModels({
     }
   }
 
-  function toggleFetchedModelSelection(modelId: string) {
-    setSelectedFetchedModelIds((current) => current.includes(modelId)
-      ? current.filter((id) => id !== modelId)
-      : [...current, modelId]);
-  }
-
-  function applyFetchedModels() {
+  function applyFetchedModels(selectedModelIds: string[]) {
     if (!configDraft || !settingsProvider) return;
-    const candidates = fetchedModels.filter((entry) => selectedFetchedModelIds.includes(entry.id));
+    const selected = new Set(selectedModelIds);
+    const candidates = fetchedModels.filter((entry) => selected.has(entry.id));
     if (candidates.length === 0) {
       showNotice("没有勾选要添加的模型。");
       return;
@@ -94,7 +87,6 @@ export function useFetchedProviderModels({
     }
     setConfigDraft(normalizeDraftConfig(nextDraft));
     setShowFetchedModels(false);
-    setSelectedFetchedModelIds([]);
     setFetchedModels([]);
     showNotice(
       added > 0 ? `已添加 ${added} 个模型。` : "没有新增模型。",
@@ -104,13 +96,10 @@ export function useFetchedProviderModels({
 
   return {
     fetchedModels,
-    selectedFetchedModelIds,
-    setSelectedFetchedModelIds,
     showFetchedModels,
     setShowFetchedModels,
     isFetchingModels,
     fetchAndShowProviderModels,
-    toggleFetchedModelSelection,
     applyFetchedModels
   };
 }
