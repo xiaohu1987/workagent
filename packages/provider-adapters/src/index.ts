@@ -3393,6 +3393,7 @@ export function stripTaggedToolCalls(text: string): string {
     .replace(/<tool_result\b[^>]*>[\s\S]*$/i, "")
     .replace(/<\/tool_(?:calls|result)\s*>/gi, "")
     .replace(/<\/function_calls\s*>/gi, "")
+    .replace(/<\/(?:invoke|parameter)\s*>/gi, "")
     .replace(/\n{3,}/g, "\n\n");
   return stripPartialToolTagPrefix(visible);
 }
@@ -3404,9 +3405,19 @@ function stripPartialToolTagPrefix(text: string): string {
   }
 
   const trailing = text.slice(tagStart).toLowerCase();
-  return "<tool_calls".startsWith(trailing) ||
-    "<function_calls".startsWith(trailing) ||
-    "<tool_result".startsWith(trailing)
+  const controlTagPrefixes = [
+    "<tool_calls",
+    "<function_calls",
+    "<tool_result",
+    "<invoke",
+    "<parameter",
+    "</tool_calls",
+    "</function_calls",
+    "</tool_result",
+    "</invoke",
+    "</parameter"
+  ];
+  return controlTagPrefixes.some((prefix) => prefix.startsWith(trailing))
     ? text.slice(0, tagStart)
     : text;
 }

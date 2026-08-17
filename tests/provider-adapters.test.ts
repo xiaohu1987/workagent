@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -91,6 +91,35 @@ describe("native tool names", () => {
     expect(mocks.chatCreate.mock.calls[0]?.[0]).not.toHaveProperty("tools");
     expect(mocks.chatCreate.mock.calls[0]?.[0]).toMatchObject({ response_format: { type: "json_object" } });
     expect(decision.toolCalls).toMatchObject([{ name: "fs.read_directory", arguments: { path: "." } }]);
+  });
+});
+
+describe("DSML visible-text cleanup", () => {
+  it("removes orphan invoke and parameter closing tags", () => {
+    const visible = stripTaggedToolCalls([
+      "文件内容",
+      "</｜DSML｜parameter>",
+      "</｜DSML｜invoke>"
+    ].join("\n"));
+
+    expect(visible.trim()).toBe("文件内容");
+    expect(visible).not.toMatch(/DSML|<\/?(?:invoke|parameter)/i);
+  });
+
+  it("suppresses a trailing partial DSML control tag during streaming", () => {
+    expect(stripTaggedToolCalls("文件内容\n</｜DSML｜inv")).toBe("文件内容\n");
+    expect(stripTaggedToolCalls("文件内容\n<｜DSML｜param")).toBe("文件内容\n");
+  });
+
+  it("keeps orphan DSML closers out of DeepSeek visible stream text", () => {
+    const compat = resolveModelCompat({ id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash" });
+    const visible = compat.extractVisibleStreamText([
+      "fs.read_file File src/app.ts",
+      "</｜DSML｜parameter>",
+      "</｜DSML｜invoke>"
+    ].join("\n"));
+
+    expect(visible.trim()).toBe("fs.read_file File src/app.ts");
   });
 });
 
