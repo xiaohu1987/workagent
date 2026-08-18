@@ -43,7 +43,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, prepareGrokAvailableTools, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -1036,6 +1036,82 @@ describe("OpenAiCompatibleProvider", () => {
     const messages = request.messages as Array<Record<string, unknown>>;
     expect(messages.map((message) => message.role)).toEqual(["system", "assistant", "user", "assistant"]);
     expect(messages[1].content).toBe("first progress\n\nsecond progress\n\nthird progress");
+  });
+
+  it("presents Grok-native file tool names and maps read_file back to the runtime", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{
+        message: {
+          content: "",
+          tool_calls: [{
+            id: "grok-read-1",
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ target_file: "src/App.tsx", offset: 10, limit: 20 }) }
+          }]
+        },
+        finish_reason: "tool_calls"
+      }]
+    });
+    const provider: ProviderDefinition = { id: "xai", type: "openai-compatible", apiKey: "secret", apiFormat: "openai_chat" };
+    const model: ModelProfile = {
+      id: "grok-4.6-latest",
+      providerId: provider.id,
+      displayName: "Grok 4.6",
+      contextWindow: 128_000,
+      supportsStreaming: false,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    };
+    const tool = (name: string) => ({
+      name,
+      description: name,
+      inputSchema: { type: "object", properties: {}, required: [] },
+      riskLevel: "low" as const
+    });
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Use tools.",
+      transcript: [{ role: "user", content: "读取文件" }],
+      availableTools: [tool("fs.read_file"), tool("fs.read_directory"), tool("code.search"), tool("search_replace"), tool("shell.exec"), tool("apply_patch"), tool("fs.write_file")],
+      model,
+      provider
+    });
+
+    const request = mocks.chatCreate.mock.calls.at(-1)?.[0];
+    expect(request.tools.map((entry: any) => entry.function.name)).toEqual(["read_file", "list_dir", "grep", "search_replace", "bash"]);
+    expect(request.tools[0].function.parameters.required).toEqual(["target_file"]);
+    expect(decision.toolCalls).toEqual([{
+      id: "grok-read-1",
+      name: "fs.read_file",
+      arguments: { path: "src/App.tsx", offset: 10, limit: 20 }
+    }]);
+  });
+
+  it("repairs Grok's same-path copy mistake into a file read", () => {
+    const model = { id: "grok-4.6-latest", displayName: "Grok 4.6" } as ModelProfile;
+    const input = {
+      availableTools: [{ name: "fs.read_file" }],
+      transcript: []
+    } as unknown as ProviderTurnInput;
+    const normalized = resolveModelCompat(model).normalizeDecision({
+      toolCalls: [{
+        id: "copy-1",
+        name: "fs.copy",
+        arguments: { from: "E:\\repo\\vue.config.js", to: "E:\\repo\\vue.config.js" }
+      }],
+      endTurn: false,
+      goalCompleted: false,
+      isStructured: true
+    }, { model, input });
+
+    expect(normalized.toolCalls).toEqual([{
+      id: "copy-1",
+      name: "fs.read_file",
+      arguments: { path: "E:\\repo\\vue.config.js" }
+    }]);
   });
 
   it("sends DeepSeek only complete contiguous tool-call pairs", async () => {
@@ -4485,6 +4561,45 @@ describe("decision system prompt", () => {
     expect(prompt).toContain("Do not expose tool names, Skill IDs, internal hashes, raw commands, file paths, call counts");
     expect(prompt).toContain("choose the format that makes the information easiest to scan");
     expect(prompt).toContain("Do not force information into a table");
+    expect(prompt).not.toContain("Grok apply_patch compatibility");
+  });
+
+  it("directs Grok models to exact search_replace edits", () => {
+    const prompt = buildDecisionSystemPrompt({
+      id: "grok-4-0709",
+      providerId: "xai",
+      displayName: "Grok 4",
+      contextWindow: 128_000,
+      supportsStreaming: true,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: true,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false
+    });
+
+    expect(prompt).toContain("For every file creation or content edit, use search_replace");
+    expect(prompt).toContain("{file_path, old_string, new_string, replace_all?}");
+    expect(prompt).toContain("Number prefixes such as 448|");
+    expect(prompt).toContain("must never appear in old_string or new_string");
+    expect(prompt).toContain("use read_file with {target_file, offset?, limit?}");
+    expect(prompt).toContain("Use list_dir with {target_directory}");
+    expect(prompt).toContain("Use grep with {pattern, path?}");
+    expect(prompt).toContain("call list_dir with { target_directory: \".\" }");
+    expect(prompt).not.toContain("call fs.read_directory");
+    expect(prompt).toContain("old_string set to an empty string");
+    expect(prompt).toContain("desired target state already exists");
+    expect(prompt).toContain("never resend stale arguments unchanged");
+    expect(prompt).not.toContain("Grok apply_patch compatibility");
+  });
+
+  it("exposes search_replace instead of patch and full-file writes to Grok", () => {
+    const tools = ["fs.read_file", "apply_patch", "fs.write_file", "search_replace"].map((name) => ({ name })) as ProviderTurnInput["availableTools"];
+    const grok = prepareGrokAvailableTools({ id: "grok-4", displayName: "Grok 4" }, tools);
+    const other = prepareGrokAvailableTools({ id: "gpt-5", displayName: "GPT-5" }, tools);
+
+    expect(grok.map((tool) => tool.name)).toEqual(["fs.read_file", "search_replace"]);
+    expect(other).toBe(tools);
   });
 });
 

@@ -331,7 +331,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
     try {
       if (nextImages.length === 0) {
         await window.codexh.clearApplicationBackground();
-        updateSettings({ fileName: null });
+        updateSettings({ mode: "none", enabled: false, fileName: null });
       } else {
         await window.codexh.saveApplicationBackgrounds({
           items: nextImages.map(({ id: imageId, bytes, mimeType, fileName }) => ({ id: imageId, bytes, mimeType, fileName })),
@@ -379,7 +379,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
       }
       imagesRef.current = [];
       setImages([]);
-      updateSettings({ fileName: null });
+      updateSettings({ mode: "none", enabled: false, fileName: null });
       showNotice("应用背景已清除", { tone: "success" });
     } catch (error) {
       showNotice("清除背景失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });

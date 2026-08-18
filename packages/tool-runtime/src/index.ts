@@ -250,6 +250,7 @@ const TOOL_ALIASES: Record<string, string> = {
   read_directory: "fs.read_directory",
   list_directory: "fs.read_directory",
   write_file: "fs.write_file",
+  search_replace: "search_replace",
   applypatch: "apply_patch",
   execute_command: "shell.exec",
   image_gen: "image.generate",
@@ -269,7 +270,7 @@ const TOOL_ALIASES: Record<string, string> = {
 };
 
 const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
-  "apply_patch", "fs.write_file", "fs.mkdir", "fs.rename", "fs.delete", "fs.copy", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
+  "apply_patch", "fs.write_file", "search_replace", "fs.mkdir", "fs.rename", "fs.delete", "fs.copy", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
   "skills.install", "plugins.install", "mcp.install",
   "image.generate", "video.generate",
   "knowledge.add", "todo.write",
@@ -658,6 +659,96 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
 
   runtime.register(
     {
+      name: "search_replace",
+      description: "Replace an exact string in one UTF-8 file. The old_string must match exactly once by default; use replace_all only intentionally. Pass an empty old_string only to create a missing file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          file_path: { type: "string" },
+          old_string: { type: "string" },
+          new_string: { type: "string" },
+          replace_all: { type: "boolean" }
+        },
+        required: ["file_path", "old_string", "new_string"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      const requestedPath = String(args.file_path ?? "");
+      const filePath = resolveFromCwd(ctx.cwd, requestedPath);
+      const oldString = String(args.old_string ?? "");
+      const newString = String(args.new_string ?? "");
+      const replaceAll = args.replace_all === true;
+      let before: string | null = null;
+      try {
+        before = await ctx.readFile(filePath);
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+        if (oldString !== "" || (code && code !== "ENOENT")) {
+          return { ok: false, content: `search_replace could not read ${requestedPath}: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      }
+
+      const current = before ?? "";
+      if (oldString === "" && before !== null && current.length > 0) {
+        return { ok: false, content: "search_replace refuses an empty old_string for a non-empty file. Read the file and provide an exact old_string." };
+      }
+
+      const normalize = (value: string) => value.replace(/\r\n/g, "\n");
+      const normalizedCurrent = normalize(current);
+      const normalizedOld = normalize(oldString);
+      const normalizedNew = normalize(newString);
+      const matches = normalizedOld === ""
+        ? 1
+        : [...normalizedCurrent.matchAll(new RegExp(escapeRegExp(normalizedOld), "g"))].length;
+      if (matches === 0) {
+        const desiredMatches = normalizedNew === ""
+          ? 0
+          : [...normalizedCurrent.matchAll(new RegExp(escapeRegExp(normalizedNew), "g"))].length;
+        if (desiredMatches === 1) {
+          const relativePath = path.relative(ctx.cwd, filePath).split(path.sep).join("/");
+          return {
+            ok: true,
+            content: `search_replace target state was already present in ${relativePath}; no file changes were necessary.`,
+            json: { path: filePath, file_path: filePath, replacements: 0, alreadyApplied: true, snapshots: [createTextSnapshot(relativePath, current, current)] }
+          };
+        }
+        return { ok: false, content: `search_replace old_string was not found in ${requestedPath}. Re-read the file and copy the exact current text, excluding line-number prefixes.` };
+      }
+      if (!replaceAll && matches > 1) {
+        return { ok: false, content: `search_replace old_string matched ${matches} locations in ${requestedPath}. Include more surrounding context or set replace_all=true intentionally.` };
+      }
+
+      const expectedVersion = ctx.expectedFileVersions?.get(filePath) ?? ctx.expectedFileVersions?.get(requestedPath);
+      if (expectedVersion && sha256(current) !== expectedVersion) {
+        return { ok: false, content: `search_replace stopped because ${requestedPath} changed since it was read. Re-read the file before retrying.` };
+      }
+      const lineEnding = current.includes("\r\n") ? "\r\n" : "\n";
+      const replaced = normalizedOld === ""
+        ? normalizedNew
+        : replaceAll
+          ? normalizedCurrent.split(normalizedOld).join(normalizedNew)
+          : normalizedCurrent.replace(normalizedOld, normalizedNew);
+      const after = lineEnding === "\r\n" ? replaced.replace(/\n/g, "\r\n") : replaced;
+      const approved = await ctx.requestApproval({
+        title: "精确替换文件内容",
+        description: filePath,
+        riskLevel: "medium",
+        payload: { path: filePath, replacements: replaceAll ? matches : 1 }
+      });
+      if (!approved) return { ok: false, content: "search_replace 写入被拒绝。" };
+      await ctx.writeFile(filePath, after);
+      const relativePath = path.relative(ctx.cwd, filePath).split(path.sep).join("/");
+      return {
+        ok: true,
+        content: `search_replace wrote ${relativePath} (${replaceAll ? matches : 1} replacement${(replaceAll ? matches : 1) === 1 ? "" : "s"}).`,
+        json: { path: filePath, file_path: filePath, replacements: replaceAll ? matches : 1, snapshots: [createTextSnapshot(relativePath, current, after)] }
+      };
+    }
+  );
+
+  runtime.register(
+    {
       name: "fs.mkdir",
       description: "Create a directory (and parents) inside the project workspace.",
       inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
@@ -733,7 +824,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     {
       name: "fs.copy",
-      description: "Copy a file or directory inside the project workspace.",
+      description: "Copy a file or directory to a distinct destination inside the project workspace. The from and to paths must differ. Use fs.read_file or fs.read_directory to inspect content; copying is never needed for inspection.",
       inputSchema: {
         type: "object",
         properties: { from: { type: "string" }, to: { type: "string" } },
@@ -744,6 +835,13 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     async (args, ctx) => {
       const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""));
       const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""));
+      if (workspacePathsMatch(from, to)) {
+        return {
+          ok: true,
+          content: `Copy skipped because source and destination resolve to the same path: ${from}`,
+          json: { from, to, skipped: true, reason: "same_path" }
+        };
+      }
       const approved = await ctx.requestApproval({
         title: "复制文件",
         description: `${from} → ${to}`,
@@ -770,9 +868,23 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("code.search", "Search the current workspace for a keyword.", ["pattern"], "low"),
+    {
+      name: "code.search",
+      description: "Search the current workspace, or an optional file/directory path, for a regular expression.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          pattern: { type: "string" },
+          path: { type: "string", description: "Optional workspace-relative file or directory to search." }
+        },
+        required: ["pattern"]
+      },
+      riskLevel: "low",
+      parallelSafe: true
+    },
     async (args, ctx) => {
-      const command = buildCodeSearchCommand(String(args.pattern ?? ""), ctx.cwd);
+      const searchRoot = resolveFromCwd(ctx.cwd, typeof args.path === "string" ? args.path : ".");
+      const command = buildCodeSearchCommand(String(args.pattern ?? ""), searchRoot);
       const terminal = await runShell(command, ctx);
       const outputLines = terminal.output.replace(/\r\n/g, "\n").split("\n");
       const output = outputLines.length > MAX_CODE_SEARCH_RESULT_LINES
@@ -832,8 +944,8 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     spec(
       "shell.exec",
       process.platform === "win32"
-        ? "Run a command inside the current workspace. Windows uses PowerShell; recognized CMD syntax is adapted automatically. Use apply_patch for all file edits, never shell redirection or shell write commands."
-        : "Run a shell command inside the current workspace. Use apply_patch for all file edits, never shell redirection or shell write commands.",
+        ? "Run a command inside the current workspace. Windows uses PowerShell; recognized CMD syntax is adapted automatically. Use the provided managed file-edit tool for all file edits, never shell redirection or shell write commands."
+        : "Run a shell command inside the current workspace. Use the provided managed file-edit tool for all file edits, never shell redirection or shell write commands.",
       ["command"],
       "high"
     ),
@@ -918,8 +1030,13 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           )
         )
         .slice(0, 40);
+      const alreadyApplied = result.changes.length > 0 &&
+        result.changes.every((change) => change.action === "update" && change.additions === 0 && change.deletions === 0) &&
+        result.snapshots.every((snapshot) => snapshot.before === snapshot.after);
       const content = [
-        "Patch committed atomically.",
+        alreadyApplied
+          ? "Patch target state was already present; no file changes were necessary."
+          : "Patch committed atomically.",
         result.touched.join("\n"),
         symbolLines.length > 0 ? `Entity changes:\n${symbolLines.join("\n")}` : ""
       ]
@@ -2670,7 +2787,7 @@ function createTextSnapshot(path: string, before: string, after: string) {
 }
 
 export function buildApplyPatchFailureMessage(reason: string): string {
-  if (/Patch hunk contains no edits/i.test(reason)) {
+  if (/Patch hunk contains no (?:edits|additions or removals)/i.test(reason)) {
     return [
       "Patch was not applied because the update did not contain explicit additions or removals and could not be inferred safely.",
       `Details: ${reason}`,
@@ -3040,6 +3157,18 @@ function isSafeVerificationCommand(command: string): boolean {
 
 function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function workspacePathsMatch(left: string, right: string): boolean {
+  const normalizedLeft = path.normalize(left);
+  const normalizedRight = path.normalize(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function escapePosixShell(value: string): string {

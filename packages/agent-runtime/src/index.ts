@@ -39,7 +39,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, isGrokModel, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
@@ -273,6 +273,7 @@ export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 10;
 // itself must never create an unbounded completion loop.
 export const MAX_STANDARD_COMPLETION_RECOVERIES = 5;
 export const MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES = 1;
+export const MAX_STANDARD_COMPLETION_AUDIT_NO_PROGRESS_RECOVERIES = 3;
 export const STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS = 2;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 30_000;
 export const CONTEXT_COMPACTION_THRESHOLD = 0.75;
@@ -680,6 +681,7 @@ export interface SuccessfulToolEvidence {
   toolName: string;
   kinds: CompletionEvidenceKind[];
   unitTestPassed?: boolean;
+  unitTestUnavailable?: boolean;
   verifiedPaths?: string[];
   resultPreview?: string;
 }
@@ -701,6 +703,7 @@ export interface ActCompletionValidationResult {
   missingDelivery: boolean;
   missingVerification: boolean;
   missingUnitTest: boolean;
+  missingUnitTestDisclosure?: boolean;
   missingTestReport: boolean;
   missingBrowserVerification?: string[];
 }
@@ -728,13 +731,14 @@ export interface StandardCompletionValidationResult {
   missingDelivery: boolean;
   missingVerification: boolean;
   missingUnitTest: boolean;
+  missingUnitTestDisclosure?: boolean;
   missingTestReport: boolean;
   missingRequestedDeliverable: boolean;
 }
 
 export interface ManagedWriteRecoveryState {
   phase: "none" | "read" | "directory" | "write";
-  failedToolName?: "apply_patch" | "fs.write_file";
+  failedToolName?: "apply_patch" | "fs.write_file" | "search_replace";
   targetPaths: string[];
 }
 
@@ -2043,6 +2047,9 @@ class ThreadSessionRuntime {
       let managedWriteCompletionAttempts = 0;
       let standardCompletionAttempts = 0;
       let standardCompletionAuditAttempts = 0;
+      let standardCompletionAuditEvidenceBaseline: number | null = null;
+      let standardCompletionAuditNoProgressAttempts = 0;
+      let standardCompletionAuditRecoveryGaps: string[] = [];
       let modelAwaitReason: "turn_start" | "after_tools" | "recovery" = "turn_start";
       let draftSequence = 0;
       let useTextToolProtocol = false;
@@ -2100,17 +2107,25 @@ class ThreadSessionRuntime {
         );
       }
 
-      const requestAgentProtocolContinuation = async (reason: string, source: "runtime" | "model") => {
+      const requestAgentProtocolContinuation = async (
+        reason: string,
+        source: "runtime" | "model",
+        continuationDirective = ""
+      ) => {
         if (protocolRecoveryBatch >= MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES) {
           throw new Error(
             `Agent decision protocol failed after ${MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES + 1} batches: ${reason}`
           );
         }
         const nextBatch = protocolRecoveryBatch + 1;
+        const cleanDisplayContent = displayContent?.trim() || initialInput;
+        const queuedContent = continuationDirective.trim()
+          ? buildAgentProtocolContinuationInput(cleanDisplayContent, continuationDirective)
+          : initialInput;
         await this.services.persistence.enqueueQueuedMessage({
           threadId: this.threadId,
-          content: initialInput,
-          displayContent: initialInput,
+          content: queuedContent,
+          displayContent: cleanDisplayContent,
           attachments,
           mediaIntent: null,
           internalKind: "agent_protocol_recovery",
@@ -3935,20 +3950,17 @@ class ThreadSessionRuntime {
             });
           }
         }
-        if (
-          this.#gpa.stage !== "off" &&
-          this.#gpa.stage !== "act" &&
-          decision.toolCalls.length === 0 &&
-          decision.endTurn &&
-          assistantMessage &&
-          isProgressOnlyAssistantMessage(assistantMessage)
-        ) {
+        if (shouldRejectProgressOnlyCompletion({
+          assistantMessage,
+          toolCallCount: decision.toolCalls.length,
+          endTurn: decision.endTurn
+        })) {
           progressOnlyCompletionAttempts += 1;
           await this.services.log("turn.progress_completion_rejected", this.threadId, {
             turnRunId: turn.id,
             attempt: progressOnlyCompletionAttempts,
             maxAttempts: MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES,
-            messagePreview: assistantMessage.slice(0, 500)
+            messagePreview: (assistantMessage ?? "").slice(0, 500)
           });
           if (progressOnlyCompletionAttempts >= MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES) {
             throw new Error(
@@ -4091,6 +4103,7 @@ class ThreadSessionRuntime {
               missingDelivery: standardCompletion.missingDelivery,
               missingVerification: standardCompletion.missingVerification,
               missingUnitTest: standardCompletion.missingUnitTest,
+              missingUnitTestDisclosure: standardCompletion.missingUnitTestDisclosure,
               missingTestReport: standardCompletion.missingTestReport,
               missingRequestedDeliverable: standardCompletion.missingRequestedDeliverable
             });
@@ -4124,23 +4137,9 @@ class ThreadSessionRuntime {
               continue;
             }
             if (standardCompletionAttempts >= MAX_STANDARD_COMPLETION_RECOVERIES) {
-              if (requiresUnitTest && standardCompletion.missingUnitTest) {
-                repeatedTaskFailure = {
-                  taskKey: "project-code-unit-test",
-                  attempts: standardCompletionAttempts,
-                  lastError: standardCompletion.reasons.join(" ")
-                };
-                await this.services.log("turn.project_code_unit_test_required", this.threadId, {
-                  turnRunId: turn.id,
-                  attempt: standardCompletionAttempts,
-                  reasons: standardCompletion.reasons
-                });
-                await settleDraft({ discarded: true });
-                break;
-              }
               // The user can already see the candidate in the draft. Do not
-              // turn an advisory evidence gap into an invisible failure after
-              // the finite recovery budget has been spent.
+              // report a completion-evidence gap as repeated executable
+              // failures after the finite recovery budget has been spent.
               bypassStandardCompletionAudit = true;
               decision.goalCompleted = true;
               await this.services.log("turn.standard_completion_accepted_without_evidence", this.threadId, {
@@ -4163,6 +4162,62 @@ class ThreadSessionRuntime {
             }
           }
 
+          if (
+            !bypassStandardCompletionAudit &&
+            standardCompletionAuditEvidenceBaseline !== null
+          ) {
+            const freshAuditEvidence = hasFreshStandardCompletionAuditEvidence({
+              baseline: standardCompletionAuditEvidenceBaseline,
+              successfulEvidence: successfulToolEvidence
+            });
+            if (!freshAuditEvidence) {
+              standardCompletionAuditNoProgressAttempts += 1;
+              useTextToolProtocol = true;
+              this.#useFunctionCallCompatibilityTranscript = true;
+              await this.services.log("turn.standard_completion_audit_recovery_without_progress", this.threadId, {
+                turnRunId: turn.id,
+                attempt: standardCompletionAuditNoProgressAttempts,
+                maxAttempts: MAX_STANDARD_COMPLETION_AUDIT_NO_PROGRESS_RECOVERIES,
+                evidenceBaseline: standardCompletionAuditEvidenceBaseline,
+                gaps: standardCompletionAuditRecoveryGaps
+              });
+              if (standardCompletionAuditNoProgressAttempts >= MAX_STANDARD_COMPLETION_AUDIT_NO_PROGRESS_RECOVERIES) {
+                await requestAgentProtocolContinuation(
+                  "Completion-audit recovery produced no fresh successful evidence.",
+                  "runtime",
+                  buildStandardCompletionAuditRecoveryInstruction(
+                    standardCompletionAuditRecoveryGaps,
+                    { requireFreshEvidence: true }
+                  )
+                );
+              }
+              await this.services.emit({
+                type: "agent.retrying",
+                threadId: this.threadId,
+                payload: {
+                  attempt: standardCompletionAuditNoProgressAttempts,
+                  maxAttempts: MAX_STANDARD_COMPLETION_AUDIT_NO_PROGRESS_RECOVERIES,
+                  reason: "completion_audit_missing_fresh_evidence"
+                },
+                createdAt: new Date().toISOString()
+              });
+              transcript.push({
+                role: "user",
+                content: buildStandardCompletionAuditRecoveryInstruction(
+                  standardCompletionAuditRecoveryGaps,
+                  { requireFreshEvidence: true }
+                )
+              });
+              await retryDraft();
+              decision.assistantMessage = undefined;
+              decision.endTurn = false;
+              decision.goalCompleted = false;
+              continue;
+            }
+            standardCompletionAuditEvidenceBaseline = null;
+            standardCompletionAuditNoProgressAttempts = 0;
+          }
+
           if (bypassStandardCompletionAudit) {
             await this.services.log("turn.standard_completion_audit_bypassed", this.threadId, {
               turnRunId: turn.id,
@@ -4180,26 +4235,29 @@ class ThreadSessionRuntime {
           });
           await updateDraft("auditing", assistantMessage ?? streamedVisibleContent);
 
-          let auditDecision: ProviderTurnDecision | null = null;
-          try {
+          const auditInstruction = buildStandardCompletionAuditInstruction({
+            originalRequest: effectiveRequest,
+            candidateSummary: assistantMessage ?? "",
+            deliveredPaths,
+            successfulEvidence: successfulToolEvidence,
+            artifactEvidence: latestRequestedArtifactEvidence
+          });
+          const auditDecisions: ProviderTurnDecision[] = [];
+          const runAuditDiagnosis = async (input: {
+            phase: "phase_1_diagnosis" | "phase_3_consistency" | "phase_4_gold";
+            auditAdapter: typeof adapter;
+            auditModel: ModelProfile;
+            auditProvider: ProviderDefinition;
+          }): Promise<StandardCompletionAuditDiagnosis> => {
             const auditAbortController = createChildAbortController(abortController.signal);
-            auditDecision = await waitForAbortOrTimeout(
-              adapter.runTurn({
-                systemPrompt: buildStandardCompletionAuditSystemPrompt(model),
-                transcript: [{
-                  role: "user",
-                  content: buildStandardCompletionAuditInstruction({
-                    originalRequest: effectiveRequest,
-                    candidateSummary: assistantMessage ?? "",
-                    deliveredPaths,
-                    successfulEvidence: successfulToolEvidence,
-                    artifactEvidence: latestRequestedArtifactEvidence
-                  })
-                }],
+            const auditDecision = await waitForAbortOrTimeout(
+              input.auditAdapter.runTurn({
+                systemPrompt: buildStandardCompletionAuditSystemPrompt(input.auditModel),
+                transcript: [{ role: "user", content: auditInstruction }],
                 availableTools: [],
-                model,
-                provider,
-                reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
+                model: input.auditModel,
+                provider: input.auditProvider,
+                reasoningEffort: resolveModelReasoningEffort(input.auditModel, this.services.config.reasoningEffort),
                 stream: false,
                 abortSignal: auditAbortController.signal
               }),
@@ -4207,13 +4265,105 @@ class ThreadSessionRuntime {
               RECOVERY_MODEL_DECISION_TIMEOUT_MS,
               () => auditAbortController.abort()
             );
-          } catch (error) {
-            if (abortController.signal.aborted) {
-              throw error;
+            auditDecisions.push(auditDecision);
+            const diagnosis = resolveStandardCompletionAuditDiagnosis(auditDecision);
+            await this.services.log("turn.standard_completion_audit_phase_completed", this.threadId, {
+              turnRunId: turn.id,
+              phase: input.phase,
+              modelId: input.auditModel.id,
+              temperature: input.auditModel.defaultTemperature,
+              score: diagnosis.overall_score,
+              canStop: diagnosis.can_stop,
+              symptomCount: diagnosis.symptoms.length
+            });
+            return diagnosis;
+          };
+
+          let auditResult: StandardCompletionAuditPipelineResult | null = null;
+          try {
+            const firstDiagnosis = await runAuditDiagnosis({
+              phase: "phase_1_diagnosis",
+              auditAdapter: adapter,
+              auditModel: createStandardCompletionAuditModel(model, "diagnosis"),
+              auditProvider: provider
+            });
+            const firstRepairs = selectStandardCompletionAuditRepairs(firstDiagnosis);
+            if (!firstDiagnosis.can_stop || firstRepairs.length > 0) {
+              auditResult = resolveStandardCompletionAuditPipeline({ first: firstDiagnosis });
+            } else {
+              let secondDiagnosis: StandardCompletionAuditDiagnosis;
+              try {
+                secondDiagnosis = await runAuditDiagnosis({
+                  phase: "phase_3_consistency",
+                  auditAdapter: adapter,
+                  auditModel: createStandardCompletionAuditModel(model, "consistency"),
+                  auditProvider: provider
+                });
+              } catch (error) {
+                if (abortController.signal.aborted) throw error;
+                secondDiagnosis = {
+                  symptoms: [{
+                    level: "high",
+                    description: `Phase 3 second validation was unavailable: ${error instanceof Error ? error.message : String(error)}`,
+                    suggested_fix: "Run the fixed temperature-0 gold validation."
+                  }],
+                  overall_score: 0,
+                  can_stop: false
+                };
+              }
+              const phase3Result = resolveStandardCompletionAuditPipeline({
+                first: firstDiagnosis,
+                second: secondDiagnosis
+              });
+              if (phase3Result.accepted) {
+                auditResult = phase3Result;
+              } else {
+                let goldModel = model;
+                let goldProvider = provider;
+                try {
+                  goldModel = resolveModel(
+                    this.services.config,
+                    this.services.config.defaultModel,
+                    this.services.config.defaultProvider
+                  );
+                  goldProvider = resolveProvider(this.services.config, goldModel.providerId);
+                } catch {
+                  goldModel = model;
+                  goldProvider = provider;
+                }
+                try {
+                  const goldDiagnosis = await runAuditDiagnosis({
+                    phase: "phase_4_gold",
+                    auditAdapter: this.services.providerFactory.create(goldProvider),
+                    auditModel: createStandardCompletionAuditModel(goldModel, "gold"),
+                    auditProvider: goldProvider
+                  });
+                  auditResult = resolveStandardCompletionAuditPipeline({
+                    first: firstDiagnosis,
+                    second: secondDiagnosis,
+                    gold: goldDiagnosis
+                  });
+                } catch (error) {
+                  if (abortController.signal.aborted) throw error;
+                  auditResult = {
+                    ...phase3Result,
+                    accepted: false,
+                    phase: "phase_4_gold",
+                    gaps: [
+                      ...phase3Result.gaps,
+                      `Phase 4 temperature-0 gold validation was unavailable: ${error instanceof Error ? error.message : String(error)}`
+                    ],
+                    goldValidated: false
+                  };
+                }
+              }
             }
+          } catch (error) {
+            if (abortController.signal.aborted) throw error;
             const reason = error instanceof Error ? error.message : String(error);
             await this.services.log("turn.standard_completion_audit_unavailable", this.threadId, {
               turnRunId: turn.id,
+              phase: "phase_1_diagnosis",
               reason
             });
             await this.services.log("turn.standard_completion_audit_bypassed", this.threadId, {
@@ -4221,35 +4371,29 @@ class ThreadSessionRuntime {
               reason: "audit_unavailable",
               detail: reason
             });
-            const disposition = resolveStandardCompletionAuditDisposition({
-              outcome: "unavailable",
-              attempt: standardCompletionAttempts + 1
-            });
-            if (disposition !== "accept_candidate") {
-              await retryDraft();
-            }
           }
 
-          if (auditDecision) {
-            const auditUsage = auditDecision.usage ?? (typeof auditDecision.outputTokens === "number"
-              ? finalizeTokenUsage({ outputTokens: auditDecision.outputTokens, outputContentTokens: auditDecision.outputTokens })
-              : null);
-            if (auditUsage) {
-              turnTokenUsage = addTokenUsage(turnTokenUsage, auditUsage);
-              await this.services.persistence.finishTurn(turn.id, {
-                promptTokens: turnTokenUsage.inputTokens,
-                completionTokens: turnTokenUsage.outputTokens,
-                usageJson: JSON.stringify(turnTokenUsage)
-              });
-              await this.services.emit({
-                type: "turn.usage",
-                threadId: this.threadId,
-                payload: { turnRunId: turn.id, usage: turnTokenUsage },
-                createdAt: new Date().toISOString()
-              });
+          if (auditDecisions.length > 0) {
+            for (const auditDecision of auditDecisions) {
+              const auditUsage = auditDecision.usage ?? (typeof auditDecision.outputTokens === "number"
+                ? finalizeTokenUsage({ outputTokens: auditDecision.outputTokens, outputContentTokens: auditDecision.outputTokens })
+                : null);
+              if (auditUsage) turnTokenUsage = addTokenUsage(turnTokenUsage, auditUsage);
             }
+            await this.services.persistence.finishTurn(turn.id, {
+              promptTokens: turnTokenUsage.inputTokens,
+              completionTokens: turnTokenUsage.outputTokens,
+              usageJson: JSON.stringify(turnTokenUsage)
+            });
+            await this.services.emit({
+              type: "turn.usage",
+              threadId: this.threadId,
+              payload: { turnRunId: turn.id, usage: turnTokenUsage },
+              createdAt: new Date().toISOString()
+            });
+          }
 
-            const auditResult = resolveStandardCompletionAuditResult(auditDecision);
+          if (auditResult) {
             if (auditResult.needsUserInput) {
               const statusMessage = buildStandardCompletionAuditStatusMessage({
                 gaps: auditResult.gaps,
@@ -4287,20 +4431,19 @@ class ThreadSessionRuntime {
             }
             if (!auditResult.accepted) {
               standardCompletionAuditAttempts += 1;
+              standardCompletionAuditEvidenceBaseline = countStandardCompletionAuditEvidence(successfulToolEvidence);
+              standardCompletionAuditRecoveryGaps = auditResult.gaps;
               await this.services.log("turn.standard_completion_audit_rejected", this.threadId, {
                 turnRunId: turn.id,
                 attempt: standardCompletionAuditAttempts,
+                phase: auditResult.phase,
+                similarity: auditResult.similarity,
+                goldValidated: auditResult.goldValidated,
+                conclusion: buildStandardCompletionAuditConclusion(auditResult),
                 gaps: auditResult.gaps
               });
               const disposition = resolveStandardCompletionAuditDisposition({
                 outcome: "rejected",
-                attempt: standardCompletionAuditAttempts
-              });
-              await this.recordMessage("assistant", buildStandardCompletionAuditStatusMessage({
-                gaps: auditResult.gaps,
-                nextStep: disposition === "retry" ? "continue" : "request_retry_confirmation"
-              }), turn.id, {
-                kind: "completion_audit_status",
                 attempt: standardCompletionAuditAttempts
               });
               if (disposition === "retry") {
@@ -4315,6 +4458,13 @@ class ThreadSessionRuntime {
                 decision.goalCompleted = false;
                 continue;
               }
+              await this.recordMessage("assistant", buildStandardCompletionAuditStatusMessage({
+                gaps: auditResult.gaps,
+                nextStep: "request_retry_confirmation"
+              }), turn.id, {
+                kind: "completion_audit_status",
+                attempt: standardCompletionAuditAttempts
+              });
               const answers = await this.services.requestUserInput(this.threadId, turn.id, {
                 title: "任务仍未完成闭环",
                 kind: "generic",
@@ -4337,6 +4487,9 @@ class ThreadSessionRuntime {
               });
               if (answers.completion_audit_recovery === "continue") {
                 standardCompletionAuditAttempts = 0;
+                standardCompletionAuditEvidenceBaseline = countStandardCompletionAuditEvidence(successfulToolEvidence);
+                standardCompletionAuditNoProgressAttempts = 0;
+                standardCompletionAuditRecoveryGaps = auditResult.gaps;
                 transcript.push({
                   role: "user",
                   content: buildStandardCompletionAuditRecoveryInstruction(auditResult.gaps)
@@ -4363,6 +4516,10 @@ class ThreadSessionRuntime {
             } else {
               await this.services.log("turn.standard_completion_audit_accepted", this.threadId, {
                 turnRunId: turn.id,
+                phase: auditResult.phase,
+                similarity: auditResult.similarity,
+                goldValidated: auditResult.goldValidated,
+                conclusion: buildStandardCompletionAuditConclusion(auditResult),
                 deliveredPaths,
                 successfulEvidenceCount: successfulToolEvidence.length
               });
@@ -5586,7 +5743,8 @@ class ThreadSessionRuntime {
                 ...modeHiddenToolNames,
                 ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read", "knowledge.add"]),
                 ...(resolveDefaultModalityModel(this.services.config, "image") ? [] : ["image.generate"]),
-                ...(resolveDefaultModalityModel(this.services.config, "video") ? [] : ["video.generate"])
+                ...(resolveDefaultModalityModel(this.services.config, "video") ? [] : ["video.generate"]),
+                ...(isGrokModel(model) ? ["apply_patch", "fs.write_file"] : [])
               ],
               loadSkill: (skillId) =>
                 this.services.skills.loadInstructions(skillId, [...availableSkillIds, ...installedSkillIds])
@@ -5929,6 +6087,7 @@ class ThreadSessionRuntime {
                 ? result.json?.passed === true && Array.isArray(result.json?.commands) && result.json.commands.length > 0
                 : undefined,
               unitTestPassed: result.ok && hasSuccessfulUnitTestResult(toolCall, result),
+              unitTestUnavailable: result.ok && hasUnavailableUnitTestResult(toolCall, result),
               verifiedPaths: pathVerification?.verifiedPaths,
               requiresVerifiedPath: pathVerification?.requiresVerifiedPath,
               resultPreview: modelContent
@@ -6029,7 +6188,7 @@ class ThreadSessionRuntime {
             }
             if (
               modePolicy.mode === "project" &&
-              toolCall.name === "apply_patch" &&
+              MANAGED_WRITE_TOOL_NAMES.has(toolCall.name) &&
               executionPolicy.autoVerify &&
               toolContext
             ) {
@@ -6117,7 +6276,7 @@ class ThreadSessionRuntime {
                 toolCallId: verificationCall.id,
                 toolResultOk: verificationResult.ok
               });
-              if (verificationResult.ok && verificationResult.json?.unverified !== true) {
+              if (verificationResult.ok) {
                 successfulToolEvidence.push(classifySuccessfulToolEvidence({
                   toolCallId: verificationCall.id,
                   toolRecordId: verificationRecord.id,
@@ -6125,7 +6284,8 @@ class ThreadSessionRuntime {
                   hasPriorDelivery: true,
                   verificationPassed: verificationResult.json?.passed === true &&
                     Array.isArray(verificationResult.json?.commands) && verificationResult.json.commands.length > 0,
-                  unitTestPassed: hasSuccessfulUnitTestResult(verificationCall, verificationResult)
+                  unitTestPassed: hasSuccessfulUnitTestResult(verificationCall, verificationResult),
+                  unitTestUnavailable: hasUnavailableUnitTestResult(verificationCall, verificationResult)
                 }));
               } else if (!verificationResult.ok) {
                 await registerTargetFailure(
@@ -6553,6 +6713,7 @@ class ThreadSessionRuntime {
     const childForbiddenTools = new Set([
       "apply_patch",
       "fs.write_file",
+      "search_replace",
       "fs.mkdir",
       "fs.rename",
       "fs.delete",
@@ -7205,7 +7366,7 @@ function getToolProgressKind(name: string): ToolProgressKind {
   if (name.startsWith("web_search.") || name.startsWith("knowledge.") || name.startsWith("browser.") || name.startsWith("mcp.")) {
     return "research";
   }
-  if (name === "apply_patch" || name === "fs.write_file") return "change";
+  if (name === "apply_patch" || name === "fs.write_file" || name === "search_replace") return "change";
   if (name.startsWith("fs.") || name.startsWith("code.") || name.startsWith("git.")) return "code";
   if (name.startsWith("shell.") || name.startsWith("database.")) return "check";
   if (["spawn_agent", "wait_agent", "followup_task", "send_message", "list_agents", "interrupt_agent"].includes(name)) {
@@ -7244,7 +7405,7 @@ function describeToolProgress(toolCall: RuntimeToolCall): string {
   }
   if (name === "list_agents") return "我看一下其他部分目前处理到哪里，确认是否还有内容需要衔接。";
   if (name === "interrupt_agent") return "我先调整一下当前的处理安排，避免继续沿着不合适的方向推进。";
-  if (name === "apply_patch" || name === "fs.write_file") return "我来把相关内容修改好，完成后再检查是否还有遗漏。";
+  if (name === "apply_patch" || name === "fs.write_file" || name === "search_replace") return "我来把相关内容修改好，完成后再检查是否还有遗漏。";
   if (name === "fs.read_file") return "我先把相关代码读一遍，弄清楚现在的实现和前后关系。";
   if (name.startsWith("code.")) return name.includes("search")
     ? "我先在代码里找出所有相关位置，确认这次修改会影响到哪些地方。"
@@ -7476,6 +7637,7 @@ export function isReusableSuccessfulToolCall(toolName: string): boolean {
 const DELIVERY_TOOL_NAMES = new Set([
   "apply_patch",
   "fs.write_file",
+  "search_replace",
   "git.worktree_add",
   "git.worktree_remove",
   "browser.click",
@@ -7487,7 +7649,8 @@ const DELIVERY_TOOL_NAMES = new Set([
 
 const MANAGED_WRITE_TOOL_NAMES = new Set([
   "apply_patch",
-  "fs.write_file"
+  "fs.write_file",
+  "search_replace"
 ]);
 
 const GIT_MUTATION_TOOL_NAMES = new Set([
@@ -7601,7 +7764,7 @@ function buildBrowserVerificationDirective(stage: GpaStage): string {
   if (stage !== "act") return "";
   return [
     "\n\nFrontend verification policy:",
-    "Preferred order: locate with fs/code tools, write changes with apply_patch or fs.write_file, then verify in the app browser when the task is browser-rendered.",
+    "Preferred order: locate with fs/code tools, write changes with search_replace, apply_patch, or fs.write_file as available, then verify in the app browser when the task is browser-rendered.",
     "After changing HTML, CSS, JavaScript, JSX, TSX, Vue, Svelte, Canvas, or other browser-rendered resources, prefer fast completion with successful read-back, build, or test evidence. Request full browser verification only when the user asks for it or the change is visually risky. Do not start browser verification before the user's choice. If full verification is chosen, gather browser evidence before completing.",
     "Desktop ~1440x900 and mobile ~390x844 are recommended unless the user asked for desktop-only.",
     "Useful checks include relevant text/elements, images_loaded, no_horizontal_overflow, no_severe_console_errors, and canvas_nonblank for Canvas/game work.",
@@ -7780,8 +7943,13 @@ function getDeliveredFilePaths(
     const patch = [args.patch, args.patch_content, args.patchText].find((value): value is string => typeof value === "string") ?? "";
     return [...patch.matchAll(/^\*\*\* (?:Add|Update) File: (.+)$/gm)].map((match) => match[1].trim());
   }
-  if (toolName === "fs.write_file") {
-    const candidate = typeof result.json?.path === "string" ? result.json.path : typeof args.path === "string" ? args.path : "";
+  if (toolName === "fs.write_file" || toolName === "search_replace") {
+    const argumentPath = toolName === "search_replace" ? args.file_path : args.path;
+    const candidate = typeof result.json?.path === "string"
+      ? result.json.path
+      : typeof argumentPath === "string"
+        ? argumentPath
+        : "";
     return candidate ? [candidate] : [];
   }
   return [];
@@ -7794,6 +7962,7 @@ export function classifySuccessfulToolEvidence(input: {
   hasPriorDelivery: boolean;
   verificationPassed?: boolean;
   unitTestPassed?: boolean;
+  unitTestUnavailable?: boolean;
   verifiedPaths?: string[];
   requiresVerifiedPath?: boolean;
   resultPreview?: string;
@@ -7825,6 +7994,7 @@ export function classifySuccessfulToolEvidence(input: {
     toolName: input.toolName,
     kinds: [...kinds],
     unitTestPassed: input.unitTestPassed === true || undefined,
+    unitTestUnavailable: input.unitTestUnavailable === true || undefined,
     verifiedPaths: input.verifiedPaths,
     resultPreview: input.resultPreview?.trim().slice(0, 2_000) || undefined
   };
@@ -8221,7 +8391,10 @@ export function validateStandardCompletion(input: {
     (input.verifiedArtifactPaths?.length ?? 0) === 0 &&
     !input.successfulEvidence.some((item) => item.kinds.includes("verification"));
   const missingUnitTest = input.requiresUnitTest === true &&
-    !input.successfulEvidence.some((item) => item.unitTestPassed === true);
+    !input.successfulEvidence.some((item) => item.unitTestPassed === true || item.unitTestUnavailable === true);
+  const missingUnitTestDisclosure = input.requiresUnitTest === true &&
+    input.successfulEvidence.some((item) => item.unitTestUnavailable === true) &&
+    !hasUnitTestUnavailableReport(assistantMessage);
   const missingTestReport = input.requiresUnitTest === true &&
     !hasUnitTestReport(assistantMessage);
   const missingRequestedDeliverable = requiresStructuredTestCaseDeliverable(input.originalRequest ?? "") &&
@@ -8242,6 +8415,9 @@ export function validateStandardCompletion(input: {
   if (missingDelivery) reasons.push("The requested project file change has no verified file delivery.");
   if (missingVerification) reasons.push("The requested project file change has no post-delivery verification.");
   if (missingUnitTest) reasons.push("The project code change has no successful unit-test evidence.");
+  if (missingUnitTestDisclosure) {
+    reasons.push("No runnable unit-test command was found, but the final summary does not disclose that unit tests were unavailable.");
+  }
   if (missingRequestedDeliverable) {
     reasons.push("The requested test-case deliverable does not contain actual structured test cases.");
   }
@@ -8253,6 +8429,7 @@ export function validateStandardCompletion(input: {
     missingDelivery,
     missingVerification,
     missingUnitTest,
+    missingUnitTestDisclosure,
     missingTestReport,
     missingRequestedDeliverable
   };
@@ -8326,15 +8503,255 @@ export function buildStandardCompletionAuditSystemPrompt(model: ModelProfile): s
     "You have no tools, no Skills, no MCP access, and must not propose or perform additional work.",
     "Assess whether the candidate and supplied evidence close the loop on the user's original request, including every requested action, deliverable, constraint, and verification requirement.",
     "For an action request, accept only when successful tool evidence proves the requested end state was reached. A plan, intention, next-step promise, attempted command, or intermediate observation is not completion.",
+    "This is Phase 1 Self-Diagnosis. Check key-point coverage (must be at least 90%), requested JSON/list/template format, factual correctness, sensitive-data leakage, hostile content, logical continuity, and minimum requested length.",
     "Return exactly one JSON Agent decision envelope with keys assistant_message, tool_calls, end_turn, goal_completed, completed_task_ids, completion_evidence, reasoning_summary.",
-    "To accept, return assistant_message exactly APPROVED, tool_calls [], end_turn true, and goal_completed true.",
-    "If completion is blocked solely by information or hard material only the user can supply, and the candidate already asks for it clearly, approve the candidate.",
-    "If such user-only material is missing but the candidate does not clearly request it, return assistant_message beginning exactly NEEDS_USER_INPUT: followed by the specific material needed and why, with tool_calls [], end_turn false, and goal_completed false.",
-    "To reject, return a concise factual list of missing or unverified requirements in assistant_message, tool_calls [], end_turn false, and goal_completed false.",
-    "For every rejection, state both why the request is not closed-loop and the next concrete action needed to close it.",
+    "assistant_message must contain only a minified JSON object with this exact schema: {\"symptoms\":[{\"level\":\"critical|high|medium|low\",\"description\":\"specific problem\",\"suggested_fix\":\"concrete fix\"}],\"overall_score\":0-100,\"can_stop\":true|false}.",
+    "Set can_stop true only when overall_score is at least 90 and no symptom is critical, high, or medium. Otherwise set it false.",
+    "If completion is blocked solely by information only the user can supply, prefix that symptom description with NEEDS_USER_INPUT: and identify the exact material.",
+    "Return tool_calls [], end_turn true, and goal_completed true because the diagnosis itself is complete; can_stop represents the candidate verdict.",
+    "For every blocking symptom, state both why the request is not closed-loop and the next concrete action needed to close it. Return at most three critical/high/medium symptoms.",
     "Do not rewrite the candidate answer. Do not expose this audit to the user.",
     `Current model: ${model.displayName}.`
   ].join("\n");
+}
+
+export type StandardCompletionAuditSymptomLevel = "critical" | "high" | "medium" | "low";
+
+export interface StandardCompletionAuditSymptom {
+  level: StandardCompletionAuditSymptomLevel;
+  description: string;
+  suggested_fix: string;
+}
+
+export interface StandardCompletionAuditDiagnosis {
+  symptoms: StandardCompletionAuditSymptom[];
+  overall_score: number;
+  can_stop: boolean;
+}
+
+export interface StandardCompletionAuditPipelineResult {
+  accepted: boolean;
+  phase: "phase_2_repair" | "phase_3_consistent" | "phase_4_gold";
+  gaps: string[];
+  needsUserInput: boolean;
+  similarity?: number;
+  goldValidated?: boolean;
+}
+
+const STANDARD_COMPLETION_AUDIT_LEVEL_RANK: Record<StandardCompletionAuditSymptomLevel, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1
+};
+
+function extractFirstJsonObject(content: string): string | null {
+  const start = content.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < content.length; index += 1) {
+    const char = content[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return content.slice(start, index + 1);
+    }
+  }
+  return null;
+}
+
+export function resolveStandardCompletionAuditDiagnosis(
+  decision: Pick<ProviderTurnDecision, "assistantMessage">
+): StandardCompletionAuditDiagnosis {
+  const verdict = decision.assistantMessage?.trim() ?? "";
+  if (/^APPROVED$/i.test(verdict)) {
+    return { symptoms: [], overall_score: 100, can_stop: true };
+  }
+  const jsonText = extractFirstJsonObject(verdict);
+  if (jsonText) {
+    try {
+      const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+      const symptoms = Array.isArray(parsed.symptoms)
+        ? parsed.symptoms.flatMap((item): StandardCompletionAuditSymptom[] => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+            const record = item as Record<string, unknown>;
+            const level = typeof record.level === "string" ? record.level.toLowerCase() : "";
+            const description = typeof record.description === "string" ? record.description.trim() : "";
+            const suggestedFix = typeof record.suggested_fix === "string" ? record.suggested_fix.trim() : "";
+            if (!(level in STANDARD_COMPLETION_AUDIT_LEVEL_RANK) || !description || !suggestedFix) return [];
+            return [{
+              level: level as StandardCompletionAuditSymptomLevel,
+              description: description.slice(0, 2_000),
+              suggested_fix: suggestedFix.slice(0, 2_000)
+            }];
+          }).slice(0, 12)
+        : [];
+      const score = typeof parsed.overall_score === "number" && Number.isFinite(parsed.overall_score)
+        ? Math.max(0, Math.min(100, Math.round(parsed.overall_score)))
+        : 0;
+      const hasBlockingSymptom = symptoms.some(
+        (item) => STANDARD_COMPLETION_AUDIT_LEVEL_RANK[item.level] >= STANDARD_COMPLETION_AUDIT_LEVEL_RANK.medium
+      );
+      return {
+        symptoms,
+        overall_score: score,
+        can_stop: parsed.can_stop === true && score >= 90 && !hasBlockingSymptom
+      };
+    } catch {
+      // Fall through to a controlled format symptom.
+    }
+  }
+  const plainGap = verdict.replace(/^REJECTED\s*[:：-]?\s*/i, "").trim();
+  return {
+    symptoms: [{
+      level: "high",
+      description: plainGap || "The auditor did not return the required diagnosis JSON.",
+      suggested_fix: plainGap
+        ? "Perform the concrete missing action and provide fresh successful evidence."
+        : "Retry the bounded audit once with the required JSON schema."
+    }],
+    overall_score: 0,
+    can_stop: false
+  };
+}
+
+export function selectStandardCompletionAuditRepairs(
+  diagnosis: StandardCompletionAuditDiagnosis,
+  limit = 3
+): StandardCompletionAuditSymptom[] {
+  return diagnosis.symptoms
+    .filter((item) => STANDARD_COMPLETION_AUDIT_LEVEL_RANK[item.level] >= STANDARD_COMPLETION_AUDIT_LEVEL_RANK.medium)
+    .sort((left, right) => STANDARD_COMPLETION_AUDIT_LEVEL_RANK[right.level] - STANDARD_COMPLETION_AUDIT_LEVEL_RANK[left.level])
+    .slice(0, Math.max(1, Math.min(3, limit)));
+}
+
+function standardCompletionAuditComparisonText(diagnosis: StandardCompletionAuditDiagnosis): string {
+  return [
+    diagnosis.can_stop ? "audit-pass" : "audit-fail",
+    ...diagnosis.symptoms.flatMap((item) => [item.level, item.description, item.suggested_fix])
+  ].join(" ").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function toCharacterNgrams(content: string, size = 3): Set<string> {
+  const normalized = content.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+  if (!normalized) return new Set();
+  if (normalized.length <= size) return new Set([normalized]);
+  return new Set(Array.from({ length: normalized.length - size + 1 }, (_, index) => normalized.slice(index, index + size)));
+}
+
+function toAuditKeywords(content: string): Set<string> {
+  const words = content.match(/[\p{L}\p{N}_-]{2,}/gu) ?? [];
+  const chineseChunks = content.match(/[\p{Script=Han}]{2,}/gu) ?? [];
+  const chineseBigrams = chineseChunks.flatMap((chunk) =>
+    Array.from({ length: Math.max(0, chunk.length - 1) }, (_, index) => chunk.slice(index, index + 2))
+  );
+  return new Set([...words, ...chineseBigrams].map((item) => item.toLowerCase()));
+}
+
+function jaccardSimilarity(left: Set<string>, right: Set<string>): number {
+  if (left.size === 0 && right.size === 0) return 1;
+  const intersection = [...left].filter((item) => right.has(item)).length;
+  const union = new Set([...left, ...right]).size;
+  return union === 0 ? 1 : intersection / union;
+}
+
+export function calculateStandardCompletionAuditSimilarity(
+  first: StandardCompletionAuditDiagnosis,
+  second: StandardCompletionAuditDiagnosis
+): { semanticSimilarity: number; keywordOverlap: number; combined: number } {
+  const firstText = standardCompletionAuditComparisonText(first);
+  const secondText = standardCompletionAuditComparisonText(second);
+  const semanticSimilarity = jaccardSimilarity(toCharacterNgrams(firstText), toCharacterNgrams(secondText));
+  const keywordOverlap = jaccardSimilarity(toAuditKeywords(firstText), toAuditKeywords(secondText));
+  return {
+    semanticSimilarity,
+    keywordOverlap,
+    combined: semanticSimilarity * 0.6 + keywordOverlap * 0.4
+  };
+}
+
+export function resolveStandardCompletionAuditPipeline(input: {
+  first: StandardCompletionAuditDiagnosis;
+  second?: StandardCompletionAuditDiagnosis;
+  gold?: StandardCompletionAuditDiagnosis;
+  similarityThreshold?: number;
+}): StandardCompletionAuditPipelineResult {
+  const firstRepairs = selectStandardCompletionAuditRepairs(input.first);
+  if (!input.first.can_stop || firstRepairs.length > 0) {
+    const gaps = firstRepairs.map((item) => `${item.description} 修复建议：${item.suggested_fix}`);
+    return {
+      accepted: false,
+      phase: "phase_2_repair",
+      gaps: gaps.length > 0
+        ? gaps
+        : [`Phase 1 综合得分为 ${input.first.overall_score}，低于 90 分停止阈值。修复建议：补齐覆盖率、格式、事实或长度检查中未达标的项目。`],
+      needsUserInput: firstRepairs.some((item) => /^NEEDS_USER_INPUT\s*:/i.test(item.description))
+    };
+  }
+  if (!input.second) {
+    return {
+      accepted: false,
+      phase: "phase_2_repair",
+      gaps: ["Phase 3 consistency validation did not produce its second bounded result."],
+      needsUserInput: false
+    };
+  }
+  const similarity = calculateStandardCompletionAuditSimilarity(input.first, input.second).combined;
+  const threshold = input.similarityThreshold ?? 0.85;
+  const secondRepairs = selectStandardCompletionAuditRepairs(input.second);
+  if (input.second.can_stop && secondRepairs.length === 0 && similarity >= threshold) {
+    return {
+      accepted: true,
+      phase: "phase_3_consistent",
+      gaps: [],
+      needsUserInput: false,
+      similarity
+    };
+  }
+  if (input.gold) {
+    const goldRepairs = selectStandardCompletionAuditRepairs(input.gold);
+    return {
+      accepted: input.gold.can_stop && goldRepairs.length === 0,
+      phase: "phase_4_gold",
+      gaps: goldRepairs.length > 0
+        ? goldRepairs.map((item) => `${item.description} 修复建议：${item.suggested_fix}`)
+        : input.gold.can_stop
+          ? []
+          : ["The temperature-0 gold audit did not approve the candidate."],
+      needsUserInput: goldRepairs.some((item) => /^NEEDS_USER_INPUT\s*:/i.test(item.description)),
+      similarity,
+      goldValidated: true
+    };
+  }
+  return {
+    accepted: false,
+    phase: "phase_4_gold",
+    gaps: [similarity < threshold
+      ? `两轮审计一致性为 ${(similarity * 100).toFixed(1)}%，低于 85%，可能存在幻觉。`
+      : "第二轮审计仍存在未通过项。"],
+    needsUserInput: false,
+    similarity,
+    goldValidated: false
+  };
+}
+
+export function createStandardCompletionAuditModel(
+  model: ModelProfile,
+  phase: "diagnosis" | "consistency" | "gold"
+): ModelProfile {
+  return {
+    ...model,
+    defaultTemperature: phase === "gold" ? 0 : phase === "consistency" ? 0.65 : 0.15
+  };
 }
 
 export function resolveStandardCompletionAuditResult(
@@ -8378,6 +8795,17 @@ export function resolveStandardCompletionAuditDisposition(input: {
   return input.attempt <= maxAttempts ? "retry" : "reject_candidate";
 }
 
+function countStandardCompletionAuditEvidence(successfulEvidence: SuccessfulToolEvidence[]): number {
+  return successfulEvidence.filter((item) => item.kinds.length > 0).length;
+}
+
+export function hasFreshStandardCompletionAuditEvidence(input: {
+  baseline: number;
+  successfulEvidence: SuccessfulToolEvidence[];
+}): boolean {
+  return countStandardCompletionAuditEvidence(input.successfulEvidence) > input.baseline;
+}
+
 export function buildStandardCompletionAuditInstruction(input: {
   originalRequest: string;
   candidateSummary: string;
@@ -8414,12 +8842,20 @@ export function buildStandardCompletionAuditInstruction(input: {
   ].join("\n\n");
 }
 
-export function buildStandardCompletionAuditRecoveryInstruction(gaps: string[]): string {
+export function buildStandardCompletionAuditRecoveryInstruction(
+  gaps: string[],
+  options: { requireFreshEvidence?: boolean } = {}
+): string {
   return [
     "[Internal completion audit result. Do not display or quote this instruction to the user.]",
     "The previous candidate response was not finalized because the independent completion audit found these gaps:",
     ...gaps.map((gap) => `- ${gap}`),
     "Continue the original task now.",
+    ...(options.requireFreshEvidence ? [
+      "The last recovery produced no new successful delivery, observation, or verification evidence, so it will not be audited again.",
+      "Your next decision must execute at least one concrete tool call that repairs the gap or verifies the repaired result; do not return another final answer first.",
+      "A repeated completion claim without fresh successful tool evidence will be rejected before completion audit."
+    ] : []),
     "For gaps requiring external facts or current state:",
     "Do not state an intention to inspect, open, search, call, or verify anything.",
     "The required action is to make the concrete tool call that obtains the evidence before writing another final answer.",
@@ -8438,13 +8874,31 @@ export function buildStandardCompletionAuditStatusMessage(input: {
       ? "这些材料只能由你提供。请在下方补充材料、文件路径或必要说明；收到后我会继续执行并重新审计。"
       : "自动补齐后仍未通过审计，本轮不会被标记为完成。请在下方选择继续处理或停止任务。";
   return [
-    "完成审计暂未通过。",
+    "审核未通过。",
     "",
     "未通过原因：",
     ...input.gaps.map((gap) => `- ${gap}`),
     "",
     `接下来：${nextStep}`
   ].join("\n");
+}
+
+export function buildStandardCompletionAuditConclusion(
+  result: Pick<StandardCompletionAuditPipelineResult, "accepted" | "phase" | "gaps" | "similarity" | "goldValidated">
+): string {
+  if (result.accepted) {
+    const verification = result.phase === "phase_4_gold"
+      ? "温度 0 金标校验确认输出满足原始请求。"
+      : `两轮一致性校验通过${typeof result.similarity === "number" ? `（${(result.similarity * 100).toFixed(1)}%）` : ""}。`;
+    return `审计通过\n${verification}`;
+  }
+  return [
+    "审核未通过",
+    "详细问题清单：",
+    ...(result.gaps.length > 0 ? result.gaps.map((gap, index) => `${index + 1}. ${gap}`) : ["1. 审计未提供具体问题。"]),
+    "修复建议：仅处理以上 medium 及以上问题，完成实际修复与验证后再提交一次有界审计。",
+    result.goldValidated === false ? "金标状态：温度 0 外部校验未完成或不可用。" : ""
+  ].filter(Boolean).join("\n");
 }
 
 export function requiresStructuredTestCaseDeliverable(request: string): boolean {
@@ -8498,13 +8952,16 @@ export function buildStandardCompletionRecoveryInstruction(
     "[Internal completion gate. Do not display or quote this instruction to the user.]",
     `The previous response was rejected: ${result.reasons.join(" ")}`,
     ...(result.missingDelivery
-      ? ["Perform the requested file change now with apply_patch or fs.write_file."]
+      ? ["Perform the requested file change now with search_replace, apply_patch, or fs.write_file."]
       : []),
     ...(result.missingVerification
       ? ["After the file change, run a targeted read-back, diff, build, or test and require it to succeed."]
       : []),
     ...(result.missingUnitTest
       ? ["Run the relevant unit-test command now and wait for a successful tool result; a build, typecheck, or read-back cannot substitute for it."]
+      : []),
+    ...(result.missingUnitTestDisclosure
+      ? ["Do not run the unavailable test again. State clearly in the final summary that no runnable unit-test command was found and report the verification that did run."]
       : []),
     ...(result.missingRequestedDeliverable
       ? ["Provide the actual test cases now. Include identifiable cases with test steps and expected results; do not return only an introduction, scope note, or promise to provide them."]
@@ -8528,7 +8985,7 @@ export function buildStandardCompletionTextToolFallbackInstruction(
   result: StandardCompletionValidationResult
 ): string {
   const requiredAction = result.missingDelivery
-    ? "Your next decision must contain exactly one apply_patch or fs.write_file call that performs the requested file change."
+    ? "Your next decision must contain exactly one search_replace, apply_patch, or fs.write_file call that performs the requested file change."
     : result.missingUnitTest
       ? "Your next decision must contain exactly one shell.exec or project.verify call that runs the relevant unit tests."
     : "Your next decision must contain exactly one targeted fs.read_file, shell.exec, or other listed verification tool call.";
@@ -8591,7 +9048,11 @@ export function validateActCompletion(input: {
   const missingVerification = !input.summaryOnly &&
     !referencedEvidence.some((item) => item.kinds.includes("verification"));
   const missingUnitTest = !input.summaryOnly && input.requiresUnitTest === true &&
-    !referencedEvidence.some((item) => item.unitTestPassed === true);
+    !referencedEvidence.some((item) => item.unitTestPassed === true) &&
+    !input.successfulEvidence.some((item) => item.unitTestUnavailable === true);
+  const missingUnitTestDisclosure = !input.summaryOnly && input.requiresUnitTest === true &&
+    input.successfulEvidence.some((item) => item.unitTestUnavailable === true) &&
+    !hasUnitTestUnavailableReport(input.decision.assistantMessage ?? "");
   const missingTestReport = !input.summaryOnly && input.requiresUnitTest === true &&
     !hasUnitTestReport(input.decision.assistantMessage ?? "");
   const missingBrowserVerification: string[] = [];
@@ -8639,6 +9100,9 @@ export function validateActCompletion(input: {
   if (missingDelivery) reasons.push("No verified delivery evidence was referenced.");
   if (missingVerification) reasons.push("No post-delivery verification evidence was referenced.");
   if (missingUnitTest) reasons.push("No successful unit-test evidence was referenced for the project code change.");
+  if (missingUnitTestDisclosure) {
+    reasons.push("No runnable unit-test command was found, but the final summary does not disclose that unit tests were unavailable.");
+  }
   if (missingBrowserVerification.length > 0) {
     reasons.push(`Frontend browser verification is incomplete: ${missingBrowserVerification.join(", ")}.`);
   }
@@ -8652,6 +9116,7 @@ export function validateActCompletion(input: {
     missingDelivery,
     missingVerification,
     missingUnitTest,
+    missingUnitTestDisclosure,
     missingTestReport,
     missingBrowserVerification
   };
@@ -8663,11 +9128,13 @@ export function buildActCompletionRecoveryInstruction(
   attempt = 1
 ): string {
   const nextAction = result.missingDelivery
-    ? "Call the next delivery tool now. For file work, use apply_patch or fs.write_file and wait for its successful result."
+    ? "Call the next delivery tool now. For file work, use search_replace, apply_patch, or fs.write_file and wait for its successful result."
     : result.missingUnitTest
       ? "Run the project's focused unit-test command now and wait for its successful result."
     : result.missingVerification
       ? "Call a verification tool now, such as a test/build command or a read-back of the changed files."
+      : result.missingUnitTestDisclosure
+        ? "Return a corrected final summary that explicitly states no runnable unit-test command was found; do not call the unavailable test again."
       : (result.missingBrowserVerification?.length ?? 0) > 0
         ? "Complete browser verification on the same rendered tab: reload it, run browser.set_viewport and browser.assert_page, then browser.capture_screenshot for each required viewport."
       : "Return a corrected final JSON decision using only the successful tool call ids already present in the transcript.";
@@ -8685,7 +9152,7 @@ export function buildActCompletionRecoveryInstruction(
   if (attempt >= 2) {
     return [
       "[Internal completion validation. Do not display or quote this instruction to the user.]",
-      `Missing: delivery=${result.missingDelivery}; verification=${result.missingVerification}; unitTest=${result.missingUnitTest}; tasks=${result.missingTaskIds.join(",") || "none"}; evidenceTasks=${result.missingEvidenceTaskIds.join(",") || "none"}; browser=${(result.missingBrowserVerification ?? []).join(",") || "none"}.`,
+      `Missing: delivery=${result.missingDelivery}; verification=${result.missingVerification}; unitTest=${result.missingUnitTest}; unitTestDisclosure=${result.missingUnitTestDisclosure}; tasks=${result.missingTaskIds.join(",") || "none"}; evidenceTasks=${result.missingEvidenceTaskIds.join(",") || "none"}; browser=${(result.missingBrowserVerification ?? []).join(",") || "none"}.`,
       evidenceBlock,
       nextAction
     ].join("\n");
@@ -8716,9 +9183,9 @@ async function verifySuccessfulToolDeliveryPaths(
       candidates.push(match[1].trim());
     }
     requiresVerifiedPath = candidates.length > 0;
-  } else if (toolName === "fs.write_file") {
+  } else if (toolName === "fs.write_file" || toolName === "search_replace") {
     const resultPath = result.json?.path;
-    const argumentPath = argumentsJson.path;
+    const argumentPath = toolName === "search_replace" ? argumentsJson.file_path : argumentsJson.path;
     const candidate = typeof resultPath === "string"
       ? resultPath
       : typeof argumentPath === "string"
@@ -9195,7 +9662,20 @@ export function isProgressOnlyAssistantMessage(content: string): boolean {
     return true;
   }
   return /^(?:[.…:：,，。!！?？-]+\s*)*(?:(?:好的|好|嗯)[，,。!！?？:\s]*)?(?:让我(?:先|继续)?|计划已确认|开始实施|开始执行|正在|接下来|下一步|准备(?:开始)?|我(?:将|会|先)|先(?:来|从)|starting\b|working\s+on\b|fetching\b|next\s+i\s+will\b|i\s+will\b)/i.test(normalized)
-    || /\b(?:let me|i(?:'ll| will)|we(?:'ll| will))\s+(?:look|check|inspect|search|use|dig|continue|investigate)\b/i.test(normalized);
+    || /\b(?:let me|i(?:'ll| will)|we(?:'ll| will))\s+(?:look|check|inspect|search|use|dig|continue|investigate)\b/i.test(normalized)
+    || /(?:^|[。！？；：!?;:]\s*)(?:(?:接下来|下一步|然后|之后)\s*(?:我\s*)?(?:会|将|要|准备|先|再|继续|接着)?|让我(?:先|继续)?|我(?:会|将|要|准备|先|再|继续|接着))\s*(?:读|读取|看|查看|检查|确认|核对|验证|搜索|查找|分析|调查|定位|打开|运行|执行|测试|修改|实现|处理|整理|补充|完善|继续)[^。！？!?]*(?:[。！？!?])?$/i.test(normalized)
+    || /(?:^|[。！？；：!?;:]\s*)我\s*(?:读|读取|看|查看|检查|确认|核对|验证|搜索|查找|分析|调查|定位|打开|运行|执行|测试|处理|整理)(?:一下|一遍|下)[^。！？!?]*(?:[。！？!?])?$/i.test(normalized);
+}
+
+export function shouldRejectProgressOnlyCompletion(input: {
+  assistantMessage: string | undefined;
+  toolCallCount: number;
+  endTurn: boolean;
+}): boolean {
+  return input.toolCallCount === 0 &&
+    input.endTurn &&
+    Boolean(input.assistantMessage?.trim()) &&
+    isProgressOnlyAssistantMessage(input.assistantMessage ?? "");
 }
 
 export function buildAgentProtocolContinuationInstruction(batch: number): string {
@@ -9205,6 +9685,17 @@ export function buildAgentProtocolContinuationInstruction(batch: number): string
     "Continue only the unfinished work from the verified conversation and tool evidence; do not restate completed analysis, tool results, or the user request.",
     "Return a valid native tool call or a valid JSON decision envelope. Do not repeat the malformed response or describe this recovery to the user."
   ].join(" ");
+}
+
+export function buildAgentProtocolContinuationInput(
+  originalInput: string,
+  continuationDirective: string
+): string {
+  const directive = continuationDirective.trim();
+  if (!directive || originalInput.includes(directive)) {
+    return originalInput;
+  }
+  return `${originalInput.trim()}\n\n${directive}`;
 }
 
 export function sanitizeProtocolRecoveryEvidence(
@@ -9221,6 +9712,7 @@ export function sanitizeProtocolRecoveryEvidence(
       toolName: item.toolName,
       kinds: Array.isArray(item.kinds) ? item.kinds.filter(isCompletionEvidenceKind) : [],
       unitTestPassed: item.unitTestPassed === true || undefined,
+      unitTestUnavailable: item.unitTestUnavailable === true || undefined,
       verifiedPaths: Array.isArray(item.verifiedPaths)
         ? item.verifiedPaths.filter((path) => typeof path === "string").slice(0, 24)
         : undefined,
@@ -9278,7 +9770,7 @@ export function isDeferredExecutionPayload(content: string): boolean {
     return true;
   }
 
-  if (/^(?:(?:web_search|browser|shell|fs|knowledge|mcp|database|git|code|project|skills|multi_agents|image|video)(?:[._][\w-]+)+|execute_command|read_file|write_file|apply_patch)(?:\s*[\[\{(]|\s*$)/i.test(trimmed)) {
+  if (/^(?:(?:web_search|browser|shell|fs|knowledge|mcp|database|git|code|project|skills|multi_agents|image|video)(?:[._][\w-]+)+|execute_command|read_file|write_file|apply_patch|search_replace)(?:\s*[\[\{(]|\s*$)/i.test(trimmed)) {
     return true;
   }
 
@@ -9340,6 +9832,19 @@ export function hasSuccessfulUnitTestResult(
   return isUnitTestCommand(command);
 }
 
+export function hasUnavailableUnitTestResult(
+  toolCall: Pick<RuntimeToolCall, "name">,
+  result: Pick<ToolResult, "json">
+): boolean {
+  if (toolCall.name !== "project.verify") return false;
+  const commands = Array.isArray(result.json?.commands) ? result.json.commands : [];
+  const hasUnitTestCommand = commands.some(
+    (command) => typeof command === "string" && isUnitTestCommand(command)
+  );
+  if (hasUnitTestCommand) return false;
+  return result.json?.unverified === true || result.json?.passed === true;
+}
+
 export function isUnitTestCommand(command: string): boolean {
   const knownRunner = /(?:^|[;&|]\s*)(?:pnpm|npm|yarn|bun)\s+(?:(?:run\s+)?test(?:[:\w-]+)?|exec\s+(?:vitest|jest|mocha|ava)|(?:vitest|jest|mocha|ava)\b)|(?:^|[;&|]\s*)(?:vitest|jest|mocha|ava|pytest|phpunit|rspec)\b|(?:^|[;&|]\s*)(?:go\s+test|cargo\s+test|dotnet\s+test|python(?:3)?\s+-m\s+pytest)\b/i;
   const nodeTestScript = /(?:^|[;&|]\s*)node(?:\.exe)?\s+(?:["'])?(?:\.?[\\/])?(?:tests?|__tests__)[\\/][^"';&|\s]+\.(?:[cm]?js|ts)(?:["'])?(?=\s|[;&|]|$)/i;
@@ -9348,6 +9853,10 @@ export function isUnitTestCommand(command: string): boolean {
 
 export function hasUnitTestReport(content: string): boolean {
   return /(?:单元测试|测试报告|unit tests?|test report|测试结果)[\s\S]{0,160}(?:通过|passed|成功|0\s+failed|failures?\s*[:=]\s*0)/i.test(content);
+}
+
+export function hasUnitTestUnavailableReport(content: string): boolean {
+  return /(?:未(?:配置|找到|提供|发现)|没有|无)(?:可运行的?)?(?:单元)?测试(?:脚本|命令)?|(?:no|without)\s+(?:runnable\s+|configured\s+|available\s+)?unit[- ]?test(?:\s+(?:script|command))?|unit[- ]?tests?\s+(?:were\s+)?(?:unavailable|not available|not configured|not found)/i.test(content);
 }
 
 export function getAddedPatchFiles(argumentsJson: Record<string, unknown>): string[] {
@@ -10531,7 +11040,7 @@ export function buildManagedWriteCompletionRecoveryInstruction(
     "The previous completion claim was rejected because no successful managed file delivery was verified.",
     ...result.reasons,
     ...(result.failedToolSummaries.length > 0 ? [`Failed managed writes: ${result.failedToolSummaries.join("; ")}.`] : []),
-    "Inspect the failed target and make a successful file change with apply_patch or fs.write_file.",
+    "Inspect the failed target and make a successful file change with search_replace, apply_patch, or fs.write_file.",
     "After verification, return a corrected final decision. If the change cannot be completed, end with goal_completed false and state that it was not completed."
   ].join(" ");
 }
@@ -10630,7 +11139,7 @@ export function advanceManagedWriteRecovery(
   if (isToolArgsTruncated(input.argumentsJson) || isToolArgsInvalid(input.argumentsJson)) {
     return;
   }
-  if ((input.toolName === "apply_patch" || input.toolName === "fs.write_file") && !input.ok) {
+  if (MANAGED_WRITE_TOOL_NAMES.has(input.toolName) && !input.ok) {
     const addOnlyTargetPaths = input.toolName === "apply_patch"
       ? getManagedWriteAddOnlyTargetPaths(input.argumentsJson)
       : [];
@@ -10681,7 +11190,7 @@ export function buildManagedWriteRecoveryInstruction(state: ManagedWriteRecovery
     ? `Inspect the failed target with ${inspectTool}: ${state.targetPaths.join(", ")}.`
     : `Inspect the intended target first with ${inspectTool}.`;
   const next = state.phase === "write"
-    ? "Now retry with apply_patch or fs.write_file."
+    ? "Now retry with search_replace, apply_patch, or fs.write_file."
     : target;
   return [
     "[Internal managed-write recovery. Do not display or quote this instruction to the user.]",
@@ -10706,7 +11215,7 @@ function getManagedWriteTargetPaths(toolName: string, argumentsJson: Record<stri
       : undefined;
     return [...new Set([...patchPaths, explicitPath].filter((candidate): candidate is string => Boolean(candidate)))];
   }
-  const candidate = argumentsJson.path;
+  const candidate = toolName === "search_replace" ? argumentsJson.file_path : argumentsJson.path;
   return typeof candidate === "string" && candidate.trim() ? [candidate] : [];
 }
 

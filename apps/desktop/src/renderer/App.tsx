@@ -838,26 +838,21 @@ export function App() {
   } = chatBackground;
   const realtimeEnhancement = useRealtimeEnhancement({
     threadId: selectedThreadId,
-    defaultEnabled: true,
+    defaultEnabled: chatBackgroundSettings.mode === "dynamic",
     onInterrupt: () => interruptActiveThread()
   });
-  const backgroundMode: ChatBackgroundMode = realtimeEnhancement.enabled
-    ? "dynamic"
-    : chatBackgroundUrl && chatBackgroundSettings.enabled
-      ? "image"
-      : "none";
+  const backgroundMode: ChatBackgroundMode = chatBackgroundSettings.mode;
+
+  useEffect(() => {
+    const shouldEnableRealtime = backgroundMode === "dynamic";
+    if (realtimeEnhancement.enabled !== shouldEnableRealtime) {
+      realtimeEnhancement.setEnabled(shouldEnableRealtime);
+    }
+  }, [backgroundMode, realtimeEnhancement.enabled]);
 
   function setBackgroundMode(mode: ChatBackgroundMode) {
-    if (mode === "dynamic") {
-      updateChatBackgroundSettings({ enabled: false });
-      realtimeEnhancement.setEnabled(true);
-      return;
-    }
-
-    realtimeEnhancement.setEnabled(false);
-    updateChatBackgroundSettings({
-      enabled: mode === "image" && Boolean(chatBackgroundUrl)
-    });
+    updateChatBackgroundSettings({ mode, enabled: mode === "image" });
+    realtimeEnhancement.setEnabled(mode === "dynamic");
   }
   const appUpdate = useAppUpdate(showNotice);
   const {
@@ -5802,6 +5797,19 @@ export function App() {
 
     setIsSettingsOpen(false);
     await openThread(item.targetId, { scrollToLatest: true });
+    if (!item.anchorId && item.status === "attention") {
+      window.setTimeout(() => {
+        const selector = item.attentionKind === "approval"
+          ? ".approval-card"
+          : item.attentionKind === "input"
+            ? ".user-input-prompt-card:not(.resolved)"
+            : item.attentionKind === "gpa"
+              ? ".gpa-confirmation.stage-goal, .gpa-confirmation.stage-plan"
+              : ".approval-card, .user-input-prompt-card:not(.resolved), .gpa-confirmation.stage-goal, .gpa-confirmation.stage-plan";
+        document.querySelector<HTMLElement>(selector)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 180);
+      return;
+    }
     if (!item.anchorId) return;
     window.setTimeout(() => {
       const prefix = item.attentionKind === "approval" ? "approval-card" : "user-input-prompt";

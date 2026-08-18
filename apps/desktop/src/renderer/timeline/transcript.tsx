@@ -107,11 +107,11 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
     >
       <summary
         className="tool-activity-summary"
-        aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}，${toolCalls.length} 项`}
+        aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已执行"}，${toolCalls.length} 项`}
       >
         <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={toolCalls[0]?.toolName ?? ""} /></span>
         <span className="tool-activity-summary-copy"><strong>{conciseLabel}</strong></span>
-        <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已完成"}</span>
+        <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已执行"}</span>
         <span className="tool-activity-summary-count">{toolCalls.length} 项</span>
         <span className="tool-activity-chevron" aria-hidden />
       </summary>

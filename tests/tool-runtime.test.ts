@@ -739,12 +739,111 @@ describe("ToolRuntime", () => {
 
     expect(direct.map((tool) => tool.name)).toContain("apply_patch");
     expect(direct.map((tool) => tool.name)).toContain("fs.write_file");
+    expect(direct.map((tool) => tool.name)).toContain("search_replace");
     expect(direct.map((tool) => tool.name)).toEqual(expect.arrayContaining([
       "skills.install",
       "plugins.install",
       "mcp.install"
     ]));
     expect(deferred.map((tool) => tool.name)).not.toContain("fs.write_file");
+  });
+
+  it("treats copying a path onto itself as an idempotent no-op", async () => {
+    const runtime = new ToolRuntime();
+    const requestApproval = vi.fn();
+    const result = await runtime.execute({
+      id: "copy-same-path",
+      name: "fs.copy",
+      arguments: { from: "vue.config.js", to: ".\\vue.config.js" }
+    }, {
+      cwd: process.cwd(),
+      requestApproval
+    } as unknown as ToolRuntimeContext);
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("source and destination resolve to the same path");
+    expect(result.json).toMatchObject({ skipped: true, reason: "same_path" });
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it("performs exact unique search_replace edits while preserving CRLF", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-search-replace-"));
+    const filePath = path.join(root, "sample.txt");
+    await fs.writeFile(filePath, "alpha\r\nbeta\r\ngamma\r\n", "utf8");
+    const runtime = new ToolRuntime();
+    const context = {
+      cwd: root,
+      readFile: (target: string) => fs.readFile(target, "utf8"),
+      writeFile: (target: string, content: string) => fs.writeFile(target, content, "utf8"),
+      requestApproval: vi.fn().mockResolvedValue(true)
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const result = await runtime.execute({
+        id: "search-replace-crlf",
+        name: "search_replace",
+        arguments: { file_path: "sample.txt", old_string: "alpha\nbeta", new_string: "alpha\nupdated" }
+      }, context);
+
+      expect(result.ok).toBe(true);
+      expect(await fs.readFile(filePath, "utf8")).toBe("alpha\r\nupdated\r\ngamma\r\n");
+      expect(result.json?.replacements).toBe(1);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on ambiguous search_replace matches and accepts an already-applied edit", async () => {
+    const runtime = new ToolRuntime();
+    const readFile = vi.fn().mockResolvedValue("same same desired");
+    const writeFile = vi.fn();
+    const context = {
+      cwd: process.cwd(),
+      readFile,
+      writeFile,
+      requestApproval: vi.fn().mockResolvedValue(true)
+    } as unknown as ToolRuntimeContext;
+
+    const ambiguous = await runtime.execute({
+      id: "search-replace-ambiguous",
+      name: "search_replace",
+      arguments: { file_path: "sample.txt", old_string: "same", new_string: "changed" }
+    }, context);
+    const alreadyApplied = await runtime.execute({
+      id: "search-replace-idempotent",
+      name: "search_replace",
+      arguments: { file_path: "sample.txt", old_string: "missing", new_string: "desired" }
+    }, context);
+
+    expect(ambiguous.ok).toBe(false);
+    expect(ambiguous.content).toContain("matched 2 locations");
+    expect(alreadyApplied.ok).toBe(true);
+    expect(alreadyApplied.json?.alreadyApplied).toBe(true);
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+
+  it("creates a missing file only when old_string is empty", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-search-replace-create-"));
+    const runtime = new ToolRuntime();
+    const context = {
+      cwd: root,
+      readFile: (target: string) => fs.readFile(target, "utf8"),
+      writeFile: (target: string, content: string) => fs.writeFile(target, content, "utf8"),
+      requestApproval: vi.fn().mockResolvedValue(true)
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const result = await runtime.execute({
+        id: "search-replace-create",
+        name: "search_replace",
+        arguments: { file_path: "created.txt", old_string: "", new_string: "created\n" }
+      }, context);
+
+      expect(result.ok).toBe(true);
+      await expect(fs.readFile(path.join(root, "created.txt"), "utf8")).resolves.toBe("created\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("loads selected Skill instructions through the skills.load tool", async () => {
@@ -971,6 +1070,131 @@ describe("ToolRuntime", () => {
 
       expect(result.ok).toBe(true);
       await expect(fs.readFile(filePath, "utf8")).resolves.toBe("<h1>After</h1>\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs Grok patches that split numbered context and changed lines into separate hunks", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const filePath = path.join(root, "styles.css");
+    await fs.writeFile(
+      filePath,
+      ".searchBox {\n  padding: 15px 18px 1px 18px;\n}\n\n.tableBox {\n  padding: 0 18px 18px;\n}\n",
+      "utf8"
+    );
+    const runtime = new ToolRuntime();
+
+    try {
+      const result = await runtime.execute(
+        {
+          id: "grok-numbered-split-patch",
+          name: "apply_patch",
+          arguments: {
+            patch: [
+              "*** Begin Patch",
+              "*** Update File: styles.css",
+              "@@",
+              "  448|.searchBox {",
+              "  449|  padding: 15px 18px 1px 18px;",
+              "  450|}",
+              "  451|",
+              "  452|.tableBox {",
+              "  453|  padding: 0 18px 18px;",
+              "  454|}",
+              "@@",
+              "+  padding: 15px 24px 1px 24px;",
+              "+  padding: 0 24px 24px;",
+              "*** End Patch"
+            ].join("\n")
+          }
+        },
+        { cwd: root, requestApproval: vi.fn().mockResolvedValue(true) } as unknown as ToolRuntimeContext
+      );
+
+      expect(result.ok).toBe(true);
+      await expect(fs.readFile(filePath, "utf8")).resolves.toContain("padding: 15px 24px 1px 24px");
+      await expect(fs.readFile(filePath, "utf8")).resolves.toContain("padding: 0 24px 24px");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs Grok patches that put complete before and after blocks in separate hunks", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const filePath = path.join(root, "component.css");
+    await fs.writeFile(filePath, ".box {\n  padding: 12px;\n}\n", "utf8");
+    const runtime = new ToolRuntime();
+
+    try {
+      const result = await runtime.execute(
+        {
+          id: "grok-before-after-split-patch",
+          name: "apply_patch",
+          arguments: {
+            patch: [
+              "*** Begin Patch",
+              "*** Update File: component.css",
+              "@@",
+              " .box {",
+              "   padding: 12px;",
+              " }",
+              "@@",
+              " .box {",
+              "   padding: 24px;",
+              " }",
+              "*** End Patch"
+            ].join("\n")
+          }
+        },
+        { cwd: root, requestApproval: vi.fn().mockResolvedValue(true) } as unknown as ToolRuntimeContext
+      );
+
+      expect(result.ok).toBe(true);
+      await expect(fs.readFile(filePath, "utf8")).resolves.toBe(".box {\n  padding: 24px;\n}\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a canonical patch as successful when every target change is already applied", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const filePath = path.join(root, "already-applied.css");
+    await fs.writeFile(
+      filePath,
+      ".searchBox {\n  padding: 15px 24px 1px 24px;\n}\n\n.tableBox {\n  padding: 0 24px 24px;\n}\n",
+      "utf8"
+    );
+    const runtime = new ToolRuntime();
+
+    try {
+      const result = await runtime.execute(
+        {
+          id: "already-applied-patch",
+          name: "apply_patch",
+          arguments: {
+            patch: [
+              "*** Begin Patch",
+              "*** Update File: already-applied.css",
+              "@@",
+              "-  padding: 15px 18px 1px 18px;",
+              "+  padding: 15px 24px 1px 24px;",
+              "@@",
+              "-  padding: 0 18px 18px;",
+              "+  padding: 0 24px 24px;",
+              "*** End Patch"
+            ].join("\n")
+          }
+        },
+        { cwd: root, requestApproval: vi.fn().mockResolvedValue(true) } as unknown as ToolRuntimeContext
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.content).toContain("target state was already present");
+      expect(result.json).toMatchObject({
+        changes: [{ additions: 0, deletions: 0 }]
+      });
+      await expect(fs.readFile(filePath, "utf8")).resolves.toContain("padding: 0 24px 24px");
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

@@ -4,13 +4,17 @@ export type LiveEditPreviewToolCall = {
 };
 
 export function getLiveEditWriteTargets(toolCall: LiveEditPreviewToolCall): string[] {
-  if (toolCall.toolName !== "apply_patch" && toolCall.toolName !== "fs.write_file") {
+  if (toolCall.toolName !== "apply_patch" && toolCall.toolName !== "fs.write_file" && toolCall.toolName !== "search_replace") {
     return [];
   }
 
   const input = parseArguments(toolCall.argumentsJson);
   if (toolCall.toolName === "fs.write_file") {
     return uniquePaths([input.path, input.filePath]);
+  }
+
+  if (toolCall.toolName === "search_replace") {
+    return uniquePaths([input.file_path, input.filePath, input.path]);
   }
 
   return uniquePaths(

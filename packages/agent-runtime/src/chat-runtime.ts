@@ -35,7 +35,8 @@ const CHAT_WRITE_TOOLS = new Set([
   "fs.rename",
   "fs.delete",
   "fs.copy",
-  "apply_patch"
+  "apply_patch",
+  "search_replace"
 ]);
 
 const CHAT_EXECUTE_TOOLS = new Set([

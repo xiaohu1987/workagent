@@ -25,6 +25,8 @@ describe("ToolActivityGroup", () => {
     const html = renderToStaticMarkup(createElement(ToolActivityGroup, { toolCalls: [toolCall] }));
 
     expect(html).toContain("tool-activity-summary");
+    expect(html).toContain(">已执行<");
+    expect(html).not.toContain(">已完成<");
     expect(html).not.toContain("tool-activity-details-shell");
     expect(html).not.toContain("tool-activity-row compact");
   });

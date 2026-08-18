@@ -716,6 +716,7 @@ export function getTurnSummaryCreatedAt(
 export function isFileWriteTool(toolName: string): boolean {
   return toolName === "apply_patch"
     || toolName === "fs.write_file"
+    || toolName === "search_replace"
     || toolName === "fs.mkdir"
     || toolName === "fs.rename"
     || toolName === "fs.delete"
@@ -911,35 +912,10 @@ export function getToolFileChanges(
     }));
   }
 
-  if (toolCall.toolName === "code.ast_diff") {
-    const path = typeof resultJson?.path === "string"
-      ? resultJson.path
+  if (toolCall.toolName === "fs.write_file" || toolCall.toolName === "search_replace") {
+    const path = toolCall.toolName === "search_replace"
+      ? typeof input.file_path === "string" ? input.file_path : ""
       : typeof input.path === "string" ? input.path : "";
-    const entities = Array.isArray(resultJson?.entities) ? resultJson.entities : [];
-    const symbols = entities
-      .map((raw) => {
-        const entity = raw as Record<string, unknown>;
-        return {
-          name: String(entity.name ?? ""),
-          kind: String(entity.kind ?? "symbol"),
-          change: String(entity.change ?? "modified")
-        };
-      })
-      .filter((symbol) => symbol.name);
-    return path
-      ? [{
-          path: toWorkspaceRelativePath(path, workspaceRoot),
-          action: "modified" as const,
-          additions: symbols.filter((symbol) => symbol.change === "added").length,
-          deletions: symbols.filter((symbol) => symbol.change === "removed").length,
-          symbols,
-          snapshot: findResultFileSnapshot(resultJson, path, workspaceRoot)
-        }]
-      : [];
-  }
-
-  if (toolCall.toolName === "fs.write_file") {
-    const path = typeof input.path === "string" ? input.path : "";
     const absolutePath = typeof resultJson?.path === "string"
       ? resultJson.path
       : typeof result.path === "string" ? result.path : undefined;
@@ -947,7 +923,7 @@ export function getToolFileChanges(
       ? [decorateGeneratedFileChange({
           path: toWorkspaceRelativePath(path, workspaceRoot),
         absolutePath,
-        action: "created",
+        action: toolCall.toolName === "search_replace" && input.old_string !== "" ? "modified" : "created",
         additions: 0,
         deletions: 0,
         snapshot: findResultFileSnapshot(resultJson, path, workspaceRoot)
@@ -1160,7 +1136,7 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", s
     const label = "\u6b63\u5728\u52a0\u8f7d\u6280\u80fd";
     return skillName ? `${label} ${skillName}` : label;
   }
-  const rawTarget = input.command ?? input.path ?? input.filePath ?? input.query ?? input.pattern ?? input.url;
+  const rawTarget = input.command ?? input.path ?? input.file_path ?? input.filePath ?? input.query ?? input.pattern ?? input.url;
   const target = typeof rawTarget === "string" ? compactRuntimeTarget(rawTarget) : "";
   if (toolName === "apply_patch") {
     const file = parsePatchFileChanges(String(input.patch ?? ""))[0]?.path;
@@ -1181,7 +1157,7 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", s
   if (toolName === "list_mcp_resources" || toolName === "list_mcp_resource_templates") {
     return "正在查看 MCP 资源";
   }
-  if (toolName === "fs.write_file" || toolName === "apply_patch") {
+  if (toolName === "fs.write_file" || toolName === "apply_patch" || toolName === "search_replace") {
     return target ? `正在写入 ${target}` : "正在写入文件";
   }
   if (toolName === "fs.mkdir") return target ? `正在创建目录 ${target}` : "正在创建目录";
@@ -1346,8 +1322,10 @@ export function getToolActivitySummary(toolCalls: ToolCallRecord[], runningCall?
 
 export function getToolWriteTargets(toolCall: ToolCallRecord): string[] {
   const input = parseTimelineJson(toolCall.argumentsJson);
-  if (toolCall.toolName === "fs.write_file") {
-    const path = input.path ?? input.filePath;
+  if (toolCall.toolName === "fs.write_file" || toolCall.toolName === "search_replace") {
+    const path = toolCall.toolName === "search_replace"
+      ? input.file_path ?? input.filePath ?? input.path
+      : input.path ?? input.filePath;
     return typeof path === "string" && path.trim() ? [path.trim()] : [];
   }
 
@@ -1411,7 +1389,7 @@ export function isVerificationCommand(toolCall: ToolCallRecord): boolean {
 }
 
 export function getFileWriteTarget(input: Record<string, unknown>) {
-  const path = input.path ?? input.filePath;
+  const path = input.path ?? input.file_path ?? input.filePath;
   if (typeof path === "string" && path.trim()) return path;
   const patch = input.patch;
   if (typeof patch === "string") {

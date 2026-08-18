@@ -19,11 +19,15 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
   const diffPreviewPresence = useMotionPresence(diffPreview, 140);
   const visibleDiffPreview = diffPreview ?? diffPreviewPresence.value;
   const fileChanges = useMemo(
-    () => files.map((file) => ({ file, ...getFileChangeLineCounts(file) })),
+    () => getVisibleFileChanges(files),
     [files]
   );
   const additions = fileChanges.reduce((total, file) => total + file.additions, 0);
   const deletions = fileChanges.reduce((total, file) => total + file.deletions, 0);
+  const changeSummary = [
+    additions > 0 ? `新增 ${additions} 行` : "",
+    deletions > 0 ? `删除 ${deletions} 行` : ""
+  ].filter(Boolean).join("，");
 
   useEffect(() => {
     if (!open) return;
@@ -51,7 +55,7 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
   }, []);
 
-  if (files.length === 0) return null;
+  if (fileChanges.length === 0) return null;
 
   const clearPreviewCloseTimer = () => {
     if (closeTimerRef.current === null) return;
@@ -85,16 +89,16 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
         type="button"
         className="composer-task-changes-trigger"
         aria-expanded={open}
-        title={`本次任务修改 ${files.length} 个文件，新增 ${additions} 行，删除 ${deletions} 行`}
+        title={`本次任务修改 ${fileChanges.length} 个文件${changeSummary ? `，${changeSummary}` : ""}`}
         onClick={() => {
           setOpen((current) => !current);
           setDiffPreview(null);
         }}
       >
         <span className="composer-task-changes-icon" aria-hidden><IconFileChanges /></span>
-        <span className="composer-task-changes-label">{files.length} 个文件已更改</span>
-        <span className="is-added">+{additions}</span>
-        <span className="is-removed">-{deletions}</span>
+        <span className="composer-task-changes-label">{fileChanges.length} 个文件已更改</span>
+        {additions > 0 ? <span className="is-added" aria-label={`+${additions}`}>+{additions}</span> : null}
+        {deletions > 0 ? <span className="is-removed" aria-label={`-${deletions}`}>-{deletions}</span> : null}
       </button>
       {open ? (
         <section className="composer-task-changes-popover" aria-label="本次任务修改的文件">
@@ -139,6 +143,19 @@ export function getFileChangeLineCounts(file: FileChangeSummaryItem): { addition
     additions: lines.filter((line) => line.kind === "added").length,
     deletions: lines.filter((line) => line.kind === "removed").length
   };
+}
+
+/**
+ * Keep the task summary aligned with the final file contents. A tool can report
+ * a modified file even when its write was a no-op or a later edit restored it.
+ * Empty created/deleted files remain visible because they are structural changes.
+ */
+export function getVisibleFileChanges(files: FileChangeSummaryItem[]) {
+  return files
+    .map((file) => ({ file, ...getFileChangeLineCounts(file) }))
+    .filter(({ file, additions, deletions }) =>
+      file.action !== "modified" || additions > 0 || deletions > 0
+    );
 }
 
 export function FileChangeSummary({

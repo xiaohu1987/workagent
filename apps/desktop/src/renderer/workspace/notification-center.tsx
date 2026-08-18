@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { IconBell, IconNotificationStatus } from "../icons";
+import { IconBell, IconChevronRight, IconNotificationStatus } from "../icons";
 import {
   isFinishedNotification,
   sortNotificationItems,
@@ -53,8 +53,15 @@ export function NotificationCenter({
             const statusLabel = getNotificationStatusLabel(item.status);
             const elapsed = formatNotificationElapsed(item.startedAt, item.status === "running" || item.status === "attention" ? now : Date.parse(item.updatedAt));
             const highlighted = highlightedTarget === `${item.source}:${item.targetId}`;
+            const actionLabel = item.status === "attention" ? "去处理" : item.status === "running" ? "查看任务" : "查看结果";
             return (
-              <button key={item.id} type="button" className={`notification-center-item is-${item.status} ${item.unread ? "is-unread" : ""} ${highlighted ? "is-highlighted" : ""}`} onClick={() => void onOpenItem(item)}>
+              <button
+                key={item.id}
+                type="button"
+                className={`notification-center-item is-${item.status} ${item.unread ? "is-unread" : ""} ${highlighted ? "is-highlighted" : ""}`}
+                aria-label={`${actionLabel}：${item.title}`}
+                onClick={() => void onOpenItem(item)}
+              >
                 <span className="notification-item-status" aria-hidden><IconNotificationStatus status={item.status} /></span>
                 <span className="notification-item-copy">
                   <span className="notification-item-heading"><strong>{item.title}</strong><small>{statusLabel} · {elapsed}</small></span>
@@ -68,6 +75,7 @@ export function NotificationCenter({
                     ) : <span className="notification-item-progress is-indeterminate" aria-label={`${item.title} 正在运行`}><i /></span>
                   ) : null}
                 </span>
+                <span className="notification-item-action" aria-hidden><span>{actionLabel}</span><IconChevronRight /></span>
                 {item.unread && isFinishedNotification(item) ? <span className="notification-item-unread" aria-label="未读" /> : null}
               </button>
             );

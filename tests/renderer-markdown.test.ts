@@ -21,7 +21,7 @@ import {
   formatComposerAttachments,
   retainPersistentComposerContexts
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
-import { getFileChangeLineCounts } from "../apps/desktop/src/renderer/timeline/conversation-rail";
+import { getFileChangeLineCounts, getVisibleFileChanges } from "../apps/desktop/src/renderer/timeline/conversation-rail";
 import {
   extractMessageMediaReferences,
   isGeneratedUserSkill,
@@ -507,6 +507,29 @@ describe("parseMarkdownBlocks", () => {
     })).toEqual({ additions: 2, deletions: 1 });
   });
 
+  it("excludes modified files with no final content diff from the task summary", () => {
+    const visible = getVisibleFileChanges([
+      {
+        path: "src/no-op.ts",
+        action: "modified",
+        additions: 3,
+        deletions: 3,
+        snapshot: {
+          path: "src/no-op.ts",
+          before: "same",
+          after: "same",
+          beforeTruncated: false,
+          afterTruncated: false
+        }
+      },
+      { path: "src/zero.ts", action: "modified", additions: 0, deletions: 0 },
+      { path: "src/changed.ts", action: "modified", additions: 1, deletions: 1 },
+      { path: "empty.ts", action: "created", additions: 0, deletions: 0 }
+    ]);
+
+    expect(visible.map(({ file }) => file.path)).toEqual(["src/changed.ts", "empty.ts"]);
+  });
+
   it("selects only the latest one-shot task, including an internal GPA continuation", () => {
     const patchCall = (
       turnRunId: string,
@@ -548,6 +571,32 @@ describe("parseMarkdownBlocks", () => {
 
     expect(latestTurnRunId).toBe("turn-gpa-resume");
     expect(changes.map((file) => file.path)).toEqual(["src/current.ts"]);
+  });
+
+  it("does not report read-only AST comparisons as file changes", () => {
+    const astDiffCall = {
+      id: "ast-diff-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "code.ast_diff",
+      status: "completed",
+      argumentsJson: JSON.stringify({ path: "src/App.vue" }),
+      resultJson: JSON.stringify({
+        ok: true,
+        json: {
+          path: "src/App.vue",
+          language: null,
+          entities: [],
+          summary: "Unsupported language for AST diff: src/App.vue"
+        }
+      }),
+      riskLevel: "low",
+      approvalMode: "prompt",
+      startedAt: "2026-08-17T10:00:00.000Z",
+      completedAt: "2026-08-17T10:00:01.000Z"
+    } as any;
+
+    expect(collectFileChangesByTurn([astDiffCall], "D:\\project").get("turn-1")).toBeUndefined();
   });
 
   it("merges repeated edits within one turn and excludes failed writes", () => {

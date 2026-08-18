@@ -385,6 +385,7 @@ describe("tool processing labels", () => {
     expect(getToolProcessingLabel("fs.read_file")).toBe("正在读取文件");
     expect(getToolProcessingLabel("fs.read_directory")).toBe("正在读取目录");
     expect(getToolProcessingLabel("apply_patch")).toBe("正在写入文件");
+    expect(getToolProcessingLabel("search_replace")).toBe("正在写入文件");
     expect(getToolProcessingLabel("shell.exec")).toBe("正在执行命令");
     expect(getToolProcessingLabel("browser.open_tab")).toBe("正在操作浏览器");
     expect(getToolProcessingLabel("code.search")).toBe("正在代码搜索");
@@ -420,6 +421,7 @@ describe("tool processing labels", () => {
   it("includes the current command or target in the running status", () => {
     expect(getToolProcessingLabel("shell.exec", JSON.stringify({ command: "pnpm build" }))).toBe("正在运行 pnpm build");
     expect(getToolProcessingLabel("fs.read_file", JSON.stringify({ path: "src/App.tsx" }))).toBe("正在读取 src/App.tsx");
+    expect(getToolProcessingLabel("search_replace", JSON.stringify({ file_path: "src/App.tsx" }))).toBe("正在写入 src/App.tsx");
     expect(getToolProcessingLabel("fs.mkdir", JSON.stringify({ path: "docs/api" }))).toBe("正在创建目录 docs/api");
     expect(
       getToolProcessingLabel("apply_patch", JSON.stringify({
@@ -472,6 +474,7 @@ describe("file write transcript filtering", () => {
     expect(isPatchAssistantMessage("Implemented the requested feature.")).toBe(false);
     expect(isFileWriteTool("apply_patch")).toBe(true);
     expect(isFileWriteTool("fs.write_file")).toBe(true);
+    expect(isFileWriteTool("search_replace")).toBe(true);
     expect(isFileWriteTool("fs.mkdir")).toBe(true);
     expect(isFileWriteTool("fs.rename")).toBe(true);
     expect(isFileWriteTool("fs.delete")).toBe(true);

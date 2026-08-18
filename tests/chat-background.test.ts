@@ -38,6 +38,7 @@ describe("chat background settings", () => {
         dialog: null
       }
     })).toEqual({
+      mode: "none",
       enabled: false,
       rotationEnabled: true,
       rotationIntervalSeconds: 10,
@@ -79,6 +80,13 @@ describe("chat background settings", () => {
     });
   });
 
+  it("defaults to no background mode and migrates legacy image settings", () => {
+    expect(DEFAULT_CHAT_BACKGROUND_SETTINGS.mode).toBe("none");
+    expect(normalizeChatBackgroundSettings({ enabled: true })).toMatchObject({ mode: "none" });
+    expect(normalizeChatBackgroundSettings({ enabled: true, fileName: "scene.jpg" })).toMatchObject({ mode: "image" });
+    expect(normalizeChatBackgroundSettings({ mode: "dynamic", enabled: false })).toMatchObject({ mode: "dynamic" });
+  });
+
   it("falls back when persisted JSON is malformed", () => {
     const storage = { getItem: () => "not-json" };
     expect(readChatBackgroundSettings(storage)).toEqual(DEFAULT_CHAT_BACKGROUND_SETTINGS);
@@ -88,6 +96,7 @@ describe("chat background settings", () => {
     let persisted = "";
     writeChatBackgroundSettings(
       {
+        mode: "image",
         enabled: true,
         rotationEnabled: true,
         rotationIntervalSeconds: 72.4,
@@ -111,6 +120,7 @@ describe("chat background settings", () => {
       { setItem: (_key, value) => { persisted = value; } }
     );
     expect(JSON.parse(persisted)).toEqual({
+      mode: "image",
       enabled: true,
       rotationEnabled: true,
       rotationIntervalSeconds: 72,
@@ -131,6 +141,16 @@ describe("chat background settings", () => {
         workspace: 12
       }
     });
+  });
+
+  it("persists and restores the selected background mode", () => {
+    let persisted = "";
+    writeChatBackgroundSettings(
+      { ...DEFAULT_CHAT_BACKGROUND_SETTINGS, mode: "dynamic" },
+      { setItem: (_key, value) => { persisted = value; } }
+    );
+
+    expect(readChatBackgroundSettings({ getItem: () => persisted }).mode).toBe("dynamic");
   });
 
   it("turns drag positions into a visible pan transform", () => {
@@ -160,10 +180,12 @@ describe("chat background settings", () => {
   it("only rotates an enabled background collection with multiple images", () => {
     expect(isChatBackgroundRotationActive({
       ...DEFAULT_CHAT_BACKGROUND_SETTINGS,
+      enabled: true,
       rotationEnabled: true
     }, 1)).toBe(false);
     expect(isChatBackgroundRotationActive({
       ...DEFAULT_CHAT_BACKGROUND_SETTINGS,
+      enabled: true,
       rotationEnabled: true
     }, 2)).toBe(true);
   });

@@ -24,13 +24,17 @@ import type {
   ModelCompatContext
 } from "./models";
 import { resolveModelCompat } from "./models";
-import { appendGrokCompletionAuditInstruction, normalizeGrokCompletionAuditDecision } from "./models";
+import { appendGrokCompletionAuditInstruction, grokFileToolPromptLines, grokNativeToolName, isGrokModel, normalizeGrokCompletionAuditDecision, prepareGrokAvailableTools } from "./models";
 
 export {
   resolveModelCompat,
   gptCompat,
   deepseekCompat,
   grokCompat,
+  isGrokModel,
+  grokNativeToolName,
+  prepareGrokAvailableTools,
+  grokFileToolPromptLines,
   glmCompat,
   qwenCompat,
   senseNovaCompat,
@@ -591,6 +595,11 @@ export class ProviderFactory {
   }
 }
 
+function withModelSpecificTools(input: ProviderTurnInput): ProviderTurnInput {
+  const availableTools = prepareGrokAvailableTools(input.model, input.availableTools);
+  return availableTools === input.availableTools ? input : { ...input, availableTools };
+}
+
 class MockProvider implements ProviderAdapter {
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
     const userMessage = [...input.transcript].reverse().find((message) => message.role === "user");
@@ -733,6 +742,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    input = withModelSpecificTools(input);
     const compat = resolveModelCompat(input.model, input.provider);
     const ctx: ModelCompatContext = { model: input.model, input };
     const toolCallMode = compat.resolveToolCallMode(ctx);
@@ -740,7 +750,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       ? input.availableTools.map((tool) => ({
           type: "function" as const,
           function: {
-            name: nativeToolName(tool.name),
+            name: nativeToolNameForModel(tool.name, input.model),
             description: tool.description,
             parameters: tool.inputSchema
           }
@@ -1104,12 +1114,13 @@ class OpenAiResponsesProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    input = withModelSpecificTools(input);
     const compat = resolveModelCompat(input.model, input.provider);
     const compatContext: ModelCompatContext = { model: input.model, input };
     const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
       ? input.availableTools.map((tool) => ({
           type: "function" as const,
-          name: nativeToolName(tool.name),
+          name: nativeToolNameForModel(tool.name, input.model),
           description: tool.description,
           parameters: tool.inputSchema,
           strict: false
@@ -1146,14 +1157,14 @@ class OpenAiResponsesProvider implements ProviderAdapter {
           signal: input.abortSignal
         }) as any;
         if (isAsyncIterable(stream)) {
-          return consumeResponsesStream(stream, input);
+          return compat.normalizeDecision(await consumeResponsesStream(stream, input), compatContext);
         }
-        return parseResponsesResponse(stream, input);
+        return compat.normalizeDecision(parseResponsesResponse(stream, input), compatContext);
       }
       const limitedRequest = applyProviderRequestLimits(request, this.provider, input.model);
       await reportProviderRequestMeasurement(input, limitedRequest);
       const response = await this.#client.responses.create(limitedRequest as any, { signal: input.abortSignal });
-      return parseResponsesResponse(response, input);
+      return compat.normalizeDecision(parseResponsesResponse(response, input), compatContext);
     } catch (error) {
       throw createApiFormatRequestError("Responses API", this.provider, "/responses", error);
     }
@@ -1316,6 +1327,13 @@ export function nativeToolName(name: string): string {
   // with underscores is ambiguous (`foo.bar` and `foo_bar` collide), so use a
   // stable compact digest only on the provider boundary.
   return `tool_${createHash("sha256").update(name).digest("hex").slice(0, 24)}`;
+}
+
+function nativeToolNameForModel(
+  name: string,
+  model: Pick<ModelProfile, "id" | "displayName">
+): string {
+  return grokNativeToolName(name, model) ?? nativeToolName(name);
 }
 
 function isDeepSeekModel(
@@ -1597,7 +1615,7 @@ function looksLikeMalformedDecisionProtocol(text: string): boolean {
 
 export function isBareToolInvocationText(text: string): boolean {
   const normalized = text.trim();
-  return /^(?:(?:web_search|browser|shell|fs|knowledge|mcp|database|git|code|project|skills|multi_agents|image|video|memories)(?:[._][a-z0-9-]+)+|apply_patch|request_user_input|spawn_agent|send_message|followup_task|wait_agent|interrupt_agent|list_agents)$/i.test(
+  return /^(?:(?:web_search|browser|shell|fs|knowledge|mcp|database|git|code|project|skills|multi_agents|image|video|memories)(?:[._][a-z0-9-]+)+|apply_patch|search_replace|request_user_input|spawn_agent|send_message|followup_task|wait_agent|interrupt_agent|list_agents)$/i.test(
     normalized
   );
 }
@@ -1616,10 +1634,11 @@ class AnthropicProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    input = withModelSpecificTools(input);
     const compatContext: ModelCompatContext = { model: input.model, input };
     const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
       ? input.availableTools.map((tool) => ({
-          name: nativeToolName(tool.name),
+          name: nativeToolNameForModel(tool.name, input.model),
           description: tool.description,
           input_schema: tool.inputSchema as any
         }))
@@ -1694,7 +1713,11 @@ function parseAnthropicResponse(
   const withReasoning = reasoning && !withUsage.reasoningSummary
     ? { ...withUsage, reasoningSummary: reasoning }
     : withUsage;
-  return normalizeGrokCompletionAuditDecision({ model: input.model, input }, withReasoning, text, reasoning);
+  const context: ModelCompatContext = { model: input.model, input };
+  return resolveModelCompat(input.model, input.provider).normalizeDecision(
+    normalizeGrokCompletionAuditDecision(context, withReasoning, text, reasoning),
+    context
+  );
 }
 
 async function consumeAnthropicStream(
@@ -1776,7 +1799,11 @@ async function consumeAnthropicStream(
       : parseDecisionFromText(text);
   const withUsage = withTokenUsage(decision, usage);
   const withReasoning = reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
-  return normalizeGrokCompletionAuditDecision({ model: input.model, input }, withReasoning, text, reasoning);
+  const context: ModelCompatContext = { model: input.model, input };
+  return resolveModelCompat(input.model, input.provider).normalizeDecision(
+    normalizeGrokCompletionAuditDecision(context, withReasoning, text, reasoning),
+    context
+  );
 }
 
 function throwForAnthropicStopReason(stopReason: string): void {
@@ -1795,6 +1822,7 @@ class GeminiProvider implements ProviderAdapter {
   public constructor(private readonly provider: ProviderDefinition) {}
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    input = withModelSpecificTools(input);
     const apiKey = resolveApiKey(this.provider);
     const endpoint = this.provider.baseUrl
       ? `${this.provider.baseUrl.replace(/\/$/, "")}/models/${input.model.id}:generateContent?key=${apiKey}`
@@ -1815,7 +1843,7 @@ class GeminiProvider implements ProviderAdapter {
           ? {
               tools: [{
                 functionDeclarations: input.availableTools.map((tool) => ({
-                  name: nativeToolName(tool.name),
+                  name: nativeToolNameForModel(tool.name, input.model),
                   description: tool.description,
                   parameters: tool.inputSchema
                 }))
@@ -1880,20 +1908,24 @@ class GeminiProvider implements ProviderAdapter {
       }];
     });
     if (nativeCalls.length > 0) {
-      return withTokenUsage({
+      const decision = withTokenUsage({
         assistantMessage: parts.map((part) => part.text ?? "").join("\n").trim() || undefined,
         toolCalls: nativeCalls,
         endTurn: false,
         goalCompleted: false,
         isStructured: true
       }, json.usageMetadata);
+      const context: ModelCompatContext = { model: input.model, input };
+      return resolveModelCompat(input.model, input.provider).normalizeDecision(decision, context);
     }
     const text = parts.map((part) => part.text ?? "").join("\n").trim();
     const usesNativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0;
-    return withTokenUsage(
+    const decision = withTokenUsage(
       usesNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
       json.usageMetadata
     );
+    const context: ModelCompatContext = { model: input.model, input };
+    return resolveModelCompat(input.model, input.provider).normalizeDecision(decision, context);
   }
 }
 
@@ -2251,7 +2283,7 @@ async function buildOpenAiCompatibleMessages(input: ProviderTurnInput) {
           id: call.id,
           type: "function",
           function: {
-            name: nativeToolName(call.name),
+            name: nativeToolNameForModel(call.name, input.model),
             arguments: JSON.stringify(call.arguments)
           }
         }))
@@ -2310,7 +2342,7 @@ async function buildResponsesInput(input: ProviderTurnInput): Promise<any[]> {
         items.push({
           type: "function_call",
           call_id: call.id,
-          name: nativeToolName(call.name),
+          name: nativeToolNameForModel(call.name, input.model),
           arguments: JSON.stringify(call.arguments)
         });
       }
@@ -2556,7 +2588,7 @@ async function buildAnthropicMessages(input: ProviderTurnInput): Promise<any[]> 
           ...message.toolCalls.map((call) => ({
             type: "tool_use",
             id: call.id,
-            name: nativeToolName(call.name),
+            name: nativeToolNameForModel(call.name, input.model),
             input: call.arguments
           }))
         ]
@@ -2601,7 +2633,7 @@ async function buildGeminiContents(input: ProviderTurnInput): Promise<any[]> {
         parts: [
           ...(message.content ? [{ text: message.content }] : []),
           ...message.toolCalls.map((call) => ({
-            functionCall: { name: nativeToolName(call.name), args: call.arguments }
+            functionCall: { name: nativeToolNameForModel(call.name, input.model), args: call.arguments }
           }))
         ]
       });
@@ -2614,7 +2646,7 @@ async function buildGeminiContents(input: ProviderTurnInput): Promise<any[]> {
           role: "user",
           parts: [{
             functionResponse: {
-              name: nativeToolName(call.name),
+              name: nativeToolNameForModel(call.name, input.model),
               response: message.toolResultOk === false
                 ? { error: message.content }
                 : { content: message.content }
@@ -3455,6 +3487,10 @@ function looksLikeAgentDecisionEnvelope(parsed: Record<string, unknown>): boolea
 }
 
 const PROVIDER_TOOL_NAME_ALIASES: Record<string, string> = {
+  read_file: "fs.read_file",
+  list_dir: "fs.read_directory",
+  grep: "code.search",
+  bash: "shell.exec",
   image_gen: "image.generate",
   imagegen: "image.generate",
   "image-gen": "image.generate",
@@ -3475,6 +3511,11 @@ function assertNever(_value: ProviderType): never {
 }
 
 export function buildDecisionSystemPrompt(model: ModelProfile): string {
+  const grokModel = isGrokModel(model);
+  const fileEditTool = grokModel ? "search_replace" : "apply_patch";
+  const readFileTool = grokModel ? "read_file" : "fs.read_file";
+  const listDirectoryTool = grokModel ? "list_dir" : "fs.read_directory";
+  const shellTool = grokModel ? "bash" : "shell.exec";
   return [
     "You are codexh, a desktop agent.",
     "When native function tools are provided, invoke them through the provider tool-call channel; never serialize a tool call into assistant text.",
@@ -3487,23 +3528,31 @@ export function buildDecisionSystemPrompt(model: ModelProfile): string {
     "For every GPA ACT decision, include completed_task_ids: use [] when no new PLAN task is complete, otherwise cumulatively list every completed PLAN task id. Before starting a later PLAN task, return a decision that marks the preceding accepted task complete. completion_evidence must be an array of { task_id, tool_call_id, kind }, where kind is observation, delivery, or verification and tool_call_id comes from an actual successful tool result.",
     "When request_user_input is listed, call it only for a material decision that tools and the current context cannot resolve safely. Provide one to four concise questions with two to four mutually exclusive options, then wait for the tool result. Do not place such questions in assistant_message, and do not use it for facts that can be inspected or verified with tools. Do not call tools that were not listed.",
     "Only call tools that were provided in the tool list.",
-    "When shell.exec is listed, it is the command execution tool. Do not state that command execution is unavailable; call shell.exec with {\"command\": \"...\"} instead.",
+    `When ${shellTool} is listed, it is the command execution tool. Do not state that command execution is unavailable; call ${shellTool} with {\"command\": \"...\"} instead.`,
     ...(process.platform === "win32"
-      ? ["The desktop shell is Windows PowerShell. Use PowerShell syntax, not Bash/CMD syntax; recognizable CMD commands may be adapted automatically. Never write files through shell.exec: use apply_patch."]
+      ? [`The desktop shell is Windows PowerShell. Use PowerShell syntax, not Bash/CMD syntax; recognizable CMD commands may be adapted automatically. Never write files through shell.exec: use ${fileEditTool}.`]
       : []),
-    "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",
-    "For apply_patch, send arguments.patch as raw Codex patch text. Add example: *** Begin Patch\\n*** Add File: relative/path.ext\\n+content\\n*** End Patch. Update example: *** Begin Patch\\n*** Update File: relative/path.ext\\n@@\\n unchanged context\\n-old text\\n+new text\\n*** End Patch. Every update hunk line must start with a space, -, or +. Do not send file_path or patch_content.",
-    "When reviewing or comparing code structure (functions/classes/methods), prefer code.ast_diff with {\"path\": \"relative/file\"} (optional against). Still use apply_patch for writes.",
-    "For large source files, call code.outline first, then fs.read_file with optional {\"offset\": startLine, \"limit\": lineCount} instead of reading the entire file.",
-    "To inspect the selected project folder, call fs.read_directory with { path: \".\" }. Never call read or use Unix paths such as /home.",
-    "A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with apply_patch in the very next tool call.",
-    "After an Add File patch succeeds, never use Add File for that path again in the same task. Read it and use Update File only if a follow-up edit is necessary.",
+    ...(grokModel
+      ? grokFileToolPromptLines()
+      : [
+          "For every file creation or content edit, use apply_patch. Create a new file with an Add File patch.",
+          "For apply_patch, send arguments.patch as raw Codex patch text. Add example: *** Begin Patch\\n*** Add File: relative/path.ext\\n+content\\n*** End Patch. Update example: *** Begin Patch\\n*** Update File: relative/path.ext\\n@@\\n unchanged context\\n-old text\\n+new text\\n*** End Patch. Every update hunk line must start with a space, -, or +. Do not send file_path or patch_content."
+        ]),
+    `When reviewing or comparing code structure (functions/classes/methods), prefer code.ast_diff with {\"path\": \"relative/file\"} (optional against). Still use ${fileEditTool} for writes.`,
+    `For large source files, call code.outline first, then ${readFileTool} with optional {\"offset\": startLine, \"limit\": lineCount} instead of reading the entire file.`,
+    grokModel
+      ? `To inspect the selected project folder, call ${listDirectoryTool} with { target_directory: \".\" }. Never use copy, rename, or delete tools for inspection.`
+      : `To inspect the selected project folder, call ${listDirectoryTool} with { path: \".\" }. Never call read or use Unix paths such as /home.`,
+    `A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with ${fileEditTool} in the very next tool call.`,
+    ...(!grokModel ? ["After an Add File patch succeeds, never use Add File for that path again in the same task. Read it and use Update File only if a follow-up edit is necessary."] : []),
     "When a tool result reports the same failure twice, do not repeat the identical call. Inspect new evidence and change the tool, arguments, or implementation approach.",
     "There is no create_file tool. Never invent a tool name or substitute one for a provided tool.",
     "When no tool is needed, return an empty tool_calls array.",
     "Never put patches, diffs, or source code in assistant_message. Use tool_calls for file writes; assistant_message may only contain a short progress update or final summary.",
-    "To inspect the selected project folder, call fs.read_directory with { path: \".\" }. Never call read or use Unix paths such as /home.",
-    "A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with apply_patch in the very next tool call.",
+    grokModel
+      ? `To inspect the selected project folder, call ${listDirectoryTool} with { target_directory: \".\" }.`
+      : `To inspect the selected project folder, call ${listDirectoryTool} with { path: \".\" }. Never call read or use Unix paths such as /home.`,
+    `A successful directory listing, including an empty folder, is sufficient context. Do not repeat it: create or edit the requested files with ${fileEditTool} in the very next tool call.`,
     "There is no create_file tool. Never invent a tool name or substitute one for a provided tool.",
     "When no tool is needed, return an empty tool_calls array.",
     "Never state or imply that a file was created, changed, tested, or that a task is complete unless the corresponding tool call has already run and its result is in the transcript.",

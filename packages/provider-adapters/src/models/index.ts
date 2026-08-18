@@ -25,6 +25,10 @@ export { gptCompat } from "./gpt";
 export { deepseekCompat } from "./deepseek";
 export {
   grokCompat,
+  isGrokModel,
+  grokNativeToolName,
+  prepareGrokAvailableTools,
+  grokFileToolPromptLines,
   isGrokCompletionAudit,
   appendGrokCompletionAuditInstruction,
   normalizeGrokCompletionAuditDecision

@@ -34,11 +34,18 @@ import {
   validateStandardCompletion,
   hasValidApiCardDeliverable,
   buildStandardCompletionAuditSystemPrompt,
+  resolveStandardCompletionAuditDiagnosis,
+  selectStandardCompletionAuditRepairs,
+  calculateStandardCompletionAuditSimilarity,
+  resolveStandardCompletionAuditPipeline,
+  createStandardCompletionAuditModel,
   buildStandardCompletionAuditInstruction,
   buildStandardCompletionAuditRecoveryInstruction,
   buildStandardCompletionAuditStatusMessage,
+  buildStandardCompletionAuditConclusion,
   resolveStandardCompletionAuditResult,
   resolveStandardCompletionAuditDisposition,
+  hasFreshStandardCompletionAuditEvidence,
   shouldRunStandardCompletionAudit,
   buildStandardCompletionRecoveryInstruction,
   buildStandardCompletionTextToolFallbackInstruction,
@@ -47,8 +54,10 @@ import {
   isProjectFileMutationRequest,
   isProjectSourceCodePath,
   hasSuccessfulUnitTestResult,
+  hasUnavailableUnitTestResult,
   isUnitTestCommand,
   hasUnitTestReport,
+  hasUnitTestUnavailableReport,
   createManagedWriteRecoveryState,
   createManagedWriteRecoveryReadToolCall,
   validateManagedWriteRecoveryToolCall,
@@ -58,6 +67,7 @@ import {
   validateActCompletion,
   buildActCompletionRecoveryInstruction,
   isProgressOnlyAssistantMessage,
+  shouldRejectProgressOnlyCompletion,
   shouldRecoverUnboundAssistantMessage,
   buildUnboundAssistantMessageRecoveryInstruction,
   buildProgressOnlyCompletionRecoveryInstruction,
@@ -113,6 +123,7 @@ import {
   AGENT_PROTOCOL_RECOVERY_TOOL_NAME,
   AGENT_PROTOCOL_RECOVERY_TOOL_SPEC,
   buildAgentProtocolContinuationInstruction,
+  buildAgentProtocolContinuationInput,
   sanitizeProtocolRecoveryEvidence,
   AGENT_PROTOCOL_RECOVERY_QUESTION_ID,
   MAX_MODEL_RATE_LIMIT_RETRIES,
@@ -1430,7 +1441,7 @@ describe("standard completion validation", () => {
       alreadyUsingTextToolProtocol: true,
       result
     })).toBe(false);
-    expect(buildStandardCompletionTextToolFallbackInstruction(result)).toContain("exactly one apply_patch or fs.write_file");
+    expect(buildStandardCompletionTextToolFallbackInstruction(result)).toContain("exactly one search_replace, apply_patch, or fs.write_file");
     expect(buildStandardCompletionTextToolFallbackInstruction(result)).toContain("end_turn and goal_completed to false");
   });
 
@@ -1466,6 +1477,18 @@ describe("standard completion validation", () => {
       { name: "project.verify", arguments: {} },
       { json: { passed: true, commands: ["pnpm run typecheck"] } }
     )).toBe(false);
+    expect(hasUnavailableUnitTestResult(
+      { name: "project.verify" },
+      { json: { passed: true, commands: ["pnpm run typecheck"] } }
+    )).toBe(true);
+    expect(hasUnavailableUnitTestResult(
+      { name: "project.verify" },
+      { json: { passed: false, unverified: true, executed: false, commands: [] } }
+    )).toBe(true);
+    expect(hasUnavailableUnitTestResult(
+      { name: "project.verify" },
+      { json: { passed: true, commands: ["pnpm run test"] } }
+    )).toBe(false);
     expect(hasSuccessfulUnitTestResult(
       { name: "shell.exec", arguments: { command: "node tests/panel-layout-check.js; node --check js/game.js" } },
       { json: {} }
@@ -1476,6 +1499,8 @@ describe("standard completion validation", () => {
     expect(isUnitTestCommand("echo test")).toBe(false);
     expect(hasUnitTestReport("测试报告：单元测试 pnpm test 通过，12 passed，0 failed。")).toBe(true);
     expect(hasUnitTestReport("构建通过。")).toBe(false);
+    expect(hasUnitTestUnavailableReport("未找到可运行的单元测试命令；已完成类型检查。")).toBe(true);
+    expect(hasUnitTestUnavailableReport("No configured unit-test command was found; typecheck passed.")).toBe(true);
   });
 
   it("does not treat an unexecuted project.verify call as post-delivery verification", () => {
@@ -1678,6 +1703,110 @@ describe("standard completion validation", () => {
     })).toBe("reject_candidate");
   });
 
+  it("rejects a result preface that ends with an unperformed Chinese follow-up", () => {
+    const message = "关键证据找到了：现有 SQL 没有状态过滤。我读一下那段老逻辑确认取哪条 OverReason 的正确语义。";
+
+    expect(isProgressOnlyAssistantMessage(message)).toBe(true);
+    expect(shouldRejectProgressOnlyCompletion({
+      assistantMessage: message,
+      toolCallCount: 0,
+      endTurn: true
+    })).toBe(true);
+  });
+
+  it("does not reject progress commentary while its promised tool call is pending", () => {
+    expect(shouldRejectProgressOnlyCompletion({
+      assistantMessage: "我读一下那段老逻辑。",
+      toolCallCount: 1,
+      endTurn: false
+    })).toBe(false);
+  });
+
+  it("accepts a verified code change when unit tests are unavailable and the limitation is disclosed", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "Updated src/voice.ts. Typecheck passed; no runnable unit-test command was found.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      requiresUnitTest: true,
+      deliveredPaths: ["D:\\project\\src\\voice.ts"],
+      successfulEvidence: [
+        { toolCallId: "write-1", toolName: "search_replace", kinds: ["delivery"] },
+        { toolCallId: "verify-1", toolName: "project.verify", kinds: ["verification"], unitTestUnavailable: true }
+      ]
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.missingUnitTest).toBe(false);
+    expect(result.missingUnitTestDisclosure).toBe(false);
+  });
+
+  it("requests a disclosure instead of another test run when unit tests are unavailable", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "Updated src/voice.ts and typecheck passed.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      requiresUnitTest: true,
+      deliveredPaths: ["D:\\project\\src\\voice.ts"],
+      successfulEvidence: [
+        { toolCallId: "write-1", toolName: "search_replace", kinds: ["delivery"] },
+        { toolCallId: "verify-1", toolName: "project.verify", kinds: ["verification"], unitTestUnavailable: true }
+      ]
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.missingUnitTest).toBe(false);
+    expect(result.missingUnitTestDisclosure).toBe(true);
+    expect(buildStandardCompletionRecoveryInstruction(result)).toContain("Do not run the unavailable test again");
+    expect(shouldSwitchStandardCompletionToTextToolProtocol({
+      attempt: STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
+      alreadyUsingTextToolProtocol: false,
+      result
+    })).toBe(false);
+  });
+
+  it("requires fresh successful evidence before re-auditing a rejected completion", () => {
+    const existingEvidence = [{
+      toolCallId: "write-1",
+      toolName: "apply_patch",
+      kinds: ["delivery" as const]
+    }];
+
+    expect(hasFreshStandardCompletionAuditEvidence({
+      baseline: 1,
+      successfulEvidence: existingEvidence
+    })).toBe(false);
+    expect(hasFreshStandardCompletionAuditEvidence({
+      baseline: 1,
+      successfulEvidence: [
+        ...existingEvidence,
+        { toolCallId: "test-1", toolName: "shell.exec", kinds: ["verification" as const] }
+      ]
+    })).toBe(true);
+    expect(hasFreshStandardCompletionAuditEvidence({
+      baseline: 1,
+      successfulEvidence: [
+        ...existingEvidence,
+        { toolCallId: "noop-1", toolName: "skills.load", kinds: [] }
+      ]
+    })).toBe(false);
+
+    const instruction = buildStandardCompletionAuditRecoveryInstruction(
+      ["The frontend was not changed."],
+      { requireFreshEvidence: true }
+    );
+    expect(instruction).toContain("will not be audited again");
+    expect(instruction).toContain("must execute at least one concrete tool call");
+    expect(instruction).toContain("without fresh successful tool evidence");
+  });
+
   it("requires concrete execution instead of another intention after an audit rejection", () => {
     const instruction = buildStandardCompletionAuditRecoveryInstruction([
       "The page was not opened and no score was reported."
@@ -1725,9 +1854,79 @@ describe("standard completion validation", () => {
     expect(systemPrompt).toContain("successful tool evidence proves the requested end state was reached");
     expect(systemPrompt).toContain("NEEDS_USER_INPUT:");
     expect(systemPrompt).toContain("the next concrete action needed to close it");
-    expect(systemPrompt).toContain("assistant_message exactly APPROVED");
+    expect(systemPrompt).toContain("Phase 1 Self-Diagnosis");
+    expect(systemPrompt).toContain('"overall_score":0-100');
+    expect(systemPrompt).toContain("at most three critical/high/medium symptoms");
     expect(buildStandardCompletionAuditRecoveryInstruction(["Expected results are missing."]))
       .toContain("Expected results are missing.");
+  });
+
+  it("parses strict Phase 1 diagnosis JSON and limits Phase 2 repairs to three blocking symptoms", () => {
+    const diagnosis = resolveStandardCompletionAuditDiagnosis({
+      assistantMessage: JSON.stringify({
+        symptoms: [
+          { level: "low", description: "措辞可更紧凑", suggested_fix: "压缩一句话" },
+          { level: "critical", description: "遗漏接口接入", suggested_fix: "接入 GetProjectInfo" },
+          { level: "high", description: "没有页面验证", suggested_fix: "运行页面测试" },
+          { level: "medium", description: "字段显隐未绑定", suggested_fix: "绑定 SectionVisibles" },
+          { level: "medium", description: "缺少路径", suggested_fix: "列出修改文件" }
+        ],
+        overall_score: 72,
+        can_stop: true
+      })
+    });
+
+    expect(diagnosis.can_stop).toBe(false);
+    expect(diagnosis.overall_score).toBe(72);
+    expect(selectStandardCompletionAuditRepairs(diagnosis)).toEqual([
+      expect.objectContaining({ level: "critical" }),
+      expect.objectContaining({ level: "high" }),
+      expect.objectContaining({ level: "medium" })
+    ]);
+    expect(resolveStandardCompletionAuditPipeline({
+      first: {
+        symptoms: [{ level: "low", description: "措辞可优化", suggested_fix: "精简措辞" }],
+        overall_score: 89,
+        can_stop: false
+      }
+    }).gaps[0]).toContain("低于 90 分停止阈值");
+  });
+
+  it("runs at most two consistency results and routes disagreement through temperature-0 gold validation", () => {
+    const pass = resolveStandardCompletionAuditDiagnosis({
+      assistantMessage: '{"symptoms":[],"overall_score":96,"can_stop":true}'
+    });
+    const similarPass = resolveStandardCompletionAuditDiagnosis({
+      assistantMessage: '{"symptoms":[],"overall_score":94,"can_stop":true}'
+    });
+    const inconsistent = resolveStandardCompletionAuditDiagnosis({
+      assistantMessage: '{"symptoms":[{"level":"high","description":"缺少实际页面改造","suggested_fix":"修改 Vue 页面"}],"overall_score":55,"can_stop":false}'
+    });
+
+    expect(calculateStandardCompletionAuditSimilarity(pass, similarPass).combined).toBe(1);
+    expect(resolveStandardCompletionAuditPipeline({ first: pass, second: similarPass })).toMatchObject({
+      accepted: true,
+      phase: "phase_3_consistent"
+    });
+    expect(resolveStandardCompletionAuditPipeline({ first: pass, second: inconsistent })).toMatchObject({
+      accepted: false,
+      phase: "phase_4_gold",
+      goldValidated: false
+    });
+    expect(resolveStandardCompletionAuditPipeline({ first: pass, second: inconsistent, gold: pass })).toMatchObject({
+      accepted: true,
+      phase: "phase_4_gold",
+      goldValidated: true
+    });
+    expect(buildStandardCompletionAuditConclusion(
+      resolveStandardCompletionAuditPipeline({ first: pass, second: similarPass })
+    )).toContain("审计通过");
+    expect(buildStandardCompletionAuditConclusion(
+      resolveStandardCompletionAuditPipeline({ first: pass, second: inconsistent })
+    )).toContain("审核未通过");
+    expect(createStandardCompletionAuditModel({ defaultTemperature: 1 } as ModelProfile, "diagnosis").defaultTemperature).toBe(0.15);
+    expect(createStandardCompletionAuditModel({ defaultTemperature: 1 } as ModelProfile, "consistency").defaultTemperature).toBe(0.65);
+    expect(createStandardCompletionAuditModel({ defaultTemperature: 1 } as ModelProfile, "gold").defaultTemperature).toBe(0);
   });
 
   it("rejects a test-case request when the response contains only an introduction", () => {
@@ -1881,6 +2080,19 @@ describe("Agent decision protocol recovery", () => {
     expect(instruction).toContain(String(MAX_AGENT_PROTOCOL_FAILURES));
     expect(instruction).toContain(String(MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES));
     expect(instruction).toContain("unfinished work");
+  });
+
+  it("carries an audit repair directive into a fresh turn without duplicating it", () => {
+    const request = "根据 GetProjectInfo 重构项目基本信息页面";
+    const directive = buildStandardCompletionAuditRecoveryInstruction(
+      ["前端页面尚未修改。"],
+      { requireFreshEvidence: true }
+    );
+    const continued = buildAgentProtocolContinuationInput(request, directive);
+
+    expect(continued).toContain(request);
+    expect(continued).toContain("前端页面尚未修改");
+    expect(buildAgentProtocolContinuationInput(continued, directive)).toBe(continued);
   });
 
   it("carries only valid deduplicated execution evidence into a fresh turn", () => {
@@ -2840,6 +3052,43 @@ describe("GPA ACT completion evidence", () => {
     expect(isProgressOnlyAssistantMessage("... 让我检查音色选择逻辑：")).toBe(true);
     expect(isProgressOnlyAssistantMessage("让我验证一下修改是否完整应用：")).toBe(true);
     expect(isProgressOnlyAssistantMessage("任务已经完成并通过全部测试。")).toBe(false);
+  });
+
+  it("accepts GPA verification with an explicit unavailable-unit-test disclosure", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-1",
+      toolName: "search_replace",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\src\\App.tsx"]
+    });
+    const verification = classifySuccessfulToolEvidence({
+      toolCallId: "verify-1",
+      toolName: "project.verify",
+      hasPriorDelivery: true,
+      verificationPassed: true,
+      unitTestUnavailable: true
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "The build passed. No runnable unit-test command was found.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-1", kind: "delivery" },
+          { taskId: "T1", toolCallId: "verify-1", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, verification],
+      requiresUnitTest: true
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.missingUnitTest).toBe(false);
+    expect(result.missingUnitTestDisclosure).toBe(false);
   });
 
   it("builds a concrete next step instead of accepting progress prose", () => {

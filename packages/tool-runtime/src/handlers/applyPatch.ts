@@ -245,6 +245,7 @@ async function commitPatch(planned: PlannedFile[], fileSystem: PatchFileSystem):
   try {
     for (const entry of planned) {
       if (entry.after === null) continue;
+      if (entry.restore !== null && entry.after === entry.before) continue;
       await fileSystem.mkdir(path.dirname(entry.path), { recursive: true });
       const temporary = `${entry.path}.codexh-${randomUUID()}.tmp`;
       await fileSystem.writeFile(temporary, entry.after, "utf8");
@@ -439,7 +440,14 @@ async function applyHunks(
   const language = languageFromPath(filePath);
   let symbols = language ? await extractSymbols(normalizedOriginal, language) : null;
 
-  for (const hunk of hunks) {
+  for (let hunkIndex = 0; hunkIndex < hunks.length; hunkIndex += 1) {
+    const normalizedHunk = stripDisplayedLineNumbers(hunks[hunkIndex]);
+    const nextHunk = hunks[hunkIndex + 1]
+      ? stripDisplayedLineNumbers(hunks[hunkIndex + 1])
+      : undefined;
+    const repairedPair = repairSplitReplacementHunk(current, normalizedHunk, nextHunk);
+    const hunk = repairedPair ?? normalizedHunk;
+    if (repairedPair) hunkIndex += 1;
     const prepared = prepareHunk(current, hunk, symbols);
     additions += prepared.additions;
     deletions += prepared.deletions;
@@ -461,6 +469,83 @@ async function applyHunks(
     deletions,
     applyMode: language ? applyMode : "text"
   };
+}
+
+function stripDisplayedLineNumbers(hunk: { lines: string[] }): { lines: string[] } {
+  return {
+    lines: hunk.lines.map((line) => {
+      const prefix = line.startsWith(" ") || line.startsWith("+") || line.startsWith("-")
+        ? line[0]
+        : "";
+      const body = prefix ? line.slice(1) : line;
+      const match = /^\s*\d+\|(.*)$/.exec(body);
+      return match ? `${prefix}${match[1]}` : line;
+    })
+  };
+}
+
+function repairSplitReplacementHunk(
+  current: string[],
+  beforeHunk: { lines: string[] },
+  afterHunk?: { lines: string[] }
+): { lines: string[] } | null {
+  if (!afterHunk) return null;
+
+  const before = contextOnlyLines(beforeHunk);
+  if (!before || findSequenceStarts(current, before).length !== 1) return null;
+
+  const afterContext = contextOnlyLines(afterHunk);
+  const afterAdditions = additionsOnlyLines(afterHunk);
+  const desired = afterContext ?? (afterAdditions ? mergePartialReplacement(before, afterAdditions) : null);
+  if (!desired || sameLines(before, desired)) return null;
+
+  return {
+    lines: [
+      ...before.map((line) => `-${line}`),
+      ...desired.map((line) => `+${line}`)
+    ]
+  };
+}
+
+function contextOnlyLines(hunk: { lines: string[] }): string[] | null {
+  if (countHunkEdits(hunk).additions > 0 || countHunkEdits(hunk).deletions > 0) return null;
+  if (!hunk.lines.every((line) => line === "" || line.startsWith(" "))) return null;
+  return hunk.lines.map((line) => line === "" ? "" : line.slice(1));
+}
+
+function additionsOnlyLines(hunk: { lines: string[] }): string[] | null {
+  const counts = countHunkEdits(hunk);
+  if (counts.additions === 0 || counts.deletions > 0) return null;
+  if (!hunk.lines.every((line) => line.startsWith("+"))) return null;
+  return hunk.lines.map((line) => line.slice(1));
+}
+
+function mergePartialReplacement(before: string[], additions: string[]): string[] | null {
+  if (additions.length === before.length) return additions;
+  if (additions.length > before.length) return null;
+
+  const desired = [...before];
+  const used = new Set<number>();
+  for (const addition of additions) {
+    const shape = replacementLineShape(addition);
+    if (!shape) return null;
+    const matches = before
+      .map((line, index) => ({ index, line }))
+      .filter(({ index, line }) => !used.has(index) && line !== addition && replacementLineShape(line) === shape);
+    if (matches.length !== 1) return null;
+    desired[matches[0].index] = addition;
+    used.add(matches[0].index);
+  }
+  return desired;
+}
+
+function replacementLineShape(line: string): string {
+  return line
+    .trim()
+    .replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, "<text>")
+    .replace(/#[0-9a-f]{3,8}\b/gi, "<hex>")
+    .replace(/-?\d+(?:\.\d+)?/g, "<number>")
+    .replace(/\s+/g, " ");
 }
 
 function prepareHunk(
@@ -506,7 +591,36 @@ function prepareHunk(
     }
   }
 
-  return { location: locateHunk(current, hunk, symbols), ...counts };
+  try {
+    return { location: locateHunk(current, hunk, symbols), ...counts };
+  } catch (error) {
+    const alreadyApplied = locateAlreadyAppliedHunk(current, hunk);
+    if (alreadyApplied) {
+      return { location: alreadyApplied, additions: 0, deletions: 0 };
+    }
+    throw error;
+  }
+}
+
+function locateAlreadyAppliedHunk(
+  current: string[],
+  hunk: { lines: string[] }
+): ReturnType<typeof locateHunk> | null {
+  const counts = countHunkEdits(hunk);
+  if (counts.additions === 0 || counts.deletions === 0) return null;
+
+  const oldBlock = hunk.lines
+    .filter((line) => line.startsWith(" ") || line.startsWith("-"))
+    .map((line) => line.slice(1));
+  const desiredBlock = hunk.lines
+    .filter((line) => line.startsWith(" ") || line.startsWith("+"))
+    .map((line) => line.slice(1));
+  if (oldBlock.length === 0 || desiredBlock.length === 0 || sameLines(oldBlock, desiredBlock)) return null;
+  if (findSequenceStarts(current, oldBlock).length > 0) return null;
+
+  const desiredMatches = findSequenceStarts(current, desiredBlock);
+  if (desiredMatches.length !== 1) return null;
+  return { start: desiredMatches[0], deleteCount: 0, replacement: [], mode: "text" };
 }
 
 function inferRawDesiredFragment(

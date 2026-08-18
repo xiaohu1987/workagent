@@ -13,6 +13,7 @@ export type ChatBackgroundSurfaceKey =
 export type ChatBackgroundSurfaces = Record<ChatBackgroundSurfaceKey, number>;
 
 export type ChatBackgroundSettings = {
+  mode: ChatBackgroundMode;
   enabled: boolean;
   rotationEnabled: boolean;
   rotationIntervalSeconds: number;
@@ -53,7 +54,8 @@ export const CHAT_BACKGROUND_SURFACE_OPTIONS: Array<{
 ];
 
 export const DEFAULT_CHAT_BACKGROUND_SETTINGS: ChatBackgroundSettings = {
-  enabled: true,
+  mode: "none",
+  enabled: false,
   rotationEnabled: false,
   rotationIntervalSeconds: 60,
   motionEnabled: true,
@@ -107,8 +109,13 @@ export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundS
   }
 
   const source = value as Partial<ChatBackgroundSettings>;
+  const fileName = typeof source.fileName === "string" && source.fileName.trim() ? source.fileName.trim() : null;
+  const mode = source.mode === "none" || source.mode === "image" || source.mode === "dynamic"
+    ? source.mode
+    : source.enabled !== false && fileName ? "image" : "none";
   return {
-    enabled: source.enabled !== false,
+    mode,
+    enabled: mode === "image",
     rotationEnabled: source.rotationEnabled === true,
     rotationIntervalSeconds: Math.round(clamp(source.rotationIntervalSeconds, 10, 600, DEFAULT_CHAT_BACKGROUND_SETTINGS.rotationIntervalSeconds)),
     motionEnabled: source.motionEnabled !== false,
@@ -121,7 +128,7 @@ export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundS
     zoom: Math.round(clamp(source.zoom, 100, 180, DEFAULT_CHAT_BACKGROUND_SETTINGS.zoom)),
     positionX: Math.round(clamp(source.positionX, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.positionX)),
     positionY: Math.round(clamp(source.positionY, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.positionY)),
-    fileName: typeof source.fileName === "string" && source.fileName.trim() ? source.fileName.trim() : null,
+    fileName,
     surfaces: normalizeChatBackgroundSurfaces(source.surfaces)
   };
 }

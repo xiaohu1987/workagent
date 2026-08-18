@@ -19,6 +19,13 @@ describe("live edit preview targets", () => {
     })).toEqual(["src/a.ts", "src/b.ts"]);
   });
 
+  it("returns the search_replace target", () => {
+    expect(getLiveEditWriteTargets({
+      toolName: "search_replace",
+      argumentsJson: JSON.stringify({ file_path: "src/app.ts", old_string: "old", new_string: "new" })
+    })).toEqual(["src/app.ts"]);
+  });
+
   it("ignores malformed payloads and non-write tools", () => {
     expect(getLiveEditWriteTargets({ toolName: "apply_patch", argumentsJson: "not json" })).toEqual([]);
     expect(getLiveEditWriteTargets({ toolName: "shell.exec", argumentsJson: JSON.stringify({ path: "src/a.ts" }) })).toEqual([]);
