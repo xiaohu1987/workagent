@@ -48,10 +48,12 @@ export const gptCompat: ModelCompat = {
   },
 
   normalizeRequestParams(
-    { input }: ModelCompatContext,
+    { input, openAiApiFormat }: ModelCompatContext,
     base: Record<string, unknown>
   ): Record<string, unknown> {
-    return isConfigurableGptReasoningModel(input.model) && isGptReasoningEffort(input.reasoningEffort)
+    return openAiApiFormat === "openai_chat" &&
+      isConfigurableGptReasoningModel(input.model) &&
+      isGptReasoningEffort(input.reasoningEffort)
       ? { ...base, reasoning_effort: input.reasoningEffort }
       : base;
   },

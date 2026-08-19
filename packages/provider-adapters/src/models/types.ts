@@ -9,6 +9,8 @@ import type { ModelProfile, ProviderTurnDecision, ProviderTurnInput } from "@sha
 export interface ModelCompatContext {
   model: ModelProfile;
   input: ProviderTurnInput;
+  /** OpenAI-compatible transport currently building the request payload. */
+  openAiApiFormat?: "openai_chat" | "openai_responses";
 }
 
 /**

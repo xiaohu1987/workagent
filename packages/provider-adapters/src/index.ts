@@ -744,7 +744,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
     input = withModelSpecificTools(input);
     const compat = resolveModelCompat(input.model, input.provider);
-    const ctx: ModelCompatContext = { model: input.model, input };
+    const ctx: ModelCompatContext = { model: input.model, input, openAiApiFormat: "openai_chat" };
     const toolCallMode = compat.resolveToolCallMode(ctx);
     const nativeTools = toolCallMode.useNativeTools
       ? input.availableTools.map((tool) => ({
@@ -1116,7 +1116,11 @@ class OpenAiResponsesProvider implements ProviderAdapter {
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
     input = withModelSpecificTools(input);
     const compat = resolveModelCompat(input.model, input.provider);
-    const compatContext: ModelCompatContext = { model: input.model, input };
+    const compatContext: ModelCompatContext = {
+      model: input.model,
+      input,
+      openAiApiFormat: "openai_responses"
+    };
     const nativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0
       ? input.availableTools.map((tool) => ({
           type: "function" as const,
@@ -1186,11 +1190,17 @@ function errorField(error: unknown, key: string): unknown {
 export function classifyResponsesFallback(error: unknown): ResponsesFallbackKind {
   const status = Number(errorField(error, "status"));
   const code = String(errorField(error, "code") ?? "").toUpperCase();
-  const message = String(errorField(error, "message") ?? (error instanceof Error ? error.message : error ?? ""));
   if (status === 404 || status === 405 || status === 501 || code === "RESPONSES_MODEL_NOT_SUPPORTED") {
     return "permanent";
   }
-  if (status === 503 && (code === "SERVICE_BUSY" || /maintenan|维护|service\s+busy/i.test(message))) {
+  if (
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    code === "SERVER_ERROR" ||
+    code === "SERVICE_BUSY"
+  ) {
     return "temporary";
   }
   return null;

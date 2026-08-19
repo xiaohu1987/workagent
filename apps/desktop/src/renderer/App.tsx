@@ -123,6 +123,7 @@ import {
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
   shouldShowRuntimeActivityPanel,
+  upsertRuntimeUserInputPrompt,
   upsertRuntimeToolCallSummary,
   type SkillNameMap
 } from "./lib/conversation-utils";
@@ -1217,6 +1218,26 @@ export function App() {
     });
   }
 
+  function updateRuntimePromptSnapshots(threadId: string, prompt: UserInputPrompt) {
+    // Interaction events are authoritative and can arrive before a snapshot refresh.
+    // Keep both the selected snapshot and cache current so the card appears immediately.
+    invalidateSnapshotRequest(threadId);
+    const cached = snapshotCacheByThreadRef.current.get(threadId);
+    if (cached) {
+      cacheThreadSnapshot({
+        ...cached,
+        prompts: upsertRuntimeUserInputPrompt(cached.prompts, prompt)
+      });
+    }
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      return {
+        ...current,
+        prompts: upsertRuntimeUserInputPrompt(current.prompts, prompt)
+      };
+    });
+  }
+
   function removeQueuedMessageFromSnapshots(threadId: string, queueItemId: string) {
     // Queue events are newer than any snapshot already in flight. Invalidate
     // that request and update both snapshot sources so a stale response or a
@@ -1763,19 +1784,9 @@ export function App() {
         return;
       }
       if (typed.type === "user-input.resolved" && typed.threadId && typed.payload?.prompt) {
-        const resolvedPrompt = typed.payload.prompt as UserInputPrompt;
-        setSnapshot((current) => {
-          if (!current || current.thread.id !== typed.threadId) {
-            return current;
-          }
-          return {
-            ...current,
-            prompts: current.prompts.map((prompt) =>
-              prompt.id === resolvedPrompt.id
-                ? { ...prompt, ...resolvedPrompt, status: "answered" as const }
-                : prompt
-            )
-          };
+        updateRuntimePromptSnapshots(typed.threadId, {
+          ...typed.payload.prompt,
+          status: "answered"
         });
         if (notificationThreadId) {
           resumeThreadNotification(notificationThreadId, "信息已补充，任务继续运行。", typed.createdAt);
@@ -1819,14 +1830,17 @@ export function App() {
           typed.createdAt
         );
       }
-      if (typed.type === "user-input.requested" && notificationThreadId && typed.payload?.prompt) {
-        setThreadNotificationAttention(
-          notificationThreadId,
-          typed.payload.prompt.title || "任务正在等待你补充信息。",
-          "input",
-          typed.payload.prompt.id,
-          typed.createdAt
-        );
+      if (typed.type === "user-input.requested" && typed.threadId && typed.payload?.prompt) {
+        updateRuntimePromptSnapshots(typed.threadId, typed.payload.prompt);
+        if (notificationThreadId) {
+          setThreadNotificationAttention(
+            notificationThreadId,
+            typed.payload.prompt.title || "任务正在等待你补充信息。",
+            "input",
+            typed.payload.prompt.id,
+            typed.createdAt
+          );
+        }
       }
       if (typed.type === "approval.resolved" && typed.threadId) {
         const approvalPayload = typed.payload as unknown as {
@@ -6106,7 +6120,10 @@ export function App() {
                     onAnswer={(answers) => void answerPendingPrompt(prompt, answers)}
                   />
                 ))}
-                {(gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan") && !gpaConfirmationSubmitting ? (
+                {(gpaState.awaitingConfirmation === "goal" || gpaState.awaitingConfirmation === "plan") &&
+                  !gpaConfirmationSubmitting &&
+                  !gpaRevisionSubmitting &&
+                  !isTaskProcessing ? (
                   <GpaConfirmationCard
                     stage={gpaState.awaitingConfirmation}
                     disabled={gpaRevisionSubmitting || gpaConfirmationSubmitting}

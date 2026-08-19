@@ -2333,7 +2333,9 @@ describe("OpenAiCompatibleProvider", () => {
       systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
       model: baseModel, provider, reasoningEffort: "xhigh", stream: false
     });
-    expect(mocks.chatCreate.mock.calls.at(-1)?.[0]).toMatchObject({ reasoning_effort: "xhigh" });
+    const chatRequest = mocks.chatCreate.mock.calls.at(-1)?.[0];
+    expect(chatRequest).toMatchObject({ reasoning_effort: "xhigh" });
+    expect(chatRequest).not.toHaveProperty("reasoning");
 
     await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
@@ -3943,9 +3945,11 @@ describe("native provider tool protocols", () => {
       provider, reasoningEffort: "high", stream: false
     });
 
-    expect(mocks.responsesCreate.mock.calls.at(-1)?.[0]).toMatchObject({
+    const responsesRequest = mocks.responsesCreate.mock.calls.at(-1)?.[0];
+    expect(responsesRequest).toMatchObject({
       reasoning: { effort: "high", summary: "concise" }
     });
+    expect(responsesRequest).not.toHaveProperty("reasoning_effort");
   });
 
   it("preserves Responses reasoning items for the next tool-result request", async () => {
@@ -4283,8 +4287,11 @@ describe("native provider tool protocols", () => {
     expect(mocks.chatCreate).toHaveBeenCalledTimes(chatCallCount);
   });
 
-  it("uses 503 maintenance as a temporary fallback without caching Chat", async () => {
-    mocks.responsesCreate.mockRejectedValue({ status: 503, code: "SERVICE_BUSY", message: "Responses capability under maintenance" });
+  it("uses an overloaded server error as a temporary fallback without caching Chat", async () => {
+    mocks.responsesCreate.mockRejectedValue({
+      code: "server_error",
+      message: "Our servers are currently overloaded. Please try again later."
+    });
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"Done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
@@ -4326,8 +4333,10 @@ describe("native provider tool protocols", () => {
   it("classifies only documented Responses fallback errors", () => {
     expect(classifyResponsesFallback({ status: 400, error: { code: "RESPONSES_MODEL_NOT_SUPPORTED" } })).toBe("permanent");
     expect(classifyResponsesFallback({ status: 405 })).toBe("permanent");
+    expect(classifyResponsesFallback({ status: 500, code: "server_error" })).toBe("temporary");
+    expect(classifyResponsesFallback({ code: "server_error", message: "Our servers are currently overloaded." })).toBe("temporary");
     expect(classifyResponsesFallback({ status: 503, code: "SERVICE_BUSY" })).toBe("temporary");
-    expect(classifyResponsesFallback({ status: 503, message: "Responses capability under maintenance" })).toBe("temporary");
+    expect(classifyResponsesFallback({ status: 504 })).toBe("temporary");
     expect(classifyResponsesFallback({ status: 429 })).toBeNull();
     expect(classifyResponsesFallback({ status: 401 })).toBeNull();
   });

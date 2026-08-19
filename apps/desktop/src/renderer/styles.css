@@ -5937,7 +5937,11 @@ input[type="radio"]:focus-visible {
   font-size: 13px;
 }
 
-.composer-task-change-file.has-diff-preview { cursor: help; }
+.composer-task-change-file.has-diff-preview { cursor: pointer; }
+.composer-task-change-file.has-diff-preview[aria-pressed="true"] {
+  background: rgba(82, 178, 222, 0.1);
+  box-shadow: inset 2px 0 0 rgba(116, 192, 252, 0.85);
+}
 .composer-task-change-file:hover { background: rgba(255, 255, 255, 0.045); }
 
 .composer-task-change-file > span {
@@ -14154,11 +14158,17 @@ input[type="radio"]:focus-visible {
 }
 
 .generated-file-list-item.has-diff-preview {
+  cursor: pointer;
   transition: background-color 140ms ease;
 }
 
 .generated-file-list-item.has-diff-preview:hover {
   background: rgba(82, 178, 222, 0.055);
+}
+
+.generated-file-list-item.has-diff-preview[aria-pressed="true"] {
+  background: rgba(82, 178, 222, 0.1);
+  box-shadow: inset 2px 0 0 rgba(116, 192, 252, 0.85);
 }
 
 .generated-file-path {
@@ -19482,12 +19492,18 @@ select option:checked {
 
 .quick-notes-sheet .quick-notes-layout {
   grid-template-columns: 290px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .quick-notes-sheet .quick-notes-list {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
   padding: 18px;
+  overflow: hidden;
 }
 
 .quick-notes-sheet .quick-notes-editor {
@@ -19528,8 +19544,13 @@ select option:checked {
 
 .quick-notes-items {
   display: grid;
+  grid-auto-rows: max-content;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-content: start;
   gap: 4px;
   margin-top: 14px;
+  overflow-y: auto;
 }
 
 .quick-notes-item {
@@ -19675,6 +19696,7 @@ select option:checked {
 
   .quick-notes-sheet .quick-notes-layout {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(96px, 34%) minmax(0, 1fr);
   }
 }
 

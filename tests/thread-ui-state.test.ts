@@ -46,12 +46,13 @@ import {
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
   shouldKeepTimelineEntryWhenTurnCollapsed,
+  upsertRuntimeUserInputPrompt,
   upsertRuntimeToolCallSummary
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
 import { didTranscriptScrollUpWithoutContentShrink, getSidebarUpdateReminder, removeQueuedMessageById, shouldFollowLatestAfterTranscriptScroll } from "../apps/desktop/src/renderer/App";
 import { hasRecognizedGitRepository } from "../apps/desktop/src/renderer/workspace/right-workspace";
-import type { MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, ToolCallSummary } from "../packages/shared-types/src";
+import type { MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, ToolCallSummary, UserInputPrompt } from "../packages/shared-types/src";
 
 it("removes a guided queue item without disturbing the remaining queue", () => {
   const messages = [
@@ -122,6 +123,26 @@ function makeThread(overrides: Partial<ThreadRecord> = {}): ThreadRecord {
     agentRole: null,
     lastTaskMessage: null,
     multiAgentMode: "disabled",
+    ...overrides
+  };
+}
+
+function makeUserInputPrompt(overrides: Partial<UserInputPrompt> = {}): UserInputPrompt {
+  return {
+    id: "prompt-1",
+    threadId: "thread-1",
+    turnRunId: "turn-1",
+    title: "Need more information",
+    kind: "generic",
+    allowSkip: false,
+    expiresAt: null,
+    defaultAnswers: null,
+    resolutionSource: null,
+    questions: [],
+    status: "pending",
+    answers: null,
+    createdAt: "2026-07-15T01:00:00.000Z",
+    answeredAt: null,
     ...overrides
   };
 }
@@ -1483,6 +1504,36 @@ describe("assistant draft lifecycle", () => {
 });
 
 describe("incremental snapshot merging", () => {
+  it("upserts runtime prompts without duplicates and keeps chronological order", () => {
+    const earlier = makeUserInputPrompt({
+      id: "prompt-earlier",
+      createdAt: "2026-07-15T00:59:00.000Z"
+    });
+    const stale = makeUserInputPrompt({
+      id: "prompt-live",
+      title: "Stale title",
+      status: "answered",
+      createdAt: "2026-07-15T01:01:00.000Z"
+    });
+    const later = makeUserInputPrompt({
+      id: "prompt-later",
+      createdAt: "2026-07-15T01:02:00.000Z"
+    });
+    const runtimePrompt = makeUserInputPrompt({
+      id: "prompt-live",
+      title: "Current title",
+      status: "pending",
+      createdAt: "2026-07-15T01:01:00.000Z"
+    });
+
+    expect(upsertRuntimeUserInputPrompt([], runtimePrompt)).toEqual([runtimePrompt]);
+    expect(upsertRuntimeUserInputPrompt([later, stale, earlier], runtimePrompt)).toEqual([
+      earlier,
+      runtimePrompt,
+      later
+    ]);
+  });
+
   it("appends new records, applies updates, and keeps chronological order", () => {
     const existing = [
       { id: "tool-1", createdAt: "2026-07-15T01:00:00.000Z", status: "running" },

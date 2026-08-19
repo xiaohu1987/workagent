@@ -1432,6 +1432,13 @@ export function mergeSnapshotRecords<T extends { id: string }>(
   return merged.sort((left, right) => multiplier * getCreatedAt(left).localeCompare(getCreatedAt(right)));
 }
 
+export function upsertRuntimeUserInputPrompt(
+  prompts: UserInputPrompt[],
+  prompt: UserInputPrompt
+): UserInputPrompt[] {
+  return mergeSnapshotRecords(prompts, [prompt], (item) => item.createdAt);
+}
+
 export function upsertRuntimeToolCallSummary(
   toolCalls: ToolCallSummary[],
   toolCall: ToolCallSummary

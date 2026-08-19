@@ -10,9 +10,12 @@ import { getFileLeafName } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
 import { renderCodePreviewLine } from "../workspace/file-preview";
 
+const DIFF_PREVIEW_HOVER_DELAY_MS = 200;
+
 export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] }) {
   const [open, setOpen] = useState(false);
   const [diffPreview, setDiffPreview] = useState<{ file: FileChangeSummaryItem; anchor: DOMRect } | null>(null);
+  const [pinnedDiffPath, setPinnedDiffPath] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
@@ -35,12 +38,14 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
       if (!rootRef.current?.contains(event.target as Node)) {
         setOpen(false);
         setDiffPreview(null);
+        setPinnedDiffPath(null);
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setOpen(false);
       setDiffPreview(null);
+      setPinnedDiffPath(null);
     };
     window.addEventListener("pointerdown", handlePointerDown);
     window.addEventListener("keydown", handleKeyDown);
@@ -63,13 +68,13 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
     closeTimerRef.current = null;
   };
   const startDiffPreviewTimer = (file: FileChangeSummaryItem, anchor: DOMRect) => {
-    if (!file.snapshot) return;
+    if (!file.snapshot || pinnedDiffPath) return;
     clearPreviewCloseTimer();
     if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = window.setTimeout(() => {
       setDiffPreview({ file, anchor });
       hoverTimerRef.current = null;
-    }, 3_000);
+    }, DIFF_PREVIEW_HOVER_DELAY_MS);
   };
   const scheduleDiffPreviewClose = () => {
     if (hoverTimerRef.current !== null) {
@@ -77,10 +82,22 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
       hoverTimerRef.current = null;
     }
     clearPreviewCloseTimer();
+    if (pinnedDiffPath) return;
     closeTimerRef.current = window.setTimeout(() => {
       setDiffPreview(null);
       closeTimerRef.current = null;
     }, 140);
+  };
+  const togglePinnedDiff = (file: FileChangeSummaryItem, anchor: DOMRect) => {
+    if (!file.snapshot) return;
+    clearPreviewCloseTimer();
+    if (pinnedDiffPath === file.path) {
+      setPinnedDiffPath(null);
+      setDiffPreview(null);
+      return;
+    }
+    setPinnedDiffPath(file.path);
+    setDiffPreview({ file, anchor });
   };
 
   return (
@@ -93,6 +110,7 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
         onClick={() => {
           setOpen((current) => !current);
           setDiffPreview(null);
+          setPinnedDiffPath(null);
         }}
       >
         <span className="composer-task-changes-icon" aria-hidden><IconFileChanges /></span>
@@ -107,9 +125,18 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
               <div
                 key={file.path}
                 className={`composer-task-change-file ${file.snapshot ? "has-diff-preview" : ""}`}
-                title={file.snapshot ? `${file.path}；停留 3 秒查看 Diff 快照` : file.path}
+                title={file.snapshot ? `${file.path}；移入预览，点击固定查看 Diff` : file.path}
                 onMouseEnter={(event) => startDiffPreviewTimer(file, event.currentTarget.getBoundingClientRect())}
                 onMouseLeave={scheduleDiffPreviewClose}
+                onClick={(event) => togglePinnedDiff(file, event.currentTarget.getBoundingClientRect())}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  togglePinnedDiff(file, event.currentTarget.getBoundingClientRect());
+                }}
+                role={file.snapshot ? "button" : undefined}
+                tabIndex={file.snapshot ? 0 : undefined}
+                aria-pressed={file.snapshot ? pinnedDiffPath === file.path : undefined}
               >
                 <span>{getFileLeafName(file.path)}</span>
                 <div>
@@ -167,6 +194,7 @@ export function FileChangeSummary({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [diffPreview, setDiffPreview] = useState<{ file: FileChangeSummaryItem; anchor: DOMRect } | null>(null);
+  const [pinnedDiffPath, setPinnedDiffPath] = useState<string | null>(null);
   const diffPreviewPresence = useMotionPresence(diffPreview, 140);
   const visibleDiffPreview = diffPreview ?? diffPreviewPresence.value;
   const hoverTimerRef = useRef<number | null>(null);
@@ -187,13 +215,13 @@ export function FileChangeSummary({
     closeTimerRef.current = null;
   };
   const startDiffPreviewTimer = (file: FileChangeSummaryItem, anchor: DOMRect) => {
-    if (!file.snapshot) return;
+    if (!file.snapshot || pinnedDiffPath) return;
     clearPreviewCloseTimer();
     if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = window.setTimeout(() => {
       setDiffPreview({ file, anchor });
       hoverTimerRef.current = null;
-    }, 3_000);
+    }, DIFF_PREVIEW_HOVER_DELAY_MS);
   };
   const scheduleDiffPreviewClose = () => {
     if (hoverTimerRef.current !== null) {
@@ -201,10 +229,22 @@ export function FileChangeSummary({
       hoverTimerRef.current = null;
     }
     clearPreviewCloseTimer();
+    if (pinnedDiffPath) return;
     closeTimerRef.current = window.setTimeout(() => {
       setDiffPreview(null);
       closeTimerRef.current = null;
     }, 140);
+  };
+  const togglePinnedDiff = (file: FileChangeSummaryItem, anchor: DOMRect) => {
+    if (!file.snapshot) return;
+    clearPreviewCloseTimer();
+    if (pinnedDiffPath === file.path) {
+      setPinnedDiffPath(null);
+      setDiffPreview(null);
+      return;
+    }
+    setPinnedDiffPath(file.path);
+    setDiffPreview({ file, anchor });
   };
 
   return (
@@ -218,12 +258,14 @@ export function FileChangeSummary({
           onClick={() => {
             setExpanded((current) => !current);
             setDiffPreview(null);
+            setPinnedDiffPath(null);
           }}
           onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
             setExpanded((current) => !current);
             setDiffPreview(null);
+            setPinnedDiffPath(null);
           }}
         >
           <div className="generated-file-list-heading">
@@ -240,6 +282,7 @@ export function FileChangeSummary({
               event.stopPropagation();
               setExpanded((current) => !current);
               setDiffPreview(null);
+              setPinnedDiffPath(null);
             }}
           >
             <IconChevronDown />
@@ -252,12 +295,24 @@ export function FileChangeSummary({
               className={`generated-file-list-item ${file.snapshot ? "has-diff-preview" : ""}`}
               onMouseEnter={(event) => startDiffPreviewTimer(file, event.currentTarget.getBoundingClientRect())}
               onMouseLeave={scheduleDiffPreviewClose}
+              onClick={(event) => togglePinnedDiff(file, event.currentTarget.getBoundingClientRect())}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                togglePinnedDiff(file, event.currentTarget.getBoundingClientRect());
+              }}
+              role={file.snapshot ? "button" : undefined}
+              tabIndex={file.snapshot ? 0 : undefined}
+              aria-pressed={file.snapshot ? pinnedDiffPath === file.path : undefined}
             >
               <button
                 type="button"
                 className="generated-file-path"
-                onClick={() => onOpenFolder(file.absolutePath ?? file.path)}
-                title={file.snapshot ? "停留 3 秒查看快照 Diff；点击打开所在文件夹" : "打开所在文件夹"}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenFolder(file.absolutePath ?? file.path);
+                }}
+                title={file.snapshot ? "移入查看快照 Diff；点击打开所在文件夹" : "打开所在文件夹"}
               >
                 {getFileLeafName(file.path)}
               </button>
