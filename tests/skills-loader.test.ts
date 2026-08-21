@@ -65,12 +65,19 @@ policy:
   it("keeps system skills cached while exposing user domains for on-demand loading", async () => {
     const appHome = await makeTempDir();
     const systemSkillDir = path.join(appHome, "skills", "system", "release-skill");
+    const categorizedSystemSkillDir = path.join(appHome, "skills", "system", "categorized-skill");
     const userSkillDir = path.join(appHome, "skills", "imported", "data-skill");
     await fs.mkdir(systemSkillDir, { recursive: true });
+    await fs.mkdir(categorizedSystemSkillDir, { recursive: true });
     await fs.mkdir(userSkillDir, { recursive: true });
     await fs.writeFile(
       path.join(systemSkillDir, "SKILL.md"),
       "---\nname: release-skill\ndescription: Prepare a software release\n---\nSystem release instructions.",
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(categorizedSystemSkillDir, "SKILL.md"),
+      "---\nname: categorized-skill\ndescription: Verify changed behavior\ndomain: 测试\n---\nTesting instructions.",
       "utf8"
     );
     await fs.writeFile(
@@ -84,6 +91,7 @@ policy:
     const userSkill = skills.find((skill) => skill.name === "data-skill");
 
     expect(skills.find((skill) => skill.name === "release-skill")?.domain).toBe("系统");
+    expect(skills.find((skill) => skill.name === "categorized-skill")?.domain).toBe("测试");
     expect(userSkill?.domain).toBe("数据分析");
 
     const catalog = manager.buildContext(skills, {

@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { ApprovalRequest, AssistantDraftPhase, MessageAttachment, MessageRecord, ToolCallRecord, ToolCallSummary, UserInputPrompt } from "@shared-types";
 import { getDisplayMessageContent, getFileWriteTarget, getMessageDisplayKind, getSelectedMessageContexts, getToolActivityPresentation, getToolActivityTarget, getToolProcessingLabel, isFileWriteTool, parseMessageEventBlocks, parseTimelineJson, resolveSkillDisplayName, type SkillNameMap } from "../lib/conversation-utils";
 import type { ChatEventBlock, ChatEventType, SelectedMessageContext } from "../lib/conversation-utils";
+import { buildFileSnapshotDiff } from "../lib/project-files";
 import { IconChart, IconCheck, IconChecklist, IconChevronDown, IconClose, IconCode, IconCompose, IconCopy, IconEye, IconFile, IconFileChanges, IconFolder, IconGlobe, IconGpa, IconHelpCircle, IconImage, IconKnowledge, IconMcp, IconNotebook, IconSearch, IconShield, IconSkills, IconTerminal, IconVideo } from "../icons";
 import { CopyTextButton, MessageMediaLightbox, getFileLeafName, normalizeMarkdownImageSource, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
@@ -111,8 +112,6 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
       >
         <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={toolCalls[0]?.toolName ?? ""} /></span>
         <span className="tool-activity-summary-copy"><strong>{conciseLabel}</strong></span>
-        <span className={`tool-activity-summary-status ${status}`}>{isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已执行"}</span>
-        <span className="tool-activity-summary-count">{toolCalls.length} 项</span>
         <span className="tool-activity-chevron" aria-hidden />
       </summary>
       {isOpen ? (
@@ -164,6 +163,142 @@ function areToolActivityGroupsEqual(previous: ToolCallRecord[], next: ToolCallRe
   });
 }
 
+export type DatabaseExecutionDetail = {
+  label: string;
+  sql: string;
+  parameters?: unknown[];
+};
+
+export function getDatabaseExecutionDetails(
+  toolName: string,
+  input: Record<string, unknown>
+): DatabaseExecutionDetail[] {
+  if (toolName === "database.federated_query") {
+    if (!Array.isArray(input.sources)) return [];
+    return input.sources.flatMap((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const source = entry as Record<string, unknown>;
+      if (typeof source.sql !== "string" || !source.sql.trim()) return [];
+      const alias = typeof source.alias === "string" ? source.alias.trim() : "";
+      const sourceId = typeof source.sourceId === "string" ? source.sourceId.trim() : "";
+      return [{
+        label: [alias || `数据源 ${index + 1}`, sourceId].filter(Boolean).join(" · "),
+        sql: source.sql,
+        ...(Array.isArray(source.parameters) && source.parameters.length > 0
+          ? { parameters: source.parameters }
+          : {})
+      }];
+    });
+  }
+
+  if (!["database.query", "database.insert", "database.update", "database.delete"].includes(toolName)) return [];
+  if (typeof input.sql !== "string" || !input.sql.trim()) return [];
+  return [{
+    label: typeof input.sourceId === "string" && input.sourceId.trim() ? input.sourceId.trim() : "SQL",
+    sql: input.sql,
+    ...(Array.isArray(input.parameters) && input.parameters.length > 0
+      ? { parameters: input.parameters }
+      : {})
+  }];
+}
+
+export function DatabaseExecutionDetails({ details }: { details: DatabaseExecutionDetail[] }) {
+  if (details.length === 0) return null;
+  return (
+    <div className="database-execution-details">
+      {details.map((detail, index) => (
+        <section className="database-execution-detail" key={`${detail.label}-${index}`}>
+          <div className="database-execution-detail-head">
+            <span>SQL</span>
+            <code title={detail.label}>{detail.label}</code>
+          </div>
+          <pre><code>{detail.sql}</code></pre>
+          {detail.parameters ? (
+            <div className="database-execution-parameters">
+              <span>参数</span>
+              <pre><code>{JSON.stringify(detail.parameters, null, 2)}</code></pre>
+            </div>
+          ) : null}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+export type ToolActivityMetric =
+  | { kind: "read"; startLine: number; endLine: number }
+  | { kind: "edit"; additions: number; deletions: number };
+
+function getStructuredToolResult(result: Record<string, unknown>): Record<string, unknown> {
+  const structured = result.json;
+  return structured && typeof structured === "object" && !Array.isArray(structured)
+    ? structured as Record<string, unknown>
+    : result;
+}
+
+export function getToolActivityMetric(
+  toolName: string,
+  result: Record<string, unknown>
+): ToolActivityMetric | null {
+  const structured = getStructuredToolResult(result);
+  if (toolName === "fs.read_file") {
+    const totalLines = Number(structured.totalLines);
+    if (!Number.isFinite(totalLines) || totalLines < 0) return null;
+    const startLine = Number(structured.startLine ?? (totalLines > 0 ? 1 : 0));
+    const endLine = Number(structured.endLine ?? totalLines);
+    if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) return null;
+    return { kind: "read", startLine, endLine };
+  }
+
+  if (toolName === "apply_patch") {
+    if (!Array.isArray(structured.changes)) return null;
+    return structured.changes.reduce<ToolActivityMetric>((metric, entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) || metric.kind !== "edit") return metric;
+      const change = entry as Record<string, unknown>;
+      return {
+        kind: "edit",
+        additions: metric.additions + Math.max(0, Number(change.additions) || 0),
+        deletions: metric.deletions + Math.max(0, Number(change.deletions) || 0)
+      };
+    }, { kind: "edit", additions: 0, deletions: 0 });
+  }
+
+  if (toolName !== "fs.write_file" && toolName !== "search_replace") return null;
+  if (!Array.isArray(structured.snapshots)) return null;
+  let additions = 0;
+  let deletions = 0;
+  let hasCompleteSnapshot = false;
+  for (const entry of structured.snapshots) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const snapshot = entry as Record<string, unknown>;
+    if (
+      typeof snapshot.before !== "string" ||
+      typeof snapshot.after !== "string" ||
+      snapshot.beforeTruncated === true ||
+      snapshot.afterTruncated === true
+    ) continue;
+    hasCompleteSnapshot = true;
+    for (const line of buildFileSnapshotDiff(snapshot.before, snapshot.after)) {
+      if (line.kind === "added") additions += 1;
+      if (line.kind === "removed") deletions += 1;
+    }
+  }
+  return hasCompleteSnapshot ? { kind: "edit", additions, deletions } : null;
+}
+
+export function ToolActivityMetricLabel({ metric }: { metric: ToolActivityMetric | null }) {
+  if (!metric) return null;
+  if (metric.kind === "read") {
+    return <span className="tool-activity-compact-metric read">第 {metric.startLine}-{metric.endLine} 行</span>;
+  }
+  return (
+    <span className="tool-activity-compact-metric edit">
+      <b>+{metric.additions}</b>
+      <i>-{metric.deletions}</i>
+    </span>
+  );
+}
+
 function ToolActivityRow({ toolCall, compact = false, skillNames }: { toolCall: ToolCallRecord; compact?: boolean; skillNames?: SkillNameMap }) {
   const input = parseTimelineJson(toolCall.argumentsJson);
   const result = parseTimelineJson(toolCall.resultJson);
@@ -181,19 +316,23 @@ function ToolActivityRow({ toolCall, compact = false, skillNames }: { toolCall: 
   const output = getTimelineOutput(result);
   const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
   const target = getToolActivityTarget(toolCall.toolName, input, command, skillNames);
+  const databaseExecutionDetails = getDatabaseExecutionDetails(toolCall.toolName, input);
+  const activityMetric = getToolActivityMetric(toolCall.toolName, result);
 
   if (compact) {
     return (
       <details className={`tool-activity-row compact ${status}`}>
-        <summary className={`tool-activity-compact-summary${target ? "" : " without-target"}`}>
+        <summary className={`tool-activity-compact-summary${target ? "" : " without-target"}${activityMetric ? " with-metric" : ""}`}>
           <span className="tool-activity-row-icon" aria-hidden><ToolActivityIcon toolName={toolCall.toolName} /></span>
           <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
           {target ? <code title={target}>{target}</code> : null}
+          <ToolActivityMetricLabel metric={activityMetric} />
           <span className="tool-activity-compact-status">{isRunning ? "执行中" : blocked ? "已拦截" : failed ? "失败" : "完成"}</span>
           {duration !== null ? <time>{formatDuration(duration)}</time> : null}
         </summary>
         <div className="tool-activity-compact-details">
           <code>$ {displayCommand}</code>
+          <DatabaseExecutionDetails details={databaseExecutionDetails} />
           {localUrl ? <LocalServerPreview url={localUrl} /> : null}
           {output ? (
             <details className="tool-activity-output" open>
@@ -217,6 +356,7 @@ function ToolActivityRow({ toolCall, compact = false, skillNames }: { toolCall: 
           {duration !== null ? <time>{formatDuration(duration)}</time> : null}
         </div>
         <code>{isFileWriteTool(toolCall.toolName) ? getFileWriteTarget(input) : `$ ${displayCommand}`}</code>
+        <DatabaseExecutionDetails details={databaseExecutionDetails} />
         {localUrl ? <LocalServerPreview url={localUrl} /> : null}
         {output ? (
           <details className="tool-activity-output" open={failed || blocked}>

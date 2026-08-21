@@ -3345,7 +3345,7 @@ export class DatabaseService {
   }
 }
 
-async function seedSystemSkills(skillsSystemDir: string): Promise<void> {
+export async function seedSystemSkills(skillsSystemDir: string): Promise<void> {
   const seeds = [
     {
       dir: path.join(skillsSystemDir, "programming", "plan-and-patch"),
@@ -3385,6 +3385,74 @@ Prefer writing user-visible outputs into the thread outputs directory and regist
   display_name: Artifact Writer
   short_description: Produce user-visible deliverables
   default_prompt: Save final deliverables to outputs, not tmp.
+policy:
+  allow_implicit_invocation: true
+`
+    },
+    {
+      dir: path.join(skillsSystemDir, "programming", "code-change-test-report"),
+      force: false,
+      skill: `---
+name: code-change-test-report
+description: After code changes, identify affected behavior, add or update focused unit tests, run the strongest practical verification commands, and produce an evidence-based verification report. Use when code has been modified, a bug has been fixed, an API or data contract has changed, or the user asks for tests, validation, regression coverage, or a post-change test report.
+domain: 测试
+metadata:
+  short-description: Verify code changes and report test evidence
+---
+
+# Code Change Test Report
+
+Use this skill at the end of an implementation task. Turn the final diff into a small, repeatable test plan, add regression coverage where the changed behavior is not already protected, run tests in increasing scope, and report exactly what passed, failed, or could not be verified.
+
+## Inspect the change
+
+Read the final diff and surrounding implementation. Find existing tests for changed functions, classes, routes, components, and error messages. Preserve unrelated user changes. Determine:
+
+- the observable behavior that changed;
+- the smallest regression case that would have failed before the fix;
+- boundary, error, async, and compatibility cases with meaningful risk;
+- the repository's package manager, test runner, and existing test conventions.
+
+Do not add tests merely to increase line count. Extend existing coverage only when the change introduces a new branch or regression risk.
+
+## Add focused coverage
+
+Add or update tests close to the affected module and follow local fixtures, mocks, naming, and assertion style. Prefer deterministic tests:
+
+- isolate network, filesystem, timers, and process boundaries with existing mocks;
+- cover the successful path and the changed failure or edge path;
+- assert externally visible outcomes and important calls, not implementation details;
+- use fake timers for retry, timeout, debounce, or scheduling behavior;
+- avoid real credentials, production endpoints, destructive commands, and flaky sleeps.
+
+If a suitable test cannot be added safely, explain why and add a narrower characterization test or static/type-level check when appropriate.
+
+## Verify in scope order
+
+Use the project's documented scripts from the repository root. Start with the smallest relevant test command, then broaden based on risk:
+
+1. The changed test file or test name.
+2. The affected package or module test suite.
+3. Typecheck, lint, build, or integration tests when shared types, public contracts, packaging, or cross-process behavior changed.
+4. The full test suite when practical or when the blast radius is broad.
+
+Adapt to the actual package scripts instead of assuming a particular command exists. Never hide a failure by weakening assertions, deleting a test, or treating a pre-existing failure as caused by the current change. Re-run a failed focused test once only when diagnosis indicates an environmental or transient failure.
+
+## Report verification evidence
+
+In the final response, concisely include:
+
+- changed behavior and test files added or updated;
+- exact verification commands and their result (PASS, FAIL, or NOT RUN);
+- test counts or key output when available;
+- existing failures, environmental blockers, and residual test gaps.
+
+Never imply that a build, typecheck, or full suite passed when only a focused test passed.
+`,
+      meta: `interface:
+  display_name: Code Change Test Report
+  short_description: 为代码改动补充回归测试并报告验证证据
+  default_prompt: 检查最终代码改动，补充聚焦的回归测试，运行适当范围的验证并报告结果。
 policy:
   allow_implicit_invocation: true
 `

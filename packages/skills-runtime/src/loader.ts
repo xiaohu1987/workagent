@@ -24,6 +24,7 @@ const CHINESE_SKILL_DESCRIPTIONS: Record<string, string> = {
   "code-review-change-size": "评估代码改动规模，避免变更过大而难以审查。",
   "code-review-context": "检查模型或审查流程获得的上下文是否足够。",
   "code-review-testing": "为代码审查补充测试策略、测试用例和覆盖检查。",
+  "code-change-test-report": "在代码修改后识别受影响行为、补充聚焦的回归测试、执行验证并报告证据。",
   "codex-bug": "分析 OpenAI Codex 仓库的 GitHub 缺陷报告并判断下一步处理方式。",
   "codex-issue-digest": "按标签、领域和时间范围汇总 OpenAI Codex 的 GitHub Issue。",
   "codex-pr-body": "更新一个或多个拉取请求的标题与说明内容。",
@@ -105,6 +106,7 @@ const SKILL_DOMAIN_OVERRIDES: Record<string, string> = {
   "chatgpt-apps": "编程",
   "cli-creator": "编程",
   "cloudflare-deploy": "交付运维",
+  "code-change-test-report": "测试",
   "define-goal": "规划",
   figma: "前端",
   "figma-code-connect-components": "前端",
@@ -326,14 +328,6 @@ function resolveSkillDomain(input: {
   if (input.pluginId) {
     return "第三方/插件";
   }
-  if (input.scope === "system") {
-    // Keep programming system skills distinguishable from generic system helpers.
-    const source = `${input.name} ${input.description}`.toLowerCase();
-    if (/(plan-and-patch|patch|programming|repo|code)/.test(source)) {
-      return "编程";
-    }
-    return "系统";
-  }
 
   const domainOverride = SKILL_DOMAIN_OVERRIDES[input.name];
   if (domainOverride) {
@@ -347,6 +341,15 @@ function resolveSkillDomain(input: {
   const tags = input.frontmatter.tags;
   if (Array.isArray(tags) && typeof tags[0] === "string" && tags[0].trim()) {
     return normalizeSkillDomain(tags[0].trim(), input.name, input.description);
+  }
+
+  if (input.scope === "system") {
+    // Keep programming system skills distinguishable from generic system helpers.
+    const source = `${input.name} ${input.description}`.toLowerCase();
+    if (/(plan-and-patch|patch|programming|repo|code)/.test(source)) {
+      return "编程";
+    }
+    return "系统";
   }
 
   return normalizeSkillDomain("通用", input.name, input.description);

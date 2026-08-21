@@ -2250,9 +2250,9 @@ export function App() {
       }
       if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "function_call_protocol_compatibility") {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
-          appendRuntimeStatus(typed.threadId, "模型服务工具调用不兼容，正在切换兼容模式重试", typed.createdAt);
+          appendRuntimeStatus(typed.threadId, "工具调用遇到兼容问题，正在自动调整并重试", typed.createdAt);
           if (notificationThreadId) {
-            updateThreadNotification(notificationThreadId, "正在切换兼容模式重试。", typed.createdAt);
+            updateThreadNotification(notificationThreadId, "工具调用遇到兼容问题，正在自动调整并重试。", typed.createdAt);
           }
           setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         }
