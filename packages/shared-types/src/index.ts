@@ -931,6 +931,8 @@ export function resolveModelReasoningEffort(
   return isConfigurableGptReasoningModel(model) ? globalGptEffort : model.defaultReasoningEffort;
 }
 
+export type BrowserOpenMode = "in_app" | "external_default";
+
 export interface AppConfig {
   defaultModel: string;
   defaultProvider: string;
@@ -956,7 +958,8 @@ export interface AppConfig {
   desktop: {
     theme: "light" | "dark" | "system";
     approvals: ApprovalMode;
-    inAppBrowser: boolean;
+    browserOpenMode: BrowserOpenMode;
+    silentBrowserOpen: boolean;
     liveEditPreview: boolean;
     llmLogViewer: boolean;
   };

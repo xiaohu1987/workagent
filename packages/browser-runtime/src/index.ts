@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as cheerio from "cheerio";
-import type { BrowserTabRecord } from "@shared-types";
+import type { BrowserOpenMode, BrowserTabRecord } from "@shared-types";
 
 export interface PageSnapshot {
   title: string;
@@ -21,6 +21,17 @@ interface BrowserTabSession {
 }
 
 export const MAX_BROWSER_TABS_PER_THREAD = 3;
+
+export function resolveBrowserOpenPreferences(
+  defaultOpenMode: BrowserOpenMode,
+  silentBrowserOpen: boolean,
+  requestedOpenMode?: BrowserOpenMode
+): { browserOpenMode: BrowserOpenMode; silentBrowserOpen: boolean } {
+  return {
+    browserOpenMode: requestedOpenMode ?? defaultOpenMode,
+    silentBrowserOpen
+  };
+}
 
 export function browserTabOriginKey(url: string): string {
   try {

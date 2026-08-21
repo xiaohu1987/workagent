@@ -7,7 +7,9 @@ type Notice = (title: string, options?: { tone?: "success" | "warning"; message?
 export function useUserSkillGeneration(
   refreshUserSkills: () => Promise<void>,
   refreshSkills: () => Promise<void>,
-  showNotice: Notice
+  showNotice: Notice,
+  startNotification: (targetId: string, title: string) => void,
+  finishNotification: (targetId: string, status: "completed" | "failed", detail: string, title?: string) => void
 ) {
   const [dialog, setDialog] = useState<UserSkillGenerationDialog | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -21,13 +23,19 @@ export function useUserSkillGeneration(
     const skillName = target.name.trim();
     if (!skillName || target.thread.parentThreadId || target.thread.status === "running" || isGenerating) return;
     setIsGenerating(true);
+    const notificationTargetId = `${target.thread.id}:${skillName}`;
+    const notificationTitle = `提炼技能 · ${skillName}`;
+    startNotification(notificationTargetId, notificationTitle);
     try {
       const skill = await window.codexh.generateUserSkill(target.thread.id, skillName);
       await Promise.all([refreshUserSkills(), refreshSkills()]);
       setDialog(null);
+      finishNotification(notificationTargetId, "completed", `${skill.displayName ?? skill.name} 已生成。`, `提炼技能 · ${skill.displayName ?? skill.name}`);
       showNotice(`已生成用户技能：${skill.displayName ?? skill.name}`, { tone: "success" });
     } catch (error) {
-      showNotice("生成用户技能失败", { message: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      finishNotification(notificationTargetId, "failed", `生成用户技能失败：${message}`, notificationTitle);
+      showNotice("生成用户技能失败", { message });
     } finally {
       setIsGenerating(false);
     }

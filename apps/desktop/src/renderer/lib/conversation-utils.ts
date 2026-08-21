@@ -1239,6 +1239,18 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", s
   return "正在调用工具";
 }
 
+export function getPostToolDecisionLabel(
+  completedTools: readonly Pick<ToolCallRecord, "toolName" | "argumentsJson">[],
+  skillNames?: SkillNameMap
+): string {
+  const latestTool = completedTools.at(-1);
+  if (!latestTool) return "正在处理工具结果";
+  const action = getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "");
+  return completedTools.length > 1
+    ? `已完成 ${completedTools.length} 项操作，正在${action}`
+    : `正在${action}`;
+}
+
 export function compactRuntimeTarget(value: string): string {
   const singleLine = value.replace(/\s+/g, " ").trim();
   return singleLine.length > 88 ? `${singleLine.slice(0, 85)}...` : singleLine;

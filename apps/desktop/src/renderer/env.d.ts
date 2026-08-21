@@ -277,7 +277,7 @@ declare global {
       listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean }) => Promise<any[]>;
       deleteSelfImprovementMemory: (id: string) => Promise<void>;
       refreshSelfImprovementMemories: () => Promise<{ processed: number; pruned: number }>;
-      openBrowserTab: (payload: { threadId: string; url: string }) => Promise<any>;
+      openBrowserTab: (payload: { threadId: string; url: string; openMode?: "in_app" | "external_default" }) => Promise<any>;
       navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) => Promise<any>;
       focusBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;
       reloadBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;

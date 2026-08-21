@@ -56,6 +56,31 @@ describe("notification center state", () => {
     expect(reduceNotificationCenter(state, { type: "mark-all-read" }).items[0]?.unread).toBe(false);
   });
 
+  it("keeps user skill generation visible after the dialog is closed", () => {
+    const started: NotificationCenterItem = {
+      ...item("thread-1"),
+      id: "user-skill:thread-1:skill",
+      source: "user-skill",
+      targetId: "thread-1:skill",
+      title: "提炼技能 · skill",
+      detail: "正在根据聊天记录提炼用户技能。"
+    };
+    let state = reduceNotificationCenter(EMPTY_NOTIFICATION_CENTER_STATE, { type: "start", item: started });
+    expect(state.items[0]).toMatchObject({ source: "user-skill", status: "running", unread: false });
+
+    state = reduceNotificationCenter(state, {
+      type: "finish",
+      source: "user-skill",
+      targetId: "thread-1:skill",
+      updatedAt: "2026-07-22T10:03:00.000Z",
+      status: "completed",
+      title: "提炼技能 · skill",
+      detail: "skill 已生成。",
+      unread: true
+    });
+    expect(state.items[0]).toMatchObject({ source: "user-skill", status: "completed", unread: true, detail: "skill 已生成。" });
+  });
+
   it("does not mark unresolved attention items as read", () => {
     const attention = { ...item("waiting", "attention"), unread: true };
     const state = reduceNotificationCenter({ items: [attention] }, { type: "mark-all-read" });

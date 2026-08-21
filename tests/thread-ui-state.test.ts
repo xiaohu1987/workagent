@@ -8,6 +8,7 @@ import {
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
   normalizeGpaStateForThread,
+  shouldCommitThreadSnapshotImmediately,
   shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
@@ -21,6 +22,7 @@ import {
   getDefaultCollapsedConversationTurnIds,
   createOptimisticThreadSnapshot,
   getThreadDeleteFailureMessage,
+  getPostToolDecisionLabel,
   getToolProcessingLabel,
   getActiveSubagents,
   getSubagentWaitLabel,
@@ -157,6 +159,13 @@ describe("thread UI state helpers", () => {
     expect(getThreadContentView(null, null, 0)).toBe("welcome");
     expect(getThreadContentView("thread-2", "thread-2", 0)).toBe("welcome");
     expect(getThreadContentView("thread-2", "thread-2", 3)).toBe("transcript");
+  });
+
+  it("commits the first selected snapshot without a transition", () => {
+    expect(shouldCommitThreadSnapshotImmediately("thread-2", null, "thread-2")).toBe(true);
+    expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-1", "thread-2")).toBe(true);
+    expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2")).toBe(false);
+    expect(shouldCommitThreadSnapshotImmediately("thread-3", "thread-1", "thread-2")).toBe(false);
   });
 
   it("shows the Git workspace only after the current project is identified as a Git repository", () => {
@@ -449,6 +458,17 @@ describe("tool processing labels", () => {
         patch: "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"
       }))
     ).toBe("正在修改 src/App.tsx");
+  });
+
+  it("describes processing after a tool result with grammatical status text", () => {
+    expect(getPostToolDecisionLabel([])).toBe("正在处理工具结果");
+    expect(getPostToolDecisionLabel([
+      { toolName: "fs.read_file", argumentsJson: JSON.stringify({ path: "src/App.tsx" }) }
+    ])).toBe("正在读取 src/App.tsx");
+    expect(getPostToolDecisionLabel([
+      { toolName: "fs.read_file", argumentsJson: JSON.stringify({ path: "src/App.tsx" }) },
+      { toolName: "shell.exec", argumentsJson: JSON.stringify({ command: "pnpm test" }) }
+    ])).toBe("已完成 2 项操作，正在运行 pnpm test");
   });
 });
 

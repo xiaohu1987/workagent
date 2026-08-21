@@ -189,6 +189,44 @@ export function useThreadNotifications({ threadsRef, threadStatusRef, notificati
     dispatch({ type: "start", item: { id: `skill-lab:${jobId}`, source: "skill-lab", targetId: jobId, title, detail: "正在分析需求并准备生成 Skill。", status: "running", createdAt: timestamp, updatedAt: timestamp, startedAt: timestamp, unread: false, progress: { current: 0, total: totalIterations, percent: 0 } } });
   }
 
+  function startUserSkillGenerationNotification(targetId: string, title: string) {
+    if (findActiveNotification(notificationStateRef.current.items, "user-skill", targetId)) return;
+    const timestamp = new Date().toISOString();
+    dispatch({
+      type: "start",
+      item: {
+        id: `user-skill:${targetId}:${timestamp}`,
+        source: "user-skill",
+        targetId,
+        title,
+        detail: "正在根据聊天记录提炼用户技能。",
+        status: "running",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        startedAt: timestamp,
+        unread: false
+      }
+    });
+  }
+
+  function finishUserSkillGenerationNotification(
+    targetId: string,
+    status: "completed" | "failed",
+    detail: string,
+    title?: string
+  ) {
+    dispatch({
+      type: "finish",
+      source: "user-skill",
+      targetId,
+      updatedAt: new Date().toISOString(),
+      status,
+      title,
+      detail,
+      unread: true
+    });
+  }
+
   return {
     updateThreadNotification,
     setThreadNotificationAttention,
@@ -196,6 +234,8 @@ export function useThreadNotifications({ threadsRef, threadStatusRef, notificati
     applyThreadStatusNotification,
     syncThreadNotifications,
     updateSkillLabNotification,
-    startSkillLabNotification
+    startSkillLabNotification,
+    startUserSkillGenerationNotification,
+    finishUserSkillGenerationNotification
   };
 }

@@ -61,6 +61,14 @@ export function getThreadContentView(
   return timelineEntryCount === 0 ? "welcome" : "transcript";
 }
 
+export function shouldCommitThreadSnapshotImmediately(
+  selectedThreadId: string | null,
+  renderedSnapshotThreadId: string | null,
+  incomingThreadId: string
+): boolean {
+  return selectedThreadId === incomingThreadId && renderedSnapshotThreadId !== incomingThreadId;
+}
+
 export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRuntimeMessages>(
   threadId: string,
   state: {

@@ -248,6 +248,31 @@ describe("model configuration storage", () => {
     expect((await loadConfig(configFile)).reasoningEffort).toBe("xhigh");
   });
 
+  it("migrates the legacy in-app browser flag to explicit browser preferences", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-browser-preferences-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    await fs.writeFile(configFile, [
+      'defaultModel = "mock-codexh"',
+      'defaultProvider = "mock"',
+      '[desktop]',
+      'theme = "system"',
+      'approvals = "prompt"',
+      'inAppBrowser = false'
+    ].join("\n"), "utf8");
+
+    const migrated = await loadConfig(configFile);
+    expect(migrated.desktop).toMatchObject({
+      browserOpenMode: "external_default",
+      silentBrowserOpen: true
+    });
+
+    const stored = await fs.readFile(configFile, "utf8");
+    expect(stored).toContain('browserOpenMode = "external_default"');
+    expect(stored).toContain("silentBrowserOpen = true");
+    expect(stored).not.toContain("inAppBrowser");
+  });
+
   it("recognizes GPT-5.4+ reasoning models and leaves other model defaults unchanged", () => {
     const base: ModelProfile = {
       id: "gpt-5.6-terra",

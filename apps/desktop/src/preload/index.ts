@@ -225,7 +225,7 @@ const api = {
     ipcRenderer.invoke("self-improvement:list", input),
   deleteSelfImprovementMemory: (id: string) => ipcRenderer.invoke("self-improvement:delete", id),
   refreshSelfImprovementMemories: () => ipcRenderer.invoke("self-improvement:refresh"),
-  openBrowserTab: (payload: { threadId: string; url: string }) =>
+  openBrowserTab: (payload: { threadId: string; url: string; openMode?: "in_app" | "external_default" }) =>
     ipcRenderer.invoke("browser:open", payload),
   navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) =>
     ipcRenderer.invoke("browser:navigate", payload),

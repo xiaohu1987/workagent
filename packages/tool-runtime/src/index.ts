@@ -115,10 +115,12 @@ export interface ToolRuntimeContext {
   openPage: (url: string) => Promise<{ title: string; url: string; text: string }>;
   findInPage: (url: string, pattern: string) => Promise<string[]>;
   listBrowserTabs: () => Promise<BrowserTabRecord[]>;
-  openBrowserTab: (url: string) => Promise<{
+  openBrowserTab: (url: string, openMode?: "in_app" | "external_default") => Promise<{
     tab: BrowserTabRecord;
     page: { title: string; url: string; text: string };
     reused?: boolean;
+    browserOpenMode?: "in_app" | "external_default";
+    silentBrowserOpen?: boolean;
   }>;
   navigateBrowserTab: (tabId: string, url: string) => Promise<{ tab: BrowserTabRecord; page: { title: string; url: string; text: string } }>;
   reloadBrowserTab: (tabId: string) => Promise<{ tab: BrowserTabRecord; page: { title: string; url: string; text: string } }>;
@@ -1628,7 +1630,23 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("browser.open_tab", "Open a browser tab in the thread workspace.", ["url"], "medium"),
+    {
+      name: "browser.open_tab",
+      description: "Open a browser tab using the configured default. Set openMode to in_app or external_default only when the user explicitly requests that browser for this opening.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+          openMode: {
+            type: "string",
+            enum: ["in_app", "external_default"],
+            description: "Optional one-time override for an explicit user browser request."
+          }
+        },
+        required: ["url"]
+      },
+      riskLevel: "medium"
+    },
     async (args, ctx) => {
       const url = String(args.url ?? "");
       const approved = await ctx.requestApproval({
@@ -1640,14 +1658,19 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "打开浏览器标签被拒绝。" };
       }
-      const result = await ctx.openBrowserTab(url);
+      const requestedOpenMode = args.openMode === "in_app" || args.openMode === "external_default"
+        ? args.openMode
+        : undefined;
+      const result = await ctx.openBrowserTab(url, requestedOpenMode);
       return {
         ok: true,
         content: `${result.tab.title}\n${result.tab.url}${result.reused ? "\n(reused existing tab)" : ""}`,
         json: {
           tab: result.tab,
           page: pageForModel(result.page),
-          reused: result.reused === true
+          reused: result.reused === true,
+          browserOpenMode: result.browserOpenMode,
+          silentBrowserOpen: result.silentBrowserOpen
         }
       };
     }

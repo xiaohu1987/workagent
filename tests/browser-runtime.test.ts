@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BrowserRuntime, isBrowserErrorPageUrl } from "@browser-runtime";
+import { BrowserRuntime, isBrowserErrorPageUrl, resolveBrowserOpenPreferences } from "@browser-runtime";
 
 const tempDirs: string[] = [];
 
@@ -17,6 +17,17 @@ afterEach(async () => {
 });
 
 describe("BrowserRuntime", () => {
+  it("uses the configured browser target unless an opening explicitly overrides it", () => {
+    expect(resolveBrowserOpenPreferences("in_app", true)).toEqual({
+      browserOpenMode: "in_app",
+      silentBrowserOpen: true
+    });
+    expect(resolveBrowserOpenPreferences("external_default", false, "in_app")).toEqual({
+      browserOpenMode: "in_app",
+      silentBrowserOpen: false
+    });
+  });
+
   it("identifies Chromium internal error page URLs", () => {
     expect(isBrowserErrorPageUrl("chrome-error://chromewebdata/")).toBe(true);
     expect(isBrowserErrorPageUrl("http://127.0.0.1:8000/")).toBe(false);

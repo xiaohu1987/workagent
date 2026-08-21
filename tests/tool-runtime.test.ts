@@ -81,6 +81,60 @@ describe("apply-patch failures", () => {
 });
 
 describe("ToolRuntime", () => {
+  it("exposes the optional browser opening target in the tool schema", () => {
+    const browserTool = new ToolRuntime().listToolSpecs().direct.find((tool) => tool.name === "browser.open_tab");
+    expect(browserTool?.inputSchema).toMatchObject({
+      properties: {
+        openMode: { enum: ["in_app", "external_default"] }
+      }
+    });
+  });
+
+  it("passes an explicit browser opening target through browser.open_tab", async () => {
+    const openBrowserTab = vi.fn().mockResolvedValue({
+      tab: { id: "tab-1", title: "Example", url: "https://example.com" },
+      page: { title: "Example", url: "https://example.com", text: "Example" },
+      browserOpenMode: "external_default",
+      silentBrowserOpen: true,
+      reused: false
+    });
+    const runtime = new ToolRuntime();
+
+    const result = await runtime.execute(
+      { id: "browser-open-external", name: "browser.open_tab", arguments: { url: "https://example.com", openMode: "external_default" } },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        openBrowserTab
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(openBrowserTab).toHaveBeenCalledWith("https://example.com", "external_default");
+    expect(result.json).toMatchObject({ browserOpenMode: "external_default", silentBrowserOpen: true });
+  });
+
+  it("leaves browser opening target undefined when the tool call relies on the configured default", async () => {
+    const openBrowserTab = vi.fn().mockResolvedValue({
+      tab: { id: "tab-1", title: "Example", url: "https://example.com" },
+      page: { title: "Example", url: "https://example.com", text: "Example" },
+      browserOpenMode: "in_app",
+      silentBrowserOpen: true,
+      reused: false
+    });
+    const runtime = new ToolRuntime();
+
+    await runtime.execute(
+      { id: "browser-open-default", name: "browser.open_tab", arguments: { url: "https://example.com" } },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        openBrowserTab
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(openBrowserTab).toHaveBeenCalledWith("https://example.com", undefined);
+  });
+
   it("hard-blocks mutating tools for read-only child agents", async () => {
     const runtime = new ToolRuntime();
     const context = { cwd: process.cwd(), readOnlyAgent: true } as unknown as ToolRuntimeContext;

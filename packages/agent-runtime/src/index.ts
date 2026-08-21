@@ -936,7 +936,7 @@ interface RuntimeServices {
   openPage(threadId: string, url: string): Promise<{ title: string; url: string; text: string }>;
   findInPage(url: string, pattern: string): Promise<string[]>;
   listBrowserTabs(threadId: string): Promise<any[]>;
-  openBrowserTab(threadId: string, url: string): Promise<any>;
+  openBrowserTab(threadId: string, url: string, openMode?: "in_app" | "external_default"): Promise<any>;
   closeBrowserTabs(threadId: string, tabIds: string[]): Promise<void>;
   navigateBrowserTab(threadId: string, tabId: string, url: string): Promise<any>;
   reloadBrowserTab(threadId: string, tabId: string): Promise<any>;
@@ -5646,8 +5646,8 @@ class ThreadSessionRuntime {
               ),
               findInPage: this.services.findInPage,
               listBrowserTabs: () => this.services.listBrowserTabs(this.threadId),
-              openBrowserTab: (url) => trackOpenedBrowserTabs(
-                () => this.services.openBrowserTab(this.threadId, url)
+              openBrowserTab: (url, openMode) => trackOpenedBrowserTabs(
+                () => this.services.openBrowserTab(this.threadId, url, openMode)
               ),
               navigateBrowserTab: (tabId, url) => this.services.navigateBrowserTab(this.threadId, tabId, url),
               reloadBrowserTab: (tabId) => this.services.reloadBrowserTab(this.threadId, tabId),

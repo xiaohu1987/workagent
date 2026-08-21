@@ -52,7 +52,7 @@ function makeConfig(): AppConfig {
       video: { enabled: true },
       input: { enabled: true }
     },
-    desktop: { theme: "system", approvals: "prompt", inAppBrowser: true, liveEditPreview: true, llmLogViewer: false },
+    desktop: { theme: "system", approvals: "prompt", browserOpenMode: "in_app", silentBrowserOpen: true, liveEditPreview: true, llmLogViewer: false },
     multiAgent: { enabled: false, maxAgents: 1, maxDepth: 1 },
     selfImprovement: { enabled: false, memoryEnabled: false, maxMemories: 100 },
     mcpServers: [],

@@ -1,6 +1,6 @@
 import type { RuntimeEvent, ThreadStatus } from "@shared-types";
 
-export type NotificationSource = "thread" | "skill-lab";
+export type NotificationSource = "thread" | "skill-lab" | "user-skill";
 export type NotificationStatus = "running" | "attention" | "completed" | "failed" | "cancelled";
 
 export interface NotificationProgress {

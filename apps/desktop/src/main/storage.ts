@@ -318,7 +318,8 @@ export function defaultConfig(): AppConfig {
     desktop: {
       theme: "system",
       approvals: "prompt",
-      inAppBrowser: true,
+      browserOpenMode: "in_app",
+      silentBrowserOpen: true,
       liveEditPreview: false,
       llmLogViewer: false
     },
@@ -468,6 +469,19 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
   const parsed = TOML.parse(raw) as any;
   const needsReasoningEffortMigration = !isGptReasoningEffort(parsed.reasoningEffort);
   const needsAutonomousRuntimeMigration = Object.prototype.hasOwnProperty.call(parsed, "timeouts");
+  const legacyInAppBrowser = parsed.desktop?.inAppBrowser;
+  const browserOpenMode = parsed.desktop?.browserOpenMode === "external_default"
+    ? "external_default"
+    : parsed.desktop?.browserOpenMode === "in_app"
+      ? "in_app"
+      : legacyInAppBrowser === false
+        ? "external_default"
+        : "in_app";
+  const silentBrowserOpen = parsed.desktop?.silentBrowserOpen === false ? false : true;
+  const needsBrowserPreferenceMigration =
+    parsed.desktop?.browserOpenMode !== browserOpenMode ||
+    typeof parsed.desktop?.silentBrowserOpen !== "boolean" ||
+    Object.prototype.hasOwnProperty.call(parsed.desktop ?? {}, "inAppBrowser");
   const migratedProviders = Object.entries(parsed.providers ?? {}).map(([id, value]) => migrateProvider({
     id,
     ...(value as Record<string, unknown>)
@@ -513,7 +527,8 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     desktop: {
       theme: parsed.desktop?.theme ?? 'system',
       approvals: parsed.desktop?.approvals ?? 'prompt',
-      inAppBrowser: parsed.desktop?.inAppBrowser ?? true,
+      browserOpenMode,
+      silentBrowserOpen,
       liveEditPreview: parsed.desktop?.liveEditPreview ?? false,
       llmLogViewer: parsed.desktop?.llmLogViewer ?? false
     },
@@ -538,7 +553,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
     })) satisfies McpServerConfig[],
     databaseConnections: normalizeDatabaseConnections(parsed.databaseConnections)
   };
-  if (needsReasoningEffortMigration || needsAutonomousRuntimeMigration || migratedProviders.some((entry) => entry.changed)) {
+  if (needsReasoningEffortMigration || needsAutonomousRuntimeMigration || needsBrowserPreferenceMigration || migratedProviders.some((entry) => entry.changed)) {
     await saveConfig(configFile, config);
   }
   return config;

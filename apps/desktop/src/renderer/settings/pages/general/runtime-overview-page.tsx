@@ -56,14 +56,53 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
               <strong>{config?.desktop.approvals ?? "prompt"}</strong>
             </div>
             <div className="general-default-item">
-              <span><IconGlobe />内置浏览器</span>
-              <strong className={config?.desktop.inAppBrowser ? "is-online" : "is-offline"}><i aria-hidden />{config?.desktop.inAppBrowser ? "已启用" : "已关闭"}</strong>
+              <span><IconGlobe />浏览器打开方式</span>
+              <strong className={config?.desktop.browserOpenMode === "external_default" ? "is-offline" : "is-online"}><i aria-hidden />{config?.desktop.browserOpenMode === "external_default" ? "系统默认浏览器" : "程序内浏览器"}</strong>
+            </div>
+            <div className="general-default-item">
+              <span><IconGlobe />浏览器面板</span>
+              <strong className={config?.desktop.silentBrowserOpen ? "is-offline" : "is-online"}><i aria-hidden />{config?.desktop.silentBrowserOpen ? "静默打开" : "自动展开"}</strong>
             </div>
           </div>
         </div>
 
         {configDraft ? (
           <>
+          <div className="config-block general-subagent-settings">
+            <div className="section-copy">
+              <strong><IconGlobe />浏览器</strong>
+              <span>外部默认浏览器会展示同一网址；任务仍使用程序内后台页面完成读取和自动化，两者不共享登录状态。</span>
+            </div>
+            <div className="general-subagent-settings-grid">
+              <label className="settings-field">
+                <span>默认打开方式</span>
+                <ComposerSelect
+                  className="form-select"
+                  ariaLabel="浏览器默认打开方式"
+                  value={configDraft.desktop.browserOpenMode}
+                  onChange={(value) => setConfigDraft((current) => current ? {
+                    ...current,
+                    desktop: {
+                      ...current.desktop,
+                      browserOpenMode: value === "external_default" ? "external_default" : "in_app"
+                    }
+                  } : current)}
+                  options={[
+                    { value: "in_app", label: "程序内浏览器" },
+                    { value: "external_default", label: "系统默认浏览器" }
+                  ]}
+                  placeholder="选择浏览器"
+                />
+                <small className="settings-field-hint">对话中明确指定浏览器时，仅本次打开会覆盖这里的默认值。</small>
+              </label>
+              <div className="settings-field general-permission-field">
+                <span>静默打开</span>
+                <label className="memory-switch"><input type="checkbox" checked={configDraft.desktop.silentBrowserOpen} onChange={(event) => setConfigDraft((current) => current ? { ...current, desktop: { ...current.desktop, silentBrowserOpen: event.target.checked } } : current)} /> <span>不自动展开程序内浏览器面板</span></label>
+                <small className="settings-field-hint">此选项不影响系统默认浏览器的前台行为。</small>
+              </div>
+            </div>
+            <div className="settings-save-row"><span className="subtle-inline">更改会在保存后应用于后续网页打开。</span><button className="button warm" type="button" onClick={() => void onSave()}>保存</button></div>
+          </div>
           <div className="config-block">
             <div className="section-copy section-copy-with-action">
               <div>

@@ -43,6 +43,7 @@ import {
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
   normalizeGpaStateForThread,
+  shouldCommitThreadSnapshotImmediately,
   shouldPreservePreparingRuntime,
   shouldShowTaskProcessing
 } from "./core/thread-ui-state";
@@ -99,6 +100,7 @@ import {
   getGpaPlanMessageId,
   getLatestTurnRunId,
   getMessageDisplayKind,
+  getPostToolDecisionLabel,
   getSubagentWaitLabel,
   getThreadDeleteFailureMessage,
   getToolActivityKind,
@@ -290,6 +292,7 @@ import { useProjectFilePreview } from "./hooks/use-project-file-preview";
 import { useStableEvent } from "./hooks/use-stable-event";
 import { DATABASE_PERMISSION_OPTIONS, getSkillSortLabel, RESPONSE_TONE_OPTIONS, SKILL_SORT_OPTIONS } from "./settings/settings-options";
 import { reregisterBrowserWebviews } from "./workspace/browser-workspace";
+import { shouldRevealBrowserWorkspace } from "./workspace/browser-preferences";
 import { RightWorkspacePanel, type RightWorkspaceTab } from "./workspace/right-workspace";
 import { NotificationCenter } from "./workspace/notification-center";
 import { HelpSheet } from "./workspace/help-sheet";
@@ -769,14 +772,6 @@ export function App() {
     refreshBase: refreshKnowledgeBase,
     deleteBase: deleteKnowledgeBase
   } = knowledgeBaseState;
-  const userSkillGeneration = useUserSkillGeneration(refreshUserSkills, refreshSkills, showNotice);
-  const {
-    dialog: userSkillGenerationDialog,
-    setDialog: setUserSkillGenerationDialog,
-    isGenerating: isGeneratingUserSkill,
-    open: openUserSkillGenerationDialog,
-    generate: generateUserSkill
-  } = userSkillGeneration;
   const selfImprovementMemoryState = useSelfImprovementMemories(showNotice);
   const {
     memories: selfImprovementMemories,
@@ -958,13 +953,29 @@ export function App() {
     applyThreadStatusNotification,
     syncThreadNotifications: syncThreadNotificationsFromThreads,
     updateSkillLabNotification,
-    startSkillLabNotification
+    startSkillLabNotification,
+    startUserSkillGenerationNotification,
+    finishUserSkillGenerationNotification
   } = useThreadNotifications({
     threadsRef,
     threadStatusRef,
     notificationStateRef: notificationCenterStateRef,
     dispatch: dispatchNotificationCenter
   });
+  const userSkillGeneration = useUserSkillGeneration(
+    refreshUserSkills,
+    refreshSkills,
+    showNotice,
+    startUserSkillGenerationNotification,
+    finishUserSkillGenerationNotification
+  );
+  const {
+    dialog: userSkillGenerationDialog,
+    setDialog: setUserSkillGenerationDialog,
+    isGenerating: isGeneratingUserSkill,
+    open: openUserSkillGenerationDialog,
+    generate: generateUserSkill
+  } = userSkillGeneration;
   const [isTranscriptAtLatest, setIsTranscriptAtLatest] = useState(true);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [historyThreadDeleteConfirmation, setHistoryThreadDeleteConfirmation] = useState<ThreadRecord | null>(null);
@@ -1235,6 +1246,26 @@ export function App() {
         ...current,
         prompts: upsertRuntimeUserInputPrompt(current.prompts, prompt)
       };
+    });
+  }
+
+  function updateRuntimeApprovalSnapshots(threadId: string, approval: ApprovalRequest) {
+    // Approval events can arrive before the next snapshot refresh. Keep the
+    // pending card available immediately in both the selected view and cache.
+    invalidateSnapshotRequest(threadId);
+    const upsertApproval = (approvals: ApprovalRequest[]) => {
+      const existing = approvals.find((item) => item.id === approval.id);
+      return existing
+        ? approvals.map((item) => item.id === approval.id ? approval : item)
+        : [...approvals, approval];
+    };
+    const cached = snapshotCacheByThreadRef.current.get(threadId);
+    if (cached) {
+      cacheThreadSnapshot({ ...cached, approvals: upsertApproval(cached.approvals) });
+    }
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== threadId) return current;
+      return { ...current, approvals: upsertApproval(current.approvals) };
     });
   }
 
@@ -1576,13 +1607,7 @@ export function App() {
         .filter((entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> =>
           entry.kind === "tool" && entry.toolCall.status === "completed"
         );
-      const latestTool = completedTools.at(-1)?.toolCall;
-      const action = latestTool
-        ? getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "")
-        : "工具结果";
-      const label = completedTools.length > 1
-        ? `已完成 ${completedTools.length} 项操作，正在${action}`
-        : `正在${action}`;
+      const label = getPostToolDecisionLabel(completedTools.map((entry) => entry.toolCall), skillNames);
       const last = activity.entries.at(-1);
       if (last?.kind === "status" && last.label === label) return current;
       return {
@@ -1717,12 +1742,19 @@ export function App() {
           passed?: boolean;
           automatic?: boolean;
           tabs?: RuntimeThreadSnapshot["browserTabs"];
+          browserOpenMode?: "in_app" | "external_default";
+          silentBrowserOpen?: boolean;
           queueItemId?: string;
-          action?: "queued" | "dispatching" | "dispatched" | "deleted";
+          action?: "open" | "queued" | "dispatching" | "dispatched" | "deleted";
         };
       };
       const notificationThreadId = resolveRuntimeNotificationThreadId(runtimeEvent);
       const currentSelectedThreadId = selectedThreadIdRef.current;
+      if (shouldRevealBrowserWorkspace(typed, currentSelectedThreadId)) {
+        setIsRightWorkspaceOpen(true);
+        setRightWorkspaceTab("browser");
+        setRightWorkspaceExpandedTab("browser");
+      }
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
       if (
         typed.type === "queue.updated" &&
@@ -1822,14 +1854,17 @@ export function App() {
         }
         return;
       }
-      if (typed.type === "approval.requested" && notificationThreadId && typed.payload?.approval) {
-        setThreadNotificationAttention(
-          notificationThreadId,
-          typed.payload.approval.title || "任务正在等待你的操作确认。",
-          "approval",
-          typed.payload.approval.id,
-          typed.createdAt
-        );
+      if (typed.type === "approval.requested" && typed.payload?.approval) {
+        if (typed.threadId) updateRuntimeApprovalSnapshots(typed.threadId, typed.payload.approval);
+        if (notificationThreadId) {
+          setThreadNotificationAttention(
+            notificationThreadId,
+            typed.payload.approval.title || "任务正在等待你的操作确认。",
+            "approval",
+            typed.payload.approval.id,
+            typed.createdAt
+          );
+        }
       }
       if (typed.type === "user-input.requested" && typed.threadId && typed.payload?.prompt) {
         updateRuntimePromptSnapshots(typed.threadId, typed.payload.prompt);
@@ -2198,9 +2233,9 @@ export function App() {
       }
       if (typed.type === "agent.retrying" && typed.threadId && typed.payload?.reason === "provider_output_limit") {
         if (!suppressRuntimeProgressRef.current[typed.threadId]) {
-          appendRuntimeStatus(typed.threadId, "正在精简回复", typed.createdAt);
+          appendRuntimeStatus(typed.threadId, "深度思考", typed.createdAt);
           if (notificationThreadId) {
-            updateThreadNotification(notificationThreadId, "正在精简回复。", typed.createdAt);
+            updateThreadNotification(notificationThreadId, "深度思考。", typed.createdAt);
           }
           setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         }
@@ -3927,11 +3962,7 @@ export function App() {
       });
       cacheThreadSnapshot(mergedSnapshot);
       if (selectedThreadIdRef.current === threadId) {
-        snapshotThreadIdRef.current = threadId;
-        // The merged snapshot can carry hundreds of messages; commit it as a
-        // transition so urgent interactions (clicks, another switch) are not
-        // blocked behind the transcript render.
-        startTransition(() => {
+        const commitSelectedSnapshot = () => {
           setSnapshot((current) => selectedThreadIdRef.current === threadId
             ? reconcileSnapshotWithRuntimeEvents(mergedSnapshot)
             : current);
@@ -3942,7 +3973,20 @@ export function App() {
           // Keep the switch placeholder visible until the replacement snapshot
           // and its thread-scoped controls commit together.
           setIsThreadSwitching(false);
-        });
+        };
+        if (shouldCommitThreadSnapshotImmediately(
+          selectedThreadIdRef.current,
+          snapshotThreadIdRef.current,
+          threadId
+        )) {
+          // A transition can be starved by continuous runtime events. The first
+          // snapshot must replace the loading placeholder at normal priority.
+          commitSelectedSnapshot();
+        } else {
+          // Background refreshes of an already visible transcript may remain
+          // interruptible so clicks and live task activity stay responsive.
+          startTransition(commitSelectedSnapshot);
+        }
       }
       setThreads((current) => current.map((thread) =>
         thread.id === mergedSnapshot.thread.id
@@ -5822,6 +5866,13 @@ export function App() {
       if (config) resetConfigDraft(config);
       setSettingsTab("capabilities");
       setCapabilityTab("lab");
+      setIsSettingsOpen(true);
+      return;
+    }
+    if (item.source === "user-skill") {
+      if (config) resetConfigDraft(config);
+      setSettingsTab("capabilities");
+      setCapabilityTab("userSkills");
       setIsSettingsOpen(true);
       return;
     }

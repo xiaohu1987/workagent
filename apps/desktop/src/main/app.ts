@@ -13,6 +13,7 @@ import type {
   ApprovalRequest,
   BrowserAssertionCheck,
   BrowserAssertionResult,
+  BrowserOpenMode,
   BrowserTabRecord,
   BrowserViewport,
   DatabaseConnectionConfig,
@@ -65,7 +66,7 @@ import {
   resolveSubagentWatchdogDecision,
   toGpaPlanResumePreview
 } from "@agent-runtime";
-import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } from "@browser-runtime";
+import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, resolveBrowserOpenPreferences, type PageSnapshot } from "@browser-runtime";
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
 import { hashDirectory, PluginRuntime, type PluginInstallProgress } from "@plugin-runtime";
@@ -447,7 +448,7 @@ export class DesktopBackend {
       openPage: async (threadId, url) => this.openPage(threadId, url),
       findInPage: async (url, pattern) => this.findInPage(url, pattern),
       listBrowserTabs: async (threadId) => this.#db.listBrowserTabs(threadId),
-      openBrowserTab: async (threadId, url) => this.openBrowserTab(threadId, url),
+      openBrowserTab: async (threadId, url, openMode) => this.openBrowserTab(threadId, url, openMode),
       closeBrowserTabs: async (threadId, tabIds) => this.closeBrowserTabs(threadId, tabIds),
       navigateBrowserTab: async (threadId, tabId, url) => this.navigateBrowserTab(threadId, tabId, url),
       reloadBrowserTab: async (threadId, tabId) => this.reloadBrowserTab(threadId, tabId),
@@ -2465,15 +2466,23 @@ export class DesktopBackend {
     return updated;
   }
 
-  public async openBrowserTab(threadId: string, url: string) {
+  public async openBrowserTab(threadId: string, url: string, requestedOpenMode?: BrowserOpenMode) {
+    const { browserOpenMode, silentBrowserOpen } = resolveBrowserOpenPreferences(
+      this.#config.desktop.browserOpenMode,
+      this.#config.desktop.silentBrowserOpen,
+      requestedOpenMode
+    );
     const opened = await this.#browser.openTab(threadId, url);
     this.persistBrowserTabs(threadId);
     await this.emit({
       type: "browser.updated",
       threadId,
-      payload: { action: "open", tab: opened.tab },
+      payload: { action: "open", tab: opened.tab, browserOpenMode, silentBrowserOpen },
       createdAt: new Date().toISOString()
     });
+    if (browserOpenMode === "external_default") {
+      await shell.openExternal(opened.tab.url);
+    }
     // Wait for the renderer webview to attach so follow-up automation tools can run.
     await this.requireBrowserContents(threadId, opened.tab.id, 20_000).catch(async (error) => {
       await this.#logs.append("browser.webview_attach_timeout", {
@@ -2483,7 +2492,7 @@ export class DesktopBackend {
         error: error instanceof Error ? error.message : String(error)
       });
     });
-    return opened;
+    return { ...opened, browserOpenMode, silentBrowserOpen };
   }
 
   public async navigateBrowserTab(threadId: string, tabId: string, url: string) {
@@ -4900,10 +4909,7 @@ export class DesktopBackend {
       try {
         const response = await fetch(url, { signal: AbortSignal.timeout(1_500) });
         if (response.ok) {
-          if (!this.#db.listBrowserTabs(threadId).some((tab) => tab.url === url)) {
-            await this.openBrowserTab(threadId, url);
-          }
-          await shell.openExternal(url);
+          await this.openBrowserTab(threadId, url);
           return;
         }
       } catch {
@@ -4985,6 +4991,8 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
     desktop: {
       ...fallback.desktop,
       ...config.desktop,
+      browserOpenMode: config.desktop?.browserOpenMode === "external_default" ? "external_default" : "in_app",
+      silentBrowserOpen: config.desktop?.silentBrowserOpen !== false,
       liveEditPreview: config.desktop?.liveEditPreview === true,
       llmLogViewer: config.desktop?.llmLogViewer === true
     },
