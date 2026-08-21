@@ -148,8 +148,9 @@ function describeAttachments(attachments: MessageAttachment[]): string {
  */
 export function buildMultimodalInputRecognizeSystemPrompt(): string {
   return [
-    "You convert multimodal attachments into a precise text description for a text-only model.",
-    "Describe every attached image and file in detail: visible text (OCR), layout, UI elements, code, tables, charts, errors, and any details needed to answer the user.",
+    "You convert attached images into precise text descriptions for a text-only model.",
+    "Describe every attached image in detail: visible text (OCR), layout, UI elements, code, tables, charts, errors, and any details needed to answer the user.",
+    "Non-image attachments are provided only as filesystem paths; do not treat them as visual input or invent their contents.",
     "Respond in the same language as the user message when possible.",
     "Do not answer the user's request yourself. Do not call tools. Output only the recognition notes."
   ].join("\n");
@@ -161,12 +162,14 @@ export function buildMultimodalInputRecognizeTranscript(input: {
 }): Array<{ role: MessageRole; content: string; attachments?: MessageAttachment[] }> {
   const current = input.currentInput.trim();
   const recognizable = input.attachments.filter(
-    (attachment) => attachment.kind === "image" || attachment.kind === "file"
+    (attachment) => attachment.kind === "image"
   );
+  const nonImagePaths = formatNonImageAttachmentPaths(input.attachments);
+  const content = [current, nonImagePaths].filter(Boolean).join("\n\n");
   return [
     {
       role: "user",
-      content: current || "请识别这些附件的内容，输出详细文字描述。",
+      content: content || "请识别这些图片的内容，输出详细文字描述。",
       attachments: recognizable.length > 0 ? recognizable : undefined
     }
   ];
@@ -179,24 +182,44 @@ export function applyMultimodalInputRecognitionToTranscript(
 ): Array<{ role: MessageRole; content: string; attachments?: MessageAttachment[] }> {
   const note = description.trim();
   if (!note) {
-    return transcript.map((message) => ({ ...message, attachments: undefined }));
+    return transcript.map((message) => ({
+      ...message,
+      content: [message.content, formatNonImageAttachmentPaths(message.attachments ?? [])]
+        .filter(Boolean)
+        .join("\n\n"),
+      attachments: undefined
+    }));
   }
 
   return transcript.map((message, index) => {
-    const withoutAttachments = { ...message, attachments: undefined };
+    const nonImagePaths = formatNonImageAttachmentPaths(message.attachments ?? []);
+    const withoutAttachments = {
+      ...message,
+      content: [message.content, nonImagePaths].filter(Boolean).join("\n\n"),
+      attachments: undefined
+    };
     if (index !== transcript.length - 1 || message.role !== "user") {
       return withoutAttachments;
     }
     const header = `[Multimodal recognition via ${recognizerModelId}]\n${note}`;
-    const content = message.content.trim()
-      ? `${header}\n\n[User message]\n${message.content}`
+    const userMessage = [message.content.trim(), nonImagePaths].filter(Boolean).join("\n\n");
+    const content = userMessage
+      ? `${header}\n\n[User message]\n${userMessage}`
       : header;
     return { ...withoutAttachments, content };
   });
 }
 
 export function hasRecognizableMultimodalAttachments(attachments: MessageAttachment[]): boolean {
-  return attachments.some((attachment) => attachment.kind === "image" || attachment.kind === "file");
+  return attachments.some((attachment) => attachment.kind === "image");
+}
+
+/** Keep non-image references usable by text-only models without treating them as visual input. */
+export function formatNonImageAttachmentPaths(attachments: MessageAttachment[]): string {
+  return attachments
+    .filter((attachment) => attachment.kind !== "image")
+    .map((attachment) => `[Attached ${attachment.kind}]\n${attachment.absolutePath}`)
+    .join("\n\n");
 }
 
 /**

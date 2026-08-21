@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as XLSX from "xlsx";
 import type { AppConfig, MessageRecord, ModelProfile, SkillMetadata, ToolSpecDefinition } from "@shared-types";
 import {
@@ -193,6 +193,8 @@ import {
   MAX_BLOCKED_IDENTICAL_TOOL_RETRIES,
   shouldStopAfterBlockedIdenticalToolRetry,
   MAX_MODEL_TIMEOUT_RETRIES,
+  MODEL_DECISION_TIMEOUT_MS,
+  waitForAbortOrIdleTimeout,
   ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS,
   shouldPublishAssistantDraftUpdate,
   isExplicitGitMutationRequest,
@@ -254,6 +256,42 @@ describe("assistant draft stream throttling", () => {
 
   it("publishes phase changes immediately so status and final content are not delayed", () => {
     expect(shouldPublishAssistantDraftUpdate(1_000, 1_001, true)).toBe(true);
+  });
+});
+
+describe("root model progress watchdog", () => {
+  it("restarts only after 120 seconds with no observable progress", async () => {
+    vi.useFakeTimers();
+    try {
+      const requestAbort = new AbortController();
+      let markProgress = () => undefined;
+      const pendingRequest = new Promise<never>(() => undefined);
+      const outcome = waitForAbortOrIdleTimeout(
+        pendingRequest,
+        new AbortController().signal,
+        MODEL_DECISION_TIMEOUT_MS,
+        () => requestAbort.abort(),
+        (mark) => {
+          markProgress = mark;
+        }
+      ).catch((error) => error as Error);
+
+      await vi.advanceTimersByTimeAsync(MODEL_DECISION_TIMEOUT_MS - 1);
+      expect(requestAbort.signal.aborted).toBe(false);
+
+      markProgress();
+      await vi.advanceTimersByTimeAsync(MODEL_DECISION_TIMEOUT_MS - 1);
+      expect(requestAbort.signal.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(requestAbort.signal.aborted).toBe(true);
+      await expect(outcome).resolves.toMatchObject({
+        name: "ModelDecisionTimeoutError",
+        idle: true
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1500,6 +1538,7 @@ describe("standard completion validation", () => {
     expect(hasUnitTestReport("测试报告：单元测试 pnpm test 通过，12 passed，0 failed。")).toBe(true);
     expect(hasUnitTestReport("构建通过。")).toBe(false);
     expect(hasUnitTestUnavailableReport("未找到可运行的单元测试命令；已完成类型检查。")).toBe(true);
+    expect(hasUnitTestUnavailableReport("未找到任何可运行的项目级单测命令；已完成编译检查。")).toBe(true);
     expect(hasUnitTestUnavailableReport("No configured unit-test command was found; typecheck passed.")).toBe(true);
   });
 
@@ -1770,6 +1809,28 @@ describe("standard completion validation", () => {
       alreadyUsingTextToolProtocol: false,
       result
     })).toBe(false);
+  });
+
+  it("does not require an unavailable-test disclosure after a later unit test succeeds", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "Updated src/voice.ts. Unit tests passed: 3 passed, 0 failed.",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      requiresUnitTest: true,
+      deliveredPaths: ["D:\\project\\src\\voice.ts"],
+      successfulEvidence: [
+        { toolCallId: "write-1", toolName: "search_replace", kinds: ["delivery"] },
+        { toolCallId: "verify-1", toolName: "project.verify", kinds: ["verification"], unitTestUnavailable: true },
+        { toolCallId: "test-1", toolName: "shell.exec", kinds: ["verification"], unitTestPassed: true }
+      ]
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.missingUnitTestDisclosure).toBe(false);
   });
 
   it("requires fresh successful evidence before re-auditing a rejected completion", () => {
@@ -3088,6 +3149,48 @@ describe("GPA ACT completion evidence", () => {
 
     expect(result.valid).toBe(true);
     expect(result.missingUnitTest).toBe(false);
+    expect(result.missingUnitTestDisclosure).toBe(false);
+  });
+
+  it("does not require a GPA unavailable-test disclosure after a referenced unit test succeeds", () => {
+    const delivery = classifySuccessfulToolEvidence({
+      toolCallId: "patch-1",
+      toolName: "search_replace",
+      hasPriorDelivery: false,
+      requiresVerifiedPath: true,
+      verifiedPaths: ["C:\\project\\src\\App.tsx"]
+    });
+    const unavailable = classifySuccessfulToolEvidence({
+      toolCallId: "verify-1",
+      toolName: "project.verify",
+      hasPriorDelivery: true,
+      verificationPassed: true,
+      unitTestUnavailable: true
+    });
+    const test = classifySuccessfulToolEvidence({
+      toolCallId: "test-1",
+      toolName: "shell.exec",
+      hasPriorDelivery: true,
+      unitTestPassed: true
+    });
+    const result = validateActCompletion({
+      decision: {
+        assistantMessage: "修改完成，单元测试通过。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true,
+        completedTaskIds: ["T1"],
+        completionEvidence: [
+          { taskId: "T1", toolCallId: "patch-1", kind: "delivery" },
+          { taskId: "T1", toolCallId: "test-1", kind: "verification" }
+        ]
+      },
+      planTasks,
+      successfulEvidence: [delivery, unavailable, test],
+      requiresUnitTest: true
+    });
+
+    expect(result.valid).toBe(true);
     expect(result.missingUnitTestDisclosure).toBe(false);
   });
 
@@ -4424,13 +4527,13 @@ describe("multimodal intent classification", () => {
 });
 
 describe("multimodal input recognition fallback", () => {
-  it("detects recognizable image and file attachments", () => {
+  it("detects only image attachments as recognizable multimodal input", () => {
     expect(hasRecognizableMultimodalAttachments([
       { id: "1", kind: "image", name: "a.png", mimeType: "image/png", absolutePath: "/tmp/a.png", sizeBytes: 10, source: "user" }
     ])).toBe(true);
     expect(hasRecognizableMultimodalAttachments([
       { id: "2", kind: "file", name: "a.pdf", mimeType: "application/pdf", absolutePath: "/tmp/a.pdf", sizeBytes: 10, source: "user" }
-    ])).toBe(true);
+    ])).toBe(false);
     expect(hasRecognizableMultimodalAttachments([
       { id: "3", kind: "video", name: "a.mp4", mimeType: "video/mp4", absolutePath: "/tmp/a.mp4", sizeBytes: 10, source: "user" }
     ])).toBe(false);
@@ -4451,6 +4554,17 @@ describe("multimodal input recognition fallback", () => {
         attachments
       }
     ]);
+  });
+
+  it("keeps non-image attachment paths as text while recognizing images", () => {
+    const image = { id: "1", kind: "image" as const, name: "a.png", mimeType: "image/png", absolutePath: "/tmp/a.png", sizeBytes: 10, source: "user" as const };
+    const file = { id: "2", kind: "file" as const, name: "a.pdf", mimeType: "application/pdf", absolutePath: "/tmp/a.pdf", sizeBytes: 10, source: "user" as const };
+    const transcript = buildMultimodalInputRecognizeTranscript({
+      currentInput: "请对比附件",
+      attachments: [image, file]
+    });
+    expect(transcript[0]?.attachments).toEqual([image]);
+    expect(transcript[0]?.content).toContain("[Attached file]\n/tmp/a.pdf");
   });
 
   it("injects recognition notes into the latest user message and strips attachments", () => {
@@ -4475,6 +4589,23 @@ describe("multimodal input recognition fallback", () => {
     expect(next[1]?.content).toContain("截图里有一个登录按钮");
     expect(next[1]?.content).toContain("[User message]");
     expect(next[1]?.content).toContain("解释这张截图");
+  });
+
+  it("preserves non-image paths when recognition notes are applied", () => {
+    const next = applyMultimodalInputRecognitionToTranscript(
+      [{
+        role: "user",
+        content: "请分析",
+        attachments: [
+          { id: "1", kind: "image", name: "a.png", mimeType: "image/png", absolutePath: "/tmp/a.png", sizeBytes: 10, source: "user" },
+          { id: "2", kind: "file", name: "a.pdf", mimeType: "application/pdf", absolutePath: "/tmp/a.pdf", sizeBytes: 10, source: "user" }
+        ]
+      }],
+      "图片说明",
+      "vision-model"
+    );
+    expect(next[0]?.attachments).toBeUndefined();
+    expect(next[0]?.content).toContain("[Attached file]\n/tmp/a.pdf");
   });
 });
 

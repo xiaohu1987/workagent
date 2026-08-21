@@ -1679,6 +1679,7 @@ export function App() {
           title?: string;
           attempt?: number;
           maxAttempts?: number;
+          issues?: unknown[];
           overageBytes?: number;
           reason?: string;
           detail?: string;
@@ -2214,9 +2215,25 @@ export function App() {
         const attempt = typeof typed.payload.attempt === "number" ? typed.payload.attempt : 1;
         const maxAttempts = typeof typed.payload.maxAttempts === "number" ? typed.payload.maxAttempts : 0;
         const attemptLabel = maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : "";
-        appendRuntimeStatus(typed.threadId, `发现最终结果缺少执行证据，正在继续完成${attemptLabel}`, typed.createdAt);
+        const rawIssue = Array.isArray(typed.payload.issues)
+          ? typed.payload.issues.find((issue): issue is string => typeof issue === "string" && Boolean(issue.trim()))
+          : undefined;
+        const issue = rawIssue === "No runnable unit-test command was found, but the final summary does not disclose that unit tests were unavailable."
+          ? "最终总结未说明单元测试不可用"
+          : rawIssue === "The requested project file change has no verified file delivery."
+            ? "未确认项目文件已经交付"
+            : rawIssue === "The requested project file change has no post-delivery verification."
+              ? "文件修改后尚未完成验证"
+              : rawIssue === "The project code change has no successful unit-test evidence."
+                ? "代码修改缺少成功的单元测试结果"
+              : rawIssue;
+        const displayIssue = issue?.trim().slice(0, 160);
+        const status = typed.payload.reason === "completion_audit"
+          ? `完成审计未通过${displayIssue ? `：${displayIssue}` : ""}，正在继续处理${attemptLabel}`
+          : `完成校验未通过${displayIssue ? `：${displayIssue}` : ""}，正在修正${attemptLabel}`;
+        appendRuntimeStatus(typed.threadId, status, typed.createdAt);
         if (notificationThreadId) {
-          updateThreadNotification(notificationThreadId, `正在补齐执行步骤${attemptLabel}`, typed.createdAt);
+          updateThreadNotification(notificationThreadId, status, typed.createdAt);
         }
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;

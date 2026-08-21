@@ -17,7 +17,7 @@ describe("model configuration storage", () => {
   it("clears legacy protocol fields when switching to the DeepSeek template", () => {
     expect(providerTemplatePatch("deepseek")).toMatchObject({
       baseUrl: "https://api.deepseek.com",
-      apiFormat: "openai_responses",
+      apiFormat: "auto",
       compatibilityProfile: "deepseek",
       transport: undefined,
       deepseekProtocol: undefined
@@ -109,7 +109,8 @@ describe("model configuration storage", () => {
     expect(config.desktop.liveEditPreview).toBe(false);
     expect(config.providers).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "anthropic", baseUrl: "https://api.anthropic.com/v1" }),
-      expect.objectContaining({ id: "xai", apiFormat: "openai_responses", baseUrl: "https://api.x.ai/v1" })
+      expect.objectContaining({ id: "openai", apiFormat: "auto" }),
+      expect.objectContaining({ id: "xai", apiFormat: "auto", baseUrl: "https://api.x.ai/v1" })
     ]));
     expect(config.models).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "claude-sonnet-4-20250514", providerId: "anthropic", defaultReasoningEffort: "medium" }),

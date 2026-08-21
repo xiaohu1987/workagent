@@ -92,6 +92,7 @@ import {
   buildMultimodalInputRecognizeSystemPrompt,
   buildMultimodalInputRecognizeTranscript,
   detectRequestedImageCount,
+  formatNonImageAttachmentPaths,
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
 import type { GpaStage, GpaState } from "@shared-types";
@@ -164,8 +165,8 @@ export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
 // resend the same rejected invocation indefinitely. End the turn after a
 // small number of blocked repeats so that a busy task cannot spin forever.
 export const MAX_BLOCKED_IDENTICAL_TOOL_RETRIES = 3;
-/** Zero disables wall-clock aborts. The user can stop an active task explicitly. */
-export const MODEL_DECISION_TIMEOUT_MS = 0;
+/** Restart a root model request after 2 minutes without observable progress. */
+export const MODEL_DECISION_TIMEOUT_MS = 120_000;
 /** Parent tasks remain user-cancellable; child model calls must converge. */
 export const SUBAGENT_MODEL_DECISION_TIMEOUT_MS = 120_000;
 export const SUBAGENT_INSPECTION_DELAY_MS = 60_000;
@@ -1035,9 +1036,12 @@ export function shouldApplyToolExecutionTimeout(toolName: string): boolean {
 }
 
 class ModelDecisionTimeoutError extends Error {
-  public constructor(timeoutMs: number) {
-    super(`The model decision timed out after ${timeoutMs}ms.`);
+  public readonly idle: boolean;
+
+  public constructor(timeoutMs: number, idle = false) {
+    super(`The model decision ${idle ? "made no progress for" : "timed out after"} ${timeoutMs}ms.`);
     this.name = "ModelDecisionTimeoutError";
+    this.idle = idle;
   }
 }
 
@@ -1055,26 +1059,37 @@ function waitForAbortOrTimeout<T>(
   operation: Promise<T>,
   signal: AbortSignal,
   timeoutMs: number,
-  onTimeout?: () => void
+  onTimeout?: () => void,
+  onProgress?: (markProgress: () => void) => void
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timer = timeoutMs > 0 ? setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = () => {
       if (settled) {
         return;
       }
       settled = true;
       signal.removeEventListener("abort", onAbort);
       onTimeout?.();
-      reject(new ModelDecisionTimeoutError(timeoutMs));
-    }, timeoutMs) : null;
+      reject(new ModelDecisionTimeoutError(timeoutMs, onProgress !== undefined));
+    };
+    const armTimer = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = timeoutMs > 0 ? setTimeout(timeout, timeoutMs) : null;
+    };
+    const markProgress = () => {
+      if (!settled && timeoutMs > 0) armTimer();
+    };
+    onProgress?.(markProgress);
+    armTimer();
 
     const finish = (callback: () => void) => {
       if (settled) {
         return;
       }
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
       callback();
     };
@@ -1092,6 +1107,16 @@ function waitForAbortOrTimeout<T>(
     }
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+export function waitForAbortOrIdleTimeout<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  idleTimeoutMs: number,
+  onTimeout: () => void,
+  onProgress: (markProgress: () => void) => void
+): Promise<T> {
+  return waitForAbortOrTimeout(operation, signal, idleTimeoutMs, onTimeout, onProgress);
 }
 
 class ThreadSessionRuntime {
@@ -1975,7 +2000,13 @@ class ThreadSessionRuntime {
           multimodalInputRecognition.modelId
         );
       } else if (!model.supportsMultimodalInput) {
-        transcript = transcript.map((message) => ({ ...message, attachments: undefined }));
+        transcript = transcript.map((message) => ({
+          ...message,
+          content: [message.content, formatNonImageAttachmentPaths(message.attachments ?? [])]
+            .filter(Boolean)
+            .join("\n\n"),
+          attachments: undefined
+        }));
       }
       const policyKey = normalizeWorkspacePolicyKey(workspaceCwd);
       const executionPolicy = this.services.config.projectExecutionPolicies?.[policyKey] ?? DEFAULT_PROJECT_EXECUTION_POLICY;
@@ -2490,7 +2521,8 @@ class ThreadSessionRuntime {
       };
 
       const scheduleStandardCompletionRecovery = async (
-        reason: "completion_validation" | "completion_audit"
+        reason: "completion_validation" | "completion_audit",
+        issues: string[] = []
       ) => {
         const attempt = reason === "completion_audit"
           ? standardCompletionAuditAttempts
@@ -2504,7 +2536,8 @@ class ThreadSessionRuntime {
           payload: {
             attempt,
             maxAttempts,
-            reason
+            reason,
+            ...(issues.length > 0 ? { issues: issues.slice(0, 3) } : {})
           },
           createdAt: new Date().toISOString()
         });
@@ -2729,8 +2762,12 @@ class ThreadSessionRuntime {
             {
               force,
               requiredUserMessage: {
-                content: initialInput,
-                attachments: model.supportsMultimodalInput && attachments.length > 0 ? attachments : undefined
+                content: [initialInput, formatNonImageAttachmentPaths(attachments)]
+                  .filter(Boolean)
+                  .join("\n\n"),
+                attachments: model.supportsMultimodalInput
+                  ? attachments.filter((attachment) => attachment.kind === "image")
+                  : undefined
               }
             }
           );
@@ -2804,14 +2841,9 @@ class ThreadSessionRuntime {
           payload: contextMeasurementPayload,
           createdAt: new Date().toISOString()
         });
-        const timeoutRecoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
-        const timeoutRecoveryMultiplier = Math.min(3, 1 + Math.floor(modelTimeoutAttempts / timeoutRecoveryWindow));
-        // Root turns retain the existing user-controlled unlimited request. A
-        // delegated turn must not hold its parent indefinitely when a provider
-        // accepts a request but never responds.
-        const decisionTimeoutMs = (thread.parentThreadId
+        const decisionTimeoutMs = thread.parentThreadId
           ? SUBAGENT_MODEL_DECISION_TIMEOUT_MS
-          : MODEL_DECISION_TIMEOUT_MS) * timeoutRecoveryMultiplier;
+          : MODEL_DECISION_TIMEOUT_MS;
         const activeGpaTask = this.#gpa.planTasks.find((task) => !task.done);
         const awaitingModelPayload = {
           turnRunId: turn.id,
@@ -2830,6 +2862,7 @@ class ThreadSessionRuntime {
         // Default next loop to recovery unless a tool batch marks after_tools.
         modelAwaitReason = "recovery";
         let decision: ProviderTurnDecision;
+        let markModelProgress: () => void = () => undefined;
         try {
           const requestModel = providerOutputLimitAttempts > 0
             ? {
@@ -2845,7 +2878,7 @@ class ThreadSessionRuntime {
             model,
             useTextToolProtocol
           );
-          decision = await waitForAbortOrTimeout(
+          decision = await waitForAbortOrIdleTimeout(
             adapter.runTurn({
               systemPrompt,
               transcript: (
@@ -2863,12 +2896,14 @@ class ThreadSessionRuntime {
                 if (abortController.signal.aborted) {
                   return;
                 }
+                markModelProgress();
                 await updateDraft("generating", `${streamedVisibleContent}${delta}`);
               },
               onToolCallPreparing: async ({ name, argumentsJson }) => {
                 if (abortController.signal.aborted || canonicalizeToolName(name) === AGENT_PROTOCOL_RECOVERY_TOOL_NAME) {
                   return;
                 }
+                markModelProgress();
                 await this.services.emit({
                   type: "agent.tool_call_preparing",
                   threadId: this.threadId,
@@ -2881,6 +2916,7 @@ class ThreadSessionRuntime {
                 });
               },
               onRequestMeasured: async (measurement) => {
+                markModelProgress();
                 const measuredPayload = { ...contextMeasurementPayload, ...measurement };
                 await this.services.log("agent.context_measured", this.threadId, measuredPayload);
                 await this.services.emit({
@@ -2903,8 +2939,9 @@ class ThreadSessionRuntime {
                   await this.services.log("provider.request_limit_recovered", this.threadId, recoveryPayload);
                 }
               },
-              onProviderTrace: this.services.config.desktop.llmLogViewer
-                ? ({ phase, payload }) => {
+              onProviderTrace: ({ phase, payload }) => {
+                markModelProgress();
+                if (this.services.config.desktop.llmLogViewer) {
                     void this.services.log(`llm.${phase}`, this.threadId, {
                       turnRunId: turn.id,
                       modelId: model.id,
@@ -2912,12 +2949,15 @@ class ThreadSessionRuntime {
                       ...payload
                     }).catch(() => undefined);
                   }
-                : undefined,
+              },
               abortSignal: modelTurnAbortController.signal
             }),
             abortController.signal,
             decisionTimeoutMs,
-            () => modelTurnAbortController.abort()
+            () => modelTurnAbortController.abort(),
+            (markProgress) => {
+              markModelProgress = markProgress;
+            }
           );
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
@@ -3305,9 +3345,9 @@ class ThreadSessionRuntime {
             throw error;
           }
 
-          // A timeout is a transient service failure. Keep the task running
-          // until the user explicitly stops it; each configured retry window
-          // compacts the transcript and increases the next decision timeout.
+          // A request that makes no observable progress for the configured
+          // window is transient. Retry automatically and periodically compact
+          // the transcript until the user explicitly stops the task.
           modelTimeoutAttempts += 1;
           const timeoutRecoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
           const recoveryCycle = Math.ceil(modelTimeoutAttempts / timeoutRecoveryWindow);
@@ -3319,7 +3359,9 @@ class ThreadSessionRuntime {
             retryWindow: timeoutRecoveryWindow,
             recoveryCycle,
             retrying: true,
-            reason: "The model did not return an Agent decision before the response timeout."
+            reason: error.idle
+              ? "The model request made no observable progress before the idle timeout."
+              : "The model did not return an Agent decision before the response timeout."
           });
 
           if (escalated) {
@@ -3342,7 +3384,7 @@ class ThreadSessionRuntime {
             content:
               "The previous model request timed out. Continue from the existing verified context now. " +
               "Return the required structured decision without repeating completed work." +
-              (escalated ? " The context was compacted and the next request has a longer timeout." : "")
+              (escalated ? " The context was compacted before this retry." : "")
           });
           await retryDraft();
           await sleepWithAbort(Math.min(5_000, 1_000 * Math.min(modelTimeoutAttempts, 5)), abortController.signal);
@@ -4149,7 +4191,7 @@ class ThreadSessionRuntime {
                 reasons: standardCompletion.reasons
               });
             } else {
-              await scheduleStandardCompletionRecovery("completion_validation");
+              await scheduleStandardCompletionRecovery("completion_validation", standardCompletion.reasons);
               transcript.push({
                 role: "user",
                 content: buildStandardCompletionRecoveryInstruction(standardCompletion)
@@ -4447,7 +4489,7 @@ class ThreadSessionRuntime {
                 attempt: standardCompletionAuditAttempts
               });
               if (disposition === "retry") {
-                await scheduleStandardCompletionRecovery("completion_audit");
+                await scheduleStandardCompletionRecovery("completion_audit", auditResult.gaps);
                 transcript.push({
                   role: "user",
                   content: buildStandardCompletionAuditRecoveryInstruction(auditResult.gaps)
@@ -8393,6 +8435,7 @@ export function validateStandardCompletion(input: {
   const missingUnitTest = input.requiresUnitTest === true &&
     !input.successfulEvidence.some((item) => item.unitTestPassed === true || item.unitTestUnavailable === true);
   const missingUnitTestDisclosure = input.requiresUnitTest === true &&
+    !input.successfulEvidence.some((item) => item.unitTestPassed === true) &&
     input.successfulEvidence.some((item) => item.unitTestUnavailable === true) &&
     !hasUnitTestUnavailableReport(assistantMessage);
   const missingTestReport = input.requiresUnitTest === true &&
@@ -9051,6 +9094,7 @@ export function validateActCompletion(input: {
     !referencedEvidence.some((item) => item.unitTestPassed === true) &&
     !input.successfulEvidence.some((item) => item.unitTestUnavailable === true);
   const missingUnitTestDisclosure = !input.summaryOnly && input.requiresUnitTest === true &&
+    !referencedEvidence.some((item) => item.unitTestPassed === true) &&
     input.successfulEvidence.some((item) => item.unitTestUnavailable === true) &&
     !hasUnitTestUnavailableReport(input.decision.assistantMessage ?? "");
   const missingTestReport = !input.summaryOnly && input.requiresUnitTest === true &&
@@ -9856,7 +9900,7 @@ export function hasUnitTestReport(content: string): boolean {
 }
 
 export function hasUnitTestUnavailableReport(content: string): boolean {
-  return /(?:未(?:配置|找到|提供|发现)|没有|无)(?:可运行的?)?(?:单元)?测试(?:脚本|命令)?|(?:no|without)\s+(?:runnable\s+|configured\s+|available\s+)?unit[- ]?test(?:\s+(?:script|command))?|unit[- ]?tests?\s+(?:were\s+)?(?:unavailable|not available|not configured|not found)/i.test(content);
+  return /(?:未(?:配置|找到|提供|发现)|没有|无)(?:任何)?(?:可运行的?)?(?:项目级)?(?:单元测试|单测|测试)(?:脚本|命令|入口)?|(?:no|without)\s+(?:runnable\s+|configured\s+|available\s+)?unit[- ]?test(?:\s+(?:script|command))?|unit[- ]?tests?\s+(?:were\s+)?(?:unavailable|not available|not configured|not found)/i.test(content);
 }
 
 export function getAddedPatchFiles(argumentsJson: Record<string, unknown>): string[] {

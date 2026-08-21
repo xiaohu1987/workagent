@@ -77,6 +77,19 @@ export type ApiFormat = "auto" | "openai_responses" | "openai_chat" | "anthropic
 export type OpenAiApiFormat = Extract<ApiFormat, "openai_responses" | "openai_chat">;
 export type CompatibilityProfile = "standard" | "deepseek";
 
+export function isGptFamilyModel(model: Pick<ModelProfile, "id" | "displayName">): boolean {
+  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  return /(?:^|[^a-z0-9])(?:chat)?gpt(?:$|[^a-z0-9]|\d)/.test(identity);
+}
+
+export function defaultOpenAiApiFormatsForModel(
+  model: Pick<ModelProfile, "id" | "displayName">
+): OpenAiApiFormat[] {
+  return isGptFamilyModel(model)
+    ? ["openai_responses", "openai_chat"]
+    : ["openai_chat"];
+}
+
 export interface ThreadRecord {
   id: string;
   title: string;

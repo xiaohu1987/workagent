@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import path from "node:path";
 import type { ModelProfile, ProviderDefinition, ProviderTurnInput } from "@shared-types";
 
 const mocks = vi.hoisted(() => ({
@@ -43,7 +44,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, prepareGrokAvailableTools, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, defaultOpenAiApiFormatsForModel, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, prepareGrokAvailableTools, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -3766,6 +3767,17 @@ describe("native provider tool protocols", () => {
     supportsJsonOutput: true, supportsMultimodalInput: false, supportsReasoningSummary: false
   };
 
+  it("defaults GPT models to Responses and all other models to Chat", () => {
+    expect(defaultOpenAiApiFormatsForModel({ id: "gpt-5.6-terra", displayName: "GPT 5.6 Terra" }))
+      .toEqual(["openai_responses", "openai_chat"]);
+    expect(defaultOpenAiApiFormatsForModel({ id: "openai/gpt-4.1", displayName: "GPT 4.1" }))
+      .toEqual(["openai_responses", "openai_chat"]);
+    expect(defaultOpenAiApiFormatsForModel({ id: "l-qwen3.8-27b", displayName: "Qwen 3.8 27B" }))
+      .toEqual(["openai_chat"]);
+    expect(defaultOpenAiApiFormatsForModel({ id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro" }))
+      .toEqual(["openai_chat"]);
+  });
+
   it("uses Anthropic tool_use blocks instead of text JSON", async () => {
     mocks.anthropicCreate.mockResolvedValue({
       content: [{ type: "tool_use", id: "anthropic-call", name: nativeToolName(tool.name), input: { path: "." } }],
@@ -3952,6 +3964,42 @@ describe("native provider tool protocols", () => {
     expect(responsesRequest).not.toHaveProperty("reasoning_effort");
   });
 
+  it("sends only images as Responses visual blocks and keeps other attachment paths as text", async () => {
+    mocks.responsesCreate.mockResolvedValue({
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
+    });
+    const provider: ProviderDefinition = {
+      id: "openai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret"
+    };
+    const imagePath = path.join(process.cwd(), "package.json");
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{
+        role: "user",
+        content: "Inspect these.",
+        attachments: [
+          { id: "image", kind: "image", name: "image.png", mimeType: "image/png", absolutePath: imagePath, sizeBytes: 1, source: "user" },
+          { id: "file", kind: "file", name: "notes.pdf", mimeType: "application/pdf", absolutePath: "/tmp/notes.pdf", sizeBytes: 1, source: "user" },
+          { id: "video", kind: "video", name: "clip.mp4", mimeType: "video/mp4", absolutePath: "/tmp/clip.mp4", sizeBytes: 1, source: "user" }
+        ]
+      }],
+      availableTools: [],
+      model: { ...model, id: "gpt-5.6-terra", providerId: provider.id, role: "reasoning" },
+      provider,
+      stream: false
+    });
+
+    const input = (mocks.responsesCreate.mock.calls.at(-1)?.[0] as Record<string, any>).input as any[];
+    const userContent = input.find((item) => item.role === "user")?.content as any[];
+    expect(userContent.some((part) => part.type === "input_image")).toBe(true);
+    expect(userContent.some((part) => part.type === "input_image" && part.image_url.includes("base64,"))).toBe(true);
+    const text = userContent.find((part) => part.type === "input_text")?.text as string;
+    expect(text).toContain("[Attached file]\n/tmp/notes.pdf");
+    expect(text).toContain("[Attached video]\n/tmp/clip.mp4");
+    expect(userContent.filter((part) => part.type === "input_image")).toHaveLength(1);
+  });
+
   it("preserves Responses reasoning items for the next tool-result request", async () => {
     const provider: ProviderDefinition = {
       id: "responses", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret"
@@ -4014,7 +4062,8 @@ describe("native provider tool protocols", () => {
       id: "rs_streamed",
       type: "reasoning",
       summary: [{ type: "summary_text", text: "Inspecting the workspace." }],
-      content: [{ type: "reasoning_text", text: "I need to list files first." }]
+      content: [{ type: "reasoning_text", text: "I need to list files first." }],
+      encrypted_content: "opaque-passback"
     };
     const reasoningModel = {
       ...model,
@@ -4040,6 +4089,17 @@ describe("native provider tool protocols", () => {
         output_index: 0,
         content_index: 0,
         text: "I need to list files first."
+      };
+      yield {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          id: reasoningItem.id,
+          type: "reasoning",
+          summary: reasoningItem.summary,
+          content: [],
+          encrypted_content: reasoningItem.encrypted_content
+        }
       };
       yield {
         type: "response.output_item.added",
@@ -4151,7 +4211,18 @@ describe("native provider tool protocols", () => {
       systemPrompt: "Use tools.",
       transcript: [
         { role: "user", content: "Inspect." },
-        { role: "assistant", content: "Inspecting.", toolCalls: [{ id: "old-call", name: tool.name, arguments: { path: "." } }] },
+        {
+          role: "assistant",
+          content: "Inspecting.",
+          toolCalls: [{ id: "old-call", name: tool.name, arguments: { path: "." } }],
+          responseReasoningItem: {
+            id: "rs_incomplete",
+            type: "reasoning",
+            summary: [],
+            content: [],
+            encrypted_content: "opaque-without-reasoning-text"
+          }
+        },
         { role: "tool", content: "Directory listing", toolCallId: "old-call" }
       ],
       availableTools: [tool],
@@ -4170,6 +4241,7 @@ describe("native provider tool protocols", () => {
       })
     ]));
     expect(request.input).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "reasoning", id: "rs_incomplete" }),
       expect.objectContaining({ type: "function_call", call_id: "old-call" }),
       expect.objectContaining({ type: "function_call_output", call_id: "old-call" })
     ]));
@@ -4236,7 +4308,7 @@ describe("native provider tool protocols", () => {
 
     const decision = await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Finish.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
-      model: { ...model, providerId: "xai" }, provider
+      model: { ...model, id: "gpt-5.6-terra", displayName: "GPT 5.6 Terra", providerId: "xai" }, provider
     });
 
     expect(mocks.responsesCreate).toHaveBeenCalledTimes(responseCallCount + 1);
@@ -4244,28 +4316,28 @@ describe("native provider tool protocols", () => {
     expect(decision).toMatchObject({ assistantMessage: "Done", endTurn: true });
   });
 
-  it("keeps automatic format caches independent for 0731 and 0813 models", async () => {
-    mocks.responsesCreate
-      .mockResolvedValueOnce({
-        status: "completed",
-        output: [{ type: "message", content: [{ type: "output_text", text: "Responses ok" }] }]
-      })
-      .mockRejectedValueOnce({ status: 400, code: "RESPONSES_MODEL_NOT_SUPPORTED" });
+  it("routes non-GPT automatic providers directly through Chat despite a legacy Responses cache", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: '{"assistant_message":"Chat ok","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
-    const provider: ProviderDefinition = { id: "deepseek-gateway", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
-    const flash = { ...model, id: "deepseek-v4-flash-0731", providerId: provider.id };
-    const pro = { ...model, id: "deepseek-v4-pro-0813", providerId: provider.id };
-    const adapter = new ProviderFactory().create(provider);
+    const provider: ProviderDefinition = { id: "company", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
+    const qwen = {
+      ...model,
+      id: "l-qwen3.8-27b",
+      providerId: provider.id,
+      preferredApiFormat: "openai_responses" as const,
+      apiFormatCheckedAt: new Date().toISOString()
+    };
+    const responseCallCount = mocks.responsesCreate.mock.calls.length;
 
-    await adapter.runTurn({ systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: flash, provider });
-    await adapter.runTurn({ systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: pro, provider });
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: qwen, provider
+    });
 
-    expect(flash.preferredApiFormat).toBe("openai_responses");
-    expect(pro.preferredApiFormat).toBe("openai_chat");
-    expect(flash.apiFormatCheckedAt).toBeTruthy();
-    expect(pro.apiFormatCheckedAt).toBeTruthy();
+    expect(decision).toMatchObject({ assistantMessage: "Chat ok", endTurn: true });
+    expect(mocks.responsesCreate).toHaveBeenCalledTimes(responseCallCount);
+    expect(qwen.preferredApiFormat).toBe("openai_chat");
+    expect(qwen.apiFormatCheckedAt).toBeTruthy();
   });
 
   it("does not hide a manual Responses failure or switch on non-fallback errors", async () => {
@@ -4281,7 +4353,8 @@ describe("native provider tool protocols", () => {
       mocks.responsesCreate.mockRejectedValueOnce(error);
       const autoProvider: ProviderDefinition = { id: "auto", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
       await expect(new ProviderFactory().create(autoProvider).runTurn({
-        systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: { ...model }, provider: autoProvider
+        systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [],
+        model: { ...model, id: "gpt-5.6-terra", displayName: "GPT 5.6 Terra" }, provider: autoProvider
       })).rejects.toMatchObject({ status: error.status });
     }
     expect(mocks.chatCreate).toHaveBeenCalledTimes(chatCallCount);
@@ -4296,12 +4369,39 @@ describe("native provider tool protocols", () => {
       choices: [{ message: { content: '{"assistant_message":"Done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
     });
     const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
-    const temporaryModel = { ...model };
+    const temporaryModel = {
+      ...model,
+      id: "gpt-5.6-terra",
+      displayName: "GPT 5.6 Terra"
+    };
     await new ProviderFactory().create(provider).runTurn({
-      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: temporaryModel, provider
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [],
+      model: temporaryModel, provider
     });
     expect(temporaryModel.preferredApiFormat).toBeUndefined();
     expect(temporaryModel.apiFormatCheckedAt).toBeUndefined();
+  });
+
+  it("falls back to Chat when a Responses gateway fails before returning an HTTP status", async () => {
+    mocks.responsesCreate.mockRejectedValue(new Error("Upstream request failed"));
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"Done","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiFormat: "auto", apiKey: "secret" };
+    const temporaryModel = {
+      ...model,
+      id: "gpt-5.6-terra",
+      displayName: "GPT 5.6 Terra",
+      preferredApiFormat: "openai_responses" as const,
+      apiFormatCheckedAt: new Date().toISOString()
+    };
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: temporaryModel, provider
+    });
+
+    expect(decision).toMatchObject({ assistantMessage: "Done", endTurn: true });
+    expect(temporaryModel.preferredApiFormat).toBe("openai_responses");
   });
 
   it("reports both endpoints when automatic mode cannot recover", async () => {
@@ -4311,7 +4411,8 @@ describe("native provider tool protocols", () => {
       id: "gateway", type: "openai-compatible", apiFormat: "auto", baseUrl: "https://gateway.example/v1", apiKey: "secret"
     };
     await expect(new ProviderFactory().create(provider).runTurn({
-      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [], model: { ...model }, provider
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [],
+      model: { ...model, id: "gpt-5.6-terra", displayName: "GPT 5.6 Terra" }, provider
     })).rejects.toThrow(/技术详情：Responses .*endpoint=https:\/\/gateway\.example\/v1\/responses；Chat/);
   });
 
@@ -4325,9 +4426,33 @@ describe("native provider tool protocols", () => {
     const chatCallCount = mocks.chatCreate.mock.calls.length;
     await expect(new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [],
-      model: { ...model, supportsStreaming: true }, provider, stream: true, onTextDelta: () => undefined
+      model: { ...model, id: "gpt-5.6-terra", displayName: "GPT 5.6 Terra", supportsStreaming: true },
+      provider, stream: true, onTextDelta: () => undefined
     })).rejects.toMatchObject({ status: 404 });
     expect(mocks.chatCreate).toHaveBeenCalledTimes(chatCallCount);
+  });
+
+  it("preserves a missing Responses terminal event as a protocol error", async () => {
+    async function* incompleteResponsesStream() {
+      yield { type: "response.output_text.delta", delta: "OK" };
+      yield { type: "response.output_text.done", text: "OK" };
+    }
+    mocks.responsesCreate.mockResolvedValue(incompleteResponsesStream());
+    const provider: ProviderDefinition = {
+      id: "manual", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret"
+    };
+
+    const request = new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Test.", transcript: [{ role: "user", content: "Hi" }], availableTools: [],
+      model: { ...model, id: "l-qwen3.8-27b", supportsStreaming: true },
+      provider, stream: true, onTextDelta: () => undefined
+    });
+
+    await expect(request).rejects.toMatchObject({
+      name: "ProviderStreamIncompleteError",
+      reason: "missing_finish_reason",
+      message: "Responses 流式协议不完整：上游已返回流内容，但未发送 response.completed 终态事件。"
+    });
   });
 
   it("classifies only documented Responses fallback errors", () => {
@@ -4337,6 +4462,8 @@ describe("native provider tool protocols", () => {
     expect(classifyResponsesFallback({ code: "server_error", message: "Our servers are currently overloaded." })).toBe("temporary");
     expect(classifyResponsesFallback({ status: 503, code: "SERVICE_BUSY" })).toBe("temporary");
     expect(classifyResponsesFallback({ status: 504 })).toBe("temporary");
+    expect(classifyResponsesFallback(new Error("Upstream request failed"))).toBe("temporary");
+    expect(classifyResponsesFallback(new Error("fetch failed: ECONNRESET"))).toBe("temporary");
     expect(classifyResponsesFallback({ status: 429 })).toBeNull();
     expect(classifyResponsesFallback({ status: 401 })).toBeNull();
   });

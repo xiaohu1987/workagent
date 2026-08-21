@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { finalizeTokenUsage, modelJsonCandidates, tryParseModelJson } from "@shared-types";
+import { defaultOpenAiApiFormatsForModel, finalizeTokenUsage, isGptFamilyModel, modelJsonCandidates, tryParseModelJson } from "@shared-types";
 import type {
   OpenAiApiFormat,
   MessageAttachment,
@@ -53,6 +53,7 @@ export type {
   VideoGenerationPlan,
   defineCompat
 } from "./models";
+export { defaultOpenAiApiFormatsForModel, isGptFamilyModel } from "@shared-types";
 
 export interface ProviderAdapter {
   runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision>;
@@ -81,7 +82,10 @@ export interface GeneratedImageResult {
 export class ProviderStreamIncompleteError extends Error {
   public readonly reason: "missing_finish_reason" | "length" | "content_filter" | "insufficient_system_resource";
 
-  public constructor(reason: "missing_finish_reason" | "length" | "content_filter" | "insufficient_system_resource") {
+  public constructor(
+    reason: "missing_finish_reason" | "length" | "content_filter" | "insufficient_system_resource",
+    protocol?: "responses"
+  ) {
     super(
       reason === "length"
         ? "Provider stream terminated because the response reached its output limit."
@@ -89,7 +93,9 @@ export class ProviderStreamIncompleteError extends Error {
           ? "Provider stream terminated because its response was filtered."
           : reason === "insufficient_system_resource"
             ? "Provider stream was interrupted because the upstream model service reported insufficient system resources."
-            : "Provider stream terminated before emitting a completion signal."
+            : protocol === "responses"
+              ? "Responses 流式协议不完整：上游已返回流内容，但未发送 response.completed 终态事件。"
+              : "Provider stream terminated before emitting a completion signal."
     );
     this.reason = reason;
     this.name = "ProviderStreamIncompleteError";
@@ -1170,6 +1176,12 @@ class OpenAiResponsesProvider implements ProviderAdapter {
       const response = await this.#client.responses.create(limitedRequest as any, { signal: input.abortSignal });
       return compat.normalizeDecision(parseResponsesResponse(response, input), compatContext);
     } catch (error) {
+      if (
+        error instanceof ProviderStreamIncompleteError ||
+        (error instanceof Error && error.name === "ProviderStreamIncompleteError")
+      ) {
+        throw error;
+      }
       throw createApiFormatRequestError("Responses API", this.provider, "/responses", error);
     }
   }
@@ -1200,6 +1212,18 @@ export function classifyResponsesFallback(error: unknown): ResponsesFallbackKind
     status === 504 ||
     code === "SERVER_ERROR" ||
     code === "SERVICE_BUSY"
+  ) {
+    return "temporary";
+  }
+  // Some gateways/proxies terminate the request before an HTTP response is
+  // available. The OpenAI SDK then exposes only a transport-level message
+  // such as "Upstream request failed". In automatic mode this is recoverable
+  // by retrying through the provider's Chat Completions endpoint.
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (
+    !Number.isFinite(status) &&
+    !code &&
+    /(?:upstream request failed|fetch failed|network error|connection (?:reset|refused|closed)|econn(?:reset|refused)|etimedout|socket hang up|stream disconnected)/i.test(message)
   ) {
     return "temporary";
   }
@@ -1292,6 +1316,11 @@ class AutoOpenAiProvider implements ProviderAdapter {
   }
 
   public async runTurn(input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+    if (!isGptFamilyModel(input.model)) {
+      const decision = await this.#chat.runTurn(input);
+      await this.#remember(input.model, "openai_chat");
+      return decision;
+    }
     if (input.model.preferredApiFormat === "openai_chat" &&
       (!input.model.apiFormatCheckedAt || isFreshApiFormatCache(input.model))) {
       const decision = await this.#chat.runTurn(input);
@@ -2335,8 +2364,13 @@ async function buildResponsesInput(input: ProviderTurnInput): Promise<any[]> {
       if (message.content) {
         items.push({ role: "assistant", content: [{ type: "output_text", text: message.content }] });
       }
-      const reasoningItem = isResponsesReasoningItem(message.responseReasoningItem)
+      const candidateReasoningItem = isResponsesReasoningItem(message.responseReasoningItem)
         ? message.responseReasoningItem
+        : undefined;
+      const reasoningItem = candidateReasoningItem && (
+        !requiresDeepSeekReasoningPassback || hasResponsesReasoningText(candidateReasoningItem)
+      )
+        ? candidateReasoningItem
         : undefined;
       if (reasoningItem) {
         // Responses requires this item before the function calls it produced.
@@ -2372,7 +2406,11 @@ async function buildResponsesInput(input: ProviderTurnInput): Promise<any[]> {
     const role = message.role === "assistant" ? "assistant" : "user";
     items.push({
       role,
-      content: [{ type: role === "assistant" ? "output_text" : "input_text", text: contentWithFileAttachments(message.content, message.attachments) }]
+      content: await buildResponsesContent(
+        role,
+        contentWithFileAttachments(message.content, message.attachments),
+        message.attachments
+      )
     });
   }
   return items;
@@ -2433,7 +2471,13 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
       (event?.type === "response.output_item.added" || event?.type === "response.output_item.done") &&
       isResponsesReasoningItem(event.item)
     ) {
-      streamedReasoningItem = structuredClone(event.item);
+      // Some compatible gateways emit a complete reasoning_text through delta
+      // events, then finish with an output_item.done whose content is empty.
+      // Keep whichever representation carries the stronger passback payload.
+      streamedReasoningItem = selectCompleteResponsesReasoningItem(
+        structuredClone(event.item),
+        streamedReasoningItem
+      );
       continue;
     }
     if (
@@ -2478,7 +2522,7 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
       throw new Error(event.response?.error?.message || "The Responses API stream failed.");
     }
   }
-  if (!terminalResponse) throw new ProviderStreamIncompleteError("missing_finish_reason");
+  if (!terminalResponse) throw new ProviderStreamIncompleteError("missing_finish_reason", "responses");
   const streamedCalls = [...calls.entries()]
     .sort(([left], [right]) => left - right)
     .flatMap(([, call]) => {
@@ -2500,6 +2544,15 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
 function isResponsesReasoningItem(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" &&
     (value as { type?: unknown }).type === "reasoning";
+}
+
+function hasResponsesReasoningText(item: Record<string, unknown>): boolean {
+  return Array.isArray(item.content) && item.content.some(
+    (part) => isRecord(part) &&
+      part.type === "reasoning_text" &&
+      typeof part.text === "string" &&
+      part.text.length > 0
+  );
 }
 
 function updateResponsesReasoningText(
@@ -2527,13 +2580,31 @@ function selectCompleteResponsesReasoningItem(
 ): Record<string, unknown> | undefined {
   const score = (item: Record<string, unknown> | undefined): number => {
     if (!item) return -1;
-    const contentScore = Array.isArray(item.content) && item.content.some(
-      (part) => isRecord(part) && part.type === "reasoning_text" && typeof part.text === "string"
-    ) ? 2 : 0;
+    const contentScore = hasResponsesReasoningText(item) ? 2 : 0;
     const encryptedScore = typeof item.encrypted_content === "string" && item.encrypted_content ? 1 : 0;
     return contentScore + encryptedScore;
   };
-  return score(streamedItem) > score(terminalItem) ? streamedItem : terminalItem ?? streamedItem;
+  const preferStreamed = score(streamedItem) > score(terminalItem);
+  const preferred = preferStreamed ? streamedItem : terminalItem ?? streamedItem;
+  const alternate = preferStreamed ? terminalItem : streamedItem;
+  if (!preferred || !alternate) return preferred;
+
+  const preferredId = typeof preferred.id === "string" ? preferred.id : undefined;
+  const alternateId = typeof alternate.id === "string" ? alternate.id : undefined;
+  if (preferredId && alternateId && preferredId !== alternateId) return preferred;
+
+  const merged = { ...alternate, ...preferred };
+  if (!hasResponsesReasoningText(preferred) && hasResponsesReasoningText(alternate)) {
+    merged.content = structuredClone(alternate.content);
+  }
+  if (
+    !(typeof preferred.encrypted_content === "string" && preferred.encrypted_content) &&
+    typeof alternate.encrypted_content === "string" &&
+    alternate.encrypted_content
+  ) {
+    merged.encrypted_content = alternate.encrypted_content;
+  }
+  return merged;
 }
 
 function extractResponsesText(output: unknown): string {
@@ -3015,9 +3086,12 @@ async function attachmentDataUrl(attachment: MessageAttachment): Promise<string>
 }
 
 function contentWithFileAttachments(content: string, attachments?: MessageAttachment[]): string {
-  const files = attachments?.filter((attachment) => attachment.kind === "file") ?? [];
-  if (files.length === 0) return content;
-  return [content, ...files.map((file) => `[Attached file]\n${file.absolutePath}`)].filter(Boolean).join("\n\n");
+  const nonImages = attachments?.filter((attachment) => attachment.kind !== "image") ?? [];
+  if (nonImages.length === 0) return content;
+  return [
+    content,
+    ...nonImages.map((attachment) => `[Attached ${attachment.kind}]\n${attachment.absolutePath}`)
+  ].filter(Boolean).join("\n\n");
 }
 
 function withTokenUsage(decision: ProviderTurnDecision, rawUsage: unknown): ProviderTurnDecision {
@@ -3462,6 +3536,23 @@ function stripPartialToolTagPrefix(text: string): string {
   return controlTagPrefixes.some((prefix) => prefix.startsWith(trailing))
     ? text.slice(0, tagStart)
     : text;
+}
+
+async function buildResponsesContent(
+  role: "user" | "assistant",
+  content: string,
+  attachments?: MessageAttachment[]
+): Promise<any[]> {
+  const images = role === "user"
+    ? attachments?.filter((attachment) => attachment.kind === "image") ?? []
+    : [];
+  return [
+    { type: role === "assistant" ? "output_text" : "input_text", text: content },
+    ...(await Promise.all(images.map(async (attachment) => ({
+      type: "input_image",
+      image_url: await attachmentDataUrl(attachment)
+    }))))
+  ];
 }
 
 function tryParseJsonDecision(text: string): Record<string, any> | null {

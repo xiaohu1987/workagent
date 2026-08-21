@@ -21,7 +21,7 @@ export const PROVIDER_TEMPLATE_OPTIONS: Array<{ value: ProviderTemplate; label: 
 ];
 
 export const OPENAI_API_FORMAT_OPTIONS: Array<{ value: ApiFormat; label: string }> = [
-  { value: "auto", label: "自动检测（推荐）" },
+  { value: "auto", label: "自动（GPT 用 Responses，其余用 Chat）" },
   { value: "openai_responses", label: "Responses API" },
   { value: "openai_chat", label: "Chat Completions" }
 ];
@@ -29,7 +29,7 @@ export const OPENAI_API_FORMAT_OPTIONS: Array<{ value: ApiFormat; label: string 
 export function providerTemplatePatch(template: ProviderTemplate): Partial<ProviderDefinition> {
   switch (template) {
     case "deepseek":
-      return { providerTemplate: template, type: "openai-compatible", baseUrl: "https://api.deepseek.com", apiFormat: "openai_responses", compatibilityProfile: "deepseek", transport: undefined, deepseekProtocol: undefined };
+      return { providerTemplate: template, type: "openai-compatible", baseUrl: "https://api.deepseek.com", apiFormat: "auto", compatibilityProfile: "deepseek", transport: undefined, deepseekProtocol: undefined };
     case "anthropic":
       return { providerTemplate: template, type: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiFormat: "anthropic", compatibilityProfile: "standard", transport: undefined, deepseekProtocol: undefined };
     case "gemini":

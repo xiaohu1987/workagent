@@ -69,7 +69,7 @@ import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, type PageSnapshot } fr
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
 import { hashDirectory, PluginRuntime, type PluginInstallProgress } from "@plugin-runtime";
-import { classifyResponsesFallback, ProviderFactory } from "@provider-adapters";
+import { classifyResponsesFallback, defaultOpenAiApiFormatsForModel, ProviderFactory } from "@provider-adapters";
 import {
   SkillsManager,
   buildUserWorkflowPrompt,
@@ -1727,7 +1727,7 @@ export class DesktopBackend {
     }
 
     const formats: Array<OpenAiApiFormat | "anthropic" | "gemini"> = input.provider.apiFormat === "auto"
-      ? ["openai_responses", "openai_chat"]
+      ? defaultOpenAiApiFormatsForModel(input.model)
       : input.provider.apiFormat === "openai_responses" || input.provider.apiFormat === "openai_chat"
         ? [input.provider.apiFormat]
         : input.provider.apiFormat === "anthropic" || input.provider.apiFormat === "gemini"

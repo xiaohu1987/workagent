@@ -193,7 +193,7 @@ export function defaultConfig(): AppConfig {
       id: "openai",
       type: "openai-compatible",
       providerTemplate: "openai_compatible",
-      apiFormat: "openai_responses",
+      apiFormat: "auto",
       compatibilityProfile: "standard",
       apiKeyEnv: "OPENAI_API_KEY"
     },
@@ -211,7 +211,7 @@ export function defaultConfig(): AppConfig {
       name: "xAI",
       type: "openai-compatible",
       providerTemplate: "openai_compatible",
-      apiFormat: "openai_responses",
+      apiFormat: "auto",
       compatibilityProfile: "standard",
       baseUrl: "https://api.x.ai/v1",
       apiKeyEnv: "XAI_API_KEY"
@@ -344,8 +344,6 @@ function migrateProvider(provider: ProviderDefinition): { provider: ProviderDefi
   const rawProviderTemplate = (provider as { providerTemplate?: unknown }).providerTemplate;
   const baseUrl = provider.baseUrl?.trim().replace(/\/+$/, "").toLowerCase();
   const isDeepSeekOfficial = baseUrl === "https://api.deepseek.com" || baseUrl === "https://api.deepseek.com/v1";
-  const isBuiltInOpenAi = provider.id === "openai";
-  const isBuiltInXai = provider.id === "xai";
   const inferredProviderTemplate: ProviderTemplate = isDeepSeekOfficial ? "deepseek"
       : provider.type === "anthropic" ? "anthropic"
         : provider.type === "gemini" ? "gemini"
@@ -357,8 +355,7 @@ function migrateProvider(provider: ProviderDefinition): { provider: ProviderDefi
   const apiFormat = provider.apiFormat
     ?? (provider.type === "anthropic" ? "anthropic"
       : provider.type === "gemini" ? "gemini"
-        : isDeepSeekOfficial || isBuiltInOpenAi || isBuiltInXai ? "openai_responses"
-          : "auto");
+        : "auto");
   const compatibilityProfile = provider.compatibilityProfile
     ?? (legacyProtocol === "native" || (legacyProtocol === undefined && isDeepSeekOfficial) ? "deepseek" : "standard");
   const { transport: _transport, deepseekProtocol: _deepseekProtocol, ...current } = provider;

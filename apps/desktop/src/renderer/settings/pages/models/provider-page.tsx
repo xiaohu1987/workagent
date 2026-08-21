@@ -1,4 +1,5 @@
 import type { Dispatch, SetStateAction } from "react";
+import { isGptFamilyModel } from "@shared-types";
 import type { AppConfig, ModelProfile, ProviderDefinition, ProviderTemplate } from "@shared-types";
 import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../../../../packages/provider-adapters/src/models/media-protocol";
 import { OPENAI_API_FORMAT_OPTIONS, PROVIDER_TEMPLATE_OPTIONS, getModelProfileKey, getProviderDisplayName, hasProviderTestEndpoint, hasStoredSecret } from "../../../lib/config-utils";
@@ -23,10 +24,15 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
   const canTestModels = settingsProvider ? hasProviderTestEndpoint(settingsProvider) : false;
 
   function formatStatus(model: ModelProfile): string {
+    if (settingsProvider?.apiFormat === "auto" && !isGptFamilyModel(model)) {
+      return model.preferredApiFormat === "openai_chat" || model.verifiedApiFormats?.includes("openai_chat")
+        ? "已验证：Chat Completions"
+        : "自动：Chat Completions";
+    }
     if (!model.preferredApiFormat && model.verifiedApiFormats?.includes("openai_chat")) return "Responses 暂时不可用，已使用 Chat";
     if (!model.apiFormatCheckedAt || !model.preferredApiFormat) return "未检测";
     if (model.preferredApiFormat === "openai_responses") return "已验证：Responses";
-    if (settingsProvider?.apiFormat === "auto") return "Responses 暂时不可用，已使用 Chat";
+    if (settingsProvider?.apiFormat === "auto") return "自动选择：Chat Completions";
     return "已验证：Chat Completions";
   }
 
@@ -109,7 +115,7 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
                           {settingsProvider.apiFormat === "anthropic" ? "Anthropic Messages" : "Google Gemini"}
                         </div>
                       )}
-                      <small className="settings-field-hint">自动检测会按每个模型分别验证，检测结果缓存 24 小时。</small>
+                      <small className="settings-field-hint">自动模式下，GPT 模型优先使用 Responses，其他模型直接使用 Chat Completions；检测结果缓存 24 小时。</small>
                     </label>
 
                     <label className="settings-field">
