@@ -10817,43 +10817,41 @@ export function estimateRuntimeTokens(content: string): number {
   return Math.max(codePointEstimate, byteEstimate);
 }
 
-function selectProtocolSafeRecentMessages(
-  transcript: ProviderTurnInput["transcript"],
-  minimumRecentMessages: number
-): ProviderTurnInput["transcript"] {
-  const startIndex = Math.max(0, transcript.length - minimumRecentMessages);
-  const firstRecent = transcript[startIndex];
-  if (startIndex === 0 || firstRecent?.role !== "tool" || !firstRecent.toolCallId) {
-    return transcript.slice(startIndex);
-  }
-
-  for (let index = startIndex - 1; index >= 0; index -= 1) {
-    const candidate = transcript[index];
-    if (
-      candidate?.role === "assistant" &&
-      candidate.toolCalls?.some((call) => call.id === firstRecent.toolCallId)
-    ) {
-      return transcript.slice(index);
-    }
-  }
-
-  return transcript.slice(startIndex);
-}
-
 function selectProtocolSafeRecentMessagesByBudget(
   transcript: ProviderTurnInput["transcript"],
   tokenBudget: number
 ): ProviderTurnInput["transcript"] {
+  let endIndex = transcript.length;
   let startIndex = transcript.length;
   let retainedTokens = 0;
-  while (startIndex > 0) {
-    const candidate = transcript[startIndex - 1]!;
-    const candidateTokens = estimateRuntimeTokens(candidate.content);
-    if (startIndex < transcript.length && retainedTokens + candidateTokens > tokenBudget) break;
-    startIndex -= 1;
-    retainedTokens += candidateTokens;
+  while (endIndex > 0) {
+    const unitStartIndex = findProtocolSafeUnitStart(transcript, endIndex);
+    const unitTokens = estimateRuntimeTranscriptTokens(transcript.slice(unitStartIndex, endIndex));
+    if (endIndex < transcript.length && retainedTokens + unitTokens > tokenBudget) break;
+    startIndex = unitStartIndex;
+    retainedTokens += unitTokens;
+    endIndex = unitStartIndex;
   }
-  return selectProtocolSafeRecentMessages(transcript, transcript.length - startIndex);
+  return transcript.slice(startIndex);
+}
+
+function findProtocolSafeUnitStart(
+  transcript: ProviderTurnInput["transcript"],
+  endIndex: number
+): number {
+  const lastMessage = transcript[endIndex - 1];
+  if (lastMessage?.role !== "tool" || !lastMessage.toolCallId) {
+    return endIndex - 1;
+  }
+
+  for (let index = endIndex - 2; index >= 0; index -= 1) {
+    const candidate = transcript[index];
+    if (candidate?.role === "assistant" && candidate.toolCalls?.some((call) => call.id === lastMessage.toolCallId)) {
+      return index;
+    }
+  }
+
+  return endIndex - 1;
 }
 
 function normalizeAssistantMessageForDeduplication(content: string): string {

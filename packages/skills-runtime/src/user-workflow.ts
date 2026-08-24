@@ -12,22 +12,34 @@ export interface UserWorkflowDraft {
   workflow: string;
 }
 
-const MAX_SOURCE_CHARS = 70_000;
+const MAX_MESSAGE_SECTION_CHARS = 18_000;
+const MAX_TOOL_SECTION_CHARS = 10_000;
+const MAX_MESSAGE_CHARS = 3_500;
+const MAX_TOOL_ARGUMENT_CHARS = 1_200;
+const MAX_TOOL_RESULT_CHARS = 1_800;
 const MAX_WORKFLOW_CHARS = 20_000;
 
 export function buildUserWorkflowPrompt(source: UserWorkflowSource): string {
+  const messages = retainNewestEntries(
+    source.messages.map((message) => `[${message.role}] ${truncateWorkflowText(message.content, MAX_MESSAGE_CHARS)}`),
+    MAX_MESSAGE_SECTION_CHARS
+  );
+  const toolCalls = retainNewestEntries(
+    source.toolCalls.map((call) => [
+      `[${call.status}] ${call.name}`,
+      `arguments: ${truncateWorkflowText(call.argumentsJson, MAX_TOOL_ARGUMENT_CHARS)}`,
+      call.resultJson ? `result: ${truncateWorkflowText(call.resultJson, MAX_TOOL_RESULT_CHARS)}` : ""
+    ].filter(Boolean).join("\n")),
+    MAX_TOOL_SECTION_CHARS
+  );
   const sections = [
     `聊天标题：${sanitizeWorkflowText(source.title)}`,
     "聊天消息：",
-    ...source.messages.map((message) => `[${message.role}] ${sanitizeWorkflowText(message.content)}`),
+    ...messages,
     "工具调用：",
-    ...source.toolCalls.map((call) => [
-      `[${call.status}] ${call.name}`,
-      `arguments: ${sanitizeWorkflowText(call.argumentsJson)}`,
-      call.resultJson ? `result: ${sanitizeWorkflowText(call.resultJson)}` : ""
-    ].filter(Boolean).join("\n"))
+    ...toolCalls
   ];
-  const transcript = sections.join("\n\n").slice(0, MAX_SOURCE_CHARS);
+  const transcript = sections.join("\n\n");
   return [
     "把下面的历史聊天提炼为一个可复用的用户 Skill。只输出一个 JSON 对象，不要使用 Markdown 代码围栏。",
     "JSON 格式：",
@@ -98,6 +110,29 @@ function sanitizeWorkflowText(value: string, maxChars = 8_000): string {
     .replace(/[A-Za-z]:\\Users\\[^\\\s]+\\/gi, "<user-path>\\")
     .replace(/\bBearer\s+[A-Za-z0-9._~-]{12,}\b/gi, "Bearer [redacted]")
     .slice(0, maxChars);
+}
+
+function truncateWorkflowText(value: string, maxChars: number): string {
+  const sanitized = sanitizeWorkflowText(value, value.length);
+  if (sanitized.length <= maxChars) return sanitized;
+  const headLength = Math.ceil(maxChars * 0.7);
+  const tailLength = maxChars - headLength;
+  return `${sanitized.slice(0, headLength)}\n...[已截断 ${sanitized.length - maxChars} 个字符]...\n${sanitized.slice(-tailLength)}`;
+}
+
+function retainNewestEntries(entries: string[], maxChars: number): string[] {
+  const selected: string[] = [];
+  let used = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    const addition = entry.length + (selected.length > 0 ? 2 : 0);
+    if (used + addition > maxChars) break;
+    selected.push(entry);
+    used += addition;
+  }
+  const omitted = entries.length - selected.length;
+  if (omitted > 0) selected.push(`[已省略较早的 ${omitted} 条记录]`);
+  return selected.reverse();
 }
 
 function compactDescription(value: string): string {

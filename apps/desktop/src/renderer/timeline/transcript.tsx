@@ -14,6 +14,12 @@ type ToolActivityGroupProps = {
   skillNames?: SkillNameMap;
 };
 
+type ToolActivityDisplayStatus = "completed" | "failed" | "in_progress" | "blocked";
+
+function isFileContentWriteTool(toolName: string): boolean {
+  return toolName === "apply_patch" || toolName === "fs.write_file" || toolName === "search_replace";
+}
+
 type MessageKnowledgeSource = {
   knowledgeBaseId: string;
   knowledgeBaseName: string;
@@ -48,10 +54,12 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
   const [detailLoadState, setDetailLoadState] = useState<"idle" | "loading" | "error">("idle");
   const [detailLoadAttempt, setDetailLoadAttempt] = useState(0);
   const wasRunningRef = useRef(isRunning);
-  const status = toolPresentation.status;
-  const conciseLabel = runningCall
-    ? getToolProcessingLabel(runningCall.toolName, runningCall.argumentsJson, skillNames)
-    : getConciseToolActivityLabel(toolCalls, undefined, skillNames);
+  const resolvedToolCalls = toolCalls.map((toolCall) => {
+    if (!loadedResults.has(toolCall.id)) return toolCall;
+    const resultJson = loadedResults.get(toolCall.id) ?? null;
+    return resultJson === toolCall.resultJson ? toolCall : { ...toolCall, resultJson };
+  });
+  const conciseLabel = getConciseToolActivityLabel(resolvedToolCalls, runningCall, skillNames);
 
   useEffect(() => {
     if (isRunning) {
@@ -102,13 +110,13 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
 
   return (
     <details
-      className={`tool-activity-group ${status}`}
+      className="tool-activity-group"
       open={isOpen}
       onToggle={(event) => setIsOpen(event.currentTarget.open)}
     >
       <summary
         className="tool-activity-summary"
-        aria-label={`${conciseLabel}：${isRunning ? "执行中" : status === "failed" ? "部分失败" : status === "blocked" ? "已拦截" : "已执行"}，${toolCalls.length} 项`}
+        aria-label={`${conciseLabel}，${toolCalls.length} 项，展开查看明细`}
       >
         <span className="tool-activity-summary-icon" aria-hidden><ToolActivityIcon toolName={toolCalls[0]?.toolName ?? ""} /></span>
         <span className="tool-activity-summary-copy"><strong>{conciseLabel}</strong></span>
@@ -124,15 +132,9 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
                 <button type="button" onClick={() => setDetailLoadAttempt((current) => current + 1)}>重试</button>
               </div>
             ) : null}
-            {toolCalls.map((toolCall) => {
-              const resultJson = loadedResults.has(toolCall.id)
-                ? loadedResults.get(toolCall.id) ?? null
-                : toolCall.resultJson;
-              const resolvedToolCall = resultJson === toolCall.resultJson
-                ? toolCall
-                : { ...toolCall, resultJson };
-              return <ToolActivityRow key={toolCall.id} toolCall={resolvedToolCall} compact skillNames={skillNames} />;
-            })}
+            {resolvedToolCalls.map((toolCall) => (
+              <ToolActivityRow key={toolCall.id} toolCall={toolCall} compact skillNames={skillNames} />
+            ))}
           </div>
         </div>
       ) : null}
@@ -236,6 +238,18 @@ function getStructuredToolResult(result: Record<string, unknown>): Record<string
     : result;
 }
 
+export function getResolvedToolActivityCommand(
+  toolName: string,
+  input: Record<string, unknown>,
+  result: Record<string, unknown>
+): string {
+  const command = getTimelineCommand(toolName, input);
+  if (command !== toolName || toolName !== "fs.read_file") return command;
+  const structured = getStructuredToolResult(result);
+  const resultPath = structured.path ?? structured.file_path ?? structured.filePath;
+  return typeof resultPath === "string" && resultPath.trim() ? resultPath : command;
+}
+
 export function getToolActivityMetric(
   toolName: string,
   result: Record<string, unknown>
@@ -299,10 +313,21 @@ export function ToolActivityMetricLabel({ metric }: { metric: ToolActivityMetric
   );
 }
 
+export function ToolActivityStatusDot({ status }: { status: ToolActivityDisplayStatus }) {
+  const label = status === "in_progress"
+    ? "执行中"
+    : status === "blocked"
+      ? "已拦截"
+      : status === "failed"
+        ? "失败"
+        : "完成";
+  return <span className={`tool-activity-compact-status ${status}`} role="status" aria-label={label} />;
+}
+
 function ToolActivityRow({ toolCall, compact = false, skillNames }: { toolCall: ToolCallRecord; compact?: boolean; skillNames?: SkillNameMap }) {
   const input = parseTimelineJson(toolCall.argumentsJson);
   const result = parseTimelineJson(toolCall.resultJson);
-  const command = getTimelineCommand(toolCall.toolName, input);
+  const command = getResolvedToolActivityCommand(toolCall.toolName, input, result);
   const displayCommand = toolCall.toolName === "skills.load"
     ? resolveSkillDisplayName(input.skill_id, skillNames) || command
     : command;
@@ -316,6 +341,12 @@ function ToolActivityRow({ toolCall, compact = false, skillNames }: { toolCall: 
   const output = getTimelineOutput(result);
   const localUrl = typeof result.localUrl === "string" ? result.localUrl : null;
   const target = getToolActivityTarget(toolCall.toolName, input, command, skillNames);
+  const displayTarget = (toolCall.toolName === "fs.read_file" || isFileWriteTool(toolCall.toolName)) && target
+    ? getFileLeafName(target)
+    : target;
+  const detailCommand = toolCall.toolName === "fs.read_file" && displayTarget
+    ? `fs.read_file · ${displayTarget}`
+    : displayCommand;
   const databaseExecutionDetails = getDatabaseExecutionDetails(toolCall.toolName, input);
   const activityMetric = getToolActivityMetric(toolCall.toolName, result);
 
@@ -325,13 +356,13 @@ function ToolActivityRow({ toolCall, compact = false, skillNames }: { toolCall: 
         <summary className={`tool-activity-compact-summary${target ? "" : " without-target"}${activityMetric ? " with-metric" : ""}`}>
           <span className="tool-activity-row-icon" aria-hidden><ToolActivityIcon toolName={toolCall.toolName} /></span>
           <strong>{getToolActivityLabel(toolCall.toolName)}</strong>
-          {target ? <code title={target}>{target}</code> : null}
+          {displayTarget ? <code title={target}>{displayTarget}</code> : null}
           <ToolActivityMetricLabel metric={activityMetric} />
-          <span className="tool-activity-compact-status">{isRunning ? "执行中" : blocked ? "已拦截" : failed ? "失败" : "完成"}</span>
           {duration !== null ? <time>{formatDuration(duration)}</time> : null}
+          <ToolActivityStatusDot status={status} />
         </summary>
         <div className="tool-activity-compact-details">
-          <code>$ {displayCommand}</code>
+          <code>$ {detailCommand}</code>
           <DatabaseExecutionDetails details={databaseExecutionDetails} />
           {localUrl ? <LocalServerPreview url={localUrl} /> : null}
           {output ? (
@@ -391,11 +422,18 @@ export function ToolActivityIcon({ toolName }: { toolName: string }) {
 
 export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], runningCall?: ToolCallRecord, skillNames?: SkillNameMap): string {
   if (runningCall) {
+    if (runningCall.toolName === "fs.read_file") return "正在读取文件";
+    if (isFileContentWriteTool(runningCall.toolName)) return "正在修改文件";
     return getToolProcessingLabel(
       runningCall.toolName,
       runningCall.toolName === "skills.load" ? runningCall.argumentsJson : undefined,
       skillNames
     );
+  }
+
+  if (toolCalls.length === 1) {
+    if (toolCalls[0]!.toolName === "fs.read_file") return "读取文件";
+    if (isFileContentWriteTool(toolCalls[0]!.toolName)) return "修改文件";
   }
 
   const has = (toolName: string) => toolCalls.some((toolCall) => toolCall.toolName === toolName);
@@ -471,7 +509,7 @@ function getToolActivityLabel(toolName: string) {
   if (toolName === "fs.rename") return "重命名文件";
   if (toolName === "fs.delete") return "删除文件";
   if (toolName === "fs.copy") return "复制文件";
-  if (isFileWriteTool(toolName)) return "写入文件";
+  if (isFileWriteTool(toolName)) return "修改文件";
   if (toolName === "code.search") return "代码搜索";
   if (toolName === "code.outline") return "查看代码大纲";
   if (toolName === "code.ast_diff") return "对比代码";
@@ -748,7 +786,7 @@ export function UserInputPromptCard({
 }
 
 export function getTimelineCommand(toolName: string, input: Record<string, unknown>): string {
-  const command = input.command ?? input.filePath ?? input.path ?? input.query ?? input.skill_id;
+  const command = input.command ?? input.filePath ?? input.file_path ?? input.target_file ?? input.path ?? input.query ?? input.skill_id;
   return typeof command === "string" && command.trim() ? command : toolName;
 }
 

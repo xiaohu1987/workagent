@@ -1579,7 +1579,9 @@ export class DesktopBackend {
     const thread = this.#db.getThread(threadId);
     if (thread.parentThreadId) throw new Error("只能从主聊天生成用户技能。");
     const messages = this.#db.listMessages(threadId)
-      .filter((message) => message.role === "user" || message.role === "assistant" || message.role === "tool")
+      // Tool messages repeat the full tool result. Tool calls below keep the
+      // actionable name, arguments, status, and a bounded result instead.
+      .filter((message) => message.role === "user" || message.role === "assistant")
       .map((message) => ({ role: message.role, content: message.content }));
     const toolCalls = this.#db.listToolCalls(threadId).map(userWorkflowToolCall);
     if (messages.length === 0 && toolCalls.length === 0) throw new Error("所选聊天没有可提炼的内容。");
@@ -1590,6 +1592,7 @@ export class DesktopBackend {
     if (!provider || !model || model.role !== "reasoning") throw new Error("所选聊天没有可用的推理模型。");
     const prompt = buildUserWorkflowPrompt({ title: thread.title, messages, toolCalls });
     const timeout = new AbortController();
+    let failureStage: "provider_request" | "parse_response" | "save_skill" = "provider_request";
 
     try {
       const decision = await this.#providerFactory.create(provider).runTurn({
@@ -1601,10 +1604,12 @@ export class DesktopBackend {
         stream: false,
         abortSignal: timeout.signal
       });
+      failureStage = "parse_response";
       const generatedDraft = parseUserWorkflowDraft(decision.assistantMessage ?? "", thread.title);
       const draft = requestedName?.trim()
         ? { ...generatedDraft, name: normalizeUserSkillName(requestedName) }
         : generatedDraft;
+      failureStage = "save_skill";
       const skillDirectory = await reserveUserSkillDirectory(this.#layout.skillsDraftsDir, draft.name);
       const skillPath = path.join(skillDirectory, "SKILL.md");
       try {
@@ -1619,6 +1624,23 @@ export class DesktopBackend {
         throw error;
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.#logs.append("user_skill.generation_failed", {
+        modelId: model.id,
+        providerId: provider.id,
+        messageCount: messages.length,
+        toolCallCount: toolCalls.length,
+        promptChars: prompt.length,
+        responseFormat: "json_object",
+        stage: failureStage,
+        error: message.slice(0, 2_000)
+      }, threadId);
+      if (failureStage === "provider_request") {
+        throw new Error(`提炼技能的模型请求失败：${message}`);
+      }
+      if (failureStage === "parse_response") {
+        throw new Error(`提炼技能时模型没有返回可用的 JSON 内容：${message}`);
+      }
       throw error;
     }
   }

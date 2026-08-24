@@ -2520,6 +2520,38 @@ describe("context compaction", () => {
     ]));
   });
 
+  it("budgets complete native tool-call units using their serialized arguments", () => {
+    const transcript = Array.from({ length: 3 }, (_, index) => [
+      {
+        role: "assistant" as const,
+        content: "",
+        toolCalls: [{
+          id: `native-call-${index}`,
+          name: "fs.write_file",
+          arguments: { content: "x".repeat(10_000) }
+        }]
+      },
+      {
+        role: "tool" as const,
+        toolCallId: `native-call-${index}`,
+        content: "fs.write_file\nOK"
+      }
+    ]).flat();
+
+    const result = compactTranscriptForContext(transcript, 20_000, "system instructions", { force: true });
+
+    expect(result.compacted).toBe(true);
+    expect(result.beforeTokens).toBeGreaterThan(15_000);
+    expect(result.afterTokens).toBeLessThan(10_000);
+    expect(result.transcript).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolCalls: [expect.objectContaining({ id: "native-call-2" })] }),
+      expect.objectContaining({ role: "tool", toolCallId: "native-call-2" })
+    ]));
+    expect(result.transcript).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolCalls: [expect.objectContaining({ id: "native-call-0" })] })
+    ]));
+  });
+
   it("keeps a complete large native tool batch during compaction", () => {
     const calls = Array.from({ length: 10 }, (_, index) => ({
       id: `native-call-${index}`,

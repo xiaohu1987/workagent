@@ -21,7 +21,7 @@ import {
   formatComposerAttachments,
   retainPersistentComposerContexts
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
-import { getFileChangeLineCounts, getVisibleFileChanges } from "../apps/desktop/src/renderer/timeline/conversation-rail";
+import { getFileChangeLineCounts, getVisibleFileChanges, resolveFileSnapshotFromToolDetails } from "../apps/desktop/src/renderer/timeline/conversation-rail";
 import {
   extractMessageMediaReferences,
   isGeneratedUserSkill,
@@ -628,6 +628,66 @@ describe("parseMarkdownBlocks", () => {
 
     expect(changes.map((file) => file.path)).toEqual(["src/App.tsx"]);
     expect(changes[0]?.snapshot).toMatchObject({ before: "old", after: "latest" });
+  });
+
+  it("recovers a compacted file snapshot from full tool-call details", () => {
+    const file = {
+      path: "src/Generated.cs",
+      action: "created" as const,
+      additions: 120,
+      deletions: 0,
+      sourceThreadId: "thread-1",
+      sourceToolCallIds: ["write-1"]
+    };
+    const snapshot = resolveFileSnapshotFromToolDetails(file, [{
+      toolCallId: "write-1",
+      available: true,
+      resultSize: 12_000,
+      resultJson: JSON.stringify({
+        ok: true,
+        json: {
+          snapshots: [{
+            path: "src/Generated.cs",
+            before: "",
+            after: "namespace Generated;",
+            beforeTruncated: false,
+            afterTruncated: false
+          }]
+        }
+      })
+    }]);
+
+    expect(snapshot).toEqual({
+      path: "src/Generated.cs",
+      before: "",
+      after: "namespace Generated;",
+      beforeTruncated: false,
+      afterTruncated: false
+    });
+  });
+
+  it("keeps source tool ids when compact results omit snapshots", () => {
+    const changes = collectFileChangesByTurn([{
+      id: "write-large-file",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "apply_patch",
+      status: "completed",
+      argumentsJson: JSON.stringify({
+        patch: "*** Begin Patch\n*** Add File: src/Generated.cs\n+namespace Generated;\n*** End Patch"
+      }),
+      resultJson: null,
+      riskLevel: "medium",
+      approvalMode: "prompt",
+      startedAt: "2026-08-17T10:00:00.000Z",
+      completedAt: "2026-08-17T10:00:01.000Z"
+    } as any], "D:\\project").get("turn-1") ?? [];
+
+    expect(changes[0]).toMatchObject({
+      path: "src/Generated.cs",
+      sourceThreadId: "thread-1",
+      sourceToolCallIds: ["write-large-file"]
+    });
   });
 
   it("shows runtime activity only after the latest visible message", () => {

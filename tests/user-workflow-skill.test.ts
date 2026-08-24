@@ -23,6 +23,28 @@ describe("user workflow skills", () => {
     expect(prompt).not.toContain("abc123secret");
   });
 
+  it("bounds large transcripts while retaining the newest messages and useful tool context", () => {
+    const prompt = buildUserWorkflowPrompt({
+      title: "大体量聊天",
+      messages: [
+        { role: "user", content: "早期上下文 ".repeat(3_000) },
+        { role: "assistant", content: "最终结论：调用 database.query 并验证行数。" }
+      ],
+      toolCalls: [{
+        name: "database.query",
+        argumentsJson: '{"sql":"SELECT * FROM report"}',
+        resultJson: `开始 ${"中间内容 ".repeat(5_000)}完成`,
+        status: "completed"
+      }]
+    });
+
+    expect(prompt.length).toBeLessThan(32_000);
+    expect(prompt).toContain("最终结论：调用 database.query 并验证行数。");
+    expect(prompt).toContain("database.query");
+    expect(prompt).toContain("完成");
+    expect(prompt).toContain("[已截断");
+  });
+
   it("normalizes model JSON into a valid concise SKILL.md", () => {
     const draft = parseUserWorkflowDraft(JSON.stringify({
       name: "Monthly Report!!!",

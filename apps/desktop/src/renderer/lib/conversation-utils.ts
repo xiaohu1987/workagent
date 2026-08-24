@@ -121,6 +121,8 @@ export type FileChangeAction = "created" | "modified" | "deleted";
 export type FileChangeSummaryItem = {
   path: string;
   absolutePath?: string;
+  sourceThreadId?: string;
+  sourceToolCallIds?: string[];
   action: FileChangeAction;
   additions: number;
   deletions: number;
@@ -811,8 +813,13 @@ export function collectFileChangesByTurn(
 
     const turnChanges = changesByTurn.get(toolCall.turnRunId) ?? new Map<string, FileChangeSummaryItem>();
     for (const file of files) {
+      const attributedFile = {
+        ...file,
+        sourceThreadId: toolCall.threadId,
+        sourceToolCallIds: [toolCall.id]
+      };
       const existing = turnChanges.get(file.path);
-      turnChanges.set(file.path, mergeFileChange(existing, file));
+      turnChanges.set(file.path, mergeFileChange(existing, attributedFile));
     }
     changesByTurn.set(toolCall.turnRunId, turnChanges);
   }
@@ -1004,6 +1011,11 @@ export function mergeFileChange(existing: FileChangeSummaryItem | undefined, nex
   return {
     path: next.path,
     absolutePath: next.absolutePath ?? existing.absolutePath,
+    sourceThreadId: next.sourceThreadId ?? existing.sourceThreadId,
+    sourceToolCallIds: [...new Set([
+      ...(existing.sourceToolCallIds ?? []),
+      ...(next.sourceToolCallIds ?? [])
+    ])],
     action: existing.action === "created" && next.action === "modified" ? "created" : next.action,
     additions: existing.additions + next.additions,
     deletions: existing.deletions + next.deletions,

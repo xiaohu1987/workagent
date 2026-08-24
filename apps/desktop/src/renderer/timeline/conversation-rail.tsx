@@ -1,16 +1,101 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
-import type { MessageRecord, ToolCallRecord } from "@shared-types";
-import { collectFileChangesByTurn, getGeneratedFileDescription } from "../lib/conversation-utils";
+import type { MessageRecord, ToolCallDetail, ToolCallRecord } from "@shared-types";
+import { collectFileChangesByTurn, findResultFileSnapshot, getGeneratedFileDescription, parseTimelineJson } from "../lib/conversation-utils";
 import type { ConversationTurnItem, FileChangeSummaryItem } from "../lib/conversation-utils";
 import { buildFileSnapshotDiff, buildFileSnapshotDiffPreview, getFileSnapshotDiffMarker } from "../lib/project-files";
+import type { FileSnapshot } from "../lib/project-files";
 import { IconChevronDown, IconFileChanges } from "../icons";
 import { getFileLeafName } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
 import { renderCodePreviewLine } from "../workspace/file-preview";
 
 const DIFF_PREVIEW_HOVER_DELAY_MS = 200;
+
+function getFileSnapshotLoadKey(file: FileChangeSummaryItem): string {
+  return `${file.sourceThreadId ?? ""}:${file.path}:${(file.sourceToolCallIds ?? []).join(",")}`;
+}
+
+export function resolveFileSnapshotFromToolDetails(
+  file: FileChangeSummaryItem,
+  details: ToolCallDetail[]
+): FileSnapshot | undefined {
+  const detailsById = new Map(details.map((detail) => [detail.toolCallId, detail]));
+  const snapshots = (file.sourceToolCallIds ?? []).flatMap((toolCallId) => {
+    const detail = detailsById.get(toolCallId);
+    const result = parseTimelineJson(detail?.resultJson ?? null);
+    const resultJson = result.json && typeof result.json === "object" && !Array.isArray(result.json)
+      ? result.json as Record<string, unknown>
+      : undefined;
+    const snapshot = findResultFileSnapshot(resultJson, file.path);
+    return snapshot ? [snapshot] : [];
+  });
+  const first = snapshots[0];
+  const last = snapshots.at(-1);
+  if (!first || !last) return undefined;
+  return {
+    path: last.path,
+    before: first.before,
+    after: last.after,
+    beforeTruncated: first.beforeTruncated,
+    afterTruncated: last.afterTruncated
+  };
+}
+
+function useFilesWithLoadedSnapshots(files: FileChangeSummaryItem[], enabled: boolean): FileChangeSummaryItem[] {
+  const [loadedSnapshots, setLoadedSnapshots] = useState<Map<string, FileSnapshot | null>>(() => new Map());
+  const loadSignature = files.map(getFileSnapshotLoadKey).join("|");
+
+  useEffect(() => {
+    if (!enabled) return;
+    const missingFiles = files.filter((file) =>
+      !file.snapshot &&
+      file.sourceThreadId &&
+      (file.sourceToolCallIds?.length ?? 0) > 0 &&
+      !loadedSnapshots.has(getFileSnapshotLoadKey(file))
+    );
+    if (missingFiles.length === 0) return;
+
+    let cancelled = false;
+    const filesByThread = new Map<string, FileChangeSummaryItem[]>();
+    for (const file of missingFiles) {
+      const threadFiles = filesByThread.get(file.sourceThreadId!) ?? [];
+      threadFiles.push(file);
+      filesByThread.set(file.sourceThreadId!, threadFiles);
+    }
+    void Promise.all([...filesByThread.entries()].map(async ([threadId, threadFiles]) => {
+      const toolCallIds = [...new Set(threadFiles.flatMap((file) => file.sourceToolCallIds ?? []))];
+      const details = await window.codexh.getToolCallDetails({ threadId, toolCallIds });
+      return threadFiles.map((file) => [
+        getFileSnapshotLoadKey(file),
+        resolveFileSnapshotFromToolDetails(file, details) ?? null
+      ] as const);
+    })).then((groups) => {
+      if (cancelled) return;
+      setLoadedSnapshots((current) => {
+        const next = new Map(current);
+        for (const [key, snapshot] of groups.flat()) next.set(key, snapshot);
+        return next;
+      });
+    }).catch(() => {
+      if (cancelled) return;
+      setLoadedSnapshots((current) => {
+        const next = new Map(current);
+        for (const file of missingFiles) next.set(getFileSnapshotLoadKey(file), null);
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, files, loadSignature, loadedSnapshots]);
+
+  return useMemo(() => files.map((file) => {
+    const loadedSnapshot = loadedSnapshots.get(getFileSnapshotLoadKey(file));
+    return !file.snapshot && loadedSnapshot ? { ...file, snapshot: loadedSnapshot } : file;
+  }), [files, loadSignature, loadedSnapshots]);
+}
 
 export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] }) {
   const [open, setOpen] = useState(false);
@@ -21,9 +106,10 @@ export function ComposerTaskChanges({ files }: { files: FileChangeSummaryItem[] 
   const closeTimerRef = useRef<number | null>(null);
   const diffPreviewPresence = useMotionPresence(diffPreview, 140);
   const visibleDiffPreview = diffPreview ?? diffPreviewPresence.value;
+  const resolvedFiles = useFilesWithLoadedSnapshots(files, open);
   const fileChanges = useMemo(
-    () => getVisibleFileChanges(files),
-    [files]
+    () => getVisibleFileChanges(resolvedFiles),
+    [resolvedFiles]
   );
   const additions = fileChanges.reduce((total, file) => total + file.additions, 0);
   const deletions = fileChanges.reduce((total, file) => total + file.deletions, 0);
@@ -199,6 +285,7 @@ export function FileChangeSummary({
   const visibleDiffPreview = diffPreview ?? diffPreviewPresence.value;
   const hoverTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
+  const resolvedFiles = useFilesWithLoadedSnapshots(files, expanded);
   useEffect(() => () => {
     if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
@@ -207,7 +294,7 @@ export function FileChangeSummary({
     return null;
   }
 
-  const visibleFiles = expanded ? files : [];
+  const visibleFiles = expanded ? resolvedFiles : [];
 
   const clearPreviewCloseTimer = () => {
     if (closeTimerRef.current === null) return;
