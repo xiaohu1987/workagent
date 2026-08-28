@@ -64,6 +64,8 @@ export interface ApplyPatchResult {
 export interface ApplyPatchOptions {
   /** File versions recorded by the current Agent turn after a successful read. */
   expectedVersions?: ReadonlyMap<string, string> | Record<string, string>;
+  /** Additional authorized roots. Relative patch paths resolve from rootDir. */
+  workspaceRoots?: string[];
   /** Test seam for deterministic commit and rollback failure coverage. */
   fileSystem?: PatchFileSystem;
 }
@@ -115,7 +117,7 @@ export async function applyCodexPatch(
 ): Promise<ApplyPatchResult> {
   const operations = parsePatch(patchText);
   const fileSystem = options.fileSystem ?? NODE_FILE_SYSTEM;
-  const planned = await preflightPatch(operations, rootDir, fileSystem, options.expectedVersions);
+  const planned = await preflightPatch(operations, rootDir, fileSystem, options.expectedVersions, options.workspaceRoots ?? [rootDir]);
   await commitPatch(planned, fileSystem);
 
   return {
@@ -137,16 +139,20 @@ async function preflightPatch(
   operations: PatchOperation[],
   rootDir: string,
   fileSystem: PatchFileSystem,
-  expectedVersions?: ApplyPatchOptions["expectedVersions"]
+  expectedVersions?: ApplyPatchOptions["expectedVersions"],
+  workspaceRoots: string[] = [rootDir]
 ): Promise<PlannedFile[]> {
   const planned: PlannedFile[] = [];
   const occupiedPaths = new Set<string>();
 
   for (const [operationIndex, operation] of operations.entries()) {
-    const sourcePath = resolveWorkspacePath(rootDir, operation.file);
+    const sourcePath = resolveWorkspacePath(rootDir, operation.file, workspaceRoots);
     const targetPath = operation.type === "update"
-      ? resolveWorkspacePath(rootDir, operation.moveTo ?? operation.file)
+      ? resolveWorkspacePath(rootDir, operation.moveTo ?? operation.file, workspaceRoots)
       : sourcePath;
+    if (operation.type === "update" && operation.moveTo && workspaceRootForPath(sourcePath, workspaceRoots) !== workspaceRootForPath(targetPath, workspaceRoots)) {
+      throw new PatchApplyError("Cross-workspace moves are not supported.", "preflight_failed", operationIndex, [sourcePath, targetPath]);
+    }
     const claimed = new Set([sourcePath, targetPath]);
     if ([...claimed].some((candidate) => occupiedPaths.has(candidate))) {
       throw new PatchApplyError(
@@ -339,16 +345,25 @@ function createSnapshot(path: string, before: string, after: string): ApplyPatch
   };
 }
 
-function resolveWorkspacePath(rootDir: string, targetPath: string): string {
+function resolveWorkspacePath(rootDir: string, targetPath: string, workspaceRoots: string[]): string {
   const root = path.resolve(rootDir);
   const resolved = path.isAbsolute(targetPath)
     ? path.resolve(targetPath)
     : path.resolve(root, targetPath);
-  const relative = path.relative(root, resolved);
-  if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+  if (workspaceRootForPath(resolved, workspaceRoots)) {
     return resolved;
   }
   throw new Error("Patch path is outside the project folder.");
+}
+
+function workspaceRootForPath(targetPath: string, workspaceRoots: string[]): string | null {
+  const resolved = path.resolve(targetPath);
+  for (const candidate of workspaceRoots) {
+    const root = path.resolve(candidate);
+    const relative = path.relative(root, resolved);
+    if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) return root;
+  }
+  return null;
 }
 
 function parsePatch(patchText: string): PatchOperation[] {

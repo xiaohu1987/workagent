@@ -46,6 +46,7 @@ export function validateProjectMcpPriority(input: {
 export interface RuntimeWorkspacePriorityContext {
   mode: "project" | "chat";
   cwd: string | null;
+  workspaceRoots?: string[];
   localWorkspaceFirst: boolean;
 }
 
@@ -55,8 +56,12 @@ export function buildProjectWorkspacePriorityPrompt(
   if (context.mode !== "project" || !context.cwd) return null;
   const lines = [
     "## Current Project Workspace",
-    `The current project path is ${JSON.stringify(context.cwd)}.`,
-    "For questions about this project's code, repository, files, modules, or behavior, this local workspace is the authoritative source."
+    `The primary project path is ${JSON.stringify(context.cwd)}.`,
+    "Relative paths resolve from the primary path. Every collaboration root listed below is writable; use absolute paths for secondary roots.",
+    ...(context.workspaceRoots?.length
+      ? context.workspaceRoots.map((root, index) => `${index + 1}. ${root}${index === 0 ? " (primary)" : ""}`)
+      : [`1. ${context.cwd} (primary)`]),
+    "For questions about these projects' code, repositories, files, modules, or behavior, these local workspaces are the authoritative source."
   ];
   if (context.localWorkspaceFirst) {
     lines.push(
@@ -74,6 +79,7 @@ export function buildProjectWorkspacePriorityPrompt(
 
 export function createProjectRuntimePolicy(input: {
   cwd: string | null;
+  workspaceRoots?: string[];
   explicitlySelectedMcp: boolean;
   explicitlyRequestedMcp: boolean;
 }): ProjectRuntimePolicy {
@@ -82,6 +88,7 @@ export function createProjectRuntimePolicy(input: {
   const systemPrompt = buildProjectWorkspacePriorityPrompt({
     mode: "project",
     cwd: workspaceRoot,
+    workspaceRoots: input.workspaceRoots,
     localWorkspaceFirst: !input.explicitlySelectedMcp && !input.explicitlyRequestedMcp
   })! + "\n\nProject completion policy: when this task changes source code, run the relevant unit tests and wait for a successful result before claiming completion. Base completion on the executed test evidence, not on a required phrase or report format in the final summary. Briefly mention verification when useful, but do not repeat a successful test only because the summary omitted it. Builds, typechecks, file read-back, and claimed tests do not replace successful unit-test evidence.";
   return {

@@ -49,6 +49,8 @@ export const MAX_CODE_SEARCH_RESULT_LINES = 500;
 
 export interface ToolRuntimeContext {
   cwd: string;
+  /** Writable roots authorized for this task. Relative paths still resolve from cwd. */
+  workspaceRoots?: string[];
   appHome: string;
   threadId: string;
   turnRunId: string;
@@ -64,7 +66,7 @@ export interface ToolRuntimeContext {
   listFiles: (dir: string) => Promise<string[]>;
   readFile: (filePath: string) => Promise<string>;
   writeFile: (filePath: string, content: string) => Promise<void>;
-  runTerminalCommand?: (command: string) => Promise<TerminalCommandResult>;
+  runTerminalCommand?: (command: string, cwd?: string) => Promise<TerminalCommandResult>;
   cancelActiveTerminalCommands?: (reason?: string) => Promise<void> | void;
   requestApproval: (input: {
     kind?: "permission" | "explicit_authorization";
@@ -325,6 +327,7 @@ export class ToolRuntime {
     call: RuntimeToolCall,
     ctx: ToolRuntimeContext
   ): Promise<ToolResult> {
+    ctx.workspaceRoots ??= [ctx.cwd];
     const canonicalName = canonicalizeToolName(call.name);
     if (ctx.readOnlyAgent && CHILD_READ_ONLY_FORBIDDEN_TOOLS.has(canonicalName)) {
       return {
@@ -549,7 +552,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       parallelSafe: true
     },
     async (args, ctx) => {
-      const filePath = resolveFromCwd(ctx.cwd, String(args.path));
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path), ctx.workspaceRoots);
       const content = await ctx.readFile(filePath);
       const lines = content.split(/\r?\n/);
       const totalLines = lines.length;
@@ -586,7 +589,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     ),
     async (args, ctx) => {
       const relativePath = String(args.path ?? "");
-      const filePath = resolveFromCwd(ctx.cwd, relativePath);
+      const filePath = resolveFromCwd(ctx.cwd, relativePath, ctx.workspaceRoots);
       const language = languageFromPath(filePath);
       if (!language) {
         return {
@@ -629,7 +632,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       "medium"
     ),
     async (args, ctx) => {
-      const filePath = resolveFromCwd(ctx.cwd, String(args.path));
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path), ctx.workspaceRoots);
       const content = String(args.content ?? "");
       const approved = await ctx.requestApproval({
         title: "写入文件",
@@ -677,7 +680,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     },
     async (args, ctx) => {
       const requestedPath = String(args.file_path ?? "");
-      const filePath = resolveFromCwd(ctx.cwd, requestedPath);
+      const filePath = resolveFromCwd(ctx.cwd, requestedPath, ctx.workspaceRoots);
       const oldString = String(args.old_string ?? "");
       const newString = String(args.new_string ?? "");
       const replaceAll = args.replace_all === true;
@@ -757,7 +760,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium"
     },
     async (args, ctx) => {
-      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
       const approved = await ctx.requestApproval({
         title: "创建目录",
         description: target,
@@ -782,8 +785,11 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium"
     },
     async (args, ctx) => {
-      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""));
-      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""));
+      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""), ctx.workspaceRoots);
+      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""), ctx.workspaceRoots);
+      if (workspaceRootForPath(from, ctx.workspaceRoots ?? [ctx.cwd]) !== workspaceRootForPath(to, ctx.workspaceRoots ?? [ctx.cwd])) {
+        return { ok: false, content: "跨协作目录移动文件暂不支持，请改用复制操作。" };
+      }
       const approved = await ctx.requestApproval({
         title: "重命名/移动",
         description: `${from} → ${to}`,
@@ -809,7 +815,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "high"
     },
     async (args, ctx) => {
-      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
       const recursive = Boolean(args.recursive);
       const approved = await ctx.requestApproval({
         title: "删除文件",
@@ -835,8 +841,8 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium"
     },
     async (args, ctx) => {
-      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""));
-      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""));
+      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""), ctx.workspaceRoots);
+      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""), ctx.workspaceRoots);
       if (workspacePathsMatch(from, to)) {
         return {
           ok: true,
@@ -860,7 +866,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("fs.read_directory", "List direct children under a directory.", ["path"], "low"),
     async (args, ctx) => {
-      const target = resolveFromCwd(ctx.cwd, String(args.path ?? "."));
+      const target = resolveFromCwd(ctx.cwd, String(args.path ?? "."), ctx.workspaceRoots);
       const entries = await ctx.listFiles(target);
       const content = entries.length > 0
         ? `Directory listing succeeded:\n${entries.join("\n")}`
@@ -885,7 +891,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       parallelSafe: true
     },
     async (args, ctx) => {
-      const searchRoot = resolveFromCwd(ctx.cwd, typeof args.path === "string" ? args.path : ".");
+      const searchRoot = resolveFromCwd(ctx.cwd, typeof args.path === "string" ? args.path : ".", ctx.workspaceRoots);
       const command = buildCodeSearchCommand(String(args.pattern ?? ""), searchRoot);
       const terminal = await runShell(command, ctx);
       const outputLines = terminal.output.replace(/\r\n/g, "\n").split("\n");
@@ -905,13 +911,13 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     ),
     async (args, ctx) => {
       const relativePath = String(args.path ?? "");
-      const filePath = resolveFromCwd(ctx.cwd, relativePath);
+      const filePath = resolveFromCwd(ctx.cwd, relativePath, ctx.workspaceRoots);
       const after = await fs.readFile(filePath, "utf8");
       let before = "";
       let againstLabel = "empty";
 
       if (typeof args.against === "string" && args.against.trim()) {
-        const againstPath = resolveFromCwd(ctx.cwd, String(args.against));
+        const againstPath = resolveFromCwd(ctx.cwd, String(args.against), ctx.workspaceRoots);
         before = await fs.readFile(againstPath, "utf8");
         againstLabel = String(args.against);
       } else {
@@ -943,14 +949,18 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec(
-      "shell.exec",
-      process.platform === "win32"
-        ? "Run a command inside the current workspace. Windows uses PowerShell; recognized CMD syntax is adapted automatically. Use the provided managed file-edit tool for all file edits, never shell redirection or shell write commands."
-        : "Run a shell command inside the current workspace. Use the provided managed file-edit tool for all file edits, never shell redirection or shell write commands.",
-      ["command"],
-      "high"
-    ),
+    {
+      name: "shell.exec",
+      description: process.platform === "win32"
+        ? "Run a command inside an authorized workspace. Windows uses PowerShell. Optional cwd may select another collaboration folder."
+        : "Run a command inside an authorized workspace. Optional cwd may select another collaboration folder.",
+      inputSchema: {
+        type: "object",
+        properties: { command: { type: "string" }, cwd: { type: "string" } },
+        required: ["command"]
+      },
+      riskLevel: "high"
+    },
     async (args, ctx) => {
       let command = String(args.command ?? "");
       const windowsPrepared = prepareShellCommandForWindows(command);
@@ -980,7 +990,8 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!approved) {
         return { ok: false, content: "命令执行被拒绝。" };
       }
-      const terminal = await runShell(command, ctx);
+      const commandCwd = resolveFromCwd(ctx.cwd, typeof args.cwd === "string" ? args.cwd : ".", ctx.workspaceRoots);
+      const terminal = await runShell(command, ctx, commandCwd);
       return {
         ok: true,
         content: terminal.output,
@@ -1017,7 +1028,10 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       }
       let result: Awaited<ReturnType<typeof applyCodexPatch>>;
       try {
-        result = await applyCodexPatch(patchText, ctx.cwd, { expectedVersions: ctx.expectedFileVersions });
+        result = await applyCodexPatch(patchText, ctx.cwd, {
+          expectedVersions: ctx.expectedFileVersions,
+          workspaceRoots: ctx.workspaceRoots
+        });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         return {
@@ -1184,7 +1198,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium",
       description: String(args.path ?? ""),
       payload: { path: args.path },
-      command: `git add -- "${escapeDoubleQuotes(resolveFromCwd(ctx.cwd, String(args.path ?? "")))}"`,
+      command: `git add -- "${escapeDoubleQuotes(resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots))}"`,
       successLabel: `已暂存 ${String(args.path ?? "")}`
     })
   );
@@ -1213,7 +1227,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium"
     },
     async (args, ctx) => {
-      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
       return runGitMutation(ctx, {
         title: "取消暂存",
         riskLevel: "medium",
@@ -1240,7 +1254,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "high"
     },
     async (args, ctx) => {
-      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
       const untracked = Boolean(args.untracked);
       return runGitMutation(ctx, {
         title: untracked ? "删除未跟踪文件" : "撤销文件修改",
@@ -1425,7 +1439,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!probe.isGitRepository) {
         return { ...gitNotRepositoryResult(), ok: false };
       }
-      const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
       const branch = String(args.branch ?? "");
       const base = typeof args.base === "string" ? args.base : "HEAD";
       const command = `git worktree add "${escapeDoubleQuotes(targetPath)}" -b "${escapeDoubleQuotes(branch)}" "${escapeDoubleQuotes(base)}"`;
@@ -1450,7 +1464,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!probe.isGitRepository) {
         return { ...gitNotRepositoryResult(), ok: false };
       }
-      const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""));
+      const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
       const command = `git worktree remove "${escapeDoubleQuotes(targetPath)}" --force`;
       const approved = await ctx.requestApproval({
         title: "移除 worktree",
@@ -2793,8 +2807,8 @@ function fullyQualifiedName(spec: ToolSpecDefinition): string {
   return spec.namespace ? `${spec.namespace}:${spec.name}` : spec.name;
 }
 
-function resolveFromCwd(cwd: string, targetPath: string): string {
-  return resolveWorkspacePath(cwd, targetPath);
+function resolveFromCwd(cwd: string, targetPath: string, workspaceRoots?: string[]): string {
+  return resolveWorkspacePath(cwd, targetPath, workspaceRoots ?? [cwd]);
 }
 
 const FILE_SNAPSHOT_TEXT_LIMIT = 512_000;
@@ -3049,16 +3063,25 @@ function resolvePatchRelativePath(diffPath: string, requestedPath: unknown): str
   return pathValue.replace(/^[/\\]+/, "").replace(/^[^/\\]+:[/\\]+/, "");
 }
 
-function resolveWorkspacePath(rootDir: string, targetPath: string): string {
+function resolveWorkspacePath(rootDir: string, targetPath: string, workspaceRoots: string[] = [rootDir]): string {
   const root = path.resolve(rootDir);
   const resolved = path.isAbsolute(targetPath)
     ? path.resolve(targetPath)
     : path.resolve(root, targetPath);
-  const relative = path.relative(root, resolved);
-  if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+  if (workspaceRootForPath(resolved, workspaceRoots)) {
     return resolved;
   }
   throw new Error("File path is outside the project folder.");
+}
+
+function workspaceRootForPath(targetPath: string, workspaceRoots: string[]): string | null {
+  const resolved = path.resolve(targetPath);
+  for (const candidate of workspaceRoots) {
+    const root = path.resolve(candidate);
+    const relative = path.relative(root, resolved);
+    if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) return root;
+  }
+  return null;
 }
 
 function escapePowerShell(value: string): string {
@@ -3354,7 +3377,7 @@ async function buildGitDiffAstSummary(
       continue;
     }
     try {
-      const after = await fs.readFile(resolveFromCwd(ctx.cwd, relativePath), "utf8");
+      const after = await fs.readFile(resolveFromCwd(ctx.cwd, relativePath, ctx.workspaceRoots), "utf8");
       let before = "";
       try {
         before = (await runShell(`git show HEAD:${escapeDoubleQuotes(relativePath)}`, ctx)).output;
@@ -3401,14 +3424,14 @@ function gitNotRepositoryResult(): ToolResult {
   };
 }
 
-async function runShell(command: string, ctx: ToolRuntimeContext): Promise<TerminalCommandResult> {
+async function runShell(command: string, ctx: ToolRuntimeContext, cwd = ctx.cwd): Promise<TerminalCommandResult> {
   if (ctx.runTerminalCommand) {
-    return ctx.runTerminalCommand(command);
+    return cwd === ctx.cwd ? ctx.runTerminalCommand(command) : ctx.runTerminalCommand(command, cwd);
   }
   if (process.platform === "win32") {
-    return { output: await runCommand("powershell", ["-NoProfile", "-Command", command], ctx.cwd) };
+    return { output: await runCommand("powershell", ["-NoProfile", "-Command", command], cwd) };
   }
-  return { output: await runCommand("sh", ["-lc", command], ctx.cwd) };
+  return { output: await runCommand("sh", ["-lc", command], cwd) };
 }
 
 function runCommand(command: string, args: string[], cwd: string): Promise<string> {

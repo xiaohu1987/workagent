@@ -716,19 +716,25 @@ export class DesktopBackend {
     await this.#logs.append("mcp.oauth_logout", { serverId, outcome: "success" });
   }
 
-  public createThread(input: {
+  public async createThread(input: {
     title: string;
     mode: ThreadRecord["mode"];
     cwd?: string | null;
+    workspaceRoots?: string[];
     providerId?: string | null;
     modelId?: string | null;
-  }): ThreadRecord {
+  }): Promise<ThreadRecord> {
+    const workspaceRoots = input.mode === "project"
+      ? await validateWorkspaceRoots(input.workspaceRoots?.length ? input.workspaceRoots : input.cwd ? [input.cwd] : [])
+      : [];
+    const cwd = workspaceRoots[0] ?? null;
     const selection = resolveThreadModelSelection(this.#config, input.providerId, input.modelId);
     const thread = this.#db.createThread({
       title: input.title,
       mode: input.mode,
-      workspaceKind: input.cwd ? "project" : "projectless",
-      cwd: input.cwd,
+      workspaceKind: cwd ? "project" : "projectless",
+      cwd,
+      workspaceRoots,
       modelId: selection.modelId,
       providerId: selection.providerId,
       // Ordinary conversations start with least privilege. Project tasks keep
@@ -739,6 +745,37 @@ export class DesktopBackend {
     this.refreshSkillsInBackground(thread.cwd);
     this.#runtime.ensureThread(thread.id);
     return thread;
+  }
+
+  public async addThreadWorkspaceRoot(threadId: string, rootPath: string): Promise<ThreadRecord> {
+    const thread = this.#db.getThread(threadId);
+    this.assertWorkspaceRootsMutable(thread);
+    const workspaceRoots = await validateWorkspaceRoots([...(thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : [])), rootPath]);
+    const updated = this.#db.setThreadWorkspaceRoots(threadId, workspaceRoots);
+    await this.emitThreadUpdated(updated);
+    return updated;
+  }
+
+  public async removeThreadWorkspaceRoot(threadId: string, rootPath: string): Promise<ThreadRecord> {
+    const thread = this.#db.getThread(threadId);
+    this.assertWorkspaceRootsMutable(thread);
+    const target = normalizeWorkspaceRoot(rootPath);
+    if (sameWorkspacePath(target, thread.cwd)) throw new Error("主目录不能移除。");
+    const currentRoots = thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : []);
+    const workspaceRoots = currentRoots.filter((root) => !sameWorkspacePath(root, target));
+    if (workspaceRoots.length === currentRoots.length) throw new Error("协作目录不存在。");
+    const updated = this.#db.setThreadWorkspaceRoots(threadId, workspaceRoots);
+    await this.emitThreadUpdated(updated);
+    return updated;
+  }
+
+  private assertWorkspaceRootsMutable(thread: ThreadRecord): void {
+    if (thread.mode !== "project" || !thread.cwd) throw new Error("只有项目任务可以管理协作目录。");
+    if (thread.status === "running" || thread.status === "waiting") throw new Error("任务执行期间不能修改协作目录。");
+  }
+
+  private async emitThreadUpdated(thread: ThreadRecord): Promise<void> {
+    await this.emit({ type: "thread.updated", threadId: thread.id, payload: { thread }, createdAt: new Date().toISOString() });
   }
 
   public async deleteThread(threadId: string): Promise<void> {
@@ -805,22 +842,22 @@ export class DesktopBackend {
     return updated;
   }
 
-  public async openTerminal(threadId: string, sessionId = "default") {
+  public async openTerminal(threadId: string, sessionId = "default", rootPath?: string) {
     const thread = this.#db.getThread(threadId);
-    const cwd = thread.cwd ?? await this.getThreadOutputDir(threadId);
+    const cwd = thread.cwd ? this.getProjectDirectory(threadId, rootPath) : await this.getThreadOutputDir(threadId);
     return this.#terminal.open(
       threadId,
       cwd,
       (data, heartbeat) => {
-        void this.emitTerminalOutput(threadId, data, sessionId, heartbeat, input);
+        void this.emitTerminalOutput(threadId, data, sessionId, heartbeat);
       },
       sessionId
     );
   }
 
-  public async writeTerminal(threadId: string, input: string, sessionId = "default"): Promise<void> {
+  public async writeTerminal(threadId: string, input: string, sessionId = "default", rootPath?: string): Promise<void> {
     const thread = this.#db.getThread(threadId);
-    const cwd = thread.cwd ?? await this.getThreadOutputDir(threadId);
+    const cwd = thread.cwd ? this.getProjectDirectory(threadId, rootPath) : await this.getThreadOutputDir(threadId);
     this.#terminal.write(
       threadId,
       cwd,
@@ -836,13 +873,13 @@ export class DesktopBackend {
     await this.#terminal.close(threadId, sessionId);
   }
 
-  public async listProjectFiles(threadId: string, relativeDirectory = ""): Promise<ProjectFileEntry[]> {
-    const root = this.getProjectDirectory(threadId);
+  public async listProjectFiles(threadId: string, rootPath?: string, relativeDirectory = ""): Promise<ProjectFileEntry[]> {
+    const root = this.getProjectDirectory(threadId, rootPath);
     return listProjectDirectoryEntries(root, relativeDirectory);
   }
 
-  public async readProjectFile(threadId: string, relativePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
-    const root = this.getProjectDirectory(threadId);
+  public async readProjectFile(threadId: string, rootPath: string | undefined, relativePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
+    const root = this.getProjectDirectory(threadId, rootPath);
     const target = resolveProjectFilePath(root, relativePath);
     const stats = await fs.stat(target);
     if (!stats.isFile()) {
@@ -861,12 +898,12 @@ export class DesktopBackend {
     };
   }
 
-  public async writeProjectFile(threadId: string, relativePath: string, content: string): Promise<{ path: string }> {
+  public async writeProjectFile(threadId: string, rootPath: string | undefined, relativePath: string, content: string): Promise<{ path: string }> {
     if (typeof content !== "string") {
       throw new Error("Project file content must be text.");
     }
 
-    const root = this.getProjectDirectory(threadId);
+    const root = this.getProjectDirectory(threadId, rootPath);
     const target = resolveProjectFilePath(root, relativePath);
     const stats = await fs.stat(target);
     if (!stats.isFile()) {
@@ -978,52 +1015,51 @@ export class DesktopBackend {
     await this.#runtime.setGpaStage(threadId, stage);
   }
 
-  public getGitSnapshot(threadId: string): Promise<GitSnapshot> {
-    const thread = this.#db.getThread(threadId);
-    return this.#git.snapshot(thread.cwd ? path.resolve(thread.cwd) : null);
+  public getGitSnapshot(threadId: string, rootPath?: string): Promise<GitSnapshot> {
+    return this.#git.snapshot(this.getProjectDirectory(threadId, rootPath));
   }
 
-  public stageGitFile(threadId: string, path: string): Promise<GitActionResult> {
-    return this.#git.stageFile(this.getProjectDirectory(threadId), path);
+  public stageGitFile(threadId: string, filePath: string, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.stageFile(this.getProjectDirectory(threadId, rootPath), filePath);
   }
 
-  public stageAllGitChanges(threadId: string): Promise<GitActionResult> {
-    return this.#git.stageAll(this.getProjectDirectory(threadId));
+  public stageAllGitChanges(threadId: string, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.stageAll(this.getProjectDirectory(threadId, rootPath));
   }
 
-  public unstageGitFile(threadId: string, path: string): Promise<GitActionResult> {
-    return this.#git.unstageFile(this.getProjectDirectory(threadId), path);
+  public unstageGitFile(threadId: string, filePath: string, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.unstageFile(this.getProjectDirectory(threadId, rootPath), filePath);
   }
 
-  public revertGitFile(threadId: string, path: string, untracked?: boolean): Promise<GitActionResult> {
-    return this.#git.revertFile(this.getProjectDirectory(threadId), path, untracked === true);
+  public revertGitFile(threadId: string, filePath: string, untracked?: boolean, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.revertFile(this.getProjectDirectory(threadId, rootPath), filePath, untracked === true);
   }
 
   public applyGitHunk(
     threadId: string,
-    payload: { path: string; hunkId: string; source: "staged" | "unstaged"; action: "stage" | "unstage" | "revert" }
+    payload: { path: string; hunkId: string; source: "staged" | "unstaged"; action: "stage" | "unstage" | "revert"; rootPath?: string }
   ): Promise<GitActionResult> {
-    return this.#git.applyHunk(this.getProjectDirectory(threadId), payload.path, payload.hunkId, payload.source, payload.action);
+    return this.#git.applyHunk(this.getProjectDirectory(threadId, payload.rootPath), payload.path, payload.hunkId, payload.source, payload.action);
   }
 
-  public commitGitChanges(threadId: string, message: string): Promise<GitActionResult> {
-    return this.#git.commit(this.getProjectDirectory(threadId), message);
+  public commitGitChanges(threadId: string, message: string, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.commit(this.getProjectDirectory(threadId, rootPath), message);
   }
 
-  public pushGitChanges(threadId: string): Promise<GitActionResult> {
-    return this.#git.push(this.getProjectDirectory(threadId));
+  public pushGitChanges(threadId: string, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.push(this.getProjectDirectory(threadId, rootPath));
   }
 
-  public pullGitChanges(threadId: string): Promise<GitActionResult> {
-    return this.#git.pull(this.getProjectDirectory(threadId));
+  public pullGitChanges(threadId: string, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.pull(this.getProjectDirectory(threadId, rootPath));
   }
 
-  public switchGitBranch(threadId: string, branch: string): Promise<GitActionResult> {
-    return this.#git.switchBranch(this.getProjectDirectory(threadId), branch);
+  public switchGitBranch(threadId: string, branch: string, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.switchBranch(this.getProjectDirectory(threadId, rootPath), branch);
   }
 
-  public async createGitPullRequest(threadId: string): Promise<GitActionResult> {
-    const result = await this.#git.createPullRequest(this.getProjectDirectory(threadId));
+  public async createGitPullRequest(threadId: string, rootPath?: string): Promise<GitActionResult> {
+    const result = await this.#git.createPullRequest(this.getProjectDirectory(threadId, rootPath));
     if (result.ok && result.pullRequestUrl) {
       await shell.openExternal(result.pullRequestUrl);
     }
@@ -4006,6 +4042,7 @@ export class DesktopBackend {
       mode: parent.mode,
       workspaceKind: parent.workspaceKind,
       cwd: parent.cwd,
+      workspaceRoots: parent.workspaceRoots ?? (parent.cwd ? [parent.cwd] : []),
       modelId: selectedModel?.id ?? parent.modelId,
       providerId: selectedModel?.providerId ?? parent.providerId,
       parentThreadId: parent.id,
@@ -4916,12 +4953,16 @@ export class DesktopBackend {
     });
   }
 
-  private getProjectDirectory(threadId: string): string {
+  private getProjectDirectory(threadId: string, requestedRoot?: string): string {
     const thread = this.#db.getThread(threadId);
     if (!thread.cwd) {
       throw new Error("This task does not have a project folder.");
     }
-    return path.resolve(thread.cwd);
+    if (!requestedRoot) return path.resolve(thread.cwd);
+    const resolved = normalizeWorkspaceRoot(requestedRoot);
+    const match = (thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : [])).find((root) => sameWorkspacePath(root, resolved));
+    if (!match) throw new Error("The selected folder is not part of this collaboration task.");
+    return path.resolve(match);
   }
 
   private async openLocalServerUrl(threadId: string, url: string): Promise<void> {
@@ -4946,6 +4987,39 @@ export class DesktopBackend {
 
     this.#openedLocalUrls.delete(key);
   }
+}
+
+function normalizeWorkspaceRoot(value: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("协作目录不能为空。");
+  if (!path.isAbsolute(value.trim())) throw new Error("协作目录必须使用绝对路径。");
+  return path.resolve(value.trim());
+}
+
+function workspaceComparisonKey(value: string): string {
+  const normalized = path.resolve(value).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? normalized.toLocaleLowerCase() : normalized;
+}
+
+function sameWorkspacePath(left: string | null | undefined, right: string | null | undefined): boolean {
+  return Boolean(left && right && workspaceComparisonKey(left) === workspaceComparisonKey(right));
+}
+
+async function validateWorkspaceRoots(values: string[]): Promise<string[]> {
+  const roots = values.map(normalizeWorkspaceRoot);
+  for (const [index, root] of roots.entries()) {
+    const stats = await fs.stat(root).catch(() => null);
+    if (!stats?.isDirectory()) throw new Error(`协作目录不可访问：${root}`);
+    for (let otherIndex = 0; otherIndex < index; otherIndex += 1) {
+      const other = roots[otherIndex];
+      if (sameWorkspacePath(root, other)) throw new Error(`协作目录重复：${root}`);
+      const relativeToOther = path.relative(other, root);
+      const relativeToRoot = path.relative(root, other);
+      const nested = (relativeToOther && !relativeToOther.startsWith(`..${path.sep}`) && relativeToOther !== ".." && !path.isAbsolute(relativeToOther))
+        || (relativeToRoot && !relativeToRoot.startsWith(`..${path.sep}`) && relativeToRoot !== ".." && !path.isAbsolute(relativeToRoot));
+      if (nested) throw new Error(`协作目录不能互相包含：${root}`);
+    }
+  }
+  return roots;
 }
 
 function sanitizeRuntimeEventForLog(event: RuntimeEvent): RuntimeEvent {

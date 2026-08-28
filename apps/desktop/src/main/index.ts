@@ -421,6 +421,12 @@ function registerIpc(): void {
   );
   ipcMain.handle("threads:search", (_event, query: string) => backend.searchThreads(query));
   ipcMain.handle("threads:create", (_event, payload) => backend.createThread(payload));
+  ipcMain.handle("threads:workspace-roots:add", (_event, payload: { threadId: string; rootPath: string }) =>
+    backend.addThreadWorkspaceRoot(payload.threadId, payload.rootPath)
+  );
+  ipcMain.handle("threads:workspace-roots:remove", (_event, payload: { threadId: string; rootPath: string }) =>
+    backend.removeThreadWorkspaceRoot(payload.threadId, payload.rootPath)
+  );
   ipcMain.handle("threads:set-pinned", (_event, payload: { threadId: string; isPinned: boolean }) =>
     backend.setThreadPinned(payload.threadId, payload.isPinned)
   );
@@ -466,14 +472,14 @@ function registerIpc(): void {
     const result = await dialog.showOpenDialog({ properties: ["openDirectory", "multiSelections"] });
     return result.canceled ? [] : result.filePaths;
   });
-  ipcMain.handle("projects:list-files", (_event, threadId: string, relativeDirectory?: string) =>
-    backend.listProjectFiles(threadId, relativeDirectory)
+  ipcMain.handle("projects:list-files", (_event, payload: { threadId: string; rootPath?: string; relativeDirectory?: string }) =>
+    backend.listProjectFiles(payload.threadId, payload.rootPath, payload.relativeDirectory)
   );
-  ipcMain.handle("projects:read-file", (_event, payload: { threadId: string; path: string }) =>
-    backend.readProjectFile(payload.threadId, payload.path)
+  ipcMain.handle("projects:read-file", (_event, payload: { threadId: string; rootPath?: string; path: string }) =>
+    backend.readProjectFile(payload.threadId, payload.rootPath, payload.path)
   );
-  ipcMain.handle("projects:write-file", (_event, payload: { threadId: string; path: string; content: string }) =>
-    backend.writeProjectFile(payload.threadId, payload.path, payload.content)
+  ipcMain.handle("projects:write-file", (_event, payload: { threadId: string; rootPath?: string; path: string; content: string }) =>
+    backend.writeProjectFile(payload.threadId, payload.rootPath, payload.path, payload.content)
   );
   ipcMain.handle("live-edit-preview:set-active-thread", (_event, threadId: string | null) => {
     const activeThread = typeof threadId === "string" ? backend.listThreads().find((thread) => thread.id === threadId) : null;
@@ -485,16 +491,16 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("live-edit-preview:ready", () => liveEditPreview.markReady());
-  ipcMain.handle("git:snapshot", (_event, threadId: string) => backend.getGitSnapshot(threadId));
-  ipcMain.handle("git:stage-file", (_event, payload: { threadId: string; path: string }) =>
-    backend.stageGitFile(payload.threadId, payload.path)
+  ipcMain.handle("git:snapshot", (_event, payload: { threadId: string; rootPath?: string }) => backend.getGitSnapshot(payload.threadId, payload.rootPath));
+  ipcMain.handle("git:stage-file", (_event, payload: { threadId: string; rootPath?: string; path: string }) =>
+    backend.stageGitFile(payload.threadId, payload.path, payload.rootPath)
   );
-  ipcMain.handle("git:stage-all", (_event, threadId: string) => backend.stageAllGitChanges(threadId));
-  ipcMain.handle("git:unstage-file", (_event, payload: { threadId: string; path: string }) =>
-    backend.unstageGitFile(payload.threadId, payload.path)
+  ipcMain.handle("git:stage-all", (_event, payload: { threadId: string; rootPath?: string }) => backend.stageAllGitChanges(payload.threadId, payload.rootPath));
+  ipcMain.handle("git:unstage-file", (_event, payload: { threadId: string; rootPath?: string; path: string }) =>
+    backend.unstageGitFile(payload.threadId, payload.path, payload.rootPath)
   );
-  ipcMain.handle("git:revert-file", (_event, payload: { threadId: string; path: string; untracked?: boolean }) =>
-    backend.revertGitFile(payload.threadId, payload.path, payload.untracked)
+  ipcMain.handle("git:revert-file", (_event, payload: { threadId: string; rootPath?: string; path: string; untracked?: boolean }) =>
+    backend.revertGitFile(payload.threadId, payload.path, payload.untracked, payload.rootPath)
   );
   ipcMain.handle("git:apply-hunk", (_event, payload: {
     threadId: string;
@@ -502,16 +508,17 @@ function registerIpc(): void {
     hunkId: string;
     source: "staged" | "unstaged";
     action: "stage" | "unstage" | "revert";
+    rootPath?: string;
   }) => backend.applyGitHunk(payload.threadId, payload));
-  ipcMain.handle("git:commit", (_event, payload: { threadId: string; message: string }) =>
-    backend.commitGitChanges(payload.threadId, payload.message)
+  ipcMain.handle("git:commit", (_event, payload: { threadId: string; rootPath?: string; message: string }) =>
+    backend.commitGitChanges(payload.threadId, payload.message, payload.rootPath)
   );
-  ipcMain.handle("git:push", (_event, threadId: string) => backend.pushGitChanges(threadId));
-  ipcMain.handle("git:pull", (_event, threadId: string) => backend.pullGitChanges(threadId));
-  ipcMain.handle("git:switch-branch", (_event, payload: { threadId: string; branch: string }) =>
-    backend.switchGitBranch(payload.threadId, payload.branch)
+  ipcMain.handle("git:push", (_event, payload: { threadId: string; rootPath?: string }) => backend.pushGitChanges(payload.threadId, payload.rootPath));
+  ipcMain.handle("git:pull", (_event, payload: { threadId: string; rootPath?: string }) => backend.pullGitChanges(payload.threadId, payload.rootPath));
+  ipcMain.handle("git:switch-branch", (_event, payload: { threadId: string; rootPath?: string; branch: string }) =>
+    backend.switchGitBranch(payload.threadId, payload.branch, payload.rootPath)
   );
-  ipcMain.handle("git:create-pr", (_event, threadId: string) => backend.createGitPullRequest(threadId));
+  ipcMain.handle("git:create-pr", (_event, payload: { threadId: string; rootPath?: string }) => backend.createGitPullRequest(payload.threadId, payload.rootPath));
   ipcMain.handle("threads:delete", (_event, threadId: string) => backend.deleteThread(threadId));
   ipcMain.handle("threads:clear-conversation", (_event, threadId: string) =>
     backend.clearThreadConversation(threadId)
@@ -573,11 +580,11 @@ function registerIpc(): void {
   ipcMain.handle("threads:remove-skill", (_event, payload: { threadId: string; skillId: string }) =>
     backend.removeThreadSkill(payload.threadId, payload.skillId)
   );
-  ipcMain.handle("terminal:open", (_event, payload: { threadId: string; sessionId?: string }) =>
-    backend.openTerminal(payload.threadId, payload.sessionId)
+  ipcMain.handle("terminal:open", (_event, payload: { threadId: string; sessionId?: string; rootPath?: string }) =>
+    backend.openTerminal(payload.threadId, payload.sessionId, payload.rootPath)
   );
-  ipcMain.handle("terminal:write", (_event, payload: { threadId: string; input: string; sessionId?: string }) =>
-    backend.writeTerminal(payload.threadId, payload.input, payload.sessionId)
+  ipcMain.handle("terminal:write", (_event, payload: { threadId: string; input: string; sessionId?: string; rootPath?: string }) =>
+    backend.writeTerminal(payload.threadId, payload.input, payload.sessionId, payload.rootPath)
   );
   ipcMain.handle("terminal:close", (_event, payload: { threadId: string; sessionId?: string }) =>
     backend.closeTerminal(payload.threadId, payload.sessionId)

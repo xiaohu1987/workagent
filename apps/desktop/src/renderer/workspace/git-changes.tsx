@@ -28,6 +28,9 @@ type SideBySideDiffRow = {
 
 export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   threadId,
+  workspaceRoots,
+  rootPath,
+  onRootChange,
   snapshot,
   loading,
   busy,
@@ -37,6 +40,9 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   onComment
 }: {
   threadId: string | null;
+  workspaceRoots: string[];
+  rootPath: string;
+  onRootChange: (rootPath: string) => void;
   snapshot: GitSnapshot | null;
   loading: boolean;
   busy: boolean;
@@ -66,11 +72,17 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
     if (selectedPath && !files.some((file) => file.path === selectedPath)) setSelectedPath(null);
   }, [files, openedPath, selectedPath]);
 
+  const rootSelector = workspaceRoots.length > 1 ? (
+    <select className="workspace-root-select" aria-label="Git 目录" title="切换 Git 目录" value={rootPath} disabled={busy} onChange={(event) => onRootChange(event.target.value)}>
+      {workspaceRoots.map((root) => <option key={root} value={root}>{root}</option>)}
+    </select>
+  ) : null;
+
   if (loading && !snapshot) {
-    return <WorkspaceEmptyState icon={<IconSpinner />} title="Git 源代码管理" message="正在读取 Git 状态..." />;
+    return <section className="git-changes-workspace"><header className="git-changes-header">{rootSelector}</header><WorkspaceEmptyState icon={<IconSpinner />} title="Git 源代码管理" message="正在读取 Git 状态..." /></section>;
   }
   if (!snapshot?.available) {
-    return <WorkspaceEmptyState icon={<IconFileChanges />} title="Git 源代码管理" message={snapshot?.message ?? "当前项目不是 Git 仓库。"} />;
+    return <section className="git-changes-workspace"><header className="git-changes-header">{rootSelector}</header><WorkspaceEmptyState icon={<IconFileChanges />} title="Git 源代码管理" message={snapshot?.message ?? "当前项目不是 Git 仓库。"} /></section>;
   }
 
   const run = (action: () => Promise<GitActionResult>) => {
@@ -79,36 +91,39 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   };
   const fileAction = (action: "stage" | "unstage" | "revert", file: GitFileChange) => {
     if (!threadId) return;
-    if (action === "stage") run(() => window.codexh.stageGitFile({ threadId, path: file.path }) as Promise<GitActionResult>);
-    if (action === "unstage") run(() => window.codexh.unstageGitFile({ threadId, path: file.path }) as Promise<GitActionResult>);
-    if (action === "revert") run(() => window.codexh.revertGitFile({ threadId, path: file.path, untracked: file.untracked }) as Promise<GitActionResult>);
+    if (action === "stage") run(() => window.codexh.stageGitFile({ threadId, rootPath, path: file.path }) as Promise<GitActionResult>);
+    if (action === "unstage") run(() => window.codexh.unstageGitFile({ threadId, rootPath, path: file.path }) as Promise<GitActionResult>);
+    if (action === "revert") run(() => window.codexh.revertGitFile({ threadId, rootPath, path: file.path, untracked: file.untracked }) as Promise<GitActionResult>);
   };
 
   return (
     <section className={`git-changes-workspace ${opened ? "is-diff-open" : ""}`} aria-label="Git 源代码管理">
       <header className="git-changes-header">
-        <label className="git-branch-select" title="切换分支">
-          <IconFileChanges />
-          <select
-            aria-label="切换 Git 分支"
-            value={snapshot.branch ?? ""}
-            disabled={busy || !threadId || snapshot.branches.length === 0}
-            onChange={(event) => {
-              const branch = event.target.value;
-              if (threadId && branch && branch !== snapshot.branch) {
-                run(() => window.codexh.switchGitBranch({ threadId, branch }) as Promise<GitActionResult>);
-              }
-            }}
-          >
-            {!snapshot.branch ? <option value="">detached HEAD</option> : null}
-            {snapshot.branches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
-          </select>
-        </label>
-        <div className="git-header-actions">
-          <button type="button" className="git-icon-button" title="拉取" aria-label="拉取" disabled={busy || !threadId || !snapshot.upstream} onClick={() => threadId && run(() => window.codexh.pullGitChanges(threadId) as Promise<GitActionResult>)}><IconArrowDown /></button>
-          <button type="button" className="git-icon-button" title="推送" aria-label="推送" disabled={busy || !threadId || !canPush} onClick={() => threadId && run(() => window.codexh.pushGitChanges(threadId) as Promise<GitActionResult>)}><IconArrowUp /></button>
-          <button type="button" className="git-icon-button" title="刷新变更" aria-label="刷新变更" disabled={loading || busy} onClick={onRefresh}><IconRefresh /></button>
-          {snapshot.canCreatePullRequest ? <button type="button" className="git-text-action" title="创建 Pull Request" disabled={busy} onClick={() => threadId && run(() => window.codexh.createGitPullRequest(threadId) as Promise<GitActionResult>)}>PR</button> : null}
+        {rootSelector ? <div className="git-header-root-row">{rootSelector}</div> : null}
+        <div className="git-header-branch-row">
+          <label className="git-branch-select" title="切换分支">
+            <IconFileChanges />
+            <select
+              aria-label="切换 Git 分支"
+              value={snapshot.branch ?? ""}
+              disabled={busy || !threadId || snapshot.branches.length === 0}
+              onChange={(event) => {
+                const branch = event.target.value;
+                if (threadId && branch && branch !== snapshot.branch) {
+                  run(() => window.codexh.switchGitBranch({ threadId, rootPath, branch }) as Promise<GitActionResult>);
+                }
+              }}
+            >
+              {!snapshot.branch ? <option value="">detached HEAD</option> : null}
+              {snapshot.branches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+            </select>
+          </label>
+          <div className="git-header-actions">
+            <button type="button" className="git-icon-button" title="拉取" aria-label="拉取" disabled={busy || !threadId || !snapshot.upstream} onClick={() => threadId && run(() => window.codexh.pullGitChanges({ threadId, rootPath }) as Promise<GitActionResult>)}><IconArrowDown /></button>
+            <button type="button" className="git-icon-button" title="推送" aria-label="推送" disabled={busy || !threadId || !canPush} onClick={() => threadId && run(() => window.codexh.pushGitChanges({ threadId, rootPath }) as Promise<GitActionResult>)}><IconArrowUp /></button>
+            <button type="button" className="git-icon-button" title="刷新变更" aria-label="刷新变更" disabled={loading || busy} onClick={onRefresh}><IconRefresh /></button>
+            {snapshot.canCreatePullRequest ? <button type="button" className="git-text-action" title="创建 Pull Request" disabled={busy} onClick={() => threadId && run(() => window.codexh.createGitPullRequest({ threadId, rootPath }) as Promise<GitActionResult>)}>PR</button> : null}
+          </div>
         </div>
       </header>
 
@@ -124,6 +139,7 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
           file={opened}
           busy={busy}
           threadId={threadId}
+          rootPath={rootPath}
           onBack={() => setOpenedPath(null)}
           onFileAction={fileAction}
           onAction={onAction}
@@ -140,8 +156,8 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
               rows={3}
             />
             <div>
-              <button type="button" className="git-stage-all-button" disabled={busy || !threadId || !hasUnstagedFiles} onClick={() => threadId && run(() => window.codexh.stageAllGitChanges(threadId) as Promise<GitActionResult>)}><IconPlus /><span>暂存全部</span></button>
-              <button type="button" className="git-commit-button" disabled={busy || !threadId || !hasStagedFiles || !commitMessage.trim()} onClick={() => threadId && run(() => window.codexh.commitGitChanges({ threadId, message: commitMessage }) as Promise<GitActionResult>)}><IconCheck /><span>提交</span></button>
+              <button type="button" className="git-stage-all-button" disabled={busy || !threadId || !hasUnstagedFiles} onClick={() => threadId && run(() => window.codexh.stageAllGitChanges({ threadId, rootPath }) as Promise<GitActionResult>)}><IconPlus /><span>暂存全部</span></button>
+              <button type="button" className="git-commit-button" disabled={busy || !threadId || !hasStagedFiles || !commitMessage.trim()} onClick={() => threadId && run(() => window.codexh.commitGitChanges({ threadId, rootPath, message: commitMessage }) as Promise<GitActionResult>)}><IconCheck /><span>提交</span></button>
             </div>
           </section>
 
@@ -190,6 +206,7 @@ function GitDiffView({
   file,
   busy,
   threadId,
+  rootPath,
   onBack,
   onFileAction,
   onAction,
@@ -198,6 +215,7 @@ function GitDiffView({
   file: GitFileChange;
   busy: boolean;
   threadId: string | null;
+  rootPath: string;
   onBack: () => void;
   onFileAction: (action: "stage" | "unstage" | "revert", file: GitFileChange) => void;
   onAction: (action: () => Promise<GitActionResult>) => void;
@@ -217,8 +235,8 @@ function GitDiffView({
       {file.conflicted ? <p className="git-conflict-notice">此文件存在冲突，请先解决冲突。</p> : null}
       {file.binary ? <p className="git-binary-notice">二进制文件不支持文本差异对比。</p> : null}
       <div className="git-diff-scroll">
-        <GitSideBySideHunks file={file} source="staged" busy={busy} threadId={threadId} onAction={onAction} onComment={onComment} />
-        <GitSideBySideHunks file={file} source="unstaged" busy={busy} threadId={threadId} onAction={onAction} onComment={onComment} />
+        <GitSideBySideHunks file={file} source="staged" busy={busy} threadId={threadId} rootPath={rootPath} onAction={onAction} onComment={onComment} />
+        <GitSideBySideHunks file={file} source="unstaged" busy={busy} threadId={threadId} rootPath={rootPath} onAction={onAction} onComment={onComment} />
         {!file.binary && file.stagedHunks.length + file.unstagedHunks.length === 0 ? <WorkspaceEmptyState icon={<IconEye />} title="没有文本差异" message="此文件没有可显示的文本差异。" /> : null}
       </div>
     </div>
@@ -230,6 +248,7 @@ export const GitSideBySideHunks = memo(function GitSideBySideHunks({
   source,
   busy,
   threadId,
+  rootPath,
   onAction,
   onComment
 }: {
@@ -237,6 +256,7 @@ export const GitSideBySideHunks = memo(function GitSideBySideHunks({
   source: "staged" | "unstaged";
   busy: boolean;
   threadId: string | null;
+  rootPath: string;
   onAction: (action: () => Promise<GitActionResult>) => void;
   onComment: (content: string) => void;
 }) {
@@ -250,9 +270,9 @@ export const GitSideBySideHunks = memo(function GitSideBySideHunks({
           <header>
             <code>{hunk.header}</code>
             <div>
-              {source === "unstaged" ? <button type="button" disabled={busy || !threadId} title="暂存此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, path: file.path, hunkId: hunk.id, source, action: "stage" }) as Promise<GitActionResult>)}><IconPlus /></button> : null}
-              {source === "staged" ? <button type="button" disabled={busy || !threadId} title="取消暂存此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, path: file.path, hunkId: hunk.id, source, action: "unstage" }) as Promise<GitActionResult>)}><IconUndo /></button> : null}
-              {source === "unstaged" ? <button type="button" disabled={busy || !threadId} title="撤销此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, path: file.path, hunkId: hunk.id, source, action: "revert" }) as Promise<GitActionResult>)}><IconTrash /></button> : null}
+              {source === "unstaged" ? <button type="button" disabled={busy || !threadId} title="暂存此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, rootPath, path: file.path, hunkId: hunk.id, source, action: "stage" }) as Promise<GitActionResult>)}><IconPlus /></button> : null}
+              {source === "staged" ? <button type="button" disabled={busy || !threadId} title="取消暂存此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, rootPath, path: file.path, hunkId: hunk.id, source, action: "unstage" }) as Promise<GitActionResult>)}><IconUndo /></button> : null}
+              {source === "unstaged" ? <button type="button" disabled={busy || !threadId} title="撤销此块" onClick={() => threadId && onAction(() => window.codexh.applyGitHunk({ threadId, rootPath, path: file.path, hunkId: hunk.id, source, action: "revert" }) as Promise<GitActionResult>)}><IconTrash /></button> : null}
               <button type="button" title="让 Codex 处理此块" onClick={() => onComment(`请审查并处理以下 Git 修改：\n文件：${file.path}\n范围：${hunk.header}\n\n${hunk.lines.map((line) => `${line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "}${line.content}`).join("\n")}`)}><IconComment /></button>
             </div>
           </header>

@@ -1635,6 +1635,7 @@ class ThreadSessionRuntime {
     const modePolicy = thread.mode === "project"
       ? createProjectRuntimePolicy({
           cwd: thread.cwd,
+          workspaceRoots: thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : []),
           explicitlySelectedMcp: selectedMcpServerIds.length > 0,
           explicitlyRequestedMcp
         })
@@ -1645,6 +1646,7 @@ class ThreadSessionRuntime {
           requestedDeliverableExtensions
         });
     const workspaceCwd = modePolicy.workspaceRoot;
+    const workspaceRoots = modePolicy.mode === "project" ? (thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : [])) : [workspaceCwd];
     // Spreadsheets and other artifacts are commonly produced by scripts rather
     // than managed write tools, so retain a narrow, requested-format baseline.
     const workspaceRequestedArtifactsBeforeTurn = modePolicy.mode === "project"
@@ -1702,7 +1704,10 @@ class ThreadSessionRuntime {
       ? await this.services.buildKnowledgeContext(this.threadId)
       : null;
     const workflowPackContext = await this.services.buildWorkflowPackContext(this.threadId);
-    const projectInstructionContext = await loadProjectInstructionContext(modePolicy.projectInstructionRoot);
+    const projectInstructionContexts = await Promise.all(
+      (modePolicy.mode === "project" ? workspaceRoots : []).map((root) => loadProjectInstructionContext(root))
+    );
+    const projectInstructionContext = projectInstructionContexts.filter(Boolean).join("\n\n");
     const selfImprovementMemories = this.services.config.selfImprovement.useMemories && !thread.parentThreadId
       ? await this.services.searchSelfImprovementMemories?.({
           query: initialInput,
@@ -5539,6 +5544,7 @@ class ThreadSessionRuntime {
             // Projectless chats must never inherit the desktop application's launch folder.
             toolContext = {
               cwd: workspaceCwd,
+              workspaceRoots,
               appHome: "",
               threadId: this.threadId,
               turnRunId: turn.id,
@@ -5564,7 +5570,7 @@ class ThreadSessionRuntime {
               listFiles: this.services.listFiles,
               readFile: this.services.readFile,
               writeFile: this.services.writeFile,
-              runTerminalCommand: async (command) => {
+              runTerminalCommand: async (command, commandCwd = workspaceCwd) => {
                 if (webFrontendGuard) {
                   const prepared = prepareShellCommandForWebFrontend(command);
                   if (!prepared.ok) {
@@ -5577,7 +5583,7 @@ class ThreadSessionRuntime {
                     command = prepared.command;
                   }
                 }
-                return this.services.runTerminalCommand(this.threadId, workspaceCwd, command, {
+                return this.services.runTerminalCommand(this.threadId, commandCwd, command, {
                   onIdle: () => this.observeIdleTerminalCommand({
                     thread,
                     turnId: turn.id,

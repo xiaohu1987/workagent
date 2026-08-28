@@ -20,6 +20,8 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
   onOpen,
   onLoadDirectory,
   projectRoot,
+  workspaceRoots,
+  onProjectRootChange,
   onAddAttachment
 }: {
   files: ProjectFileEntry[];
@@ -32,13 +34,17 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
   onOpen: (path: string) => void;
   onLoadDirectory: (path: string) => Promise<boolean>;
   projectRoot: string;
+  workspaceRoots: string[];
+  onProjectRootChange: (rootPath: string) => void;
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
 }) {
   const [query, setQuery] = useState("");
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
+  const [expandedRootPath, setExpandedRootPath] = useState<string | null>(projectRoot || null);
   const [loadedDirectoryPaths, setLoadedDirectoryPaths] = useState<Set<string>>(() => new Set());
   const [loadingDirectoryPaths, setLoadingDirectoryPaths] = useState<Set<string>>(() => new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: ProjectFileTreeNode } | null>(null);
+  const [rootContextMenu, setRootContextMenu] = useState<{ x: number; y: number; rootPath: string } | null>(null);
   const [diffPreview, setDiffPreview] = useState<{
     node: ProjectFileTreeNode;
     snapshot: ReturnType<typeof getLatestFileSnapshot>;
@@ -64,12 +70,31 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
     ...getProjectFileChangeKinds(toolCalls)
   ]), [gitFiles, toolCalls]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
+  const workspaceRootsKey = workspaceRoots.join("\u0000");
 
   useEffect(() => {
     setExpandedPaths(new Set());
     setLoadedDirectoryPaths(new Set());
     setLoadingDirectoryPaths(new Set());
-  }, [loadRevision]);
+    setExpandedRootPath(projectRoot || workspaceRoots[0] || null);
+  }, [loadRevision, projectRoot, workspaceRootsKey]);
+
+  useEffect(() => {
+    if (workspaceRoots.length === 0) {
+      setExpandedRootPath(null);
+    } else if (expandedRootPath && !workspaceRoots.includes(expandedRootPath)) {
+      setExpandedRootPath(projectRoot || workspaceRoots[0]);
+    }
+  }, [expandedRootPath, projectRoot, workspaceRootsKey]);
+
+  const toggleRoot = (rootPath: string) => {
+    if (expandedRootPath === rootPath) {
+      setExpandedRootPath(null);
+      return;
+    }
+    setExpandedRootPath(rootPath);
+    onProjectRootChange(rootPath);
+  };
 
   const toggleDirectory = async (path: string) => {
     if (expandedPaths.has(path)) {
@@ -132,17 +157,9 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
     }, 140);
   };
 
-  if (loading) {
-    return <WorkspaceEmptyState icon={<IconSpinner />} title="读取中" message="正在读取项目文件..." />;
-  }
-
-  if (files.length === 0) {
-    return <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="当前项目文件夹没有可显示的文件" />;
-  }
-
-  return (
-    <section className="project-files-workspace" aria-label="项目文件夹">
-      <label className="project-files-filter">
+  const projectFilesContent = (
+    <>
+      {!loading && files.length > 0 ? <label className="project-files-filter">
         <IconSearch />
         <input
           value={query}
@@ -151,8 +168,8 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
           aria-label="筛选项目文件"
           spellCheck={false}
         />
-      </label>
-      <div className="project-files-list" role="tree" aria-label="项目文件">
+      </label> : null}
+      {loading ? <WorkspaceEmptyState icon={<IconSpinner />} title="读取中" message="正在读取项目文件..." /> : files.length === 0 ? <WorkspaceEmptyState icon={<IconFolder />} title="空文件夹" message="这个协作目录没有可显示的文件" /> : <div className="project-files-list" role="tree" aria-label="项目文件">
         <ProjectFileTreeRows
           nodes={tree}
           depth={0}
@@ -168,10 +185,42 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
           onHoverEnd={scheduleDiffPreviewClose}
           onContextMenu={(event, node) => {
             event.preventDefault();
+            setRootContextMenu(null);
             setContextMenu({ x: event.clientX, y: event.clientY, node });
           }}
         />
-      </div>
+      </div>}
+    </>
+  );
+
+  if (loading && workspaceRoots.length <= 1) {
+    return <WorkspaceEmptyState icon={<IconSpinner />} title="读取中" message="正在读取项目文件..." />;
+  }
+
+  if (files.length === 0 && workspaceRoots.length <= 1) {
+    return <WorkspaceEmptyState icon={<IconFolder />} title="打开文件" message="当前项目文件夹没有可显示的文件" />;
+  }
+
+  return (
+    <section className="project-files-workspace" aria-label="项目文件夹">
+      {workspaceRoots.length > 1 ? (
+        <div className="project-root-list" aria-label="协作目录">
+          {workspaceRoots.map((root) => (
+            <div key={root} className={`project-root-item ${root === expandedRootPath ? "is-expanded" : ""}`}>
+              <button type="button" className={`project-root-row ${root === projectRoot ? "active" : ""}`} aria-expanded={root === expandedRootPath} title={root} onClick={() => toggleRoot(root)} onContextMenu={(event) => { event.preventDefault(); setContextMenu(null); setRootContextMenu({ x: event.clientX, y: event.clientY, rootPath: root }); }}>
+                <span className={`project-file-disclosure ${root === expandedRootPath ? "is-expanded" : ""}`} aria-hidden><IconChevronRight /></span>
+                <IconFolder />
+                <span>{root.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || root}</span>
+                <small>{root}</small>
+              </button>
+              <div className={`project-root-accordion ${root === expandedRootPath ? "is-expanded" : "is-collapsed"}`} aria-hidden={root !== expandedRootPath} inert={root !== expandedRootPath}>
+                {root === projectRoot ? projectFilesContent : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {workspaceRoots.length <= 1 ? <div className="project-root-accordion is-expanded">{projectFilesContent}</div> : null}
       {visibleDiffPreview ? (
         <ProjectFileDiffPopover
           node={visibleDiffPreview.node}
@@ -223,6 +272,23 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
               }
             }
           ]}
+        />
+      ) : null}
+      {rootContextMenu ? (
+        <WorkspaceContextMenu
+          x={rootContextMenu.x}
+          y={rootContextMenu.y}
+          onClose={() => setRootContextMenu(null)}
+          actions={[{
+            id: "add-root-to-chat",
+            label: "添加到聊天",
+            icon: <IconCompose />,
+            onSelect: () => onAddAttachment({
+              kind: "folder",
+              path: rootContextMenu.rootPath,
+              label: rootContextMenu.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || rootContextMenu.rootPath
+            })
+          }]}
         />
       ) : null}
     </section>

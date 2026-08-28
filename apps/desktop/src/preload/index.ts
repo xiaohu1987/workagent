@@ -41,45 +41,51 @@ const api = {
     title: string;
     mode: "project" | "chat";
     cwd?: string | null;
+    workspaceRoots?: string[];
     providerId?: string | null;
     modelId?: string | null;
   }) =>
     ipcRenderer.invoke("threads:create", payload),
+  addThreadWorkspaceRoot: (payload: { threadId: string; rootPath: string }) =>
+    ipcRenderer.invoke("threads:workspace-roots:add", payload),
+  removeThreadWorkspaceRoot: (payload: { threadId: string; rootPath: string }) =>
+    ipcRenderer.invoke("threads:workspace-roots:remove", payload),
   chooseProjectDirectory: (defaultPath?: string) =>
     ipcRenderer.invoke("projects:choose-directory", defaultPath),
   chooseAttachmentFiles: (payload?: { imagesOnly?: boolean }) =>
     ipcRenderer.invoke("attachments:choose-files", payload),
   chooseKnowledgeFiles: () => ipcRenderer.invoke("knowledge:choose-files"),
   chooseKnowledgeFolders: () => ipcRenderer.invoke("knowledge:choose-folders"),
-  listProjectFiles: (threadId: string, relativeDirectory = "") =>
-    ipcRenderer.invoke("projects:list-files", threadId, relativeDirectory),
-  readProjectFile: (payload: { threadId: string; path: string }) =>
+  listProjectFiles: (payload: { threadId: string; rootPath?: string; relativeDirectory?: string }) =>
+    ipcRenderer.invoke("projects:list-files", payload),
+  readProjectFile: (payload: { threadId: string; rootPath?: string; path: string }) =>
     ipcRenderer.invoke("projects:read-file", payload),
-  writeProjectFile: (payload: { threadId: string; path: string; content: string }) =>
+  writeProjectFile: (payload: { threadId: string; rootPath?: string; path: string; content: string }) =>
     ipcRenderer.invoke("projects:write-file", payload),
   setLiveEditPreviewActiveThread: (threadId: string | null) =>
     ipcRenderer.invoke("live-edit-preview:set-active-thread", threadId),
   acknowledgeLiveEditPreviewPath: (payload: { toolCallId: string; path: string }) =>
     ipcRenderer.invoke("live-edit-preview:acknowledge-path", payload),
   markLiveEditPreviewReady: () => ipcRenderer.invoke("live-edit-preview:ready"),
-  getGitSnapshot: (threadId: string) => ipcRenderer.invoke("git:snapshot", threadId),
-  stageGitFile: (payload: { threadId: string; path: string }) => ipcRenderer.invoke("git:stage-file", payload),
-  stageAllGitChanges: (threadId: string) => ipcRenderer.invoke("git:stage-all", threadId),
-  unstageGitFile: (payload: { threadId: string; path: string }) => ipcRenderer.invoke("git:unstage-file", payload),
-  revertGitFile: (payload: { threadId: string; path: string; untracked?: boolean }) =>
+  getGitSnapshot: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:snapshot", payload),
+  stageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => ipcRenderer.invoke("git:stage-file", payload),
+  stageAllGitChanges: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:stage-all", payload),
+  unstageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => ipcRenderer.invoke("git:unstage-file", payload),
+  revertGitFile: (payload: { threadId: string; rootPath?: string; path: string; untracked?: boolean }) =>
     ipcRenderer.invoke("git:revert-file", payload),
   applyGitHunk: (payload: {
     threadId: string;
+    rootPath?: string;
     path: string;
     hunkId: string;
     source: "staged" | "unstaged";
     action: "stage" | "unstage" | "revert";
   }) => ipcRenderer.invoke("git:apply-hunk", payload),
-  commitGitChanges: (payload: { threadId: string; message: string }) => ipcRenderer.invoke("git:commit", payload),
-  pushGitChanges: (threadId: string) => ipcRenderer.invoke("git:push", threadId),
-  pullGitChanges: (threadId: string) => ipcRenderer.invoke("git:pull", threadId),
-  switchGitBranch: (payload: { threadId: string; branch: string }) => ipcRenderer.invoke("git:switch-branch", payload),
-  createGitPullRequest: (threadId: string) => ipcRenderer.invoke("git:create-pr", threadId),
+  commitGitChanges: (payload: { threadId: string; rootPath?: string; message: string }) => ipcRenderer.invoke("git:commit", payload),
+  pushGitChanges: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:push", payload),
+  pullGitChanges: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:pull", payload),
+  switchGitBranch: (payload: { threadId: string; rootPath?: string; branch: string }) => ipcRenderer.invoke("git:switch-branch", payload),
+  createGitPullRequest: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:create-pr", payload),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
   clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),
   getThreadSnapshot: (threadId: string, cursor?: RuntimeThreadSnapshotCursor) =>
@@ -127,8 +133,8 @@ const api = {
     ipcRenderer.invoke("threads:add-skill", payload),
   removeThreadSkill: (payload: { threadId: string; skillId: string }) =>
     ipcRenderer.invoke("threads:remove-skill", payload),
-  openTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:open", payload),
-  writeTerminal: (payload: { threadId: string; input: string; sessionId?: string }) =>
+  openTerminal: (payload: { threadId: string; sessionId?: string; rootPath?: string }) => ipcRenderer.invoke("terminal:open", payload),
+  writeTerminal: (payload: { threadId: string; input: string; sessionId?: string; rootPath?: string }) =>
     ipcRenderer.invoke("terminal:write", payload),
   closeTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:close", payload),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),

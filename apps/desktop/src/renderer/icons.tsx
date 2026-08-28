@@ -274,6 +274,15 @@ export function IconFolder() {
   );
 }
 
+export function IconFolders() {
+  return (
+    <SvgIcon>
+      <path d="M7 6.5a2 2 0 0 1 2-2h3l1.8 2h5.2a2 2 0 0 1 2 2v5.5a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2z" />
+      <path d="M4 9.5a2 2 0 0 0-2 2V17a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-1" />
+    </SvgIcon>
+  );
+}
+
 export function IconFile() {
   return (
     <SvgIcon>

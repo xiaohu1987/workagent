@@ -23,10 +23,10 @@ export function useTerminalSessions(selectedThreadId: string | null) {
   const activeSession = selectedThreadId && activeSessionId ? sessionsByThread[selectedThreadId]?.[activeSessionId] ?? null : null;
   const input = selectedThreadId && activeSessionId ? inputsByThread[selectedThreadId]?.[activeSessionId] ?? "" : "";
 
-  const ensureTab = (threadId: string, sessionId = "default") => {
+  const ensureTab = (threadId: string, sessionId = "default", rootPath = "") => {
     setTabsByThread((current) => current[threadId]?.some((tab) => tab.id === sessionId) ? current : {
       ...current,
-      [threadId]: [...(current[threadId] ?? []), { id: sessionId, title: sessionId === "default" ? "终端" : `终端 ${(current[threadId]?.length ?? 0) + 1}` }]
+      [threadId]: [...(current[threadId] ?? []), { id: sessionId, title: sessionId === "default" ? "终端" : `终端 ${(current[threadId]?.length ?? 0) + 1}`, rootPath }]
     });
     setActiveTabByThread((current) => current[threadId] ? current : { ...current, [threadId]: sessionId });
   };
@@ -40,10 +40,10 @@ export function useTerminalSessions(selectedThreadId: string | null) {
     if (selectedThreadId) setActiveTabByThread((current) => ({ ...current, [selectedThreadId]: sessionId }));
   };
 
-  const addTab = () => {
+  const addTab = (rootPath = "") => {
     if (!selectedThreadId) return;
     const id = globalThis.crypto.randomUUID();
-    setTabsByThread((current) => ({ ...current, [selectedThreadId]: [...(current[selectedThreadId] ?? []), { id, title: `终端 ${(current[selectedThreadId]?.length ?? 0) + 1}` }] }));
+    setTabsByThread((current) => ({ ...current, [selectedThreadId]: [...(current[selectedThreadId] ?? []), { id, title: `终端 ${(current[selectedThreadId]?.length ?? 0) + 1}`, rootPath }] }));
     setActiveTabByThread((current) => ({ ...current, [selectedThreadId]: id }));
   };
 

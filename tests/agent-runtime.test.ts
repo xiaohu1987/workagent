@@ -985,10 +985,14 @@ describe("project workspace MCP priority", () => {
     const projectPrompt = buildProjectWorkspacePriorityPrompt({
       mode: "project",
       cwd: "E:\\dev\\api",
+      workspaceRoots: ["E:\\dev\\api", "E:\\dev\\web"],
       localWorkspaceFirst: true
     });
 
     expect(projectPrompt).toContain("E:\\\\dev\\\\api");
+    expect(projectPrompt).toContain("1. E:\\dev\\api (primary)");
+    expect(projectPrompt).toContain("2. E:\\dev\\web");
+    expect(projectPrompt).toContain("absolute paths for secondary roots");
     expect(projectPrompt).toContain("authoritative source");
     expect(projectPrompt).toContain("before calling mcp.call");
     expect(projectPrompt).toContain("MCP available as a fallback");

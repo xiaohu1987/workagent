@@ -2,7 +2,7 @@ import type { RefObject } from "react";
 import { IconTerminal } from "../icons";
 import { WorkspaceEmptyState, WorkspaceSubtabStrip } from "./panels";
 
-export type TerminalWorkspaceTab = { id: string; title: string };
+export type TerminalWorkspaceTab = { id: string; title: string; rootPath: string };
 export function TerminalWorkspace({
   tabs,
   activeSessionId,
@@ -16,6 +16,9 @@ export function TerminalWorkspace({
   onSelectTab,
   onAddTab,
   onCloseTab,
+  workspaceRoots,
+  activeRootPath,
+  onRootChange,
   hasThread
 }: {
   tabs: TerminalWorkspaceTab[];
@@ -30,6 +33,9 @@ export function TerminalWorkspace({
   onSelectTab: (sessionId: string) => void;
   onAddTab: () => void;
   onCloseTab: (sessionId: string) => void;
+  workspaceRoots: string[];
+  activeRootPath: string;
+  onRootChange: (rootPath: string) => void;
   hasThread: boolean;
 }) {
   if (!hasThread) {
@@ -66,6 +72,11 @@ export function TerminalWorkspace({
           <strong>{shell}</strong>
           <span title={cwd}>{cwd || "正在连接终端"}</span>
         </div>
+        {workspaceRoots.length > 1 ? (
+          <select className="workspace-root-select" aria-label="终端目录" value={activeRootPath} onChange={(event) => onRootChange(event.target.value)}>
+            {workspaceRoots.map((root) => <option key={root} value={root}>{root}</option>)}
+          </select>
+        ) : null}
       </div>
       <pre ref={scrollRef} className="terminal-output" aria-live="polite">
         {output || " "}

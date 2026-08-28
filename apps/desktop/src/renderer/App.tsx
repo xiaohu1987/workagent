@@ -161,6 +161,7 @@ import {
   ProjectFilesWorkspace
 } from "./workspace/project-files";
 import { ProjectCreateSheet } from "./workspace/project-create-sheet";
+import { getProjectWorkspaceRoots, ProjectEditSheet } from "./workspace/project-edit-sheet";
 import { GpaPlanResumeSheet } from "./workspace/gpa-plan-resume-sheet";
 import { ConfirmationSheet } from "./workspace/confirmation-sheet";
 import {
@@ -201,6 +202,7 @@ import {
   IconEye,
   IconFileChanges,
   IconFolder,
+  IconFolders,
   IconGpa,
   IconGuide,
   IconHelpCircle,
@@ -287,7 +289,7 @@ import { useSkillLab } from "./hooks/use-skill-lab";
 import { useNotificationUiState } from "./hooks/use-notification-ui-state";
 import { useThreadNotifications } from "./hooks/use-thread-notifications";
 import { useAppNotice } from "./hooks/use-app-notice";
-import { useProjectFilePreview } from "./hooks/use-project-file-preview";
+import { parseWorkspaceFileKey, useProjectFilePreview } from "./hooks/use-project-file-preview";
 import { useStableEvent } from "./hooks/use-stable-event";
 import { DATABASE_PERMISSION_OPTIONS, getSkillSortLabel, RESPONSE_TONE_OPTIONS, SKILL_SORT_OPTIONS } from "./settings/settings-options";
 import { reregisterBrowserWebviews } from "./workspace/browser-workspace";
@@ -504,6 +506,9 @@ export function App() {
   const [resizingPane, setResizingPane] = useState<ResizePane | null>(null);
   const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("files");
   const [rightWorkspaceExpandedTab, setRightWorkspaceExpandedTab] = useState<RightWorkspaceTab | null>("files");
+  const [activeFilesRoot, setActiveFilesRoot] = useState("");
+  const [activeGitRoot, setActiveGitRoot] = useState("");
+  const [activeTerminalRoot, setActiveTerminalRoot] = useState("");
   const {
     tabs: currentTerminalTabs,
     activeSessionId: activeTerminalSessionId,
@@ -560,6 +565,20 @@ export function App() {
   const suppressRuntimeProgressRef = useRef<Record<string, boolean>>({});
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeThreadSnapshot | null>(null);
+  const selectedThread = useMemo(
+    () => (snapshot?.thread.id === selectedThreadId ? snapshot.thread : null) ??
+      threads.find((thread) => thread.id === selectedThreadId) ?? null,
+    [threads, selectedThreadId, snapshot?.thread]
+  );
+  const workspaceRoots = selectedThread?.workspaceRoots?.length
+    ? selectedThread.workspaceRoots
+    : selectedThread?.cwd ? [selectedThread.cwd] : [];
+  const isCollaborationThread = Boolean(
+    (workspaceRoots.length > 1) || selectedThread?.title.startsWith("协作：")
+  );
+  const filesRoot = workspaceRoots.includes(activeFilesRoot) ? activeFilesRoot : workspaceRoots[0] ?? "";
+  const gitRoot = workspaceRoots.includes(activeGitRoot) ? activeGitRoot : workspaceRoots[0] ?? "";
+  const terminalRoot = workspaceRoots.includes(activeTerminalRoot) ? activeTerminalRoot : workspaceRoots[0] ?? "";
   const timelineBuildCacheRef = useRef<TimelineIncrementalCache | null>(null);
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
@@ -887,6 +906,11 @@ export function App() {
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
+  const [projectEditDraft, setProjectEditDraft] = useState<{ cwd: string; workspaceRoots: string[] } | null>(null);
+  const [isPickingProjectEditFolder, setIsPickingProjectEditFolder] = useState(false);
+  const [isSavingProjectEdit, setIsSavingProjectEdit] = useState(false);
+  const [isRemovingProject, setIsRemovingProject] = useState(false);
+  const [projectRemovalTarget, setProjectRemovalTarget] = useState<string | null>(null);
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
   const [resolvingPromptId, setResolvingPromptId] = useState<string | null>(null);
   const skillLabModelOptions = (config?.models ?? [])
@@ -1383,7 +1407,9 @@ export function App() {
     }
   }, []);
 
-  const selectedProjectFile = selectedThreadId ? selectedProjectFileByThread[selectedThreadId] ?? null : null;
+  const selectedProjectFileKey = selectedThreadId ? selectedProjectFileByThread[selectedThreadId] ?? null : null;
+  const selectedProjectFileTarget = selectedProjectFileKey ? parseWorkspaceFileKey(selectedProjectFileKey) : null;
+  const selectedProjectFile = selectedProjectFileTarget?.rootPath === filesRoot ? selectedProjectFileTarget.relativePath : null;
   const filePreviewPresence = useMotionPresence(filePreviewPath, 180);
   const visibleFilePreviewPath = filePreviewPath ?? filePreviewPresence.value;
   const projectFilePreview =
@@ -1466,7 +1492,11 @@ export function App() {
     if (!selectedThreadId) {
       return;
     }
-    ensureTerminalTab(selectedThreadId);
+    const root = threadsRef.current.find((thread) => thread.id === selectedThreadId)?.cwd ?? "";
+    setActiveFilesRoot(root);
+    setActiveGitRoot(root);
+    setActiveTerminalRoot(root);
+    ensureTerminalTab(selectedThreadId, "default", root);
   }, [selectedThreadId]);
 
   useEffect(() => {
@@ -1788,7 +1818,7 @@ export function App() {
           return;
         }
         const sessionId = typeof typed.payload?.sessionId === "string" ? typed.payload.sessionId : "default";
-        ensureTerminalTab(typed.threadId, sessionId);
+        ensureTerminalTab(typed.threadId, sessionId, terminalRoot);
         queueTerminalOutput(typed.threadId, sessionId, typed.payload?.data ?? "");
         return;
       }
@@ -2587,7 +2617,8 @@ export function App() {
 
     let cancelled = false;
 
-    void window.codexh.openTerminal({ threadId: selectedThreadId, sessionId: activeTerminalSessionId }).then((terminal) => {
+    const tabRoot = currentTerminalTabs.find((tab) => tab.id === activeTerminalSessionId)?.rootPath || terminalRoot;
+    void window.codexh.openTerminal({ threadId: selectedThreadId, sessionId: activeTerminalSessionId, rootPath: tabRoot || undefined }).then((terminal) => {
       if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
         return;
       }
@@ -2609,7 +2640,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeTerminalSessionId, isTerminalOpen, selectedThreadId]);
+  }, [activeTerminalSessionId, isTerminalOpen, selectedThreadId, terminalRoot]);
 
   useEffect(() => {
     const node = terminalScrollRef.current;
@@ -2629,16 +2660,17 @@ export function App() {
     setProjectFilesRevision(revision);
     setProjectFiles([]);
     setIsProjectFilesLoading(true);
-    void window.codexh.listProjectFiles(selectedThreadId, "").then((entries) => {
+    if (!filesRoot) return;
+    void window.codexh.listProjectFiles({ threadId: selectedThreadId, rootPath: filesRoot, relativeDirectory: "" }).then((entries) => {
       if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
         return;
       }
       setProjectFiles(entries);
-      reconcileSelectedFile(selectedThreadId, entries);
+      reconcileSelectedFile(selectedThreadId, filesRoot, entries);
     }).catch(() => {
       if (!cancelled) {
         setProjectFiles([]);
-        clearSelectedFile(selectedThreadId);
+        clearSelectedFile(selectedThreadId, filesRoot);
       }
     }).finally(() => {
       if (!cancelled) {
@@ -2649,14 +2681,14 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [clearSelectedFile, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThreadId]);
+  }, [clearSelectedFile, filesRoot, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThreadId]);
 
   const loadProjectDirectory = useCallback(async (relativeDirectory: string): Promise<boolean> => {
     const threadId = selectedThreadId;
     const revision = projectFilesRevisionRef.current;
     if (!threadId) return false;
     try {
-      const entries = await window.codexh.listProjectFiles(threadId, relativeDirectory);
+      const entries = await window.codexh.listProjectFiles({ threadId, rootPath: filesRoot, relativeDirectory });
       if (selectedThreadIdRef.current !== threadId || projectFilesRevisionRef.current !== revision) {
         return false;
       }
@@ -2666,7 +2698,7 @@ export function App() {
       showNotice("无法读取文件夹", { message: error instanceof Error ? error.message : String(error) });
       return false;
     }
-  }, [selectedThreadId, showNotice]);
+  }, [filesRoot, selectedThreadId, showNotice]);
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -2677,10 +2709,11 @@ export function App() {
     setGitActionMessage(null);
     const timer = window.setTimeout(() => {
       setGitLoading(true);
-      void window.codexh.getGitSnapshot(selectedThreadId).then((next) => {
+      if (!gitRoot) return;
+      void window.codexh.getGitSnapshot({ threadId: selectedThreadId, rootPath: gitRoot }).then((next) => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
           setGitSnapshot(next as GitSnapshot);
-          setGitSnapshotThreadId(selectedThreadId);
+          setGitSnapshotThreadId(`${selectedThreadId}:${gitRoot}`);
         }
       }).catch((error: unknown) => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
@@ -2693,7 +2726,7 @@ export function App() {
             canCreatePullRequest: false,
             files: []
           });
-          setGitSnapshotThreadId(selectedThreadId);
+          setGitSnapshotThreadId(`${selectedThreadId}:${gitRoot}`);
         }
       }).finally(() => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) setGitLoading(false);
@@ -2703,10 +2736,10 @@ export function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [gitRefreshRevision, selectedThreadId]);
+  }, [gitRefreshRevision, gitRoot, selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
       return;
     }
 
@@ -2782,19 +2815,24 @@ export function App() {
           return;
         }
 
+        if (projectEditDraft && !isSavingProjectEdit && !isRemovingProject) {
+          setProjectEditDraft(null);
+          return;
+        }
+
+        if (projectRemovalTarget && !isRemovingProject) {
+          setProjectRemovalTarget(null);
+          return;
+        }
+
         setIsSettingsOpen(false);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isQuickNotesOpen, isSettingsOpen, notice, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
+  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
 
-  const selectedThread = useMemo(
-    () => (snapshot?.thread.id === selectedThreadId ? snapshot.thread : null) ??
-      threads.find((thread) => thread.id === selectedThreadId) ?? null,
-    [threads, selectedThreadId, snapshot?.thread]
-  );
   useLayoutEffect(() => {
     snapshotThreadIdRef.current = snapshot?.thread.id ?? null;
   }, [snapshot?.thread.id]);
@@ -4376,10 +4414,15 @@ export function App() {
   async function createThreadRecord(
     mode: "project" | "chat",
     cwdInput?: string,
-    options?: { useComposerSelection?: boolean }
+    options?: { useComposerSelection?: boolean; workspaceRoots?: string[]; title?: string }
   ) {
-    const title = mode === "project" ? "新建项目" : "新建任务";
-    const cwd = mode === "project" && cwdInput?.trim() ? cwdInput.trim() : undefined;
+    const title = options?.title ?? (mode === "project" ? "新建项目" : "新建任务");
+    const explicitRoots = options?.workspaceRoots?.map((root) => root.trim()).filter(Boolean);
+    const inheritedRoots = mode === "project" && cwdInput
+      ? threadsRef.current.find((thread) => thread.mode === "project" && thread.cwd && normalizeHistoryGroupKey(thread.cwd) === normalizeHistoryGroupKey(cwdInput) && getProjectWorkspaceRoots(thread).length > 1)?.workspaceRoots
+      : undefined;
+    const roots = explicitRoots ?? inheritedRoots;
+    const cwd = mode === "project" ? roots?.[0] ?? (cwdInput?.trim() || undefined) : undefined;
     const selection = config
       ? options?.useComposerSelection
         ? resolveSelectionFromConfig(config, composerProviderId, composerModelId)
@@ -4390,9 +4433,131 @@ export function App() {
       title,
       mode,
       cwd,
+      workspaceRoots: roots,
       providerId: selection?.providerId ?? null,
       modelId: selection?.modelId ?? null
     })) as ThreadRecord;
+  }
+
+  function openProjectEditor(cwd: string) {
+    const group = threadsRef.current.filter((thread) => thread.mode === "project" && thread.cwd && normalizeHistoryGroupKey(thread.cwd) === normalizeHistoryGroupKey(cwd));
+    const collaborationThread = group.find((thread) => getProjectWorkspaceRoots(thread).length > 1 || thread.title.startsWith("协作："));
+    const roots = getProjectWorkspaceRoots(collaborationThread ?? group[0]);
+    setProjectEditDraft({ cwd, workspaceRoots: roots.length > 0 ? roots : [cwd] });
+  }
+
+  async function createProjectChat(cwd: string) {
+    try {
+      const thread = await createThreadRecord("project", cwd, { title: "新建聊天" });
+      activateNewThread(thread);
+    } catch (error) {
+      showNotice("新建聊天失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  function updateProjectEditRoots(nextRoots: string[]) {
+    setProjectEditDraft((current) => current ? { ...current, workspaceRoots: nextRoots } : current);
+  }
+
+  async function chooseProjectEditFolder() {
+    if (!projectEditDraft) return;
+    setIsPickingProjectEditFolder(true);
+    try {
+      const rootPath = await window.codexh.chooseProjectDirectory(projectEditDraft.cwd);
+      if (!rootPath) return;
+      const normalized = normalizeHistoryGroupKey(rootPath);
+      if (projectEditDraft.workspaceRoots.some((root) => normalizeHistoryGroupKey(root) === normalized)) {
+        showNotice("该文件夹已在项目中。");
+        return;
+      }
+      updateProjectEditRoots([...projectEditDraft.workspaceRoots, rootPath]);
+    } catch (error) {
+      showNotice("选择协作文件夹失败", { message: error instanceof Error ? error.message : "请稍后重试。" });
+    } finally {
+      setIsPickingProjectEditFolder(false);
+    }
+  }
+
+  function removeProjectEditRoot(rootPath: string) {
+    if (!projectEditDraft || projectEditDraft.workspaceRoots[0] === rootPath) return;
+    updateProjectEditRoots(projectEditDraft.workspaceRoots.filter((root) => root !== rootPath));
+  }
+
+  async function saveProjectEdit() {
+    const draft = projectEditDraft;
+    if (!draft || isSavingProjectEdit || isRemovingProject) return;
+    const group = threadsRef.current.filter((thread) => thread.mode === "project" && thread.cwd && normalizeHistoryGroupKey(thread.cwd) === normalizeHistoryGroupKey(draft.cwd));
+    if (group.some((thread) => thread.status === "running" || thread.status === "waiting")) {
+      showNotice("项目任务运行期间不能修改源文件夹。");
+      return;
+    }
+    setIsSavingProjectEdit(true);
+    try {
+      let nextThreads = threadsRef.current;
+      for (const thread of group) {
+        let current = getProjectWorkspaceRoots(thread);
+        let updated = thread;
+        for (const rootPath of draft.workspaceRoots.filter((root) => !current.some((entry) => normalizeHistoryGroupKey(entry) === normalizeHistoryGroupKey(root)))) {
+          updated = await window.codexh.addThreadWorkspaceRoot({ threadId: updated.id, rootPath });
+          current = getProjectWorkspaceRoots(updated);
+          nextThreads = nextThreads.map((entry) => entry.id === updated.id ? updated : entry);
+        }
+        for (const rootPath of current.slice(1).filter((root) => !draft.workspaceRoots.some((entry) => normalizeHistoryGroupKey(entry) === normalizeHistoryGroupKey(root)))) {
+          updated = await window.codexh.removeThreadWorkspaceRoot({ threadId: updated.id, rootPath });
+          current = getProjectWorkspaceRoots(updated);
+          nextThreads = nextThreads.map((entry) => entry.id === updated.id ? updated : entry);
+        }
+      }
+      setThreads(nextThreads);
+      setProjectEditDraft(null);
+      await refreshThreads();
+      if (selectedThreadId && group.some((thread) => thread.id === selectedThreadId)) await refreshSnapshot(selectedThreadId);
+      showNotice("项目源文件夹已更新。", { tone: "success" });
+    } catch (error) {
+      showNotice("保存项目失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsSavingProjectEdit(false);
+    }
+  }
+
+  async function removeProjectByCwd(cwd: string) {
+    if (isSavingProjectEdit || isRemovingProject) return;
+    const group = threadsRef.current.filter((thread) => thread.mode === "project" && thread.cwd && normalizeHistoryGroupKey(thread.cwd) === normalizeHistoryGroupKey(cwd));
+    if (group.some((thread) => thread.status === "running" || thread.status === "waiting")) {
+      showNotice("项目任务运行期间不能移除项目。");
+      return;
+    }
+    setIsRemovingProject(true);
+    try {
+      const deletedIds = new Set(group.map((thread) => thread.id));
+      for (const thread of group) await window.codexh.deleteThread(thread.id);
+      if (selectedThreadId && deletedIds.has(selectedThreadId)) {
+        selectThreadId(null);
+        setSnapshot(null);
+      }
+      setProjectEditDraft(null);
+      setProjectRemovalTarget(null);
+      await refreshThreads({ fallbackToFirst: false });
+      showNotice("项目已移除，磁盘文件未删除。", { tone: "success" });
+    } catch (error) {
+      showNotice("移除项目失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsRemovingProject(false);
+    }
+  }
+
+  async function removeLocalProject() {
+    if (!projectEditDraft) return;
+    await removeProjectByCwd(projectEditDraft.cwd);
+  }
+
+  function requestRemoveProject(cwd: string) {
+    setProjectRemovalTarget(cwd);
+  }
+
+  async function confirmRemoveProject() {
+    if (!projectRemovalTarget) return;
+    await removeProjectByCwd(projectRemovalTarget);
   }
 
   async function openProjectFolder(targetPath: string) {
@@ -5701,8 +5866,9 @@ export function App() {
     }
 
     setActiveTerminalInput("");
+    const rootPath = currentTerminalTabs.find((tab) => tab.id === activeTerminalSessionId)?.rootPath || terminalRoot;
     void window.codexh
-      .writeTerminal({ threadId: selectedThreadId, input: command, sessionId: activeTerminalSessionId })
+      .writeTerminal({ threadId: selectedThreadId, input: command, sessionId: activeTerminalSessionId, rootPath: rootPath || undefined })
       .catch((error: unknown) => {
         updateTerminalSessionState(selectedThreadId, activeTerminalSessionId, (current) => ({
           output: `${current?.output ?? ""}\nTerminal error: ${error instanceof Error ? error.message : String(error)}\n`
@@ -5711,6 +5877,13 @@ export function App() {
           shell: current?.shell ?? "PowerShell"
         }));
     });
+  }
+
+  function changeTerminalRoot(rootPath: string) {
+    setActiveTerminalRoot(rootPath);
+    const existing = [...currentTerminalTabs].reverse().find((tab) => tab.rootPath === rootPath);
+    if (existing) selectTerminalTab(existing.id);
+    else addTerminalTab(rootPath);
   }
 
   async function runGitAction(action: () => Promise<GitActionResult>) {
@@ -5722,7 +5895,7 @@ export function App() {
       const result = await action();
       if (selectedThreadIdRef.current === actionThreadId) {
         setGitSnapshot(result.snapshot);
-        setGitSnapshotThreadId(actionThreadId);
+        setGitSnapshotThreadId(`${actionThreadId}:${gitRoot}`);
         setGitActionMessage(result.message);
       }
     } catch (error) {
@@ -5787,6 +5960,10 @@ export function App() {
   const historySearchPresence = useMotionPresence(isHistorySearchOpen ? true : null);
   const settingsPresence = useMotionPresence(isSettingsOpen ? true : null, 220);
   const projectCreatePresence = useMotionPresence(isProjectCreateOpen ? true : null);
+  const projectEditPresence = useMotionPresence(projectEditDraft, 180);
+  const visibleProjectEditDraft = projectEditDraft ?? projectEditPresence.value;
+  const projectRemovalPresence = useMotionPresence(projectRemovalTarget, 180);
+  const visibleProjectRemovalTarget = projectRemovalTarget ?? projectRemovalPresence.value;
   const mcpCreatePresence = useMotionPresence(isMcpCreateOpen && mcpCreateDraft ? mcpCreateDraft : null);
   const visibleMcpCreateDraft = mcpCreateDraft ?? mcpCreatePresence.value;
   const gpaPlanResumePresence = useMotionPresence(gpaPlanResumeDialog);
@@ -5944,6 +6121,9 @@ export function App() {
   const toggleThreadPinnedEvent = useStableEvent(toggleThreadPinned);
   const requestDeleteHistoryThreadEvent = useStableEvent(requestDeleteHistoryThread);
   const beginRenameHistoryThreadEvent = useStableEvent(beginRenameHistoryThread);
+  const openProjectEditorEvent = useStableEvent(openProjectEditor);
+  const createProjectChatEvent = useStableEvent((cwd: string) => { void createProjectChat(cwd); });
+  const requestRemoveProjectEvent = useStableEvent(requestRemoveProject);
   const commitRenameHistoryThreadEvent = useStableEvent(commitRenameHistoryThread);
   const cancelRenameHistoryThreadEvent = useStableEvent(cancelRenameHistoryThread);
   const hideRightWorkspaceEvent = useStableEvent(() => setIsRightWorkspaceOpen(false));
@@ -5952,14 +6132,14 @@ export function App() {
     if (!selectedThreadId || gitLoading) return;
     setGitRefreshRevision((current) => current + 1);
   });
-  const visibleGitSnapshot = gitSnapshotThreadId === selectedThreadId ? gitSnapshot : null;
+  const visibleGitSnapshot = gitSnapshotThreadId === `${selectedThreadId}:${gitRoot}` ? gitSnapshot : null;
   const selectedProjectBranch = visibleGitSnapshot?.available
     ? visibleGitSnapshot.branch?.trim() || null
     : null;
   const runGitActionEvent = useStableEvent(runGitAction);
   const sendGitCommentEvent = useStableEvent((content: string) => { void sendMessage(content); });
-  const selectProjectFileEvent = useStableEvent(selectProjectFile);
-  const openProjectPreviewEvent = useStableEvent(openProjectPreview);
+  const selectProjectFileEvent = useStableEvent((path: string) => selectProjectFile(filesRoot, path));
+  const openProjectPreviewEvent = useStableEvent((path: string) => openProjectPreview(filesRoot, path));
   const loadProjectDirectoryEvent = useStableEvent(loadProjectDirectory);
   const closeBrowserTabEvent = useStableEvent((threadId: string, tabId: string) => {
     void window.codexh.closeBrowserTab({ threadId, tabId });
@@ -6056,6 +6236,9 @@ export function App() {
         onTogglePinned={toggleThreadPinnedEvent}
         onRequestDelete={requestDeleteHistoryThreadEvent}
         onBeginRename={beginRenameHistoryThreadEvent}
+        onEditProject={openProjectEditorEvent}
+        onCreateProjectChat={createProjectChatEvent}
+        onRemoveProject={requestRemoveProjectEvent}
       />
 
       {historySearchPresence.value ? (
@@ -6342,13 +6525,13 @@ export function App() {
                   {selectedProjectCwd ? (
                     <button
                       type="button"
-                      className="composer-project-pill"
+                      className={`composer-project-pill ${isCollaborationThread ? "is-collaboration" : ""}`}
                       title={selectedProjectBranch
-                        ? `${selectedProjectBranch} / ${selectedProjectCwd}`
-                        : `打开文件夹：${selectedProjectCwd}`}
+                        ? `${isCollaborationThread ? "协作模式：" : ""}${selectedProjectBranch} / ${selectedProjectCwd}`
+                        : `${isCollaborationThread ? "协作模式：" : "打开文件夹："}${selectedProjectCwd}`}
                       onClick={() => void openProjectFolder(selectedProjectCwd)}
                     >
-                      <IconFolder />
+                      {isCollaborationThread ? <IconFolders /> : <IconFolder />}
                       {selectedProjectBranch ? (
                         <>
                           <span className="composer-project-branch">{selectedProjectBranch}</span>
@@ -6556,8 +6739,11 @@ export function App() {
               onInputChange={setActiveTerminalInput}
               onSubmit={submitTerminalInput}
               onSelectTab={selectTerminalTab}
-              onAddTab={addTerminalTab}
+              onAddTab={() => addTerminalTab(terminalRoot)}
               onCloseTab={closeTerminalTab}
+              workspaceRoots={workspaceRoots}
+              activeRootPath={currentTerminalTabs.find((tab) => tab.id === activeTerminalSessionId)?.rootPath || terminalRoot}
+              onRootChange={changeTerminalRoot}
               hasThread={Boolean(selectedThreadId)}
             />
           </section>
@@ -6579,7 +6765,11 @@ export function App() {
           expandedTab={rightWorkspaceExpandedTab}
           onExpandedTabChange={setRightWorkspaceExpandedTab}
           onHide={hideRightWorkspaceEvent}
-          projectRoot={selectedThread?.cwd ?? ""}
+          projectRoot={filesRoot}
+          workspaceRoots={workspaceRoots}
+          onProjectRootChange={setActiveFilesRoot}
+          gitRoot={gitRoot}
+          onGitRootChange={setActiveGitRoot}
           onAddAttachment={addComposerAttachmentEvent}
           projectFiles={projectFiles}
           projectFilesLoading={isProjectFilesLoading}
@@ -6603,7 +6793,7 @@ export function App() {
 
       {visibleFilePreviewPath ? (
         <FilePreviewDialog
-          path={visibleFilePreviewPath}
+          path={parseWorkspaceFileKey(visibleFilePreviewPath).relativePath}
           preview={projectFilePreview}
           motionPhase={filePreviewPresence.phase}
           onClose={closeProjectPreview}
@@ -6833,6 +7023,35 @@ export function App() {
           onChooseFolder={() => void chooseProjectFolder()}
           onPathChange={setProjectPathDraft}
           onConfirm={() => void confirmProjectCreate()}
+        />
+      ) : null}
+
+      {visibleProjectEditDraft ? (
+        <ProjectEditSheet
+          motionPhase={projectEditPresence.phase}
+          cwd={visibleProjectEditDraft.cwd}
+          workspaceRoots={visibleProjectEditDraft.workspaceRoots}
+          isPickingFolder={isPickingProjectEditFolder}
+          isSaving={isSavingProjectEdit}
+          isRemoving={isRemovingProject}
+          onClose={() => setProjectEditDraft(null)}
+          onChooseFolder={() => void chooseProjectEditFolder()}
+          onRemoveRoot={removeProjectEditRoot}
+          onSave={() => void saveProjectEdit()}
+          onRemoveProject={() => void removeLocalProject()}
+        />
+      ) : null}
+
+      {visibleProjectRemovalTarget ? (
+        <ConfirmationSheet
+          motionPhase={projectRemovalPresence.phase}
+          titleId="project-remove-confirm-title"
+          title="移除这个项目？"
+          description={<>将移除“{getFileLeafName(visibleProjectRemovalTarget)}”下的全部项目聊天记录。磁盘上的项目文件夹和文件不会被删除。</>}
+          confirmLabel={isRemovingProject ? "正在移除..." : "移除项目"}
+          busy={isRemovingProject}
+          onClose={() => setProjectRemovalTarget(null)}
+          onConfirm={() => void confirmRemoveProject()}
         />
       ) : null}
 

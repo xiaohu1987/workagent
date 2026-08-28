@@ -23,6 +23,10 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onExpandedTabChange,
   onHide,
   projectRoot,
+  workspaceRoots,
+  onProjectRootChange,
+  gitRoot,
+  onGitRootChange,
   onAddAttachment,
   projectFiles,
   projectFilesLoading,
@@ -50,6 +54,10 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onExpandedTabChange: (tab: RightWorkspaceTab | null) => void;
   onHide: () => void;
   projectRoot: string;
+  workspaceRoots: string[];
+  onProjectRootChange: (rootPath: string) => void;
+  gitRoot: string;
+  onGitRootChange: (rootPath: string) => void;
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
   projectFiles: ProjectFileEntry[];
   projectFilesLoading: boolean;
@@ -107,6 +115,9 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
           <div id="right-workspace-content-changes" className={`right-workspace-view ${activeTab === "changes" ? "active" : ""}`} role={activeTab === "changes" ? "tabpanel" : undefined} aria-labelledby={activeTab === "changes" ? "right-workspace-tab-changes" : undefined} aria-hidden={activeTab !== "changes"} inert={activeTab !== "changes"}>
             <GitChangesWorkspace
               threadId={threadId}
+              workspaceRoots={workspaceRoots}
+              rootPath={gitRoot}
+              onRootChange={onGitRootChange}
               snapshot={gitSnapshot}
               loading={gitLoading}
               busy={gitActionBusy}
@@ -130,6 +141,8 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
             onOpen={onOpenProjectFile}
             onLoadDirectory={onLoadProjectDirectory}
             projectRoot={projectRoot}
+            workspaceRoots={workspaceRoots}
+            onProjectRootChange={onProjectRootChange}
             onAddAttachment={onAddAttachment}
           />
         </div>

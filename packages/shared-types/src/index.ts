@@ -96,6 +96,8 @@ export interface ThreadRecord {
   mode: ThreadMode;
   workspaceKind: WorkspaceKind;
   cwd: string | null;
+  /** Ordered writable workspace roots. The first entry is the fixed primary cwd. */
+  workspaceRoots?: string[];
   projectId: string | null;
   workspaceId: string | null;
   modelId: string;

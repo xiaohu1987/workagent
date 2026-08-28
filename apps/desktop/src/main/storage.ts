@@ -709,6 +709,16 @@ export class DatabaseService {
         metadata_json TEXT,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS thread_workspace_roots (
+        thread_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (thread_id, path)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_workspace_roots_position
+        ON thread_workspace_roots(thread_id, position);
       CREATE TABLE IF NOT EXISTS queued_messages (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
@@ -991,6 +1001,10 @@ export class DatabaseService {
         ON subagent_pending_dispatch(root_thread_id, created_at);
     `);
     this.ensureColumns();
+    this.#db.prepare(`
+      INSERT OR IGNORE INTO thread_workspace_roots (thread_id, path, position, is_primary, created_at)
+      SELECT id, cwd, 0, 1, created_at FROM threads WHERE cwd IS NOT NULL AND cwd <> ''
+    `).run();
   }
 
   private ensureColumns(): void {
@@ -1104,26 +1118,26 @@ export class DatabaseService {
     return this.#db
       .prepare(`SELECT * FROM threads ${includeSubagents ? "" : "WHERE parent_thread_id IS NULL"} ORDER BY is_pinned DESC, pinned_at DESC, created_at DESC, rowid DESC`)
       .all()
-      .map(mapThreadRow);
+      .map((row) => this.mapThreadRow(row));
   }
 
   public listAgentTree(rootThreadId: string): ThreadRecord[] {
     return this.#db
       .prepare("SELECT * FROM threads WHERE root_thread_id = ? ORDER BY agent_path ASC, created_at ASC")
       .all(rootThreadId)
-      .map(mapThreadRow);
+      .map((row) => this.mapThreadRow(row));
   }
 
   public listChildThreads(parentThreadId: string): ThreadRecord[] {
     return this.#db
       .prepare("SELECT * FROM threads WHERE parent_thread_id = ? ORDER BY created_at ASC")
       .all(parentThreadId)
-      .map(mapThreadRow);
+      .map((row) => this.mapThreadRow(row));
   }
 
   public findAgentThread(rootThreadId: string, agentPath: string): ThreadRecord | null {
     const row = this.#db.prepare("SELECT * FROM threads WHERE root_thread_id = ? AND agent_path = ?").get(rootThreadId, agentPath);
-    return row ? mapThreadRow(row) : null;
+    return row ? this.mapThreadRow(row) : null;
   }
 
   public searchThreads(query: string, limit = 50): ThreadSearchResult[] {
@@ -1163,6 +1177,7 @@ export class DatabaseService {
     mode: ThreadRecord["mode"];
     workspaceKind: ThreadRecord["workspaceKind"];
     cwd?: string | null;
+    workspaceRoots?: string[];
     modelId: string;
     providerId: string;
     parentThreadId?: string | null;
@@ -1176,14 +1191,19 @@ export class DatabaseService {
   }): ThreadRecord {
     const now = nowIso();
     const id = randomUUID();
+    const workspaceRoots = input.workspaceRoots?.length
+      ? [...input.workspaceRoots]
+      : input.cwd ? [input.cwd] : [];
+    const primaryRoot = workspaceRoots[0] ?? input.cwd ?? null;
     const thread: ThreadRecord = {
       id,
       title: input.title,
       mode: input.mode,
       workspaceKind: input.workspaceKind,
-      cwd: input.cwd ?? null,
-      projectId: input.cwd ? hashPath(input.cwd) : null,
-      workspaceId: input.cwd ? hashPath(input.cwd) : null,
+      cwd: primaryRoot,
+      workspaceRoots,
+      projectId: primaryRoot ? hashPath(primaryRoot) : null,
+      workspaceId: primaryRoot ? hashPath(primaryRoot) : null,
       modelId: input.modelId,
       providerId: input.providerId,
       status: input.status ?? "idle",
@@ -1239,6 +1259,8 @@ export class DatabaseService {
         thread.multiAgentMode
       );
 
+    this.replaceWorkspaceRoots(thread.id, workspaceRoots, now);
+
     return thread;
   }
 
@@ -1247,7 +1269,25 @@ export class DatabaseService {
     if (!row) {
       throw new Error(`Thread ${threadId} not found.`);
     }
-    return mapThreadRow(row);
+    return this.mapThreadRow(row);
+  }
+
+  public setThreadWorkspaceRoots(threadId: string, workspaceRoots: string[]): ThreadRecord {
+    const current = this.getThread(threadId);
+    const primaryRoot = workspaceRoots[0] ?? null;
+    if (primaryRoot !== current.cwd) {
+      throw new Error("The primary workspace folder cannot be changed.");
+    }
+    this.#db.exec("BEGIN");
+    try {
+      this.replaceWorkspaceRoots(threadId, workspaceRoots, nowIso());
+      const updated = this.updateThread(threadId, { workspaceRoots });
+      this.#db.exec("COMMIT");
+      return updated;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   public updateThread(threadId: string, patch: Partial<ThreadRecord>): ThreadRecord {
@@ -1255,6 +1295,7 @@ export class DatabaseService {
     const next: ThreadRecord = {
       ...current,
       ...patch,
+      workspaceRoots: patch.workspaceRoots ?? current.workspaceRoots,
       updatedAt: patch.updatedAt ?? nowIso()
     };
 
@@ -1407,7 +1448,7 @@ export class DatabaseService {
       return null;
     }
 
-    const thread = mapThreadRow(row);
+    const thread = this.mapThreadRow(row);
     const threadScopedTables = [
       "messages",
       "queued_messages",
@@ -1423,6 +1464,7 @@ export class DatabaseService {
     this.#db.exec("BEGIN");
     try {
       this.#db.prepare("DELETE FROM subagent_pending_dispatch WHERE thread_id = ?").run(threadId);
+      this.#db.prepare("DELETE FROM thread_workspace_roots WHERE thread_id = ?").run(threadId);
       for (const table of threadScopedTables) {
         this.#db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(threadId);
       }
@@ -1434,6 +1476,22 @@ export class DatabaseService {
     }
 
     return thread;
+  }
+
+  private mapThreadRow(row: any): ThreadRecord {
+    const workspaceRoots = (this.#db
+      .prepare("SELECT path FROM thread_workspace_roots WHERE thread_id = ? ORDER BY position ASC")
+      .all(row.id) as Array<{ path: string }>).map((entry) => entry.path);
+    return mapThreadRow(row, workspaceRoots);
+  }
+
+  private replaceWorkspaceRoots(threadId: string, workspaceRoots: string[], createdAt: string): void {
+    this.#db.prepare("DELETE FROM thread_workspace_roots WHERE thread_id = ?").run(threadId);
+    const insert = this.#db.prepare(`
+      INSERT INTO thread_workspace_roots (thread_id, path, position, is_primary, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    workspaceRoots.forEach((root, position) => insert.run(threadId, root, position, Number(position === 0), createdAt));
   }
 
   public clearThreadConversation(threadId: string): ThreadRecord {
@@ -3592,13 +3650,14 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
-function mapThreadRow(row: any): ThreadRecord {
+function mapThreadRow(row: any, workspaceRoots: string[] = []): ThreadRecord {
   return {
     id: row.id,
     title: row.title,
     mode: row.mode,
     workspaceKind: row.workspace_kind,
     cwd: row.cwd,
+    workspaceRoots: workspaceRoots.length > 0 ? workspaceRoots : row.cwd ? [row.cwd] : [],
     projectId: row.project_id,
     workspaceId: row.workspace_id,
     modelId: row.model_id,
