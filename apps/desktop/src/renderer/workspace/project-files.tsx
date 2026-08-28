@@ -288,6 +288,11 @@ export const ProjectFilesWorkspace = memo(function ProjectFilesWorkspace({
               path: rootContextMenu.rootPath,
               label: rootContextMenu.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || rootContextMenu.rootPath
             })
+          }, {
+            id: "open-root-in-explorer",
+            label: "资源管理器中打开",
+            icon: <IconFolder />,
+            onSelect: () => void window.codexh.openFolder(rootContextMenu.rootPath)
           }]}
         />
       ) : null}
