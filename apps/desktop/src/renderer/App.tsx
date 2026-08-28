@@ -154,7 +154,6 @@ import {
 import {
   PanelResizeHandle,
   ResizePane,
-  WorkspaceAccordionSection,
   WorkspaceEmptyState,
   WorkspaceSubtabStrip
 } from "./workspace/panels";
@@ -361,6 +360,16 @@ export function didTranscriptScrollUpWithoutContentShrink(
 ): boolean {
   return current.scrollHeight >= previous.scrollHeight - 1 &&
     current.scrollTop < previous.scrollTop - 1;
+}
+
+export function isPointerInTranscriptScrollbar(
+  clientX: number,
+  boundsRight: number,
+  offsetWidth: number,
+  clientWidth: number
+): boolean {
+  const scrollbarWidth = Math.max(10, offsetWidth - clientWidth);
+  return clientX >= boundsRight - scrollbarWidth && clientX <= boundsRight;
 }
 
 function trimRuntimeActivityEntries(entries: RuntimeActivityEntry[]): RuntimeActivityEntry[] {
@@ -977,6 +986,7 @@ export function App() {
     generate: generateUserSkill
   } = userSkillGeneration;
   const [isTranscriptAtLatest, setIsTranscriptAtLatest] = useState(true);
+  const [isTranscriptScrollbarDragging, setIsTranscriptScrollbarDragging] = useState(false);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [historyThreadDeleteConfirmation, setHistoryThreadDeleteConfirmation] = useState<ThreadRecord | null>(null);
   const [deletingQueuedMessageId, setDeletingQueuedMessageId] = useState<string | null>(null);
@@ -2679,6 +2689,7 @@ export function App() {
             message: error instanceof Error ? error.message : String(error),
             ahead: 0,
             behind: 0,
+            branches: [],
             canCreatePullRequest: false,
             files: []
           });
@@ -3688,11 +3699,26 @@ export function App() {
     const node = chatScrollRef.current;
     if (!node) return;
     const bounds = node.getBoundingClientRect();
-    const scrollbarWidth = Math.max(10, node.offsetWidth - node.clientWidth);
-    if (clientX >= bounds.right - scrollbarWidth) {
+    if (isPointerInTranscriptScrollbar(clientX, bounds.right, node.offsetWidth, node.clientWidth)) {
       beginManualTranscriptScroll();
+      setIsTranscriptScrollbarDragging(true);
     }
   }
+
+  useEffect(() => {
+    if (!isTranscriptScrollbarDragging) return;
+    const finishScrollbarDrag = () => setIsTranscriptScrollbarDragging(false);
+    window.addEventListener("pointerup", finishScrollbarDrag, true);
+    window.addEventListener("pointercancel", finishScrollbarDrag, true);
+    window.addEventListener("mouseup", finishScrollbarDrag, true);
+    window.addEventListener("blur", finishScrollbarDrag);
+    return () => {
+      window.removeEventListener("pointerup", finishScrollbarDrag, true);
+      window.removeEventListener("pointercancel", finishScrollbarDrag, true);
+      window.removeEventListener("mouseup", finishScrollbarDrag, true);
+      window.removeEventListener("blur", finishScrollbarDrag);
+    };
+  }, [isTranscriptScrollbarDragging]);
 
   useEffect(() => {
     return () => {
@@ -6166,6 +6192,7 @@ export function App() {
                   finalizingAssistantMessageIds={finalizingAssistantMessageIds}
                   completedLatestTurnAt={completedTurnTimer?.completedAt ?? null}
                   scrollElementRef={chatScrollRef}
+                  scrollInteractionActive={isTranscriptScrollbarDragging}
                   onOpenFolder={openGeneratedFileLocationEvent}
                   onToggleTurn={toggleConversationTurnCollapsedEvent}
                 />

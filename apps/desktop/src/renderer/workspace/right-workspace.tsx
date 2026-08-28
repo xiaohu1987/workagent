@@ -1,15 +1,15 @@
 import { memo, useMemo } from "react";
+import type { ReactNode } from "react";
 import type { GitActionResult, GitSnapshot, RuntimeThreadSnapshot, ToolCallRecord } from "@shared-types";
 import type { ComposerAttachmentInput } from "../lib/conversation-utils";
 import { getProjectRelativeGitFiles, type ProjectFileEntry } from "../lib/project-files";
 import { IconChevronRight, IconFileChanges, IconFolder, IconGlobe } from "../icons";
 import { BrowserWorkspace } from "./browser-workspace";
 import { GitChangesWorkspace } from "./git-changes";
-import { WorkspaceAccordionSection, WorkspaceEmptyState } from "./panels";
+import { WorkspaceEmptyState } from "./panels";
 import { ProjectFilesWorkspace } from "./project-files";
 
 export type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
-const SHOW_GIT_WORKSPACE = false;
 
 export function hasRecognizedGitRepository(snapshot: GitSnapshot | null, projectRoot: string): boolean {
   if (snapshot?.available !== true || !snapshot.root?.trim() || !projectRoot.trim()) return false;
@@ -20,7 +20,6 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   hidden,
   activeTab,
   onTabChange,
-  expandedTab,
   onExpandedTabChange,
   onHide,
   projectRoot,
@@ -71,23 +70,41 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
   threadId: string | null;
 }) {
-  const showGitWorkspace = SHOW_GIT_WORKSPACE && hasRecognizedGitRepository(gitSnapshot, projectRoot);
+  const showGitWorkspace = true;
   const projectGitFiles = useMemo(
     () => getProjectRelativeGitFiles(gitSnapshot, projectRoot),
     [gitSnapshot, projectRoot]
   );
   return (
     <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="Right workspace" aria-hidden={hidden}>
-      <div className="right-workspace-accordion">
+      <div className="right-workspace-tabs" role="tablist" aria-label="工作区切换">
+        <WorkspaceTabButton
+          id="files"
+          label="文件夹"
+          icon={<IconFolder />}
+          active={activeTab === "files"}
+          onClick={() => selectWorkspaceTab("files", onTabChange, onExpandedTabChange)}
+        />
+        <WorkspaceTabButton
+          id="browser"
+          label="浏览器"
+          icon={<IconGlobe />}
+          active={activeTab === "browser"}
+          onClick={() => selectWorkspaceTab("browser", onTabChange, onExpandedTabChange)}
+        />
         {showGitWorkspace ? (
-          <WorkspaceAccordionSection
-            active={expandedTab === "changes"}
-            id="git"
+          <WorkspaceTabButton
+            id="changes"
             label="Git"
-            badge={gitSnapshot?.files.length ?? 0}
             icon={<IconFileChanges />}
-            onClick={() => toggleWorkspaceSection("changes", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
-          >
+            active={activeTab === "changes"}
+            onClick={() => selectWorkspaceTab("changes", onTabChange, onExpandedTabChange)}
+          />
+        ) : null}
+      </div>
+      <div className="right-workspace-content">
+        {showGitWorkspace ? (
+          <div id="right-workspace-content-changes" className={`right-workspace-view ${activeTab === "changes" ? "active" : ""}`} role={activeTab === "changes" ? "tabpanel" : undefined} aria-labelledby={activeTab === "changes" ? "right-workspace-tab-changes" : undefined} aria-hidden={activeTab !== "changes"} inert={activeTab !== "changes"}>
             <GitChangesWorkspace
               threadId={threadId}
               snapshot={gitSnapshot}
@@ -98,15 +115,9 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
               onAction={onGitAction}
               onComment={onGitComment}
             />
-          </WorkspaceAccordionSection>
+          </div>
         ) : null}
-        <WorkspaceAccordionSection
-          active={expandedTab === "files"}
-          id="files"
-          label="文件夹"
-          icon={<IconFolder />}
-          onClick={() => toggleWorkspaceSection("files", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
-        >
+        <div id="right-workspace-content-files" className={`right-workspace-view ${activeTab === "files" ? "active" : ""}`} role={activeTab === "files" ? "tabpanel" : undefined} aria-labelledby={activeTab === "files" ? "right-workspace-tab-files" : undefined} aria-hidden={activeTab !== "files"} inert={activeTab !== "files"}>
           <ProjectFilesWorkspace
             key={projectFilesRevision}
             files={projectFiles}
@@ -121,27 +132,21 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
             projectRoot={projectRoot}
             onAddAttachment={onAddAttachment}
           />
-        </WorkspaceAccordionSection>
-        <WorkspaceAccordionSection
-          active={expandedTab === "browser"}
-          id="browser"
-          label="浏览器"
-          icon={<IconGlobe />}
-          onClick={() => toggleWorkspaceSection("browser", activeTab, expandedTab, onTabChange, onExpandedTabChange)}
-        >
-          {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
-            <BrowserWorkspace
-              key={browserThreadId}
-              tabs={tabs}
-              threadId={browserThreadId}
-              onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
-              visible={!hidden && expandedTab === "browser" && browserThreadId === threadId}
-            />
-          ) : null)}
-          {threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
-            <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里。" />
-          ) : null}
-        </WorkspaceAccordionSection>
+        </div>
+        <div id="right-workspace-content-browser" className={`right-workspace-view ${activeTab === "browser" ? "active" : ""}`} role={activeTab === "browser" ? "tabpanel" : undefined} aria-labelledby={activeTab === "browser" ? "right-workspace-tab-browser" : undefined} aria-hidden={activeTab !== "browser"} inert={activeTab !== "browser"}>
+            {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
+              <BrowserWorkspace
+                key={browserThreadId}
+                tabs={tabs}
+                threadId={browserThreadId}
+                onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
+                visible={!hidden && activeTab === "browser" && browserThreadId === threadId}
+              />
+            ) : null)}
+            {threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
+              <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里。" />
+            ) : null}
+        </div>
       </div>
       <button
         type="button"
@@ -156,21 +161,43 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   );
 });
 
-function toggleWorkspaceSection(
+export function selectWorkspaceTab(
   tab: RightWorkspaceTab,
-  activeTab: RightWorkspaceTab,
-  expandedTab: RightWorkspaceTab | null,
   onTabChange: (tab: RightWorkspaceTab) => void,
   onExpandedTabChange: (tab: RightWorkspaceTab | null) => void
 ): void {
-  if (expandedTab === tab) {
-    onExpandedTabChange(null);
-    return;
-  }
-  if (activeTab !== tab) {
-    onTabChange(tab);
-  }
+  onTabChange(tab);
   onExpandedTabChange(tab);
+}
+
+function WorkspaceTabButton({
+  id,
+  label,
+  icon,
+  active,
+  onClick
+}: {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      id={`right-workspace-tab-${id}`}
+      className={`right-workspace-tab ${active ? "active" : ""}`}
+      role="tab"
+      aria-selected={active}
+      aria-controls={`right-workspace-content-${id}`}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+    >
+      {icon}
+    </button>
+  );
 }
 
 function normalizeWorkspacePath(value: string): string {

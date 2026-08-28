@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveMeasurementScrollAdjustment,
-  resolveVirtualizedRange
+  resolveVirtualizedRange,
+  shouldDeferVirtualTimelineMeasurement
 } from "../apps/desktop/src/renderer/timeline/virtualized-timeline";
 
 describe("virtualized timeline range", () => {
@@ -26,5 +27,11 @@ describe("virtualized timeline range", () => {
     expect(resolveMeasurementScrollAdjustment(180, 260, 400, 500, false)).toBe(80);
     expect(resolveMeasurementScrollAdjustment(180, 260, 540, 500, false)).toBe(0);
     expect(resolveMeasurementScrollAdjustment(180, 260, 400, 500, true)).toBe(0);
+  });
+
+  it("defers row measurements throughout a scrollbar drag and its release batch", () => {
+    expect(shouldDeferVirtualTimelineMeasurement(true, false)).toBe(true);
+    expect(shouldDeferVirtualTimelineMeasurement(false, true)).toBe(true);
+    expect(shouldDeferVirtualTimelineMeasurement(false, false)).toBe(false);
   });
 });

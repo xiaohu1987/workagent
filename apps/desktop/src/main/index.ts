@@ -508,6 +508,9 @@ function registerIpc(): void {
   );
   ipcMain.handle("git:push", (_event, threadId: string) => backend.pushGitChanges(threadId));
   ipcMain.handle("git:pull", (_event, threadId: string) => backend.pullGitChanges(threadId));
+  ipcMain.handle("git:switch-branch", (_event, payload: { threadId: string; branch: string }) =>
+    backend.switchGitBranch(payload.threadId, payload.branch)
+  );
   ipcMain.handle("git:create-pr", (_event, threadId: string) => backend.createGitPullRequest(threadId));
   ipcMain.handle("threads:delete", (_event, threadId: string) => backend.deleteThread(threadId));
   ipcMain.handle("threads:clear-conversation", (_event, threadId: string) =>

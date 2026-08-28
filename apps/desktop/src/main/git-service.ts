@@ -36,6 +36,7 @@ const EMPTY_SNAPSHOT: GitSnapshot = {
   available: false,
   ahead: 0,
   behind: 0,
+  branches: [],
   canCreatePullRequest: false,
   files: []
 };
@@ -69,7 +70,7 @@ export class GitService {
     const hasStagedChanges = changedFiles.some((file) => file.staged);
     const hasTrackedUnstagedChanges = changedFiles.some((file) => file.unstaged && !file.untracked);
     const emptyDiff: GitCommandResult = { code: 0, stdout: "", stderr: "" };
-    const [headResult, stagedResult, unstagedResult, remoteResult] = await Promise.all([
+    const [headResult, stagedResult, unstagedResult, remoteResult, branchesResult] = await Promise.all([
       runGit(root, ["rev-parse", "--short", "HEAD"]),
       hasStagedChanges
         ? runGit(root, ["diff", "--cached", "--no-ext-diff", "--no-color", "--unified=3"])
@@ -77,7 +78,8 @@ export class GitService {
       hasTrackedUnstagedChanges
         ? runGit(root, ["diff", "--no-ext-diff", "--no-color", "--unified=3"])
         : Promise.resolve(emptyDiff),
-      status.branch ? runGit(root, ["remote", "get-url", "origin"]) : Promise.resolve(emptyDiff)
+      status.branch ? runGit(root, ["remote", "get-url", "origin"]) : Promise.resolve(emptyDiff),
+      runGit(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
     ]);
     const stagedDiffs = parseDiff(stagedResult.stdout, "staged");
     const unstagedDiffs = parseDiff(unstagedResult.stdout, "unstaged");
@@ -106,6 +108,9 @@ export class GitService {
       upstream: status.upstream,
       ahead: status.ahead,
       behind: status.behind,
+      branches: branchesResult.code === 0
+        ? branchesResult.stdout.split(/\r?\n/).map((branch) => branch.trim()).filter(Boolean)
+        : status.branch ? [status.branch] : [],
       canCreatePullRequest: Boolean(comparison),
       files
     };
@@ -184,6 +189,23 @@ export class GitService {
     const result = await runGit(snapshot.root, ["pull", "--ff-only"]);
     if (result.code !== 0) return this.failure(snapshot.root, result.stderr.trim() || "拉取失败。请先处理本地修改或冲突。");
     return { ok: true, message: "已拉取远端更新", snapshot: await this.snapshot(snapshot.root) };
+  }
+
+  public async switchBranch(cwd: string, branch: string): Promise<GitActionResult> {
+    const root = await this.getRoot(cwd);
+    if (!root) return this.failure(cwd, "当前项目不是 Git 仓库。");
+    const name = branch.trim();
+    if (!name) return this.failure(root, "请选择要切换的分支。");
+    const branches = await runGit(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+    const available = branches.code === 0
+      ? branches.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+      : [];
+    if (!available.includes(name)) return this.failure(root, `本地分支不存在：${name}`);
+    const result = await runGit(root, ["switch", name]);
+    if (result.code !== 0) {
+      return this.failure(root, result.stderr.trim() || "切换分支失败，请先处理会被覆盖的本地修改。");
+    }
+    return { ok: true, message: `已切换到分支 ${name}`, snapshot: await this.snapshot(root) };
   }
 
   public async createPullRequest(cwd: string): Promise<GitActionResult> {

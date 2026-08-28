@@ -33,6 +33,7 @@ type Props = {
   finalizingAssistantMessageIds: Set<string>;
   completedLatestTurnAt: string | null;
   scrollElementRef: RefObject<HTMLElement | null>;
+  scrollInteractionActive: boolean;
   onOpenFolder: (filePath: string) => void;
   onToggleTurn: (turnId: string) => void;
 };
@@ -55,6 +56,7 @@ export const TimelineEntries = memo(function TimelineEntries({
   finalizingAssistantMessageIds,
   completedLatestTurnAt,
   scrollElementRef,
+  scrollInteractionActive,
   onOpenFolder,
   onToggleTurn
 }: Props) {
@@ -76,6 +78,7 @@ export const TimelineEntries = memo(function TimelineEntries({
       getKey={getTimelineEntryKey}
       getAnchorId={getTimelineEntryAnchorId}
       scrollElementRef={scrollElementRef}
+      scrollInteractionActive={scrollInteractionActive}
       renderItem={(entry) => {
         const entryTurn = turnByEntryId.get(entry.id);
         const isLatestTurn = entryTurn?.id === latestTurnId;

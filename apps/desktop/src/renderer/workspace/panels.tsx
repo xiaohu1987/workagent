@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { IconChevronDown, IconPlus, IconClose } from "../icons";
+import { IconPlus, IconClose } from "../icons";
 
 export type ResizePane = "sidebar" | "right-workspace";
 
@@ -33,46 +33,6 @@ export function PanelResizeHandle({
         onPointerDown();
       }}
     />
-  );
-}
-
-export function WorkspaceAccordionSection({
-  active,
-  id,
-  label,
-  badge,
-  icon,
-  children,
-  onClick
-}: {
-  active: boolean;
-  id: string;
-  label: string;
-  badge?: number;
-  icon: ReactNode;
-  children: ReactNode;
-  onClick: () => void;
-}) {
-  const contentId = `right-workspace-${id}`;
-
-  return (
-    <section className={`right-workspace-accordion-section ${active ? "active" : ""}`}>
-      <button
-        type="button"
-        className="right-workspace-tab"
-        aria-expanded={active}
-        aria-controls={contentId}
-        onClick={onClick}
-      >
-        {icon}
-        <span className="right-workspace-tab-label">{label}</span>
-        {badge ? <span className="right-workspace-tab-badge">{badge > 99 ? "99+" : badge}</span> : null}
-        <span className="right-workspace-tab-chevron" aria-hidden="true"><IconChevronDown /></span>
-      </button>
-      <div id={contentId} className="right-workspace-accordion-content" aria-hidden={!active} inert={!active}>
-        {children}
-      </div>
-    </section>
   );
 }
 

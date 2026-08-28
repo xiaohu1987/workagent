@@ -11,6 +11,7 @@ type VirtualizedTimelineProps<T> = {
   getAnchorId?: (item: T) => string | null;
   renderItem: (item: T, index: number) => ReactNode;
   scrollElementRef: RefObject<HTMLElement | null>;
+  scrollInteractionActive?: boolean;
   estimatedRowHeight?: number;
   overscanPx?: number;
   threshold?: number;
@@ -41,18 +42,33 @@ export function resolveMeasurementScrollAdjustment(
   return !pinnedToBottom && rowBottom <= viewportTop ? nextHeight - previousHeight : 0;
 }
 
+export function shouldDeferVirtualTimelineMeasurement(
+  scrollInteractionActive: boolean,
+  deferredCommitPending: boolean
+): boolean {
+  return scrollInteractionActive || deferredCommitPending;
+}
+
 export function VirtualizedTimeline<T>({
   items,
   getKey,
   getAnchorId,
   renderItem,
   scrollElementRef,
+  scrollInteractionActive = false,
   estimatedRowHeight = DEFAULT_ESTIMATED_ROW_HEIGHT,
   overscanPx = DEFAULT_OVERSCAN_PX,
   threshold = DEFAULT_VIRTUALIZATION_THRESHOLD
 }: VirtualizedTimelineProps<T>) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const measurementsRef = useRef(new Map<string, number>());
+  const deferredMeasurementsRef = useRef(new Map<string, number>());
+  const deferMeasurementsRef = useRef(scrollInteractionActive);
+  const deferredScrollCorrectionRef = useRef<{
+    applyAfterVersion: number;
+    adjustment: number;
+    pinnedToBottom: boolean;
+  } | null>(null);
   const layoutRef = useRef<{ offsets: number[]; sizes: number[]; keyIndexes: Map<string, number> }>({
     offsets: [],
     sizes: [],
@@ -62,6 +78,7 @@ export function VirtualizedTimeline<T>({
   const [measurementVersion, setMeasurementVersion] = useState(0);
   const [range, setRange] = useState<VisibleRange>(() => ({ start: 0, end: Math.min(items.length, 20) }));
   const virtualized = items.length > threshold;
+  if (scrollInteractionActive) deferMeasurementsRef.current = true;
 
   const layout = useMemo(() => {
     const offsets = new Array<number>(items.length);
@@ -105,6 +122,63 @@ export function VirtualizedTimeline<T>({
     scheduleRangeUpdate();
   }, [layout.totalSize, scheduleRangeUpdate]);
 
+  useLayoutEffect(() => {
+    if (scrollInteractionActive) return;
+    if (deferredMeasurementsRef.current.size === 0) {
+      deferMeasurementsRef.current = false;
+      return;
+    }
+    const scrollElement = scrollElementRef.current;
+    const container = containerRef.current;
+    const currentLayout = layoutRef.current;
+    const pinnedToBottom = Boolean(
+      scrollElement && scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 24
+    );
+    const containerTop = container?.getBoundingClientRect().top ?? null;
+    const viewportTop = scrollElement?.getBoundingClientRect().top ?? null;
+    let adjustment = 0;
+
+    for (const [key, height] of deferredMeasurementsRef.current) {
+      const index = currentLayout.keyIndexes.get(key);
+      const previousHeight = index === undefined
+        ? estimatedRowHeight
+        : currentLayout.sizes[index] ?? estimatedRowHeight;
+      if (index !== undefined && containerTop !== null && viewportTop !== null) {
+        const rowBottom = containerTop + currentLayout.offsets[index] + previousHeight;
+        adjustment += resolveMeasurementScrollAdjustment(
+          previousHeight,
+          height,
+          rowBottom,
+          viewportTop,
+          pinnedToBottom
+        );
+      }
+      measurementsRef.current.set(key, height);
+    }
+
+    deferredMeasurementsRef.current.clear();
+    deferMeasurementsRef.current = false;
+    deferredScrollCorrectionRef.current = {
+      applyAfterVersion: measurementVersion + 1,
+      adjustment,
+      pinnedToBottom
+    };
+    setMeasurementVersion((current) => current + 1);
+  }, [estimatedRowHeight, measurementVersion, scrollElementRef, scrollInteractionActive]);
+
+  useLayoutEffect(() => {
+    const correction = deferredScrollCorrectionRef.current;
+    if (scrollInteractionActive || !correction || measurementVersion < correction.applyAfterVersion) return;
+    deferredScrollCorrectionRef.current = null;
+    const scrollElement = scrollElementRef.current;
+    if (!scrollElement) return;
+    if (correction.pinnedToBottom) {
+      scrollElement.scrollTop = scrollElement.scrollHeight;
+    } else if (correction.adjustment !== 0) {
+      scrollElement.scrollTop += correction.adjustment;
+    }
+  }, [layout.totalSize, measurementVersion, scrollElementRef, scrollInteractionActive]);
+
   useEffect(() => {
     if (!virtualized) return;
     const scrollElement = scrollElementRef.current;
@@ -121,8 +195,12 @@ export function VirtualizedTimeline<T>({
   }, [scheduleRangeUpdate, scrollElementRef, virtualized]);
 
   const recordMeasurement = useCallback((key: string, height: number) => {
-    const previous = measurementsRef.current.get(key);
+    const previous = deferredMeasurementsRef.current.get(key) ?? measurementsRef.current.get(key);
     if (previous !== undefined && Math.abs(previous - height) < 0.5) return;
+    if (shouldDeferVirtualTimelineMeasurement(scrollInteractionActive, deferMeasurementsRef.current)) {
+      deferredMeasurementsRef.current.set(key, height);
+      return;
+    }
     const scrollElement = scrollElementRef.current;
     const pinnedToBottom = Boolean(
       scrollElement && scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 24
@@ -152,7 +230,7 @@ export function VirtualizedTimeline<T>({
         pinnedToBottom
       );
     }
-  }, [estimatedRowHeight, scrollElementRef]);
+  }, [estimatedRowHeight, scrollElementRef, scrollInteractionActive]);
 
   if (!virtualized) {
     return <>{items.map((item, index) => renderItem(item, index))}</>;

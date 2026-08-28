@@ -1320,6 +1320,7 @@ export interface GitSnapshot {
   upstream?: string;
   ahead: number;
   behind: number;
+  branches: string[];
   canCreatePullRequest: boolean;
   files: GitFileChange[];
 }

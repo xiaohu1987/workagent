@@ -52,8 +52,8 @@ import {
   upsertRuntimeToolCallSummary
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
-import { didTranscriptScrollUpWithoutContentShrink, getSidebarUpdateReminder, removeQueuedMessageById, shouldFollowLatestAfterTranscriptScroll } from "../apps/desktop/src/renderer/App";
-import { hasRecognizedGitRepository } from "../apps/desktop/src/renderer/workspace/right-workspace";
+import { didTranscriptScrollUpWithoutContentShrink, getSidebarUpdateReminder, isPointerInTranscriptScrollbar, removeQueuedMessageById, shouldFollowLatestAfterTranscriptScroll } from "../apps/desktop/src/renderer/App";
+import { hasRecognizedGitRepository, selectWorkspaceTab } from "../apps/desktop/src/renderer/workspace/right-workspace";
 import type { MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, ToolCallSummary, UserInputPrompt } from "../packages/shared-types/src";
 
 it("removes a guided queue item without disturbing the remaining queue", () => {
@@ -80,6 +80,8 @@ it("does not re-enable transcript auto-scroll during a manual drag near the bott
     { scrollTop: 800, scrollHeight: 1_400 },
     { scrollTop: 760, scrollHeight: 1_300 }
   )).toBe(false);
+  expect(isPointerInTranscriptScrollbar(995, 1_000, 1_000, 988)).toBe(true);
+  expect(isPointerInTranscriptScrollbar(970, 1_000, 1_000, 988)).toBe(false);
 });
 
 function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
@@ -170,10 +172,19 @@ describe("thread UI state helpers", () => {
 
   it("shows the Git workspace only after the current project is identified as a Git repository", () => {
     expect(hasRecognizedGitRepository(null, "E:\\project")).toBe(false);
-    expect(hasRecognizedGitRepository({ available: false, ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(false);
-    expect(hasRecognizedGitRepository({ available: true, ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(false);
-    expect(hasRecognizedGitRepository({ available: true, root: "E:\\project", ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(true);
-    expect(hasRecognizedGitRepository({ available: true, root: "E:\\project", ahead: 0, behind: 0, canCreatePullRequest: false, files: [] }, "E:\\project\\src")).toBe(false);
+    expect(hasRecognizedGitRepository({ available: false, ahead: 0, behind: 0, branches: [], canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(false);
+    expect(hasRecognizedGitRepository({ available: true, ahead: 0, behind: 0, branches: [], canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(false);
+    expect(hasRecognizedGitRepository({ available: true, root: "E:\\project", ahead: 0, behind: 0, branches: [], canCreatePullRequest: false, files: [] }, "E:\\project")).toBe(true);
+    expect(hasRecognizedGitRepository({ available: true, root: "E:\\project", ahead: 0, behind: 0, branches: [], canCreatePullRequest: false, files: [] }, "E:\\project\\src")).toBe(false);
+  });
+
+  it("selects a horizontal workspace tab without toggling it closed", () => {
+    const selected: string[] = [];
+    const expanded: Array<string | null> = [];
+    selectWorkspaceTab("browser", (tab) => selected.push(tab), (tab) => expanded.push(tab));
+    selectWorkspaceTab("browser", (tab) => selected.push(tab), (tab) => expanded.push(tab));
+    expect(selected).toEqual(["browser", "browser"]);
+    expect(expanded).toEqual(["browser", "browser"]);
   });
 
   it("isolates GPA stages from non-project chats", () => {
