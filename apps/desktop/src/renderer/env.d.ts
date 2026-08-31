@@ -292,6 +292,26 @@ declare global {
       registerBrowserWebContents: (payload: { threadId: string; tabId: string; webContentsId: number }) => Promise<void>;
       syncBrowserWebContents: (payload: { threadId: string; tabId: string }) => Promise<any>;
       onBrowserReregisterRequest: (handler: (payload: { threadId: string; tabId: string }) => void) => () => void;
+      detectRecordingBrowsers: () => Promise<import("@shared-types").DetectedBrowser[]>;
+      chooseChromeExecutablePath: () => Promise<string | null>;
+      listBrowserRecordings: () => Promise<import("@shared-types").BrowserRecording[]>;
+      getBrowserRecordingState: () => Promise<import("@shared-types").BrowserRecordingSession>;
+      startBrowserRecording: (payload: { threadId: string; browser: import("@shared-types").BrowserRecordingFamily; name?: string; startUrl?: string; startUrls?: string[] }) => Promise<import("@shared-types").BrowserRecordingSession>;
+      stopBrowserRecording: () => Promise<import("@shared-types").BrowserRecordingSession>;
+      cancelBrowserRecording: () => Promise<import("@shared-types").BrowserRecordingSession>;
+      playBrowserRecording: (payload: { recordingId: string; threadId: string }) => Promise<import("@shared-types").BrowserRecordingSession>;
+      retryBrowserRecordingPlayback: () => Promise<import("@shared-types").BrowserRecordingSession>;
+      stopBrowserRecordingPlayback: () => Promise<import("@shared-types").BrowserRecordingSession>;
+      applyBrowserRecordingLlmCandidate: (recordingId: string) => Promise<import("@shared-types").BrowserRecordingSession>;
+      discardBrowserRecordingLlmCandidate: (recordingId: string) => Promise<import("@shared-types").BrowserRecordingSession>;
+      enhanceBrowserRecording: (payload: { recordingId: string; threadId: string }) => Promise<import("@shared-types").BrowserRecordingSession>;
+      renameBrowserRecording: (payload: { recordingId: string; name: string }) => Promise<import("@shared-types").BrowserRecording>;
+      deleteBrowserRecording: (recordingId: string) => Promise<void>;
+      readBrowserRecordingScript: (recordingId: string) => Promise<string>;
+      readBrowserRecordingDocument: (recordingId: string) => Promise<string>;
+      openBrowserRecordingDirectory: (recordingId: string) => Promise<void>;
+      onBrowserRecordingState: (handler: (state: import("@shared-types").BrowserRecordingSession) => void) => () => void;
+      onOpenBrowserRecordingSettings: (handler: (payload: { recordingId: string | null }) => void) => () => void;
       resolveApproval: (
         id: string,
         resolution: { decision: "approved" | "denied"; mode?: "once" | "session" | "remember" }

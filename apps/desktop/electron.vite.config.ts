@@ -35,7 +35,7 @@ export default defineConfig({
     build: {
       outDir: "dist/main",
       rollupOptions: {
-        external: ["electron"],
+        external: ["electron", "playwright-core"],
         input: path.resolve(root, "apps/desktop/src/main/index.ts")
       }
     }

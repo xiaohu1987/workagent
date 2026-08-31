@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { NotificationNavigationTarget, QueuedMessageRecord, RuntimeThreadSnapshotCursor } from "@shared-types";
+import type { BrowserRecordingFamily, BrowserRecordingSession, NotificationNavigationTarget, QueuedMessageRecord, RuntimeThreadSnapshotCursor } from "@shared-types";
 
 const api = {
   reportRendererError: (payload: { message: string; stack?: string; componentStack?: string; unhandledRejection?: boolean }) =>
@@ -254,6 +254,34 @@ const api = {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: { threadId: string; tabId: string }) => handler(payload);
     ipcRenderer.on("browser:request-reregister", wrapped);
     return () => ipcRenderer.removeListener("browser:request-reregister", wrapped);
+  },
+  detectRecordingBrowsers: () => ipcRenderer.invoke("recordings:detect-browsers"),
+  chooseChromeExecutablePath: () => ipcRenderer.invoke("recordings:choose-chrome-path") as Promise<string | null>,
+  listBrowserRecordings: () => ipcRenderer.invoke("recordings:list"),
+  getBrowserRecordingState: () => ipcRenderer.invoke("recordings:state") as Promise<BrowserRecordingSession>,
+  startBrowserRecording: (payload: { threadId: string; browser: BrowserRecordingFamily; name?: string; startUrl?: string; startUrls?: string[] }) => ipcRenderer.invoke("recordings:start", payload),
+  stopBrowserRecording: () => ipcRenderer.invoke("recordings:stop"),
+  cancelBrowserRecording: () => ipcRenderer.invoke("recordings:cancel"),
+  playBrowserRecording: (payload: { recordingId: string; threadId: string }) => ipcRenderer.invoke("recordings:play", payload),
+  retryBrowserRecordingPlayback: () => ipcRenderer.invoke("recordings:retry"),
+  stopBrowserRecordingPlayback: () => ipcRenderer.invoke("recordings:stop-playback"),
+  applyBrowserRecordingLlmCandidate: (recordingId: string) => ipcRenderer.invoke("recordings:apply-llm-candidate", recordingId),
+  discardBrowserRecordingLlmCandidate: (recordingId: string) => ipcRenderer.invoke("recordings:discard-llm-candidate", recordingId),
+  enhanceBrowserRecording: (payload: { recordingId: string; threadId: string }) => ipcRenderer.invoke("recordings:enhance", payload),
+  renameBrowserRecording: (payload: { recordingId: string; name: string }) => ipcRenderer.invoke("recordings:rename", payload),
+  deleteBrowserRecording: (recordingId: string) => ipcRenderer.invoke("recordings:delete", recordingId),
+  readBrowserRecordingScript: (recordingId: string) => ipcRenderer.invoke("recordings:read-script", recordingId),
+  readBrowserRecordingDocument: (recordingId: string) => ipcRenderer.invoke("recordings:read-document", recordingId),
+  openBrowserRecordingDirectory: (recordingId: string) => ipcRenderer.invoke("recordings:open-directory", recordingId),
+  onBrowserRecordingState: (handler: (state: BrowserRecordingSession) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, state: BrowserRecordingSession) => handler(state);
+    ipcRenderer.on("recordings:state-changed", wrapped);
+    return () => ipcRenderer.removeListener("recordings:state-changed", wrapped);
+  },
+  onOpenBrowserRecordingSettings: (handler: (payload: { recordingId: string | null }) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: { recordingId: string | null }) => handler(payload);
+    ipcRenderer.on("recordings:open-settings", wrapped);
+    return () => ipcRenderer.removeListener("recordings:open-settings", wrapped);
   },
   resolveApproval: (
     id: string,

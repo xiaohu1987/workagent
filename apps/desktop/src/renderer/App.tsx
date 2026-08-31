@@ -212,6 +212,7 @@ import {
   IconPin,
   IconPlus,
   IconRefresh,
+  IconRecord,
   IconSearch,
   IconShield,
   IconSidebar,
@@ -248,6 +249,7 @@ import { UserSkillGenerationDialog as UserSkillGenerationDialogView } from "./se
 import { FetchedModelsDialog } from "./settings/fetched-models-dialog";
 import { MultimodalPickerDialog } from "./settings/multimodal-picker-dialog";
 import { AppearanceSettingsPage } from "./settings/pages/application/appearance-page";
+import { RecordingPage } from "./settings/pages/application/recording-page";
 import { MultimodalSettingsPage } from "./settings/pages/models/multimodal-page";
 import { ProviderSettingsPage } from "./settings/pages/models/provider-page";
 import { ApiFavoritesPage } from "./settings/pages/knowledge/api-favorites-page";
@@ -285,6 +287,7 @@ import { useUserSkillGeneration } from "./hooks/use-user-skill-generation";
 import { useSelfImprovementMemories } from "./hooks/use-self-improvement-memories";
 import { useErrorSolutions } from "./hooks/use-error-solutions";
 import { useSettingsDialogState } from "./hooks/use-settings-dialog-state";
+import { useBrowserRecordings } from "./hooks/use-browser-recordings";
 import { useSkillLab } from "./hooks/use-skill-lab";
 import { useNotificationUiState } from "./hooks/use-notification-ui-state";
 import { useThreadNotifications } from "./hooks/use-thread-notifications";
@@ -902,6 +905,7 @@ export function App() {
     capabilityTab,
     setCapabilityTab
   } = useSettingsDialogState();
+  const browserRecordings = useBrowserRecordings(showNotice, selectedThreadId);
   const [settingsContentReady, setSettingsContentReady] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
@@ -2967,6 +2971,19 @@ export function App() {
       void refreshErrorSolutions();
     }
   }, [isSettingsOpen, settingsTab]);
+
+  useEffect(() => {
+    if (browserRecordings.session.mode === "recording" || browserRecordings.session.mode === "replaying") {
+      setIsSettingsOpen(false);
+    }
+  }, [browserRecordings.session.mode, setIsSettingsOpen]);
+
+  useEffect(() => window.codexh.onOpenBrowserRecordingSettings(({ recordingId }) => {
+    if (recordingId) browserRecordings.setSelectedId(recordingId);
+    setSettingsTab("recording");
+    setIsSettingsOpen(true);
+    void browserRecordings.refresh();
+  }), [browserRecordings.refresh, browserRecordings.setSelectedId, setIsSettingsOpen, setSettingsTab]);
 
   const activeSnapshotThreadId = snapshot?.thread.id ?? null;
   const activeSnapshotThreadStatus = snapshot?.thread.status ?? null;
@@ -6618,6 +6635,16 @@ export function App() {
                       <IconPlus />
                     </button>
                   </div>
+                  <button
+                    className={`composer-icon-button ${browserRecordings.session.operation ? "is-active" : ""}`}
+                    type="button"
+                    title={selectedThreadId ? "录制浏览器操作" : "请先选择一个聊天，再录制浏览器操作"}
+                    aria-label="录制浏览器操作"
+                    disabled={!selectedThreadId}
+                    onClick={() => openSettingsEvent("recording")}
+                  >
+                    <IconRecord />
+                  </button>
                   {gpaState.fullAccess ? (
                     <span className="composer-mode-chip composer-mode-chip-full-access" title="完全访问：文件和网络操作无需常规审批；必须由你明确决定的操作仍会询问">
                       <IconShield />
@@ -6835,6 +6862,15 @@ export function App() {
                   onEndDrag={endChatBackgroundDrag}
                   onResetSurfaces={resetChatBackgroundSurfaces}
                   onClear={clearChatBackground}
+                />
+              ) : null}
+
+              {settingsTab === "recording" ? (
+                <RecordingPage
+                  controller={browserRecordings}
+                  configDraft={configDraft}
+                  setConfigDraft={setConfigDraft}
+                  onSaveConfig={saveConfigDraft}
                 />
               ) : null}
 

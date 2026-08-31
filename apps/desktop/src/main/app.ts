@@ -4,7 +4,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
 import iconv from "iconv-lite";
-import { app, BrowserWindow, net, shell, webContents } from "electron";
+import { app, BrowserWindow, desktopCapturer, dialog, net, screen, shell, webContents } from "electron";
 import type { WebContents } from "electron";
 import type {
   AttachmentImportInput,
@@ -13,6 +13,9 @@ import type {
   ApprovalRequest,
   BrowserAssertionCheck,
   BrowserAssertionResult,
+  BrowserRecording,
+  BrowserRecordingFamily,
+  BrowserRecordingSession,
   BrowserOpenMode,
   BrowserTabRecord,
   BrowserViewport,
@@ -88,6 +91,8 @@ import { GitService } from "./git-service";
 import { SkillLabService } from "./skill-lab";
 import { parseEditableMessageMetadata } from "./message-metadata";
 import { isProjectAttachmentPath } from "./attachment-path";
+import { BrowserRecordingRuntime } from "./browser-recording-runtime";
+import { BrowserRecordingChatBridge } from "./browser-recording-chat";
 import {
   DatabaseService,
   defaultConfig,
@@ -294,6 +299,7 @@ export class DesktopBackend {
   readonly #browserConsoleErrors = new Map<string, Array<{ message: string; sourceId?: string; line?: number }>>();
   readonly #browserDebuggerOwned = new Set<string>();
   readonly #skillLabEvents = new EventEmitter();
+  readonly #browserRecordingEvents = new EventEmitter();
 
   #layout!: HomeLayout;
   #db!: DatabaseService;
@@ -306,6 +312,8 @@ export class DesktopBackend {
   #databaseCredentials!: McpCredentialStore;
   #databases!: DatabaseRuntime;
   #logs!: RuntimeLogWriter;
+  #browserRecordings!: BrowserRecordingRuntime;
+  #browserRecordingChat!: BrowserRecordingChatBridge;
   #deferredServices: Promise<void> | null = null;
   #backgroundSkillRefresh: Promise<void> | null = null;
   readonly #subagentDispatches = new Map<string, Promise<void>>();
@@ -314,6 +322,22 @@ export class DesktopBackend {
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
     this.#logs = new RuntimeLogWriter(this.#layout.logsDir);
+    this.#browserRecordings = new BrowserRecordingRuntime({
+      recordingsDir: this.#layout.recordingsDir,
+      browserProfilesDir: this.#layout.browserProfilesDir,
+      getChromeExecutablePath: () => this.#config?.desktop?.chromeExecutablePath,
+      chooseFiles: async ({ multiple, title }) => {
+        const result = await dialog.showOpenDialog({
+          title,
+          properties: multiple ? ["openFile", "multiSelections"] : ["openFile"],
+          filters: [{ name: "所有文件", extensions: ["*"] }]
+        });
+        return result.canceled ? [] : result.filePaths;
+      },
+      trashDirectory: (directory) => shell.trashItem(directory),
+      onState: (state) => this.#browserRecordingEvents.emit("state", state)
+    });
+    await this.#browserRecordings.initialize();
     this.#mcpOAuth = new McpOAuthService(
       new McpCredentialStore(path.join(path.dirname(this.#layout.configFile), "mcp-credentials.json"))
     );
@@ -466,6 +490,8 @@ export class DesktopBackend {
       waitForBrowserPage: async (threadId, tabId, input) => this.waitForBrowserPage(threadId, tabId, input),
       setBrowserViewport: async (threadId, tabId, viewport) => this.setBrowserViewport(threadId, tabId, viewport),
       assertBrowserPage: async (threadId, tabId, checks) => this.assertBrowserPage(threadId, tabId, checks),
+      captureScreenScreenshot: async (threadId, turnRunId, target) =>
+        this.captureScreenScreenshot(threadId, turnRunId, target),
       captureBrowserScreenshot: async (threadId, tabId, turnRunId, fullPage) => this.captureBrowserScreenshot(threadId, tabId, turnRunId, fullPage),
       captureBrowserSnapshot: async (threadId, tabId, turnRunId) =>
         this.captureBrowserSnapshot(threadId, tabId, turnRunId),
@@ -496,6 +522,17 @@ export class DesktopBackend {
         });
       }
     });
+    this.#browserRecordingChat = new BrowserRecordingChatBridge({
+      db: this.#db,
+      getConfig: () => this.#config,
+      providerFactory: this.#providerFactory,
+      emit: (event) => this.emit(event),
+      isThreadBusy: (threadId) => {
+        const thread = this.#db.getThread(threadId);
+        return this.#runtime.isProcessingTurn(threadId) || thread.status === "running" || thread.status === "waiting";
+      }
+    });
+    this.#browserRecordings.setChatBridge(this.#browserRecordingChat);
     for (const approval of this.#db.listPendingApprovals()) {
       this.#scheduleApprovalTimeout(approval.id);
     }
@@ -745,6 +782,84 @@ export class DesktopBackend {
     this.refreshSkillsInBackground(thread.cwd);
     this.#runtime.ensureThread(thread.id);
     return thread;
+  }
+
+  public onBrowserRecordingState(listener: (state: BrowserRecordingSession) => void): () => void {
+    this.#browserRecordingEvents.on("state", listener);
+    return () => this.#browserRecordingEvents.off("state", listener);
+  }
+
+  public getBrowserRecordingState(): BrowserRecordingSession {
+    return this.#browserRecordings.getState();
+  }
+
+  public detectRecordingBrowsers() {
+    return this.#browserRecordings.detectBrowsers();
+  }
+
+  public listBrowserRecordings(): Promise<BrowserRecording[]> {
+    return this.#browserRecordings.listRecordings();
+  }
+
+  public startBrowserRecording(input: { threadId: string; browser: BrowserRecordingFamily; name?: string; startUrl?: string; startUrls?: string[] }) {
+    return this.#browserRecordings.startRecording(input);
+  }
+
+  public stopBrowserRecording() {
+    return this.#browserRecordings.stopRecording();
+  }
+
+  public cancelBrowserRecording() {
+    return this.#browserRecordings.cancelRecording();
+  }
+
+  public playBrowserRecording(recordingId: string, threadId: string) {
+    return this.#browserRecordings.play(recordingId, threadId);
+  }
+
+  public retryBrowserRecordingPlayback() {
+    return this.#browserRecordings.retryPlayback();
+  }
+
+  public stopBrowserRecordingPlayback() {
+    return this.#browserRecordings.stopPlayback();
+  }
+
+  public applyBrowserRecordingLlmCandidate(recordingId: string) {
+    return this.#browserRecordings.applyLlmCandidate(recordingId);
+  }
+
+  public discardBrowserRecordingLlmCandidate(recordingId: string) {
+    return this.#browserRecordings.discardLlmCandidate(recordingId);
+  }
+
+  public enhanceBrowserRecording(recordingId: string, threadId: string) {
+    return this.#browserRecordings.enhanceRecording(recordingId, threadId);
+  }
+
+  public renameBrowserRecording(recordingId: string, name: string) {
+    return this.#browserRecordings.rename(recordingId, name);
+  }
+
+  public deleteBrowserRecording(recordingId: string) {
+    return this.#browserRecordings.delete(recordingId);
+  }
+
+  public readBrowserRecordingScript(recordingId: string) {
+    return this.#browserRecordings.readScript(recordingId);
+  }
+
+  public readBrowserRecordingDocument(recordingId: string) {
+    return this.#browserRecordings.readDocument(recordingId);
+  }
+
+  public async openBrowserRecordingDirectory(recordingId: string): Promise<void> {
+    const result = await shell.openPath(this.#browserRecordings.getDirectory(recordingId));
+    if (result) throw new Error(result);
+  }
+
+  public shutdownBrowserRecordings(): Promise<void> {
+    return this.#browserRecordings.shutdown();
   }
 
   public async addThreadWorkspaceRoot(threadId: string, rootPath: string): Promise<ThreadRecord> {
@@ -3203,6 +3318,80 @@ export class DesktopBackend {
     return { ...snapshot, artifact };
   }
 
+  public async captureScreenScreenshot(
+    threadId: string,
+    turnRunId: string,
+    target: "cursor" | "primary" = "cursor"
+  ) {
+    const display = target === "primary"
+      ? screen.getPrimaryDisplay()
+      : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const pixelWidth = Math.max(1, Math.round(display.size.width * display.scaleFactor));
+    const pixelHeight = Math.max(1, Math.round(display.size.height * display.scaleFactor));
+    const sources = await desktopCapturer.getSources({
+      types: ["screen"],
+      thumbnailSize: { width: pixelWidth, height: pixelHeight },
+      fetchWindowIcons: false
+    });
+    const displayId = String(display.id);
+    const displays = screen.getAllDisplays();
+    const matchingIndex = displays.findIndex((candidate) => String(candidate.id) === displayId);
+    const source = sources.find((candidate) => candidate.display_id === displayId)
+      ?? sources.find((candidate) => candidate.id.startsWith(`screen:${displayId}:`))
+      ?? (matchingIndex >= 0 ? sources[matchingIndex] : undefined);
+    if (!source || source.thumbnail.isEmpty()) {
+      throw new Error(`Unable to capture desktop display ${displayId}. Screen recording permission may be unavailable.`);
+    }
+
+    const png = source.thumbnail.toPNG();
+    const dimensions = readPngDimensions(png);
+    const outputDir = await this.getThreadOutputDir(threadId);
+    const screenshotDir = path.join(outputDir, "screenshots");
+    await fs.mkdir(screenshotDir, { recursive: true });
+    const fileName = `screen-${Date.now()}-${randomUUID().slice(0, 8)}.png`;
+    const filePath = path.join(screenshotDir, fileName);
+    await fs.writeFile(filePath, png);
+    const stats = await fs.stat(filePath);
+    const capturedAt = new Date().toISOString();
+    const artifact = this.#db.addArtifact({
+      threadId,
+      turnRunId,
+      messageId: null,
+      toolCallId: null,
+      artifactKind: "desktop-screenshot",
+      displayName: fileName,
+      absolutePath: filePath,
+      relativePath: path.relative(outputDir, filePath),
+      mimeType: "image/png",
+      sizeBytes: stats.size,
+      sha256: await fileSha256(filePath),
+      sourceKind: "desktop",
+      isUserVisible: true,
+      status: "ready"
+    });
+    const attachment: MessageAttachment = {
+      id: randomUUID(),
+      kind: "image",
+      name: fileName,
+      mimeType: "image/png",
+      absolutePath: filePath,
+      sizeBytes: stats.size,
+      width: dimensions.width,
+      height: dimensions.height,
+      source: "generated"
+    };
+    return {
+      displayId,
+      displayName: source.name || `Display ${displayId}`,
+      filePath,
+      width: dimensions.width,
+      height: dimensions.height,
+      capturedAt,
+      attachment,
+      artifact
+    };
+  }
+
   public async captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string, fullPage = false) {
     const contents = await this.requireBrowserContents(threadId, tabId);
     const key = this.browserContentsKey(threadId, tabId);
@@ -5094,7 +5283,10 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       browserOpenMode: config.desktop?.browserOpenMode === "external_default" ? "external_default" : "in_app",
       silentBrowserOpen: config.desktop?.silentBrowserOpen !== false,
       liveEditPreview: config.desktop?.liveEditPreview === true,
-      llmLogViewer: config.desktop?.llmLogViewer === true
+      llmLogViewer: config.desktop?.llmLogViewer === true,
+      chromeExecutablePath: typeof config.desktop?.chromeExecutablePath === "string" && config.desktop.chromeExecutablePath.trim()
+        ? config.desktop.chromeExecutablePath.trim()
+        : undefined
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     multiAgent: {
@@ -5354,7 +5546,7 @@ function normalizeBrowserAssertionChecks(checks: BrowserAssertionCheck[]): Brows
 
 function readPngDimensions(buffer: Buffer): { width: number; height: number } {
   if (buffer.length < 24 || buffer.toString("ascii", 1, 4) !== "PNG") {
-    throw new Error("Browser screenshot is not a valid PNG image.");
+    throw new Error("Screenshot is not a valid PNG image.");
   }
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
 }

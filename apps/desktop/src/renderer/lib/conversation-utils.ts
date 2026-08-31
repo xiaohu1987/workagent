@@ -1207,6 +1207,7 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", s
   }
   if (toolName === "browser.assert_page") return "正在执行页面断言";
   if (toolName === "browser.capture_screenshot") return "正在截取页面验证图";
+  if (toolName === "screen.capture_screenshot") return "正在截取当前屏幕";
   if (toolName.startsWith("browser.")) {
     return target ? `正在打开 ${target}` : "正在操作浏览器";
   }

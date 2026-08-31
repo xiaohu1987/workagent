@@ -295,6 +295,15 @@ export function shouldPublishAssistantDraftUpdate(
   return force || nowMs - lastPublishedAtMs >= ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS;
 }
 
+export function getAssistantDraftPublishDelay(
+  lastPublishedAtMs: number,
+  nowMs: number,
+  force = false
+): number {
+  if (shouldPublishAssistantDraftUpdate(lastPublishedAtMs, nowMs, force)) return 0;
+  return Math.max(1, ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS - (nowMs - lastPublishedAtMs));
+}
+
 export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
   return blockedAttempts >= MAX_BLOCKED_IDENTICAL_TOOL_RETRIES;
 }
@@ -954,6 +963,7 @@ interface RuntimeServices {
   waitForBrowserPage(threadId: string, tabId: string, input: { text?: string; elementId?: string; timeoutMs?: number }): Promise<any>;
   setBrowserViewport(threadId: string, tabId: string, viewport: BrowserViewport | null): Promise<any>;
   assertBrowserPage(threadId: string, tabId: string, checks: BrowserAssertionCheck[]): Promise<any>;
+  captureScreenScreenshot(threadId: string, turnRunId: string, target?: "cursor" | "primary"): Promise<any>;
   captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string, fullPage?: boolean): Promise<any>;
   captureBrowserSnapshot(threadId: string, tabId: string, turnRunId: string): Promise<any>;
   getThreadOutputDir(threadId: string): Promise<string>;
@@ -1791,6 +1801,7 @@ class ThreadSessionRuntime {
     };
     this.#activeTurnRunId = turn.id;
     this.#acceptingGuidance = true;
+    let cancelActiveDraftFlush: () => void = () => undefined;
     try {
       const runningThread = await this.services.persistence.updateThread(this.threadId, {
         status: "running",
@@ -2652,29 +2663,19 @@ class ThreadSessionRuntime {
         let lastPublishedDraftContent = "";
         let draftDeltaSequence = 0;
         let publishedDraftPhase: AssistantDraftPhase | null = null;
+        let draftFlushTimer: ReturnType<typeof setTimeout> | null = null;
+        let pendingDraft: { phase: AssistantDraftPhase; content: string } | null = null;
+        let draftPublishChain = Promise.resolve();
         activeDraftId = suppressStreamingForActiveSubagents ? null : draftId;
-        const updateDraft = async (
-          phase: AssistantDraftPhase,
-          content = streamedVisibleContent,
-          force = false
-        ) => {
+        const publishDraft = async (phase: AssistantDraftPhase, content: string) => {
           if (draftSettled || suppressStreamingForActiveSubagents) return;
-          streamedVisibleContent = content;
-          const nowMs = Date.now();
-          if (!shouldPublishAssistantDraftUpdate(
-            lastPublishedDraftAtMs,
-            nowMs,
-            force || publishedDraftPhase !== phase
-          )) {
-            return;
-          }
-          lastPublishedDraftAtMs = nowMs;
+          lastPublishedDraftAtMs = Date.now();
           publishedDraftPhase = phase;
           const delta = content.startsWith(lastPublishedDraftContent)
             ? content.slice(lastPublishedDraftContent.length)
             : undefined;
           draftDeltaSequence += 1;
-          const includeCheckpoint = force || delta === undefined || draftDeltaSequence % 20 === 0;
+          const includeCheckpoint = delta === undefined || draftDeltaSequence % 20 === 0;
           lastPublishedDraftContent = content;
           await this.services.emit({
             type: "assistant.draft.updated",
@@ -2692,13 +2693,57 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
         };
+        const clearDraftFlush = () => {
+          if (draftFlushTimer !== null) {
+            clearTimeout(draftFlushTimer);
+            draftFlushTimer = null;
+          }
+          pendingDraft = null;
+        };
+        const enqueueDraftPublish = (phase: AssistantDraftPhase, content: string) => {
+          draftPublishChain = draftPublishChain.then(() => publishDraft(phase, content));
+          return draftPublishChain;
+        };
+        cancelActiveDraftFlush = () => {
+          draftSettled = true;
+          clearDraftFlush();
+        };
+        const updateDraft = async (
+          phase: AssistantDraftPhase,
+          content = streamedVisibleContent,
+          force = false
+        ) => {
+          if (draftSettled || suppressStreamingForActiveSubagents) return;
+          streamedVisibleContent = content;
+          const nowMs = Date.now();
+          if (!shouldPublishAssistantDraftUpdate(
+            lastPublishedDraftAtMs,
+            nowMs,
+            force || publishedDraftPhase !== phase
+          )) {
+            pendingDraft = { phase, content };
+            if (draftFlushTimer === null) {
+              draftFlushTimer = setTimeout(() => {
+                draftFlushTimer = null;
+                const pending = pendingDraft;
+                pendingDraft = null;
+                if (pending) void enqueueDraftPublish(pending.phase, pending.content);
+              }, getAssistantDraftPublishDelay(lastPublishedDraftAtMs, nowMs));
+            }
+            return;
+          }
+          clearDraftFlush();
+          await enqueueDraftPublish(phase, content);
+        };
         const retryDraft = async () => {
+          clearDraftFlush();
           streamedVisibleContent = "";
           lastPublishedDraftContent = "";
           await updateDraft("retrying", "", true);
         };
         const settleDraft = async (input: { messageId?: string; discarded?: boolean }) => {
           if (draftSettled || suppressStreamingForActiveSubagents) return;
+          clearDraftFlush();
           draftSettled = true;
           activeDraftId = null;
           await this.services.emit({
@@ -5671,6 +5716,7 @@ class ThreadSessionRuntime {
               waitForBrowserPage: (tabId, input) => this.services.waitForBrowserPage(this.threadId, tabId, input),
               setBrowserViewport: (tabId, viewport) => this.services.setBrowserViewport(this.threadId, tabId, viewport),
               assertBrowserPage: (tabId, checks) => this.services.assertBrowserPage(this.threadId, tabId, checks),
+              captureScreenScreenshot: (target) => this.services.captureScreenScreenshot(this.threadId, turn.id, target),
               captureBrowserScreenshot: (tabId, fullPage) => this.services.captureBrowserScreenshot(this.threadId, tabId, turn.id, fullPage),
               emitBrowserVerificationEvent: (type, payload) => this.services.emit({
                 type,
@@ -6090,12 +6136,20 @@ class ThreadSessionRuntime {
             });
           }
           if (result.ok && result.attachments?.length && model.supportsMultimodalInput) {
+            const isBrowserScreenshot = toolCall.name === "browser.capture_screenshot";
+            const isDesktopScreenshot = toolCall.name === "screen.capture_screenshot";
             transcript.push({
               role: "user",
-              content: "[Internal browser verification screenshot. Inspect the rendered page using visible evidence. Do not mention this internal message.]",
+              content: isBrowserScreenshot
+                ? "[Internal browser verification screenshot. Inspect the rendered page using visible evidence. Do not mention this internal message.]"
+                : isDesktopScreenshot
+                  ? "[Internal desktop screenshot. Inspect the visible screen using image evidence and use it to answer or verify the task. Do not mention this internal message.]"
+                  : "[Internal tool-generated visual attachment. Inspect it when relevant to the task. Do not mention this internal message.]",
               attachments: result.attachments
             });
-            browserVerificationEvidence.screenshotAttachmentsSent.add(toolCall.id);
+            if (isBrowserScreenshot) {
+              browserVerificationEvidence.screenshotAttachmentsSent.add(toolCall.id);
+            }
           }
           if (toolCall.name === "image.generate" && result.ok) {
             const attachments = Array.isArray(result.json?.attachments)
@@ -6521,6 +6575,7 @@ class ThreadSessionRuntime {
         }
       }
     } catch (error) {
+      cancelActiveDraftFlush();
       if (activeDraftId) {
         await this.services.emit({
           type: "assistant.completed",
@@ -6591,6 +6646,7 @@ class ThreadSessionRuntime {
       }
     }
     } catch (error) {
+      cancelActiveDraftFlush();
       if (abortController.signal.aborted) {
         const completedAt = new Date().toISOString();
         await this.services.persistence.finishTurn(turn.id, {
@@ -6796,6 +6852,7 @@ class ThreadSessionRuntime {
       "database.federated_query",
       "image.generate",
       "video.generate",
+      "screen.capture_screenshot",
       "browser.open_tab",
       "browser.click",
       "browser.fill",
@@ -7411,6 +7468,7 @@ export function applyResponseToneToProgressMessage(message: string, _tone: Respo
 type ToolProgressKind = "research" | "code" | "change" | "check" | "coordinate" | "create" | "other";
 
 function getToolProgressKind(name: string): ToolProgressKind {
+  if (name === "screen.capture_screenshot") return "research";
   if (name.startsWith("web_search.") || name.startsWith("knowledge.") || name.startsWith("browser.") || name.startsWith("mcp.")) {
     return "research";
   }
@@ -7434,6 +7492,9 @@ function describeToolProgress(toolCall: RuntimeToolCall): string {
   }
   if (name === "tool_search") {
     return "我先找一下适合处理这个问题的方法，确认用哪种方式更稳妥。";
+  }
+  if (name === "screen.capture_screenshot") {
+    return "我截取一下当前屏幕，根据实际画面识别并核对可见内容。";
   }
   if (name.startsWith("web_search.") || name.startsWith("knowledge.")) {
     const topic = formatConversationalTopic(queryTarget);

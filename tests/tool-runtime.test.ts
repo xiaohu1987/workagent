@@ -802,6 +802,63 @@ describe("ToolRuntime", () => {
     expect(deferred.map((tool) => tool.name)).not.toContain("fs.write_file");
   });
 
+  it("captures the current desktop display and returns visual model context", async () => {
+    const runtime = new ToolRuntime();
+    const captureScreenScreenshot = vi.fn().mockResolvedValue({
+      displayId: "2528732444",
+      displayName: "Screen 1",
+      filePath: "C:\\output\\screenshots\\screen.png",
+      width: 2560,
+      height: 1440,
+      capturedAt: "2026-08-31T00:00:00.000Z",
+      attachment: {
+        id: "screen-attachment-1",
+        kind: "image",
+        name: "screen.png",
+        mimeType: "image/png",
+        absolutePath: "C:\\output\\screenshots\\screen.png",
+        sizeBytes: 4321,
+        width: 2560,
+        height: 1440,
+        source: "generated"
+      },
+      artifact: {
+        id: "screen-artifact-1",
+        artifactKind: "desktop-screenshot"
+      }
+    });
+    const context = { cwd: process.cwd(), captureScreenScreenshot } as unknown as ToolRuntimeContext;
+
+    const screenshot = await runtime.execute({
+      id: "desktop-screenshot",
+      name: "screen.capture_screenshot",
+      arguments: {}
+    }, context);
+    const primaryScreenshot = await runtime.execute({
+      id: "primary-desktop-screenshot",
+      name: "screen.capture_screenshot",
+      arguments: { target: "primary" }
+    }, context);
+    const invalidScreenshot = await runtime.execute({
+      id: "invalid-desktop-screenshot",
+      name: "screen.capture_screenshot",
+      arguments: { target: "secondary" }
+    }, context);
+
+    expect(captureScreenScreenshot).toHaveBeenNthCalledWith(1, "cursor");
+    expect(captureScreenScreenshot).toHaveBeenNthCalledWith(2, "primary");
+    expect(screenshot).toMatchObject({
+      ok: true,
+      json: { displayId: "2528732444", width: 2560, height: 1440 }
+    });
+    expect(primaryScreenshot.ok).toBe(true);
+    expect(invalidScreenshot).toMatchObject({ ok: false });
+    expect(invalidScreenshot.content).toContain("arguments.target must be one of: cursor, primary");
+    expect(captureScreenScreenshot).toHaveBeenCalledTimes(2);
+    expect(screenshot.attachments).toEqual([expect.objectContaining({ kind: "image", width: 2560, height: 1440 })]);
+    expect(screenshot.artifacts).toEqual([expect.objectContaining({ artifactKind: "desktop-screenshot" })]);
+  });
+
   it("treats copying a path onto itself as an idempotent no-op", async () => {
     const runtime = new ToolRuntime();
     const requestApproval = vi.fn();

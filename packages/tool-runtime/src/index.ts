@@ -158,6 +158,16 @@ export interface ToolRuntimeContext {
     attachment: MessageAttachment;
     artifact: ArtifactRecord;
   }>;
+  captureScreenScreenshot: (target?: "cursor" | "primary") => Promise<{
+    displayId: string;
+    displayName: string;
+    filePath: string;
+    width: number;
+    height: number;
+    capturedAt: string;
+    attachment: MessageAttachment;
+    artifact: ArtifactRecord;
+  }>;
   emitBrowserVerificationEvent?: (type: "browser.verification_started" | "browser.assertion_completed" | "browser.screenshot_attached" | "browser.verification_completed", payload: Record<string, unknown>) => Promise<void>;
   captureBrowserSnapshot: (tabId: string) => Promise<{
     filePath: string;
@@ -277,6 +287,7 @@ const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
   "apply_patch", "fs.write_file", "search_replace", "fs.mkdir", "fs.rename", "fs.delete", "fs.copy", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
   "skills.install", "plugins.install", "mcp.install",
   "image.generate", "video.generate",
+  "screen.capture_screenshot",
   "knowledge.add", "todo.write",
   "git.stage_file", "git.stage_all", "git.unstage_file", "git.revert_file", "git.apply_hunk",
   "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
@@ -2365,6 +2376,38 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       const result = await ctx.assertBrowserPage(tabId, checks);
       await ctx.emitBrowserVerificationEvent?.("browser.assertion_completed", { tabId, ...result });
       return { ok: result.passed, content: JSON.stringify(result), json: result };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "screen.capture_screenshot",
+      description:
+        "Capture the current desktop display as a PNG and attach it for visual inspection. Call this automatically when the user asks what is visible on screen, requests a screenshot, or needs visual verification outside the managed browser tab. Defaults to the display under the mouse pointer; use target=primary only when the primary display is specifically needed.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          target: {
+            type: "string",
+            enum: ["cursor", "primary"],
+            description: "Desktop display to capture. Defaults to cursor."
+          }
+        },
+        additionalProperties: false
+      },
+      riskLevel: "low",
+      parallelSafe: false
+    },
+    async (args, ctx) => {
+      const target = args.target === "primary" ? "primary" : "cursor";
+      const screenshot = await ctx.captureScreenScreenshot(target);
+      return {
+        ok: true,
+        content: `Captured ${screenshot.displayName} (${screenshot.width}x${screenshot.height}).\n${screenshot.filePath}`,
+        json: screenshot,
+        artifacts: [screenshot.artifact],
+        attachments: [screenshot.attachment]
+      };
     }
   );
 

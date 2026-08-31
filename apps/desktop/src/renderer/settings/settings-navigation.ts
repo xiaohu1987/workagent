@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { IconGear, IconGlobe, IconKnowledge, IconMcp, IconSinglePanel, IconSkills } from "../icons";
+import { IconGear, IconGlobe, IconKnowledge, IconMcp, IconSinglePanel, IconSkills, IconVideo } from "../icons";
 import type { SettingsTab } from "../core/app-types";
 
 export type SettingsMenuGroup = {
@@ -16,6 +16,7 @@ export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string
   { id: "multimodal", label: "多模态", hint: "配置默认多模态识别、生图与视频模型" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
   { id: "database", label: "数据库", hint: "配置只读数据库并在聊天中调用" },
+  { id: "recording", label: "录制", hint: "录制和回放系统浏览器操作" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "memory", label: "记忆", hint: "查看和清理错误解决方案记忆" },
   { id: "apiFavorites", label: "接口卡片", hint: "管理收藏的 API 卡片,从 + 菜单快速唤出" },
@@ -29,6 +30,7 @@ export const SETTINGS_MENU_GROUPS: SettingsMenuGroup[] = [
   { id: "general", label: "智能运行", hint: "自动恢复和运行策略", tabs: ["general"], icon: IconGear },
   { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"], icon: IconGlobe },
   { id: "connections", label: "连接", hint: "MCP 与数据库", tabs: ["mcp", "database"], icon: IconMcp },
+  { id: "recording", label: "录制", hint: "系统浏览器录制与回放", tabs: ["recording"], icon: IconVideo },
   { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory", "apiFavorites"], icon: IconKnowledge },
   { id: "capabilities", label: "能力中心", hint: "技能与插件", tabs: ["capabilities"], icon: IconSkills },
   { id: "application", label: "应用", hint: "外观、统计与更新", tabs: ["appearance", "usage", "update"], icon: IconSinglePanel }
@@ -45,6 +47,7 @@ export function getSettingsTitle(tab: SettingsTab): string {
     case "knowledge": return "知识库";
     case "memory": return "记忆";
     case "general": return "智能运行";
+    case "recording": return "浏览器录制";
     case "update": return "应用更新";
     default: return "设置";
   }
