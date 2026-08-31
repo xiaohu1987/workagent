@@ -4,7 +4,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
 import iconv from "iconv-lite";
-import { app, BrowserWindow, net, shell, webContents } from "electron";
+import { app, BrowserWindow, desktopCapturer, net, screen, shell, webContents } from "electron";
 import type { WebContents } from "electron";
 import type {
   AttachmentImportInput,
@@ -467,6 +467,7 @@ export class DesktopBackend {
       setBrowserViewport: async (threadId, tabId, viewport) => this.setBrowserViewport(threadId, tabId, viewport),
       assertBrowserPage: async (threadId, tabId, checks) => this.assertBrowserPage(threadId, tabId, checks),
       captureBrowserScreenshot: async (threadId, tabId, turnRunId, fullPage) => this.captureBrowserScreenshot(threadId, tabId, turnRunId, fullPage),
+      captureDesktopScreenshot: async (threadId, turnRunId, display) => this.captureDesktopScreenshot(threadId, turnRunId, display),
       captureBrowserSnapshot: async (threadId, tabId, turnRunId) =>
         this.captureBrowserSnapshot(threadId, tabId, turnRunId),
       getThreadOutputDir: async (threadId) => this.getThreadOutputDir(threadId),
@@ -3281,6 +3282,87 @@ export class DesktopBackend {
       viewport: this.#browserViewports.get(key) ?? this.defaultBrowserViewport(contents),
       fullPage,
       capturedAt,
+      attachment,
+      artifact
+    };
+  }
+
+  public async captureDesktopScreenshot(
+    threadId: string,
+    turnRunId: string,
+    target: "cursor" | "primary" = "cursor"
+  ) {
+    const displays = screen.getAllDisplays();
+    if (displays.length === 0) throw new Error("No desktop display is available for screenshot capture.");
+
+    const targetDisplay = target === "primary"
+      ? screen.getPrimaryDisplay()
+      : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const targetIndex = Math.max(0, displays.findIndex((display) => display.id === targetDisplay.id));
+    const scaleFactor = Number.isFinite(targetDisplay.scaleFactor) ? Math.max(1, targetDisplay.scaleFactor) : 1;
+    const requestedWidth = Math.max(1, Math.round(targetDisplay.size.width * scaleFactor));
+    const requestedHeight = Math.max(1, Math.round(targetDisplay.size.height * scaleFactor));
+    const captureScale = Math.min(1, 8192 / Math.max(requestedWidth, requestedHeight));
+    const sources = await desktopCapturer.getSources({
+      types: ["screen"],
+      thumbnailSize: {
+        width: Math.max(1, Math.round(requestedWidth * captureScale)),
+        height: Math.max(1, Math.round(requestedHeight * captureScale))
+      },
+      fetchWindowIcons: false
+    });
+    const source = sources.find((candidate) => candidate.display_id === String(targetDisplay.id))
+      ?? sources[targetIndex]
+      ?? sources[0];
+    if (!source || source.thumbnail.isEmpty()) {
+      throw new Error("Desktop screenshot capture returned no image. Check the operating system screen-recording permission and try again.");
+    }
+
+    const outputDir = await this.getThreadOutputDir(threadId);
+    const screenshotDir = path.join(outputDir, "screenshots");
+    await fs.mkdir(screenshotDir, { recursive: true });
+    const displayLabel = targetDisplay.label?.trim() || source.name || `Display ${targetDisplay.id}`;
+    const fileName = `desktop-${String(targetDisplay.id).replace(/[^a-z0-9_-]+/gi, "-")}-${Date.now()}.png`;
+    const filePath = path.join(screenshotDir, fileName);
+    const png = source.thumbnail.toPNG();
+    await fs.writeFile(filePath, png);
+    const stats = await fs.stat(filePath);
+    const dimensions = readPngDimensions(png);
+    const artifact = this.#db.addArtifact({
+      threadId,
+      turnRunId,
+      messageId: null,
+      toolCallId: null,
+      artifactKind: "desktop-screenshot",
+      displayName: fileName,
+      absolutePath: filePath,
+      relativePath: path.relative(outputDir, filePath),
+      mimeType: "image/png",
+      sizeBytes: stats.size,
+      sha256: await fileSha256(filePath),
+      sourceKind: "desktop",
+      isUserVisible: true,
+      status: "ready"
+    });
+    const attachment: MessageAttachment = {
+      id: randomUUID(),
+      kind: "image",
+      name: fileName,
+      mimeType: "image/png",
+      absolutePath: filePath,
+      sizeBytes: stats.size,
+      width: dimensions.width,
+      height: dimensions.height,
+      source: "generated"
+    };
+    return {
+      title: `Desktop screenshot: ${displayLabel}`,
+      filePath,
+      width: dimensions.width,
+      height: dimensions.height,
+      displayId: String(targetDisplay.id),
+      displayLabel,
+      capturedAt: new Date().toISOString(),
       attachment,
       artifact
     };

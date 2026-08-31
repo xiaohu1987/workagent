@@ -1727,3 +1727,33 @@ describe("thread deletion feedback", () => {
     expect(message).not.toContain("EBUSY");
   });
 });
+
+describe("desktop screenshot artifacts", () => {
+  it("renders desktop screenshots as generated images in the timeline", () => {
+    const entries = buildTimelineEntries([], [], [{
+      id: "desktop-screenshot-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      messageId: null,
+      toolCallId: null,
+      artifactKind: "desktop-screenshot",
+      displayName: "desktop-1.png",
+      absolutePath: "C:\\output\\screenshots\\desktop-1.png",
+      relativePath: "screenshots\\desktop-1.png",
+      mimeType: "image/png",
+      sizeBytes: 100,
+      sha256: "hash",
+      sourceKind: "desktop",
+      isUserVisible: true,
+      status: "ready",
+      createdAt: "2026-08-31T00:00:00.000Z"
+    }]);
+
+    expect(entries).toEqual([
+      expect.objectContaining({
+        kind: "file-summary",
+        files: [expect.objectContaining({ kind: "generated-image", description: "桌面截图" })]
+      })
+    ]);
+  });
+});

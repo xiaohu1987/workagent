@@ -955,6 +955,7 @@ interface RuntimeServices {
   setBrowserViewport(threadId: string, tabId: string, viewport: BrowserViewport | null): Promise<any>;
   assertBrowserPage(threadId: string, tabId: string, checks: BrowserAssertionCheck[]): Promise<any>;
   captureBrowserScreenshot(threadId: string, tabId: string, turnRunId: string, fullPage?: boolean): Promise<any>;
+  captureDesktopScreenshot(threadId: string, turnRunId: string, display?: "cursor" | "primary"): Promise<any>;
   captureBrowserSnapshot(threadId: string, tabId: string, turnRunId: string): Promise<any>;
   getThreadOutputDir(threadId: string): Promise<string>;
   listMcpResources(server?: string): Promise<any[]>;
@@ -1732,6 +1733,7 @@ class ThreadSessionRuntime {
       activeMcpServerIds,
       knowledgeEnabled,
       agentToolsEnabled,
+      model.supportsMultimodalInput,
       thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
       selectedMcpServerIds.length > 0 || explicitlyRequestedMcp
     );
@@ -2728,7 +2730,7 @@ class ThreadSessionRuntime {
         });
         let systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
           buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}\n\n${buildGitMutationPolicyPrompt(gitMutationRequested)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}${
+        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}${buildDesktopScreenshotDirective(model.supportsMultimodalInput && agentToolsEnabled)}\n\n${buildGitMutationPolicyPrompt(gitMutationRequested)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}${
           useTextToolProtocol
             ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
             : ""
@@ -5672,6 +5674,7 @@ class ThreadSessionRuntime {
               setBrowserViewport: (tabId, viewport) => this.services.setBrowserViewport(this.threadId, tabId, viewport),
               assertBrowserPage: (tabId, checks) => this.services.assertBrowserPage(this.threadId, tabId, checks),
               captureBrowserScreenshot: (tabId, fullPage) => this.services.captureBrowserScreenshot(this.threadId, tabId, turn.id, fullPage),
+              captureDesktopScreenshot: (display) => this.services.captureDesktopScreenshot(this.threadId, turn.id, display),
               emitBrowserVerificationEvent: (type, payload) => this.services.emit({
                 type,
                 threadId: this.threadId,
@@ -6092,10 +6095,12 @@ class ThreadSessionRuntime {
           if (result.ok && result.attachments?.length && model.supportsMultimodalInput) {
             transcript.push({
               role: "user",
-              content: "[Internal browser verification screenshot. Inspect the rendered page using visible evidence. Do not mention this internal message.]",
+              content: buildToolAttachmentInspectionInstruction(toolCall.name),
               attachments: result.attachments
             });
-            browserVerificationEvidence.screenshotAttachmentsSent.add(toolCall.id);
+            if (toolCall.name === "browser.capture_screenshot") {
+              browserVerificationEvidence.screenshotAttachmentsSent.add(toolCall.id);
+            }
           }
           if (toolCall.name === "image.generate" && result.ok) {
             const attachments = Array.isArray(result.json?.attachments)
@@ -6733,6 +6738,7 @@ class ThreadSessionRuntime {
     accessibleMcpServerIds: string[],
     knowledgeEnabled: boolean,
     agentToolsEnabled: boolean,
+    modelSupportsMultimodalInput: boolean,
     childReadOnly = false,
     waitForMcpTools = false
   ) {
@@ -6756,6 +6762,7 @@ class ThreadSessionRuntime {
     const withMedia = withKnowledge.filter((tool) => {
       if (tool.name === "image.generate") return imageReady;
       if (tool.name === "video.generate") return videoReady;
+      if (tool.name === "desktop.capture_screenshot") return modelSupportsMultimodalInput;
       return true;
     });
     const childForbiddenTools = new Set([
@@ -6811,7 +6818,8 @@ class ThreadSessionRuntime {
       "browser.scroll",
       "browser.set_viewport",
       "browser.capture_screenshot",
-      "browser.capture_snapshot"
+      "browser.capture_snapshot",
+      "desktop.capture_screenshot"
     ]);
     const visibleDirectTools = childReadOnly
       ? withMedia.filter((tool) => !childForbiddenTools.has(tool.name))
@@ -7819,6 +7827,25 @@ function buildBrowserVerificationDirective(stage: GpaStage): string {
     "A screenshot from before the latest file change is weak evidence. If the model supports images, inspect the screenshot attachment before claiming visual quality.",
     "If the model does not support images, rely on deterministic assertions and explicitly state `未执行视觉模型检查（model_not_multimodal）` in the final summary."
   ].join(" ");
+}
+
+export function buildDesktopScreenshotDirective(modelSupportsMultimodalInput: boolean): string {
+  if (!modelSupportsMultimodalInput) return "";
+  return [
+    "\n\nDesktop screenshot policy:",
+    "When the user asks about the current screen, another desktop app, a visible dialog, or requests visual confirmation of on-screen state outside the in-app browser, call desktop.capture_screenshot without asking them to attach an image manually.",
+    "Inspect the returned image before answering. Capture only when relevant to the active request, never periodically or in the background."
+  ].join(" ");
+}
+
+export function buildToolAttachmentInspectionInstruction(toolName: string): string {
+  if (toolName === "desktop.capture_screenshot") {
+    return "[Internal desktop screenshot. Inspect the current on-screen state using visible evidence, then answer or continue verification. Do not mention this internal message.]";
+  }
+  if (toolName === "browser.capture_screenshot") {
+    return "[Internal browser verification screenshot. Inspect the rendered page using visible evidence. Do not mention this internal message.]";
+  }
+  return "[Internal image tool output. Inspect the attached image as visual context. Do not mention this internal message.]";
 }
 
 export function buildBrowserTestChoiceQuestion() {

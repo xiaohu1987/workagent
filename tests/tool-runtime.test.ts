@@ -753,6 +753,54 @@ describe("ToolRuntime", () => {
     expect(emitBrowserVerificationEvent).toHaveBeenCalledWith("browser.screenshot_attached", expect.objectContaining({ tabId: "tab-1" }));
   });
 
+  it("captures the cursor desktop display and returns image context", async () => {
+    const runtime = new ToolRuntime();
+    const desktopTool = runtime.listToolSpecs().direct.find((tool) => tool.name === "desktop.capture_screenshot");
+    const captureDesktopScreenshot = vi.fn().mockResolvedValue({
+      title: "Desktop screenshot: Display 1",
+      filePath: "C:\\output\\screenshots\\desktop-1.png",
+      width: 1920,
+      height: 1080,
+      displayId: "1",
+      displayLabel: "Display 1",
+      capturedAt: "2026-08-31T00:00:00.000Z",
+      attachment: {
+        id: "desktop-attachment-1",
+        kind: "image",
+        name: "desktop-1.png",
+        mimeType: "image/png",
+        absolutePath: "C:\\output\\screenshots\\desktop-1.png",
+        sizeBytes: 4321,
+        width: 1920,
+        height: 1080,
+        source: "generated"
+      },
+      artifact: {
+        id: "desktop-artifact-1",
+        artifactKind: "desktop-screenshot"
+      }
+    });
+
+    const result = await runtime.execute({
+      id: "desktop-screenshot",
+      name: "desktop.capture_screenshot",
+      arguments: {}
+    }, {
+      cwd: process.cwd(),
+      captureDesktopScreenshot
+    } as unknown as ToolRuntimeContext);
+
+    expect(desktopTool?.inputSchema).toMatchObject({
+      properties: { display: { enum: ["cursor", "primary"] } }
+    });
+    expect(captureDesktopScreenshot).toHaveBeenCalledWith("cursor");
+    expect(result).toMatchObject({
+      ok: true,
+      attachments: [expect.objectContaining({ kind: "image", width: 1920, height: 1080 })],
+      artifacts: [expect.objectContaining({ artifactKind: "desktop-screenshot" })]
+    });
+  });
+
   it("fails browser.assert_page when a deterministic assertion fails", async () => {
     const runtime = new ToolRuntime();
     const assertBrowserPage = vi.fn().mockResolvedValue({

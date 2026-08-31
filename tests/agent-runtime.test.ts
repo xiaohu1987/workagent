@@ -21,6 +21,8 @@ import {
   shouldSuppressPrematureRootReport,
   buildUserMessageMetadata,
   buildBrowserTestChoiceQuestion,
+  buildDesktopScreenshotDirective,
+  buildToolAttachmentInspectionInstruction,
   buildAgentProtocolRecoveryQuestion,
   resolveBrowserTestChoice,
   buildSilentBrowserFallbackInstruction,
@@ -4563,6 +4565,14 @@ describe("multimodal intent classification", () => {
 });
 
 describe("multimodal input recognition fallback", () => {
+  it("directs multimodal chat models to capture and inspect relevant desktop state", () => {
+    expect(buildDesktopScreenshotDirective(true)).toContain("desktop.capture_screenshot");
+    expect(buildDesktopScreenshotDirective(true)).toContain("without asking them to attach an image manually");
+    expect(buildDesktopScreenshotDirective(false)).toBe("");
+    expect(buildToolAttachmentInspectionInstruction("desktop.capture_screenshot")).toContain("desktop screenshot");
+    expect(buildToolAttachmentInspectionInstruction("browser.capture_screenshot")).toContain("browser verification screenshot");
+  });
+
   it("detects only image attachments as recognizable multimodal input", () => {
     expect(hasRecognizableMultimodalAttachments([
       { id: "1", kind: "image", name: "a.png", mimeType: "image/png", absolutePath: "/tmp/a.png", sizeBytes: 10, source: "user" }

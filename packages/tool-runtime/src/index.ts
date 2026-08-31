@@ -158,6 +158,17 @@ export interface ToolRuntimeContext {
     attachment: MessageAttachment;
     artifact: ArtifactRecord;
   }>;
+  captureDesktopScreenshot: (display?: "cursor" | "primary") => Promise<{
+    title: string;
+    filePath: string;
+    width: number;
+    height: number;
+    displayId: string;
+    displayLabel: string;
+    capturedAt: string;
+    attachment: MessageAttachment;
+    artifact: ArtifactRecord;
+  }>;
   emitBrowserVerificationEvent?: (type: "browser.verification_started" | "browser.assertion_completed" | "browser.screenshot_attached" | "browser.verification_completed", payload: Record<string, unknown>) => Promise<void>;
   captureBrowserSnapshot: (tabId: string) => Promise<{
     filePath: string;
@@ -282,7 +293,8 @@ const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
   "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
   "browser.open_tab", "browser.click", "browser.fill", "browser.select_option", "browser.press_key",
   "browser.navigate", "browser.reload", "browser.back", "browser.forward", "browser.go_back", "browser.go_forward",
-  "browser.focus_tab", "browser.scroll", "browser.set_viewport", "browser.capture_screenshot", "browser.capture_snapshot"
+  "browser.focus_tab", "browser.scroll", "browser.set_viewport", "browser.capture_screenshot", "browser.capture_snapshot",
+  "desktop.capture_screenshot"
 ]);
 
 export function canonicalizeToolName(name: string): string {
@@ -2365,6 +2377,36 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       const result = await ctx.assertBrowserPage(tabId, checks);
       await ctx.emitBrowserVerificationEvent?.("browser.assertion_completed", { tabId, ...result });
       return { ok: result.passed, content: JSON.stringify(result), json: result };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "desktop.capture_screenshot",
+      description:
+        "Capture the current desktop display as a PNG and return it as image context for visual inspection. Call this automatically when the user's request requires seeing or verifying the current on-screen state outside the in-app browser. Use the cursor display by default; do not capture periodically or when screen contents are irrelevant.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          display: {
+            type: "string",
+            enum: ["cursor", "primary"],
+            description: "Display to capture. cursor is the screen containing the mouse pointer; primary is the operating system primary display."
+          }
+        }
+      },
+      riskLevel: "low"
+    },
+    async (args, ctx) => {
+      const display = args.display === "primary" ? "primary" : "cursor";
+      const screenshot = await ctx.captureDesktopScreenshot(display);
+      return {
+        ok: true,
+        content: `${screenshot.title}\n${screenshot.filePath}`,
+        json: screenshot,
+        artifacts: [screenshot.artifact],
+        attachments: [screenshot.attachment]
+      };
     }
   );
 

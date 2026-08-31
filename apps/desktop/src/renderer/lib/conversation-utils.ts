@@ -327,6 +327,7 @@ export function buildTimelineEntries(
       artifact.artifactKind !== "generated-image" &&
       artifact.artifactKind !== "generated-video" &&
       artifact.artifactKind !== "browser-screenshot" &&
+      artifact.artifactKind !== "desktop-screenshot" &&
       artifact.artifactKind !== "browser-snapshot" &&
       artifact.artifactKind !== "knowledge-index"
     ) {
@@ -334,7 +335,9 @@ export function buildTimelineEntries(
     }
     const turnRunId = artifact.turnRunId ?? `artifact-${artifact.id}`;
     const isVideo = artifact.artifactKind === "generated-video";
-    const isImage = artifact.artifactKind === "generated-image" || artifact.artifactKind === "browser-screenshot";
+    const isImage = artifact.artifactKind === "generated-image"
+      || artifact.artifactKind === "browser-screenshot"
+      || artifact.artifactKind === "desktop-screenshot";
     filesByTurn.set(turnRunId, [
       ...(filesByTurn.get(turnRunId) ?? []),
       {
@@ -1069,6 +1072,7 @@ export function getGeneratedFileDescription(
   action?: FileChangeAction
 ): string {
   if (artifactKind === "browser-screenshot") return "浏览器截图";
+  if (artifactKind === "desktop-screenshot") return "桌面截图";
   if (artifactKind === "browser-snapshot") return "浏览器快照";
   if (artifactKind === "knowledge-index") return "知识库索引";
   if (kind === "generated-video") return "生成的视频";
