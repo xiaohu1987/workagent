@@ -1421,6 +1421,21 @@ describe("assistant draft lifecycle", () => {
     })?.chunks).toEqual(["Hello world restored"]);
   });
 
+  it("keeps the delta sequence after an empty initial checkpoint", () => {
+    const first = reconcileAssistantDraftStreamUpdate(undefined, {
+      content: "",
+      deltaSequence: 1
+    });
+    const second = reconcileAssistantDraftStreamUpdate(first?.buffer, {
+      delta: "Live reply",
+      deltaSequence: 2
+    });
+
+    expect(second?.chunks).toEqual(["", "Live reply"]);
+    expect(getAssistantDraftDisplayContent({ content: second?.content ?? "", chunks: second?.chunks }))
+      .toBe("Live reply");
+  });
+
   it("ignores late updates from an older model request in the same turn", () => {
     const newer = {
       draftId: "draft-2",

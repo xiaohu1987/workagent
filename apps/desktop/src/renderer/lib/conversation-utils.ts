@@ -1980,8 +1980,19 @@ export function reconcileAssistantDraftStreamUpdate(
   input: { content?: string; delta?: string; deltaSequence?: number }
 ): { buffer?: AssistantDraftStreamBuffer; content: string; chunks?: string[] } | null {
   const { content, delta, deltaSequence } = input;
-  if (deltaSequence === undefined || delta === undefined) {
+  if (deltaSequence === undefined) {
     return content === undefined ? null : { content };
+  }
+  if (delta === undefined) {
+    if (content === undefined) return null;
+    const usesMarkup = /<\/?tool_(?:calls|result)\b/i.test(content);
+    const buffer = {
+      chunks: [content],
+      checkpoint: content,
+      nextDeltaSequence: deltaSequence + 1,
+      usesMarkup
+    };
+    return { buffer, content, chunks: usesMarkup ? undefined : buffer.chunks };
   }
 
   const isNext = previous
@@ -2104,9 +2115,10 @@ export function selectActiveAssistantDraft(
     .at(-1) ?? null;
 }
 
-export function getAssistantDraftDisplayContent(entry: Pick<AssistantDraft, "content">): string {
-  if (isPatchAssistantMessage(entry.content) || isInternalAgentProtocolMessage(entry.content)) return "";
-  return stripAssistantToolMarkup(entry.content);
+export function getAssistantDraftDisplayContent(entry: Pick<AssistantDraft, "content" | "chunks">): string {
+  const content = entry.content || entry.chunks?.join("") || "";
+  if (isPatchAssistantMessage(content) || isInternalAgentProtocolMessage(content)) return "";
+  return stripAssistantToolMarkup(content);
 }
 
 export function getToolActivityTarget(
