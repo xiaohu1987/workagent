@@ -22,6 +22,7 @@ export type SettingsTab =
   | "capabilities"
   | "mcp"
   | "database"
+  | "recording"
   | "update";
 
 export type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";

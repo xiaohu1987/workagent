@@ -133,6 +133,8 @@ export interface HomeLayout {
   skillsDraftsDir: string;
   pluginsInstalledDir: string;
   pluginsDisabledDir: string;
+  recordingsDir: string;
+  browserProfilesDir: string;
 }
 
 export interface ThreadSearchResult {
@@ -160,7 +162,9 @@ export async function ensureHomeLayout(): Promise<HomeLayout> {
     skillsImportedDir: path.join(root, "skills", "imported"),
     skillsDraftsDir: path.join(root, "skills", "drafts"),
     pluginsInstalledDir: path.join(root, "plugins", "installed"),
-    pluginsDisabledDir: path.join(root, "plugins", "disabled")
+    pluginsDisabledDir: path.join(root, "plugins", "disabled"),
+    recordingsDir: path.join(root, "recordings"),
+    browserProfilesDir: path.join(root, "browser-profiles")
   };
 
   await Promise.all([
@@ -175,7 +179,9 @@ export async function ensureHomeLayout(): Promise<HomeLayout> {
     fs.mkdir(layout.skillsImportedDir, { recursive: true }),
     fs.mkdir(layout.skillsDraftsDir, { recursive: true }),
     fs.mkdir(layout.pluginsInstalledDir, { recursive: true }),
-    fs.mkdir(layout.pluginsDisabledDir, { recursive: true })
+    fs.mkdir(layout.pluginsDisabledDir, { recursive: true }),
+    fs.mkdir(layout.recordingsDir, { recursive: true }),
+    fs.mkdir(layout.browserProfilesDir, { recursive: true })
   ]);
 
   await seedSystemSkills(layout.skillsSystemDir);
@@ -321,7 +327,8 @@ export function defaultConfig(): AppConfig {
       browserOpenMode: "in_app",
       silentBrowserOpen: true,
       liveEditPreview: false,
-      llmLogViewer: false
+      llmLogViewer: false,
+      chromeExecutablePath: undefined
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -530,7 +537,10 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       browserOpenMode,
       silentBrowserOpen,
       liveEditPreview: parsed.desktop?.liveEditPreview ?? false,
-      llmLogViewer: parsed.desktop?.llmLogViewer ?? false
+      llmLogViewer: parsed.desktop?.llmLogViewer ?? false,
+      chromeExecutablePath: typeof parsed.desktop?.chromeExecutablePath === "string" && parsed.desktop.chromeExecutablePath.trim()
+        ? parsed.desktop.chromeExecutablePath.trim()
+        : undefined
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),

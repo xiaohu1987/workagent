@@ -196,6 +196,7 @@ import {
   MODEL_DECISION_TIMEOUT_MS,
   waitForAbortOrIdleTimeout,
   ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS,
+  getAssistantDraftPublishDelay,
   shouldPublishAssistantDraftUpdate,
   isExplicitGitMutationRequest,
   validateGitMutationToolCall,
@@ -256,6 +257,12 @@ describe("assistant draft stream throttling", () => {
 
   it("publishes phase changes immediately so status and final content are not delayed", () => {
     expect(shouldPublishAssistantDraftUpdate(1_000, 1_001, true)).toBe(true);
+  });
+
+  it("schedules the latest skipped update for the end of the throttle window", () => {
+    expect(getAssistantDraftPublishDelay(1_000, 1_050)).toBe(50);
+    expect(getAssistantDraftPublishDelay(1_000, 1_100)).toBe(0);
+    expect(getAssistantDraftPublishDelay(1_000, 1_001, true)).toBe(0);
   });
 });
 

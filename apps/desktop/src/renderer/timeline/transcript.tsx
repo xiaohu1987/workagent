@@ -411,6 +411,7 @@ export function ToolActivityIcon({ toolName }: { toolName: string }) {
   if (toolName === "code.search" || toolName.startsWith("code.") || toolName === "project.verify") return <IconSearch />;
   if (toolName.startsWith("git.")) return <IconCode />;
   if (toolName.startsWith("browser.") || toolName.startsWith("web_search.")) return <IconGlobe />;
+  if (toolName === "screen.capture_screenshot") return <IconImage />;
   if (toolName === "image.generate") return <IconImage />;
   if (toolName === "video.generate") return <IconVideo />;
   if (toolName.startsWith("skills.")) return <IconSkills />;
@@ -523,6 +524,7 @@ function getToolActivityLabel(toolName: string) {
   if (toolName === "web_search.open_page") return "打开网页";
   if (toolName === "web_search.find_in_page") return "页内查找";
   if (toolName.startsWith("browser.")) return "操作浏览器";
+  if (toolName === "screen.capture_screenshot") return "截取屏幕";
   if (toolName === "image.generate") return "生成图片";
   if (toolName === "video.generate") return "生成视频";
   if (toolName === "database.query" || toolName === "database.federated_query") return "查询数据库";

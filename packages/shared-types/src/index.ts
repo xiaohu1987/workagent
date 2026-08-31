@@ -964,6 +964,8 @@ export interface AppConfig {
     silentBrowserOpen: boolean;
     liveEditPreview: boolean;
     llmLogViewer: boolean;
+    /** Optional path to the Chrome executable used by browser recordings. */
+    chromeExecutablePath?: string;
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;
@@ -1325,6 +1327,126 @@ export interface GitSnapshot {
   branches: string[];
   canCreatePullRequest: boolean;
   files: GitFileChange[];
+}
+
+export type BrowserRecordingFamily = "chrome" | "edge";
+
+export interface DetectedBrowser {
+  family: BrowserRecordingFamily;
+  label: string;
+  available: boolean;
+  executablePath: string | null;
+}
+
+export interface BrowserRecordingFrameTarget {
+  name?: string;
+  url?: string;
+}
+
+export interface BrowserRecordingLocator {
+  strategy: "testId" | "role" | "label" | "placeholder" | "name" | "id" | "text" | "css";
+  value: string;
+  role?: string;
+  exact?: boolean;
+  nth?: number;
+  frame?: BrowserRecordingFrameTarget;
+}
+
+interface BrowserRecordingActionBase {
+  id: string;
+  pageId: string;
+  createdAt: string;
+}
+
+export type BrowserRecordingAction =
+  | (BrowserRecordingActionBase & { type: "navigate"; url: string })
+  | (BrowserRecordingActionBase & { type: "openPage"; url: string; openerPageId?: string })
+  | (BrowserRecordingActionBase & { type: "waitFor"; locator: BrowserRecordingLocator; state: "attached" | "visible" | "hidden" | "enabled"; timeoutMs?: number })
+  | (BrowserRecordingActionBase & { type: "waitForUrl"; url: string; timeoutMs?: number })
+  | (BrowserRecordingActionBase & { type: "waitForPage"; openerPageId?: string; pageId?: string; timeoutMs?: number })
+  | (BrowserRecordingActionBase & { type: "click"; locator: BrowserRecordingLocator; expectedUrl?: string; opensPageId?: string })
+  | (BrowserRecordingActionBase & { type: "fill"; locator: BrowserRecordingLocator; valueKey: string })
+  | (BrowserRecordingActionBase & { type: "select"; locator: BrowserRecordingLocator; valueKey: string })
+  | (BrowserRecordingActionBase & { type: "check"; locator: BrowserRecordingLocator; checked: boolean })
+  | (BrowserRecordingActionBase & { type: "press"; locator: BrowserRecordingLocator | null; key: string; expectedUrl?: string; opensPageId?: string })
+  | (BrowserRecordingActionBase & { type: "scroll"; x: number; y: number })
+  | (BrowserRecordingActionBase & { type: "upload"; locator: BrowserRecordingLocator; fileKey: string });
+
+export interface BrowserRecording {
+  id: string;
+  name: string;
+  browser: BrowserRecordingFamily;
+  startUrl: string;
+  /** Additional initial URLs for multi-page recordings. The legacy startUrl remains the first URL. */
+  startUrls?: string[];
+  status: "ready" | "recording" | "interrupted" | "invalid";
+  stepCount: number;
+  directory: string;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt: string | null;
+  lastRunStatus: "passed" | "failed" | "cancelled" | null;
+  lastError: string | null;
+  /** Chat thread that initiated the recording, when available. */
+  threadId?: string | null;
+  enhancedPlanStatus?: "none" | "generating" | "candidate" | "approved" | "failed";
+  llmError?: string | null;
+  documentStatus?: "ready" | "failed";
+  documentError?: string | null;
+  lastRepairSummary?: string | null;
+}
+
+export type BrowserRecordingOperation = "recording" | "playback";
+
+export interface BrowserRecordingSession {
+  mode: "idle" | "recording" | "replaying" | "paused" | "completed";
+  operation: BrowserRecordingOperation | null;
+  recordingId: string | null;
+  recordingName: string | null;
+  browser: BrowserRecordingFamily | null;
+  stepCount: number;
+  currentStep: number;
+  totalSteps: number;
+  error: string | null;
+  failedActionId: string | null;
+  missingFileKey: string | null;
+  threadId?: string | null;
+  llmStatus?: "idle" | "narrating" | "enhancing" | "repairing" | "applying" | "resuming" | "candidate" | "error";
+  llmMessage?: string | null;
+  candidateId?: string | null;
+  appliedCandidateId?: string | null;
+  repairAttempt?: number;
+  chatTurnRunId?: string | null;
+  chatDraftId?: string | null;
+}
+
+export type BrowserReplayState = BrowserRecordingSession;
+
+export interface BrowserRecordingExecutionPlan {
+  schemaVersion: 1;
+  baseRevision: string;
+  source: "recorded" | "llm";
+  generatedAt: string;
+  actions: BrowserRecordingAction[];
+  rationale?: string[];
+  confidence?: number;
+}
+
+export interface BrowserRecordingRepairCandidate {
+  id: string;
+  recordingId: string;
+  threadId: string | null;
+  baseRevision: string;
+  operations: Array<{
+    op: "replace" | "insertBefore" | "insertAfter" | "delete";
+    actionId: string;
+    action?: BrowserRecordingAction;
+  }>;
+  rationale: string[];
+  confidence: number;
+  createdAt: string;
+  source: "enhancement" | "replay-failure";
+  failedActionId?: string;
 }
 
 export interface GitActionResult {

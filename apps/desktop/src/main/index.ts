@@ -6,6 +6,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   DatabaseConnectionConfig,
+  BrowserRecordingFamily,
+  BrowserRecordingSession,
   NotificationNavigationTarget,
   RuntimeEvent,
   SkillLabEvent,
@@ -43,6 +45,7 @@ if (process.platform === "win32") {
 }
 
 let mainWindow: BrowserWindow | null = null;
+let browserRecordingControlWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 let shutdownTasksPromise: Promise<void> | null = null;
@@ -103,9 +106,73 @@ function quitApplication(): void {
   isQuitting = true;
   liveEditPreview.destroy();
   conversationLogWindow.destroy();
+  browserRecordingControlWindow?.destroy();
+  browserRecordingControlWindow = null;
   tray?.destroy();
   tray = null;
   app.quit();
+}
+
+function ensureBrowserRecordingControlWindow(): BrowserWindow {
+  if (browserRecordingControlWindow && !browserRecordingControlWindow.isDestroyed()) return browserRecordingControlWindow;
+  const workArea = screen.getPrimaryDisplay().workArea;
+  browserRecordingControlWindow = new BrowserWindow({
+    x: workArea.x + workArea.width - 318,
+    y: workArea.y + 24,
+    width: 318,
+    height: 112,
+    frame: false,
+    transparent: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    backgroundColor: "#171819",
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/index.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  });
+  browserRecordingControlWindow.setAlwaysOnTop(true, "floating");
+  browserRecordingControlWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  browserRecordingControlWindow.on("closed", () => { browserRecordingControlWindow = null; });
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+    *{box-sizing:border-box}body{margin:0;padding:12px;background:#171819;color:#f4f4f5;font:12px system-ui,-apple-system,"Segoe UI",sans-serif;user-select:none}
+    main{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;height:88px;border:1px solid #343638;border-radius:7px;padding:10px 11px;background:#202224;box-shadow:0 10px 34px rgba(0,0,0,.42)}
+    .copy{min-width:0;display:grid;gap:5px}.title{display:flex;align-items:center;gap:7px;font-weight:700}.dot{width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,.12)}
+    .meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#a8aaad}.actions{display:flex;gap:6px}button{height:30px;border:1px solid #45484b;border-radius:5px;padding:0 10px;color:#f4f4f5;background:#2b2d30;cursor:pointer}button:hover{background:#373a3d}button.primary{border-color:#b74444;background:#8f3030}button[hidden]{display:none}
+  </style></head><body><main><div class="copy"><div class="title"><i class="dot"></i><span id="title">浏览器录制</span></div><div class="meta" id="meta">准备中</div></div><div class="actions"><button id="cancel" hidden>取消</button><button id="retry" hidden>重试</button><button id="accept" hidden>采用修复</button><button id="stop" class="primary">停止</button></div></main><script>
+    let state=null;const title=document.getElementById('title');const meta=document.getElementById('meta');const cancel=document.getElementById('cancel');const retry=document.getElementById('retry');const accept=document.getElementById('accept');const stop=document.getElementById('stop');
+     function render(next){state=next;const playback=next.operation==='playback';title.textContent=next.llmStatus==='repairing'?'LLM 正在分析':next.llmStatus==='applying'?'LLM 正在应用修复':next.llmStatus==='resuming'?'正在继续回放':next.mode==='paused'?'回放已暂停':playback?'正在回放':'正在录制';meta.textContent=next.llmStatus==='candidate'?(next.llmMessage||'已有修复候选，请确认'):next.llmStatus==='applying'||next.llmStatus==='resuming'?(next.llmMessage||'正在继续'):next.mode==='paused'?(next.error||'步骤执行失败'):playback?((next.currentStep||0)+' / '+(next.totalSteps||0)+' 步'):((next.stepCount||0)+' 个步骤');cancel.hidden=next.operation!=='recording';retry.hidden=next.mode!=='paused';accept.hidden=next.llmStatus!=='candidate';stop.textContent=next.mode==='paused'?'终止':'停止';}
+    window.codexh.getBrowserRecordingState().then(render);window.codexh.onBrowserRecordingState(render);
+    cancel.onclick=()=>window.codexh.cancelBrowserRecording();retry.onclick=()=>window.codexh.retryBrowserRecordingPlayback();accept.onclick=()=>state?.recordingId&&window.codexh.applyBrowserRecordingLlmCandidate(state.recordingId);stop.onclick=()=>state?.operation==='recording'?window.codexh.stopBrowserRecording():window.codexh.stopBrowserRecordingPlayback();
+  </script></body></html>`;
+  void browserRecordingControlWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  return browserRecordingControlWindow;
+}
+
+function handleBrowserRecordingState(state: BrowserRecordingSession): void {
+  mainWindow?.webContents.send("recordings:state-changed", state);
+  const keepOpenForLlm = state.mode === "completed" && ["enhancing", "repairing", "applying", "resuming", "candidate", "error"].includes(state.llmStatus ?? "idle");
+  if (state.mode === "recording" || state.mode === "replaying" || state.mode === "paused" || keepOpenForLlm) {
+    const control = ensureBrowserRecordingControlWindow();
+    control.webContents.send("recordings:state-changed", state);
+    control.showInactive();
+    if (state.mode === "completed") {
+      showMainWindow();
+      mainWindow?.webContents.send("recordings:open-settings", { recordingId: state.recordingId });
+    }
+    return;
+  }
+  browserRecordingControlWindow?.hide();
+  if (state.mode === "completed") {
+    showMainWindow();
+    mainWindow?.webContents.send("recordings:open-settings", { recordingId: state.recordingId });
+  }
 }
 
 function resolveTrayIconPath(): string | null {
@@ -300,6 +367,7 @@ async function createWindow(): Promise<void> {
     notifyBackgroundSkillLabEvent(event);
     mainWindow?.webContents.send("skill-lab:event", event);
   });
+  backend.onBrowserRecordingState(handleBrowserRecordingState);
 
   mainWindow.removeMenu();
   mainWindow.setMenuBarVisibility(false);
@@ -749,6 +817,35 @@ function registerIpc(): void {
   ipcMain.handle("browser:sync-webcontents", (_event, payload: { threadId: string; tabId: string }) =>
     backend.syncBrowserWebContents(payload)
   );
+  ipcMain.handle("recordings:detect-browsers", () => backend.detectRecordingBrowsers());
+  ipcMain.handle("recordings:choose-chrome-path", async () => {
+    const result = await dialog.showOpenDialog({
+      title: "选择 Chrome 可执行文件",
+      properties: ["openFile"],
+      filters: [{ name: "Chrome 可执行文件", extensions: ["exe"] }]
+    });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  ipcMain.handle("recordings:list", () => backend.listBrowserRecordings());
+  ipcMain.handle("recordings:state", () => backend.getBrowserRecordingState());
+  ipcMain.handle("recordings:start", (_event, payload: { threadId: string; browser: BrowserRecordingFamily; name?: string; startUrl?: string; startUrls?: string[] }) =>
+    backend.startBrowserRecording(payload)
+  );
+  ipcMain.handle("recordings:stop", () => backend.stopBrowserRecording());
+  ipcMain.handle("recordings:cancel", () => backend.cancelBrowserRecording());
+  ipcMain.handle("recordings:play", (_event, payload: { recordingId: string; threadId: string }) => backend.playBrowserRecording(payload.recordingId, payload.threadId));
+  ipcMain.handle("recordings:retry", () => backend.retryBrowserRecordingPlayback());
+  ipcMain.handle("recordings:stop-playback", () => backend.stopBrowserRecordingPlayback());
+  ipcMain.handle("recordings:apply-llm-candidate", (_event, recordingId: string) => backend.applyBrowserRecordingLlmCandidate(recordingId));
+  ipcMain.handle("recordings:discard-llm-candidate", (_event, recordingId: string) => backend.discardBrowserRecordingLlmCandidate(recordingId));
+  ipcMain.handle("recordings:enhance", (_event, payload: { recordingId: string; threadId: string }) => backend.enhanceBrowserRecording(payload.recordingId, payload.threadId));
+  ipcMain.handle("recordings:rename", (_event, payload: { recordingId: string; name: string }) =>
+    backend.renameBrowserRecording(payload.recordingId, payload.name)
+  );
+  ipcMain.handle("recordings:delete", (_event, recordingId: string) => backend.deleteBrowserRecording(recordingId));
+  ipcMain.handle("recordings:read-script", (_event, recordingId: string) => backend.readBrowserRecordingScript(recordingId));
+  ipcMain.handle("recordings:read-document", (_event, recordingId: string) => backend.readBrowserRecordingDocument(recordingId));
+  ipcMain.handle("recordings:open-directory", (_event, recordingId: string) => backend.openBrowserRecordingDirectory(recordingId));
   ipcMain.handle("approval:resolve", (_event, payload) =>
     backend.resolveApproval(payload.id, payload.resolution)
   );
@@ -938,6 +1035,7 @@ function stopActiveThreadsBeforeQuit(): Promise<void> {
         if (backend.hasActiveThreads()) {
           await backend.interruptActiveThreads();
         }
+        await backend.shutdownBrowserRecordings();
       } catch (error) {
         console.error("[shutdown] Failed to interrupt active threads", error);
       } finally {

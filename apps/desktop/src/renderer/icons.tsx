@@ -508,6 +508,22 @@ export function IconStop() {
   );
 }
 
+export function IconPlay() {
+  return (
+    <SvgIcon size={18}>
+      <path d="m8 5 11 7-11 7z" fill="currentColor" stroke="none" />
+    </SvgIcon>
+  );
+}
+
+export function IconRecord() {
+  return (
+    <SvgIcon size={18}>
+      <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />
+    </SvgIcon>
+  );
+}
+
 export function IconShield() {
   return (
     <SvgIcon>
