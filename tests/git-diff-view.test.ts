@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSideBySideDiffRows } from "../apps/desktop/src/renderer/workspace/git-changes";
+import { buildSideBySideDiffRows, runOneClickGitCommit } from "../apps/desktop/src/renderer/workspace/git-changes";
 import type { GitHunk } from "../packages/shared-types/src";
 
 describe("buildSideBySideDiffRows", () => {
@@ -31,6 +31,78 @@ describe("buildSideBySideDiffRows", () => {
   });
 });
 
+describe("runOneClickGitCommit", () => {
+  it("stages, commits, pushes, and reports completion in order", async () => {
+    const calls: string[] = [];
+    const progress: number[] = [];
+    const onCommitted = () => calls.push("clear-message");
+
+    const result = await runOneClickGitCommit({
+      hasUnstagedFiles: true,
+      stageAll: async () => actionResult("staged", calls),
+      commit: async () => actionResult("committed", calls),
+      push: async () => actionResult("pushed", calls),
+      onProgress: (value) => progress.push(value.percent),
+      onCommitted
+    });
+
+    expect(result).toMatchObject({ ok: true, message: "已提交并推送" });
+    expect(calls).toEqual(["staged", "committed", "clear-message", "pushed"]);
+    expect(progress).toEqual([12, 45, 76, 100]);
+  });
+
+  it("stops when staging fails and does not clear the commit message", async () => {
+    const calls: string[] = [];
+    const onCommitted = () => calls.push("clear-message");
+
+    const result = await runOneClickGitCommit({
+      hasUnstagedFiles: true,
+      stageAll: async () => actionResult("stage-failed", calls, false),
+      commit: async () => actionResult("committed", calls),
+      push: async () => actionResult("pushed", calls),
+      onProgress: () => undefined,
+      onCommitted
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toEqual(["stage-failed"]);
+  });
+
+  it("clears the message after a successful commit even when pushing fails", async () => {
+    const calls: string[] = [];
+    const progress: string[] = [];
+
+    const result = await runOneClickGitCommit({
+      hasUnstagedFiles: false,
+      stageAll: async () => actionResult("staged", calls),
+      commit: async () => actionResult("committed", calls),
+      push: async () => actionResult("push-failed", calls, false),
+      onProgress: (value) => progress.push(`${value.state}:${value.percent}`),
+      onCommitted: () => calls.push("clear-message")
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toEqual(["committed", "clear-message", "push-failed"]);
+    expect(progress).toEqual(["running:45", "running:76", "error:76"]);
+  });
+});
+
 function hunk(lines: GitHunk["lines"]): GitHunk {
   return { id: "test-hunk", header: "@@ -1,3 +1,2 @@", lines };
+}
+
+function actionResult(message: string, calls: string[], ok = true) {
+  calls.push(message);
+  return {
+    ok,
+    message,
+    snapshot: {
+      available: true,
+      ahead: 0,
+      behind: 0,
+      branches: ["main"],
+      canCreatePullRequest: false,
+      files: []
+    }
+  };
 }

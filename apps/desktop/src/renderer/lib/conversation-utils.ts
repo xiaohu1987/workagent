@@ -1963,6 +1963,7 @@ export function createOptimisticThreadSnapshot(thread: ThreadRecord): RuntimeThr
     contextMeasurement: null,
     gpa: null,
     subagents: [],
+    subagentResults: [],
     queuedSubagentIds: []
   };
 }

@@ -26,6 +26,67 @@ type SideBySideDiffRow = {
   newKind: GitDiffLine["kind"] | "empty";
 };
 
+export type GitCommitProgress = {
+  percent: number;
+  label: string;
+  state: "running" | "success" | "error";
+};
+
+type OneClickGitCommitOptions = {
+  hasUnstagedFiles: boolean;
+  stageAll: () => Promise<GitActionResult>;
+  commit: () => Promise<GitActionResult>;
+  push: () => Promise<GitActionResult>;
+  onProgress: (progress: GitCommitProgress) => void;
+  onCommitted: () => void;
+};
+
+export async function runOneClickGitCommit({
+  hasUnstagedFiles,
+  stageAll,
+  commit,
+  push,
+  onProgress,
+  onCommitted
+}: OneClickGitCommitOptions): Promise<GitActionResult> {
+  try {
+    if (hasUnstagedFiles) {
+      onProgress({ percent: 12, label: "正在暂存全部变更", state: "running" });
+      const staged = await stageAll();
+      if (!staged.ok) {
+        onProgress({ percent: 12, label: staged.message, state: "error" });
+        return staged;
+      }
+    }
+
+    onProgress({ percent: 45, label: "正在创建提交", state: "running" });
+    const committed = await commit();
+    if (!committed.ok) {
+      onProgress({ percent: 45, label: committed.message, state: "error" });
+      return committed;
+    }
+    onCommitted();
+
+    onProgress({ percent: 76, label: "提交已创建，正在推送", state: "running" });
+    const pushed = await push();
+    if (!pushed.ok) {
+      onProgress({ percent: 76, label: pushed.message, state: "error" });
+      return pushed;
+    }
+
+    const result = { ...pushed, message: "已提交并推送" };
+    onProgress({ percent: 100, label: result.message, state: "success" });
+    return result;
+  } catch (error) {
+    onProgress({
+      percent: 0,
+      label: error instanceof Error ? error.message : String(error),
+      state: "error"
+    });
+    throw error;
+  }
+}
+
 export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   threadId,
   workspaceRoots,
@@ -54,6 +115,7 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [openedPath, setOpenedPath] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
+  const [commitProgress, setCommitProgress] = useState<GitCommitProgress | null>(null);
   const files = snapshot?.files ?? [];
   const selected = files.find((file) => file.path === selectedPath) ?? null;
   const opened = files.find((file) => file.path === openedPath) ?? null;
@@ -71,6 +133,11 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
     if (openedPath && !files.some((file) => file.path === openedPath)) setOpenedPath(null);
     if (selectedPath && !files.some((file) => file.path === selectedPath)) setSelectedPath(null);
   }, [files, openedPath, selectedPath]);
+
+  useEffect(() => {
+    setCommitMessage("");
+    setCommitProgress(null);
+  }, [rootPath, threadId]);
 
   const rootSelector = workspaceRoots.length > 1 ? (
     <select className="workspace-root-select" aria-label="Git 目录" title="切换 Git 目录" value={rootPath} disabled={busy} onChange={(event) => onRootChange(event.target.value)}>
@@ -94,6 +161,18 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
     if (action === "stage") run(() => window.codexh.stageGitFile({ threadId, rootPath, path: file.path }) as Promise<GitActionResult>);
     if (action === "unstage") run(() => window.codexh.unstageGitFile({ threadId, rootPath, path: file.path }) as Promise<GitActionResult>);
     if (action === "revert") run(() => window.codexh.revertGitFile({ threadId, rootPath, path: file.path, untracked: file.untracked }) as Promise<GitActionResult>);
+  };
+  const oneClickCommit = () => {
+    if (!threadId) return;
+    const message = commitMessage.trim();
+    run(() => runOneClickGitCommit({
+      hasUnstagedFiles,
+      stageAll: () => window.codexh.stageAllGitChanges({ threadId, rootPath }) as Promise<GitActionResult>,
+      commit: () => window.codexh.commitGitChanges({ threadId, rootPath, message }) as Promise<GitActionResult>,
+      push: () => window.codexh.pushGitChanges({ threadId, rootPath }) as Promise<GitActionResult>,
+      onProgress: setCommitProgress,
+      onCommitted: () => setCommitMessage("")
+    }));
   };
 
   return (
@@ -150,15 +229,42 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
           <section className="git-commit-panel" aria-label="提交更改">
             <textarea
               value={commitMessage}
-              onChange={(event) => setCommitMessage(event.target.value)}
-              placeholder={hasStagedFiles ? "输入提交消息（必需）" : "输入提交消息，可先暂存全部变更"}
+              onChange={(event) => {
+                setCommitMessage(event.target.value);
+                if (commitProgress?.state !== "running") setCommitProgress(null);
+              }}
+              placeholder="输入提交消息（必需）"
               disabled={busy}
               rows={3}
             />
-            <div>
-              <button type="button" className="git-stage-all-button" disabled={busy || !threadId || !hasUnstagedFiles} onClick={() => threadId && run(() => window.codexh.stageAllGitChanges({ threadId, rootPath }) as Promise<GitActionResult>)}><IconPlus /><span>暂存全部</span></button>
-              <button type="button" className="git-commit-button" disabled={busy || !threadId || !hasStagedFiles || !commitMessage.trim()} onClick={() => threadId && run(() => window.codexh.commitGitChanges({ threadId, rootPath, message: commitMessage }) as Promise<GitActionResult>)}><IconCheck /><span>提交</span></button>
+            <div className="git-commit-actions">
+              <button
+                type="button"
+                className="git-one-click-commit-button"
+                title="暂存全部变更、创建提交并推送"
+                disabled={busy || !threadId || (!hasStagedFiles && !hasUnstagedFiles) || !commitMessage.trim()}
+                onClick={oneClickCommit}
+              >
+                {busy && commitProgress?.state === "running" ? <IconSpinner /> : <IconCheck />}
+                <span>{busy && commitProgress?.state === "running" ? "正在提交" : "一键提交"}</span>
+              </button>
             </div>
+            {commitProgress ? (
+              <div className={`git-commit-progress is-${commitProgress.state}`} aria-live="polite">
+                <div
+                  className="git-commit-progress-track"
+                  role="progressbar"
+                  aria-label="Git 提交进度"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={commitProgress.percent}
+                >
+                  <span style={{ width: `${commitProgress.percent}%` }} />
+                </div>
+                <span>{commitProgress.label}</span>
+                <b>{commitProgress.percent}%</b>
+              </div>
+            ) : null}
           </section>
 
           <div className="git-change-list" aria-label="变更文件">

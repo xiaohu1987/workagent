@@ -107,6 +107,9 @@ export function shouldShowTaskProcessing(
   if (isThreadExecutionInProgress(status)) {
     return true;
   }
+  if (status === "completed" || status === "failed") {
+    return false;
+  }
   // Allow the brief preparing overlay before the backend flips to running.
   // Never keep "执行中" alive from stale runtimeProgress after stop/complete.
   return isPreparing;

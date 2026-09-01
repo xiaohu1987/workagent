@@ -125,6 +125,10 @@ const api = {
   dismissPendingResume: (threadId: string) => ipcRenderer.invoke("threads:pending-resume:dismiss", threadId),
   resumePendingResume: (threadId: string) => ipcRenderer.invoke("threads:pending-resume:resume", threadId),
   listSubagents: (threadId: string) => ipcRenderer.invoke("multi-agents:list", threadId),
+  sendAgentMessage: (payload: { threadId: string; agent: string; message: string }) =>
+    ipcRenderer.invoke("multi-agents:message", payload),
+  retryAgent: (payload: { threadId: string; agent: string; prompt: string }) =>
+    ipcRenderer.invoke("multi-agents:retry", payload),
   interruptAgent: (payload: { threadId: string; agent: string }) =>
     ipcRenderer.invoke("multi-agents:interrupt", payload),
   updateThreadModelSelection: (payload: { threadId: string; providerId: string; modelId: string }) =>

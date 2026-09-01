@@ -343,7 +343,9 @@ describe("thread UI state helpers", () => {
     expect(shouldShowTaskProcessing("waiting", false)).toBe(true);
     expect(shouldShowTaskProcessing("idle", true)).toBe(true);
     expect(shouldShowTaskProcessing("idle", false)).toBe(false);
+    expect(shouldShowTaskProcessing("completed", true)).toBe(false);
     expect(shouldShowTaskProcessing("completed", false)).toBe(false);
+    expect(shouldShowTaskProcessing("failed", true)).toBe(false);
     expect(shouldShowTaskProcessing("failed", false)).toBe(false);
   });
 

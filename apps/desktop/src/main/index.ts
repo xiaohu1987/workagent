@@ -568,6 +568,12 @@ function registerIpc(): void {
   ipcMain.handle("threads:pending-resume:dismiss", (_event, threadId: string) => backend.dismissPendingResume(threadId));
   ipcMain.handle("threads:pending-resume:resume", (_event, threadId: string) => backend.resumePendingResume(threadId));
   ipcMain.handle("multi-agents:list", (_event, threadId: string) => backend.listSubagents(threadId));
+  ipcMain.handle("multi-agents:message", (_event, payload: { threadId: string; agent: string; message: string }) =>
+    backend.sendAgentMessage(payload.threadId, { agent: payload.agent, message: payload.message })
+  );
+  ipcMain.handle("multi-agents:retry", (_event, payload: { threadId: string; agent: string; prompt: string }) =>
+    backend.followupAgentTask(payload.threadId, { agent: payload.agent, prompt: payload.prompt })
+  );
   ipcMain.handle("multi-agents:interrupt", (_event, payload: { threadId: string; agent: string }) =>
     backend.interruptAgent(payload.threadId, payload.agent)
   );

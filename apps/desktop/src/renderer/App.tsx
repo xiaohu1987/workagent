@@ -24,6 +24,7 @@ import type {
   PluginRecord,
   ProviderType,
   RuntimeEvent,
+  SubagentResultEnvelope,
   RuntimeThreadSnapshotCursor,
   RuntimeThreadSnapshot,
   SkillMetadata,
@@ -89,7 +90,6 @@ import {
   filterTranscriptMessages,
   formatComposerAttachments,
   getActivePlanTimelineItem,
-  getActiveSubagents,
   getAssistantDraftDisplayContent,
   getConversationTurnIdToCollapseAfterExecution,
   getConversationTurnIdsToCollapseForNewSubmission,
@@ -309,7 +309,7 @@ import { RealtimeBackgroundLayer } from "./workspace/realtime-background-layer";
 import { RealtimeCharacterLayer } from "./workspace/realtime-character-layer";
 import { WorkspaceControls } from "./workspace/workspace-controls";
 import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEffortPicker, type ComposerModelGroup } from "./composer/model-controls";
-import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel } from "./cards/runtime-cards";
+import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, SubagentStatusDock, SubagentTaskGroup, getSubagentGroupSummary, shouldShowSubagentStatusDock } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
 import { TimelineEntries } from "./timeline/timeline-entries";
@@ -680,6 +680,7 @@ export function App() {
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
   const [composerMediaIntent, setComposerMediaIntent] = useState<"image" | "video" | null>(null);
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
+  const [isSubagentPanelOpen, setIsSubagentPanelOpen] = useState(false);
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
   const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp" | "database" | "apiCards">("root");
   const [skillsMenuQuery, setSkillsMenuQuery] = useState("");
@@ -3101,6 +3102,21 @@ export function App() {
     () => new Set(snapshot?.queuedSubagentIds ?? []),
     [snapshot?.queuedSubagentIds]
   );
+  const subagentResultsById = useMemo(
+    () => new Map<string, SubagentResultEnvelope>((snapshot?.subagentResults ?? []).map((result) => [result.threadId, result])),
+    [snapshot?.subagentResults]
+  );
+  const waitingInputAgentIds = useMemo(
+    () => new Set([
+      ...(snapshot?.approvals ?? []).filter((approval) => approval.status === "pending").map((approval) => approval.threadId),
+      ...(snapshot?.prompts ?? []).filter((prompt) => prompt.status === "pending").map((prompt) => prompt.threadId)
+    ]),
+    [snapshot?.approvals, snapshot?.prompts]
+  );
+  const subagentGroupSummary = useMemo(
+    () => getSubagentGroupSummary(currentSubagents, queuedSubagentIds, subagentResultsById, waitingInputAgentIds),
+    [currentSubagents, queuedSubagentIds, subagentResultsById, waitingInputAgentIds]
+  );
   const activeAssistantDraft = useMemo(() => {
     return selectActiveAssistantDraft(
       Object.values(assistantDrafts),
@@ -3142,6 +3158,11 @@ export function App() {
   }, [currentTaskTurnRunId, snapshotWorkspaceRoot, snapshot?.toolCalls]);
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
+  useEffect(() => {
+    if (!isTaskProcessing || multiAgentMode !== "proactive") {
+      setIsSubagentPanelOpen(false);
+    }
+  }, [activeSnapshotThreadId, isTaskProcessing, multiAgentMode]);
   // Active-task submissions stay in the queue until the runtime reaches the
   // next safe decision boundary instead of appearing as already sent messages.
   // Queued items must remain available while the current turn runs so they
@@ -3282,10 +3303,6 @@ export function App() {
     !getToolActivityPresentation(deferredRuntimeToolGroup).runningCall
     ? deferredRuntimeToolGroup
     : null;
-  const activeSubagents = useMemo(
-    () => getActiveSubagents(currentSubagents, queuedSubagentIds),
-    [currentSubagents, queuedSubagentIds]
-  );
   const shouldRenderRuntimeTailPanel = Boolean(
     showRuntimeActivityPanel &&
     !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id))
@@ -6277,7 +6294,10 @@ export function App() {
           selectedThreadId={selectedThreadId}
           tokenUsageButtonRef={tokenUsageButtonRef}
           tokenUsagePanelRef={tokenUsagePanelRef}
-          onToggleTokenUsage={() => setIsTokenUsagePanelOpen((current) => !current)}
+          onToggleTokenUsage={() => {
+            setIsSubagentPanelOpen(false);
+            setIsTokenUsagePanelOpen((current) => !current);
+          }}
           notifications={notificationCenterState.items}
           notificationNow={notificationNow}
           notificationOpen={isNotificationCenterOpen}
@@ -6286,7 +6306,10 @@ export function App() {
           highlightedNotificationTarget={highlightedNotificationTarget}
           notificationButtonRef={notificationButtonRef}
           notificationPanelRef={notificationCenterRef}
-          onToggleNotifications={toggleNotificationCenter}
+          onToggleNotifications={() => {
+            setIsSubagentPanelOpen(false);
+            toggleNotificationCenter();
+          }}
           onOpenNotification={openNotificationItem}
           onClearFinishedNotifications={() => dispatchNotificationCenter({ type: "clear-finished" })}
           onMarkNotificationsRead={() => dispatchNotificationCenter({ type: "mark-all-read" })}
@@ -6294,6 +6317,52 @@ export function App() {
           onToggleTerminal={() => setIsTerminalOpen((current) => !current)}
           rightWorkspaceOpen={isRightWorkspaceOpen}
           onOpenRightWorkspace={() => { setRightWorkspaceTab("files"); setRightWorkspaceExpandedTab("files"); setIsRightWorkspaceOpen(true); }}
+          subagentControl={!showWelcome && !isThreadSwitchPlaceholderVisible && shouldShowSubagentStatusDock(isTaskProcessing, multiAgentMode) ? (
+            <SubagentStatusDock
+              summary={subagentGroupSummary}
+              count={currentSubagents.length}
+              expanded={isSubagentPanelOpen}
+              onToggle={() => {
+                setIsTokenUsagePanelOpen(false);
+                setIsNotificationCenterOpen(false);
+                setIsSubagentPanelOpen((current) => !current);
+              }}
+            >
+              {currentSubagents.length > 0 ? (
+                <SubagentTaskGroup
+                  agents={currentSubagents}
+                  queuedAgentIds={queuedSubagentIds}
+                  resultsById={subagentResultsById}
+                  waitingInputAgentIds={waitingInputAgentIds}
+                  runtimeActivities={runtimeActivities}
+                  skillNames={skillNames}
+                  onInterrupt={(agent) => {
+                    const parentThreadId = activeSnapshotThreadId ?? selectedThreadId;
+                    if (!parentThreadId) return;
+                    void window.codexh.interruptAgent({ threadId: parentThreadId, agent: agent.agentPath })
+                      .then(() => refreshSnapshot(parentThreadId));
+                  }}
+                  onSendInstruction={async (agent, instruction) => {
+                    const parentThreadId = activeSnapshotThreadId ?? selectedThreadId;
+                    if (!parentThreadId) throw new Error("当前主任务不可用。");
+                    await window.codexh.sendAgentMessage({ threadId: parentThreadId, agent: agent.agentPath, message: instruction });
+                    await refreshSnapshot(parentThreadId);
+                  }}
+                  onRetry={async (agent) => {
+                    const parentThreadId = activeSnapshotThreadId ?? selectedThreadId;
+                    if (!parentThreadId) throw new Error("当前主任务不可用。");
+                    await window.codexh.retryAgent({
+                      threadId: parentThreadId,
+                      agent: agent.agentPath,
+                      prompt: "请重新执行原任务，先复核失败原因，并返回新的结果摘要。"
+                    });
+                    await refreshSnapshot(parentThreadId);
+                  }}
+                  onTakeOver={(agent) => void openThread(agent.id, { scrollToLatest: true })}
+                />
+              ) : null}
+            </SubagentStatusDock>
+          ) : null}
         />
         {pendingInteractionsPresence.value ? (
           <div className="pending-strip" data-motion={pendingInteractionsPresence.phase}>
@@ -6450,14 +6519,6 @@ export function App() {
                         skillNames={skillNames}
                         preferLabel={isWaitingForSubagents}
                         hideCurrentStatus={false}
-                        activeSubagents={activeSubagents}
-                        queuedSubagentIds={queuedSubagentIds}
-                        runtimeActivities={runtimeActivities}
-                        onInterruptSubagent={(agent) => {
-                          if (!selectedThreadId) return;
-                          void window.codexh.interruptAgent({ threadId: selectedThreadId, agent: agent.agentPath })
-                            .then(() => refreshSnapshot(selectedThreadId));
-                        }}
                       />
                     ) : null}
                   </div>

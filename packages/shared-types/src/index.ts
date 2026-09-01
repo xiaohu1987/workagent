@@ -1279,6 +1279,8 @@ export interface RuntimeThreadSnapshot {
   contextMeasurement?: ContextMeasurementRecord | null;
   gpa: GpaState | null;
   subagents: ThreadRecord[];
+  /** Result envelopes preserve interrupted/queued states and terminal summaries for the parent task UI. */
+  subagentResults: SubagentResultEnvelope[];
   queuedSubagentIds: string[];
 }
 

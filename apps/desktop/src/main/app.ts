@@ -970,6 +970,7 @@ export class DesktopBackend {
       contextMeasurement: this.#db.getLatestContextMeasurement(threadId),
       gpa: this.getGpaState(threadId),
       subagents,
+      subagentResults: subagents.map((child) => this.buildSubagentEnvelope(child)),
       queuedSubagentIds: subagents
         .filter((child) => this.#db.isSubagentPendingDispatch(child.id))
         .map((child) => child.id)
@@ -4316,14 +4317,14 @@ export class DesktopBackend {
     await this.interruptThread(thread.id);
   }
 
-  private async sendAgentMessage(parentThreadId: string, input: { agent: string; message: string }): Promise<SubagentResultEnvelope> {
+  public async sendAgentMessage(parentThreadId: string, input: { agent: string; message: string }): Promise<SubagentResultEnvelope> {
     const child = this.resolveAgent(parentThreadId, input.agent);
     await this.sendMessage(child.id, input.message, [], undefined, false);
     await this.emitAgentTreeUpdated(child.rootThreadId);
     return this.buildSubagentEnvelope(child);
   }
 
-  private async followupAgentTask(parentThreadId: string, input: { agent: string; prompt: string }): Promise<SubagentResultEnvelope> {
+  public async followupAgentTask(parentThreadId: string, input: { agent: string; prompt: string }): Promise<SubagentResultEnvelope> {
     const child = this.resolveAgent(parentThreadId, input.agent);
     await this.sendMessage(child.id, input.prompt);
     return { ...this.buildSubagentEnvelope(this.#db.getThread(child.id)), status: "running" };

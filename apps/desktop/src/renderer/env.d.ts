@@ -18,6 +18,7 @@ type RendererSkillLabEvent = import("@shared-types").SkillLabEvent;
 type RendererNotificationNavigationTarget = import("@shared-types").NotificationNavigationTarget;
 type RendererPendingResumeThread = import("@shared-types").PendingResumeThread;
 type RendererRuntimeLogPage = import("@shared-types").RuntimeLogPage;
+type RendererSubagentResultEnvelope = import("@shared-types").SubagentResultEnvelope;
 
 declare global {
   interface Window {
@@ -162,6 +163,8 @@ declare global {
       dismissPendingResume: (threadId: string) => Promise<void>;
       resumePendingResume: (threadId: string) => Promise<void>;
       listSubagents: (threadId: string) => Promise<ThreadRecord[]>;
+      sendAgentMessage: (payload: { threadId: string; agent: string; message: string }) => Promise<RendererSubagentResultEnvelope>;
+      retryAgent: (payload: { threadId: string; agent: string; prompt: string }) => Promise<RendererSubagentResultEnvelope>;
       interruptAgent: (payload: { threadId: string; agent: string }) => Promise<any>;
       updateThreadModelSelection: (payload: {
         threadId: string;

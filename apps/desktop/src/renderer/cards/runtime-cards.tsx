@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { RefObject } from "react";
-import type { GpaStage, PendingResumeThread, QueuedMessageRecord, ThreadRecord } from "@shared-types";
-import { IconBolt, IconChevronRight, IconClose, IconCompose, IconGuide, IconTerminal } from "../icons";
+import type { ReactNode, RefObject } from "react";
+import type { GpaStage, MultiAgentMode, PendingResumeThread, QueuedMessageRecord, SubagentResultEnvelope, ThreadRecord } from "@shared-types";
+import { IconBolt, IconCheck, IconChevronRight, IconClose, IconCompose, IconGuide, IconHelpCircle, IconSpinner, IconStop, IconTerminal } from "../icons";
 import { getToolProcessingLabel, type SkillNameMap } from "../lib/conversation-utils";
 import { ToolActivityIcon } from "../timeline/transcript";
 import type { ComposerSubmission, RuntimeActivity, RuntimeActivityEntry, RuntimeProgress } from "../core/app-types";
@@ -72,15 +72,92 @@ function isShellOrTestTool(toolName: string, argumentsJson: string): boolean {
   return /\b(?:test|vitest|jest|mocha|ava|pytest|go\s+test|cargo\s+test|dotnet\s+test)\b/i.test(argumentsJson);
 }
 
+export type SubagentDisplayState = "queued" | "running" | "waiting_input" | "completed" | "failed" | "cancelled";
+
+const subagentTaskWordLabels: Record<string, string> = {
+  api: "API",
+  analysis: "分析",
+  analyze: "分析",
+  auth: "认证",
+  backend: "后端",
+  check: "检查",
+  code: "代码",
+  coverage: "覆盖",
+  docs: "文档",
+  documentation: "文档",
+  frontend: "前端",
+  implement: "实现",
+  implementation: "实现",
+  research: "调研",
+  review: "审查",
+  security: "安全",
+  test: "测试",
+  testing: "测试",
+  tests: "测试",
+  ui: "UI",
+  ux: "UX"
+};
+
+export function getSubagentTaskName(agent: Pick<ThreadRecord, "agentRole" | "lastTaskMessage">): string {
+  const rawRole = agent.agentRole?.trim() ?? "";
+  const shouldUsePrompt = !rawRole || /^(?:spawn[_ -]?agent|subagent|agent|worker)$/i.test(rawRole);
+  const promptGoal = agent.lastTaskMessage
+    ?.replace(/^\[[^\]]+\]\s*/, "")
+    .split(/[\r\n。！？.!?]/, 1)[0]
+    .trim();
+  const raw = shouldUsePrompt && promptGoal ? promptGoal.slice(0, 32) : rawRole || "任务分析";
+  if (/[^\x00-\x7f]/.test(raw)) return raw;
+
+  const words = raw
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((word) => subagentTaskWordLabels[word.toLowerCase()] ?? word);
+  return words.join("").replace(/([A-Z0-9]+)(?=[\u4e00-\u9fff])/g, "$1 ") || "任务分析";
+}
+
+export function resolveSubagentDisplayState(
+  agent: Pick<ThreadRecord, "status">,
+  queued: boolean,
+  result: SubagentResultEnvelope | undefined,
+  waitingForInput: boolean
+): SubagentDisplayState {
+  if (result?.status === "interrupted") return "cancelled";
+  if (queued || result?.status === "queued") return "queued";
+  if (waitingForInput) return "waiting_input";
+  if (result?.status === "failed" || agent.status === "failed") return "failed";
+  if (result?.status === "completed" || agent.status === "completed") return "completed";
+  return "running";
+}
+
+const subagentStatusLabels: Record<SubagentDisplayState, string> = {
+  queued: "排队中",
+  running: "运行中",
+  waiting_input: "等待输入",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消"
+};
+
+function SubagentStatusIcon({ state }: { state: SubagentDisplayState }) {
+  if (state === "completed") return <IconCheck />;
+  if (state === "failed") return <IconClose />;
+  if (state === "cancelled") return <IconStop />;
+  if (state === "waiting_input") return <IconHelpCircle />;
+  return state === "queued" ? <IconBolt /> : <IconSpinner />;
+}
+
 function getSubagentActivityLabel(
   agent: ThreadRecord,
-  queued: boolean,
+  state: SubagentDisplayState,
   activity: RuntimeActivity | undefined,
   skillNames?: SkillNameMap
 ): string {
-  if (queued) return "排队中";
-  if (agent.status === "completed") return "已完成";
-  if (agent.status === "failed") return "失败";
+  if (state === "queued") return "等待可用执行槽位";
+  if (state === "waiting_input") return "需要你的输入后继续";
+  if (state === "completed") return "结果已就绪";
+  if (state === "failed") return "执行未完成";
+  if (state === "cancelled") return "任务已停止";
   const activeTool = [...(activity?.entries ?? [])].reverse().find(
     (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool" && entry.toolCall.status === "running"
   );
@@ -91,121 +168,372 @@ function getSubagentActivityLabel(
   }
   const latest = activity?.entries.at(-1);
   if (latest?.kind === "status") {
-    if (/自动中断/.test(latest.label)) return "已自动中断";
     if (/重试|retry/i.test(latest.label)) return "重试中";
+    return latest.label;
   }
   if (agent.status === "waiting") return "等待模型响应";
-  return activity ? "等待模型响应" : "启动中";
+  return activity ? "正在分析任务" : "正在启动";
 }
 
-function SubagentWatchdogMeta({
+function formatActivityAge(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1_000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  return `${Math.floor(minutes / 60)} 小时`;
+}
+
+function SubagentFreshness({
   agent,
   activity,
-  queued,
-  terminal
+  state
 }: {
   agent: ThreadRecord;
   activity: RuntimeActivity | undefined;
-  queued: boolean;
-  terminal: boolean;
+  state: SubagentDisplayState;
 }) {
   const latestEntry = activity?.entries.at(-1);
-  const progressAt = latestEntry ? getRuntimeEntryCreatedAt(latestEntry) : agent.createdAt;
+  const terminal = state === "completed" || state === "failed" || state === "cancelled";
+  const progressAt = latestEntry ? getRuntimeEntryCreatedAt(latestEntry) : terminal ? agent.updatedAt : agent.createdAt;
   const sinceProgressMs = useElapsedClock(progressAt, !terminal);
-  const runtimeMs = useElapsedClock(activity?.startedAt ?? agent.createdAt, !terminal);
-  const automaticInterruptInMs = Math.max(0, Math.min(120_000 - sinceProgressMs, 1_800_000 - runtimeMs));
-  const stalled = !queued && !terminal && sinceProgressMs >= 120_000;
-  return <>
-    <span>{stalled ? "已停滞" : `最近进度 ${formatElapsedClock(sinceProgressMs)} 前`}</span>
-    {!terminal ? <span>{`自动中断倒计时 ${formatElapsedClock(automaticInterruptInMs)}`}</span> : null}
-  </>;
+  if (terminal) return <span>{`最后更新 ${formatActivityAge(sinceProgressMs)}前`}</span>;
+  if (state === "running" && sinceProgressMs >= 30_000) {
+    return <span className="is-idle">{`仍在运行，${formatActivityAge(sinceProgressMs)}无新活动`}</span>;
+  }
+  return <span>{`最近更新 ${formatActivityAge(sinceProgressMs)}前`}</span>;
 }
 
-function ActiveSubagentLines({
+type SubagentPhase = { id: string; label: string; state: "completed" | "current" | "failed" | "cancelled" };
+
+function getSubagentEntryPhase(entry: RuntimeActivityEntry): string | null {
+  if (entry.kind === "output") return "检查输出";
+  if (entry.kind === "status") {
+    if (/重试|retry/i.test(entry.label)) return "重试";
+    if (/审批|确认|输入|选择/.test(entry.label)) return "等待输入";
+    if (/等待模型|模型响应|模型生成/.test(entry.label)) return "等待模型响应";
+    if (/等待子智能体|等待子任务|等待协作/.test(entry.label)) return "等待子任务";
+    if (/等待/.test(entry.label)) return "等待继续";
+    if (/分析|思考|模型|决策|理解/.test(entry.label)) return "分析任务";
+    return null;
+  }
+  const identity = `${entry.toolCall.toolName} ${entry.toolCall.argumentsJson}`.toLowerCase();
+  if (/test|vitest|jest|pytest|mocha|cargo test|go test|dotnet test/.test(identity)) return "执行测试";
+  if (/read|search|list|glob|find|inspect/.test(identity)) return "读取代码";
+  if (/patch|write|edit|replace|delete|move|rename/.test(identity)) return "修改代码";
+  if (/browser|playwright|screenshot/.test(identity)) return "检查界面";
+  return "执行操作";
+}
+
+export function getSubagentPhases(
+  state: SubagentDisplayState,
+  activity: RuntimeActivity | undefined
+): SubagentPhase[] {
+  if (state === "queued") return [{ id: "queued", label: "排队准备", state: "current" }];
+  const labels: string[] = [];
+  for (const entry of activity?.entries ?? []) {
+    const label = getSubagentEntryPhase(entry);
+    if (label && labels.at(-1) !== label) labels.push(label);
+  }
+  if (labels.length === 0) labels.push("分析任务");
+  if (state === "waiting_input" && labels.at(-1) !== "等待输入") labels.push("等待输入");
+  if (state === "completed") labels.push("整理结果");
+  if (state === "failed") labels.push("任务失败");
+  if (state === "cancelled") labels.push("任务取消");
+  return labels.slice(-5).map((label, index, visibleLabels) => ({
+    id: `${index}-${label}`,
+    label,
+    state: index < visibleLabels.length - 1 || state === "completed"
+      ? "completed"
+      : state === "failed"
+        ? "failed"
+        : state === "cancelled"
+          ? "cancelled"
+          : "current"
+  }));
+}
+
+function getSubagentOperationMetric(activity: RuntimeActivity | undefined): string | null {
+  const tools = (activity?.entries ?? []).filter(
+    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
+  );
+  if (tools.length === 0) return null;
+  const completed = tools.filter((entry) =>
+    entry.toolCall.status === "completed" || entry.toolCall.status === "failed" || entry.toolCall.status === "blocked" || entry.toolCall.status === "denied"
+  ).length;
+  return `操作 ${completed}/${tools.length}`;
+}
+
+export function compactSubagentResultSummary(value: string | null | undefined, fallback: string): string {
+  const firstLine = value
+    ?.split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:[-*#>]+|\d+[.)])\s*/, "").trim())
+    .find(Boolean);
+  if (!firstLine) return fallback;
+  return firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
+}
+
+function getSubagentCurrentOutput(
+  state: SubagentDisplayState,
+  result: SubagentResultEnvelope | undefined,
+  activity: RuntimeActivity | undefined
+): string {
+  if (state === "failed") return compactSubagentResultSummary(result?.errors[0] ?? result?.summary, "任务失败，但没有返回错误原因。");
+  if (state === "cancelled") return compactSubagentResultSummary(result?.errors[0], "任务已由用户或运行保护机制停止。");
+  if (state === "completed") return compactSubagentResultSummary(result?.summary, "任务已完成，但没有返回结果摘要。");
+  const latestOutput = [...(activity?.entries ?? [])].reverse().find(
+    (entry): entry is Extract<RuntimeActivityEntry, { kind: "output" }> => entry.kind === "output"
+  );
+  return compactSubagentResultSummary(latestOutput?.content, "暂未形成可展示的中间产出。");
+}
+
+export function getSubagentGroupSummary(
+  agents: ThreadRecord[],
+  queuedAgentIds: Set<string>,
+  resultsById: Map<string, SubagentResultEnvelope>,
+  waitingInputAgentIds: Set<string>
+): string {
+  const counts = new Map<SubagentDisplayState, number>();
+  for (const agent of agents) {
+    const state = resolveSubagentDisplayState(agent, queuedAgentIds.has(agent.id), resultsById.get(agent.id), waitingInputAgentIds.has(agent.id));
+    counts.set(state, (counts.get(state) ?? 0) + 1);
+  }
+  const parts = (["completed", "running", "waiting_input", "queued", "failed", "cancelled"] as const)
+    .flatMap((state) => counts.get(state) ? [`${counts.get(state)} ${subagentStatusLabels[state]}`] : []);
+  return parts.length > 0 ? `子任务 ${parts.join(" · ")}` : "子任务 尚未启动";
+}
+
+export function shouldShowSubagentStatusDock(taskProcessing: boolean, mode: MultiAgentMode): boolean {
+  return taskProcessing && mode === "proactive";
+}
+
+export function SubagentStatusDock({
+  summary,
+  count,
+  expanded,
+  onToggle,
+  children
+}: {
+  summary: string;
+  count: number;
+  expanded: boolean;
+  onToggle: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div className={`subagent-status-dock ${expanded ? "is-expanded" : ""}`}>
+      <button
+        type="button"
+        className="workspace-control-button subagent-status-dock-toggle"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        aria-controls="subagent-status-panel"
+        aria-label={`${expanded ? "收起" : "展开"}子智能体详情，${summary}`}
+        title={expanded ? "收起子智能体详情" : "展开子智能体详情"}
+      >
+        <span className="subagent-status-dock-icon" aria-hidden><IconGuide /></span>
+        {count > 0 ? <span className="subagent-status-dock-count" aria-hidden>{count}</span> : null}
+      </button>
+      {expanded ? (
+        <div id="subagent-status-panel" className="subagent-status-panel">
+          {children ?? <div className="subagent-status-panel-empty">尚未启动子任务</div>}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function SubagentTaskGroup({
   agents,
   queuedAgentIds,
+  resultsById,
+  waitingInputAgentIds,
   runtimeActivities,
   onInterrupt,
+  onSendInstruction,
+  onRetry,
+  onTakeOver,
   skillNames
 }: {
   agents: ThreadRecord[];
   queuedAgentIds: Set<string>;
+  resultsById: Map<string, SubagentResultEnvelope>;
+  waitingInputAgentIds: Set<string>;
   runtimeActivities: Record<string, RuntimeActivity>;
   onInterrupt: (agent: ThreadRecord) => void;
+  onSendInstruction: (agent: ThreadRecord, instruction: string) => Promise<void>;
+  onRetry: (agent: ThreadRecord) => Promise<void>;
+  onTakeOver: (agent: ThreadRecord) => void;
   skillNames?: SkillNameMap;
 }) {
+  const [instructionAgentId, setInstructionAgentId] = useState<string | null>(null);
+  const [instruction, setInstruction] = useState("");
+  const [busyAgentId, setBusyAgentId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<{ agentId: string; message: string } | null>(null);
+
+  const runAction = async (agent: ThreadRecord, action: () => Promise<void>): Promise<boolean> => {
+    setBusyAgentId(agent.id);
+    setActionError(null);
+    try {
+      await action();
+      return true;
+    } catch (error) {
+      setActionError({ agentId: agent.id, message: error instanceof Error ? error.message : String(error) });
+      return false;
+    } finally {
+      setBusyAgentId(null);
+    }
+  };
+
   return (
-    <div className="active-subagent-lines" aria-label="本次任务的子智能体" aria-live="polite">
+    <section id="subagent-task-group" className="subagent-task-group" aria-label="本次任务的子任务" aria-live="polite">
+      <header className="subagent-task-group-header">
+        <div>
+          <span className="subagent-task-group-kicker">并行任务</span>
+          <strong>{getSubagentGroupSummary(agents, queuedAgentIds, resultsById, waitingInputAgentIds)}</strong>
+        </div>
+      </header>
+      <div className="subagent-task-list">
       {agents.map((agent) => {
         const queued = queuedAgentIds.has(agent.id);
-        const state = queued
-          ? "queued"
-          : agent.status === "waiting"
-            ? "waiting"
-            : agent.status === "running"
-              ? "running"
-              : agent.status;
-        const terminal = !queued && agent.status !== "running" && agent.status !== "waiting";
+        const result = resultsById.get(agent.id);
+        const state = resolveSubagentDisplayState(agent, queued, result, waitingInputAgentIds.has(agent.id));
+        const terminal = state === "completed" || state === "failed" || state === "cancelled";
         const runtimeActivity = runtimeActivities[agent.id];
         const runtimeHistory = getSubagentRuntimeHistory(runtimeActivity, skillNames);
-        const title = getSubagentTitle(agent);
-        const statusLabel = queued
-          ? "排队中"
-          : agent.status === "waiting"
-            ? "等待中"
-            : agent.status === "running"
-              ? "运行中"
-              : agent.status === "completed"
-                ? "已完成"
-                : agent.status === "failed"
-                  ? "失败"
-                : "已创建";
-        const activityLabel = getSubagentActivityLabel(agent, queued, runtimeActivity, skillNames);
+        const title = getSubagentTaskName(agent);
+        const activityLabel = getSubagentActivityLabel(agent, state, runtimeActivity, skillNames);
+        const phases = getSubagentPhases(state, runtimeActivity);
+        const operationMetric = getSubagentOperationMetric(runtimeActivity);
+        const currentOutput = getSubagentCurrentOutput(state, result, runtimeActivity);
+        const isEditingInstruction = instructionAgentId === agent.id;
+        const isBusy = busyAgentId === agent.id;
         return (
-          <details key={agent.id} className={`active-subagent-line ${state}`}>
-            <summary title="展开子智能体详情">
-              <span className="active-subagent-name">子智能体 {title}</span>
-              <span className="active-subagent-separator">:</span>
-              <span className="active-subagent-activity">{activityLabel}</span>
+          <details key={agent.id} className={`subagent-task ${state}`}>
+            <summary title="展开任务详情">
+              <span className={`subagent-task-status ${state}`}>
+                <span aria-hidden><SubagentStatusIcon state={state} /></span>
+                {subagentStatusLabels[state]}
+              </span>
+              <span className="subagent-task-summary-copy">
+                <strong>{title}</strong>
+                <span>{terminal ? currentOutput : activityLabel}</span>
+              </span>
+              <span className="subagent-task-freshness"><SubagentFreshness agent={agent} activity={runtimeActivity} state={state} /></span>
+              {state === "failed" || state === "cancelled" ? (
+                <button
+                  type="button"
+                  className="subagent-task-quick-retry"
+                  disabled={isBusy}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void runAction(agent, () => onRetry(agent));
+                  }}
+                >
+                  <IconSpinner />
+                  {isBusy ? "重试中..." : "重试"}
+                </button>
+              ) : <span className="subagent-task-view-label">{terminal ? "查看结果" : "查看详情"}</span>}
+              <span className="subagent-task-chevron" aria-hidden><IconChevronRight /></span>
             </summary>
-            <div className="active-subagent-detail">
-              <div className="active-subagent-meta">
-                <code>{agent.agentPath}</code>
-                <span>{statusLabel}</span>
-                <span aria-hidden>·</span>
+            <div className="subagent-task-detail">
+              <div className="subagent-task-section">
+                <span className="subagent-task-section-label">任务目标</span>
+                <p>{agent.lastTaskMessage || agent.agentRole || "暂无任务说明。"}</p>
+              </div>
+              <div className="subagent-task-section">
+                <div className="subagent-task-section-head">
+                  <span className="subagent-task-section-label">阶段进度</span>
+                  {operationMetric ? <span className="subagent-task-metric">{operationMetric}</span> : null}
+                </div>
+                <div className="subagent-phase-track">
+                  {phases.map((phase, index) => (
+                    <span key={phase.id} className={`subagent-phase ${phase.state}`}>
+                      <i aria-hidden>{phase.state === "completed" ? "✓" : phase.state === "current" ? "●" : "×"}</i>
+                      {phase.label}
+                      {index < phases.length - 1 ? <b aria-hidden>→</b> : null}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="subagent-task-section">
+                <span className="subagent-task-section-label">当前产出</span>
+                <p className={`subagent-task-output ${state}`}>{currentOutput}</p>
+              </div>
+              {runtimeHistory.length > 0 ? (
+                <div className="subagent-task-section">
+                  <span className="subagent-task-section-label">关键操作时间线</span>
+                  <div className="subagent-task-history">
+                    {runtimeHistory.map((entry) => <span key={entry.id}>{entry.label}</span>)}
+                  </div>
+                </div>
+              ) : null}
+              <div className="subagent-task-meta">
                 <SubagentElapsedTime
                   startedAt={runtimeActivity?.startedAt ?? agent.createdAt}
                   active={!terminal}
                   completedAt={terminal ? agent.updatedAt : null}
                 />
-                <SubagentWatchdogMeta
-                  agent={agent}
-                  activity={runtimeActivity}
-                  queued={queued}
-                  terminal={terminal}
-                />
+                <span aria-hidden>·</span>
+                <SubagentFreshness agent={agent} activity={runtimeActivity} state={state} />
+                <details className="subagent-task-identity">
+                  <summary>代理详情</summary>
+                  <code>{agent.agentPath}</code>
+                  <code>{agent.id}</code>
+                </details>
+              </div>
+              {isEditingInstruction ? (
+                <form
+                  className="subagent-instruction-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const nextInstruction = instruction.trim();
+                    if (!nextInstruction || isBusy) return;
+                    void runAction(agent, () => onSendInstruction(agent, nextInstruction)).then((sent) => {
+                      if (!sent) return;
+                      setInstruction("");
+                      setInstructionAgentId(null);
+                    });
+                  }}
+                >
+                  <textarea
+                    value={instruction}
+                    onChange={(event) => setInstruction(event.target.value)}
+                    placeholder="补充范围、约束或新的检查方向"
+                    autoFocus
+                  />
+                  <div>
+                    <button type="button" onClick={() => { setInstructionAgentId(null); setInstruction(""); }}>取消</button>
+                    <button type="submit" disabled={!instruction.trim() || isBusy}>{isBusy ? "发送中..." : "发送指令"}</button>
+                  </div>
+                </form>
+              ) : null}
+              {actionError?.agentId === agent.id ? <div className="subagent-action-error" role="alert">{actionError.message}</div> : null}
+              <div className="subagent-task-actions">
                 {!terminal ? (
-                  <button type="button" className="active-subagent-stop" onClick={() => onInterrupt(agent)}>
+                  <button type="button" className="danger" onClick={() => onInterrupt(agent)} disabled={isBusy}>
+                    <IconStop />
                     停止
                   </button>
                 ) : null}
+                {!terminal ? (
+                  <button type="button" onClick={() => { setInstructionAgentId(agent.id); setInstruction(""); }} disabled={isBusy}>
+                    <IconCompose />
+                    追加指令
+                  </button>
+                ) : null}
+                <button type="button" onClick={() => onTakeOver(agent)} disabled={isBusy}>
+                  <IconGuide />
+                  接管
+                </button>
               </div>
-              {runtimeHistory.length > 0 ? (
-                <div className="active-subagent-history">
-                  {runtimeHistory.map((entry) => <span key={entry.id}>{entry.label}</span>)}
-                </div>
-              ) : <div className="active-subagent-empty">正在等待运行状态。</div>}
-              <div className="active-subagent-prompt">{agent.lastTaskMessage || agent.agentRole || "暂无任务说明。"}</div>
             </div>
           </details>
         );
       })}
-    </div>
+      </div>
+    </section>
   );
-}
-
-function getSubagentTitle(agent: ThreadRecord): string {
-  return agent.agentRole?.trim() || "子任务分析";
 }
 
 function SubagentElapsedTime({
@@ -219,18 +547,6 @@ function SubagentElapsedTime({
 }) {
   const elapsedMs = useElapsedClock(startedAt, active, completedAt);
   return <time>{formatElapsedClock(elapsedMs)}</time>;
-}
-
-function getSubagentRuntimeLabel(activity: RuntimeActivity | undefined, skillNames?: SkillNameMap): string | null {
-  if (!activity) return null;
-  const activeTool = [...activity.entries].reverse().find(
-    (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool" && entry.toolCall.status === "running"
-  );
-  if (activeTool) return getToolProcessingLabel(activeTool.toolCall.toolName, activeTool.toolCall.argumentsJson, skillNames);
-  const latestStatus = [...activity.entries].reverse().find(
-    (entry): entry is Extract<RuntimeActivityEntry, { kind: "status" }> => entry.kind === "status"
-  );
-  return latestStatus?.label ?? null;
 }
 
 function getSubagentRuntimeHistory(activity: RuntimeActivity | undefined, skillNames?: SkillNameMap): Array<{ id: string; label: string }> {
@@ -343,11 +659,7 @@ export function RuntimeActivityPanel({
   phase,
   skillNames,
   preferLabel = false,
-  hideCurrentStatus = false,
-  activeSubagents,
-  queuedSubagentIds,
-  runtimeActivities,
-  onInterruptSubagent
+  hideCurrentStatus = false
 }: {
   label: string;
   entries: RuntimeActivityEntry[];
@@ -356,10 +668,6 @@ export function RuntimeActivityPanel({
   skillNames?: SkillNameMap;
   preferLabel?: boolean;
   hideCurrentStatus?: boolean;
-  activeSubagents: ThreadRecord[];
-  queuedSubagentIds: Set<string>;
-  runtimeActivities: Record<string, RuntimeActivity>;
-  onInterruptSubagent: (agent: ThreadRecord) => void;
 }) {
   // Older active tasks may already contain draft-phase events. They carry no
   // execution detail, so keep them out of the timeline while preserving tools,
@@ -463,15 +771,6 @@ export function RuntimeActivityPanel({
   return (
     <section className="runtime-activity-panel" aria-live="polite">
       {hideCurrentStatus ? null : currentStatus}
-      {activeSubagents.length > 0 ? (
-        <ActiveSubagentLines
-          agents={activeSubagents}
-          queuedAgentIds={queuedSubagentIds}
-          runtimeActivities={runtimeActivities}
-          skillNames={skillNames}
-          onInterrupt={onInterruptSubagent}
-        />
-      ) : null}
     </section>
   );
 }
