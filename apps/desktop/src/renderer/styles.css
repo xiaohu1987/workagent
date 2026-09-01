@@ -17962,6 +17962,30 @@ body.panel-resizing {
   font-size: 12px;
 }
 
+.api-favorites-card-editor {
+  border-top: 1px solid var(--border);
+}
+
+.api-favorites-card-editor .api-card {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.api-favorites-card-editor .api-card-header {
+  display: none;
+}
+
+.api-favorites-card-editor .api-card-body {
+  padding: 16px;
+}
+
+.api-favorites-card-head.is-expanded {
+  padding-bottom: 9px;
+}
+
 @media (max-width: 900px) {
   .memory-control-layout { grid-template-columns: minmax(280px, 1fr) minmax(240px, 0.8fr); }
   .memory-control-group:first-child { grid-template-columns: repeat(3, minmax(0, 1fr)); }

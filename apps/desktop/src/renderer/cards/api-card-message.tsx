@@ -203,7 +203,15 @@ function ApiCardFieldControl(props: {
   }
 }
 
-export function ApiCardMessage({ configText }: { configText: string }) {
+export function ApiCardMessage({
+  configText,
+  initialCollapsed = false,
+  onCollapsedChange
+}: {
+  configText: string;
+  initialCollapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
+}) {
   const threadId = useContext(ApiCardThreadContext);
   const parsed = useMemo(() => parseApiCardConfig(configText), [configText]);
   const config = parsed.ok ? parsed.config : null;
@@ -214,17 +222,23 @@ export function ApiCardMessage({ configText }: { configText: string }) {
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ApiCardResult | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  const [url, setUrl] = useState(config?.url ?? "");
+  const [collapsed, setCollapsed] = useState(initialCollapsed);
   const favorited = useIsApiCardFavorited(config);
 
   useEffect(() => {
     if (!config) return;
     setValues(createInitialValues(config));
+    setUrl(config.url);
     setAuthToken("");
     setFieldErrors({});
     setGlobalError(null);
     setResult(null);
   }, [config]);
+
+  useEffect(() => {
+    setCollapsed(initialCollapsed);
+  }, [initialCollapsed]);
 
   if (!config) {
     return (
@@ -254,6 +268,7 @@ export function ApiCardMessage({ configText }: { configText: string }) {
   const handleReset = () => {
     if (loading) return;
     setValues(createInitialValues(config));
+    setUrl(config.url);
     setFieldErrors({});
     setGlobalError(null);
     setResult(null);
@@ -266,7 +281,7 @@ export function ApiCardMessage({ configText }: { configText: string }) {
       setGlobalError("无法确定当前任务，不能保存接口返回文件。");
       return;
     }
-    const built = buildApiRequest(config, values, authToken);
+    const built = buildApiRequest({ ...config, url }, values, authToken);
     if (!built.ok) {
       setFieldErrors(built.fieldErrors);
       setGlobalError(built.error ?? null);
@@ -337,7 +352,13 @@ export function ApiCardMessage({ configText }: { configText: string }) {
           className="api-card-collapse"
           aria-label={collapsed ? "展开卡片" : "折叠卡片"}
           aria-expanded={!collapsed}
-          onClick={() => setCollapsed((current) => !current)}
+          onClick={() => {
+            setCollapsed((current) => {
+              const next = !current;
+              onCollapsedChange?.(next);
+              return next;
+            });
+          }}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 9l6 6 6-6" />
@@ -347,8 +368,17 @@ export function ApiCardMessage({ configText }: { configText: string }) {
       {collapsed ? null : (
         <div className="api-card-body">
           {config.description ? <p className="api-card-description">{config.description}</p> : null}
-          <div className="api-card-endpoint" title={config.url}>
-            {config.url}
+          <div className="api-card-url-control">
+            <TextInput
+              label="请求地址"
+              value={url}
+              placeholder="https://api.example.com/path"
+              disabled={loading}
+              onChange={(value) => {
+                setUrl(value);
+                setGlobalError(null);
+              }}
+            />
           </div>
           {config.auth ? (
             <div className="api-card-auth">

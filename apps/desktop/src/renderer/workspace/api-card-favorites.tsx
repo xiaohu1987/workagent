@@ -6,6 +6,7 @@ import {
   useApiCardFavorites,
   type ApiCardFavorite
 } from "../api-card-favorites";
+import { ApiCardMessage, ApiCardThreadContext } from "../cards/api-card-message";
 
 function formatFavoriteTime(timestamp: number): string {
   const date = new Date(timestamp);
@@ -14,15 +15,18 @@ function formatFavoriteTime(timestamp: number): string {
 }
 
 export function ApiCardFavoritesPanel({
-  onInsert
+  onInsert,
+  threadId
 }: {
   /** 点击"发送到聊天":把 api-card 块插入聊天输入框 */
   onInsert?: (favorite: ApiCardFavorite) => void;
+  threadId?: string | null;
 }) {
   const favorites = useApiCardFavorites();
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const visible = useMemo(() => filterApiCardFavorites(favorites, query), [favorites, query]);
 
@@ -51,7 +55,7 @@ export function ApiCardFavoritesPanel({
       <div className="api-favorites-list" aria-label="接口卡片收藏列表">
         {visible.map((favorite) => (
           <article key={favorite.id} className="api-favorites-card">
-            <div className="api-favorites-card-head">
+            <div className={`api-favorites-card-head${expandedId === favorite.id ? " is-expanded" : ""}`}>
               <span className={`api-card-method is-${favorite.config.method.toLowerCase()}`}>
                 {favorite.config.method}
               </span>
@@ -93,6 +97,15 @@ export function ApiCardFavoritesPanel({
                 </span>
               </div>
               <div className="api-favorites-card-actions">
+                <button
+                  className="button ghost"
+                  type="button"
+                  title={expandedId === favorite.id ? "收起完整卡片" : "展开并编辑完整卡片"}
+                  aria-expanded={expandedId === favorite.id}
+                  onClick={() => setExpandedId((current) => current === favorite.id ? null : favorite.id)}
+                >
+                  <span>{expandedId === favorite.id ? "收起" : "编辑调用"}</span>
+                </button>
                 {onInsert ? (
                   <button
                     className="button ghost"
@@ -126,6 +139,18 @@ export function ApiCardFavoritesPanel({
                 </button>
               </div>
             </div>
+            {expandedId === favorite.id ? (
+              <div className="api-favorites-card-editor">
+                <ApiCardThreadContext.Provider value={threadId ?? null}>
+                  <ApiCardMessage
+                    configText={JSON.stringify(favorite.config)}
+                    onCollapsedChange={(collapsed) => {
+                      if (collapsed) setExpandedId(null);
+                    }}
+                  />
+                </ApiCardThreadContext.Provider>
+              </div>
+            ) : null}
           </article>
         ))}
         {favorites.length === 0 ? (
