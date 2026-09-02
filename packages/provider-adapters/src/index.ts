@@ -837,7 +837,10 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           visibleText = nextVisibleText;
         }
         const reasoningDelta = compat.extractReasoningFromDelta(delta);
-        if (reasoningDelta) reasoning += reasoningDelta;
+        if (reasoningDelta) {
+          reasoning += reasoningDelta;
+          await input.onReasoningDelta?.(reasoningDelta);
+        }
 
         for (const toolCall of delta?.tool_calls ?? []) {
           const index = typeof toolCall.index === "number" ? toolCall.index : 0;
@@ -1335,6 +1338,10 @@ class AutoOpenAiProvider implements ProviderAdapter {
         outputStarted = true;
         await input.onTextDelta?.(delta);
       },
+      onReasoningDelta: async (delta) => {
+        outputStarted = true;
+        await input.onReasoningDelta?.(delta);
+      },
       onToolCallPreparing: async (call) => {
         outputStarted = true;
         await input.onToolCallPreparing?.(call);
@@ -1801,6 +1808,7 @@ async function consumeAnthropicStream(
           visibleText = nextVisibleText;
         } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
           reasoning += delta.thinking;
+          await input.onReasoningDelta?.(delta.thinking);
         } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
           const index = typeof event.index === "number" ? event.index : 0;
           const call = blocks.get(index) ?? { input: "" };
@@ -2465,6 +2473,7 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
     }
     if (event?.type === "response.reasoning_summary_text.delta" && typeof event.delta === "string") {
       reasoning += event.delta;
+      await input.onReasoningDelta?.(event.delta);
       continue;
     }
     if (
@@ -2484,6 +2493,9 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
       (event?.type === "response.reasoning_text.delta" || event?.type === "response.reasoning_text.done") &&
       typeof (event.delta ?? event.text) === "string"
     ) {
+      if (event.type === "response.reasoning_text.delta") {
+        await input.onReasoningDelta?.(event.delta);
+      }
       streamedReasoningItem = updateResponsesReasoningText(
         streamedReasoningItem,
         typeof event.content_index === "number" ? event.content_index : 0,
@@ -3086,10 +3098,16 @@ async function attachmentDataUrl(attachment: MessageAttachment): Promise<string>
 }
 
 function contentWithFileAttachments(content: string, attachments?: MessageAttachment[]): string {
+  const normalizedContent = content.trim();
+  const images = attachments?.filter((attachment) => attachment.kind === "image") ?? [];
   const nonImages = attachments?.filter((attachment) => attachment.kind !== "image") ?? [];
-  if (nonImages.length === 0) return content;
+  // Several OpenAI-compatible gateways reject a multimodal content array
+  // when its text block is empty. This also protects retried/legacy messages
+  // that predate the composer-side normalization.
+  const imageOnlyFallback = normalizedContent || (images.length > 0 ? "请分析这张图片。" : "");
+  if (nonImages.length === 0) return imageOnlyFallback;
   return [
-    content,
+    imageOnlyFallback,
     ...nonImages.map((attachment) => `[Attached ${attachment.kind}]\n${attachment.absolutePath}`)
   ].filter(Boolean).join("\n\n");
 }

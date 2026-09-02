@@ -34,6 +34,7 @@ import {
   validateManagedWriteCompletion,
   buildManagedWriteCompletionRecoveryInstruction,
   validateStandardCompletion,
+  isPlaceholderFinalReport,
   hasValidApiCardDeliverable,
   buildStandardCompletionAuditSystemPrompt,
   resolveStandardCompletionAuditDiagnosis,
@@ -198,7 +199,12 @@ import {
   MODEL_DECISION_TIMEOUT_MS,
   waitForAbortOrIdleTimeout,
   ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS,
+  NON_STREAMING_DRAFT_CHUNK_INTERVAL_MS,
+  NON_STREAMING_DRAFT_MAX_CHUNKS,
+  NON_STREAMING_DRAFT_MIN_CHUNK_SIZE,
   shouldPublishAssistantDraftUpdate,
+  splitNonStreamingAssistantDraft,
+  shouldRevealNonStreamingAssistantDraft,
   isExplicitGitMutationRequest,
   validateGitMutationToolCall,
   buildExplicitAuthorizationRequirement,
@@ -256,8 +262,48 @@ describe("assistant draft stream throttling", () => {
     expect(shouldPublishAssistantDraftUpdate(1_000, 1_100)).toBe(true);
   });
 
-  it("publishes phase changes immediately so status and final content are not delayed", () => {
+  it("allows streaming deltas and phase changes to publish immediately", () => {
     expect(shouldPublishAssistantDraftUpdate(1_000, 1_001, true)).toBe(true);
+  });
+
+  it("splits non-streaming responses into paced, lossless display chunks", () => {
+    const content = "你好，world 👋。这是一次非流式回复，用来确认内容不会丢失。";
+    const chunks = splitNonStreamingAssistantDraft(content);
+
+    expect(NON_STREAMING_DRAFT_CHUNK_INTERVAL_MS).toBe(24);
+    expect(NON_STREAMING_DRAFT_MIN_CHUNK_SIZE).toBe(4);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.join("")).toBe(content);
+  });
+
+  it("bounds the number of synthetic chunks for long non-streaming responses", () => {
+    const content = "长".repeat(4_000);
+    const chunks = splitNonStreamingAssistantDraft(content);
+
+    expect(chunks.length).toBeLessThanOrEqual(NON_STREAMING_DRAFT_MAX_CHUNKS);
+    expect(chunks.join("")).toBe(content);
+  });
+
+  it("uses synthetic chunks only when the provider did not deliver streaming deltas", () => {
+    const finalResponse = {
+      toolCallCount: 0,
+      endTurn: true,
+      content: "完整回复"
+    };
+
+    expect(shouldRevealNonStreamingAssistantDraft({
+      ...finalResponse,
+      receivedStreamingDelta: false
+    })).toBe(true);
+    expect(shouldRevealNonStreamingAssistantDraft({
+      ...finalResponse,
+      receivedStreamingDelta: true
+    })).toBe(false);
+    expect(shouldRevealNonStreamingAssistantDraft({
+      ...finalResponse,
+      receivedStreamingDelta: false,
+      toolCallCount: 1
+    })).toBe(false);
   });
 });
 
@@ -356,9 +402,11 @@ describe("Git mutation authorization", () => {
   it("builds a one-time authorization requirement for unrequested Git writes", () => {
     expect(isExplicitGitMutationRequest("修复这个接口并运行测试")).toBe(false);
     expect(isExplicitGitMutationRequest("请提交当前改动并推送分支")).toBe(true);
+    expect(isExplicitGitMutationRequest("请比较 git merge-base 的差异")).toBe(false);
     expect(validateGitMutationToolCall({ name: "git.commit", arguments: {} }, false)).toBe("用户未授权该 Git 写操作，命令未执行。");
     expect(validateGitMutationToolCall({ name: "shell.exec", arguments: { command: "git commit -m fix" } }, false)).toBe("用户未授权该 Git 写操作，命令未执行。");
     expect(validateGitMutationToolCall({ name: "shell.exec", arguments: { command: "git -C repo pull origin test" } }, false)).toBe("用户未授权该 Git 写操作，命令未执行。");
+    expect(validateGitMutationToolCall({ name: "shell.exec", arguments: { command: "$ErrorActionPreference='Continue'; git merge-base origin/master origin/feature_xz1; git log --oneline --no-merges origin/master..origin/feature_xz1; git diff --stat origin/master...origin/feature_xz1" } }, false)).toBeNull();
     expect(validateGitMutationToolCall({ name: "git.status", arguments: {} }, false)).toBeNull();
     expect(validateGitMutationToolCall({ name: "git.commit", arguments: {} }, true)).toBeNull();
 
@@ -4571,6 +4619,26 @@ describe("multimodal input recognition fallback", () => {
     expect(buildDesktopScreenshotDirective(false)).toBe("");
     expect(buildToolAttachmentInspectionInstruction("desktop.capture_screenshot")).toContain("desktop screenshot");
     expect(buildToolAttachmentInspectionInstruction("browser.capture_screenshot")).toContain("browser verification screenshot");
+  });
+
+  it("rejects a final report placeholder instead of completing without a report body", () => {
+    const placeholder = "分析已完成，三个子智能体的证据已回收并由我汇总，最终报告见正文。";
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: placeholder,
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: false,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    expect(isPlaceholderFinalReport(placeholder)).toBe(true);
+    expect(isPlaceholderFinalReport("最终报告见正文。\n\n## 问题\n\n- 实际问题与证据。")).toBe(false);
+    expect(result.valid).toBe(false);
+    expect(result.reasons).toContain("The final user-visible summary is a placeholder without the requested report body.");
   });
 
   it("detects only image attachments as recognizable multimodal input", () => {

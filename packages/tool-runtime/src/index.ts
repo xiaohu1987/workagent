@@ -297,6 +297,10 @@ const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
   "desktop.capture_screenshot"
 ]);
 
+export function isChildReadOnlyForbiddenTool(name: string): boolean {
+  return CHILD_READ_ONLY_FORBIDDEN_TOOLS.has(canonicalizeToolName(name));
+}
+
 export function canonicalizeToolName(name: string): string {
   const trimmed = name.trim();
   return TOOL_ALIASES[trimmed] ?? TOOL_ALIASES[trimmed.toLowerCase()] ?? trimmed;
@@ -341,7 +345,7 @@ export class ToolRuntime {
   ): Promise<ToolResult> {
     ctx.workspaceRoots ??= [ctx.cwd];
     const canonicalName = canonicalizeToolName(call.name);
-    if (ctx.readOnlyAgent && CHILD_READ_ONLY_FORBIDDEN_TOOLS.has(canonicalName)) {
+    if (ctx.readOnlyAgent && isChildReadOnlyForbiddenTool(canonicalName)) {
       return {
         ok: false,
         content: `Child agents are read-only; ${canonicalName} is unavailable.`
@@ -541,7 +545,8 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     async (args, ctx, self) => {
       const hidden = new Set(ctx.hiddenToolNames ?? []);
       const results = self.searchTools(String(args.query ?? ""), ctx.deferredToolSpecs)
-        .filter((entry) => !hidden.has(entry.name));
+        .filter((entry) => !hidden.has(entry.name))
+        .filter((entry) => !ctx.readOnlyAgent || !isChildReadOnlyForbiddenTool(entry.name));
       return { ok: true, content: JSON.stringify(results, null, 2), json: { results } };
     }
   );

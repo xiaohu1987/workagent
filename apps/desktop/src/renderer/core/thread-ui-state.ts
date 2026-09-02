@@ -69,6 +69,19 @@ export function shouldCommitThreadSnapshotImmediately(
   return selectedThreadId === incomingThreadId && renderedSnapshotThreadId !== incomingThreadId;
 }
 
+/** Whether a runtime event can change the currently selected task's snapshot. */
+export function shouldRefreshSelectedSnapshotForRuntimeEvent(
+  selectedThreadId: string | null,
+  eventThreadId?: string,
+  notificationThreadId?: string | null
+): boolean {
+  return Boolean(selectedThreadId) && (
+    !eventThreadId ||
+    eventThreadId === selectedThreadId ||
+    notificationThreadId === selectedThreadId
+  );
+}
+
 export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRuntimeMessages>(
   threadId: string,
   state: {
@@ -89,6 +102,11 @@ export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRunt
 
 export function isThreadExecutionInProgress(status?: ThreadRecord["status"] | null) {
   return status === "running" || status === "waiting";
+}
+
+/** Child-agent threads belong to the active task panel, never the history list. */
+export function shouldIncludeRuntimeThreadInHistory(thread: Pick<ThreadRecord, "parentThreadId">): boolean {
+  return !thread.parentThreadId;
 }
 
 /** Whether the chat should show the live "执行中/正在请求模型决策" processing UI. */

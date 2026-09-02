@@ -98,6 +98,24 @@ describe("approval persistence", () => {
     expect(remembered?.projectId).toBe("project-1");
   });
 
+  it("finds an earlier Git authorization for approval-key migration", async () => {
+    const tempDir = await makeTempDir();
+    const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));
+    databases.push(db);
+
+    db.upsertRememberedApproval({
+      projectId: "project-1",
+      approvalKey: "legacy-git-command-key",
+      title: "Git 操作需要明确授权",
+      description: "git worktree remove .codexh/wt-review",
+      riskLevel: "high",
+      payloadJson: "{\"authorizationKind\":\"git_mutation\",\"operation\":\"git worktree remove .codexh/wt-review\"}"
+    });
+
+    expect(db.findRememberedGitMutationApproval("project-1")?.approvalKey).toBe("legacy-git-command-key");
+    expect(db.findRememberedGitMutationApproval("project-2")).toBeNull();
+  });
+
   it("persists timeout metadata and default prompt answers", async () => {
     const tempDir = await makeTempDir();
     const db = new DatabaseService(path.join(tempDir, "codexh.sqlite"));

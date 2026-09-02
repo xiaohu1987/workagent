@@ -371,6 +371,18 @@ export function IconComment() {
   );
 }
 
+export function IconChatBubbles() {
+  return (
+    <SvgIcon>
+      <path d="M6.8 5.2h7.7a3.3 3.3 0 0 1 3.3 3.3v3.2a3.3 3.3 0 0 1-3.3 3.3H11l-3.5 2.7v-2.7H6.8a3.3 3.3 0 0 1-3.3-3.3V8.5a3.3 3.3 0 0 1 3.3-3.3z" />
+      <path d="M17.8 9.2h.4a2.3 2.3 0 0 1 2.3 2.3v2.4a2.3 2.3 0 0 1-2.3 2.3h-1.7v2.1L14 16.2" />
+      <circle cx="8.1" cy="10.1" r=".55" fill="currentColor" stroke="none" />
+      <circle cx="10.7" cy="10.1" r=".55" fill="currentColor" stroke="none" />
+      <circle cx="13.3" cy="10.1" r=".55" fill="currentColor" stroke="none" />
+    </SvgIcon>
+  );
+}
+
 export function IconSpinner() {
   return (
     <SvgIcon size={16} className="icon-spinner">

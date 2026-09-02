@@ -2305,13 +2305,13 @@ pre {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   color: rgba(244, 244, 243, 0.7);
-  background: rgba(255, 255, 255, 0.03);
+  background: #121216;
   cursor: pointer;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .token-usage-toggle:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: #18181d;
   border-color: rgba(255, 255, 255, 0.16);
 }
 
@@ -4766,6 +4766,48 @@ body {
   top: 14px;
   right: 14px;
   gap: 6px;
+}
+
+.workspace-thread-title {
+  position: absolute;
+  top: 14px;
+  left: 48px;
+  z-index: 3;
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  max-width: calc(100% - 330px);
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #121216;
+  color: rgba(229, 235, 244, 0.92);
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-thread-title-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 21px;
+  height: 21px;
+  place-items: center;
+  color: #b8d5ff;
+}
+
+.workspace-thread-title-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.workspace-thread-title.is-project .workspace-thread-title-icon {
+  color: #f0c878;
 }
 
 .workspace-control-button {
@@ -12063,6 +12105,20 @@ input[type="radio"]:focus-visible {
 
 .approval-remember-button {
   display: none;
+}
+
+.explicit-authorization .approval-remember-button {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.28);
+}
+
+.explicit-authorization .approval-remember-button:hover:not(:disabled) {
+  border-color: rgba(252, 165, 165, 0.72);
+  color: #fff1f2;
+  background: rgba(153, 27, 27, 0.42);
 }
 
 .approval-allow-button {
@@ -20448,8 +20504,59 @@ select option:checked {
 }
 
 /* Keep related project tasks together without turning the sidebar into cards. */
+.sidebar-history-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  align-items: center;
+  margin: 4px 8px 0;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.sidebar-history-tab {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: rgba(244, 244, 243, 0.48);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease,
+    background-color var(--motion-fast) ease;
+}
+
+.sidebar-history-tab svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sidebar-history-tab:hover {
+  color: rgba(244, 244, 243, 0.8);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.sidebar-history-tab.active {
+  border-color: rgba(198, 178, 255, 0.3);
+  color: #d6c6ff;
+  background: rgba(163, 135, 255, 0.16);
+}
+
 .history-list {
   gap: 14px;
+}
+
+.history-list-projects,
+.history-list-tasks {
+  padding-top: 8px;
 }
 
 .history-project-group {
@@ -21172,6 +21279,12 @@ select option:checked {
 }
 
 .app-shell.has-app-background .token-usage-toggle {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(18, 18, 22, min(0.55, calc(var(--app-bg-sidebar) + 0.12)));
+  backdrop-filter: blur(8px);
+}
+
+.app-shell.has-app-background .workspace-thread-title {
   border-color: rgba(255, 255, 255, 0.1);
   background: rgba(18, 18, 22, min(0.55, calc(var(--app-bg-sidebar) + 0.12)));
   backdrop-filter: blur(8px);

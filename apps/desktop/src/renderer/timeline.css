@@ -1281,31 +1281,38 @@
   animation: runtime-activity-text-sweep 2.6s ease-in-out infinite;
 }
 
-.assistant-draft-scroll {
-  max-height: 6.6em;
-  overflow-x: hidden;
+.streaming-assistant-content {
+  display: inline;
+}
+
+.live-assistant-message .streaming-assistant-body,
+.live-assistant-message .streaming-assistant-plain-body {
+  color: #d5dde8;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  animation: none;
+}
+
+.streaming-reasoning {
+  margin: 0 0 10px;
+  color: #8f99a7;
+}
+
+.streaming-reasoning > summary {
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.streaming-reasoning-body {
+  display: block;
+  height: 200px;
+  margin-top: 6px;
+  padding-right: 8px;
   overflow-y: auto;
-  padding-right: 4px;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(143, 153, 167, 0.38) transparent;
-}
-
-.assistant-draft-scroll::-webkit-scrollbar {
-  width: 6px;
-}
-
-.assistant-draft-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.assistant-draft-scroll::-webkit-scrollbar-thumb {
-  border-radius: 3px;
-  background: rgba(143, 153, 167, 0.34);
-}
-
-.assistant-draft-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(173, 183, 197, 0.5);
+  scrollbar-gutter: stable;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #99a3b1;
 }
 
 .assistant-draft-waiting {

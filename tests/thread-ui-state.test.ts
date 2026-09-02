@@ -9,7 +9,9 @@ import {
   isThreadExecutionInProgress,
   normalizeGpaStateForThread,
   shouldCommitThreadSnapshotImmediately,
+  shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
+  shouldRefreshSelectedSnapshotForRuntimeEvent,
   shouldShowTaskProcessing
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
 import {
@@ -40,6 +42,7 @@ import {
   reconcilePendingUserMessages,
   reconcilePendingUserMessagesDetailed,
   reconcileAssistantDraftCompletion,
+  reconcileAssistantDraftReasoningUpdate,
   reconcileAssistantDraftStreamUpdate,
   reconcileAssistantDraftUpdate,
   resolveLatestThreadRecord,
@@ -168,6 +171,29 @@ describe("thread UI state helpers", () => {
     expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-1", "thread-2")).toBe(true);
     expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2")).toBe(false);
     expect(shouldCommitThreadSnapshotImmediately("thread-3", "thread-1", "thread-2")).toBe(false);
+  });
+
+  it("refreshes a parent task snapshot for runtime events from its subagents", () => {
+    expect(shouldRefreshSelectedSnapshotForRuntimeEvent(
+      "parent-thread",
+      "child-thread",
+      "parent-thread"
+    )).toBe(true);
+    expect(shouldRefreshSelectedSnapshotForRuntimeEvent(
+      "parent-thread",
+      "unrelated-thread",
+      "other-parent"
+    )).toBe(false);
+    expect(shouldRefreshSelectedSnapshotForRuntimeEvent(
+      "parent-thread",
+      "parent-thread"
+    )).toBe(true);
+    expect(shouldRefreshSelectedSnapshotForRuntimeEvent("parent-thread")).toBe(true);
+  });
+
+  it("keeps child-agent runtime updates out of the history list", () => {
+    expect(shouldIncludeRuntimeThreadInHistory(makeThread({ parentThreadId: null }))).toBe(true);
+    expect(shouldIncludeRuntimeThreadInHistory(makeThread({ parentThreadId: "parent-thread" }))).toBe(false);
   });
 
   it("shows the Git workspace only after the current project is identified as a Git repository", () => {
@@ -482,6 +508,12 @@ describe("tool processing labels", () => {
       { toolName: "fs.read_file", argumentsJson: JSON.stringify({ path: "src/App.tsx" }) },
       { toolName: "shell.exec", argumentsJson: JSON.stringify({ command: "pnpm test" }) }
     ])).toBe("已完成 2 项操作，正在运行 pnpm test");
+    expect(getPostToolDecisionLabel([
+      { toolName: "wait_agent", argumentsJson: "{}" }
+    ], undefined, false)).toBe("正在汇总子任务结果");
+    expect(getPostToolDecisionLabel([
+      { toolName: "wait_agent", argumentsJson: "{}" }
+    ], undefined, true)).toBe("正在等待子智能体");
   });
 });
 
@@ -1398,29 +1430,54 @@ describe("assistant draft lifecycle", () => {
     expect(selectActiveAssistantDraft([draft], "thread-1", "running", [])).toEqual(draft);
   });
 
-  it("reconciles incremental draft checkpoints and rejects uncheckpointed gaps", () => {
+  it("renders every incremental draft delta before the next checkpoint", () => {
     expect(reconcileAssistantDraftStreamUpdate(undefined, { content: "legacy" })).toEqual({ content: "legacy" });
 
-    const first = reconcileAssistantDraftStreamUpdate(undefined, {
-      content: "Hello",
-      delta: "Hello",
+    const initial = reconcileAssistantDraftStreamUpdate(undefined, {
+      content: "",
+      delta: "",
       deltaSequence: 1
     });
-    expect(first?.chunks).toEqual(["Hello"]);
-    const second = reconcileAssistantDraftStreamUpdate(first?.buffer, {
-      delta: " world",
+    const first = reconcileAssistantDraftStreamUpdate(initial?.buffer, {
+      delta: "Hello",
       deltaSequence: 2
     });
-    expect(second?.chunks).toEqual(["Hello", " world"]);
+    expect(first).toMatchObject({ content: "Hello", chunks: ["", "Hello"] });
+    const second = reconcileAssistantDraftStreamUpdate(first?.buffer, {
+      delta: " world",
+      deltaSequence: 3
+    });
+    expect(second).toMatchObject({ content: "Hello world", chunks: ["", "Hello", " world"] });
     expect(reconcileAssistantDraftStreamUpdate(second?.buffer, {
       delta: " skipped",
-      deltaSequence: 4
+      deltaSequence: 5
     })).toBeNull();
     expect(reconcileAssistantDraftStreamUpdate(second?.buffer, {
       content: "Hello world restored",
       delta: " restored",
       deltaSequence: 20
     })?.chunks).toEqual(["Hello world restored"]);
+  });
+
+  it("keeps streamed reasoning separate from the visible response", () => {
+    const first = reconcileAssistantDraftReasoningUpdate(undefined, {
+      delta: "Inspecting ",
+      deltaSequence: 1
+    });
+    const second = reconcileAssistantDraftReasoningUpdate(first?.buffer, {
+      delta: "the stream.",
+      deltaSequence: 2
+    });
+
+    expect(second).toMatchObject({
+      reasoning: "Inspecting the stream.",
+      chunks: ["Inspecting ", "the stream."]
+    });
+    expect(reconcileAssistantDraftReasoningUpdate(second?.buffer, {
+      reasoning: "Restored reasoning.",
+      delta: "Restored reasoning.",
+      deltaSequence: 20
+    })?.chunks).toEqual(["Restored reasoning."]);
   });
 
   it("ignores late updates from an older model request in the same turn", () => {

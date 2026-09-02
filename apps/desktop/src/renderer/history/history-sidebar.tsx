@@ -6,6 +6,7 @@ import { canDeleteThread, getHistoryItemAffordance } from "../core/thread-ui-sta
 import { useMotionPresence } from "../core/motion-presence";
 import { getFileLeafName } from "../markdown";
 import {
+  IconChatBubbles,
   IconChevronDown,
   IconChevronRight,
   IconCompose,
@@ -26,13 +27,13 @@ import { WorkspaceContextMenu } from "../workspace/panels";
 
 type ProjectGroup = { cwd: string; threads: ThreadRecord[] };
 type RenameState = { id: string; title: string } | null;
+type HistoryView = "projects" | "tasks";
 
 function isCollaborationThread(thread: ThreadRecord) {
   return (thread.workspaceRoots?.length ?? 0) > 1 || thread.title.startsWith("协作：");
 }
 
 type Props = {
-  threads: ThreadRecord[];
   projectGroups: ProjectGroup[];
   standaloneThreads: ThreadRecord[];
   selectedThreadId: string | null;
@@ -63,9 +64,12 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ threads, projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, collapsedGroups, setCollapsedGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, collapsedGroups, setCollapsedGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
+  const [historyView, setHistoryView] = useState<HistoryView>(() => (
+    selectedThreadId && standaloneThreads.some((thread) => thread.id === selectedThreadId) ? "tasks" : "projects"
+  ));
   const contextPresence = useMotionPresence(contextMenu, 140);
   const visibleContextMenu = contextMenu ?? contextPresence.value;
 
@@ -84,7 +88,7 @@ export const HistorySidebar = memo(function HistorySidebar({ threads, projectGro
     const renaming = renamingThread?.id === thread.id;
     return (
       <div key={thread.id} className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""} ${running ? "running" : ""} ${deletingThreadId === thread.id ? "is-removing" : ""}`} title={running ? affordance.title : undefined} aria-busy={running} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, thread }); }}>
-        {renaming ? <input className="history-item-rename-input" autoFocus value={renamingThread.title} aria-label="重命名任务" onFocus={(event) => event.currentTarget.select()} onChange={(event) => setRenamingThread({ id: thread.id, title: event.target.value })} onBlur={(event) => void onCommitRename(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); onCancelRename(); } }} onClick={(event) => event.stopPropagation()} /> : <button type="button" className="history-item-main" onClick={() => void onOpenThread(thread.id, { scrollToLatest: true })}><span className="history-item-label">{thread.title}</span>{thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}</button>}
+        {renaming ? <input className="history-item-rename-input" autoFocus value={renamingThread.title} aria-label="重命名任务" onFocus={(event) => event.currentTarget.select()} onChange={(event) => setRenamingThread({ id: thread.id, title: event.target.value })} onBlur={(event) => void onCommitRename(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); onCancelRename(); } }} onClick={(event) => event.stopPropagation()} /> : <button type="button" className="history-item-main" onClick={() => { setHistoryView(thread.mode === "project" && thread.cwd ? "projects" : "tasks"); void onOpenThread(thread.id, { scrollToLatest: true }); }}><span className="history-item-label">{thread.title}</span>{thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}</button>}
       </div>
     );
   }
@@ -103,9 +107,19 @@ export const HistorySidebar = memo(function HistorySidebar({ threads, projectGro
   return <aside className="sidebar">
     <div className="sidebar-scroll">
       <div className="sidebar-brand-row"><div className="sidebar-brand"><strong>Code<span className="sidebar-brand-accent">XH</span></strong><span>AI Workspace</span></div><div className="sidebar-brand-tools"><button className="sidebar-search sidebar-quick-notes" type="button" title="随手记" aria-label="随手记" onClick={() => void onOpenQuickNotes()}><IconNotebook /></button><button className="sidebar-search" type="button" title="搜索历史对话" onClick={onOpenSearch}><IconSearch /></button></div></div>
-      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={() => void onCreateThread("chat")}><span className="sidebar-nav-icon"><IconCompose /></span><span>新建任务</span></button><button className="sidebar-nav-button" onClick={() => void onCreateThread("project")}><span className="sidebar-nav-icon"><IconFolder /></span><span>新建项目</span><span className="sidebar-nav-plus"><IconPlus /></span></button></div>
-      <div className="sidebar-section-title">项目</div>
-      <div className="history-list">{threads.length === 0 ? <div className="history-empty">还没有任务</div> : <>{projectGroups.map((group) => { const collaborationProject = group.threads.some(isCollaborationThread); return renderGroup(normalizeHistoryGroupKey(group.cwd), group.threads, { ariaLabel: collaborationProject ? `协作项目 ${getFileLeafName(group.cwd)}` : `项目 ${getFileLeafName(group.cwd)}`, title: group.cwd, heading: <>{collaborationProject ? <IconFolders /> : <IconFolder />}<span>{getFileLeafName(group.cwd)}</span></> }); })}{standaloneThreads.length > 0 ? renderGroup(HISTORY_STANDALONE_GROUP_KEY, standaloneThreads, { ariaLabel: "其他任务", className: "history-standalone-group", collapsible: false, heading: projectGroups.length > 0 ? "其他任务" : undefined }) : null}</>}</div>
+      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={() => { setHistoryView("tasks"); void onCreateThread("chat"); }}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span></button><button className="sidebar-nav-button" onClick={() => { setHistoryView("projects"); void onCreateThread("project"); }}><span className="sidebar-nav-icon"><IconFolder /></span><span>新建项目</span><span className="sidebar-nav-plus"><IconPlus /></span></button></div>
+      <div className="sidebar-history-tabs" role="tablist" aria-label="历史列表">
+        <button type="button" className={`sidebar-history-tab ${historyView === "projects" ? "active" : ""}`} role="tab" aria-selected={historyView === "projects"} title="项目" aria-label="显示项目" onClick={() => setHistoryView("projects")}><IconFolder /></button>
+        <button type="button" className={`sidebar-history-tab ${historyView === "tasks" ? "active" : ""}`} role="tab" aria-selected={historyView === "tasks"} title="普通聊天" aria-label="显示普通聊天" onClick={() => setHistoryView("tasks")}><IconChatBubbles /></button>
+      </div>
+      <div className={`history-list history-list-${historyView}`} aria-label={historyView === "projects" ? "项目" : "其他任务"}>
+        {historyView === "projects" ? (
+          projectGroups.length > 0 ? projectGroups.map((group) => {
+            const collaborationProject = group.threads.some(isCollaborationThread);
+            return renderGroup(normalizeHistoryGroupKey(group.cwd), group.threads, { ariaLabel: collaborationProject ? `协作项目 ${getFileLeafName(group.cwd)}` : `项目 ${getFileLeafName(group.cwd)}`, title: group.cwd, heading: <>{collaborationProject ? <IconFolders /> : <IconFolder />}<span>{getFileLeafName(group.cwd)}</span></> });
+          }) : <div className="history-empty">还没有项目</div>
+        ) : standaloneThreads.length > 0 ? renderGroup(HISTORY_STANDALONE_GROUP_KEY, standaloneThreads, { ariaLabel: "其他任务", className: "history-standalone-group", collapsible: false }) : <div className="history-empty">还没有其他任务</div>}
+      </div>
       {visibleContextMenu ? <WorkspaceContextMenu x={visibleContextMenu.x} y={visibleContextMenu.y} motionPhase={contextPresence.phase} onClose={() => setContextMenu(null)} actions={[
         ...(!visibleContextMenu.thread.parentThreadId && visibleContextMenu.thread.status !== "running" ? [{ id: "extract-history-thread-skill", label: isGeneratingUserSkill ? "正在提炼技能..." : "提炼技能", icon: <IconSkills />, onSelect: () => onGenerateUserSkill(visibleContextMenu.thread) }] : []),
         { id: "rename-history-thread", label: "重命名", icon: <IconRename />, onSelect: () => onBeginRename(visibleContextMenu.thread) },

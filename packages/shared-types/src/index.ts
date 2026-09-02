@@ -1089,6 +1089,8 @@ export interface ProviderTurnInput {
   forceTextToolProtocol?: boolean;
   stream?: boolean;
   onTextDelta?: (delta: string) => void | Promise<void>;
+  /** Reports provider reasoning text as it is received from a streaming response. */
+  onReasoningDelta?: (delta: string) => void | Promise<void>;
   /** Reports a native tool call as soon as its name is streamed by the provider. */
   onToolCallPreparing?: (toolCall: {
     name: string;

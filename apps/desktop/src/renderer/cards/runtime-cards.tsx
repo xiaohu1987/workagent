@@ -302,8 +302,8 @@ export function getSubagentGroupSummary(
   return parts.length > 0 ? `子任务 ${parts.join(" · ")}` : "子任务 尚未启动";
 }
 
-export function shouldShowSubagentStatusDock(taskProcessing: boolean, mode: MultiAgentMode): boolean {
-  return taskProcessing && mode === "proactive";
+export function shouldShowSubagentStatusDock(taskProcessing: boolean, mode: MultiAgentMode, activeSubagentCount = 0): boolean {
+  return taskProcessing && mode === "proactive" && activeSubagentCount > 0;
 }
 
 export function SubagentStatusDock({
@@ -319,6 +319,8 @@ export function SubagentStatusDock({
   onToggle: () => void;
   children?: ReactNode;
 }) {
+  if (count === 0) return null;
+
   return (
     <div className={`subagent-status-dock ${expanded ? "is-expanded" : ""}`}>
       <button
@@ -335,7 +337,7 @@ export function SubagentStatusDock({
       </button>
       {expanded ? (
         <div id="subagent-status-panel" className="subagent-status-panel">
-          {children ?? <div className="subagent-status-panel-empty">尚未启动子任务</div>}
+          {children}
         </div>
       ) : null}
     </div>

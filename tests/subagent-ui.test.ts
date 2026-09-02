@@ -221,10 +221,22 @@ describe("subagent task UI", () => {
     expect(toggleRule).not.toContain("height: 34px");
   });
 
-  it("hides the subagent control when execution finishes or the feature is disabled", () => {
-    expect(shouldShowSubagentStatusDock(true, "proactive")).toBe(true);
-    expect(shouldShowSubagentStatusDock(false, "proactive")).toBe(false);
-    expect(shouldShowSubagentStatusDock(true, "disabled")).toBe(false);
+  it("does not render an empty panel while child tasks are being created", () => {
+    const html = renderToStaticMarkup(createElement(SubagentStatusDock, {
+      summary: "子任务 尚未启动",
+      count: 0,
+      expanded: true,
+      onToggle: vi.fn()
+    }));
+
+    expect(html).toBe("");
+  });
+
+  it("shows the subagent control only while at least one child task is in progress", () => {
+    expect(shouldShowSubagentStatusDock(true, "proactive", 1)).toBe(true);
+    expect(shouldShowSubagentStatusDock(true, "proactive", 0)).toBe(false);
+    expect(shouldShowSubagentStatusDock(false, "proactive", 1)).toBe(false);
+    expect(shouldShowSubagentStatusDock(true, "disabled", 1)).toBe(false);
     expect(getSubagentGroupSummary([], new Set(), new Map(), new Set())).toBe("子任务 尚未启动");
   });
 });

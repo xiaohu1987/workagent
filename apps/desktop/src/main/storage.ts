@@ -2287,6 +2287,14 @@ export class DatabaseService {
     return row ? mapRememberedApprovalRow(row) : null;
   }
 
+  public findRememberedGitMutationApproval(projectId: string | null): RememberedApprovalRecord | null {
+    const rows = this.#db
+      .prepare("SELECT * FROM remembered_approvals WHERE project_id IS ? ORDER BY updated_at DESC")
+      .all(projectId)
+      .map(mapRememberedApprovalRow);
+    return rows.find((record) => hasGitMutationAuthorization(record.payloadJson)) ?? null;
+  }
+
   public upsertRememberedApproval(
     input: Omit<RememberedApprovalRecord, "id" | "createdAt" | "updatedAt">
   ): RememberedApprovalRecord {
@@ -3812,6 +3820,15 @@ function mapRememberedApprovalRow(row: any): RememberedApprovalRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+function hasGitMutationAuthorization(payloadJson: string): boolean {
+  try {
+    const payload = JSON.parse(payloadJson) as unknown;
+    return Boolean(payload && typeof payload === "object" && (payload as Record<string, unknown>).authorizationKind === "git_mutation");
+  } catch {
+    return false;
+  }
 }
 
 function mapErrorSolutionRow(row: any): ErrorSolutionRecord {

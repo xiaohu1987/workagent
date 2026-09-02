@@ -184,6 +184,21 @@ describe("ToolRuntime", () => {
     expect(install.content).toContain("read-only");
   });
 
+  it("does not recommend mutating tools to read-only child agents", async () => {
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "child-tool-search", name: "tool_search", arguments: { query: "write file patch" } },
+      { cwd: process.cwd(), readOnlyAgent: true } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.json?.results).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "fs.write_file" }),
+      expect.objectContaining({ name: "apply_patch" }),
+      expect.objectContaining({ name: "search_replace" })
+    ]));
+  });
+
   it("surfaces an explicit timeout from multi-agent wait", async () => {
     const runtime = new ToolRuntime();
     const waitForSubagents = vi.fn().mockResolvedValue({ agents: [], timedOut: true });

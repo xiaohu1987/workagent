@@ -45,7 +45,9 @@ import {
   isThreadExecutionInProgress,
   normalizeGpaStateForThread,
   shouldCommitThreadSnapshotImmediately,
+  shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
+  shouldRefreshSelectedSnapshotForRuntimeEvent,
   shouldShowTaskProcessing
 } from "./core/thread-ui-state";
 import { useMotionPresence } from "./core/motion-presence";
@@ -68,6 +70,7 @@ import {
 import {
   ActiveToolCall,
   AssistantDraft,
+  AssistantDraftReasoningBuffer,
   AssistantDraftStreamBuffer,
   ChatEventBlock,
   ChatEventType,
@@ -116,6 +119,7 @@ import {
   mergeSnapshotRecords,
   parseMessageEventBlocks,
   reconcileAssistantDraftCompletion,
+  reconcileAssistantDraftReasoningUpdate,
   reconcileAssistantDraftStreamUpdate,
   reconcileAssistantDraftUpdate,
   reconcilePendingUserMessages,
@@ -186,6 +190,7 @@ import {
   IconArrowDown,
   IconArrowUp,
   IconBell,
+  IconChatBubbles,
   IconChart,
   IconCheck,
   IconChecklist,
@@ -523,10 +528,9 @@ export function App() {
     updateSession: updateTerminalSessionState,
     clearThread: clearTerminalThread
   } = useTerminalSessions(selectedThreadId);
-  const assistantDraftFramesRef = useRef<
-    Record<string, { draft: AssistantDraft; frame: number }>
-  >({});
   const assistantDraftBuffersRef = useRef<Record<string, AssistantDraftStreamBuffer>>({});
+  const assistantDraftReasoningBuffersRef = useRef<Record<string, AssistantDraftReasoningBuffer>>({});
+  const assistantDraftThreadIdsRef = useRef<Record<string, string>>({});
   const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
   const [projectFilesRevision, setProjectFilesRevision] = useState(0);
   const projectFilesRevisionRef = useRef(0);
@@ -1035,10 +1039,9 @@ export function App() {
   }, []);
 
   useEffect(() => () => {
-    for (const pending of Object.values(assistantDraftFramesRef.current)) {
-      window.cancelAnimationFrame(pending.frame);
-    }
-    assistantDraftFramesRef.current = {};
+    assistantDraftBuffersRef.current = {};
+    assistantDraftReasoningBuffersRef.current = {};
+    assistantDraftThreadIdsRef.current = {};
     for (const timer of Object.values(finalMessageFadeTimersRef.current)) {
       window.clearTimeout(timer);
     }
@@ -1420,27 +1423,18 @@ export function App() {
   const projectToolCalls = snapshot?.thread.id === selectedThreadId ? snapshot.toolCalls : [];
 
   function flushAssistantDraft(draftId: string) {
-    const pending = assistantDraftFramesRef.current[draftId];
-    if (!pending) return;
-
-    window.cancelAnimationFrame(pending.frame);
-    delete assistantDraftFramesRef.current[draftId];
     delete assistantDraftBuffersRef.current[draftId];
-    setAssistantDrafts((current) => reconcileAssistantDraftUpdate(current, pending.draft));
+    delete assistantDraftReasoningBuffersRef.current[draftId];
+    delete assistantDraftThreadIdsRef.current[draftId];
   }
 
   function discardQueuedAssistantDraft(draftId: string) {
-    const pending = assistantDraftFramesRef.current[draftId];
-    if (pending) {
-      window.cancelAnimationFrame(pending.frame);
-      delete assistantDraftFramesRef.current[draftId];
-    }
-    delete assistantDraftBuffersRef.current[draftId];
+    flushAssistantDraft(draftId);
   }
 
   function discardQueuedAssistantDraftsForThread(threadId: string) {
-    for (const [draftId, pending] of Object.entries(assistantDraftFramesRef.current)) {
-      if (pending.draft.threadId === threadId) {
+    for (const [draftId, draftThreadId] of Object.entries(assistantDraftThreadIdsRef.current)) {
+      if (draftThreadId === threadId) {
         discardQueuedAssistantDraft(draftId);
       }
     }
@@ -1465,19 +1459,6 @@ export function App() {
       });
     }, ASSISTANT_FINAL_MESSAGE_FADE_DURATION_MS);
   }, []);
-
-  function queueAssistantDraft(draft: AssistantDraft) {
-    const pending = assistantDraftFramesRef.current[draft.draftId];
-    if (pending) {
-      pending.draft = draft;
-      return;
-    }
-
-    assistantDraftFramesRef.current[draft.draftId] = {
-      draft,
-      frame: window.requestAnimationFrame(() => flushAssistantDraft(draft.draftId))
-    };
-  }
 
   useEffect(() => {
     setGpaState(normalizeGpaStateForThread("chat", null));
@@ -1711,16 +1692,19 @@ export function App() {
   useEffect(() => {
     let runtimeRefreshTimer: number | null = null;
     let shouldRefreshSelectedSnapshot = false;
-    const scheduleRuntimeRefresh = (threadId?: string) => {
-      if (!threadId || threadId === selectedThreadIdRef.current) {
+    const scheduleRuntimeRefresh = (threadId?: string, notificationThreadId?: string | null) => {
+      if (shouldRefreshSelectedSnapshotForRuntimeEvent(
+        selectedThreadIdRef.current,
+        threadId,
+        notificationThreadId
+      )) {
         shouldRefreshSelectedSnapshot = true;
       }
-      if (runtimeRefreshTimer !== null) window.clearTimeout(runtimeRefreshTimer);
+      if (runtimeRefreshTimer !== null) return;
       runtimeRefreshTimer = window.setTimeout(() => {
         runtimeRefreshTimer = null;
         const snapshotThreadId = shouldRefreshSelectedSnapshot ? selectedThreadIdRef.current : null;
         shouldRefreshSelectedSnapshot = false;
-        void refreshThreads({ refreshSelectedSnapshot: false });
         if (snapshotThreadId) {
           void refreshSnapshot(snapshotThreadId);
         }
@@ -1738,10 +1722,13 @@ export function App() {
           draftId?: string;
           sequence?: number;
           deltaSequence?: number;
+          reasoningDeltaSequence?: number;
           phase?: AssistantDraftPhase;
           discarded?: boolean;
           delta?: string;
           content?: string;
+          reasoning?: string;
+          reasoningDelta?: string;
           title?: string;
           attempt?: number;
           maxAttempts?: number;
@@ -1774,6 +1761,7 @@ export function App() {
           agentCapabilityReason?: string;
           data?: string;
           sessionId?: string;
+          inputPreview?: string;
           contextWindow?: number;
           beforeTokens?: number;
           afterTokens?: number;
@@ -2181,20 +2169,39 @@ export function App() {
           assistantDraftBuffersRef.current[draftId],
           { content: rawContent, delta, deltaSequence }
         );
-        if (!streamUpdate) return;
-        if (streamUpdate.buffer) assistantDraftBuffersRef.current[draftId] = streamUpdate.buffer;
-        else delete assistantDraftBuffersRef.current[draftId];
-        queueAssistantDraft({
-          draftId,
-          sequence: typeof payload.sequence === "number" ? payload.sequence : 0,
-          threadId,
-          turnRunId,
-          content: streamUpdate.content,
-          chunks: streamUpdate.chunks,
-          deltaSequence,
-          phase,
-          startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
-          completed: false
+        if (streamUpdate?.buffer) assistantDraftBuffersRef.current[draftId] = streamUpdate.buffer;
+        else if (streamUpdate) delete assistantDraftBuffersRef.current[draftId];
+        const rawReasoning = typeof payload.reasoning === "string" ? payload.reasoning : undefined;
+        const reasoningDelta = typeof payload.reasoningDelta === "string" ? payload.reasoningDelta : undefined;
+        const reasoningDeltaSequence = typeof payload.reasoningDeltaSequence === "number"
+          ? payload.reasoningDeltaSequence
+          : undefined;
+        const reasoningUpdate = reconcileAssistantDraftReasoningUpdate(
+          assistantDraftReasoningBuffersRef.current[draftId],
+          { reasoning: rawReasoning, delta: reasoningDelta, deltaSequence: reasoningDeltaSequence }
+        );
+        if (reasoningUpdate?.buffer) assistantDraftReasoningBuffersRef.current[draftId] = reasoningUpdate.buffer;
+        else if (reasoningUpdate) delete assistantDraftReasoningBuffersRef.current[draftId];
+        if (!streamUpdate && !reasoningUpdate) return;
+        setAssistantDrafts((current) => {
+          const previous = current[draftId];
+          const next = {
+            draftId,
+            sequence: typeof payload.sequence === "number" ? payload.sequence : 0,
+            threadId,
+            turnRunId,
+            content: streamUpdate?.content ?? previous?.content ?? "",
+            chunks: streamUpdate ? streamUpdate.chunks : previous?.chunks,
+            deltaSequence,
+            reasoning: reasoningUpdate?.reasoning ?? previous?.reasoning,
+            reasoningChunks: reasoningUpdate ? reasoningUpdate.chunks : previous?.reasoningChunks,
+            reasoningDeltaSequence,
+            phase,
+            startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
+            completed: false
+          };
+          assistantDraftThreadIdsRef.current[draftId] = threadId;
+          return reconcileAssistantDraftUpdate(current, next);
         });
         setRuntimeProgress({ threadId, phase: "generating", runtimeObserved: true });
         return;
@@ -2508,15 +2515,21 @@ export function App() {
           : typed.payload.thread;
         latestRuntimeThreadsRef.current[runtimeThreadId] = runtimeThread;
         invalidateSnapshotRequest(runtimeThreadId);
-        setThreads((current) => {
-          let found = false;
-          const next = current.map((thread) => {
-            if (thread.id !== runtimeThreadId) return thread;
-            found = true;
-            return resolveLatestThreadRecord(thread, runtimeThread);
+        if (shouldIncludeRuntimeThreadInHistory(runtimeThread)) {
+          setThreads((current) => {
+            let found = false;
+            const next = current.map((thread) => {
+              if (thread.id !== runtimeThreadId) return thread;
+              found = true;
+              return resolveLatestThreadRecord(thread, runtimeThread);
+            });
+            return found ? next : [runtimeThread, ...next];
           });
-          return found ? next : [runtimeThread, ...next];
-        });
+        } else {
+          // Older renderer sessions may already contain this internal thread
+          // from the former fallback insertion behavior. Remove it immediately.
+          setThreads((current) => current.filter((thread) => thread.id !== runtimeThreadId));
+        }
         reconcileCachedAndSelectedSnapshot(runtimeThreadId);
         const status = runtimeThread.status;
         const resumePlan = gpaPlanResumeAttemptRef.current.get(runtimeThreadId);
@@ -2599,7 +2612,7 @@ export function App() {
         typed.type === "browser.updated" ||
         typed.type === "knowledge.imported"
       )) {
-        scheduleRuntimeRefresh(typed.threadId);
+        scheduleRuntimeRefresh(typed.threadId, notificationThreadId);
       }
       if (typed.type === "knowledge.imported") {
         void refreshSkills();
@@ -3184,14 +3197,12 @@ export function App() {
       Date.parse(toolCall.completedAt ?? toolCall.startedAt) >= currentTurnStartedAt
     );
   }, [activeRuntimeThreadId, latestConversationTurn?.startedAt, snapshot?.toolCalls]);
+  const subagentWaitLabel = getSubagentWaitLabel(currentSubagents, queuedSubagentIds);
   const currentTurnDecisionLabel = useMemo(() => {
-    const latestTool = completedCurrentTurnTools.at(-1);
-    if (!latestTool) return "正在思考";
-    const action = getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "");
-    return completedCurrentTurnTools.length > 1
-      ? `已完成 ${completedCurrentTurnTools.length} 项操作，正在${action}`
-      : `正在${action}`;
-  }, [completedCurrentTurnTools, skillNames]);
+    return completedCurrentTurnTools.length > 0
+      ? getPostToolDecisionLabel(completedCurrentTurnTools, skillNames, Boolean(subagentWaitLabel))
+      : "正在思考";
+  }, [completedCurrentTurnTools, skillNames, subagentWaitLabel]);
   const currentGpaTask = useMemo(
     () => gpaState.planTasks.find((task) => !task.done) ?? null,
     [gpaState.planTasks]
@@ -3307,7 +3318,6 @@ export function App() {
     showRuntimeActivityPanel &&
     !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id))
   );
-  const subagentWaitLabel = getSubagentWaitLabel(currentSubagents, queuedSubagentIds);
   const isWaitingForSubagents = Boolean(
     isTaskProcessing &&
     subagentWaitLabel &&
@@ -3872,6 +3882,8 @@ export function App() {
     activeSnapshotThreadStatus,
     activeAssistantDraft?.content,
     activeAssistantDraft?.chunks?.length,
+    activeAssistantDraft?.reasoning,
+    activeAssistantDraft?.reasoningChunks?.length,
     latestVisibleMessageId,
     showRuntimeActivityPanel,
     showWelcome,
@@ -3921,7 +3933,10 @@ export function App() {
   }
 
   async function refreshThreads(options?: { refreshSelectedSnapshot?: boolean; fallbackToFirst?: boolean }) {
-    const listedThreads = (await window.codexh.listThreads()) as ThreadRecord[];
+    const listedThreads = ((await window.codexh.listThreads()) as ThreadRecord[])
+      // Keep the sidebar correct if it is served by an older main-process
+      // session during a hot reload.
+      .filter(shouldIncludeRuntimeThreadInHistory);
     const nextThreads = listedThreads.map((thread) => {
       const runtimeThread = latestRuntimeThreadsRef.current[thread.id];
       return runtimeThread ? resolveLatestThreadRecord(runtimeThread, thread) : thread;
@@ -4780,8 +4795,11 @@ export function App() {
     stageOverride?: GpaStage,
     options?: { internal?: boolean; displayContent?: string }
   ) {
-    const inputContent = (forcedContent ?? input.trim()).trim();
     const submittedAttachments = forcedContent ? [] : [...composerAttachments];
+    const rawInputContent = (forcedContent ?? input.trim()).trim();
+    const inputContent = rawInputContent || (submittedAttachments.some((attachment) => attachment.kind === "image")
+      ? "请分析这张图片。"
+      : "");
     const submittedMediaIntent = forcedContent ? null : composerMediaIntent;
     const hasOneShotAttachment = submittedAttachments.some((attachment) => !isPersistentComposerContextKind(attachment.kind));
     if (!inputContent && (forcedContent || !hasOneShotAttachment)) {
@@ -6227,7 +6245,6 @@ export function App() {
       </header>
 
       <HistorySidebar
-        threads={threads}
         projectGroups={projectHistoryGroups}
         standaloneThreads={standaloneHistoryThreads}
         selectedThreadId={selectedThreadId}
@@ -6287,6 +6304,17 @@ export function App() {
             onTerminalVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
           />
         ) : null}
+        {!showWelcome && selectedThread?.title ? (
+          <div
+            className={`workspace-thread-title ${selectedThread.mode === "project" ? "is-project" : "is-chat"}`}
+            title={`${selectedThread.mode === "project" ? "项目" : "普通聊天"}：${selectedThread.title}`}
+          >
+            <span className="workspace-thread-title-icon" aria-hidden="true">
+              {selectedThread.mode === "project" ? <IconFolder /> : <IconChatBubbles />}
+            </span>
+            {selectedThread.title}
+          </div>
+        ) : null}
         <WorkspaceControls
           tokenUsage={threadTokenUsage.thread}
           tokenUsageOpen={isTokenUsagePanelOpen}
@@ -6317,7 +6345,7 @@ export function App() {
           onToggleTerminal={() => setIsTerminalOpen((current) => !current)}
           rightWorkspaceOpen={isRightWorkspaceOpen}
           onOpenRightWorkspace={() => { setRightWorkspaceTab("files"); setRightWorkspaceExpandedTab("files"); setIsRightWorkspaceOpen(true); }}
-          subagentControl={!showWelcome && !isThreadSwitchPlaceholderVisible && shouldShowSubagentStatusDock(isTaskProcessing, multiAgentMode) ? (
+          subagentControl={!showWelcome && !isThreadSwitchPlaceholderVisible && shouldShowSubagentStatusDock(isTaskProcessing, multiAgentMode, currentSubagents.length) ? (
             <SubagentStatusDock
               summary={subagentGroupSummary}
               count={currentSubagents.length}
@@ -6448,6 +6476,20 @@ export function App() {
                   onOpenFolder={openGeneratedFileLocationEvent}
                   onToggleTurn={toggleConversationTurnCollapsedEvent}
                 />
+                {activeAssistantDraft ? (
+                  <AssistantDraftMessage
+                    key={`draft-${activeAssistantDraft.draftId}`}
+                    assistantLabel={activeAssistantLabel}
+                    content={activeDraftContent}
+                    chunks={activeAssistantDraft.chunks}
+                    reasoning={activeAssistantDraft.reasoning}
+                    reasoningChunks={activeAssistantDraft.reasoningChunks}
+                    draftId={activeAssistantDraft.draftId}
+                    phase={activeAssistantDraft.phase}
+                    startedAt={activeAssistantDraft.startedAt}
+                    completed={activeAssistantDraft.completed}
+                  />
+                ) : null}
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -6492,22 +6534,10 @@ export function App() {
                     onConfirm={() => void confirmGpaPlanResumeRetry()}
                   />
                 ) : null}
-                {(completedDeferredRuntimeToolGroup || activeAssistantDraft || shouldRenderRuntimeTailPanel) ? (
+                {(completedDeferredRuntimeToolGroup || shouldRenderRuntimeTailPanel) ? (
                   <div className="runtime-tail">
                     {completedDeferredRuntimeToolGroup ? (
                       <ToolActivityGroup toolCalls={completedDeferredRuntimeToolGroup} skillNames={skillNames} />
-                    ) : null}
-                    {activeAssistantDraft ? (
-                      <AssistantDraftMessage
-                        key={`draft-${activeAssistantDraft.draftId}`}
-                        assistantLabel={activeAssistantLabel}
-                        content={activeDraftContent}
-                        chunks={activeAssistantDraft.chunks}
-                        draftId={activeAssistantDraft.draftId}
-                        phase={activeAssistantDraft.phase}
-                        startedAt={activeAssistantDraft.startedAt}
-                        completed={activeAssistantDraft.completed}
-                      />
                     ) : null}
                     {shouldRenderRuntimeTailPanel ? (
                       <RuntimeActivityPanel

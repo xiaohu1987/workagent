@@ -82,6 +82,7 @@ import { listProjectDirectoryEntries, type ProjectFileEntry } from "./project-fi
 import { ToolRuntime } from "@tool-runtime";
 import { DatabaseRuntime } from "@database-runtime";
 import { redactRuntimeLogPayload, RuntimeLogWriter } from "./runtime-log";
+import { buildSubagentCompletionSummary } from "./subagent-summary";
 import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime, type TerminalOutputHeartbeat } from "./terminal-runtime";
 import { GitService } from "./git-service";
@@ -310,6 +311,7 @@ export class DesktopBackend {
   #backgroundSkillRefresh: Promise<void> | null = null;
   readonly #subagentDispatches = new Map<string, Promise<void>>();
   readonly #subagentProgress = new Map<string, SubagentProgress>();
+  readonly #publishedSubagentSummaryIds = new Set<string>();
 
   public async initialize(): Promise<void> {
     this.#layout = await ensureHomeLayout();
@@ -546,7 +548,9 @@ export class DesktopBackend {
   }
 
   public listThreads(): ThreadRecord[] {
-    return this.#db.listThreads();
+    // Child-agent records support the active-task panel; they are not chats a
+    // user can return to from the sidebar history.
+    return this.#db.listThreads().filter((thread) => !thread.parentThreadId);
   }
 
   public getThreadTokenUsage(threadId: string): {
@@ -923,7 +927,7 @@ export class DesktopBackend {
 
   public getThreadSnapshot(threadId: string, cursor?: RuntimeThreadSnapshotCursor): RuntimeThreadSnapshot {
     const thread = this.#db.getThread(threadId);
-    const subagents = this.getCurrentRequestSubagents(thread);
+    const subagents = this.getCurrentRequestSubagents(thread).filter((child) => this.isSubagentActive(child));
     const childApprovals = thread.parentThreadId
       ? []
       : subagents.flatMap((child) => this.#db.listApprovals(child.id).filter((approval) => approval.status === "pending"));
@@ -1109,6 +1113,12 @@ export class DesktopBackend {
     dispatch = true,
     mediaIntent?: "image" | "video" | null
   ): Promise<{ queued: QueuedMessageRecord; queuedBehindActiveTask: boolean }> {
+    // Some OpenAI-compatible gateways reject an image message containing an
+    // empty text part. Preserve the intended image-only action as a normal
+    // user request before it enters the queue or durable chat history.
+    const normalizedContent = content.trim() || (attachments.some((attachment) => attachment.kind === "image")
+      ? "请分析这张图片。"
+      : content);
     // Queue first so cold-start maintenance (plugin discovery, skill indexing,
     // MCP refresh) never delays visible message submission.
     void this.initializeDeferredServices();
@@ -1122,7 +1132,7 @@ export class DesktopBackend {
     const isFirstThreadMessage = this.#db.countMessages(threadId) === 0 && this.#db.listQueuedMessages(threadId).length === 0;
     if (isFirstThreadMessage) {
       const updated = this.#db.updateThread(threadId, {
-        title: buildThreadTitleFromFirstMessage(displayContent || content)
+        title: buildThreadTitleFromFirstMessage(displayContent || normalizedContent)
       });
       void this.emit({
         type: "thread.updated",
@@ -1134,8 +1144,8 @@ export class DesktopBackend {
 
     const queued = this.#db.enqueueQueuedMessage({
       threadId,
-      content,
-      displayContent: displayContent || content,
+      content: normalizedContent,
+      displayContent: displayContent || normalizedContent,
       attachments,
       mediaIntent: mediaIntent ?? null
     });
@@ -3836,8 +3846,11 @@ export class DesktopBackend {
     }
 
     const approved = resolution.decision === "approved";
+    const canRemember = approval.kind === "permission" || isRememberableExplicitAuthorization(approval.payloadJson);
     const resolutionMode = approved
-      ? (approval.kind === "explicit_authorization" ? "once" : (resolution.mode ?? "once"))
+      ? (approval.kind === "explicit_authorization"
+        ? (canRemember && resolution.mode === "remember" ? "remember" : "once")
+        : (resolution.mode ?? "once"))
       : null;
     const source = resolution.source ?? "user";
     this.#clearApprovalTimeout(id);
@@ -3847,16 +3860,16 @@ export class DesktopBackend {
       if (resolutionMode === "session") {
         this.#sessionApprovedThreadIds.add(approval.threadId);
       }
-      if (resolutionMode === "remember") {
-        this.#db.upsertRememberedApproval({
-          projectId: approval.projectId,
-          approvalKey: approval.approvalKey,
-          title: approval.title,
-          description: approval.description,
-          riskLevel: approval.riskLevel,
-          payloadJson: approval.payloadJson
-        });
-      }
+    }
+    if (approved && canRemember && resolutionMode === "remember") {
+      this.#db.upsertRememberedApproval({
+        projectId: approval.projectId,
+        approvalKey: approval.approvalKey,
+        title: approval.title,
+        description: approval.description,
+        riskLevel: approval.riskLevel,
+        payloadJson: approval.payloadJson
+      });
     }
 
     void this.emit({
@@ -3923,16 +3936,23 @@ export class DesktopBackend {
     const thread = this.#db.getThread(threadId);
     const kind = input.kind ?? "permission";
     const requiresExplicitAuthorization = kind === "explicit_authorization";
+    const canRememberExplicitAuthorization = requiresExplicitAuthorization && isRememberableExplicitAuthorization(input.payload);
     if (!requiresExplicitAuthorization && this.getGpaState(threadId).fullAccess) {
       return true;
     }
-    const approvalKey = hashApprovalPayload({
-      kind,
-      title: input.title,
-      description: input.description,
-      riskLevel: input.riskLevel,
-      payload: getApprovalScopePayload(input.payload)
-    });
+    const approvalKey = canRememberExplicitAuthorization
+      ? hashApprovalPayload({
+        kind,
+        authorizationKind: "git_mutation",
+        workspaceRoot: thread.cwd ?? ""
+      })
+      : hashApprovalPayload({
+        kind,
+        title: input.title,
+        description: input.description,
+        riskLevel: input.riskLevel,
+        payload: getApprovalScopePayload(input.payload)
+      });
     if (!requiresExplicitAuthorization && this.#config.desktop.approvals === "auto" && input.riskLevel === "low") {
       return true;
     }
@@ -3943,7 +3963,19 @@ export class DesktopBackend {
       return true;
     }
 
-    if (!requiresExplicitAuthorization && this.#db.findRememberedApproval(thread.projectId, approvalKey)) {
+    if ((!requiresExplicitAuthorization || canRememberExplicitAuthorization) && this.#db.findRememberedApproval(thread.projectId, approvalKey)) {
+      return true;
+    }
+    if (canRememberExplicitAuthorization && this.#db.findRememberedGitMutationApproval(thread.projectId)) {
+      // Upgrade an earlier per-command Git approval to the workspace-scoped key.
+      this.#db.upsertRememberedApproval({
+        projectId: thread.projectId,
+        approvalKey,
+        title: input.title,
+        description: input.description,
+        riskLevel: input.riskLevel,
+        payloadJson: JSON.stringify(input.payload)
+      });
       return true;
     }
 
@@ -4760,6 +4792,37 @@ export class DesktopBackend {
     this.#subagentProgress.set(subject.id, next);
   }
 
+  private async publishSubagentCompletionSummary(child: ThreadRecord): Promise<void> {
+    if (this.#publishedSubagentSummaryIds.has(child.id)) return;
+    const root = this.#db.getThread(child.rootThreadId);
+    if (root.id === child.id || (root.status !== "running" && root.status !== "waiting")) return;
+    if (!this.getCurrentRequestSubagents(root).some((item) => item.id === child.id)) return;
+
+    const result = this.buildSubagentEnvelope(child);
+    if (result.status !== "completed") return;
+
+    this.#publishedSubagentSummaryIds.add(child.id);
+    const activeRootTurn = this.#db.getLatestTurnRun(root.id);
+    const message = this.#db.createMessage({
+      threadId: root.id,
+      turnRunId: activeRootTurn?.status === "running" ? activeRootTurn.id : null,
+      role: "assistant",
+      content: buildSubagentCompletionSummary(child, result),
+      metadataJson: JSON.stringify({ displayKind: "subagent-summary", childThreadId: child.id })
+    });
+    await this.emit({
+      type: "message.created",
+      threadId: root.id,
+      payload: { message },
+      createdAt: message.createdAt
+    });
+    await this.#logs.append("subagent.completion_summary_published", {
+      rootThreadId: root.id,
+      childThreadId: child.id,
+      agentPath: child.agentPath
+    }, root.id);
+  }
+
   private async emit(event: RuntimeEvent): Promise<void> {
     let subject: ThreadRecord | null = null;
     if (event.threadId) {
@@ -4783,6 +4846,12 @@ export class DesktopBackend {
     this.#events.emit("runtime-event", boundedEvent);
     if (boundedEvent.type === "thread.updated") {
       if (subject?.parentThreadId) {
+        void this.publishSubagentCompletionSummary(subject).catch((error) => {
+          void this.#logs.append("subagent.completion_summary_publish_failed", {
+            threadId: subject.id,
+            error: error instanceof Error ? error.message : String(error)
+          }, subject.rootThreadId);
+        });
         const root = this.#db.getThread(subject.rootThreadId);
         this.#events.emit("runtime-event", {
           type: "thread.updated",
@@ -5765,6 +5834,18 @@ function getApprovalScopePayload(payload: Record<string, unknown>): Record<strin
     return { operation: "apply_patch" };
   }
   return payload;
+}
+
+function isRememberableExplicitAuthorization(payload: Record<string, unknown> | string): boolean {
+  if (typeof payload === "string") {
+    try {
+      const parsed = JSON.parse(payload) as unknown;
+      return Boolean(parsed && typeof parsed === "object" && (parsed as Record<string, unknown>).authorizationKind === "git_mutation");
+    } catch {
+      return false;
+    }
+  }
+  return payload.authorizationKind === "git_mutation";
 }
 
 function stableStringify(value: unknown): string {

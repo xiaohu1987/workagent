@@ -42,7 +42,7 @@ import type {
 import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, isGrokModel, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
-import { ToolRuntime, canonicalizeToolName, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
+import { ToolRuntime, canonicalizeToolName, isChildReadOnlyForbiddenTool, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
 import * as mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import {
@@ -286,6 +286,10 @@ export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 8_000;
 export const MAX_RAW_HISTORY_TOKENS_PER_REQUEST = 48_000;
 /** Limit full-text draft snapshots so long streamed replies do not starve the desktop renderer. */
 export const ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS = 100;
+/** Pace synthetic chunks when a provider returns the complete response without streaming deltas. */
+export const NON_STREAMING_DRAFT_CHUNK_INTERVAL_MS = 24;
+export const NON_STREAMING_DRAFT_MAX_CHUNKS = 120;
+export const NON_STREAMING_DRAFT_MIN_CHUNK_SIZE = 4;
 
 export function shouldPublishAssistantDraftUpdate(
   lastPublishedAtMs: number,
@@ -293,6 +297,49 @@ export function shouldPublishAssistantDraftUpdate(
   force = false
 ): boolean {
   return force || nowMs - lastPublishedAtMs >= ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS;
+}
+
+export function splitNonStreamingAssistantDraft(content: string): string[] {
+  const characters = Array.from(content);
+  if (characters.length === 0) return [];
+
+  const targetSize = Math.max(
+    NON_STREAMING_DRAFT_MIN_CHUNK_SIZE,
+    Math.ceil(characters.length / NON_STREAMING_DRAFT_MAX_CHUNKS)
+  );
+  const boundaryPattern = /[\s，。！？；：、,.!?;:]/u;
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < characters.length) {
+    let end = Math.min(characters.length, start + targetSize);
+    if (end < characters.length) {
+      const lookaheadEnd = Math.min(characters.length, end + Math.min(4, targetSize));
+      for (let cursor = end; cursor < lookaheadEnd; cursor += 1) {
+        if (boundaryPattern.test(characters[cursor] ?? "")) {
+          end = cursor + 1;
+          break;
+        }
+      }
+    }
+    chunks.push(characters.slice(start, end).join(""));
+    start = end;
+  }
+
+  return chunks;
+}
+
+export function shouldRevealNonStreamingAssistantDraft(input: {
+  receivedStreamingDelta: boolean;
+  toolCallCount: number;
+  endTurn: boolean;
+  content: string;
+}): boolean {
+  return !input.receivedStreamingDelta &&
+    input.toolCallCount === 0 &&
+    input.endTurn &&
+    Boolean(input.content) &&
+    !isPatchPayload(input.content);
 }
 
 export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
@@ -2649,24 +2696,28 @@ class ThreadSessionRuntime {
         const sequence = ++draftSequence;
         const draftStartedAt = new Date().toISOString();
         let streamedVisibleContent = "";
+        let streamedReasoningContent = "";
         let draftSettled = suppressStreamingForActiveSubagents;
         let lastPublishedDraftAtMs = Number.NEGATIVE_INFINITY;
         let lastPublishedDraftContent = "";
         let draftDeltaSequence = 0;
+        let lastPublishedDraftReasoning = "";
+        let draftReasoningDeltaSequence = 0;
         let publishedDraftPhase: AssistantDraftPhase | null = null;
         activeDraftId = suppressStreamingForActiveSubagents ? null : draftId;
         const updateDraft = async (
           phase: AssistantDraftPhase,
           content = streamedVisibleContent,
-          force = false
+          options: { force?: boolean; immediate?: boolean; deliveryMode?: "streaming" | "chunked" } = {}
         ) => {
           if (draftSettled || suppressStreamingForActiveSubagents) return;
           streamedVisibleContent = content;
           const nowMs = Date.now();
+          const force = options.force === true;
           if (!shouldPublishAssistantDraftUpdate(
             lastPublishedDraftAtMs,
             nowMs,
-            force || publishedDraftPhase !== phase
+            force || options.immediate === true || publishedDraftPhase !== phase
           )) {
             return;
           }
@@ -2687,8 +2738,34 @@ class ThreadSessionRuntime {
               sequence,
               deltaSequence: draftDeltaSequence,
               phase,
+              ...(options.deliveryMode ? { deliveryMode: options.deliveryMode } : {}),
               ...(includeCheckpoint ? { content } : {}),
               ...(delta !== undefined ? { delta } : {}),
+              startedAt: draftStartedAt
+            },
+            createdAt: new Date().toISOString()
+          });
+        };
+        const updateDraftReasoning = async (delta: string) => {
+          if (!delta || draftSettled || suppressStreamingForActiveSubagents) return;
+          streamedReasoningContent += delta;
+          const reasoningDelta = streamedReasoningContent.startsWith(lastPublishedDraftReasoning)
+            ? streamedReasoningContent.slice(lastPublishedDraftReasoning.length)
+            : undefined;
+          lastPublishedDraftReasoning = streamedReasoningContent;
+          draftReasoningDeltaSequence += 1;
+          const includeCheckpoint = reasoningDelta === undefined || draftReasoningDeltaSequence % 20 === 0;
+          await this.services.emit({
+            type: "assistant.draft.updated",
+            threadId: this.threadId,
+            payload: {
+              turnRunId: turn.id,
+              draftId,
+              sequence,
+              phase: "generating",
+              reasoningDeltaSequence: draftReasoningDeltaSequence,
+              ...(includeCheckpoint ? { reasoning: streamedReasoningContent } : {}),
+              ...(reasoningDelta !== undefined ? { reasoningDelta } : {}),
               startedAt: draftStartedAt
             },
             createdAt: new Date().toISOString()
@@ -2697,7 +2774,37 @@ class ThreadSessionRuntime {
         const retryDraft = async () => {
           streamedVisibleContent = "";
           lastPublishedDraftContent = "";
-          await updateDraft("retrying", "", true);
+          streamedReasoningContent = "";
+          lastPublishedDraftReasoning = "";
+          draftReasoningDeltaSequence = 0;
+          await this.services.emit({
+            type: "assistant.draft.updated",
+            threadId: this.threadId,
+            payload: {
+              turnRunId: turn.id,
+              draftId,
+              sequence,
+              phase: "retrying",
+              reasoning: "",
+              startedAt: draftStartedAt
+            },
+            createdAt: new Date().toISOString()
+          });
+          await updateDraft("retrying", "", { force: true });
+        };
+        const revealNonStreamingDraft = async (content: string) => {
+          const chunks = splitNonStreamingAssistantDraft(content);
+          let revealedContent = "";
+          for (let index = 0; index < chunks.length; index += 1) {
+            revealedContent += chunks[index];
+            await updateDraft("generating", revealedContent, {
+              immediate: true,
+              deliveryMode: "chunked"
+            });
+            if (index < chunks.length - 1) {
+              await sleepWithAbort(NON_STREAMING_DRAFT_CHUNK_INTERVAL_MS, abortController.signal);
+            }
+          }
         };
         const settleDraft = async (input: { messageId?: string; discarded?: boolean }) => {
           if (draftSettled || suppressStreamingForActiveSubagents) return;
@@ -2710,7 +2817,7 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
         };
-        await updateDraft("generating", "", true);
+        await updateDraft("generating", "", { force: true });
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const borrowedCapsuleTokens = Math.max(
           0,
@@ -2870,6 +2977,8 @@ class ThreadSessionRuntime {
         modelAwaitReason = "recovery";
         let decision: ProviderTurnDecision;
         let markModelProgress: () => void = () => undefined;
+        const requestUsesStreaming = model.supportsStreaming && !forceNonStreamingAfterIncompleteStream;
+        let receivedStreamingDelta = false;
         try {
           const requestModel = providerOutputLimitAttempts > 0
             ? {
@@ -2898,13 +3007,22 @@ class ThreadSessionRuntime {
               provider: requestProvider,
               reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
               forceTextToolProtocol: useTextToolProtocol,
-              stream: model.supportsStreaming && !forceNonStreamingAfterIncompleteStream,
+              stream: requestUsesStreaming,
               onTextDelta: async (delta) => {
                 if (abortController.signal.aborted) {
                   return;
                 }
+                receivedStreamingDelta = true;
                 markModelProgress();
-                await updateDraft("generating", `${streamedVisibleContent}${delta}`);
+                await updateDraft("generating", `${streamedVisibleContent}${delta}`, {
+                  immediate: true,
+                  deliveryMode: "streaming"
+                });
+              },
+              onReasoningDelta: async (delta) => {
+                if (abortController.signal.aborted) return;
+                markModelProgress();
+                await updateDraftReasoning(delta);
               },
               onToolCallPreparing: async ({ name, argumentsJson }) => {
                 if (abortController.signal.aborted || canonicalizeToolName(name) === AGENT_PROTOCOL_RECOVERY_TOOL_NAME) {
@@ -3422,7 +3540,17 @@ class ThreadSessionRuntime {
         ) {
           decision.assistantMessage = returnedVisibleContent;
         }
-        await updateDraft("validating", returnedVisibleContent);
+        if (shouldRevealNonStreamingAssistantDraft({
+          receivedStreamingDelta,
+          toolCallCount: decision.toolCalls.length,
+          endTurn: decision.endTurn,
+          content: returnedVisibleContent
+        })) {
+          await revealNonStreamingDraft(returnedVisibleContent);
+        }
+        await updateDraft("validating", returnedVisibleContent, {
+          deliveryMode: receivedStreamingDelta ? "streaming" : "chunked"
+        });
 
         const stepUsage = decision.usage ?? (typeof decision.outputTokens === "number"
           ? finalizeTokenUsage({ outputTokens: decision.outputTokens, outputContentTokens: decision.outputTokens })
@@ -4186,6 +4314,22 @@ class ThreadSessionRuntime {
               continue;
             }
             if (standardCompletionAttempts >= MAX_STANDARD_COMPLETION_RECOVERIES) {
+              const hasReportQualityFailure = standardCompletion.reasons.some((reason) =>
+                reason === "The final user-visible summary is a placeholder without the requested report body."
+              );
+              if (hasReportQualityFailure) {
+                repeatedTaskFailure = {
+                  taskKey: "completion-report",
+                  attempts: standardCompletionAttempts,
+                  lastError: standardCompletion.reasons.join(" ")
+                };
+                await this.services.log("turn.standard_completion_report_rejected", this.threadId, {
+                  turnRunId: turn.id,
+                  attempt: standardCompletionAttempts,
+                  reasons: standardCompletion.reasons
+                });
+                break;
+              }
               // The user can already see the candidate in the draft. Do not
               // report a completion-evidence gap as repeated executable
               // failures after the finite recovery budget has been spent.
@@ -5899,13 +6043,21 @@ class ThreadSessionRuntime {
           const pathVerification = result.ok
             ? await verifySuccessfulToolDeliveryPaths(toolCall.name, toolCall.arguments, result, workspaceCwd)
             : undefined;
-          recordManagedWriteResult(managedWriteCompletion, {
-            toolCallId: toolCall.id,
-            toolName: toolCall.name,
-            ok: result.ok,
-            verifiedPaths: pathVerification?.verifiedPaths,
-            failureSummary: result.ok ? undefined : result.content
-          });
+          const readOnlyChildWriteDenied =
+            thread.parentThreadId !== null &&
+            this.services.config.multiAgent.childWritePolicy === "read-only" &&
+            MANAGED_WRITE_TOOL_NAMES.has(toolCall.name) &&
+            !result.ok &&
+            isChildReadOnlyForbiddenTool(toolCall.name);
+          if (!readOnlyChildWriteDenied) {
+            recordManagedWriteResult(managedWriteCompletion, {
+              toolCallId: toolCall.id,
+              toolName: toolCall.name,
+              ok: result.ok,
+              verifiedPaths: pathVerification?.verifiedPaths,
+              failureSummary: result.ok ? undefined : result.content
+            });
+          }
           const readPath = result.ok && toolCall.name === "fs.read_file"
             ? resolveSuccessfulReadFilePath(toolCall.arguments, result, workspaceCwd)
             : undefined;
@@ -5916,13 +6068,15 @@ class ThreadSessionRuntime {
           if (result.ok && LOCAL_WORKSPACE_OBSERVATION_TOOLS.has(toolCall.name)) {
             hasInspectedLocalWorkspace = true;
           }
-          advanceManagedWriteRecovery(managedWriteRecovery, {
-            toolName: toolCall.name,
-            argumentsJson: toolCall.arguments,
-            ok: result.ok,
-            workspaceCwd,
-            readPath
-          });
+          if (!readOnlyChildWriteDenied) {
+            advanceManagedWriteRecovery(managedWriteRecovery, {
+              toolName: toolCall.name,
+              argumentsJson: toolCall.arguments,
+              ok: result.ok,
+              workspaceCwd,
+              readPath
+            });
+          }
 
           const completedAt = new Date().toISOString();
           const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result, model.contextWindow);
@@ -6352,6 +6506,13 @@ class ThreadSessionRuntime {
               }
             }
           } else {
+            if (readOnlyChildWriteDenied) {
+              transcript.push({
+                role: "user",
+                content: "This is a read-only child agent. Do not retry file writes or inspect a missing delivery file. Return the analysis and proposed changes directly to the parent task."
+              });
+              continue;
+            }
             if (isBrowserWorkspaceUnavailableError(toolCall.name, result.content)) {
               browserVerificationEvidence.testChoice = "skip";
               await this.services.log("browser.workspace_unavailable_silent_fallback", this.threadId, {
@@ -7725,8 +7886,8 @@ const GIT_MUTATION_TOOL_NAMES = new Set([
 
 // Git accepts global options before the subcommand, e.g. `git -C repo pull`.
 // Recognize those forms as well so they receive the same explicit approval.
-const GIT_MUTATION_SHELL_PATTERN = /\bgit(?:\s+--?[A-Za-z][\w-]*(?:[=\s]+[^\s;&|]+)?)*\s+(?:add|restore|reset|clean|commit|push|pull|fetch|merge|rebase|cherry-pick|worktree)\b/i;
-const EXPLICIT_GIT_MUTATION_PATTERN = /(?:\bgit\s+(?:add|stage|unstage|restore|reset|clean|commit|push|pull|fetch|merge|rebase|cherry-pick|worktree)\b|(?:暂存|取消暂存|撤销(?:[\s\S]{0,12})修改|清理(?:[\s\S]{0,12})git|提交(?:代码|改动|更改|commit)?|推送(?:代码|分支)?|拉取(?:代码|分支|远端)?|创建(?:pull request|pr|合并请求)))/i;
+const GIT_MUTATION_SHELL_PATTERN = /\bgit(?:\s+--?[A-Za-z][\w-]*(?:[=\s]+[^\s;&|]+)?)*\s+(?:add|restore|reset|clean|commit|push|pull|fetch|merge(?!-base\b)|rebase|cherry-pick|worktree)\b/i;
+const EXPLICIT_GIT_MUTATION_PATTERN = /(?:\bgit\s+(?:add|stage|unstage|restore|reset|clean|commit|push|pull|fetch|merge(?!-base\b)|rebase|cherry-pick|worktree)\b|(?:暂存|取消暂存|撤销(?:[\s\S]{0,12})修改|清理(?:[\s\S]{0,12})git|提交(?:代码|改动|更改|commit)?|推送(?:代码|分支)?|拉取(?:代码|分支|远端)?|创建(?:pull request|pr|合并请求)))/i;
 const EXPLICIT_AUTHORIZATION_OPERATION_LIMIT = 2_000;
 
 export interface ExplicitAuthorizationRequirement {
@@ -7773,7 +7934,7 @@ export function buildExplicitAuthorizationRequirement(
     description: [
       "程序准备执行以下会修改 Git 仓库的操作：",
       operation,
-      "该操作可能访问网络，并修改分支引用、暂存区或工作区。只有当前展示的操作会获得一次性授权。"
+      "该操作可能访问网络，并修改分支引用、暂存区或工作区。默认只授权当前操作；选择“同意且下次不再询问”会记住当前工作目录内的 Git 写操作。"
     ].join("\n\n"),
     riskLevel: "high",
     payload: {
@@ -8482,6 +8643,9 @@ export function validateStandardCompletion(input: {
     reasons.push("The model did not declare the original goal complete.");
   }
   if (!assistantMessage) reasons.push("The final user-visible summary is empty.");
+  if (isPlaceholderFinalReport(assistantMessage)) {
+    reasons.push("The final user-visible summary is a placeholder without the requested report body.");
+  }
   if (isProgressOnlyAssistantMessage(assistantMessage)) {
     reasons.push("The assistant message is progress commentary, not a final summary.");
   }
@@ -8509,6 +8673,18 @@ export function validateStandardCompletion(input: {
     missingTestReport,
     missingRequestedDeliverable
   };
+}
+
+/** Rejects completion messages that point at a report instead of containing it. */
+export function isPlaceholderFinalReport(message: string): boolean {
+  const normalized = message.trim().replace(/\s+/g, " ");
+  if (!normalized) return false;
+  const pointsToMissingBody = /(最终报告|完整报告|报告|分析结果).{0,12}(见正文|详见正文|见上文|见下文)/i.test(normalized) ||
+    /(?:see|refer to)\s+(?:the\s+)?(?:正文|报告|body|report)/i.test(normalized);
+  if (!pointsToMissingBody) return false;
+  // A real report may mention the body in passing; short, single-paragraph
+  // pointer text is the failure mode this gate is intended to catch.
+  return normalized.length < 240 && !/[\r\n].*[\r\n]/.test(message);
 }
 
 function resolveProtocolRecoveryProvider(

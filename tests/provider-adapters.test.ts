@@ -3402,6 +3402,90 @@ describe("OpenAiCompatibleProvider", () => {
     });
   });
 
+  it("adds a non-empty prompt for an image-only chat-completions message", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"OK","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = { id: "vision-gateway", type: "openai-compatible", apiKey: "secret" };
+    const visionModel: ModelProfile = {
+      id: "vision-model",
+      providerId: provider.id,
+      displayName: "Vision model",
+      contextWindow: 8_192,
+      supportsStreaming: true,
+      supportsToolCalling: false,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: false,
+      supportsMultimodalInput: true,
+      supportsReasoningSummary: false
+    };
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{
+        role: "user",
+        content: "",
+        attachments: [{
+          id: "image-only",
+          kind: "image",
+          name: "image.png",
+          mimeType: "image/png",
+          absolutePath: path.join(process.cwd(), "package.json"),
+          sizeBytes: 1,
+          source: "user"
+        }]
+      }],
+      availableTools: [],
+      model: visionModel,
+      provider,
+      stream: false
+    });
+
+    const messages = (mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, any>).messages as any[];
+    const content = messages.find((message) => message.role === "user")?.content as any[];
+    expect(content.find((part) => part.type === "text")?.text).toBe("请分析这张图片。");
+    expect(content.find((part) => part.type === "image_url")?.image_url.url).toContain("data:image/png;base64,");
+  });
+
+  it("forwards OpenAI-compatible reasoning deltas while streaming", async () => {
+    async function* streamReasoning() {
+      yield { choices: [{ delta: { reasoning_content: "Inspecting ", content: "Hello" } }] };
+      yield { choices: [{ finish_reason: "stop", delta: { reasoning_content: "the request.", content: " world" } }] };
+    }
+
+    mocks.chatCreate.mockResolvedValue(streamReasoning());
+    const provider: ProviderDefinition = { id: "gateway", type: "openai-compatible", apiKey: "secret" };
+    const streamingModel: ModelProfile = {
+      id: "test-model",
+      providerId: "gateway",
+      displayName: "Test model",
+      contextWindow: 8_192,
+      supportsStreaming: true,
+      supportsToolCalling: false,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: false,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: true
+    };
+    const visibleDeltas: string[] = [];
+    const reasoningDeltas: string[] = [];
+
+    const decision = await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      model: streamingModel,
+      provider,
+      stream: true,
+      onTextDelta: (delta) => { visibleDeltas.push(delta); },
+      onReasoningDelta: (delta) => { reasoningDeltas.push(delta); }
+    });
+
+    expect(visibleDeltas).toEqual(["Hello", " world"]);
+    expect(reasoningDeltas).toEqual(["Inspecting ", "the request."]);
+    expect(decision.reasoningSummary).toBe("Inspecting the request.");
+  });
+
   it("streams only the decoded assistant_message before a JSON tool batch", async () => {
     async function* streamDecision() {
       yield { choices: [{ delta: { content: '{"assistant_message":"I will inspect ' } }] };
@@ -3858,14 +3942,17 @@ describe("native provider tool protocols", () => {
     mocks.anthropicCreate.mockResolvedValue(events());
     const provider: ProviderDefinition = { id: "provider", type: "anthropic", apiKey: "secret" };
     const deltas: string[] = [];
+    const reasoningDeltas: string[] = [];
 
     const decision = await new ProviderFactory().create(provider).runTurn({
       systemPrompt: "Use the function.", transcript: [{ role: "user", content: "Inspect." }],
       availableTools: [tool], model: { ...model, supportsStreaming: true }, provider, stream: true,
-      onTextDelta: (delta) => { deltas.push(delta); }
+      onTextDelta: (delta) => { deltas.push(delta); },
+      onReasoningDelta: (delta) => { reasoningDeltas.push(delta); }
     });
 
     expect(deltas).toEqual([]);
+    expect(reasoningDeltas).toEqual(["Inspecting."]);
     expect(decision).toMatchObject({
       toolCalls: [{ id: "stream-call", name: tool.name, arguments: { path: "." } }],
       reasoningSummary: "Inspecting.",
@@ -3998,6 +4085,41 @@ describe("native provider tool protocols", () => {
     expect(text).toContain("[Attached file]\n/tmp/notes.pdf");
     expect(text).toContain("[Attached video]\n/tmp/clip.mp4");
     expect(userContent.filter((part) => part.type === "input_image")).toHaveLength(1);
+  });
+
+  it("adds a non-empty prompt for an image-only Responses message", async () => {
+    mocks.responsesCreate.mockResolvedValue({
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
+    });
+    const provider: ProviderDefinition = {
+      id: "openai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "secret"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{
+        role: "user",
+        content: "",
+        attachments: [{
+          id: "image-only",
+          kind: "image",
+          name: "image.png",
+          mimeType: "image/png",
+          absolutePath: path.join(process.cwd(), "package.json"),
+          sizeBytes: 1,
+          source: "user"
+        }]
+      }],
+      availableTools: [],
+      model: { ...model, id: "gpt-5.6-terra", providerId: provider.id, role: "reasoning", supportsMultimodalInput: true },
+      provider,
+      stream: false
+    });
+
+    const input = (mocks.responsesCreate.mock.calls.at(-1)?.[0] as Record<string, any>).input as any[];
+    const content = input.find((item) => item.role === "user")?.content as any[];
+    expect(content.find((part) => part.type === "input_text")?.text).toBe("请分析这张图片。");
+    expect(content.some((part) => part.type === "input_image")).toBe(true);
   });
 
   it("preserves Responses reasoning items for the next tool-result request", async () => {

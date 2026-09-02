@@ -148,6 +148,10 @@ export type AssistantDraft = {
   /** Optional chunked representation used by the incremental stream path. */
   chunks?: string[];
   deltaSequence?: number;
+  /** Provider reasoning kept separate from the visible final response. */
+  reasoning?: string;
+  reasoningChunks?: string[];
+  reasoningDeltaSequence?: number;
   phase: AssistantDraftPhase;
   startedAt: string;
   completed: boolean;
@@ -1257,10 +1261,14 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", s
 
 export function getPostToolDecisionLabel(
   completedTools: readonly Pick<ToolCallRecord, "toolName" | "argumentsJson">[],
-  skillNames?: SkillNameMap
+  skillNames?: SkillNameMap,
+  hasActiveSubagents?: boolean
 ): string {
   const latestTool = completedTools.at(-1);
   if (!latestTool) return "正在处理工具结果";
+  if (isSubagentWaitTool(latestTool.toolName) && hasActiveSubagents === false) {
+    return "正在汇总子任务结果";
+  }
   const action = getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "");
   return completedTools.length > 1
     ? `已完成 ${completedTools.length} 项操作，正在${action}`
@@ -1979,6 +1987,11 @@ export type AssistantDraftStreamBuffer = {
   usesMarkup: boolean;
 };
 
+export type AssistantDraftReasoningBuffer = {
+  chunks: string[];
+  nextDeltaSequence: number;
+};
+
 export function reconcileAssistantDraftStreamUpdate(
   previous: AssistantDraftStreamBuffer | undefined,
   input: { content?: string; delta?: string; deltaSequence?: number }
@@ -2015,9 +2028,34 @@ export function reconcileAssistantDraftStreamUpdate(
   };
   return {
     buffer,
-    content: usesMarkup ? chunks.join("") : buffer.checkpoint,
+    // Checkpoints are sent periodically. Until the next one arrives, render
+    // the accumulated deltas so short streamed responses do not stay blank.
+    content: chunks.join(""),
     chunks: usesMarkup ? undefined : chunks
   };
+}
+
+export function reconcileAssistantDraftReasoningUpdate(
+  previous: AssistantDraftReasoningBuffer | undefined,
+  input: { reasoning?: string; delta?: string; deltaSequence?: number }
+): { buffer?: AssistantDraftReasoningBuffer; reasoning: string; chunks?: string[] } | null {
+  const { reasoning, delta, deltaSequence } = input;
+  if (deltaSequence === undefined || delta === undefined) {
+    return reasoning === undefined ? null : { reasoning };
+  }
+
+  const isNext = previous
+    ? deltaSequence === previous.nextDeltaSequence
+    : reasoning !== undefined || deltaSequence === 1;
+  if (!isNext) {
+    if (reasoning === undefined) return null;
+    const buffer = { chunks: [reasoning], nextDeltaSequence: deltaSequence + 1 };
+    return { buffer, reasoning, chunks: buffer.chunks };
+  }
+
+  const chunks = reasoning !== undefined ? [reasoning] : [...(previous?.chunks ?? []), delta];
+  const buffer = { chunks, nextDeltaSequence: deltaSequence + 1 };
+  return { buffer, reasoning: chunks.join(""), chunks: buffer.chunks };
 }
 
 export function getAssistantDraftPhaseLabel(phase: AssistantDraftPhase): string {
