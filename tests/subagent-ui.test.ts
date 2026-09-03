@@ -15,6 +15,7 @@ import {
 } from "../apps/desktop/src/renderer/cards/runtime-cards";
 
 const rendererStylesCss = readFileSync(new URL("../apps/desktop/src/renderer/styles.css", import.meta.url), "utf8");
+const backendSource = readFileSync(new URL("../apps/desktop/src/main/app.ts", import.meta.url), "utf8");
 
 function createAgent(id: string, status: ThreadRecord["status"], role: string): ThreadRecord {
   return {
@@ -238,5 +239,15 @@ describe("subagent task UI", () => {
     expect(shouldShowSubagentStatusDock(false, "proactive", 1)).toBe(false);
     expect(shouldShowSubagentStatusDock(true, "disabled", 1)).toBe(false);
     expect(getSubagentGroupSummary([], new Set(), new Map(), new Set())).toBe("子任务 尚未启动");
+  });
+
+  it("keeps completed child tasks in the current-request snapshot while the parent is still running", () => {
+    const snapshotImplementation = backendSource.slice(
+      backendSource.indexOf("public getThreadSnapshot"),
+      backendSource.indexOf("public getGpaState")
+    );
+
+    expect(snapshotImplementation).toContain("const subagents = this.getCurrentRequestSubagents(thread);");
+    expect(snapshotImplementation).not.toContain("getCurrentRequestSubagents(thread).filter((child) => this.isSubagentActive(child))");
   });
 });

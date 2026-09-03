@@ -88,7 +88,7 @@ export class ConversationLogWindow {
         minHeight: 420,
         show: false,
         title: "LLM 实时日志",
-        backgroundColor: this.#options.getTheme() === "light" ? "#f7fbff" : "#090d13",
+        backgroundColor: this.#options.getTheme() === "light" ? "#ffffff" : "#090d13",
         webPreferences: {
           preload: this.#options.preloadPath,
           contextIsolation: true,

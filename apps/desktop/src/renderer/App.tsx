@@ -6257,7 +6257,7 @@ export function App() {
   const appTheme = resolveAppTheme(config?.desktop.theme);
   // Background modes are visual preferences independent from the color theme.
   // Keep them available in both light and dark appearances.
-  const showImageBackground = backgroundMode === "image";
+  const showImageBackground = backgroundMode === "image" && chatBackgroundImages.length > 0;
   const showRealtimeBackground = backgroundMode === "dynamic";
 
   return (
@@ -6298,6 +6298,17 @@ export function App() {
             {appTheme === "light" ? <IconMoon /> : <IconSun />}
           </button>
         </div>
+        {!showWelcome && selectedThread?.title ? (
+          <div
+            className={`workspace-thread-title windowbar-thread-title ${selectedThread.mode === "project" ? "is-project" : "is-chat"}`}
+            title={`${selectedThread.mode === "project" ? "项目" : "普通聊天"}：${selectedThread.title}`}
+          >
+            <span className="workspace-thread-title-icon" aria-hidden="true">
+              {selectedThread.mode === "project" ? <IconFolder /> : <IconChatBubbles />}
+            </span>
+            {selectedThread.title}
+          </div>
+        ) : null}
       </header>
 
       <HistorySidebar
@@ -6359,17 +6370,6 @@ export function App() {
             scene={realtimeEnhancement.scene}
             onTerminalVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
           />
-        ) : null}
-        {!showWelcome && selectedThread?.title ? (
-          <div
-            className={`workspace-thread-title ${selectedThread.mode === "project" ? "is-project" : "is-chat"}`}
-            title={`${selectedThread.mode === "project" ? "项目" : "普通聊天"}：${selectedThread.title}`}
-          >
-            <span className="workspace-thread-title-icon" aria-hidden="true">
-              {selectedThread.mode === "project" ? <IconFolder /> : <IconChatBubbles />}
-            </span>
-            {selectedThread.title}
-          </div>
         ) : null}
         <WorkspaceControls
           tokenUsage={threadTokenUsage.thread}

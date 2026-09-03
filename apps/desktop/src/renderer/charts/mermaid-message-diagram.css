@@ -1,0 +1,105 @@
+.markdown-mermaid {
+  width: 100%;
+  margin: 20px 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: #101217;
+}
+
+.markdown-mermaid-head {
+  position: relative;
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  padding: 0 52px 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: #c4cbd6;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.markdown-mermaid-head .copy-text-button {
+  top: 6px;
+  right: 9px;
+}
+
+.markdown-mermaid-canvas {
+  min-height: 220px;
+  overflow: auto;
+  padding: 24px;
+}
+
+.markdown-mermaid-canvas svg {
+  display: block;
+  width: 100%;
+  min-width: 420px;
+  max-height: 560px;
+  margin: 0 auto;
+}
+
+.markdown-mermaid-loading,
+.markdown-mermaid-error {
+  min-height: 150px;
+  padding: 24px;
+  color: #9da7b6;
+}
+
+.markdown-mermaid-loading {
+  display: grid;
+  place-items: center;
+}
+
+.markdown-mermaid-error {
+  display: grid;
+  gap: 8px;
+  color: #e7b3b7;
+}
+
+.markdown-mermaid-error pre {
+  max-height: 220px;
+  margin: 4px 0 0;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 6px;
+  color: #d5dbe4;
+  background: #17191f;
+  font: 12px/1.6 "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+}
+
+:root[data-theme="light"] .markdown-mermaid {
+  border-color: #d0d7de;
+  background: #ffffff;
+  box-shadow: none;
+}
+
+:root[data-theme="light"] .markdown-mermaid-head {
+  border-bottom-color: #d8dee4;
+  color: #57606a;
+  background: #f6f8fa;
+}
+
+:root[data-theme="light"] .markdown-mermaid-canvas {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .markdown-mermaid-loading {
+  color: #57606a;
+}
+
+:root[data-theme="light"] .markdown-mermaid-error {
+  color: #9f2d35;
+  background: #fff5f5;
+}
+
+:root[data-theme="light"] .markdown-mermaid-error pre {
+  border: 1px solid #efd0d2;
+  color: #57252a;
+  background: #ffffff;
+}
+
+@media (max-width: 720px) {
+  .markdown-mermaid-canvas { padding: 16px 12px; }
+  .markdown-mermaid-canvas svg { min-width: 320px; }
+}

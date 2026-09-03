@@ -109,7 +109,7 @@ function broadcastTheme(): void {
     height: 32
   };
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setBackgroundColor(theme === "light" ? "#f7fbff" : "#09090a");
+    mainWindow.setBackgroundColor(theme === "light" ? "#ffffff" : "#09090a");
     mainWindow.setTitleBarOverlay(titleBarOverlay);
   }
   for (const window of BrowserWindow.getAllWindows()) {
@@ -289,7 +289,7 @@ async function createWindow(): Promise<void> {
     minWidth,
     minHeight,
     autoHideMenuBar: true,
-    backgroundColor: backend.getConfig().desktop.theme === "light" ? "#f7fbff" : "#09090a",
+    backgroundColor: backend.getConfig().desktop.theme === "light" ? "#ffffff" : "#09090a",
     title: "codexh",
     titleBarStyle: "hidden",
     titleBarOverlay: {

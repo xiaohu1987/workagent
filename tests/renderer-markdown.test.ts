@@ -88,6 +88,13 @@ describe("parseMarkdownBlocks", () => {
     expect(parseMarkdownBlocks(`\`\`\`json\n${content}\n\`\`\``)).toEqual([{ kind: "code", language: "json", content }]);
   });
 
+  it("parses only a closed mermaid fence as a diagram block", () => {
+    const content = "flowchart LR\n  A[开始] --> B[完成]";
+
+    expect(parseMarkdownBlocks(`\`\`\`mermaid\n${content}\n\`\`\``)).toEqual([{ kind: "mermaid", content }]);
+    expect(parseMarkdownBlocks(`\`\`\`mermaid\n${content}`)).toEqual([{ kind: "code", language: "mermaid", content }]);
+  });
+
   it("merges repeatedly restarted numbered items with their descriptions", () => {
     expect(parseMarkdownBlocks([
       "1. **First repository**",

@@ -1235,26 +1235,43 @@ const COLLAPSED_BROWSER_SOURCE_COUNT = 6;
 
 function MessageBrowserSources({ sources }: { sources: MessageBrowserSource[] }) {
   const [expanded, setExpanded] = useState(false);
+  const [hoveredSourceUrl, setHoveredSourceUrl] = useState<string | null>(null);
   if (sources.length === 0) return null;
   const hiddenCount = Math.max(0, sources.length - COLLAPSED_BROWSER_SOURCE_COUNT);
   const visibleSources = expanded ? sources : sources.slice(0, COLLAPSED_BROWSER_SOURCE_COUNT);
   return (
     <div className="message-browser-sources" aria-label="网页来源">
-      {visibleSources.map((source) => (
-        <a
-          key={source.url}
-          className="message-browser-source"
-          href={source.url}
-          title={`网页来源\n${source.title}\n${source.url}`}
-          onClick={(event) => {
-            event.preventDefault();
-            void window.codexh.openExternal(source.url);
-          }}
-        >
-          <IconGlobe />
-          <span>网页来源 · {source.title}</span>
-        </a>
-      ))}
+      {visibleSources.map((source) => {
+        const tooltipVisible = hoveredSourceUrl === source.url;
+        const tooltipId = `message-browser-source-tooltip-${encodeURIComponent(source.url)}`;
+        return (
+          <span className="message-browser-source-wrap" key={source.url}>
+            <a
+              className="message-browser-source"
+              href={source.url}
+              aria-describedby={tooltipVisible ? tooltipId : undefined}
+              onMouseEnter={() => setHoveredSourceUrl(source.url)}
+              onMouseLeave={() => setHoveredSourceUrl(null)}
+              onFocus={() => setHoveredSourceUrl(source.url)}
+              onBlur={() => setHoveredSourceUrl(null)}
+              onClick={(event) => {
+                event.preventDefault();
+                void window.codexh.openExternal(source.url);
+              }}
+            >
+              <IconGlobe />
+              <span>网页来源 · {source.title}</span>
+            </a>
+            {tooltipVisible ? (
+              <span id={tooltipId} className="message-browser-source-tooltip" role="tooltip">
+                <span className="message-browser-source-tooltip-label">网页来源</span>
+                <strong>{source.title}</strong>
+                <code>{source.url}</code>
+              </span>
+            ) : null}
+          </span>
+        );
+      })}
       {hiddenCount > 0 ? (
         <button
           type="button"

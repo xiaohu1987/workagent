@@ -13707,6 +13707,49 @@ input[type="radio"]:focus-visible {
   white-space: nowrap;
 }
 
+.message-browser-source-wrap {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+}
+
+.message-browser-source-tooltip {
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  gap: 3px;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 48px));
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-elevated);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+}
+
+.message-browser-source-tooltip-label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.message-browser-source-tooltip strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.message-browser-source-tooltip code {
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .message-user-content {
   position: relative;
   display: inline-flex;
@@ -24743,4 +24786,1411 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   border-top-color: #dbe7f3;
   color: #688097;
   background: #f7fbff;
+}
+
+/* Light workbench system. This final layer intentionally supersedes the
+   compatibility overrides above so every surface shares one visual grammar. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --window: #f6f8fa;
+  --sidebar: #ffffff;
+  --sidebar-border: #d0d7de;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-soft: #f3f7fb;
+  --surface-card: #ffffff;
+  --surface-card-hover: #f0f7ff;
+  --border: #d0d7de;
+  --border-strong: #8c959f;
+  --text: #1f2328;
+  --text-soft: #57606a;
+  --text-muted: #6e7781;
+  --text-faint: #8c959f;
+  --action-primary: #2196f3;
+  --action-primary-hover: #1976d2;
+  --accent-blue: #2196f3;
+  --accent-blue-soft: #ddf4ff;
+  --accent-purple: #8b5cf6;
+  --accent-purple-soft: #f3e8ff;
+  --accent-teal: #0f766e;
+  --accent-teal-soft: #ccfbf1;
+  --accent-pink: #db2777;
+  --accent-pink-soft: #fce7f3;
+  --accent-green: #16a34a;
+  --accent-green-soft: #dafbe1;
+  --accent-amber: #d97706;
+  --accent-amber-soft: #fff8c5;
+  --accent-red: #dc2626;
+  --accent-red-soft: #ffebe9;
+  --list-accent: #339cff;
+  --shadow: 0 8px 20px rgba(140, 149, 159, 0.2);
+  --shadow-blue-edge: 0 4px 18px rgba(33, 150, 243, 0.07);
+  --shadow-blue-control:
+    0 0 0 1px rgba(51, 156, 255, 0.16),
+    0 0 24px 5px rgba(51, 156, 255, 0.13),
+    0 12px 32px rgba(51, 156, 255, 0.11);
+  --shadow-blue-elevated: 0 12px 34px rgba(33, 150, 243, 0.15);
+}
+
+/* Canvas, structural working surfaces, and low-emphasis tool surfaces. */
+:root[data-theme="light"] :is(
+  .app-shell,
+  .chat-scroll,
+  .chat-transcript,
+  .chat-canvas,
+  .conversation-log-workspace,
+  .project-files-workspace,
+  .git-changes-workspace,
+  .right-workspace-content,
+  .right-workspace-view
+) {
+  color: var(--text) !important;
+  background: var(--window) !important;
+}
+
+:root[data-theme="light"] :is(
+  .windowbar,
+  .sidebar,
+  .workspace,
+  .right-workspace-panel,
+  .right-workspace-tabs,
+  .right-workspace-header,
+  .right-workspace-content,
+  .right-workspace-view.active,
+  .chat-composer,
+  .composer-shell,
+  .settings-dialog,
+  .settings-layout,
+  .settings-sidebar,
+  .settings-body,
+  .project-sheet,
+  .fetch-models-dialog,
+  .quick-notes-sheet
+) {
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+  background: var(--surface) !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .windowbar {
+  min-height: 48px;
+  border-bottom: 1px solid var(--border) !important;
+}
+
+:root[data-theme="light"] .workspace,
+:root[data-theme="light"] .right-workspace-panel {
+  margin-top: 0;
+  border-radius: 6px;
+}
+
+:root[data-theme="light"] :is(
+  .workspace-thread-title,
+  .composer-toolbar,
+  .composer-model-row,
+  .right-workspace-tabs,
+  .project-files-filter,
+  .git-changes-header,
+  .git-diff-header,
+  .workspace-subtab-strip,
+  .project-preview-header,
+  .browser-toolbar,
+  .browser-tabs,
+  .settings-topbar,
+  .settings-tab-strip,
+  .conversation-log-toolbar
+) {
+  border-color: var(--border) !important;
+  color: var(--text-soft) !important;
+  background: var(--surface-soft) !important;
+  box-shadow: none !important;
+}
+
+/* Shared compact interactive states. */
+:root[data-theme="light"] :is(
+  .title-icon-button,
+  .sidebar-search,
+  .workspace-control-button,
+  .composer-icon-button,
+  .theme-toggle-button,
+  .right-workspace-hide-button,
+  .settings-icon-button,
+  .settings-mini-button,
+  .git-icon-button,
+  .git-text-action,
+  .copy-text-button,
+  .conversation-log-refresh,
+  .conversation-log-close
+) {
+  border: 1px solid transparent !important;
+  border-radius: 6px;
+  color: var(--text-soft) !important;
+  background: transparent !important;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+:root[data-theme="light"] :is(
+  .title-icon-button,
+  .sidebar-search,
+  .workspace-control-button,
+  .composer-icon-button,
+  .theme-toggle-button,
+  .right-workspace-hide-button,
+  .settings-icon-button,
+  .settings-mini-button,
+  .git-icon-button,
+  .git-text-action,
+  .copy-text-button,
+  .conversation-log-refresh,
+  .conversation-log-close
+):hover:not(:disabled),
+:root[data-theme="light"] :is(
+  .title-icon-button,
+  .sidebar-search,
+  .workspace-control-button,
+  .composer-icon-button,
+  .theme-toggle-button,
+  .right-workspace-hide-button,
+  .settings-icon-button,
+  .settings-mini-button,
+  .git-icon-button,
+  .git-text-action,
+  .copy-text-button,
+  .conversation-log-refresh,
+  .conversation-log-close
+):focus-visible {
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+  background: var(--surface-soft) !important;
+  outline: 2px solid color-mix(in srgb, var(--accent-blue) 36%, transparent);
+  outline-offset: 1px;
+}
+
+:root[data-theme="light"] :is(input, textarea, select, .composer-select-trigger, .composer-model-picker-trigger) {
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+  background: var(--surface) !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] :is(input, textarea, select, .composer-select-trigger, .composer-model-picker-trigger):focus,
+:root[data-theme="light"] :is(input, textarea, select, .composer-select-trigger, .composer-model-picker-trigger):focus-visible {
+  border-color: var(--accent-blue) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-blue) 22%, transparent) !important;
+}
+
+/* Navigation and all repeated lists share a single hierarchy. */
+:root[data-theme="light"] .sidebar {
+  border-right-color: var(--border) !important;
+}
+
+:root[data-theme="light"] .sidebar-scroll { padding: 14px; }
+:root[data-theme="light"] .sidebar-brand { color: var(--text) !important; font-size: 16px; }
+:root[data-theme="light"] .sidebar-brand .sidebar-brand-accent { color: #ef4444 !important; }
+:root[data-theme="light"] .sidebar-section-title { color: var(--text-muted) !important; font-size: 12px; letter-spacing: 0; }
+:root[data-theme="light"] .sidebar-nav { gap: 4px; }
+
+:root[data-theme="light"] .sidebar-nav-button,
+:root[data-theme="light"] .history-item {
+  border: 1px solid transparent !important;
+  border-radius: 6px;
+  color: var(--text-soft) !important;
+  background: transparent !important;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+:root[data-theme="light"] .sidebar-nav-button { min-height: 36px; padding: 0 8px; font-size: 14px; }
+:root[data-theme="light"] .history-list { gap: 2px; }
+:root[data-theme="light"] .history-item { min-height: 34px; padding: 2px 6px 2px 8px; }
+
+:root[data-theme="light"] :is(.sidebar-nav-button, .history-item):hover,
+:root[data-theme="light"] :is(.sidebar-nav-button, .history-item):focus-visible {
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+  background: var(--surface-soft) !important;
+}
+
+:root[data-theme="light"] .history-item.selected {
+  border-color: #b6d9f8 !important;
+  color: #0969da !important;
+  background: var(--accent-blue-soft) !important;
+  box-shadow: inset 2px 0 0 var(--accent-blue) !important;
+}
+
+:root[data-theme="light"] :is(.history-item.running, .history-item-project.running) {
+  border-color: #b6d9f8 !important;
+  background: #f0f7ff !important;
+}
+:root[data-theme="light"] :is(.history-item.running, .history-item-project.running)::after {
+  background: var(--accent-blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-blue) 18%, transparent) !important;
+}
+:root[data-theme="light"] .history-item-pin { color: var(--accent-amber) !important; }
+
+:root[data-theme="light"] :is(
+  .project-file-row,
+  .git-file-row,
+  .workspace-subtab,
+  .provider-list-card,
+  .provider-model-row,
+  .quick-notes-item,
+  .skill-row,
+  .mcp-server-row,
+  .mcp-tool-row,
+  .database-connection-card,
+  .api-favorites-card,
+  .history-search-result,
+  .notification-center-item,
+  .composer-task-change-file
+) {
+  border-color: var(--border) !important;
+  border-radius: 6px !important;
+  color: var(--text-soft) !important;
+  background: var(--surface) !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] :is(
+  .project-file-row:not(:disabled):hover,
+  .project-file-row.selected,
+  .git-file-row-wrap:hover,
+  .git-file-row-wrap.active,
+  .workspace-subtab:hover,
+  .workspace-subtab.active,
+  .provider-list-card:hover,
+  .provider-list-card.selected,
+  .quick-notes-item:hover,
+  .quick-notes-item.selected,
+  .skill-row:hover,
+  .mcp-server-row:hover,
+  .mcp-tool-row:hover,
+  .database-connection-card:hover,
+  .api-favorites-card:hover,
+  .history-search-result:hover,
+  .history-search-result.is-current,
+  .notification-center-item:hover,
+  .composer-task-change-file:hover,
+  .composer-task-change-file.has-diff-preview[aria-pressed="true"]
+) {
+  border-color: #b6d9f8 !important;
+  color: #0969da !important;
+  background: var(--accent-blue-soft) !important;
+}
+
+:root[data-theme="light"] .right-workspace-tab {
+  border-radius: 4px;
+  color: var(--text-soft) !important;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+:root[data-theme="light"] .right-workspace-tab:hover { color: var(--text) !important; background: var(--surface) !important; }
+:root[data-theme="light"] .right-workspace-tab.active { color: #0969da !important; background: var(--accent-blue-soft) !important; box-shadow: inset 0 -2px 0 var(--accent-blue) !important; }
+
+/* Semantic state accents stay local to their domain. */
+:root[data-theme="light"] :is(.subagent-status-panel, .subagent-task-group, .subagent-task, .subagent-task-detail, .subagent-instruction-form) {
+  border-color: color-mix(in srgb, var(--accent-purple) 30%, var(--border)) !important;
+  color: var(--text-soft) !important;
+  background: var(--surface) !important;
+  box-shadow: none !important;
+}
+:root[data-theme="light"] .subagent-task-group-header { background: var(--accent-purple-soft) !important; }
+:root[data-theme="light"] :is(.subagent-task-group-header strong, .subagent-task-view-label, .subagent-task-identity > summary) { color: #6d28d9 !important; }
+:root[data-theme="light"] .subagent-task > summary:hover,
+:root[data-theme="light"] .subagent-task[open] { background: #faf5ff !important; }
+
+/* Phase progress uses compact semantic color rather than one undifferentiated
+   text color: completed green, active blue, waiting amber, and errors red. */
+:root[data-theme="light"] .subagent-phase {
+  color: #57606a !important;
+  font-weight: 600;
+}
+:root[data-theme="light"] .subagent-phase i {
+  border-color: currentColor;
+  color: #ffffff;
+  background: #8c959f;
+}
+:root[data-theme="light"] .subagent-phase.completed { color: #1a7f37 !important; }
+:root[data-theme="light"] .subagent-phase.completed i { background: #1a7f37; }
+:root[data-theme="light"] .subagent-phase.current { color: #0969da !important; }
+:root[data-theme="light"] .subagent-phase.current i {
+  background: #2196f3;
+  box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.12);
+}
+:root[data-theme="light"] .subagent-phase.current.is-waiting { color: #9a6700 !important; }
+:root[data-theme="light"] .subagent-phase.current.is-waiting i {
+  background: #d97706;
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12);
+}
+:root[data-theme="light"] .subagent-phase.failed { color: #cf222e !important; }
+:root[data-theme="light"] .subagent-phase.failed i { background: #dc2626; }
+:root[data-theme="light"] .subagent-phase.cancelled { color: #6e7781 !important; }
+:root[data-theme="light"] .subagent-phase.cancelled i { background: #8c959f; }
+:root[data-theme="light"] .subagent-phase b { color: #8c959f !important; }
+
+/* The composer queue follows the shared list hierarchy. The next item is the
+   active row; later items remain neutral until they move to the front. */
+:root[data-theme="light"] .composer-queue {
+  gap: 4px;
+  padding: 4px 0;
+  background: transparent !important;
+}
+:root[data-theme="light"] .composer-queue-item {
+  min-height: 36px;
+  padding: 0 6px 0 10px;
+  border: 1px solid #d8e0e8 !important;
+  border-left: 3px solid #b8c4cf !important;
+  border-radius: 6px;
+  color: #1f2328 !important;
+  background: #ffffff !important;
+  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+}
+:root[data-theme="light"] .composer-queue-item:first-child {
+  border-color: #b6d9f8 !important;
+  border-left-color: #2196f3 !important;
+  background: #f3f8fc !important;
+}
+:root[data-theme="light"] .composer-queue-item:hover {
+  border-color: #9dcaf0 !important;
+  border-left-color: #2196f3 !important;
+  background: #eef7fc !important;
+  box-shadow: 0 2px 8px rgba(31, 35, 40, 0.08);
+}
+:root[data-theme="light"] .composer-queue-index {
+  border-color: #b8d8ee;
+  color: #45637c;
+  background: #ffffff;
+}
+:root[data-theme="light"] .composer-queue-item:first-child .composer-queue-index {
+  border-color: #2196f3;
+  color: #0969da;
+  background: #ddf4ff;
+}
+:root[data-theme="light"] .composer-queue-item:first-child .composer-queue-label {
+  color: #0969da !important;
+  font-weight: 650;
+}
+:root[data-theme="light"] .composer-queue-preview { color: #1f2328 !important; }
+:root[data-theme="light"] .composer-queue-attachments {
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #0f766e !important;
+  background: rgba(15, 118, 110, 0.1);
+}
+:root[data-theme="light"] .chat-composer .composer-queue-steer {
+  border: 1px solid #2196f3 !important;
+  color: #ffffff !important;
+  background: #2196f3 !important;
+  opacity: 1;
+}
+:root[data-theme="light"] .chat-composer .composer-queue-steer:hover:not(:disabled),
+:root[data-theme="light"] .chat-composer .composer-queue-steer:focus-visible,
+:root[data-theme="light"] .chat-composer .composer-queue-steer.is-active {
+  border-color: #1976d2 !important;
+  color: #ffffff !important;
+  background: #1976d2 !important;
+}
+:root[data-theme="light"] .chat-composer .composer-queue-delete {
+  border: 1px solid transparent !important;
+  color: #57606a !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] .chat-composer .composer-queue-delete:hover:not(:disabled),
+:root[data-theme="light"] .chat-composer .composer-queue-delete:focus-visible {
+  border-color: #dc2626 !important;
+  color: #ffffff !important;
+  background: #dc2626 !important;
+}
+
+:root[data-theme="light"] :is(.project-file-row.changed-added, .git-file-row b, .composer-task-changes-icon) { color: var(--accent-teal) !important; }
+:root[data-theme="light"] :is(.message-image-attachment, .composer-attachment-chip.image, .composer-attachment-chip.video) { border-color: color-mix(in srgb, var(--accent-pink) 30%, var(--border)) !important; }
+:root[data-theme="light"] :is(.composer-attachment-chip.image .composer-attachment-icon, .composer-attachment-chip.video .composer-attachment-icon) { color: var(--accent-pink) !important; background: var(--accent-pink-soft) !important; }
+
+:root[data-theme="light"] :is(.pending-pill, .gpa-confirmation.stage-goal, .approval-card, .pending-resume-card) { border-color: #d4a72c !important; color: #9a6700 !important; background: var(--accent-amber-soft) !important; }
+:root[data-theme="light"] :is(.execution-step.completed, .event-meta-pill.success) { border-color: var(--accent-green) !important; color: #1a7f37 !important; background: var(--accent-green-soft) !important; }
+:root[data-theme="light"] :is(.execution-step.failed, .event-meta-pill.danger, .approval-card.explicit-authorization) { border-color: var(--accent-red) !important; color: #cf222e !important; background: var(--accent-red-soft) !important; }
+
+/* Primary commands retain the requested blue/green/red contract. */
+:root[data-theme="light"] .app-shell :is(
+  button.button.primary,
+  button.button.warm,
+  button.settings-add-provider,
+  button.message-user-edit-button.primary,
+  button.pending-resume-card-primary,
+  button.api-card-button.is-primary,
+  button.approval-session-button,
+  button.approval-allow-button,
+  button.user-input-submit,
+  .git-commit-panel button
+):not(:disabled) {
+  border-color: var(--action-primary) !important;
+  color: #ffffff !important;
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] .app-shell :is(
+  button.button.primary,
+  button.button.warm,
+  button.settings-add-provider,
+  button.message-user-edit-button.primary,
+  button.pending-resume-card-primary,
+  button.api-card-button.is-primary,
+  button.approval-session-button,
+  button.approval-allow-button,
+  button.user-input-submit,
+  .git-commit-panel button
+):hover:not(:disabled) { border-color: var(--action-primary-hover) !important; background: var(--action-primary-hover) !important; }
+
+/* Markdown reads as a document, while retaining code and data hierarchy. */
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) {
+  color: var(--text) !important;
+  font-size: 14px;
+  line-height: 1.7;
+}
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) p { margin-bottom: 12px; }
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(h1, h2, h3, h4, h5, h6) { color: var(--text) !important; letter-spacing: 0; }
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(h1, h2) { padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) h1 { font-size: 22px; }
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) h2 { font-size: 18px; }
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) h3 { font-size: 16px; }
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(h4, h5, h6) { font-size: 14px; }
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) code:not(.hljs) {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: #0f766e !important;
+  background: #f6f8fa !important;
+  font-weight: 500;
+}
+:root[data-theme="light"] .markdown-link { color: #0969da !important; text-decoration: none; }
+:root[data-theme="light"] .markdown-link:hover { color: #0550ae !important; text-decoration: underline; }
+:root[data-theme="light"] .markdown-link.file { color: var(--accent-teal) !important; }
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) blockquote {
+  padding: 8px 12px;
+  border-left: 3px solid #54aeff !important;
+  color: var(--text-soft) !important;
+  background: #f0f7ff !important;
+}
+:root[data-theme="light"] .markdown-task-list input { accent-color: var(--accent-blue); }
+:root[data-theme="light"] .markdown-task-list > li:has(input:checked) { color: var(--text-muted) !important; }
+:root[data-theme="light"] .markdown-horizontal-rule { border-color: var(--border) !important; }
+
+:root[data-theme="light"] .markdown-code-block {
+  border-color: var(--border) !important;
+  border-radius: 6px;
+  background: var(--surface) !important;
+}
+:root[data-theme="light"] .markdown-code-label {
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted) !important;
+  background: var(--surface-soft) !important;
+}
+:root[data-theme="light"] .markdown-code-scroll { color: #24292f !important; background: #f6f8fa !important; }
+:root[data-theme="light"] .markdown-code-lines li::before { border-right-color: var(--border); color: var(--text-faint); }
+:root[data-theme="light"] .markdown-code-lines li:hover { background: #eef6ff !important; }
+:root[data-theme="light"] .copy-text-button { color: var(--text-muted) !important; background: var(--surface) !important; opacity: 0.55; }
+:root[data-theme="light"] .markdown-code-block:hover .copy-text-button,
+:root[data-theme="light"] .copy-text-button:focus-visible { opacity: 1; }
+:root[data-theme="light"] .copy-text-button.is-copied { border-color: var(--accent-green) !important; color: var(--accent-green) !important; background: var(--accent-green-soft) !important; }
+:root[data-theme="light"] .markdown-code-block .hljs-comment,
+:root[data-theme="light"] .markdown-code-block .hljs-quote { color: #6e7781; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-keyword, .hljs-selector-tag, .hljs-meta .hljs-keyword) { color: #8250df; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-string, .hljs-doctag, .hljs-regexp, .hljs-template-variable) { color: #1a7f37; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet) { color: #9a6700; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-title, .hljs-title.function_, .hljs-function .hljs-title) { color: #0969da; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-type, .hljs-built_in, .hljs-class .hljs-title) { color: #0f766e; }
+:root[data-theme="light"] .markdown-code-block .hljs-addition { color: #1a7f37; }
+:root[data-theme="light"] .markdown-code-block .hljs-deletion { color: #cf222e; }
+
+:root[data-theme="light"] :is(.markdown-table-wrap, .markdown-table, .markdown-table tbody tr) { border-color: var(--border) !important; background: var(--surface) !important; }
+:root[data-theme="light"] .markdown-table th { color: var(--text-soft) !important; background: var(--surface-soft) !important; }
+:root[data-theme="light"] :is(.markdown-table th, .markdown-table td) { border-color: var(--border) !important; }
+:root[data-theme="light"] .markdown-table tbody tr:nth-child(even) { background: #f9fbfc !important; }
+:root[data-theme="light"] .markdown-table tbody tr:hover { background: var(--accent-blue-soft) !important; }
+:root[data-theme="light"] .markdown-image { border: 1px solid var(--border); border-radius: 6px; }
+:root[data-theme="light"] .markdown-image-button:hover .markdown-image { border-color: var(--accent-pink); }
+
+/* Git and snapshot diffs use the same inspection palette as Markdown. */
+:root[data-theme="light"] :is(.git-hunk, .generated-file-diff-popover) { border-color: var(--border) !important; background: var(--surface) !important; box-shadow: var(--shadow) !important; }
+:root[data-theme="light"] :is(.git-hunk > header, .git-side-diff-head, .generated-file-diff-head) { border-color: var(--border) !important; color: var(--text-soft) !important; background: var(--surface-soft) !important; }
+:root[data-theme="light"] :is(.git-side-diff-row > code.removed, .generated-file-diff-code > div.is-removed) { color: #cf222e !important; background: var(--accent-red-soft) !important; }
+:root[data-theme="light"] :is(.git-side-diff-row > code.added, .generated-file-diff-code > div.is-added) { color: #1a7f37 !important; background: var(--accent-green-soft) !important; }
+:root[data-theme="light"] :is(.git-side-diff-row > code.empty, .generated-file-diff-code > div.is-context, .generated-file-diff-code > div.is-omitted) { color: var(--text-muted) !important; background: #f6f8fa !important; }
+
+/* Floating layers are the only surfaces with elevation. */
+:root[data-theme="light"] :is(
+  .composer-select-menu,
+  .composer-model-picker-menu,
+  .composer-add-menu,
+  .gpa-menu,
+  .gpa-popover,
+  .workspace-context-menu,
+  .notification-center-panel,
+  .token-usage-panel,
+  .history-search-dialog,
+  .message-image-lightbox-content,
+  .file-preview-lightbox-content,
+  .message-chart-dialog,
+  .api-card
+) {
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+  background: var(--surface) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+:root[data-theme="light"] :is(.composer-select-option, .composer-model-picker-provider, .composer-model-picker-model):hover,
+:root[data-theme="light"] :is(.composer-select-option.selected, .composer-model-picker-provider.is-active, .composer-model-picker-model.is-selected) { color: #0969da !important; background: var(--accent-blue-soft) !important; }
+:root[data-theme="light"] .workspace-context-menu button.is-danger { color: #cf222e !important; }
+:root[data-theme="light"] .workspace-context-menu button.is-danger:hover { background: var(--accent-red-soft) !important; }
+:root[data-theme="light"] .message-browser-source-tooltip {
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+  background: var(--surface) !important;
+  box-shadow: 0 8px 22px rgba(31, 35, 40, 0.12) !important;
+}
+:root[data-theme="light"] .message-browser-source-tooltip-label { color: var(--text-muted) !important; }
+:root[data-theme="light"] .message-browser-source-tooltip strong { color: var(--text) !important; }
+:root[data-theme="light"] .message-browser-source-tooltip code { color: #0969da !important; }
+
+/* Background modes retain their media beneath readable light work surfaces. */
+:root[data-theme="light"] :is(.app-shell.has-app-background, .app-shell.has-realtime-character) { background: transparent !important; }
+:root[data-theme="light"] .app-shell.has-app-background :is(.windowbar, .sidebar, .workspace, .right-workspace-panel, .chat-composer, .right-workspace-tabs, .right-workspace-content),
+:root[data-theme="light"] .app-shell.has-realtime-character :is(.windowbar, .sidebar, .workspace, .right-workspace-panel, .chat-composer, .right-workspace-tabs, .right-workspace-content) { background: rgba(255, 255, 255, 0.88) !important; backdrop-filter: blur(12px); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="light"] *,
+  :root[data-theme="light"] *::before,
+  :root[data-theme="light"] *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* The composer is one continuous writing surface. Do not inherit the generic
+   form focus halo or the secondary toolbar fill used by compact controls. */
+:root[data-theme="light"] .chat-composer {
+  border-color: var(--border) !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .chat-composer textarea,
+:root[data-theme="light"] .chat-composer textarea:focus,
+:root[data-theme="light"] .chat-composer textarea:focus-visible {
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .composer-toolbar {
+  border-color: transparent !important;
+  background: transparent !important;
+}
+
+/* Separate the conversation canvas from the white writing surface. The cool
+   outer canvas gives empty transcript space depth without framing messages in
+   extra cards. */
+:root[data-theme="light"] :is(.chat-canvas, .chat-scroll) {
+  background: var(--window) !important;
+}
+
+:root[data-theme="light"] .chat-transcript {
+  background: transparent !important;
+}
+
+/* Let the user-selected visual background remain visible beneath its readable
+   work surfaces instead of restoring the solid light canvas. */
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) :is(.chat-canvas, .chat-scroll, .chat-transcript) {
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) .chat-composer {
+  background: rgba(255, 255, 255, 0.88) !important;
+  backdrop-filter: blur(12px);
+}
+
+/* These are action states, not generic primary actions. Keep them last so
+   later component styles cannot turn Send back to blue. */
+:root[data-theme="light"] .app-shell .send-button:not(:disabled) {
+  border-color: #16a34a !important;
+  color: #ffffff !important;
+  background: #16a34a !important;
+}
+
+:root[data-theme="light"] .app-shell .send-button:hover:not(:disabled),
+:root[data-theme="light"] .app-shell .send-button:focus-visible:not(:disabled) {
+  border-color: #15803d !important;
+  color: #ffffff !important;
+  background: #15803d !important;
+}
+
+:root[data-theme="light"] .app-shell .send-button.running:not(:disabled) {
+  border-color: #dc2626 !important;
+  color: #ffffff !important;
+  background: #dc2626 !important;
+}
+
+:root[data-theme="light"] .app-shell .send-button.running:hover:not(:disabled),
+:root[data-theme="light"] .app-shell .send-button.running:focus-visible:not(:disabled) {
+  border-color: #b91c1c !important;
+  color: #ffffff !important;
+  background: #b91c1c !important;
+}
+
+/* Markdown reading surface: add hierarchy without turning the response into
+   a stack of heavy cards. The document remains white; accents are reserved
+   for navigation, syntax, and interaction feedback. */
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) {
+  color: #243447 !important;
+  font-size: 15px;
+  line-height: 1.72;
+  letter-spacing: 0.005em;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) > p {
+  margin: 0 0 15px;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(h1, h2, h3, h4, h5, h6) {
+  margin: 24px 0 12px;
+  color: #1f2937 !important;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) h1 {
+  margin-top: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #c9d8e6;
+  font-size: 24px;
+  background: linear-gradient(90deg, #1d4ed8 0 56px, transparent 56px) bottom left / 100% 2px no-repeat;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) h2 {
+  padding-bottom: 8px;
+  border-bottom: 1px solid #d8e2ec;
+  font-size: 20px;
+  background: linear-gradient(90deg, #8b5cf6 0 42px, transparent 42px) bottom left / 100% 2px no-repeat;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) h3 {
+  padding-left: 10px;
+  border-left: 3px solid #54aeff;
+  font-size: 17px;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(h4, h5, h6) {
+  color: #334155 !important;
+  font-size: 15px;
+}
+
+/* Lists use colored navigation markers instead of browser-default black dots. */
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(ul:not(.markdown-task-list), ol:not(.markdown-code-lines)) {
+  margin: 4px 0 17px;
+  padding-left: 28px;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(ul:not(.markdown-task-list), ol:not(.markdown-code-lines)) > li {
+  position: relative;
+  margin: 0 0 9px;
+  padding-left: 4px;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) ul:not(.markdown-task-list) {
+  list-style: none;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) ul:not(.markdown-task-list) > li::before {
+  position: absolute;
+  top: 0.78em;
+  left: -18px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #2196f3;
+  box-shadow: 0 0 0 3px #ddf4ff;
+  content: "";
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) ol:not(.markdown-code-lines) {
+  list-style: none;
+  counter-reset: markdown-list-item;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) ol:not(.markdown-code-lines) > li {
+  counter-increment: markdown-list-item;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) ol:not(.markdown-code-lines) > li::before {
+  position: absolute;
+  top: 0.16em;
+  left: -27px;
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid #b9d9f4;
+  border-radius: 50%;
+  color: #1769aa;
+  background: #eef7ff;
+  content: counter(markdown-list-item);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(ul, ol) :is(ul, ol) {
+  margin-top: 8px;
+  margin-bottom: 7px;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) .markdown-task-list {
+  margin-left: 0;
+  padding-left: 4px;
+  list-style: none;
+}
+
+:root[data-theme="light"] .markdown-task-list > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-bottom: 8px;
+  padding-left: 0;
+}
+
+:root[data-theme="light"] .markdown-task-list > li::before { display: none; }
+:root[data-theme="light"] .markdown-task-list input {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  margin: 4px 0 0;
+  accent-color: #2196f3;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) blockquote {
+  margin: 18px 0;
+  padding: 11px 15px;
+  border-left: 4px solid #54aeff !important;
+  border-radius: 0 7px 7px 0;
+  color: #496176 !important;
+  background: linear-gradient(90deg, #eef7ff, #f7fbff) !important;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(strong, b) {
+  color: #172b4d !important;
+  font-weight: 700;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(em, i) {
+  color: #475569 !important;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) code:not(.hljs) {
+  padding: 2px 6px;
+  border: 1px solid #c9dced;
+  border-radius: 5px;
+  color: #0f5f8f !important;
+  background: #eef7fc !important;
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+:root[data-theme="light"] .markdown-code-block {
+  margin: 20px 0;
+  overflow: hidden;
+  border: 1px solid #c7d5e3 !important;
+  border-radius: 10px;
+  background: #ffffff !important;
+  box-shadow: 0 8px 24px rgba(51, 79, 107, 0.1) !important;
+}
+
+:root[data-theme="light"] .markdown-code-label {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 58px 0 15px;
+  border-bottom: 1px solid #d5e2ed !important;
+  color: #496176 !important;
+  background: linear-gradient(180deg, #f3f8fc, #eaf2f8) !important;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+:root[data-theme="light"] .markdown-code-label::before {
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: #2196f3;
+  box-shadow: 0 0 0 3px #ddf4ff;
+  content: "";
+}
+
+:root[data-theme="light"] .markdown-code-scroll {
+  padding: 12px 0 14px;
+  color: #243447 !important;
+  background: #f8fafc !important;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+:root[data-theme="light"] .markdown-code-lines li {
+  grid-template-columns: 52px minmax(0, 1fr);
+  min-height: 22px;
+  padding-right: 18px;
+}
+
+:root[data-theme="light"] .markdown-code-lines li::before {
+  padding-right: 13px;
+  border-right: 1px solid #d5e2ed !important;
+  color: #7891a7 !important;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+:root[data-theme="light"] .markdown-code-lines li:hover {
+  background: #eaf4ff !important;
+}
+
+:root[data-theme="light"] .markdown-code-block code {
+  padding-left: 14px;
+  color: #243447 !important;
+}
+
+:root[data-theme="light"] .copy-text-button {
+  top: 8px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #d2e0ec !important;
+  border-radius: 8px;
+  color: #60758a !important;
+  background: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: 0 2px 8px rgba(51, 79, 107, 0.08);
+  opacity: 0.78;
+}
+
+:root[data-theme="light"] .copy-text-button:hover,
+:root[data-theme="light"] .copy-text-button:focus-visible {
+  border-color: #8fc5f4 !important;
+  color: #1769aa !important;
+  background: #eef7ff !important;
+  box-shadow: 0 3px 10px rgba(33, 150, 243, 0.16);
+}
+
+:root[data-theme="light"] .copy-text-button.is-copied {
+  border-color: #86d49a !important;
+  color: #16803c !important;
+  background: #effbf2 !important;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) .markdown-link {
+  color: #1769aa !important;
+  text-decoration: underline;
+  text-decoration-color: #a8cbed;
+  text-underline-offset: 2px;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) .markdown-link:hover {
+  color: #0b4f86 !important;
+  text-decoration-color: #1769aa;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) .markdown-link.file {
+  color: #0f766e !important;
+  text-decoration-color: #9adbd2;
+}
+
+:root[data-theme="light"] .markdown-table-wrap {
+  margin: 20px 0;
+  border: 1px solid #c7d5e3 !important;
+  border-radius: 9px;
+  background: #ffffff !important;
+  box-shadow: 0 4px 14px rgba(51, 79, 107, 0.07);
+}
+
+:root[data-theme="light"] .markdown-table {
+  color: #334155 !important;
+  font-size: 13px;
+}
+
+:root[data-theme="light"] .markdown-table th {
+  color: #244c70 !important;
+  background: #eaf4fb !important;
+  font-weight: 700;
+}
+
+:root[data-theme="light"] .markdown-table th,
+:root[data-theme="light"] .markdown-table td {
+  border-right-color: #d7e3ed !important;
+  border-bottom-color: #d7e3ed !important;
+}
+
+:root[data-theme="light"] .markdown-table tbody tr:nth-child(even) { background: #f7fafc !important; }
+:root[data-theme="light"] .markdown-table tbody tr:hover { background: #eaf4ff !important; }
+
+:root[data-theme="light"] .markdown-horizontal-rule {
+  margin: 24px 0;
+  border: 0;
+  border-top: 1px solid #cfdae5 !important;
+  background: linear-gradient(90deg, #9bc9ef 0 72px, transparent 72px);
+  height: 2px;
+}
+
+:root[data-theme="light"] .markdown-image {
+  border-color: #c7d5e3 !important;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(51, 79, 107, 0.1);
+}
+
+/* Final Markdown polish: use the standard neutral document and code palette
+   so technical content stays familiar and easy to scan. */
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) {
+  color: #332f2a !important;
+}
+
+:root[data-theme="light"] .markdown-code-block {
+  border-color: #d0d7de !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .markdown-code-label {
+  border-bottom-color: #d8dee4 !important;
+  color: #57606a !important;
+  background: #f6f8fa !important;
+}
+
+:root[data-theme="light"] .markdown-code-label::before {
+  background: #6e7781;
+  box-shadow: 0 0 0 3px #eaeef2;
+}
+
+:root[data-theme="light"] .markdown-code-scroll {
+  color: #24292f !important;
+  background: #f6f8fa !important;
+}
+
+:root[data-theme="light"] .markdown-code-lines li::before {
+  border-right-color: #d8dee4 !important;
+  color: #8c959f !important;
+}
+
+:root[data-theme="light"] .markdown-code-lines li:hover {
+  background: #eef6ff !important;
+}
+
+:root[data-theme="light"] .markdown-code-block code {
+  color: #24292f !important;
+}
+
+:root[data-theme="light"] .markdown-code-block :is(.hljs-keyword, .hljs-selector-tag, .hljs-meta .hljs-keyword) { color: #8250df !important; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-string, .hljs-doctag, .hljs-regexp, .hljs-template-variable) { color: #1a7f37 !important; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet) { color: #9a6700 !important; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-title, .hljs-title.function_, .hljs-function .hljs-title) { color: #0969da !important; }
+:root[data-theme="light"] .markdown-code-block :is(.hljs-type, .hljs-built_in, .hljs-class .hljs-title) { color: #0f766e !important; }
+:root[data-theme="light"] .markdown-code-block .hljs-comment,
+:root[data-theme="light"] .markdown-code-block .hljs-quote { color: #6e7781 !important; }
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(ul:not(.markdown-task-list), ol:not(.markdown-code-lines)) {
+  margin-left: 2px;
+  padding-left: 31px;
+  border-left: 2px solid #e8eef4;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) ul:not(.markdown-task-list) > li::before {
+  left: -20px;
+  width: 7px;
+  height: 7px;
+  background: #3b82f6;
+  box-shadow: 0 0 0 3px #eaf4ff;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(ul, ol) :is(ul, ol) {
+  border-left-color: #eee5f7;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(ul, ol) :is(ul, ol) > li::before {
+  background: #8b5cf6;
+  box-shadow: 0 0 0 3px #f3e8ff;
+}
+
+:root[data-theme="light"] .markdown-task-list {
+  border-left: 2px solid #d7e8f8 !important;
+  padding-left: 16px !important;
+}
+
+:root[data-theme="light"] .markdown-task-list input {
+  border: 1px solid #a9c9e8;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .markdown-task-list > li:has(input:checked) {
+  color: #8492a0 !important;
+  text-decoration: line-through;
+  text-decoration-color: #b9c5cf;
+}
+
+/* The conversation canvas should not add a blue-gray wash behind messages.
+   Keep every light chat reading surface pure white, including image and
+   realtime modes, so media preferences cannot tint the transcript. */
+:root[data-theme="light"] :is(.chat-canvas, .chat-scroll) {
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) :is(.chat-canvas, .chat-scroll, .chat-transcript) {
+  background: #ffffff !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+/* Final light Markdown document contract. Generated documents use ## as the
+   primary heading and ### for subsections; legacy h1/h4-h6 remain readable
+   without creating a second, incompatible visual hierarchy. */
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) {
+  color: #24292f !important;
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) > p {
+  margin: 0 0 14px;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(h1, h2) {
+  margin: 28px 0 14px;
+  padding: 0 0 9px;
+  border: 0;
+  border-bottom: 1px solid #d9e1e8;
+  color: #1f2937 !important;
+  background: linear-gradient(90deg, #2196f3 0 52px, transparent 52px) bottom left / 100% 2px no-repeat;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) h3 {
+  margin: 22px 0 11px;
+  padding-left: 10px;
+  border-left: 3px solid #8b5cf6;
+  color: #293647 !important;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) :is(h4, h5, h6) {
+  margin: 18px 0 9px;
+  padding: 0;
+  border: 0;
+  color: #334155 !important;
+  background: none;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) > :is(h1, h2, h3):first-child {
+  margin-top: 4px;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) li > p {
+  margin: 5px 0 0;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) blockquote {
+  margin: 18px 0;
+  padding: 10px 14px;
+  border-left: 3px solid #2196f3 !important;
+  border-radius: 0 6px 6px 0;
+  color: #46586a !important;
+  background: #f3f8fc !important;
+}
+
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+:root[data-theme="light"] .markdown-table-wrap,
+:root[data-theme="light"] .markdown-code-block,
+:root[data-theme="light"] .markdown-mermaid,
+:root[data-theme="light"] .message-chart {
+  margin-top: 20px;
+  margin-bottom: 20px;
+  border-radius: 8px;
+}
+
+/* Normal light mode uses a genuinely white application canvas. Image and
+   realtime background modes keep their dedicated transparent rules above. */
+:root[data-theme="light"] body,
+:root[data-theme="light"] .app-shell:not(.has-app-background):not(.has-realtime-character) {
+  background: #ffffff !important;
+  background-image: none !important;
+}
+
+:root[data-theme="light"] .app-shell:not(.has-app-background):not(.has-realtime-character) :is(
+  .windowbar,
+  .sidebar,
+  .workspace,
+  .chat-canvas,
+  .chat-scroll,
+  .chat-transcript,
+  .right-workspace-panel,
+  .right-workspace-header,
+  .right-workspace-tabs,
+  .right-workspace-content,
+  .right-workspace-view,
+  .composer-shell
+) {
+  background: #ffffff !important;
+  background-image: none !important;
+}
+
+/* Compact light code blocks so short examples do not consume excessive
+   vertical space while line numbers and copy controls remain easy to scan. */
+:root[data-theme="light"] .markdown-code-block {
+  margin-top: 12px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+}
+
+:root[data-theme="light"] .markdown-code-label {
+  min-height: 32px;
+  padding: 0 48px 0 12px;
+  font-size: 11px;
+}
+
+:root[data-theme="light"] .markdown-code-label::before {
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  box-shadow: 0 0 0 2px #eaeef2;
+}
+
+:root[data-theme="light"] .markdown-code-scroll {
+  padding: 6px 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+:root[data-theme="light"] .markdown-code-lines li {
+  grid-template-columns: 44px minmax(0, 1fr);
+  min-height: 18px;
+  padding-right: 12px;
+}
+
+:root[data-theme="light"] .markdown-code-lines li::before {
+  padding-right: 10px;
+  font-size: 10px;
+}
+
+:root[data-theme="light"] .markdown-code-block code {
+  padding-left: 10px;
+}
+
+:root[data-theme="light"] .markdown-code-block .copy-text-button {
+  top: 3px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+}
+
+/* Light depth system: keep the application canvas white, then use restrained
+   blue light at structural edges and stronger light only for elevated UI. */
+:root[data-theme="light"] .windowbar {
+  box-shadow: var(--shadow-blue-edge) !important;
+}
+
+:root[data-theme="light"] .sidebar {
+  box-shadow: 6px 0 20px rgba(33, 150, 243, 0.06) !important;
+}
+
+:root[data-theme="light"] .right-workspace-panel {
+  box-shadow: -6px 0 20px rgba(33, 150, 243, 0.06) !important;
+}
+
+:root[data-theme="light"] .app-shell .chat-composer {
+  border-color: #b6d9f8 !important;
+  background: #ffffff !important;
+  box-shadow: var(--shadow-blue-control) !important;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+:root[data-theme="light"] .app-shell .chat-composer:focus-within {
+  border-color: #75b8f5 !important;
+  box-shadow:
+    0 0 0 2px rgba(51, 156, 255, 0.18),
+    0 0 28px 6px rgba(51, 156, 255, 0.15),
+    0 14px 34px rgba(51, 156, 255, 0.13) !important;
+}
+
+:root[data-theme="light"] .chat-composer textarea,
+:root[data-theme="light"] .chat-composer textarea:focus,
+:root[data-theme="light"] .chat-composer textarea:focus-visible {
+  padding: 9px 11px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .chat-composer .composer-toolbar {
+  margin-top: 8px;
+  padding-top: 0;
+  border-top: 0 !important;
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) .chat-composer {
+  background: #ffffff !important;
+  backdrop-filter: none;
+}
+
+/* Background media belongs to the conversation canvas. Structural chrome must
+   remain genuinely white instead of picking up a gray or pink cast through a
+   translucent wash. */
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) :is(
+  .windowbar,
+  .sidebar,
+  .right-workspace-panel,
+  .right-workspace-header,
+  .right-workspace-tabs,
+  .right-workspace-content,
+  .right-workspace-view,
+  .composer-shell
+) {
+  background: #ffffff !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] :is(
+  .settings-dialog,
+  .project-sheet,
+  .history-search-dialog,
+  .fetch-models-dialog,
+  .quick-notes-sheet,
+  .notification-center-panel,
+  .token-usage-panel,
+  .subagent-status-panel,
+  .workspace-context-menu,
+  .gpa-popover,
+  .composer-model-picker-menu
+) {
+  box-shadow: var(--shadow-blue-elevated) !important;
+}
+
+:root[data-theme="light"] :is(
+  .title-icon-button,
+  .sidebar-search,
+  .workspace-control-button,
+  .composer-icon-button,
+  .theme-toggle-button,
+  .right-workspace-hide-button
+):hover:not(:disabled),
+:root[data-theme="light"] :is(
+  .title-icon-button,
+  .sidebar-search,
+  .workspace-control-button,
+  .composer-icon-button,
+  .theme-toggle-button,
+  .right-workspace-hide-button
+):focus-visible {
+  box-shadow: 0 3px 10px rgba(33, 150, 243, 0.13) !important;
+}
+
+/* Sidebar navigation is a flat list, not a stack of outlined cards. Cover the
+   higher-specificity image/realtime skin as well as the normal light theme. */
+:root[data-theme="light"] .sidebar-nav-button,
+:root[data-theme="light"] .history-item,
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) .sidebar-nav-button,
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) .history-item {
+  border: 0 !important;
+  outline: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] :is(.sidebar-nav-button, .history-item):hover,
+:root[data-theme="light"] :is(.sidebar-nav-button, .history-item):focus-visible,
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) :is(.sidebar-nav-button, .history-item):hover,
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) :is(.sidebar-nav-button, .history-item):focus-visible {
+  border: 0 !important;
+  outline: 0;
+  color: var(--text) !important;
+  background: var(--surface-soft) !important;
+  box-shadow: none !important;
+  transform: none;
+}
+
+:root[data-theme="light"] .history-item.selected,
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) .history-item.selected {
+  border: 0 !important;
+  outline: 0;
+  color: #0969da !important;
+  background: var(--accent-blue-soft) !important;
+  box-shadow: inset 2px 0 0 var(--accent-blue) !important;
+}
+
+:root[data-theme="light"] :is(.history-item.running, .history-item-project.running),
+:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) :is(.history-item.running, .history-item-project.running) {
+  border: 0 !important;
+}
+
+/* Repeated entity lists share the same reference-blue identification rail.
+   Status indicators and diff additions/deletions keep their semantic colors. */
+:root[data-theme="light"] :is(
+  .mcp-server-row,
+  .mcp-tool-row,
+  .knowledge-base-row,
+  .knowledge-binding-item,
+  .memory-solution-card,
+  .memory-compact-row,
+  .notification-center-item,
+  .skill-row,
+  .capability-list .capability-list-item,
+  .database-connection-card,
+  .api-favorites-card,
+  .project-file-row,
+  .git-file-row-wrap,
+  .quick-notes-item,
+  .history-search-result,
+  .composer-task-change-file,
+  .composer-queue-item
+) {
+  border-left: 3px solid var(--list-accent) !important;
+}
+
+/* Provider and model configuration rows use the requested red identity rail. */
+:root[data-theme="light"] .settings-dialog :is(
+  .provider-list-card,
+  .provider-model-row
+) {
+  border-left: 3px solid var(--accent-red) !important;
+}
+
+:root[data-theme="light"] .settings-dialog .provider-list-card:is(:hover, .selected) {
+  border-left-color: var(--accent-red) !important;
+}
+
+/* Keep the active thread title in the draggable window bar, aligned with the
+   center of the sidebar region while reserving space for window controls. */
+.windowbar {
+  position: relative;
+}
+
+.windowbar > .windowbar-thread-title {
+  top: 50%;
+  left: clamp(132px, calc(var(--sidebar-pane-width) / 2 + 36px), 360px);
+  max-width: min(640px, calc(100% - clamp(132px, calc(var(--sidebar-pane-width) / 2 + 36px), 360px) - 180px));
+  min-height: 30px;
+  transform: translateY(-50%);
+}
+
+.app-shell.sidebar-collapsed .windowbar > .windowbar-thread-title {
+  left: 112px;
+  max-width: min(640px, calc(100% - 292px));
 }

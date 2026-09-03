@@ -927,7 +927,10 @@ export class DesktopBackend {
 
   public getThreadSnapshot(threadId: string, cursor?: RuntimeThreadSnapshotCursor): RuntimeThreadSnapshot {
     const thread = this.#db.getThread(threadId);
-    const subagents = this.getCurrentRequestSubagents(thread).filter((child) => this.isSubagentActive(child));
+    // Keep every child from the current request in the UI snapshot. The root
+    // task can still be waiting after a child completes, and filtering terminal
+    // children here made the subagent status dock disappear at that moment.
+    const subagents = this.getCurrentRequestSubagents(thread);
     const childApprovals = thread.parentThreadId
       ? []
       : subagents.flatMap((child) => this.#db.listApprovals(child.id).filter((approval) => approval.status === "pending"));

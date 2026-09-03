@@ -23,6 +23,7 @@ import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
 import { useMotionPresence } from "./core/motion-presence";
 import { EChartsMessageChart } from "./charts/echarts-message-chart";
+import { MermaidMessageDiagram } from "./charts/mermaid-message-diagram";
 import { ApiCardMessage } from "./cards/api-card-message";
 import { IconClose, IconCopy, IconEye, IconFolder, IconGlobe } from "./icons";
 
@@ -118,6 +119,7 @@ export type MarkdownBlock =
   | { kind: "horizontal-rule" }
   | { kind: "blockquote"; lines: string[] }
   | { kind: "code"; language?: string; content: string }
+  | { kind: "mermaid"; content: string }
   | { kind: "echarts"; content: string }
   | { kind: "api-card"; content: string }
   | { kind: "table"; headers: string[]; rows: string[][] };
@@ -394,8 +396,10 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
         const content = codeFence.lines.join("\n");
         const fenceLanguage = codeFence.language?.trim().toLowerCase();
         blocks.push(
-          fenceLanguage === "echarts"
-            ? { kind: "echarts", content }
+          fenceLanguage === "mermaid"
+            ? { kind: "mermaid", content }
+            : fenceLanguage === "echarts"
+              ? { kind: "echarts", content }
             : fenceLanguage === "api-card"
               ? { kind: "api-card", content }
               : { kind: "code", language: codeFence.language, content }
@@ -749,6 +753,8 @@ function renderMarkdownBlock(block: MarkdownBlock, key: string) {
       );
     case "echarts":
       return <EChartsMessageChart key={key} configText={block.content} />;
+    case "mermaid":
+      return <MermaidMessageDiagram key={key} source={block.content} copyControl={<CopyTextButton content={block.content} />} />;
     case "api-card":
       return <ApiCardMessage key={key} configText={block.content} />;
     case "table":

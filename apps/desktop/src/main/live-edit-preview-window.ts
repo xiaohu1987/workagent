@@ -128,7 +128,7 @@ export class LiveEditPreviewWindow {
         resizable: false,
         skipTaskbar: true,
         show: false,
-        backgroundColor: this.#options.getTheme() === "light" ? "#f7fbff" : "#0b0c0e",
+        backgroundColor: this.#options.getTheme() === "light" ? "#ffffff" : "#0b0c0e",
         parent: mainWindow ?? undefined,
         webPreferences: {
           preload: this.#options.preloadPath,

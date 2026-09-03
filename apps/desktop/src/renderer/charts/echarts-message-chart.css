@@ -245,3 +245,70 @@
     backdrop-filter: none;
   }
 }
+
+/* Light report surface shared with Markdown code and Mermaid diagrams. */
+:root[data-theme="light"] .message-chart,
+:root[data-theme="light"] .message-chart-dialog {
+  border-color: #d0d7de;
+  color: #2f343b;
+  background: #ffffff;
+  box-shadow: none;
+}
+
+:root[data-theme="light"] .message-chart-header,
+:root[data-theme="light"] .message-chart-dialog-header {
+  border-bottom-color: #d8dee4;
+  background: #f6f8fa;
+}
+
+:root[data-theme="light"] .message-chart-header > span,
+:root[data-theme="light"] .message-chart-dialog-header > span {
+  color: #5f5548;
+}
+
+:root[data-theme="light"] .message-chart-canvas {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .message-chart-actions button,
+:root[data-theme="light"] .message-chart-dialog-header > button,
+:root[data-theme="light"] .message-chart-error-header > button {
+  border-color: #e2d5c2;
+  color: #716452;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .message-chart-actions button:hover:not(:disabled),
+:root[data-theme="light"] .message-chart-actions button:focus-visible,
+:root[data-theme="light"] .message-chart-dialog-header > button:hover:not(:disabled),
+:root[data-theme="light"] .message-chart-dialog-header > button:focus-visible,
+:root[data-theme="light"] .message-chart-error-header > button:hover:not(:disabled),
+:root[data-theme="light"] .message-chart-error-header > button:focus-visible {
+  border-color: #75b8f5;
+  color: #0969da;
+  background: #eef7ff;
+  box-shadow: none;
+}
+
+:root[data-theme="light"] .message-chart-lightbox {
+  background: rgba(31, 41, 55, 0.28);
+}
+
+:root[data-theme="light"] .message-chart-load-error,
+:root[data-theme="light"] .message-chart-error-header span {
+  color: #9f2d35;
+}
+
+:root[data-theme="light"] .message-chart-error {
+  border-color: #efd0d2;
+  color: #57252a;
+  background: #fff5f5;
+}
+
+:root[data-theme="light"] .message-chart-error-header strong { color: #8f222a; }
+:root[data-theme="light"] .message-chart-error details { color: #785158; }
+:root[data-theme="light"] .message-chart-error pre {
+  border: 1px solid #efd0d2;
+  color: #57252a;
+  background: #ffffff;
+}

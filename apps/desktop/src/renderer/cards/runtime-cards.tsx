@@ -205,6 +205,10 @@ function SubagentFreshness({
 
 type SubagentPhase = { id: string; label: string; state: "completed" | "current" | "failed" | "cancelled" };
 
+function getSubagentPhaseToneClass(phase: SubagentPhase): string {
+  return phase.state === "current" && /等待|排队|重试/.test(phase.label) ? "is-waiting" : "";
+}
+
 function getSubagentEntryPhase(entry: RuntimeActivityEntry): string | null {
   if (entry.kind === "output") return "检查输出";
   if (entry.kind === "status") {
@@ -450,7 +454,7 @@ export function SubagentTaskGroup({
                 </div>
                 <div className="subagent-phase-track">
                   {phases.map((phase, index) => (
-                    <span key={phase.id} className={`subagent-phase ${phase.state}`}>
+                    <span key={phase.id} className={`subagent-phase ${phase.state} ${getSubagentPhaseToneClass(phase)}`.trim()}>
                       <i aria-hidden>{phase.state === "completed" ? "✓" : phase.state === "current" ? "●" : "×"}</i>
                       {phase.label}
                       {index < phases.length - 1 ? <b aria-hidden>→</b> : null}

@@ -1,15 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ECharts, EChartsOption } from "echarts";
+import { useRendererTheme, type RendererTheme } from "../use-renderer-theme";
 import "./echarts-message-chart.css";
 
 export const ECHARTS_CONFIG_MAX_BYTES = 256 * 1024;
 
-const ECHARTS_THEME_NAME = "codexh-chat";
+const ECHARTS_THEME_NAMES: Record<RendererTheme, string> = {
+  dark: "codexh-chat-dark",
+  light: "codexh-chat-light"
+};
 const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 let echartsModulePromise: Promise<typeof import("echarts")> | null = null;
 
-const ECHARTS_THEME = {
+const ECHARTS_DARK_THEME = {
   backgroundColor: "transparent",
   color: ["#b7a2ff", "#67c7b0", "#f0ae76", "#78aef2", "#e483a8", "#a8d36f", "#d39bf0"],
   textStyle: { color: "#dfe4ed" },
@@ -31,6 +35,31 @@ const ECHARTS_THEME = {
     backgroundColor: "rgba(19, 21, 27, 0.96)",
     borderColor: "rgba(183, 162, 255, 0.34)",
     textStyle: { color: "#edf0f5" }
+  }
+};
+
+const ECHARTS_LIGHT_THEME = {
+  backgroundColor: "transparent",
+  color: ["#2196f3", "#0f766e", "#8b5cf6", "#d97706", "#db2777", "#16a34a", "#64748b"],
+  textStyle: { color: "#334155" },
+  title: { textStyle: { color: "#1f2937" }, subtextStyle: { color: "#64748b" } },
+  legend: { textStyle: { color: "#52677a" } },
+  categoryAxis: {
+    axisLine: { lineStyle: { color: "#b8c6d3" } },
+    axisTick: { lineStyle: { color: "#b8c6d3" } },
+    axisLabel: { color: "#5f6f7f" },
+    splitLine: { lineStyle: { color: ["#e5e9ee"] } }
+  },
+  valueAxis: {
+    axisLine: { lineStyle: { color: "#b8c6d3" } },
+    axisTick: { lineStyle: { color: "#b8c6d3" } },
+    axisLabel: { color: "#5f6f7f" },
+    splitLine: { lineStyle: { color: ["#e5e9ee"] } }
+  },
+  tooltip: {
+    backgroundColor: "rgba(255, 255, 255, 0.98)",
+    borderColor: "#c9d8e6",
+    textStyle: { color: "#1f2937" }
   }
 };
 
@@ -138,7 +167,8 @@ function getChartTitle(option: EChartsOption): string {
 async function loadECharts() {
   if (!echartsModulePromise) {
     echartsModulePromise = import("echarts").then((module) => {
-      module.registerTheme(ECHARTS_THEME_NAME, ECHARTS_THEME);
+      module.registerTheme(ECHARTS_THEME_NAMES.dark, ECHARTS_DARK_THEME);
+      module.registerTheme(ECHARTS_THEME_NAMES.light, ECHARTS_LIGHT_THEME);
       return module;
     });
   }
@@ -156,6 +186,7 @@ function EChartsSurface({
   expanded?: boolean;
   onInstance: (instance: ECharts | null) => void;
 }) {
+  const theme = useRendererTheme();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<ECharts | null>(null);
   const optionRef = useRef(option);
@@ -174,7 +205,7 @@ function EChartsSurface({
     void loadECharts()
       .then((echarts) => {
         if (cancelled || !hostRef.current) return;
-        const chart = echarts.init(hostRef.current, ECHARTS_THEME_NAME, { renderer: "canvas" });
+        const chart = echarts.init(hostRef.current, ECHARTS_THEME_NAMES[theme], { renderer: "canvas" });
         chartRef.current = chart;
         chart.setOption(optionRef.current, { notMerge: true });
         onInstanceRef.current(chart);
@@ -199,7 +230,7 @@ function EChartsSurface({
       chartRef.current?.dispose();
       chartRef.current = null;
     };
-  }, []);
+  }, [theme]);
 
   useEffect(() => {
     chartRef.current?.setOption(option, { notMerge: true });
@@ -263,7 +294,7 @@ export function EChartsReportChart({ option, title, configText }: EChartsReportC
       const dataUrl = instance.getDataURL({
         type: "png",
         pixelRatio: 2,
-        backgroundColor: "#101217"
+        backgroundColor: document.documentElement.dataset.theme === "light" ? "#ffffff" : "#101217"
       });
       const anchor = document.createElement("a");
       anchor.href = dataUrl;

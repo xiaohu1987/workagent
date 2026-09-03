@@ -4819,6 +4819,11 @@ describe("decision system prompt", () => {
     expect(prompt).toContain("Do not expose tool names, Skill IDs, internal hashes, raw commands, file paths, call counts");
     expect(prompt).toContain("choose the format that makes the information easiest to scan");
     expect(prompt).toContain("Do not force information into a table");
+    expect(prompt).toContain("use only descriptive ## headings and optional ### subsections");
+    expect(prompt).toContain("never use a # heading or headings deeper than ###");
+    expect(prompt).toContain("fenced mermaid flowchart, sequenceDiagram, or stateDiagram-v2 blocks");
+    expect(prompt).toContain("never invent chart data");
+    expect(prompt).toContain("use no more than four charts in one document");
     expect(prompt).not.toContain("Grok apply_patch compatibility");
   });
 
