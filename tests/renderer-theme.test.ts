@@ -74,6 +74,26 @@ const mermaidRenderer = readFileSync(
   new URL("../apps/desktop/src/renderer/charts/mermaid-message-diagram.tsx", import.meta.url),
   "utf8"
 );
+const scrollFadeStyles = readFileSync(
+  new URL("../apps/desktop/src/renderer/scroll-fades.css", import.meta.url),
+  "utf8"
+);
+const scrollFadeRuntime = readFileSync(
+  new URL("../apps/desktop/src/renderer/scroll-fades.ts", import.meta.url),
+  "utf8"
+);
+const rendererMain = readFileSync(
+  new URL("../apps/desktop/src/renderer/main.tsx", import.meta.url),
+  "utf8"
+);
+const liveEditPreviewMain = readFileSync(
+  new URL("../apps/desktop/src/renderer/live-edit-preview/main.tsx", import.meta.url),
+  "utf8"
+);
+const conversationLogRendererMain = readFileSync(
+  new URL("../apps/desktop/src/renderer/conversation-log-window/main.tsx", import.meta.url),
+  "utf8"
+);
 
 describe("renderer theme", () => {
   it("keeps legacy system preferences on the existing dark appearance", () => {
@@ -410,6 +430,26 @@ describe("renderer theme", () => {
     expect(mainProcess).toContain('backgroundColor: backend.getConfig().desktop.theme === "light" ? "#ffffff" : "#09090a"');
     expect(conversationLogWindowMain).toContain('this.#options.getTheme() === "light" ? "#ffffff" : "#090d13"');
     expect(liveEditPreviewWindowMain).toContain('this.#options.getTheme() === "light" ? "#ffffff" : "#0b0c0e"');
+  });
+
+  it("dynamically fades every vertical scroll region in every theme", () => {
+    expect(scrollFadeRuntime).toContain('const TOP_FADE_CLASS = "has-scroll-fade-top";');
+    expect(scrollFadeRuntime).toContain('const BOTTOM_FADE_CLASS = "has-scroll-fade-bottom";');
+    expect(scrollFadeRuntime).toContain('element.scrollHeight - element.clientHeight');
+    expect(scrollFadeRuntime).toContain('element.scrollTop > SCROLL_EDGE_TOLERANCE');
+    expect(scrollFadeRuntime).toContain('element.scrollTop < maxScrollTop - SCROLL_EDGE_TOLERANCE');
+    expect(scrollFadeRuntime).toContain('new MutationObserver');
+    expect(scrollFadeRuntime).toContain('new ResizeObserver');
+    expect(scrollFadeStyles).toContain("Shared transparent edge fades for every vertically scrollable application");
+    expect(scrollFadeStyles).toContain(".has-scroll-fade-top:not(.has-scroll-fade-bottom) {");
+    expect(scrollFadeStyles).toContain(".has-scroll-fade-bottom:not(.has-scroll-fade-top) {");
+    expect(scrollFadeStyles).toContain(".has-scroll-fade-top.has-scroll-fade-bottom {");
+    expect(scrollFadeStyles).toContain("-webkit-mask-image: linear-gradient(");
+    expect(scrollFadeStyles).toContain("mask-image: linear-gradient(");
+    expect(styles).toContain("--scroll-fade-size: 56px;");
+    expect(rendererMain).toContain("installScrollFades();");
+    expect(liveEditPreviewMain).toContain("installScrollFades();");
+    expect(conversationLogRendererMain).toContain("installScrollFades();");
   });
 
   it("uses a themed in-app tooltip for browser-source details", () => {

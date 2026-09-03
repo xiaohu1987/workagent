@@ -651,6 +651,7 @@ pre {
   overflow-x: hidden;
   overflow-y: auto;
   overflow-anchor: none;
+  --scroll-fade-size: 56px;
 }
 
 .chat-scroll.welcome-mode {

@@ -5,6 +5,8 @@ import { ConversationLogWorkspace } from "../workspace/conversation-log-workspac
 import "../styles.css";
 import "./conversation-log-window.css";
 import { applyAppTheme } from "../theme";
+import "../scroll-fades.css";
+import { installScrollFades } from "../scroll-fades";
 
 type ConversationLogWindowEvent =
   | ({ kind: "history"; threadId: string } & RuntimeLogPage)
@@ -111,4 +113,5 @@ function ConversationLogWindowApp() {
   );
 }
 
+installScrollFades();
 createRoot(document.getElementById("root")!).render(<ConversationLogWindowApp />);

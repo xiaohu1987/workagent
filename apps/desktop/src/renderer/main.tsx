@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import "./styles.css";
+import "./scroll-fades.css";
+import { installScrollFades } from "./scroll-fades";
 
 type RendererErrorBoundaryState = {
   error: Error | null;
@@ -54,6 +56,8 @@ class RendererErrorBoundary extends React.Component<React.PropsWithChildren, Ren
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Renderer root element is missing.");
+
+installScrollFades();
 
 window.addEventListener("error", (event) => {
   window.codexh.reportRendererError({ message: event.message, stack: event.error?.stack });
