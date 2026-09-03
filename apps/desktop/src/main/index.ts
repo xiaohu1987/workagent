@@ -58,11 +58,13 @@ const sessionDataDir = path.join(app.getPath("userData"), "session-data");
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 const liveEditPreview = new LiveEditPreviewWindow({
   getMainWindow: () => mainWindow,
+  getTheme: () => backend.getConfig().desktop.theme,
   getPreviewUrl: getLiveEditPreviewUrl,
   preloadPath: path.join(__dirname, "../preload/index.cjs")
 });
 const conversationLogWindow = new ConversationLogWindow({
   getMainWindow: () => mainWindow,
+  getTheme: () => backend.getConfig().desktop.theme,
   getLogEntries: (threadId) => backend.getThreadRuntimeLogs(threadId),
   getLogUrl: getConversationLogUrl,
   preloadPath: path.join(__dirname, "../preload/index.cjs")
@@ -97,6 +99,22 @@ function showMainWindow(): void {
 
   mainWindow.show();
   mainWindow.focus();
+}
+
+function broadcastTheme(): void {
+  const theme = backend.getConfig().desktop.theme === "light" ? "light" : "dark";
+  const titleBarOverlay = {
+    color: "rgba(0, 0, 0, 0)",
+    symbolColor: theme === "light" ? "#1f2937" : "#f3f4f6",
+    height: 32
+  };
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setBackgroundColor(theme === "light" ? "#f7fbff" : "#09090a");
+    mainWindow.setTitleBarOverlay(titleBarOverlay);
+  }
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send("theme:changed", theme);
+  }
 }
 
 function quitApplication(): void {
@@ -271,14 +289,14 @@ async function createWindow(): Promise<void> {
     minWidth,
     minHeight,
     autoHideMenuBar: true,
-    backgroundColor: "#09090a",
+    backgroundColor: backend.getConfig().desktop.theme === "light" ? "#f7fbff" : "#09090a",
     title: "codexh",
     titleBarStyle: "hidden",
     titleBarOverlay: {
       // Keep native caption buttons, but let the custom windowbar show through.
       // Solid colors here create an opaque black block that ignores CSS module opacity.
       color: "rgba(0, 0, 0, 0)",
-      symbolColor: "#f3f4f6",
+      symbolColor: backend.getConfig().desktop.theme === "light" ? "#1f2937" : "#f3f4f6",
       height: 32
     },
     webPreferences: {
@@ -678,6 +696,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("config:save", async (_event, config) => {
     await backend.saveConfig(config);
+    broadcastTheme();
     if (!backend.getConfig().desktop.liveEditPreview) liveEditPreview.clear();
     if (!backend.getConfig().desktop.llmLogViewer) conversationLogWindow.close();
   });

@@ -4,7 +4,7 @@ import type { CSSProperties } from "react";
 import type { MessageRecord, ToolCallDetail, ToolCallRecord } from "@shared-types";
 import { collectFileChangesByTurn, findResultFileSnapshot, getGeneratedFileDescription, parseTimelineJson } from "../lib/conversation-utils";
 import type { ConversationTurnItem, FileChangeSummaryItem } from "../lib/conversation-utils";
-import { buildFileSnapshotDiff, buildFileSnapshotDiffPreview, getFileSnapshotDiffMarker } from "../lib/project-files";
+import { buildFileSnapshotDiffPreview, getFileSnapshotDiffCounts, getFileSnapshotDiffMarker } from "../lib/project-files";
 import type { FileSnapshot } from "../lib/project-files";
 import { IconChevronDown, IconFileChanges } from "../icons";
 import { getFileLeafName } from "../markdown";
@@ -251,11 +251,7 @@ export function getFileChangeLineCounts(file: FileChangeSummaryItem): { addition
   if (!file.snapshot || file.snapshot.beforeTruncated || file.snapshot.afterTruncated) {
     return { additions: file.additions, deletions: file.deletions };
   }
-  const lines = buildFileSnapshotDiff(file.snapshot.before, file.snapshot.after);
-  return {
-    additions: lines.filter((line) => line.kind === "added").length,
-    deletions: lines.filter((line) => line.kind === "removed").length
-  };
+  return getFileSnapshotDiffCounts(file.snapshot.before, file.snapshot.after);
 }
 
 /**
@@ -438,6 +434,9 @@ function FileSnapshotDiffPopover({
   const snapshot = file.snapshot;
   if (!snapshot) return null;
   const lines = buildFileSnapshotDiffPreview(snapshot.before, snapshot.after);
+  const counts = snapshot.beforeTruncated || snapshot.afterTruncated
+    ? { additions: file.additions, deletions: file.deletions }
+    : getFileSnapshotDiffCounts(snapshot.before, snapshot.after);
   const width = Math.min(720, window.innerWidth - 32);
   const left = Math.max(16, Math.min(anchor.left, window.innerWidth - width - 16));
   const placeAbove = anchor.top > Math.min(440, window.innerHeight * 0.56);
@@ -457,8 +456,8 @@ function FileSnapshotDiffPopover({
       <header className="generated-file-diff-head">
         <span title={file.path}>{file.path}</span>
         <div>
-          <b>+{file.additions}</b>
-          <i>-{file.deletions}</i>
+          <b>+{counts.additions}</b>
+          <i>-{counts.deletions}</i>
         </div>
       </header>
       <div className="generated-file-diff-code">

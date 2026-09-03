@@ -268,14 +268,14 @@
 }
 
 .api-card-button.is-primary {
-  border-color: color-mix(in srgb, var(--api-card-accent) 80%, transparent);
+  border-color: var(--action-primary);
   color: #ffffff;
-  background: var(--api-card-accent);
+  background: var(--action-primary);
 }
 
 .api-card-button.is-primary:hover:not(:disabled) {
-  border-color: var(--api-card-accent);
-  background: color-mix(in srgb, var(--api-card-accent) 88%, #ffffff);
+  border-color: var(--action-primary-hover);
+  background: var(--action-primary-hover);
   filter: none;
 }
 
@@ -296,7 +296,7 @@
 }
 
 .api-card-button:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--api-card-accent) 70%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--action-primary) 70%, transparent);
   outline-offset: 2px;
 }
 

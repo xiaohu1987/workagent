@@ -4,6 +4,7 @@ import type { RuntimeLogEntry, RuntimeLogPage } from "@shared-types";
 import { ConversationLogWorkspace } from "../workspace/conversation-log-workspace";
 import "../styles.css";
 import "./conversation-log-window.css";
+import { applyAppTheme } from "../theme";
 
 type ConversationLogWindowEvent =
   | ({ kind: "history"; threadId: string } & RuntimeLogPage)
@@ -18,6 +19,17 @@ function ConversationLogWindowApp() {
   const [hasMore, setHasMore] = useState(false);
   const visibleLimitRef = useRef(visibleLimit);
   const entriesRef = useRef(entries);
+  useEffect(() => {
+    let disposed = false;
+    void window.codexh.getConfig().then((config) => {
+      if (!disposed) applyAppTheme(config?.desktop?.theme);
+    });
+    const dispose = window.codexh.onThemeChanged((theme) => applyAppTheme(theme));
+    return () => {
+      disposed = true;
+      dispose();
+    };
+  }, []);
   visibleLimitRef.current = visibleLimit;
   entriesRef.current = entries;
 

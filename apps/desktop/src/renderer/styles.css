@@ -15,7 +15,9 @@
   --text-muted: #a09ba9;
   --text-faint: #7f7a87;
   --orange: #f28b35;
-  --blue: #42a5ff;
+  --blue: #2196f3;
+  --action-primary: #2196f3;
+  --action-primary-hover: #1687dc;
   --violet: #b86cff;
   --green: #33c26f;
   --shadow: 0 26px 80px rgba(0, 0, 0, 0.4);
@@ -5781,9 +5783,9 @@ input[type="radio"]:focus-visible {
 .settings-add-provider,
 .message-user-edit-button.primary,
 .mcp-create-sheet .project-sheet-actions .button.warm {
-  border-color: rgba(100, 168, 255, 0.58);
-  color: #eef6ff;
-  background: #17436f;
+  border-color: var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
 }
 
 .button.primary:hover:not(:disabled),
@@ -5792,9 +5794,9 @@ input[type="radio"]:focus-visible {
 .settings-add-provider:hover:not(:disabled),
 .message-user-edit-button.primary:hover:not(:disabled),
 .mcp-create-sheet .project-sheet-actions .button.warm:hover:not(:disabled) {
-  border-color: rgba(130, 187, 255, 0.78);
+  border-color: var(--action-primary-hover);
   color: #ffffff;
-  background: #1d568c;
+  background: var(--action-primary-hover);
 }
 
 .button.primary:focus-visible,
@@ -5802,7 +5804,7 @@ input[type="radio"]:focus-visible {
 .send-button:focus-visible,
 .settings-add-provider:focus-visible,
 .message-user-edit-button.primary:focus-visible {
-  outline: 2px solid rgba(100, 168, 255, 0.64);
+  outline: 2px solid color-mix(in srgb, var(--action-primary) 64%, transparent);
   outline-offset: 2px;
 }
 
@@ -8726,17 +8728,17 @@ input[type="radio"]:focus-visible {
   min-width: 66px;
   gap: 5px;
   padding: 0 10px;
-  border-color: rgba(108, 174, 255, 0.32);
-  color: #e6f1ff;
-  background: rgba(74, 142, 224, 0.22);
+  border-color: var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
   font-size: 12px;
   font-weight: 600;
 }
 
 .file-preview-lightbox-actions > .file-preview-save-button:hover:not(:disabled) {
   color: #fff;
-  border-color: rgba(125, 183, 255, 0.52);
-  background: rgba(74, 142, 224, 0.34);
+  border-color: var(--action-primary-hover);
+  background: var(--action-primary-hover);
 }
 
 .file-preview-lightbox-actions > .file-preview-save-button:disabled {
@@ -9314,10 +9316,10 @@ input[type="radio"]:focus-visible {
   min-width: 54px;
   height: 30px;
   padding: 0 12px;
-  border: 1px solid rgba(74, 222, 128, 0.72);
+  border: 1px solid var(--action-primary);
   border-radius: 5px;
-  color: #a7f3c1;
-  background: rgba(22, 101, 52, 0.26);
+  color: #ffffff;
+  background: var(--action-primary);
   box-shadow: none;
   font-size: 12px;
   font-weight: 650;
@@ -10140,17 +10142,17 @@ input[type="radio"]:focus-visible {
 
 .pending-resume-card-primary {
   padding: 6px 14px;
-  border: 1px solid rgba(77, 141, 247, 0.55);
+  border: 1px solid var(--action-primary);
   border-radius: 7px;
-  color: #dbe9ff;
+  color: #ffffff;
   font-size: 12px;
-  background: rgba(77, 141, 247, 0.18);
+  background: var(--action-primary);
   cursor: pointer;
 }
 
 .pending-resume-card-primary:hover {
-  border-color: rgba(108, 174, 255, 0.75);
-  background: rgba(77, 141, 247, 0.28);
+  border-color: var(--action-primary-hover);
+  background: var(--action-primary-hover);
 }
 
 .pending-resume-card-dismiss {
@@ -10503,9 +10505,9 @@ input[type="radio"]:focus-visible {
 }
 
 .send-button:hover:not(:disabled) {
-  border-color: #4ade80;
-  color: #dcfce7;
-  background: rgba(22, 101, 52, 0.42);
+  border-color: var(--action-primary-hover);
+  color: #ffffff;
+  background: var(--action-primary-hover);
   transform: none;
 }
 
@@ -12098,9 +12100,9 @@ input[type="radio"]:focus-visible {
 }
 
 .approval-session-button {
-  border: 1px solid rgba(250, 204, 21, 0.32);
-  color: #fde68a;
-  background: rgba(161, 98, 7, 0.2);
+  border: 1px solid var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
 }
 
 .approval-remember-button {
@@ -12122,9 +12124,9 @@ input[type="radio"]:focus-visible {
 }
 
 .approval-allow-button {
-  border: 1px solid #facc15;
-  color: #1d1b12;
-  background: #facc15;
+  border: 1px solid var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
 }
 
 .explicit-authorization .approval-allow-button {
@@ -12245,8 +12247,8 @@ input[type="radio"]:focus-visible {
 .user-input-prompt-actions button { min-height: 28px; padding: 0 10px; border-radius: 5px; font-size: 12px; cursor: pointer; }
 .user-input-skip { border: 0; color: #7e8793; background: transparent; }
 .user-input-skip:hover { color: #c4cad2; background: rgba(255, 255, 255, 0.05); }
-.user-input-submit { border: 1px solid rgba(217, 146, 104, 0.6); color: #181416; background: #d99268; }
-.user-input-submit:hover:not(:disabled) { background: #e8a27c; }
+.user-input-submit { border: 1px solid var(--action-primary); color: #ffffff; background: var(--action-primary); }
+.user-input-submit:hover:not(:disabled) { border-color: var(--action-primary-hover); background: var(--action-primary-hover); }
 .user-input-prompt-actions button:disabled { cursor: not-allowed; opacity: 0.45; }
 
 .user-input-prompt-card.resolved {
@@ -13117,10 +13119,11 @@ input[type="radio"]:focus-visible {
   gap: 5px;
   padding: 0 9px;
   border-radius: 4px;
-  color: #dceaff;
+  border: 1px solid var(--action-primary);
+  color: #ffffff;
   font-size: 11px;
   font-weight: 600;
-  background: rgba(79, 139, 214, 0.19);
+  background: var(--action-primary);
   cursor: pointer;
 }
 
@@ -13130,8 +13133,9 @@ input[type="radio"]:focus-visible {
 }
 
 .git-commit-panel button:not(:disabled):hover {
-  color: #fff;
-  background: rgba(91, 158, 240, 0.36);
+  border-color: var(--action-primary-hover);
+  color: #ffffff;
+  background: var(--action-primary-hover);
 }
 
 .git-one-click-commit-button {
@@ -13996,16 +14000,16 @@ input[type="radio"]:focus-visible {
 }
 
 .message-user-edit-button.primary {
-  border-color: rgba(100, 168, 255, 0.58);
-  color: #eef6ff;
-  background: #17436f;
+  border-color: var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
 }
 
 .message-user-edit-button.primary:hover,
 .message-user-edit-button.primary:focus-visible {
-  border-color: rgba(130, 187, 255, 0.78);
+  border-color: var(--action-primary-hover);
   color: #ffffff;
-  background: #1d568c;
+  background: var(--action-primary-hover);
 }
 
 .message-user-edit-button:disabled { cursor: not-allowed; opacity: 0.42; }
@@ -22176,8 +22180,8 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 }
 
 .chat-background-toggle input:checked + span {
-  border-color: rgba(70, 178, 114, 0.45);
-  background: #237246;
+  border-color: var(--action-primary);
+  background: var(--action-primary);
 }
 
 .chat-background-toggle input:checked + span::after {
@@ -22436,14 +22440,14 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 }
 
 .chat-background-actions .background-action-primary {
-  border-color: rgba(225, 164, 84, 0.35);
-  color: #fff8ed;
-  background: #815a2d;
+  border-color: var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
 }
 
 .chat-background-actions .background-action-primary:hover:not(:disabled) {
-  border-color: rgba(242, 189, 116, 0.52);
-  background: #956a34;
+  border-color: var(--action-primary-hover);
+  background: var(--action-primary-hover);
 }
 
 .chat-background-actions .background-action-danger {
@@ -22697,4 +22701,2046 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .usage-model-distribution { align-items: center; flex-direction: column; }
   .usage-donut { flex-basis: 156px; width: 156px; height: 156px; }
   .usage-model-table-wrap { width: 100%; }
+}
+
+/* White theme: kept at the end so it overrides legacy dark-only component rules. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --window: #f7fbff;
+  --sidebar: #ffffff;
+  --sidebar-border: #dbe7f3;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-soft: #f2f7fc;
+  --surface-card: #ffffff;
+  --surface-card-hover: #f5f9fd;
+  --border: rgba(43, 86, 124, 0.16);
+  --border-strong: rgba(43, 86, 124, 0.26);
+  --text: #172638;
+  --text-soft: #3e5872;
+  --text-muted: #688097;
+  --text-faint: #8ca0b2;
+  --blue: #2196f3;
+  --action-primary: #2196f3;
+  --action-primary-hover: #1687dc;
+  --violet: #8abcf0;
+  --orange: #e58b4d;
+  --green: #3ca979;
+  --shadow: 0 18px 52px rgba(42, 85, 123, 0.16);
+}
+
+:root[data-theme="light"] body,
+:root[data-theme="light"] .app-shell,
+:root[data-theme="light"] .sidebar,
+:root[data-theme="light"] .workspace,
+:root[data-theme="light"] .history-sidebar,
+:root[data-theme="light"] .right-workspace,
+:root[data-theme="light"] .settings-dialog,
+:root[data-theme="light"] .project-sheet,
+:root[data-theme="light"] .fetch-models-dialog {
+  color: var(--text);
+  background: #f7fbff;
+}
+
+:root[data-theme="light"] .app-shell { background: linear-gradient(180deg, #ffffff 0%, #f4f9fe 100%); }
+:root[data-theme="light"] .sidebar,
+:root[data-theme="light"] .chat-composer,
+:root[data-theme="light"] .composer-shell { background: #ffffff; }
+:root[data-theme="light"] .windowbar,
+:root[data-theme="light"] .settings-topbar,
+:root[data-theme="light"] .workspace-thread-title,
+:root[data-theme="light"] .sidebar-header,
+:root[data-theme="light"] .right-workspace-header,
+:root[data-theme="light"] .composer-shell,
+:root[data-theme="light"] .settings-tab-strip,
+:root[data-theme="light"] .chat-background-mode-panel,
+:root[data-theme="light"] .chat-background-library,
+:root[data-theme="light"] .chat-background-motion-panel,
+:root[data-theme="light"] .usage-statistics-panel {
+  border-color: #dbe7f3;
+  color: var(--text);
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .theme-toggle-button { color: #2c78b6; }
+:root[data-theme="light"] .title-icon-button:hover,
+:root[data-theme="light"] .sidebar-search:hover,
+:root[data-theme="light"] .workspace-control-button:hover,
+:root[data-theme="light"] .composer-icon-button:hover,
+:root[data-theme="light"] .theme-toggle-button:hover { background: #e7f3ff; }
+
+:root[data-theme="light"] input,
+:root[data-theme="light"] textarea,
+:root[data-theme="light"] select,
+:root[data-theme="light"] .composer-model-field select,
+:root[data-theme="light"] .form-select .composer-select-trigger,
+:root[data-theme="light"] .mcp-select .composer-select-trigger,
+:root[data-theme="light"] .composer-select-menu,
+:root[data-theme="light"] .composer-select-option,
+:root[data-theme="light"] .git-branch-select select {
+  border-color: #cfddea;
+  color: var(--text);
+  background: #ffffff;
+  box-shadow: none;
+}
+:root[data-theme="light"] input:focus,
+:root[data-theme="light"] textarea:focus,
+:root[data-theme="light"] select:focus,
+:root[data-theme="light"] .composer-select-trigger:focus-visible {
+  border-color: #78b9ef;
+  box-shadow: 0 0 0 3px rgba(117, 184, 245, 0.24);
+}
+:root[data-theme="light"] select,
+:root[data-theme="light"] select option,
+:root[data-theme="light"] select optgroup { color-scheme: light; color: #172638; background-color: #ffffff; }
+:root[data-theme="light"] ::-webkit-scrollbar-thumb { background: rgba(92, 139, 181, 0.28); background-clip: content-box; }
+
+:root[data-theme="light"] .send-button,
+:root[data-theme="light"] .button.primary,
+:root[data-theme="light"] .button.warm,
+:root[data-theme="light"] .settings-add-provider,
+:root[data-theme="light"] .message-user-edit-button.primary,
+:root[data-theme="light"] .mcp-create-sheet .project-sheet-actions .button.warm {
+  border-color: var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
+}
+:root[data-theme="light"] .send-button:hover:not(:disabled),
+:root[data-theme="light"] .button.primary:hover:not(:disabled),
+:root[data-theme="light"] .button.warm:hover:not(:disabled),
+:root[data-theme="light"] .settings-add-provider:hover:not(:disabled),
+:root[data-theme="light"] .message-user-edit-button.primary:hover:not(:disabled),
+:root[data-theme="light"] .mcp-create-sheet .project-sheet-actions .button.warm:hover:not(:disabled) {
+  border-color: var(--action-primary-hover);
+  color: #ffffff;
+  background: var(--action-primary-hover);
+}
+:root[data-theme="light"] .send-button:disabled,
+:root[data-theme="light"] .button:disabled { border-color: #d8e2eb; color: #94a5b5; background: #eef3f7; }
+
+:root[data-theme="light"] .button.secondary,
+:root[data-theme="light"] .button.ghost,
+:root[data-theme="light"] .settings-close-button,
+:root[data-theme="light"] .workspace-control-button,
+:root[data-theme="light"] .notification-center,
+:root[data-theme="light"] .token-usage-popover,
+:root[data-theme="light"] .composer-add-menu,
+:root[data-theme="light"] .gpa-menu,
+:root[data-theme="light"] .context-report-popover {
+  border-color: #d7e4ef;
+  color: var(--text-soft);
+  background: #ffffff;
+  box-shadow: 0 12px 30px rgba(42, 85, 123, 0.16);
+}
+:root[data-theme="light"] .settings-overlay,
+:root[data-theme="light"] .project-sheet-overlay,
+:root[data-theme="light"] .fetch-models-overlay,
+:root[data-theme="light"] .history-search-overlay,
+:root[data-theme="light"] .message-image-lightbox,
+:root[data-theme="light"] .file-preview-lightbox,
+:root[data-theme="light"] .message-chart-lightbox { background: rgba(31, 61, 88, 0.32); }
+
+:root[data-theme="light"] .chat-scroll,
+:root[data-theme="light"] .chat-transcript,
+:root[data-theme="light"] .timeline,
+:root[data-theme="light"] .conversation-log-workspace,
+:root[data-theme="light"] .file-preview-lightbox-content,
+:root[data-theme="light"] .message-image-lightbox-content,
+:root[data-theme="light"] .git-changes-workspace,
+:root[data-theme="light"] .project-files-workspace,
+:root[data-theme="light"] .message-assistant,
+:root[data-theme="light"] .message-user,
+:root[data-theme="light"] .tool-activity-group,
+:root[data-theme="light"] .project-preview-code,
+:root[data-theme="light"] pre,
+:root[data-theme="light"] code {
+  border-color: #dbe7f3;
+  color: var(--text);
+  background: #ffffff;
+}
+:root[data-theme="light"] .usage-statistics-refresh,
+:root[data-theme="light"] .usage-statistics-panel > header,
+:root[data-theme="light"] .usage-model-table td,
+:root[data-theme="light"] .usage-chart-legend button { border-color: #dbe7f3; color: var(--text-soft); background: transparent; }
+:root[data-theme="light"] .usage-statistics-summary b,
+:root[data-theme="light"] .usage-statistics-panel h3,
+:root[data-theme="light"] .usage-model-table td:first-child span { color: var(--text); }
+:root[data-theme="light"] .usage-chart-series circle { fill: #ffffff; }
+
+:root[data-theme="light"] .message-image-lightbox-head,
+:root[data-theme="light"] .file-preview-lightbox-head,
+:root[data-theme="light"] .file-preview-lightbox-code,
+:root[data-theme="light"] .file-preview-lightbox-loading { border-color: #dbe7f3; color: var(--text); background: #ffffff; }
+
+/* Existing screens use a number of hard-coded dark text colors. Keep every
+   text-bearing control readable when the white surface is active. */
+:root[data-theme="light"] .app-shell :is(
+  h1, h2, h3, h4, h5, h6, p, span, strong, label, legend, small, em,
+  button, output, summary, li, td, th, dt, dd, a, code, pre
+) {
+  color: var(--text) !important;
+}
+
+:root[data-theme="light"] .settings-sidebar,
+:root[data-theme="light"] .settings-layout,
+:root[data-theme="light"] .settings-body,
+:root[data-theme="light"] .settings-section,
+:root[data-theme="light"] .provider-settings-section,
+:root[data-theme="light"] .provider-list-panel,
+:root[data-theme="light"] .provider-detail-panel,
+:root[data-theme="light"] .provider-list-card,
+:root[data-theme="light"] .provider-model-box,
+:root[data-theme="light"] .provider-model-row,
+:root[data-theme="light"] .config-block,
+:root[data-theme="light"] .stack-card {
+  border-color: #dbe7f3 !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .settings-strip-tab.active,
+:root[data-theme="light"] .provider-list-card.selected,
+:root[data-theme="light"] .history-item.selected {
+  background: #e7f3ff !important;
+}
+
+:root[data-theme="light"] .send-button,
+:root[data-theme="light"] .button.primary,
+:root[data-theme="light"] .button.warm,
+:root[data-theme="light"] .settings-add-provider,
+:root[data-theme="light"] .message-user-edit-button.primary {
+  color: #ffffff !important;
+}
+
+:root[data-theme="light"] .send-button:disabled,
+:root[data-theme="light"] .button:disabled {
+  color: #94a5b5 !important;
+}
+
+/* Secondary controls must not retain the deep-black surfaces from the dark theme. */
+:root[data-theme="light"] .title-icon-button,
+:root[data-theme="light"] .sidebar-search,
+:root[data-theme="light"] .workspace-control-button,
+:root[data-theme="light"] .composer-icon-button,
+:root[data-theme="light"] .sidebar-settings,
+:root[data-theme="light"] .sidebar-settings-main,
+:root[data-theme="light"] .sidebar-settings-help,
+:root[data-theme="light"] .settings-subtab-bar,
+:root[data-theme="light"] .settings-subtab-bar button.active,
+:root[data-theme="light"] .provider-remove-button,
+:root[data-theme="light"] .settings-icon-button,
+:root[data-theme="light"] .settings-mini-button,
+:root[data-theme="light"] .current-badge,
+:root[data-theme="light"] .composer-select-trigger,
+:root[data-theme="light"] .composer-model-picker-trigger,
+:root[data-theme="light"] .composer-model-picker-menu,
+:root[data-theme="light"] .composer-model-picker-provider,
+:root[data-theme="light"] .composer-model-picker-model {
+  border-color: #cfddea !important;
+  background: #f1f6fb !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .title-icon-button:hover,
+:root[data-theme="light"] .sidebar-search:hover,
+:root[data-theme="light"] .workspace-control-button:hover,
+:root[data-theme="light"] .composer-icon-button:hover,
+:root[data-theme="light"] .settings-mini-button:hover,
+:root[data-theme="light"] .provider-remove-button:hover,
+:root[data-theme="light"] .settings-icon-button:hover,
+:root[data-theme="light"] .composer-select-trigger:hover:not(:disabled),
+:root[data-theme="light"] .composer-model-picker-trigger:hover:not(:disabled),
+:root[data-theme="light"] .composer-model-picker-provider:hover,
+:root[data-theme="light"] .composer-model-picker-model:hover {
+  border-color: #9dcaf0 !important;
+  background: #e2f1ff !important;
+}
+
+:root[data-theme="light"] .settings-subtab-bar button,
+:root[data-theme="light"] .model-test-label {
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .composer-model-picker-provider.is-active,
+:root[data-theme="light"] .composer-model-picker-model.is-selected,
+:root[data-theme="light"] .composer-select-option.selected {
+  background: #dceeff !important;
+}
+
+/* Right workspace and notifications have independent dark shells. */
+:root[data-theme="light"] .right-workspace-panel,
+:root[data-theme="light"] .right-workspace-tabs,
+:root[data-theme="light"] .right-workspace-content,
+:root[data-theme="light"] .right-workspace-view,
+:root[data-theme="light"] .browser-workspace,
+:root[data-theme="light"] .right-workspace-empty-state {
+  border-color: #d7e4ef !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .right-workspace-tab,
+:root[data-theme="light"] .right-workspace-hide-button {
+  color: #57718a !important;
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .right-workspace-tab:hover,
+:root[data-theme="light"] .right-workspace-hide-button:hover,
+:root[data-theme="light"] .right-workspace-tab.active {
+  color: #1f5f92 !important;
+  background: #e3f1ff !important;
+  box-shadow: inset 0 -2px 0 #75b8f5 !important;
+}
+
+:root[data-theme="light"] .notification-center-panel,
+:root[data-theme="light"] .notification-center-header,
+:root[data-theme="light"] .notification-center-body {
+  border-color: #d7e4ef !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: 0 14px 34px rgba(42, 85, 123, 0.18) !important;
+}
+
+:root[data-theme="light"] .notification-center-item,
+:root[data-theme="light"] .notification-center-header button,
+:root[data-theme="light"] .notification-item-status {
+  color: var(--text-soft) !important;
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .notification-center-item:hover,
+:root[data-theme="light"] .notification-center-item:focus-visible {
+  border-color: #c7ddf1 !important;
+  background: #f1f7fc !important;
+}
+
+:root[data-theme="light"] .sidebar-settings {
+  border-color: #d7e4ef !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+
+/* The workspace, settings, and composer each add dark surfaces after their
+   base styles. Cover their final rendered layers instead of relying on an
+   outer container's background to show through. */
+:root[data-theme="light"] .right-workspace-panel,
+:root[data-theme="light"] .right-workspace-header,
+:root[data-theme="light"] .right-workspace-tabs,
+:root[data-theme="light"] .right-workspace-content,
+:root[data-theme="light"] .right-workspace-view,
+:root[data-theme="light"] .right-workspace-view.active,
+:root[data-theme="light"] .right-workspace-panel .right-workspace-hide-button,
+:root[data-theme="light"] .browser-workspace,
+:root[data-theme="light"] .browser-workspace .browser-tabs,
+:root[data-theme="light"] .browser-workspace .browser-toolbar,
+:root[data-theme="light"] .right-workspace-empty-state {
+  border-color: #d7e4ef !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .right-workspace-panel :is(
+  .right-workspace-empty-state,
+  .right-workspace-empty-state > span,
+  .right-workspace-empty-state strong,
+  .right-workspace-empty-state p,
+  .right-workspace-tab,
+  .right-workspace-tab > svg,
+  .right-workspace-hide-button
+) {
+  color: #45637c !important;
+}
+
+:root[data-theme="light"] .right-workspace-panel .right-workspace-tab:hover,
+:root[data-theme="light"] .right-workspace-panel .right-workspace-tab.active,
+:root[data-theme="light"] .right-workspace-panel .right-workspace-hide-button:hover {
+  color: #1f5f92 !important;
+  background: #e3f1ff !important;
+}
+
+:root[data-theme="light"] .notification-center-panel,
+:root[data-theme="light"] .notification-center-header,
+:root[data-theme="light"] .notification-center-body,
+:root[data-theme="light"] .notification-center-token-usage,
+:root[data-theme="light"] .notification-center-body .agent-activity-list.is-notification {
+  border-color: #d7e4ef !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: 0 14px 34px rgba(42, 85, 123, 0.18) !important;
+}
+
+:root[data-theme="light"] .notification-center-panel :is(
+  strong, span, button, summary, p, code, time, .notification-center-item
+) {
+  color: var(--text-soft) !important;
+}
+
+:root[data-theme="light"] .notification-center-item:hover,
+:root[data-theme="light"] .notification-center-item:focus-visible,
+:root[data-theme="light"] .notification-center-item.is-highlighted {
+  border-color: #c7ddf1 !important;
+  background: #f1f7fc !important;
+}
+
+:root[data-theme="light"] .settings-dialog :is(
+  .settings-subtab-bar,
+  .provider-list-card,
+  .provider-model-box,
+  .provider-model-row,
+  .provider-remove-button,
+  .settings-mini-button,
+  .settings-icon-button,
+  .model-add-button,
+  .form-select .composer-select-trigger,
+  .mcp-select .composer-select-trigger,
+  .composer-select-menu,
+  .composer-select-option,
+  .composer-select-search
+) {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #f7fbff !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .settings-dialog :is(
+  .provider-remove-button,
+  .settings-mini-button,
+  .settings-icon-button,
+  .model-add-button,
+  .composer-select-trigger
+):hover:not(:disabled) {
+  border-color: #9dcaf0 !important;
+  background: #e2f1ff !important;
+}
+
+:root[data-theme="light"] .settings-dialog .settings-subtab-bar button.active,
+:root[data-theme="light"] .settings-dialog .composer-select-option.selected {
+  color: #1f5f92 !important;
+  background: #dceeff !important;
+}
+
+:root[data-theme="light"] .chat-composer,
+:root[data-theme="light"] .chat-composer textarea,
+:root[data-theme="light"] .composer-model-row,
+:root[data-theme="light"] .composer-toolbar,
+:root[data-theme="light"] .composer-queue-item,
+:root[data-theme="light"] .composer-queue-steer-editor,
+:root[data-theme="light"] .composer-model-picker-trigger,
+:root[data-theme="light"] .composer-model-picker-menu,
+:root[data-theme="light"] .composer-model-picker-models,
+:root[data-theme="light"] .composer-model-picker-provider,
+:root[data-theme="light"] .composer-model-picker-model,
+:root[data-theme="light"] .permission-pill,
+:root[data-theme="light"] .composer-project-pill,
+:root[data-theme="light"] .gpa-mode-chip {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .chat-composer textarea::placeholder,
+:root[data-theme="light"] .composer-model-picker-chevron,
+:root[data-theme="light"] .composer-select-chevron,
+:root[data-theme="light"] .composer-queue-label,
+:root[data-theme="light"] .composer-queue-attachments {
+  color: var(--text-muted) !important;
+}
+
+:root[data-theme="light"] .chat-composer :is(
+  .composer-icon-button,
+  .composer-queue-steer,
+  .composer-queue-delete
+) {
+  color: #45637c !important;
+  background: #f1f6fb !important;
+}
+
+:root[data-theme="light"] .chat-composer :is(
+  .composer-icon-button,
+  .composer-queue-steer,
+  .composer-queue-delete
+):hover:not(:disabled),
+:root[data-theme="light"] .composer-model-picker-provider:hover,
+:root[data-theme="light"] .composer-model-picker-model:hover,
+:root[data-theme="light"] .composer-model-picker-provider.is-active,
+:root[data-theme="light"] .composer-model-picker-model.is-selected {
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+
+/* Light-theme treatment for the controls called out in the appearance
+   screenshots. */
+:root[data-theme="light"] .token-usage-toggle,
+:root[data-theme="light"] .token-usage-panel,
+:root[data-theme="light"] .token-usage-panel-header,
+:root[data-theme="light"] .token-usage-panel-body,
+:root[data-theme="light"] .notification-token-usage,
+:root[data-theme="light"] .notification-token-usage-toggle,
+:root[data-theme="light"] .notification-token-usage-panel,
+:root[data-theme="light"] .context-usage-report {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: 0 14px 34px rgba(42, 85, 123, 0.18) !important;
+}
+
+:root[data-theme="light"] .token-usage-toggle:hover,
+:root[data-theme="light"] .token-usage-toggle.active,
+:root[data-theme="light"] .notification-token-usage-toggle:hover,
+:root[data-theme="light"] .context-usage-button:hover,
+:root[data-theme="light"] .context-usage-button.is-open {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+
+:root[data-theme="light"] .token-usage-panel :is(
+  strong, span, b, em, .token-usage-name, .token-usage-row,
+  .token-usage-rate-label, .token-usage-legend, .token-usage-thread,
+  .token-usage-panel-header, .token-usage-panel-body
+),
+:root[data-theme="light"] .context-usage-report :is(
+  strong, span, b, em, .context-usage-summary, .context-usage-compaction,
+  .context-usage-segments > div
+) {
+  color: var(--text-soft) !important;
+}
+
+:root[data-theme="light"] .token-usage-panel-header,
+:root[data-theme="light"] .context-usage-report > header,
+:root[data-theme="light"] .token-usage-rate {
+  border-color: #dbe7f3 !important;
+}
+
+:root[data-theme="light"] .context-usage-ring {
+  background: conic-gradient(#75b8f5 var(--context-usage-angle), #d7e4ef 0) !important;
+}
+:root[data-theme="light"] .context-usage-ring::after { background: #ffffff !important; }
+:root[data-theme="light"] .context-usage-ring span { color: #1f5f92 !important; }
+:root[data-theme="light"] .context-usage-bar { background: #dbe7f3 !important; }
+
+:root[data-theme="light"] .message-user-bubble,
+:root[data-theme="light"] .message-user-content:hover .message-user-bubble,
+:root[data-theme="light"] .message-user-content:focus-within .message-user-bubble {
+  border-color: #c7ddf1 !important;
+  color: var(--text) !important;
+  background: #eaf5ff !important;
+  box-shadow: 0 4px 14px rgba(42, 85, 123, 0.12) !important;
+}
+:root[data-theme="light"] .message-image-attachment { border-color: #cfddea !important; background: #f1f6fb !important; }
+
+:root[data-theme="light"] .scroll-to-latest-button,
+:root[data-theme="light"] .sidebar-settings-help,
+:root[data-theme="light"] .sidebar-settings-button,
+:root[data-theme="light"] .context-usage-button {
+  border-color: #cfddea !important;
+  color: #45637c !important;
+  background: #f1f6fb !important;
+}
+:root[data-theme="light"] .scroll-to-latest-button:hover,
+:root[data-theme="light"] .sidebar-settings-help:hover,
+:root[data-theme="light"] .context-usage-button:hover {
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .sidebar-settings-help {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #cfddea !important;
+  border-radius: 8px;
+}
+
+:root[data-theme="light"] .settings-sidebar,
+:root[data-theme="light"] .settings-tab-strip.settings-tab-strip-vertical,
+:root[data-theme="light"] .settings-strip-tab,
+:root[data-theme="light"] .settings-strip-tab.active,
+:root[data-theme="light"] .settings-strip-tab:hover {
+  border-color: #dbe7f3 !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .settings-strip-tab.active,
+:root[data-theme="light"] .settings-strip-tab:hover {
+  background: #e7f3ff !important;
+}
+
+:root[data-theme="light"] .chat-background-mode-option,
+:root[data-theme="light"] .chat-background-motion-settings,
+:root[data-theme="light"] .chat-background-motion-setting,
+:root[data-theme="light"] .chat-background-segmented,
+:root[data-theme="light"] .chat-background-segmented button,
+:root[data-theme="light"] .chat-background-actions button,
+:root[data-theme="light"] .chat-background-control-group,
+:root[data-theme="light"] .chat-background-surface-group {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .chat-background-mode-option:hover,
+:root[data-theme="light"] .chat-background-mode-option.is-selected,
+:root[data-theme="light"] .chat-background-segmented button:hover,
+:root[data-theme="light"] .chat-background-segmented button.active {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+  box-shadow: none !important;
+}
+:root[data-theme="light"] .chat-background-motion-setting strong,
+:root[data-theme="light"] .chat-background-motion-setting > div > span,
+:root[data-theme="light"] .chat-background-mode-copy strong,
+:root[data-theme="light"] .chat-background-mode-copy span,
+:root[data-theme="light"] .chat-background-heading :is(strong, span),
+:root[data-theme="light"] .chat-background-control-label :is(span, em),
+:root[data-theme="light"] .chat-background-actions button {
+  color: var(--text-soft) !important;
+}
+:root[data-theme="light"] .chat-background-actions .background-action-primary {
+  border-color: var(--action-primary) !important;
+  color: #ffffff !important;
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] .chat-background-actions .background-action-danger {
+  border-color: #efb7b7 !important;
+  color: #a44b4b !important;
+  background: #fff5f5 !important;
+}
+:root[data-theme="light"] .chat-background-motion-setting .chat-background-toggle span {
+  border-color: #b8cde0 !important;
+  background: #e8f0f7 !important;
+}
+:root[data-theme="light"] .chat-background-motion-setting .chat-background-toggle input:checked + span {
+  border-color: var(--action-primary) !important;
+  background: var(--action-primary) !important;
+}
+
+:root[data-theme="light"] .usage-donut {
+  box-shadow: inset 0 0 0 1px #cfddea !important;
+}
+
+/* Keep image and dynamic backgrounds visible in the light theme while using
+   translucent, readable workspace surfaces above them. */
+:root[data-theme="light"] .app-shell.has-app-background,
+:root[data-theme="light"] .app-shell.has-realtime-character {
+  background: #eef6fc !important;
+}
+:root[data-theme="light"] .app-shell.has-app-background .windowbar,
+:root[data-theme="light"] .app-shell.has-realtime-character .windowbar,
+:root[data-theme="light"] .app-shell.has-app-background .sidebar,
+:root[data-theme="light"] .app-shell.has-realtime-character .sidebar,
+:root[data-theme="light"] .app-shell.has-app-background .workspace,
+:root[data-theme="light"] .app-shell.has-realtime-character .workspace,
+:root[data-theme="light"] .app-shell.has-app-background .right-workspace-panel,
+:root[data-theme="light"] .app-shell.has-realtime-character .right-workspace-panel {
+  background: rgba(255, 255, 255, 0.78) !important;
+  backdrop-filter: blur(10px);
+}
+:root[data-theme="light"] .app-shell.has-app-background .chat-scroll,
+:root[data-theme="light"] .app-shell.has-realtime-character .chat-scroll,
+:root[data-theme="light"] .app-shell.has-app-background .chat-transcript,
+:root[data-theme="light"] .app-shell.has-realtime-character .chat-transcript {
+  background: transparent !important;
+}
+:root[data-theme="light"] .app-shell.has-app-background .chat-composer,
+:root[data-theme="light"] .app-shell.has-realtime-character .chat-composer {
+  background: rgba(255, 255, 255, 0.88) !important;
+  border-color: rgba(159, 196, 225, 0.72) !important;
+}
+:root[data-theme="light"] .app-shell.has-app-background .message-user-bubble,
+:root[data-theme="light"] .app-shell.has-realtime-character .message-user-bubble {
+  background: rgba(226, 241, 255, 0.9) !important;
+}
+
+/* Independent sheets, notices, search results, and code previews. */
+:root[data-theme="light"] .app-notice,
+:root[data-theme="light"] .app-notice-copy,
+:root[data-theme="light"] .app-notice-close {
+  border-color: #c7ddf1 !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: 0 16px 40px rgba(42, 85, 123, 0.18) !important;
+}
+:root[data-theme="light"] .app-notice-copy p,
+:root[data-theme="light"] .app-notice-close { color: var(--text-soft) !important; }
+:root[data-theme="light"] .app-notice-close:hover { background: #e2f1ff !important; color: #1f5f92 !important; }
+
+:root[data-theme="light"] .quick-notes-sheet,
+:root[data-theme="light"] .quick-notes-sheet .quick-notes-list,
+:root[data-theme="light"] .quick-notes-sheet .quick-notes-editor,
+:root[data-theme="light"] .quick-notes-items,
+:root[data-theme="light"] .quick-notes-item,
+:root[data-theme="light"] .quick-notes-plain-editor,
+:root[data-theme="light"] .quick-notes-markdown-bar,
+:root[data-theme="light"] .quick-notes-confirm-dialog {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+:root[data-theme="light"] .quick-notes-item:hover,
+:root[data-theme="light"] .quick-notes-item.selected,
+:root[data-theme="light"] .quick-notes-list .quick-notes-item.selected {
+  border-color: #9dcaf0 !important;
+  background: #e7f3ff !important;
+}
+:root[data-theme="light"] .quick-notes-plain-editor {
+  background: #f7fbff !important;
+  color: var(--text) !important;
+}
+:root[data-theme="light"] .quick-notes-list-context-menu,
+:root[data-theme="light"] .quick-notes-list-context-menu button {
+  border-color: #cfddea !important;
+  color: var(--text-soft) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .quick-notes-list-context-menu button:hover { background: #e2f1ff !important; color: #1f5f92 !important; }
+:root[data-theme="light"] .quick-notes-confirm-overlay { background: rgba(31, 61, 88, 0.28) !important; }
+
+:root[data-theme="light"] .history-search-dialog,
+:root[data-theme="light"] .history-search-input-wrap,
+:root[data-theme="light"] .history-search-result,
+:root[data-theme="light"] .history-search-close {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+:root[data-theme="light"] .history-search-input-wrap { background: #f1f6fb !important; }
+:root[data-theme="light"] .history-search-result:hover,
+:root[data-theme="light"] .history-search-result.is-current,
+:root[data-theme="light"] .history-search-close:hover {
+  border-color: #9dcaf0 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .history-search-result-meta,
+:root[data-theme="light"] .history-search-result-snippet,
+:root[data-theme="light"] .history-search-hint,
+:root[data-theme="light"] .history-search-empty { color: var(--text-muted) !important; }
+
+:root[data-theme="light"] .fetch-models-dialog,
+:root[data-theme="light"] .fetch-models-head,
+:root[data-theme="light"] .fetch-models-list,
+:root[data-theme="light"] .fetch-models-actions,
+:root[data-theme="light"] .fetch-models-item,
+:root[data-theme="light"] .fetch-models-head button,
+:root[data-theme="light"] .fetch-models-item input[type="checkbox"],
+:root[data-theme="light"] .fetch-models-item input[type="radio"] {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+:root[data-theme="light"] .fetch-models-item:hover,
+:root[data-theme="light"] .fetch-models-item.is-checked,
+:root[data-theme="light"] .fetch-models-head button:hover {
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .fetch-models-copy span,
+:root[data-theme="light"] .fetch-models-item em { color: var(--text-muted) !important; }
+:root[data-theme="light"] .fetch-models-item input[type="checkbox"]:checked,
+:root[data-theme="light"] .fetch-models-item input[type="radio"]:checked {
+  border-color: #75b8f5 !important;
+  background-color: #75b8f5 !important;
+}
+
+:root[data-theme="light"] .markdown-code-block,
+:root[data-theme="light"] .markdown-code-label,
+:root[data-theme="light"] .markdown-code-scroll,
+:root[data-theme="light"] .event-mono-shell,
+:root[data-theme="light"] .event-mono,
+:root[data-theme="light"] .event-entity-list,
+:root[data-theme="light"] .message-card pre {
+  border-color: #cfddea !important;
+  color: #24425d !important;
+  background: #f1f6fb !important;
+}
+:root[data-theme="light"] .markdown-code-block code,
+:root[data-theme="light"] .event-code,
+:root[data-theme="light"] .event-diff { color: #24425d !important; }
+:root[data-theme="light"] .markdown-code-lines li:hover { background: #e2f1ff !important; }
+:root[data-theme="light"] .markdown-code-lines li::before { border-color: #d7e4ef !important; color: #7891a7 !important; }
+:root[data-theme="light"] .markdown-code-block .hljs-comment,
+:root[data-theme="light"] .markdown-code-block .hljs-quote { color: #668198 !important; }
+:root[data-theme="light"] .event-entity-list li + li { background: transparent !important; }
+
+:root[data-theme="light"] .fetch-models-dialog :is(strong, span, em, button),
+:root[data-theme="light"] .history-search-dialog :is(strong, span, input, button),
+:root[data-theme="light"] .quick-notes-sheet :is(strong, span, input, textarea, button) {
+  color: var(--text) !important;
+}
+
+/* Keep the model picker as one rounded surface instead of a square sheet with
+   separately painted inner regions. */
+:root[data-theme="light"] .fetch-models-dialog {
+  border-radius: 18px !important;
+  overflow: hidden !important;
+}
+
+/* Quick-notes "new" action should use the light-blue accent instead of the
+   legacy navy fill (including when a background skin is enabled). */
+:root[data-theme="light"] .quick-notes-add,
+:root[data-theme="light"] .app-shell.has-app-background .quick-notes-add,
+:root[data-theme="light"] .app-shell.has-realtime-character .quick-notes-add {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .quick-notes-add:hover,
+:root[data-theme="light"] .app-shell.has-app-background .quick-notes-add:hover,
+:root[data-theme="light"] .app-shell.has-realtime-character .quick-notes-add:hover {
+  border-color: #75b8f5 !important;
+  color: #174f7d !important;
+  background: #cce7fb !important;
+}
+
+/* Capability center cards use translucent dark fills in the legacy skin. Use
+   clean white surfaces and a subtle blue hover state in the light theme. */
+:root[data-theme="light"] :is(
+  .skills-toolbar,
+  .skills-search-input,
+  .skills-sort-trigger,
+  .skills-sort-popover,
+  .skills-sort-option,
+  .skill-row,
+  .capability-list .capability-list-item,
+  .user-skill-library-block,
+  .skill-lab-settings-section > .config-block
+) {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .skills-toolbar { padding: 6px; }
+:root[data-theme="light"] .skills-search-input,
+:root[data-theme="light"] .skills-sort-trigger { background: #f7fbff !important; }
+:root[data-theme="light"] .skills-search-input:focus,
+:root[data-theme="light"] .skills-sort-trigger:hover,
+:root[data-theme="light"] .skills-sort-trigger:focus-visible,
+:root[data-theme="light"] .skills-sort-trigger.is-open {
+  border-color: #9dcaf0 !important;
+  background: #eaf5ff !important;
+  box-shadow: 0 0 0 3px rgba(117, 184, 245, 0.2) !important;
+}
+:root[data-theme="light"] .skills-sort-option:hover,
+:root[data-theme="light"] .skills-sort-option.is-selected,
+:root[data-theme="light"] .skill-row:hover,
+:root[data-theme="light"] .capability-list .capability-list-item:hover {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e7f3ff !important;
+}
+:root[data-theme="light"] :is(.skill-row-desc, .skill-row-path, .skill-stat, .skills-sort-control, .skills-sort-control > span) {
+  color: var(--text-muted) !important;
+}
+:root[data-theme="light"] .skill-stat { background: #eef4f9 !important; }
+:root[data-theme="light"] .skill-stat.is-hot { color: #1f6da5 !important; background: #e2f1ff !important; }
+:root[data-theme="light"] .skill-stat.is-good { color: #28724f !important; background: #e0f4e9 !important; }
+:root[data-theme="light"] .skills-sort-popover { box-shadow: 0 14px 30px rgba(42, 85, 123, 0.18) !important; }
+
+/* Repeat the card surfaces with the background-skin specificity. */
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .skills-toolbar, .skills-search-input, .skills-sort-trigger,
+  .skills-sort-popover, .skill-row, .capability-list .capability-list-item,
+  .user-skill-library-block
+),
+:root[data-theme="light"] .app-shell.has-realtime-character :is(
+  .skills-toolbar, .skills-search-input, .skills-sort-trigger,
+  .skills-sort-popover, .skill-row, .capability-list .capability-list-item,
+  .user-skill-library-block
+) {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: rgba(255, 255, 255, 0.96) !important;
+}
+
+/* Background-mode overlays have a more specific dark rule in the legacy
+   background skin; repeat the light surface here so the modal remains light
+   while an image or dynamic scene is enabled. */
+:root[data-theme="light"] .app-shell.has-app-background .settings-dialog,
+:root[data-theme="light"] .app-shell.has-app-background .history-search-dialog,
+:root[data-theme="light"] .app-shell.has-app-background .fetch-models-dialog,
+:root[data-theme="light"] .app-shell.has-app-background .quick-notes-confirm-dialog,
+:root[data-theme="light"] .app-shell.has-realtime-character .settings-dialog,
+:root[data-theme="light"] .app-shell.has-realtime-character .history-search-dialog,
+:root[data-theme="light"] .app-shell.has-realtime-character .fetch-models-dialog,
+:root[data-theme="light"] .app-shell.has-realtime-character .quick-notes-confirm-dialog {
+  border-color: #cfddea !important;
+  background: rgba(255, 255, 255, 0.96) !important;
+  color: var(--text) !important;
+  backdrop-filter: blur(18px);
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .app-notice,
+:root[data-theme="light"] .app-shell.has-realtime-character .app-notice {
+  border-color: #c7ddf1 !important;
+  background: rgba(255, 255, 255, 0.96) !important;
+  color: var(--text) !important;
+}
+
+/* Right-side file and source-control panes. These modules define their own
+   dark surfaces, so they need explicit light-theme values at the final layer. */
+:root[data-theme="light"] :is(
+  .project-files-workspace,
+  .project-files-filter,
+  .project-root-row,
+  .workspace-root-select,
+  .project-file-row,
+  .git-changes-workspace,
+  .git-changes-header,
+  .git-diff-header,
+  .git-sync-summary,
+  .git-commit-panel,
+  .git-commit-panel textarea,
+  .git-change-list,
+  .git-diff-pane,
+  .git-diff-scroll,
+  .git-side-diff-head,
+  .git-hunk,
+  .git-hunk > header
+) {
+  border-color: #d7e4ef !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .project-files-filter {
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .project-files-filter input,
+:root[data-theme="light"] .git-commit-panel textarea,
+:root[data-theme="light"] .git-branch-select select,
+:root[data-theme="light"] .workspace-root-select {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .project-files-filter input::placeholder,
+:root[data-theme="light"] .git-commit-panel textarea::placeholder {
+  color: #8ca0b2 !important;
+}
+:root[data-theme="light"] .project-root-row:hover,
+:root[data-theme="light"] .project-root-row.active,
+:root[data-theme="light"] .project-file-row:not(:disabled):hover,
+:root[data-theme="light"] .project-file-row.selected,
+:root[data-theme="light"] .git-file-row-wrap:hover,
+:root[data-theme="light"] .git-file-row-wrap.active {
+  color: #1f5f92 !important;
+  background: #e7f3ff !important;
+}
+:root[data-theme="light"] .project-file-row,
+:root[data-theme="light"] .project-file-row.directory,
+:root[data-theme="light"] .git-file-row,
+:root[data-theme="light"] .git-file-row b,
+:root[data-theme="light"] .git-change-list-hint,
+:root[data-theme="light"] .git-file-group h3,
+:root[data-theme="light"] .git-hunk-list > h3,
+:root[data-theme="light"] .git-sync-summary,
+:root[data-theme="light"] .git-icon-button,
+:root[data-theme="light"] .git-text-action,
+:root[data-theme="light"] .git-diff-header button,
+:root[data-theme="light"] .git-hunk header button,
+:root[data-theme="light"] .git-commit-progress {
+  color: var(--text-soft) !important;
+}
+:root[data-theme="light"] .git-icon-button:hover,
+:root[data-theme="light"] .git-text-action:hover,
+:root[data-theme="light"] .git-diff-header button:hover,
+:root[data-theme="light"] .git-hunk header button:hover {
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .git-commit-panel button {
+  border-color: var(--action-primary) !important;
+  color: #ffffff !important;
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] .git-commit-panel button:not(:disabled):hover {
+  border-color: var(--action-primary-hover) !important;
+  color: #ffffff !important;
+  background: var(--action-primary-hover) !important;
+}
+:root[data-theme="light"] .git-commit-progress-track { background: #dbe7f3 !important; }
+
+/* Terminal drawer and terminal workspace. */
+:root[data-theme="light"] :is(
+  .terminal-panel,
+  .terminal-header,
+  .terminal-heading,
+  .terminal-heading-icon,
+  .terminal-output,
+  .terminal-composer,
+  .terminal-workspace,
+  .terminal-workspace .terminal-heading,
+  .terminal-workspace .terminal-output,
+  .terminal-workspace .terminal-composer,
+  .workspace-terminal-drawer
+) {
+  border-color: #d7e4ef !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .terminal-output { color: #24425d !important; }
+:root[data-theme="light"] .terminal-heading strong,
+:root[data-theme="light"] .terminal-heading span:not(.terminal-heading-icon),
+:root[data-theme="light"] .terminal-prompt,
+:root[data-theme="light"] .terminal-hide-button {
+  color: var(--text-soft) !important;
+}
+:root[data-theme="light"] .terminal-heading-icon {
+  color: #45637c !important;
+  background: #f1f6fb !important;
+}
+:root[data-theme="light"] .terminal-hide-button:hover {
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .terminal-composer input {
+  color: var(--text) !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] .terminal-composer input::placeholder { color: #8ca0b2 !important; }
+
+/* Composer attachment/GPA menus are floating layers with a standalone dark
+   palette in the legacy stylesheet. */
+:root[data-theme="light"] :is(
+  .gpa-popover,
+  .composer-add-menu,
+  .composer-add-menu-submenu,
+  .gpa-popover-item,
+  .gpa-popover-back,
+  .composer-add-menu-empty,
+  .composer-add-menu-submenu-title
+) {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .gpa-popover-item:hover,
+:root[data-theme="light"] .gpa-popover-item.is-active,
+:root[data-theme="light"] .gpa-popover-back:hover,
+:root[data-theme="light"] .composer-add-menu-parent:hover,
+:root[data-theme="light"] .composer-add-menu-parent:focus-visible {
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .gpa-popover-item-icon {
+  border-color: #d7e4ef !important;
+  background: #f1f6fb !important;
+}
+:root[data-theme="light"] .gpa-popover-item > svg { color: #688097 !important; }
+:root[data-theme="light"] .gpa-popover-divider { background: #dbe7f3 !important; }
+:root[data-theme="light"] .gpa-popover-item-check {
+  color: #28724f !important;
+  background: #e0f4e9 !important;
+}
+:root[data-theme="light"] .gpa-popover-item-check:not(.is-active) {
+  color: #688097 !important;
+  background: #eef3f7 !important;
+}
+
+/* Keep the same corrections when an image/dynamic background raises legacy
+   selectors' specificity. */
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .terminal-panel, .terminal-header, .terminal-output, .terminal-composer,
+  .workspace-terminal-drawer, .project-files-workspace, .project-files-filter,
+  .git-changes-workspace, .git-changes-header, .git-commit-panel,
+  .git-commit-panel textarea, .gpa-popover, .composer-add-menu-submenu
+),
+:root[data-theme="light"] .app-shell.has-realtime-character :is(
+  .terminal-panel, .terminal-header, .terminal-output, .terminal-composer,
+  .workspace-terminal-drawer, .project-files-workspace, .project-files-filter,
+  .git-changes-workspace, .git-changes-header, .git-commit-panel,
+  .git-commit-panel textarea, .gpa-popover, .composer-add-menu-submenu
+) {
+  color: var(--text) !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  border-color: #cfddea !important;
+}
+
+/* Message rows and markdown tables must stay on the light canvas; the legacy
+   user-row and table-header rules intentionally use opaque near-black fills. */
+:root[data-theme="light"] .message-card.user,
+:root[data-theme="light"] .message-card.user:hover,
+:root[data-theme="light"] .message-card.user:focus-within {
+  color: var(--text) !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] :is(.message-markdown, .event-markdown, .event-final-markdown) {
+  color: var(--text) !important;
+}
+:root[data-theme="light"] :is(
+  .message-markdown h1, .message-markdown h2, .message-markdown h3,
+  .message-markdown h4, .message-markdown h5, .message-markdown h6,
+  .event-markdown h1, .event-markdown h2, .event-markdown h3,
+  .event-markdown h4, .event-markdown h5, .event-markdown h6,
+  .event-final-markdown h1, .event-final-markdown h2, .event-final-markdown h3,
+  .event-final-markdown h4, .event-final-markdown h5, .event-final-markdown h6,
+  .message-markdown strong, .event-markdown strong, .event-final-markdown strong
+) { color: var(--text) !important; }
+:root[data-theme="light"] .markdown-table-wrap,
+:root[data-theme="light"] .markdown-table,
+:root[data-theme="light"] .markdown-table tbody tr {
+  border-color: #cfddea !important;
+  color: var(--text-soft) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .markdown-table th {
+  border-color: #cfddea !important;
+  color: #1f5f92 !important;
+  background: #e7f3ff !important;
+}
+:root[data-theme="light"] .markdown-table th,
+:root[data-theme="light"] .markdown-table td { border-right-color: #dbe7f3 !important; border-bottom-color: #dbe7f3 !important; }
+:root[data-theme="light"] .markdown-table tbody tr:nth-child(even) { background: #f7fbff !important; }
+:root[data-theme="light"] .markdown-table tbody tr:hover { background: #e2f1ff !important; }
+
+/* MCP creation sheet controls. */
+:root[data-theme="light"] .mcp-create-mode {
+  border-color: #cfddea !important;
+  background: #eef3f7 !important;
+}
+:root[data-theme="light"] .mcp-create-mode button {
+  color: var(--text-soft) !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] .mcp-create-mode button:hover,
+:root[data-theme="light"] .mcp-create-mode button.active {
+  color: #1f5f92 !important;
+  background: #dceeff !important;
+}
+:root[data-theme="light"] .mcp-create-enabled {
+  border-color: #9edfc2 !important;
+  color: #28724f !important;
+  background: #e5f8ed !important;
+}
+
+/* Sidebar navigation can inherit the dark background skin while a background
+   image is active; force its resting and selected states back to white/blue. */
+:root[data-theme="light"] .app-shell.has-app-background .sidebar-nav-button,
+:root[data-theme="light"] .app-shell.has-realtime-character .sidebar-nav-button,
+:root[data-theme="light"] .app-shell.has-app-background .history-item,
+:root[data-theme="light"] .app-shell.has-realtime-character .history-item {
+  color: var(--text-soft) !important;
+  background: rgba(255, 255, 255, 0.72) !important;
+  border-color: #dbe7f3 !important;
+}
+:root[data-theme="light"] .app-shell.has-app-background .sidebar-nav-button:hover,
+:root[data-theme="light"] .app-shell.has-realtime-character .sidebar-nav-button:hover,
+:root[data-theme="light"] .app-shell.has-app-background .history-item:hover,
+:root[data-theme="light"] .app-shell.has-realtime-character .history-item:hover,
+:root[data-theme="light"] .app-shell.has-app-background .history-item.selected,
+:root[data-theme="light"] .app-shell.has-realtime-character .history-item.selected {
+  color: #1f5f92 !important;
+  background: #e7f3ff !important;
+  border-color: #9dcaf0 !important;
+}
+
+/* Sidebar navigation hover states are defined early with opaque dark fills;
+   keep the light palette regardless of whether a background skin is active. */
+:root[data-theme="light"] .sidebar-nav-button,
+:root[data-theme="light"] .history-item {
+  color: var(--text-soft) !important;
+  background: transparent !important;
+  border-color: transparent !important;
+}
+:root[data-theme="light"] .sidebar-nav-button:hover,
+:root[data-theme="light"] .sidebar-nav-button:focus-visible,
+:root[data-theme="light"] .history-item:hover,
+:root[data-theme="light"] .history-item:focus-visible {
+  color: #1f5f92 !important;
+  background: #e7f3ff !important;
+  border-color: #c7ddf1 !important;
+}
+:root[data-theme="light"] .history-item.selected {
+  color: #1f5f92 !important;
+  background: #dceeff !important;
+  border-color: #9dcaf0 !important;
+}
+
+/* Terminal tab strip was the remaining black band in the drawer screenshot. */
+:root[data-theme="light"] .workspace-subtab-strip,
+:root[data-theme="light"] .workspace-subtab,
+:root[data-theme="light"] .workspace-subtab-add,
+:root[data-theme="light"] .workspace-subtab-close {
+  border-color: #d7e4ef !important;
+  color: var(--text-soft) !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .workspace-subtab:hover,
+:root[data-theme="light"] .workspace-subtab.active,
+:root[data-theme="light"] .workspace-subtab-add:hover,
+:root[data-theme="light"] .workspace-subtab-close:hover {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+
+/* New-project folder picker and recent-project cards. */
+:root[data-theme="light"] .project-folder-picker,
+:root[data-theme="light"] .recent-project-button {
+  border-color: #cfddea !important;
+  color: var(--text-soft) !important;
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .project-folder-picker output,
+:root[data-theme="light"] .recent-project-path,
+:root[data-theme="light"] .recent-projects-label {
+  color: var(--text-muted) !important;
+}
+:root[data-theme="light"] .recent-project-button:hover,
+:root[data-theme="light"] .recent-project-button:focus-visible,
+:root[data-theme="light"] .recent-project-button.selected {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+
+/* The main canvas should remain a continuous white surface. Hide the pale
+   gutter fills and the settings-row strip while preserving separators. */
+:root[data-theme="light"] .panel-resize-handle {
+  background: transparent !important;
+}
+:root[data-theme="light"] .panel-resize-handle::after {
+  background: #dbe7f3 !important;
+}
+:root[data-theme="light"] .panel-resize-handle:hover::after,
+:root[data-theme="light"] .panel-resize-handle.is-active::after {
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] .sidebar-settings,
+:root[data-theme="light"] .sidebar-settings-button,
+:root[data-theme="light"] .sidebar-settings-main {
+  background: transparent !important;
+}
+:root[data-theme="light"] .sidebar-settings:hover,
+:root[data-theme="light"] .sidebar-settings-button:hover {
+  background: #f7fbff !important;
+}
+
+/* Inputs inside framed controls should not create a second nested frame. */
+:root[data-theme="light"] .history-search-input-wrap input,
+:root[data-theme="light"] .history-search-input-wrap input:focus,
+:root[data-theme="light"] .project-files-filter input,
+:root[data-theme="light"] .project-files-filter input:focus {
+  border: 0 !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+/* API card actions use a purple accent by default. In the white theme they
+   follow the same light-blue primary action language as the rest of the app. */
+:root[data-theme="light"] .api-card {
+  --api-card-accent: #75b8f5;
+  border-color: #c7ddf1 !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .api-card-button.is-primary {
+  border-color: var(--action-primary) !important;
+  color: #ffffff !important;
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] .api-card-button.is-primary:hover:not(:disabled) {
+  border-color: var(--action-primary-hover) !important;
+  color: #ffffff !important;
+  background: var(--action-primary-hover) !important;
+}
+:root[data-theme="light"] .api-card-button.is-ghost:hover:not(:disabled) {
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+
+/* Primary actions share one clear blue treatment across sheets, cards, and
+   timeline controls. Destructive and stop actions remain semantic red. */
+:root[data-theme="light"] :is(
+  .gpa-confirmation-button.primary,
+  .approval-session-button,
+  .pending-resume-card-primary,
+  .user-input-submit,
+  .file-preview-lightbox-actions > .file-preview-save-button
+) {
+  border-color: var(--action-primary) !important;
+  color: #ffffff !important;
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] :is(
+  .gpa-confirmation-button.primary,
+  .approval-session-button,
+  .pending-resume-card-primary,
+  .user-input-submit,
+  .file-preview-lightbox-actions > .file-preview-save-button
+):hover:not(:disabled) {
+  border-color: var(--action-primary-hover) !important;
+  color: #ffffff !important;
+  background: var(--action-primary-hover) !important;
+}
+:root[data-theme="light"] .approval-card-actions:not(.explicit-authorization) .approval-allow-button {
+  border-color: var(--action-primary) !important;
+  color: #ffffff !important;
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] .approval-card-actions:not(.explicit-authorization) .approval-allow-button:hover:not(:disabled) {
+  border-color: var(--action-primary-hover) !important;
+  background: var(--action-primary-hover) !important;
+}
+
+/* The appearance preview uses a dark fallback in the base theme. Keep the
+   light-theme canvas pure white while allowing image/video layers to render
+   above it unchanged. */
+:root[data-theme="light"] .chat-background-preview,
+:root[data-theme="light"] .app-shell.has-app-background .chat-background-preview {
+  border-color: #cfddea !important;
+  background: #ffffff !important;
+  box-shadow: 0 18px 42px rgba(42, 85, 123, 0.14) !important;
+}
+:root[data-theme="light"] .chat-background-empty {
+  border-color: #dbe7f3 !important;
+  color: #4b657d !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .chat-background-empty:hover,
+:root[data-theme="light"] .chat-background-empty:focus-visible {
+  color: #1f5f92 !important;
+  background: #f2f8fd !important;
+}
+
+/* Skill Lab mode switch: remove the dark segmented-control fill from the
+   white theme while retaining clear active and hover affordances. */
+:root[data-theme="light"] .skill-lab-mode-choice {
+  border-color: #cfddea !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .skill-lab-mode-choice button {
+  border-color: transparent !important;
+  color: #486176 !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] .skill-lab-mode-choice button:hover:not(:disabled),
+:root[data-theme="light"] .skill-lab-mode-choice button:focus-visible {
+  color: #1f5f92 !important;
+  background: #f2f8fd !important;
+}
+:root[data-theme="light"] .skill-lab-mode-choice button.active {
+  border-color: #b7d9f4 !important;
+  color: #1f5f92 !important;
+  background: #dceeff !important;
+}
+
+/* Notification text belongs directly on the outer toast surface. */
+:root[data-theme="light"] .app-notice-copy {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Consistent light-theme list hierarchy. Every repeated record gets the same
+   spacing, white surface, quiet border, and a blue emphasis for active rows. */
+:root[data-theme="light"] :is(
+  .mcp-server-list,
+  .knowledge-base-list,
+  .memory-solution-list,
+  .memory-compact-list,
+  .provider-list-scroll,
+  .skills-list,
+  .notification-center-list,
+  .database-connection-list,
+  .api-favorites-list,
+  .capability-list,
+  .knowledge-binding-list,
+  .mcp-tool-list
+) {
+  gap: 10px !important;
+  padding: 2px !important;
+  border: 0 !important;
+}
+
+:root[data-theme="light"] :is(
+  .mcp-server-row,
+  .knowledge-base-row,
+  .memory-solution-card,
+  .memory-compact-row,
+  .provider-list-card,
+  .notification-center-item,
+  .skill-row,
+  .knowledge-binding-item,
+  .database-connection-card,
+  .api-favorites-card,
+  .capability-list .capability-list-item
+) {
+  border: 1px solid #cfddea !important;
+  border-left: 3px solid transparent !important;
+  border-radius: 14px !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: 0 3px 12px rgba(42, 85, 123, 0.08) !important;
+}
+
+:root[data-theme="light"] :is(
+  .mcp-server-row:hover,
+  .knowledge-base-row:hover,
+  .memory-solution-card:hover,
+  .memory-compact-row:hover,
+  .provider-list-card:hover,
+  .notification-center-item:hover,
+  .notification-center-item:focus-visible,
+  .skill-row:hover,
+  .knowledge-binding-item:hover,
+  .database-connection-card:hover,
+  .api-favorites-card:hover,
+  .capability-list .capability-list-item:hover
+) {
+  border-color: #9dcaf0 !important;
+  border-left-color: #75b8f5 !important;
+  background: #f7fbff !important;
+  box-shadow: 0 5px 16px rgba(42, 85, 123, 0.12) !important;
+}
+
+:root[data-theme="light"] :is(
+  .mcp-server-row.is-editing,
+  .memory-solution-card.is-expanded,
+  .provider-list-card.selected,
+  .notification-center-item.is-highlighted,
+  .skill-row.is-selected
+) {
+  border-color: #9dcaf0 !important;
+  border-left-color: #5aa9e8 !important;
+  background: #e7f3ff !important;
+  box-shadow: 0 5px 18px rgba(72, 145, 209, 0.14) !important;
+}
+
+:root[data-theme="light"] .memory-compact-row {
+  min-height: 64px;
+  padding: 11px 14px !important;
+}
+
+:root[data-theme="light"] .mcp-tool-row {
+  border: 1px solid #dbe7f3 !important;
+  border-radius: 10px !important;
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .mcp-tool-row:hover {
+  border-color: #9dcaf0 !important;
+  background: #eaf5ff !important;
+}
+
+:root[data-theme="light"] .mcp-server-row,
+:root[data-theme="light"] .knowledge-base-row,
+:root[data-theme="light"] .memory-solution-card {
+  padding: 14px 16px !important;
+}
+
+:root[data-theme="light"] .mcp-server-row-actions {
+  padding-top: 12px !important;
+  border-top: 1px solid #e5eef6 !important;
+}
+
+:root[data-theme="light"] :is(
+  .mcp-server-row-target,
+  .knowledge-base-target,
+  .knowledge-base-meta,
+  .memory-solution-summary,
+  .memory-compact-copy p,
+  .memory-solution-card-meta,
+  .skill-row-desc,
+  .skill-row-path,
+  .notification-item-copy p,
+  .notification-item-detail
+) {
+  color: #6f879d !important;
+}
+
+:root[data-theme="light"] :is(
+  .mcp-transport-pill,
+  .mcp-status-pill,
+  .memory-meta-chip,
+  .knowledge-scope-pill,
+  .knowledge-status,
+  .skill-stat
+) {
+  box-shadow: none !important;
+}
+
+/* Message actions and edit controls need their own light-theme treatment;
+   these components intentionally do not use the generic .button classes. */
+:root[data-theme="light"] .message-user-actions {
+  border-color: #cfddea !important;
+  background: #ffffff !important;
+  box-shadow: 0 6px 16px rgba(42, 85, 123, 0.16) !important;
+}
+:root[data-theme="light"] .message-user-actions button {
+  border-left-color: #dbe7f3 !important;
+  color: #486176 !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] .message-user-actions button:hover,
+:root[data-theme="light"] .message-user-actions button:focus-visible {
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .message-user-edit-button {
+  border-color: #cfddea !important;
+  color: #486176 !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .message-user-edit-button:hover,
+:root[data-theme="light"] .message-user-edit-button:focus-visible {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+
+/* Markdown and event code-block copy actions should match the light control
+   language instead of retaining their dark floating-button skin. */
+:root[data-theme="light"] .copy-text-button {
+  border-color: #cfddea !important;
+  color: #486176 !important;
+  background: #ffffff !important;
+  box-shadow: 0 3px 10px rgba(42, 85, 123, 0.12) !important;
+}
+:root[data-theme="light"] .copy-text-button:hover,
+:root[data-theme="light"] .copy-text-button:focus-visible {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .copy-text-button.is-copied {
+  border-color: #9edfc2 !important;
+  color: #28724f !important;
+  background: #e5f8ed !important;
+}
+
+/* Keep the chat canvas and composer surround on the same pure-white surface;
+   only the controls inside the composer carry blue-tinted treatments. */
+:root[data-theme="light"] .workspace > .chat-canvas,
+:root[data-theme="light"] .composer-shell,
+:root[data-theme="light"] .composer-meta-row {
+  background: #ffffff !important;
+}
+
+/* Make the current project context legible against the white composer area. */
+:root[data-theme="light"] .composer-project-pill {
+  border: 1px solid #b7d9f4 !important;
+  color: #1f5f92 !important;
+  background: #e7f3ff !important;
+  box-shadow: 0 3px 10px rgba(72, 145, 209, 0.12) !important;
+}
+:root[data-theme="light"] .composer-project-pill span {
+  color: #1f5f92 !important;
+}
+:root[data-theme="light"] .composer-project-pill .composer-project-branch {
+  color: #2c78b6 !important;
+}
+:root[data-theme="light"] .composer-project-pill .composer-project-separator {
+  color: #7da5c6 !important;
+}
+:root[data-theme="light"] .composer-project-pill:hover,
+:root[data-theme="light"] .composer-project-pill:focus-visible {
+  border-color: #84c2f5 !important;
+  background: #dceeff !important;
+}
+
+/* Attachment chips inside the composer must not retain dark icon/text
+   surfaces from the legacy palette. */
+:root[data-theme="light"] .composer-attachment-chip {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #f7fbff !important;
+  box-shadow: 0 2px 8px rgba(42, 85, 123, 0.08) !important;
+}
+:root[data-theme="light"] .composer-attachment-chip.code,
+:root[data-theme="light"] .composer-attachment-chip.image,
+:root[data-theme="light"] .composer-attachment-chip.folder,
+:root[data-theme="light"] .composer-attachment-chip.mcp,
+:root[data-theme="light"] .composer-attachment-chip.skill,
+:root[data-theme="light"] .composer-attachment-chip.media-intent {
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .composer-attachment-icon {
+  color: #45637c !important;
+  background: #e7f3ff !important;
+}
+:root[data-theme="light"] .composer-attachment-copy strong {
+  color: #1f3850 !important;
+}
+:root[data-theme="light"] .composer-attachment-copy small {
+  color: #6f879d !important;
+}
+:root[data-theme="light"] .composer-attachment-remove {
+  color: #688097 !important;
+}
+:root[data-theme="light"] .composer-attachment-remove:hover,
+:root[data-theme="light"] .composer-attachment-remove:focus-visible {
+  color: #1f5f92 !important;
+  background: #dceeff !important;
+}
+
+/* Preserve the brand accent against the light theme's global text override. */
+:root[data-theme="light"] .sidebar-brand .sidebar-brand-accent {
+  color: #ef4444 !important;
+}
+
+/* Subagent status popover and task details use a standalone dark palette in
+   the runtime cards; align them with the rest of the light-theme surfaces. */
+:root[data-theme="light"] .subagent-status-dock-toggle {
+  border-color: #cfddea !important;
+  color: #45637c !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .subagent-status-dock-toggle:hover,
+:root[data-theme="light"] .subagent-status-dock-toggle:focus-visible,
+:root[data-theme="light"] .subagent-status-dock.is-expanded .subagent-status-dock-toggle {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .subagent-status-dock-count {
+  border-color: #ffffff !important;
+  color: #1f5f92 !important;
+  background: #a9d6fb !important;
+}
+:root[data-theme="light"] .subagent-status-panel,
+:root[data-theme="light"] .subagent-task-group {
+  border-color: #cfddea !important;
+  color: var(--text) !important;
+  background: #ffffff !important;
+  box-shadow: 0 14px 32px rgba(42, 85, 123, 0.18) !important;
+}
+:root[data-theme="light"] .subagent-task-group-header {
+  border-bottom-color: #dbe7f3 !important;
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .subagent-task-group-kicker,
+:root[data-theme="light"] .subagent-task-freshness,
+:root[data-theme="light"] .subagent-task-section-label,
+:root[data-theme="light"] .subagent-task-meta,
+:root[data-theme="light"] .subagent-task-metric,
+:root[data-theme="light"] .subagent-task-history span,
+:root[data-theme="light"] .subagent-task-chevron {
+  color: #6f879d !important;
+}
+:root[data-theme="light"] .subagent-task-group-header strong,
+:root[data-theme="light"] .subagent-task-summary-copy strong {
+  color: #1f3850 !important;
+}
+:root[data-theme="light"] .subagent-task {
+  border-bottom-color: #e3edf5 !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .subagent-task[open],
+:root[data-theme="light"] .subagent-task > summary:hover {
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .subagent-task > summary:focus-visible {
+  outline-color: #78b9ef !important;
+}
+:root[data-theme="light"] .subagent-task-summary-copy > span,
+:root[data-theme="light"] .subagent-task-view-label,
+:root[data-theme="light"] .subagent-task-identity > summary {
+  color: #56748f !important;
+}
+:root[data-theme="light"] .subagent-task-detail {
+  border-top-color: #dbe7f3 !important;
+}
+:root[data-theme="light"] .subagent-task-section p,
+:root[data-theme="light"] .subagent-task-output {
+  color: #34516b !important;
+}
+:root[data-theme="light"] .subagent-task-history span::before {
+  color: #8ba1b3 !important;
+}
+:root[data-theme="light"] .subagent-instruction-form {
+  border-color: #cfddea !important;
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .subagent-instruction-form textarea {
+  color: var(--text) !important;
+}
+:root[data-theme="light"] .subagent-instruction-form button,
+:root[data-theme="light"] .subagent-task-actions button {
+  border-color: #cfddea !important;
+  color: #486176 !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .subagent-instruction-form button:hover,
+:root[data-theme="light"] .subagent-task-actions button:hover {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #e2f1ff !important;
+}
+:root[data-theme="light"] .subagent-task-actions button.danger {
+  border-color: #efb7b7 !important;
+  color: #a44b4b !important;
+  background: #fff5f5 !important;
+}
+:root[data-theme="light"] .subagent-task-actions button.danger:hover {
+  border-color: #e49a9a !important;
+  background: #ffeaea !important;
+}
+:root[data-theme="light"] .subagent-action-error {
+  border-left-color: #df7e7e !important;
+  color: #a44b4b !important;
+  background: #fff5f5 !important;
+}
+
+/* Welcome-page styles are declared late in the legacy sheet. Reapply the
+   light palette here so its standalone panel and prompt cards never fall back
+   to dark surfaces after the theme changes. */
+:root[data-theme="light"] .chat-scroll.welcome-mode {
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .welcome-empty-state {
+  background-image: none !important;
+}
+:root[data-theme="light"] .welcome-panel {
+  border-color: transparent !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+:root[data-theme="light"] .welcome-panel::before {
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] .welcome-panel.project::before {
+  background: #75b8f5 !important;
+}
+:root[data-theme="light"] .welcome-eyebrow {
+  color: #45637c !important;
+}
+:root[data-theme="light"] .welcome-panel h1,
+:root[data-theme="light"] .welcome-panel h1 span {
+  color: #172638 !important;
+}
+:root[data-theme="light"] .welcome-intro p {
+  color: #56748f !important;
+}
+:root[data-theme="light"] .welcome-card {
+  border-color: #cfddea !important;
+  color: #172638 !important;
+  background: #ffffff !important;
+  box-shadow: 0 6px 18px rgba(42, 85, 123, 0.08) !important;
+}
+:root[data-theme="light"] .welcome-card:hover,
+:root[data-theme="light"] .welcome-card:focus-visible {
+  border-color: #9dcaf0 !important;
+  background: #f7fbff !important;
+  box-shadow: 0 10px 24px rgba(42, 85, 123, 0.12) !important;
+}
+:root[data-theme="light"] .welcome-card-icon {
+  color: var(--welcome-accent) !important;
+  border-color: color-mix(in srgb, var(--welcome-accent) 30%, #dbe7f3) !important;
+  background: color-mix(in srgb, var(--welcome-accent) 11%, #ffffff) !important;
+}
+:root[data-theme="light"] .welcome-card strong {
+  color: #172638 !important;
+}
+:root[data-theme="light"] .welcome-card-action {
+  color: #56748f !important;
+}
+:root[data-theme="light"] .default-home-model {
+  border-color: #dbe7f3 !important;
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .default-home-model-label {
+  color: #688097 !important;
+}
+:root[data-theme="light"] .default-home-model-value {
+  color: #24425d !important;
+}
+
+/* GPA has its own composer-level status controls and recovery sheet. These
+   styles live after the legacy dark rules so switching themes updates every
+   GPA entry point, not only the transcript confirmation card. */
+:root[data-theme="light"] .composer-plan {
+  border-color: #c7ddf1 !important;
+  background: #ffffff !important;
+  box-shadow: 0 6px 18px rgba(42, 85, 123, 0.1) !important;
+}
+:root[data-theme="light"] .composer-plan-summary {
+  color: #24425d !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .composer-plan-summary:hover,
+:root[data-theme="light"] .composer-plan-summary:focus-visible {
+  background: #eaf5ff !important;
+  outline-color: #78b9ef !important;
+}
+:root[data-theme="light"] .composer-plan-title,
+:root[data-theme="light"] .composer-plan-current,
+:root[data-theme="light"] .composer-plan-list .plan-timeline-item.in_progress {
+  color: #24425d !important;
+}
+:root[data-theme="light"] .composer-plan-title > span {
+  color: #2196f3 !important;
+}
+:root[data-theme="light"] .composer-plan-current.completed,
+:root[data-theme="light"] .composer-plan-list .plan-timeline-item.completed {
+  color: #688097 !important;
+  text-decoration-color: #9cb4c8 !important;
+}
+:root[data-theme="light"] .composer-plan-chevron {
+  border-color: #688097 !important;
+}
+:root[data-theme="light"] .composer-plan-panel {
+  border-color: #cfddea !important;
+  background: #ffffff !important;
+  box-shadow: 0 12px 28px rgba(42, 85, 123, 0.16) !important;
+}
+:root[data-theme="light"] .composer-plan-list .plan-timeline-item {
+  color: #56748f !important;
+}
+
+:root[data-theme="light"] .user-input-prompt-card.resolved.gpa-plan-answers,
+:root[data-theme="light"] .gpa-plan-answers-toggle {
+  color: #56748f !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] .gpa-plan-answers-toggle:hover,
+:root[data-theme="light"] .gpa-plan-answers-toggle:focus-visible {
+  color: #1f5f92 !important;
+  outline-color: #78b9ef !important;
+}
+:root[data-theme="light"] .gpa-plan-answers-icon {
+  color: #1f75b5 !important;
+}
+:root[data-theme="light"] .gpa-plan-answer-question {
+  color: #24425d !important;
+}
+:root[data-theme="light"] :is(.gpa-plan-answer-value, .gpa-plan-answer-note) {
+  color: #688097 !important;
+}
+
+:root[data-theme="light"] .gpa-plan-resume-sheet {
+  border-color: #cfddea !important;
+  color: #172638 !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .gpa-plan-resume-task {
+  color: #24425d !important;
+  background: #f7fbff !important;
+}
+:root[data-theme="light"] .gpa-plan-resume-task.is-done {
+  color: #688097 !important;
+}
+:root[data-theme="light"] .gpa-plan-resume-task.is-pending strong {
+  color: #9a6510 !important;
+}
+:root[data-theme="light"] .gpa-plan-resume-markdown {
+  border: 1px solid #dbe7f3 !important;
+  color: #24425d !important;
+  background: #f7fbff !important;
+}
+
+/* File-change summaries sit beside the GPA plan in the composer. Keep the
+   trigger and its disclosure aligned with the same white/blue control style. */
+:root[data-theme="light"] .composer-task-changes-trigger {
+  border-color: #cfddea !important;
+  color: #45637c !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] :is(
+  .composer-task-changes-trigger:hover,
+  .composer-task-changes-trigger:focus-visible,
+  .composer-task-changes-trigger[aria-expanded="true"]
+) {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #eaf5ff !important;
+  outline-color: #78b9ef !important;
+}
+:root[data-theme="light"] :is(
+  .composer-task-changes-icon,
+  .composer-task-changes-label
+) {
+  color: #45637c !important;
+}
+:root[data-theme="light"] :is(
+  .composer-task-changes-trigger .is-added,
+  .composer-task-change-file b
+) {
+  color: #28724f !important;
+}
+:root[data-theme="light"] :is(
+  .composer-task-changes-trigger .is-removed,
+  .composer-task-change-file i
+) {
+  color: #b4232c !important;
+}
+:root[data-theme="light"] .composer-task-changes-popover {
+  border-color: #cfddea !important;
+  background: #ffffff !important;
+  box-shadow: 0 12px 28px rgba(42, 85, 123, 0.16) !important;
+}
+:root[data-theme="light"] .composer-task-changes-list {
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .composer-task-change-file {
+  color: #24425d !important;
+  background: #ffffff !important;
+}
+:root[data-theme="light"] .composer-task-change-file:hover,
+:root[data-theme="light"] .composer-task-change-file.has-diff-preview[aria-pressed="true"] {
+  color: #1f5f92 !important;
+  background: #eaf5ff !important;
+  box-shadow: inset 2px 0 0 #75b8f5 !important;
+}
+
+/* Shared history, project, and file context menu. The destructive action is
+   already part of the action contract; render it distinctly without changing
+   the menu's behavior. */
+:root[data-theme="light"] .workspace-context-menu {
+  border-color: #cfddea !important;
+  background: #ffffff !important;
+  box-shadow: 0 12px 28px rgba(42, 85, 123, 0.18) !important;
+}
+:root[data-theme="light"] .workspace-context-menu button {
+  color: #24425d !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] .workspace-context-menu button > span {
+  color: #567f9e !important;
+}
+:root[data-theme="light"] .workspace-context-menu button:hover,
+:root[data-theme="light"] .workspace-context-menu button:focus-visible {
+  color: #1f5f92 !important;
+  background: #eaf5ff !important;
+  outline-color: #78b9ef !important;
+}
+:root[data-theme="light"] .workspace-context-menu button.is-danger,
+:root[data-theme="light"] .workspace-context-menu button.is-danger > span {
+  color: #b4232c !important;
+}
+:root[data-theme="light"] .workspace-context-menu button.is-danger:hover,
+:root[data-theme="light"] .workspace-context-menu button.is-danger:focus-visible {
+  color: #a11f27 !important;
+  background: #fff1f1 !important;
+}
+
+/* This needs to follow the broad readable-text safeguard above. Primary
+   commands are blue controls, not body text, across every settings screen. */
+:root[data-theme="light"] .app-shell :is(
+  button.send-button,
+  button.button.primary,
+  button.button.warm,
+  button.settings-add-provider,
+  button.message-user-edit-button.primary,
+  button.pending-resume-card-primary,
+  button.api-card-button.is-primary,
+  button.approval-session-button,
+  button.approval-allow-button,
+  button.user-input-submit
+):not(:disabled) {
+  border-color: var(--action-primary) !important;
+  color: #ffffff !important;
+  background: var(--action-primary) !important;
+}
+:root[data-theme="light"] .app-shell :is(
+  button.send-button,
+  button.button.primary,
+  button.button.warm,
+  button.settings-add-provider,
+  button.message-user-edit-button.primary,
+  button.pending-resume-card-primary,
+  button.api-card-button.is-primary,
+  button.approval-session-button,
+  button.approval-allow-button,
+  button.user-input-submit
+):hover:not(:disabled) {
+  border-color: var(--action-primary-hover) !important;
+  color: #ffffff !important;
+  background: var(--action-primary-hover) !important;
+}
+
+/* Composer actions signal intent: green sends a new message, while red stops
+   an active task. These rules intentionally follow the shared blue buttons. */
+.send-button:not(:disabled),
+:root[data-theme="light"] .app-shell button.send-button:not(:disabled) {
+  border-color: #16a34a !important;
+  color: #ffffff !important;
+  background: #16a34a !important;
+}
+.send-button:hover:not(:disabled),
+:root[data-theme="light"] .app-shell button.send-button:hover:not(:disabled) {
+  border-color: #15803d !important;
+  color: #ffffff !important;
+  background: #15803d !important;
+}
+.send-button.running:not(:disabled),
+:root[data-theme="light"] .app-shell button.send-button.running:not(:disabled) {
+  border-color: #dc2626 !important;
+  color: #ffffff !important;
+  background: #dc2626 !important;
+}
+.send-button.running:hover:not(:disabled),
+:root[data-theme="light"] .app-shell button.send-button.running:hover:not(:disabled) {
+  border-color: #b91c1c !important;
+  color: #ffffff !important;
+  background: #b91c1c !important;
+}
+
+/* Snapshot diffs are compact inspection surfaces. Avoid the full-editor
+   appearance and keep the changed-line signal confined to a soft side gutter. */
+.generated-file-diff-popover {
+  max-height: min(320px, calc(100vh - 32px));
+  border-radius: 8px;
+}
+.generated-file-diff-code {
+  min-height: 0;
+  padding: 6px 0;
+  line-height: 1.6;
+}
+.generated-file-diff-code > div {
+  grid-template-columns: 5.25ch 18px minmax(max-content, 1fr);
+  padding-right: 14px;
+  border-left: 2px solid transparent;
+}
+.generated-file-diff-code > div.is-removed {
+  border-left-color: #d95a5a;
+  background: rgba(198, 52, 52, 0.12);
+}
+.generated-file-diff-code > div.is-added {
+  border-left-color: #4caf78;
+  background: rgba(45, 152, 82, 0.12);
+}
+
+:root[data-theme="light"] .generated-file-diff-popover {
+  border-color: #c7ddf1;
+  color: #24425d;
+  background: #ffffff;
+  box-shadow: 0 14px 32px rgba(42, 85, 123, 0.18);
+  backdrop-filter: none;
+}
+:root[data-theme="light"] .generated-file-diff-head {
+  border-bottom-color: #dbe7f3;
+  background: #f7fbff;
+}
+:root[data-theme="light"] .generated-file-diff-head > span { color: #24425d; }
+:root[data-theme="light"] .generated-file-diff-head b { color: #28724f; }
+:root[data-theme="light"] .generated-file-diff-head i { color: #b4232c; }
+:root[data-theme="light"] .generated-file-diff-code {
+  color: #304b61;
+  background: #ffffff;
+  scrollbar-color: #a9c4da transparent;
+}
+:root[data-theme="light"] .generated-file-diff-code code {
+  color: inherit;
+  background: transparent;
+}
+:root[data-theme="light"] .generated-file-diff-code > div.is-context { color: #536d82; }
+:root[data-theme="light"] .generated-file-diff-code > div.is-removed {
+  border-left-color: #dd7a7a;
+  color: #8f343b;
+  background: #fff6f6;
+}
+:root[data-theme="light"] .generated-file-diff-code > div.is-added {
+  border-left-color: #68b68a;
+  color: #246b49;
+  background: #f2fbf6;
+}
+:root[data-theme="light"] .generated-file-diff-code > div.is-omitted {
+  color: #688097;
+  background: #f7fbff;
+}
+:root[data-theme="light"] .generated-file-diff-line-number { color: #8aa0b1; }
+:root[data-theme="light"] .generated-file-diff-note {
+  border-top-color: #dbe7f3;
+  color: #688097;
+  background: #f7fbff;
 }

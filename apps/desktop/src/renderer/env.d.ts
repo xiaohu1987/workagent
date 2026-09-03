@@ -215,6 +215,7 @@ declare global {
       }) => Promise<any>;
       getConfig: () => Promise<any>;
       saveConfig: (config: unknown) => Promise<void>;
+      onThemeChanged: (listener: (theme: "light" | "dark") => void) => () => void;
       listDatabases: () => Promise<any[]>;
       listDatabaseCredentialConnectionIds: () => Promise<string[]>;
       testDatabase: (payload: { connection: unknown; password?: string }) => Promise<

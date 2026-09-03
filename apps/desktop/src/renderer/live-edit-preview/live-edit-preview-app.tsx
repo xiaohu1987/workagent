@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getFilePreviewLanguage, highlightFilePreview, type PreviewCacheEntry } from "../workspace/file-preview-utils";
 import "./live-edit-preview.css";
+import { applyAppTheme } from "../theme";
 
 type PreviewEvent =
   | { kind: "show"; toolCallId: string; threadId: string; path: string; completed: boolean }
@@ -20,6 +21,18 @@ export function LiveEditPreviewApp() {
   const [active, setActive] = useState<ActivePreview | null>(null);
   const [preview, setPreview] = useState<PreviewCacheEntry | null>(null);
   const activeRef = useRef<ActivePreview | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    void window.codexh.getConfig().then((config) => {
+      if (!disposed) applyAppTheme(config?.desktop?.theme);
+    });
+    const dispose = window.codexh.onThemeChanged((theme) => applyAppTheme(theme));
+    return () => {
+      disposed = true;
+      dispose();
+    };
+  }, []);
 
   useEffect(() => {
     const dispose = window.codexh.onLiveEditPreviewEvent((event) => {

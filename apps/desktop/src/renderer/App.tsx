@@ -213,6 +213,7 @@ import {
   IconHelpCircle,
   IconImage,
   IconKnowledge,
+  IconMoon,
   IconNotificationStatus,
   IconPin,
   IconPlus,
@@ -223,6 +224,7 @@ import {
   IconSkills,
   IconSplitPanel,
   IconStop,
+  IconSun,
   IconTerminal,
   IconTrash,
   IconUndo,
@@ -230,6 +232,7 @@ import {
   IconVideo,
   SvgIcon
 } from "./icons";
+import { applyAppTheme, resolveAppTheme } from "./theme";
 import {
   CopyTextButton,
   MessageMediaLightbox,
@@ -707,6 +710,10 @@ export function App() {
   const gpaConfirmationPendingStageRef = useRef<Exclude<GpaStage, "off" | "act"> | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
+
+  useEffect(() => {
+    applyAppTheme(config?.desktop.theme);
+  }, [config?.desktop.theme]);
   const providerDraftEditor = useProviderDraftEditor({ configDraft, setConfigDraft, showNotice });
   const {
     settingsProviderId,
@@ -5590,6 +5597,40 @@ export function App() {
     }
   }
 
+  async function toggleTheme() {
+    if (!config) return;
+
+    const previousConfig = config;
+    const previousDraft = configDraft;
+    const nextTheme: AppConfig["desktop"]["theme"] = resolveAppTheme(config.desktop.theme) === "light" ? "dark" : "light";
+    const nextConfig = {
+      ...config,
+      desktop: {
+        ...config.desktop,
+        theme: nextTheme
+      }
+    };
+
+    applyAppTheme(nextTheme);
+    setConfig(nextConfig);
+    setConfigDraft((current) => current ? {
+      ...current,
+      desktop: {
+        ...current.desktop,
+        theme: nextTheme
+      }
+    } : current);
+
+    try {
+      await window.codexh.saveConfig(nextConfig);
+    } catch (error) {
+      applyAppTheme(previousConfig.desktop.theme);
+      setConfig(previousConfig);
+      setConfigDraft(previousDraft);
+      showNotice("主题设置失败。", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async function setLlmLogViewerEnabled(enabled: boolean) {
     if (!config) return;
     const previousConfig = config;
@@ -6213,23 +6254,28 @@ export function App() {
   const skillLabCurrentSummary = skillLabStatus === "clarifying"
     ? skillLabClarification?.summary ?? "正在整理需要确认的信息"
     : skillLabCurrentProgress?.summary ?? (skillLabMode === "optimize" ? "选择用户技能和迭代次数后开始" : "填写需求和迭代次数后开始");
+  const appTheme = resolveAppTheme(config?.desktop.theme);
+  // Background modes are visual preferences independent from the color theme.
+  // Keep them available in both light and dark appearances.
+  const showImageBackground = backgroundMode === "image";
+  const showRealtimeBackground = backgroundMode === "dynamic";
 
   return (
     <div
       ref={appShellRef}
-      className={`app-shell ${backgroundMode === "image" ? "has-app-background" : ""} ${backgroundMode === "dynamic" ? "has-realtime-character" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+      className={`app-shell ${showImageBackground ? "has-app-background" : ""} ${showRealtimeBackground ? "has-realtime-character" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
         isRightWorkspaceOpen ? "right-workspace-open" : ""
       } ${isTerminalOpen ? "terminal-open" : ""}`}
       style={{
         "--sidebar-pane-width": `${sidebarWidth}px`,
         "--right-workspace-pane-width": `${rightWorkspaceWidth}px`,
-        ...(backgroundMode === "image"
+        ...(showImageBackground
           ? getChatBackgroundSurfaceStyleVars(chatBackgroundSettings.surfaces)
           : {})
       } as React.CSSProperties}
     >
-      {backgroundMode === "image" ? <AppBackgroundLayer images={chatBackgroundImages} activeIndex={activeChatBackgroundIndex} settings={chatBackgroundSettings} /> : null}
-      {backgroundMode === "dynamic" ? <RealtimeBackgroundLayer scene={realtimeEnhancement.scene} /> : null}
+      {showImageBackground ? <AppBackgroundLayer images={chatBackgroundImages} activeIndex={activeChatBackgroundIndex} settings={chatBackgroundSettings} /> : null}
+      {showRealtimeBackground ? <RealtimeBackgroundLayer scene={realtimeEnhancement.scene} /> : null}
       <header className="windowbar">
         <div className="windowbar-left">
           <button
@@ -6240,6 +6286,16 @@ export function App() {
             onClick={() => setIsSidebarCollapsed((current) => !current)}
           >
             <IconSidebar />
+          </button>
+          <button
+            type="button"
+            className="title-icon-button theme-toggle-button"
+            title={appTheme === "light" ? "切换到深色主题" : "切换到浅色主题"}
+            aria-label={appTheme === "light" ? "切换到深色主题" : "切换到浅色主题"}
+            aria-pressed={appTheme === "light"}
+            onClick={() => void toggleTheme()}
+          >
+            {appTheme === "light" ? <IconMoon /> : <IconSun />}
           </button>
         </div>
       </header>
@@ -6298,7 +6354,7 @@ export function App() {
       ) : null}
 
       <main className="workspace">
-        {backgroundMode === "dynamic" ? (
+        {showRealtimeBackground ? (
           <RealtimeCharacterLayer
             scene={realtimeEnhancement.scene}
             onTerminalVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}

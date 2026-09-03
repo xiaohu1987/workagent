@@ -220,12 +220,198 @@ export function buildFileSnapshotDiff(before: string, after: string): FileSnapsh
   ) {
     suffix += 1;
   }
-  return [
+  const unchangedStart = [
     ...beforeLines.slice(0, prefix).map((content) => ({ kind: "context" as const, content })),
-    ...beforeLines.slice(prefix, beforeLines.length - suffix).map((content) => ({ kind: "removed" as const, content })),
-    ...afterLines.slice(prefix, afterLines.length - suffix).map((content) => ({ kind: "added" as const, content })),
+  ];
+  const changed = buildChangedSnapshotLines(
+    beforeLines.slice(prefix, beforeLines.length - suffix),
+    afterLines.slice(prefix, afterLines.length - suffix)
+  );
+  const unchangedEnd = [
     ...beforeLines.slice(beforeLines.length - suffix).map((content) => ({ kind: "context" as const, content }))
   ];
+  return [...unchangedStart, ...changed, ...unchangedEnd];
+}
+
+const MAX_SNAPSHOT_MYERS_EDIT_DISTANCE = 1_024;
+const MAX_SNAPSHOT_LCS_CELLS = 1_000_000;
+
+function buildChangedSnapshotLines(before: string[], after: string[]): FileSnapshotDiffLine[] {
+  if (before.length === 0) return after.map((content) => ({ kind: "added" as const, content }));
+  if (after.length === 0) return before.map((content) => ({ kind: "removed" as const, content }));
+
+  // Unique common lines split large files into small, independent edit regions.
+  // This keeps multi-hunk snapshots accurate without making the renderer hold a
+  // quadratic matrix for an entire source file.
+  const anchors = findSnapshotDiffAnchors(before, after);
+  if (anchors.length > 0) {
+    const lines: FileSnapshotDiffLine[] = [];
+    let beforeStart = 0;
+    let afterStart = 0;
+    for (const anchor of anchors) {
+      lines.push(...buildUnanchoredSnapshotLines(
+        before.slice(beforeStart, anchor.beforeIndex),
+        after.slice(afterStart, anchor.afterIndex)
+      ));
+      lines.push({ kind: "context", content: before[anchor.beforeIndex] });
+      beforeStart = anchor.beforeIndex + 1;
+      afterStart = anchor.afterIndex + 1;
+    }
+    lines.push(...buildUnanchoredSnapshotLines(before.slice(beforeStart), after.slice(afterStart)));
+    return lines;
+  }
+
+  return buildUnanchoredSnapshotLines(before, after);
+}
+
+function buildUnanchoredSnapshotLines(before: string[], after: string[]): FileSnapshotDiffLine[] {
+  if (before.length === 0) return after.map((content) => ({ kind: "added" as const, content }));
+  if (after.length === 0) return before.map((content) => ({ kind: "removed" as const, content }));
+  if (before.length * after.length <= MAX_SNAPSHOT_LCS_CELLS) {
+    return buildSnapshotLcsDiff(before, after);
+  }
+  return buildSnapshotMyersDiff(before, after) ?? [
+    ...before.map((content) => ({ kind: "removed" as const, content })),
+    ...after.map((content) => ({ kind: "added" as const, content }))
+  ];
+}
+
+function findSnapshotDiffAnchors(before: string[], after: string[]) {
+  const beforeIndices = new Map<string, number>();
+  const afterIndices = new Map<string, number>();
+  for (let index = 0; index < before.length; index += 1) {
+    const line = before[index];
+    beforeIndices.set(line, beforeIndices.has(line) ? -1 : index);
+  }
+  for (let index = 0; index < after.length; index += 1) {
+    const line = after[index];
+    afterIndices.set(line, afterIndices.has(line) ? -1 : index);
+  }
+  const candidates = [...beforeIndices.entries()]
+    .flatMap(([content, beforeIndex]) => {
+      const afterIndex = afterIndices.get(content);
+      return beforeIndex >= 0 && afterIndex !== undefined && afterIndex >= 0 ? [{ beforeIndex, afterIndex }] : [];
+    })
+    .sort((left, right) => left.beforeIndex - right.beforeIndex);
+  const tails: number[] = [];
+  const previous = new Array<number>(candidates.length).fill(-1);
+  const tailIndices: number[] = [];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const afterIndex = candidates[index].afterIndex;
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const midpoint = Math.floor((low + high) / 2);
+      if (tails[midpoint] < afterIndex) low = midpoint + 1;
+      else high = midpoint;
+    }
+    if (low > 0) previous[index] = tailIndices[low - 1];
+    tails[low] = afterIndex;
+    tailIndices[low] = index;
+  }
+  const anchors: Array<{ beforeIndex: number; afterIndex: number }> = [];
+  for (let index = tailIndices.at(-1) ?? -1; index >= 0; index = previous[index]) {
+    anchors.push(candidates[index]);
+  }
+  return anchors.reverse();
+}
+
+function buildSnapshotLcsDiff(before: string[], after: string[]): FileSnapshotDiffLine[] {
+  const width = after.length + 1;
+  const lcs = new Uint32Array((before.length + 1) * width);
+  for (let beforeIndex = before.length - 1; beforeIndex >= 0; beforeIndex -= 1) {
+    for (let afterIndex = after.length - 1; afterIndex >= 0; afterIndex -= 1) {
+      const current = beforeIndex * width + afterIndex;
+      lcs[current] = before[beforeIndex] === after[afterIndex]
+        ? lcs[current + width + 1] + 1
+        : Math.max(lcs[current + width], lcs[current + 1]);
+    }
+  }
+  const lines: FileSnapshotDiffLine[] = [];
+  let beforeIndex = 0;
+  let afterIndex = 0;
+  while (beforeIndex < before.length && afterIndex < after.length) {
+    if (before[beforeIndex] === after[afterIndex]) {
+      lines.push({ kind: "context", content: before[beforeIndex] });
+      beforeIndex += 1;
+      afterIndex += 1;
+    } else if (lcs[(beforeIndex + 1) * width + afterIndex] >= lcs[beforeIndex * width + afterIndex + 1]) {
+      lines.push({ kind: "removed", content: before[beforeIndex++] });
+    } else {
+      lines.push({ kind: "added", content: after[afterIndex++] });
+    }
+  }
+  return [
+    ...lines,
+    ...before.slice(beforeIndex).map((content) => ({ kind: "removed" as const, content })),
+    ...after.slice(afterIndex).map((content) => ({ kind: "added" as const, content }))
+  ];
+}
+
+function buildSnapshotMyersDiff(before: string[], after: string[]): FileSnapshotDiffLine[] | null {
+  let frontier = new Map<number, number>([[1, 0]]);
+  const trace: Array<Map<number, number>> = [];
+  const maximumDistance = Math.min(before.length + after.length, MAX_SNAPSHOT_MYERS_EDIT_DISTANCE);
+  for (let distance = 0; distance <= maximumDistance; distance += 1) {
+    const next = new Map<number, number>();
+    for (let diagonal = -distance; diagonal <= distance; diagonal += 2) {
+      const down = frontier.get(diagonal + 1) ?? Number.NEGATIVE_INFINITY;
+      const right = frontier.get(diagonal - 1) ?? Number.NEGATIVE_INFINITY;
+      let beforeIndex = diagonal === -distance || (diagonal !== distance && right < down)
+        ? down
+        : right + 1;
+      let afterIndex = beforeIndex - diagonal;
+      while (beforeIndex < before.length && afterIndex < after.length && before[beforeIndex] === after[afterIndex]) {
+        beforeIndex += 1;
+        afterIndex += 1;
+      }
+      next.set(diagonal, beforeIndex);
+      if (beforeIndex >= before.length && afterIndex >= after.length) {
+        trace.push(next);
+        return backtrackSnapshotMyersDiff(before, after, trace);
+      }
+    }
+    trace.push(next);
+    frontier = next;
+  }
+  return null;
+}
+
+function backtrackSnapshotMyersDiff(
+  before: string[],
+  after: string[],
+  trace: Array<Map<number, number>>
+): FileSnapshotDiffLine[] {
+  const lines: FileSnapshotDiffLine[] = [];
+  let beforeIndex = before.length;
+  let afterIndex = after.length;
+  for (let distance = trace.length - 1; distance > 0; distance -= 1) {
+    const frontier = trace[distance - 1];
+    const diagonal = beforeIndex - afterIndex;
+    const down = frontier.get(diagonal + 1) ?? Number.NEGATIVE_INFINITY;
+    const right = frontier.get(diagonal - 1) ?? Number.NEGATIVE_INFINITY;
+    const previousDiagonal = diagonal === -distance || (diagonal !== distance && right < down)
+      ? diagonal + 1
+      : diagonal - 1;
+    const previousBeforeIndex = frontier.get(previousDiagonal) ?? 0;
+    const previousAfterIndex = previousBeforeIndex - previousDiagonal;
+    while (beforeIndex > previousBeforeIndex && afterIndex > previousAfterIndex) {
+      lines.push({ kind: "context", content: before[--beforeIndex] });
+      afterIndex -= 1;
+    }
+    if (beforeIndex === previousBeforeIndex) {
+      lines.push({ kind: "added", content: after[--afterIndex] });
+    } else {
+      lines.push({ kind: "removed", content: before[--beforeIndex] });
+    }
+  }
+  while (beforeIndex > 0 && afterIndex > 0) {
+    lines.push({ kind: "context", content: before[--beforeIndex] });
+    afterIndex -= 1;
+  }
+  while (beforeIndex > 0) lines.push({ kind: "removed", content: before[--beforeIndex] });
+  while (afterIndex > 0) lines.push({ kind: "added", content: after[--afterIndex] });
+  return lines.reverse();
 }
 
 export function buildFileSnapshotDiffPreview(before: string, after: string, maximumLines = 180) {
@@ -270,6 +456,16 @@ export function buildFileSnapshotDiffPreview(before: string, after: string, maxi
       omitted: true
     }] : [])
   ];
+}
+
+export function getFileSnapshotDiffCounts(before: string, after: string) {
+  return buildFileSnapshotDiff(before, after).reduce(
+    (counts, line) => ({
+      additions: counts.additions + (line.kind === "added" ? 1 : 0),
+      deletions: counts.deletions + (line.kind === "removed" ? 1 : 0)
+    }),
+    { additions: 0, deletions: 0 }
+  );
 }
 
 export function getFileSnapshotDiffMarker(kind: FileSnapshotDiffLine["kind"]): string {

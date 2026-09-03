@@ -371,6 +371,23 @@ export function IconComment() {
   );
 }
 
+export function IconSun() {
+  return (
+    <SvgIcon>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.75v2.1M12 19.15v2.1M21.25 12h-2.1M4.85 12h-2.1M18.54 5.46l-1.49 1.49M6.95 17.05l-1.49 1.49M18.54 18.54l-1.49-1.49M6.95 6.95 5.46 5.46" />
+    </SvgIcon>
+  );
+}
+
+export function IconMoon() {
+  return (
+    <SvgIcon>
+      <path d="M20 14.65A8.25 8.25 0 0 1 9.35 4 8.25 8.25 0 1 0 20 14.65z" />
+    </SvgIcon>
+  );
+}
+
 export function IconChatBubbles() {
   return (
     <SvgIcon>

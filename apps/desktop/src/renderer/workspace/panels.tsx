@@ -144,6 +144,7 @@ export function WorkspaceContextMenu({
           key={action.id}
           type="button"
           role="menuitem"
+          className={action.destructive ? "is-danger" : undefined}
           onClick={() => {
             action.onSelect();
             onClose();

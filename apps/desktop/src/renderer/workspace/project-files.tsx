@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { IconChevronRight, IconSearch, IconCompose, IconCopy, IconFolder, IconFile, IconEye, IconSpinner } from "../icons";
-import { ProjectFileChangeKind, ProjectFileEntry, ProjectFileTreeNode, buildFileSnapshotDiffPreview, buildProjectFileTree, buildProjectFolderManifest, getFileSnapshotDiffMarker, getGitProjectFileChangeKinds, getLatestFileSnapshot, getProjectFileChangeKinds, getProjectFileGlyphClass, getProjectFileNodeChangeKind, mergeProjectFileEntries, projectFileChangeBadge, projectFileChangeLabel, projectFileNodeMatches, resolveProjectFilePath } from "../lib/project-files";
+import { ProjectFileChangeKind, ProjectFileEntry, ProjectFileTreeNode, buildFileSnapshotDiffPreview, buildProjectFileTree, buildProjectFolderManifest, getFileSnapshotDiffCounts, getFileSnapshotDiffMarker, getGitProjectFileChangeKinds, getLatestFileSnapshot, getProjectFileChangeKinds, getProjectFileGlyphClass, getProjectFileNodeChangeKind, mergeProjectFileEntries, projectFileChangeBadge, projectFileChangeLabel, projectFileNodeMatches, resolveProjectFilePath } from "../lib/project-files";
 import { ComposerAttachmentInput } from "../lib/conversation-utils";
 import { WorkspaceContextMenu, WorkspaceEmptyState } from "./panels";
 import { renderCodePreviewLine } from "./file-preview";
@@ -426,8 +426,18 @@ function ProjectFileDiffPopover({
           omitted: line.kind === "meta"
         }))
       ]) : []);
-  const additions = snapshot ? lines.filter((line) => line.kind === "added").length : gitFile?.additions ?? 0;
-  const deletions = snapshot ? lines.filter((line) => line.kind === "removed").length : gitFile?.deletions ?? 0;
+  const snapshotCounts = snapshot ? getFileSnapshotDiffCounts(snapshot.before, snapshot.after) : null;
+  // The Git hunk rows are the content shown in this popover. Count those rows
+  // directly so a stale aggregate from the Git snapshot cannot show +0/-0.
+  const gitCounts = lines.reduce(
+    (counts, line) => ({
+      additions: counts.additions + (line.kind === "added" ? 1 : 0),
+      deletions: counts.deletions + (line.kind === "removed" ? 1 : 0)
+    }),
+    { additions: 0, deletions: 0 }
+  );
+  const additions = snapshotCounts?.additions ?? gitCounts.additions;
+  const deletions = snapshotCounts?.deletions ?? gitCounts.deletions;
   const width = Math.min(720, window.innerWidth - 32);
   const left = Math.max(16, Math.min(anchor.left, window.innerWidth - width - 16));
   const placeAbove = anchor.top > Math.min(440, window.innerHeight * 0.56);

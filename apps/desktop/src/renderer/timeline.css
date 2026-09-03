@@ -648,36 +648,36 @@
 }
 
 .gpa-confirmation-button.primary {
-  border-color: rgba(96, 165, 250, 0.68);
-  color: #dcecff;
-  background: rgba(37, 99, 235, 0.55);
+  border-color: var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
 }
 
 .gpa-confirmation-button.primary:hover:not(:disabled) {
-  border-color: #60a5fa;
-  background: rgba(37, 99, 235, 0.76);
+  border-color: var(--action-primary-hover);
+  background: var(--action-primary-hover);
 }
 
 .gpa-confirmation-button.primary.stage-goal {
-  border-color: rgba(245, 183, 52, 0.76);
-  color: #fff4c7;
-  background: rgba(180, 116, 10, 0.68);
+  border-color: var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
 }
 
 .gpa-confirmation-button.primary.stage-goal:hover:not(:disabled) {
-  border-color: #f5c451;
-  background: rgba(202, 138, 4, 0.86);
+  border-color: var(--action-primary-hover);
+  background: var(--action-primary-hover);
 }
 
 .gpa-confirmation-button.primary.stage-plan {
-  border-color: rgba(96, 165, 250, 0.72);
-  color: #dcecff;
-  background: rgba(37, 99, 235, 0.68);
+  border-color: var(--action-primary);
+  color: #ffffff;
+  background: var(--action-primary);
 }
 
 .gpa-confirmation-button.primary.stage-plan:hover:not(:disabled) {
-  border-color: #79b8ff;
-  background: rgba(37, 99, 235, 0.86);
+  border-color: var(--action-primary-hover);
+  background: var(--action-primary-hover);
 }
 
 .gpa-confirmation-button:active:not(:disabled) {
@@ -1305,7 +1305,7 @@
 
 .streaming-reasoning-body {
   display: block;
-  height: 200px;
+  max-height: min(21vh, 180px);
   margin-top: 6px;
   padding-right: 8px;
   overflow-y: auto;
@@ -1566,6 +1566,448 @@
 .task-timeline .message-user-content:hover .message-user-actions,
 .task-timeline .message-user-content:focus-within .message-user-actions {
   transform: translateY(0) scale(1);
+}
+
+/* timeline.css loads after the shared stylesheet. Keep sent-message bubbles
+   from inheriting the dark fallback when the application uses the light theme. */
+:root[data-theme="light"] .task-timeline .message-card.user .message-user-bubble,
+:root[data-theme="light"] .task-timeline .message-card.user .message-user-content:hover .message-user-bubble,
+:root[data-theme="light"] .task-timeline .message-card.user .message-user-content:focus-within .message-user-bubble {
+  border-color: #c7ddf1 !important;
+  color: #172638 !important;
+  background: #eaf5ff !important;
+  box-shadow: 0 4px 14px rgba(42, 85, 123, 0.12) !important;
+}
+:root[data-theme="light"] .task-timeline .message-card.user .message-user-text {
+  color: #172638 !important;
+}
+
+/* timeline.css is imported after the shared stylesheet. Keep every transcript
+   card on the same light surface so late legacy rules cannot restore a dark
+   panel or low-contrast text in the conversation. */
+:root[data-theme="light"] :is(
+  .plan-timeline,
+  .gpa-confirmation,
+  .execution-step,
+  .tool-activity-details,
+  .local-server-preview,
+  .approval-card,
+  .user-input-prompt-card:not(.resolved),
+  .pending-resume-card,
+  .gpa-plan-message,
+  .event-block:not(.commentary):not(.final),
+  .file-change-summary,
+  .agent-activity-list
+) {
+  border-color: #cfddea !important;
+  color: #172638 !important;
+  background: #ffffff !important;
+  box-shadow: 0 6px 18px rgba(42, 85, 123, 0.08) !important;
+}
+
+:root[data-theme="light"] :is(
+  .gpa-confirmation.stage-goal,
+  .pending-resume-card,
+  .approval-card
+) {
+  border-color: #ead39a !important;
+  background: #fffdf7 !important;
+}
+
+:root[data-theme="light"] :is(
+  .gpa-confirmation.gpa-resume-retry,
+  .execution-step.failed,
+  .approval-card.explicit-authorization
+) {
+  border-color: #f0b8b8 !important;
+  background: #fff7f7 !important;
+}
+
+:root[data-theme="light"] .execution-step.completed {
+  border-color: #a9dfc2 !important;
+  background: #f4fcf7 !important;
+}
+
+:root[data-theme="light"] :is(
+  .plan-timeline-title,
+  .plan-timeline-current,
+  .plan-timeline-item.in_progress,
+  .gpa-confirmation-copy strong,
+  .execution-step-head,
+  .local-server-preview-copy strong,
+  .approval-card-copy strong,
+  .user-input-prompt-head strong,
+  .user-input-question legend,
+  .event-title,
+  .file-change-summary-title strong
+) {
+  color: #172638 !important;
+}
+
+:root[data-theme="light"] :is(
+  .plan-timeline-current.completed,
+  .plan-timeline-item,
+  .gpa-confirmation-copy span,
+  .gpa-revision-footer,
+  .execution-tool-name,
+  .execution-duration,
+  .execution-output,
+  .execution-output summary,
+  .local-server-preview-copy span,
+  .approval-card-copy p,
+  .pending-resume-card-title,
+  .pending-resume-card-text,
+  .pending-resume-card-preview,
+  .user-input-question p,
+  .user-input-option,
+  .user-input-option-copy small,
+  .event-meta-pill,
+  .file-change-summary-row
+) {
+  color: #56748f !important;
+}
+
+:root[data-theme="light"] :is(
+  .gpa-revision-input,
+  .user-input-question textarea,
+  .execution-command,
+  .execution-output pre,
+  .tool-activity-output pre,
+  .database-execution-detail > pre,
+  .database-execution-parameters > pre
+) {
+  border-color: #dbe7f3 !important;
+  color: #24425d !important;
+  background: #f7fbff !important;
+}
+
+:root[data-theme="light"] :is(
+  .gpa-revision-input::placeholder,
+  .user-input-question textarea::placeholder
+) {
+  color: #8ca0b2 !important;
+}
+
+:root[data-theme="light"] :is(
+  .execution-step-details,
+  .tool-activity-details,
+  .active-subagent-lines
+) {
+  border-color: #dbe7f3 !important;
+}
+
+:root[data-theme="light"] .execution-step-head:hover {
+  background: #f2f8fd !important;
+}
+
+:root[data-theme="light"] :is(
+  .gpa-confirmation-button.secondary,
+  .pending-resume-card-dismiss,
+  .approval-deny-button,
+  .local-server-preview button,
+  .tool-activity-detail-load-state button
+) {
+  border-color: #cfddea !important;
+  color: #486176 !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] :is(
+  .gpa-confirmation-button.secondary,
+  .pending-resume-card-dismiss,
+  .approval-deny-button,
+  .local-server-preview button,
+  .tool-activity-detail-load-state button
+):hover:not(:disabled) {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: #eaf5ff !important;
+}
+
+:root[data-theme="light"] :is(
+  .tool-activity-group,
+  .tool-activity-summary,
+  .tool-activity-summary-copy strong,
+  .tool-activity-row-head strong,
+  .tool-activity-row-copy > code,
+  .tool-activity-output,
+  .database-execution-detail-head,
+  .database-execution-detail-head > code,
+  .active-subagent-line,
+  .active-subagent-detail,
+  .active-subagent-meta code,
+  .active-subagent-meta time,
+  .active-subagent-history span,
+  .active-subagent-empty,
+  .active-subagent-prompt
+) {
+  color: #56748f !important;
+}
+
+:root[data-theme="light"] .tool-activity-summary:hover,
+:root[data-theme="light"] .active-subagent-line > summary:hover .active-subagent-name {
+  color: #1f5f92 !important;
+}
+
+:root[data-theme="light"] :is(
+  .tool-activity-details,
+  .tool-activity-row,
+  .tool-activity-group .tool-activity-row.compact,
+  .active-subagent-lines
+) {
+  background: #f7fbff !important;
+}
+
+:root[data-theme="light"] :is(
+  .tool-activity-group .tool-activity-row.compact,
+  .active-subagent-line + .active-subagent-line
+) {
+  border-color: #dbe7f3 !important;
+}
+
+:root[data-theme="light"] :is(
+  .tool-activity-summary-icon,
+  .tool-activity-row-icon,
+  .tool-activity-chevron,
+  .active-subagent-separator,
+  .active-subagent-line > summary::after
+) {
+  color: #688097 !important;
+  border-color: #688097 !important;
+}
+
+:root[data-theme="light"] .active-subagent-name,
+:root[data-theme="light"] .database-execution-detail-head > span,
+:root[data-theme="light"] .tool-activity-row.in_progress .tool-activity-row-head span,
+:root[data-theme="light"] .tool-activity-row-progress,
+:root[data-theme="light"] .tool-activity-detail-load-state {
+  color: #1f75b5 !important;
+}
+
+:root[data-theme="light"] .active-subagent-activity,
+:root[data-theme="light"] .timeline-status-icon.completed {
+  color: #28724f !important;
+}
+
+:root[data-theme="light"] .active-subagent-line.waiting .active-subagent-activity,
+:root[data-theme="light"] .active-subagent-line.queued .active-subagent-activity,
+:root[data-theme="light"] .execution-progress {
+  color: #9a6510 !important;
+}
+
+:root[data-theme="light"] :is(
+  .gpa-plan-message-head,
+  .file-change-summary-head,
+  .event-block-head
+) {
+  border-color: #dbe7f3 !important;
+  background: #f7fbff !important;
+}
+
+:root[data-theme="light"] .gpa-plan-message-title,
+:root[data-theme="light"] .gpa-plan-message-toggle,
+:root[data-theme="light"] .event-badge,
+:root[data-theme="light"] .event-badge.final {
+  color: #24425d !important;
+}
+
+:root[data-theme="light"] :is(
+  .gpa-plan-message-toggle:hover,
+  .gpa-plan-message-toggle:focus-visible,
+  .file-change-summary-row:hover
+) {
+  color: #1f5f92 !important;
+  background: #eaf5ff !important;
+}
+
+:root[data-theme="light"] :is(
+  .event-block.tool_call,
+  .event-block.tool_result,
+  .event-block.file_view,
+  .event-block.file_change,
+  .event-block.test_result
+) {
+  border-color: #cfddea !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] :is(
+  .event-badge,
+  .event-badge.commentary,
+  .event-badge.file_view,
+  .event-badge.final,
+  .event-meta-pill
+) {
+  border-color: #dbe7f3 !important;
+  background: #f1f6fb !important;
+}
+
+:root[data-theme="light"] .event-badge.tool_call,
+:root[data-theme="light"] .event-meta-pill.running {
+  border-color: #b8d9f5 !important;
+  color: #1f75b5 !important;
+  background: #eaf5ff !important;
+}
+
+:root[data-theme="light"] :is(
+  .event-badge.tool_result,
+  .event-badge.test_result,
+  .event-meta-pill.success
+) {
+  border-color: #b7e2c8 !important;
+  color: #28724f !important;
+  background: #eefaf4 !important;
+}
+
+:root[data-theme="light"] :is(
+  .event-badge.file_change,
+  .event-meta-pill.action
+) {
+  border-color: #ead39a !important;
+  color: #9a6510 !important;
+  background: #fff8e7 !important;
+}
+
+:root[data-theme="light"] :is(
+  .event-meta-pill.danger,
+  .tool-activity-row.failed .tool-activity-row-head span,
+  .tool-activity-detail-load-state.error,
+  .active-subagent-stop
+) {
+  color: #b4232c !important;
+}
+
+:root[data-theme="light"] :is(
+  .context-compaction-notice,
+  .context-compaction-notice summary > span:last-child,
+  .context-compaction-icon,
+  .context-compaction-detail,
+  .user-input-prompt-card.resolved,
+  .user-input-prompt-card.resolved strong
+) {
+  color: #688097 !important;
+}
+
+/* Live transcript status rows are deliberately lightweight, but they still
+   need readable text and a white-theme code surface while work is running. */
+:root[data-theme="light"] :is(
+  .runtime-activity-panel,
+  .runtime-activity-current,
+  .runtime-activity-history-item,
+  .runtime-activity-output,
+  .composer-submission-status,
+  .turn-elapsed-banner,
+  .streaming-assistant,
+  .directory-read-group,
+  .task-processing-indicator
+) {
+  color: #56748f !important;
+}
+
+:root[data-theme="light"] :is(
+  .runtime-activity-current strong,
+  .runtime-activity-command > span,
+  .runtime-activity-command code,
+  .composer-submission-status-head strong,
+  .live-assistant-message .streaming-assistant-body,
+  .live-assistant-message .streaming-assistant-plain-body,
+  .assistant-draft-waiting-label
+) {
+  --runtime-text-base: #24425d;
+  color: #24425d !important;
+  background-image: none !important;
+  -webkit-text-fill-color: currentColor !important;
+}
+
+:root[data-theme="light"] :is(
+  .runtime-activity-current-detail,
+  .runtime-activity-current time,
+  .runtime-activity-history-item,
+  .runtime-activity-history-item time,
+  .runtime-activity-output summary > span:last-child,
+  .turn-elapsed-label,
+  .streaming-assistant-state,
+  .streaming-reasoning,
+  .streaming-reasoning-body,
+  .directory-read-group,
+  .directory-read-group-count,
+  .task-processing-indicator
+) {
+  color: #688097 !important;
+}
+
+:root[data-theme="light"] :is(
+  .runtime-activity-current-icon,
+  .runtime-activity-history-icon,
+  .runtime-activity-output-icon,
+  .runtime-activity-history-chevron,
+  .runtime-activity-stream-chevron,
+  .turn-elapsed-toggle
+) {
+  color: #1f75b5 !important;
+}
+
+:root[data-theme="light"] .streaming-caret { background: #1f75b5 !important; }
+
+:root[data-theme="light"] :is(
+  .runtime-activity-output pre,
+  .runtime-activity-history-output pre,
+  .directory-read-group code
+) {
+  border-color: #dbe7f3 !important;
+  color: #24425d !important;
+  background: #f1f6fb !important;
+}
+
+:root[data-theme="light"] .task-processing-indicator {
+  border-color: #c7ddf1 !important;
+  background: #f7fbff !important;
+}
+
+:root[data-theme="light"] .streaming-assistant {
+  border-left-color: #9dcaf0 !important;
+}
+
+:root[data-theme="light"] :is(
+  .event-commentary-markdown,
+  .event-final-markdown,
+  .event-path-row code,
+  .file-change-symbol-list
+) {
+  color: #24425d !important;
+}
+
+:root[data-theme="light"] :is(
+  .generated-file-list,
+  .generated-file-list-head,
+  .generated-file-list-items,
+  .generated-file-list-item
+) {
+  border-color: #cfddea !important;
+  color: #24425d !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .generated-file-list-head {
+  background: #f7fbff !important;
+}
+
+:root[data-theme="light"] :is(
+  .generated-file-list-head:hover,
+  .generated-file-list-item.has-diff-preview:hover,
+  .generated-file-list-item.has-diff-preview[aria-pressed="true"]
+) {
+  color: #1f5f92 !important;
+  background: #eaf5ff !important;
+}
+
+:root[data-theme="light"] :is(
+  .generated-file-list-title,
+  .generated-file-list-count,
+  .generated-file-list-toggle
+) {
+  color: #56748f !important;
 }
 
 @media (max-width: 820px) {

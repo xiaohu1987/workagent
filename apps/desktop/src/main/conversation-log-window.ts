@@ -3,6 +3,7 @@ import type { RuntimeEvent, RuntimeLogEntry, RuntimeLogPage } from "@shared-type
 
 type Options = {
   getMainWindow: () => BrowserWindow | null;
+  getTheme: () => "light" | "dark" | "system";
   getLogEntries: (threadId: string, limit?: number) => Promise<RuntimeLogPage>;
   getLogUrl: (threadId: string) => Promise<string>;
   preloadPath: string;
@@ -87,7 +88,7 @@ export class ConversationLogWindow {
         minHeight: 420,
         show: false,
         title: "LLM 实时日志",
-        backgroundColor: "#090d13",
+        backgroundColor: this.#options.getTheme() === "light" ? "#f7fbff" : "#090d13",
         webPreferences: {
           preload: this.#options.preloadPath,
           contextIsolation: true,

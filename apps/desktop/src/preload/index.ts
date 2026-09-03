@@ -196,6 +196,11 @@ const api = {
     return result;
   },
   saveConfig: (config: unknown) => ipcRenderer.invoke("config:save", config),
+  onThemeChanged: (listener: (theme: "light" | "dark") => void) => {
+    const wrapped = (_event: unknown, theme: "light" | "dark") => listener(theme);
+    ipcRenderer.on("theme:changed", wrapped);
+    return () => ipcRenderer.off("theme:changed", wrapped);
+  },
   setLiveEditPreviewEnabled: (enabled: boolean) => ipcRenderer.invoke("config:set-live-edit-preview", enabled),
   setLlmLogViewerEnabled: (enabled: boolean) => ipcRenderer.invoke("config:set-llm-log-viewer", enabled),
   listDatabases: () => ipcRenderer.invoke("databases:list"),

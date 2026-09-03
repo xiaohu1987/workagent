@@ -4,6 +4,7 @@ import {
   buildProjectFolderManifest,
   buildFileSnapshotDiff,
   buildFileSnapshotDiffPreview,
+  getFileSnapshotDiffCounts,
   getFileSnapshotDiffMarker,
   getGitProjectFileChangeKinds,
   getProjectRelativeGitFiles,
@@ -452,6 +453,45 @@ describe("parseMarkdownBlocks", () => {
     ]);
   });
 
+  it("keeps unchanged lines between separate snapshot edits as context", () => {
+    const diff = buildFileSnapshotDiff(
+      "first\nold-one\nmiddle\nold-two\nlast",
+      "first\nnew-one\nmiddle\nnew-two\nlast"
+    );
+
+    expect(diff).toEqual([
+      { kind: "context", content: "first" },
+      { kind: "removed", content: "old-one" },
+      { kind: "added", content: "new-one" },
+      { kind: "context", content: "middle" },
+      { kind: "removed", content: "old-two" },
+      { kind: "added", content: "new-two" },
+      { kind: "context", content: "last" }
+    ]);
+    expect(diff.filter((line) => line.kind === "added")).toHaveLength(2);
+    expect(diff.filter((line) => line.kind === "removed")).toHaveLength(2);
+  });
+
+  it("counts separated snapshot insertions and deletions without counting their context", () => {
+    const counts = getFileSnapshotDiffCounts(
+      "first\nremove-me\nmiddle\nlast",
+      "first\ninsert-me\nmiddle\nlast\nappend-me"
+    );
+
+    expect(counts).toEqual({ additions: 2, deletions: 1 });
+  });
+
+  it("preserves repeated context when a large snapshot uses the bounded diff path", () => {
+    const repeatedContext = Array.from({ length: 1_001 }, () => "repeated context");
+    const before = ["old-first", ...repeatedContext, "old-last"].join("\n");
+    const after = ["new-first", ...repeatedContext, "new-last"].join("\n");
+    const diff = buildFileSnapshotDiff(before, after);
+
+    expect(diff.filter((line) => line.kind === "context")).toHaveLength(1_001);
+    expect(diff.filter((line) => line.kind === "added")).toHaveLength(2);
+    expect(diff.filter((line) => line.kind === "removed")).toHaveLength(2);
+  });
+
   it("includes a bounded directory tree and inspection requirement for attached folders", () => {
     const folder = buildProjectFileTree([
       { path: "src", kind: "directory" },
@@ -489,6 +529,29 @@ describe("parseMarkdownBlocks", () => {
     expect(preview.some((line) => line.kind === "removed" && line.content === "old")).toBe(true);
     expect(preview.some((line) => line.kind === "added" && line.content === "new")).toBe(true);
     expect(preview.length).toBeLessThan(20);
+  });
+
+  it("keeps complete snapshot totals when the displayed preview is truncated", () => {
+    const before = [
+      ...Array.from({ length: 24 }, (_, index) => `before-${index}`),
+      "old-one",
+      ...Array.from({ length: 24 }, (_, index) => `middle-${index}`),
+      "old-two",
+      ...Array.from({ length: 24 }, (_, index) => `later-${index}`),
+      "old-three",
+      ...Array.from({ length: 24 }, (_, index) => `after-${index}`)
+    ].join("\n");
+    const after = before
+      .replace("old-one", "new-one")
+      .replace("old-two", "new-two")
+      .replace("old-three", "new-three");
+    const preview = buildFileSnapshotDiffPreview(before, after, 20);
+    const full = buildFileSnapshotDiff(before, after);
+
+    expect(full.filter((line) => line.kind === "added")).toHaveLength(3);
+    expect(full.filter((line) => line.kind === "removed")).toHaveLength(3);
+    expect(preview.filter((line) => line.kind === "added").length).toBeLessThan(3);
+    expect(preview.filter((line) => line.kind === "removed").length).toBeLessThan(3);
   });
 
   it("counts the current task's net snapshot changes", () => {
