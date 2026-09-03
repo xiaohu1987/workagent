@@ -880,13 +880,26 @@ export function App() {
   const backgroundMode: ChatBackgroundMode = chatBackgroundSettings.mode;
 
   useEffect(() => {
+    const isLightTheme = resolveAppTheme(config?.desktop.theme) === "light";
+    if (backgroundMode === "dynamic" && isLightTheme) {
+      updateChatBackgroundSettings({ mode: "none", enabled: false });
+      realtimeEnhancement.setEnabled(false);
+      return;
+    }
+
     const shouldEnableRealtime = backgroundMode === "dynamic";
     if (realtimeEnhancement.enabled !== shouldEnableRealtime) {
       realtimeEnhancement.setEnabled(shouldEnableRealtime);
     }
-  }, [backgroundMode, realtimeEnhancement.enabled]);
+  }, [backgroundMode, config?.desktop.theme, realtimeEnhancement.enabled]);
 
   function setBackgroundMode(mode: ChatBackgroundMode) {
+    if (mode === "dynamic" && resolveAppTheme(config?.desktop.theme) === "light") {
+      updateChatBackgroundSettings({ mode: "none", enabled: false });
+      realtimeEnhancement.setEnabled(false);
+      return;
+    }
+
     updateChatBackgroundSettings({ mode, enabled: mode === "image" });
     realtimeEnhancement.setEnabled(mode === "dynamic");
   }
@@ -5603,6 +5616,8 @@ export function App() {
     const previousConfig = config;
     const previousDraft = configDraft;
     const nextTheme: AppConfig["desktop"]["theme"] = resolveAppTheme(config.desktop.theme) === "light" ? "dark" : "light";
+    const shouldResetDynamicBackground = nextTheme === "light" && backgroundMode === "dynamic";
+    const previousBackgroundEnabled = chatBackgroundSettings.enabled;
     const nextConfig = {
       ...config,
       desktop: {
@@ -5620,6 +5635,10 @@ export function App() {
         theme: nextTheme
       }
     } : current);
+    if (shouldResetDynamicBackground) {
+      updateChatBackgroundSettings({ mode: "none", enabled: false });
+      realtimeEnhancement.setEnabled(false);
+    }
 
     try {
       await window.codexh.saveConfig(nextConfig);
@@ -5627,6 +5646,10 @@ export function App() {
       applyAppTheme(previousConfig.desktop.theme);
       setConfig(previousConfig);
       setConfigDraft(previousDraft);
+      if (shouldResetDynamicBackground) {
+        updateChatBackgroundSettings({ mode: "dynamic", enabled: previousBackgroundEnabled });
+        realtimeEnhancement.setEnabled(true);
+      }
       showNotice("主题设置失败。", { message: error instanceof Error ? error.message : String(error) });
     }
   }
@@ -6255,10 +6278,8 @@ export function App() {
     ? skillLabClarification?.summary ?? "正在整理需要确认的信息"
     : skillLabCurrentProgress?.summary ?? (skillLabMode === "optimize" ? "选择用户技能和迭代次数后开始" : "填写需求和迭代次数后开始");
   const appTheme = resolveAppTheme(config?.desktop.theme);
-  // Background modes are visual preferences independent from the color theme.
-  // Keep them available in both light and dark appearances.
   const showImageBackground = backgroundMode === "image" && chatBackgroundImages.length > 0;
-  const showRealtimeBackground = backgroundMode === "dynamic";
+  const showRealtimeBackground = appTheme === "dark" && backgroundMode === "dynamic";
 
   return (
     <div
@@ -6969,6 +6990,7 @@ export function App() {
                   imageUrl={chatBackgroundUrl}
                   settings={chatBackgroundSettings}
                   backgroundMode={backgroundMode}
+                  dynamicBackgroundDisabled={appTheme === "light"}
                   isDragging={isChatBackgroundDragging}
                   onImportFiles={importChatBackgroundFiles}
                   onSelectImage={setActiveChatBackgroundIndex}

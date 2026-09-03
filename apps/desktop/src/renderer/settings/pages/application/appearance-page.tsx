@@ -1,4 +1,4 @@
-import { useEffect, useState, type MutableRefObject, type PointerEventHandler } from "react";
+import { useEffect, useState, type CSSProperties, type MutableRefObject, type PointerEventHandler } from "react";
 import { IconImage, IconRefresh, IconTrash, IconUpload } from "../../../icons";
 import {
   CHAT_BACKGROUND_SURFACE_OPTIONS,
@@ -31,6 +31,11 @@ const CHAT_BACKGROUND_MODE_OPTIONS: ReadonlyArray<{
   { value: "dynamic", label: "动态背景" }
 ];
 
+function getRangeProgressStyle(value: number, minimum: number, maximum: number): CSSProperties {
+  const progress = Math.min(100, Math.max(0, ((value - minimum) / (maximum - minimum)) * 100));
+  return { "--range-progress": `${progress}%` } as CSSProperties;
+}
+
 type AppearanceSettingsPageProps = {
   inputRef: MutableRefObject<HTMLInputElement | null>;
   images: ChatBackgroundImage[];
@@ -38,6 +43,7 @@ type AppearanceSettingsPageProps = {
   imageUrl: string | null;
   settings: ChatBackgroundSettings;
   backgroundMode: ChatBackgroundMode;
+  dynamicBackgroundDisabled: boolean;
   isDragging: boolean;
   onImportFiles: (files: File[]) => Promise<void>;
   onSelectImage: (index: number) => void;
@@ -60,6 +66,7 @@ export function AppearanceSettingsPage({
   imageUrl,
   settings,
   backgroundMode,
+  dynamicBackgroundDisabled,
   isDragging,
   onImportFiles,
   onSelectImage,
@@ -87,27 +94,33 @@ export function AppearanceSettingsPage({
         <em>三种模式互斥，只启用其中一种</em>
       </div>
       <div className="chat-background-mode-options" role="radiogroup" aria-label="背景模式">
-        {CHAT_BACKGROUND_MODE_OPTIONS.map((option) => (
-          <label
-            key={option.value}
-            className={`chat-background-mode-option ${viewMode === option.value ? "is-selected" : ""}`}
-          >
-            <input
-              type="radio"
-              name="chat-background-mode"
-              value={option.value}
-              checked={viewMode === option.value}
-              onChange={() => {
-                setViewMode(option.value);
-                onBackgroundModeChange(option.value);
-              }}
-            />
-            <span className="chat-background-mode-radio" aria-hidden="true" />
-            <span className="chat-background-mode-copy">
-              <strong>{option.label}</strong>
-            </span>
-          </label>
-        ))}
+        {CHAT_BACKGROUND_MODE_OPTIONS.map((option) => {
+          const disabled = option.value === "dynamic" && dynamicBackgroundDisabled;
+          return (
+            <label
+              key={option.value}
+              className={`chat-background-mode-option ${viewMode === option.value ? "is-selected" : ""} ${disabled ? "is-disabled" : ""}`}
+              title={disabled ? "浅色模式不支持动态背景" : undefined}
+            >
+              <input
+                type="radio"
+                name="chat-background-mode"
+                value={option.value}
+                checked={viewMode === option.value}
+                disabled={disabled}
+                onChange={() => {
+                  if (disabled) return;
+                  setViewMode(option.value);
+                  onBackgroundModeChange(option.value);
+                }}
+              />
+              <span className="chat-background-mode-radio" aria-hidden="true" />
+              <span className="chat-background-mode-copy">
+                <strong>{option.label}</strong>
+              </span>
+            </label>
+          );
+        })}
       </div>
     </section>
   );
@@ -272,6 +285,7 @@ export function AppearanceSettingsPage({
                   max="600"
                   step="10"
                   value={settings.rotationIntervalSeconds}
+                  style={getRangeProgressStyle(settings.rotationIntervalSeconds, 10, 600)}
                   disabled={images.length < 2 || !settings.rotationEnabled}
                   onChange={(event) => onUpdateSettings({ rotationIntervalSeconds: Number(event.target.value) })}
                 />
@@ -389,6 +403,7 @@ export function AppearanceSettingsPage({
                 max="180"
                 step="1"
                 value={settings.zoom}
+                style={getRangeProgressStyle(settings.zoom, 100, 180)}
                 disabled={!imageUrl}
                 onChange={(event) => onUpdateSettings({ zoom: Number(event.target.value) })}
               />
@@ -405,6 +420,7 @@ export function AppearanceSettingsPage({
                 max="30"
                 step="1"
                 value={settings.blur}
+                style={getRangeProgressStyle(settings.blur, 0, 30)}
                 onChange={(event) => onUpdateSettings({ blur: Number(event.target.value) })}
               />
             </label>
@@ -420,6 +436,7 @@ export function AppearanceSettingsPage({
                 max="100"
                 step="1"
                 value={settings.opacity}
+                style={getRangeProgressStyle(settings.opacity, 0, 100)}
                 onChange={(event) => onUpdateSettings({ opacity: Number(event.target.value) })}
               />
             </label>
@@ -440,6 +457,7 @@ export function AppearanceSettingsPage({
                       max="100"
                       step="1"
                       value={settings.surfaces[option.key]}
+                      style={getRangeProgressStyle(settings.surfaces[option.key], 0, 100)}
                       disabled={!imageUrl || !settings.enabled}
                       onChange={(event) => onUpdateSurface(option.key, Number(event.target.value))}
                     />

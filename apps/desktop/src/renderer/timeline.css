@@ -1927,13 +1927,21 @@
   .runtime-activity-output summary > span:last-child,
   .turn-elapsed-label,
   .streaming-assistant-state,
-  .streaming-reasoning,
-  .streaming-reasoning-body,
   .directory-read-group,
   .directory-read-group-count,
   .task-processing-indicator
 ) {
   color: #688097 !important;
+}
+
+/* Reasoning stays readable but uses a neutral gray so it is visually
+   secondary to the blue-gray assistant response text. */
+:root[data-theme="light"] :is(
+  .streaming-reasoning,
+  .streaming-reasoning > summary,
+  .streaming-reasoning-body
+) {
+  color: #6e7781 !important;
 }
 
 :root[data-theme="light"] :is(

@@ -21677,6 +21677,11 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   opacity: 0.45;
 }
 
+.chat-background-mode-option.is-disabled:hover {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.035);
+}
+
 .chat-background-mode-option > input {
   position: absolute;
   width: 1px;
@@ -24259,12 +24264,13 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   background: #ffffff !important;
 }
 
-/* Make the current project context legible against the white composer area. */
+/* Match the project context to the adjacent file-change summary: a white
+   default surface with blue reserved for interactive feedback. */
 :root[data-theme="light"] .composer-project-pill {
-  border: 1px solid #b7d9f4 !important;
+  border: 1px solid #cfddea !important;
   color: #1f5f92 !important;
-  background: #e7f3ff !important;
-  box-shadow: 0 3px 10px rgba(72, 145, 209, 0.12) !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
 }
 :root[data-theme="light"] .composer-project-pill span {
   color: #1f5f92 !important;
@@ -24277,8 +24283,8 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 }
 :root[data-theme="light"] .composer-project-pill:hover,
 :root[data-theme="light"] .composer-project-pill:focus-visible {
-  border-color: #84c2f5 !important;
-  background: #dceeff !important;
+  border-color: #9dcaf0 !important;
+  background: #eaf5ff !important;
 }
 
 /* Attachment chips inside the composer must not retain dark icon/text
@@ -24871,6 +24877,19 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   color: var(--text) !important;
   background: var(--surface) !important;
   box-shadow: none !important;
+}
+:root[data-theme="light"] .chat-background-mode-option.is-disabled,
+:root[data-theme="light"] .chat-background-mode-option.is-disabled:hover {
+  border-color: #d8e0e8 !important;
+  color: #8c959f !important;
+  background: #f6f8fa !important;
+  box-shadow: none !important;
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+:root[data-theme="light"] .chat-background-mode-option.is-disabled .chat-background-mode-radio {
+  border-color: #afb8c1 !important;
+  background: #eaeef2 !important;
 }
 
 :root[data-theme="light"] .windowbar {
@@ -25833,15 +25852,23 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   text-decoration-color: #b9c5cf;
 }
 
-/* The conversation canvas should not add a blue-gray wash behind messages.
-   Keep every light chat reading surface pure white, including image and
-   realtime modes, so media preferences cannot tint the transcript. */
+/* Keep the normal light conversation canvas pure white. Image backgrounds
+   opt into the dedicated translucent workspace rules below. */
 :root[data-theme="light"] :is(.chat-canvas, .chat-scroll) {
   background: #ffffff !important;
 }
 
-:root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) :is(.chat-canvas, .chat-scroll, .chat-transcript) {
-  background: #ffffff !important;
+/* Image backgrounds remain available in light mode. Reuse the configured
+   workspace mask strength so the image stays visible without sacrificing
+   transcript readability. Dynamic backgrounds remain dark-theme only. */
+:root[data-theme="light"] .app-shell.has-app-background .workspace {
+  background: rgba(255, 255, 255, var(--app-bg-workspace)) !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background :is(.chat-canvas, .chat-scroll, .chat-transcript) {
+  background: transparent !important;
   background-image: none !important;
   backdrop-filter: none;
 }
@@ -26176,21 +26203,800 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   border-left-color: var(--accent-red) !important;
 }
 
-/* Keep the active thread title in the draggable window bar, aligned with the
-   center of the sidebar region while reserving space for window controls. */
+/* Align the active thread title with the main workspace. The title is plain
+   window-bar content: only its semantic icon and text remain visible. */
 .windowbar {
   position: relative;
 }
 
 .windowbar > .windowbar-thread-title {
   top: 50%;
-  left: clamp(132px, calc(var(--sidebar-pane-width) / 2 + 36px), 360px);
-  max-width: min(640px, calc(100% - clamp(132px, calc(var(--sidebar-pane-width) / 2 + 36px), 360px) - 180px));
+  left: calc(var(--sidebar-pane-width) + 28px);
+  max-width: min(720px, calc(100% - var(--sidebar-pane-width) - 220px));
   min-height: 30px;
+  padding: 0;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none;
+  -webkit-user-select: none;
+  user-select: none;
   transform: translateY(-50%);
+}
+
+/* The earlier light surface group has greater specificity than the shared
+   title rule. Override it explicitly so the title never becomes a panel. */
+:root[data-theme="light"] .windowbar > .windowbar-thread-title {
+  border: 0 !important;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none;
+}
+
+.windowbar > .windowbar-thread-title::selection,
+.windowbar > .windowbar-thread-title *::selection {
+  color: inherit;
+  background: transparent;
 }
 
 .app-shell.sidebar-collapsed .windowbar > .windowbar-thread-title {
   left: 112px;
-  max-width: min(640px, calc(100% - 292px));
+  max-width: min(720px, calc(100% - 292px));
+}
+
+.app-shell.has-app-background .windowbar > .windowbar-thread-title {
+  border: 0 !important;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none;
+}
+
+/* Light appearance editor: use the same blue-white control language as the
+   rest of the workbench and keep hierarchy in separators instead of nested
+   dark cards. */
+:root[data-theme="light"] .chat-background-settings {
+  color: var(--text);
+}
+
+:root[data-theme="light"] .chat-background-editor {
+  gap: clamp(20px, 2vw, 32px);
+}
+
+:root[data-theme="light"] .chat-background-controls {
+  gap: 18px;
+}
+
+:root[data-theme="light"] :is(
+  .chat-background-mode-panel,
+  .chat-background-heading,
+  .chat-background-motion-panel
+) {
+  border-color: var(--border) !important;
+}
+
+:root[data-theme="light"] .chat-background-mode-panel {
+  padding-bottom: 18px;
+}
+
+:root[data-theme="light"] .chat-background-mode-option {
+  min-height: 48px;
+  border-color: #d0d7de !important;
+  color: var(--text-soft) !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .chat-background-mode-option:hover:not(.is-disabled) {
+  border-color: #8fc5f2 !important;
+  color: #0969da !important;
+  background: #f3f8fc !important;
+  transform: translateY(-1px);
+}
+
+:root[data-theme="light"] .chat-background-mode-option.is-selected:not(.is-disabled) {
+  border-color: #75b8f5 !important;
+  color: #0969da !important;
+  background: #e7f3ff !important;
+  box-shadow: inset 0 0 0 1px rgba(33, 150, 243, 0.08) !important;
+}
+
+:root[data-theme="light"] .chat-background-mode-radio {
+  border-color: #8c959f !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .chat-background-mode-radio::after {
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .chat-background-mode-option.is-selected:not(.is-disabled) .chat-background-mode-radio {
+  border-color: #2196f3 !important;
+  background: #2196f3 !important;
+  box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.14) !important;
+}
+
+:root[data-theme="light"] .chat-background-mode-copy strong {
+  color: inherit !important;
+  font-weight: 650;
+}
+
+:root[data-theme="light"] .chat-background-heading {
+  padding: 0 0 16px;
+}
+
+:root[data-theme="light"] .chat-background-heading strong,
+:root[data-theme="light"] .chat-background-control-label > span,
+:root[data-theme="light"] .chat-background-rotation-row strong {
+  color: var(--text) !important;
+}
+
+:root[data-theme="light"] .chat-background-heading span,
+:root[data-theme="light"] .chat-background-control-label em,
+:root[data-theme="light"] .chat-background-rotation-row > div > span,
+:root[data-theme="light"] .chat-background-motion-setting > div > span {
+  color: var(--text-muted) !important;
+}
+
+:root[data-theme="light"] .chat-background-preview,
+:root[data-theme="light"] .app-shell.has-app-background .chat-background-preview {
+  border-color: #b9d7ef !important;
+  background: #ffffff !important;
+  box-shadow:
+    0 0 0 1px rgba(33, 150, 243, 0.05),
+    0 16px 38px rgba(33, 100, 154, 0.12) !important;
+}
+
+:root[data-theme="light"] .chat-background-preview-bar {
+  border-bottom-color: rgba(208, 215, 222, 0.9) !important;
+  color: var(--text) !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  backdrop-filter: blur(14px);
+}
+
+:root[data-theme="light"] .chat-background-preview-avatar {
+  background: #2196f3 !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.5),
+    0 3px 9px rgba(33, 150, 243, 0.2) !important;
+}
+
+:root[data-theme="light"] .preview-bubble {
+  border-color: rgba(208, 215, 222, 0.88) !important;
+  color: #1f2328 !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  box-shadow: 0 8px 20px rgba(31, 35, 40, 0.1) !important;
+}
+
+:root[data-theme="light"] .preview-bubble-user {
+  border-color: rgba(117, 184, 245, 0.72) !important;
+  color: #0a4f86 !important;
+  background: rgba(221, 244, 255, 0.94) !important;
+}
+
+:root[data-theme="light"] .chat-background-library {
+  gap: 14px;
+  padding: 16px 0;
+  border: 0 !important;
+  border-top: 1px solid var(--border) !important;
+  border-bottom: 1px solid var(--border) !important;
+  border-radius: 0;
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .chat-background-add-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border-color: #2196f3 !important;
+  color: #ffffff !important;
+  background: #2196f3 !important;
+  box-shadow: 0 5px 14px rgba(33, 150, 243, 0.18);
+}
+
+:root[data-theme="light"] .chat-background-add-button:hover {
+  border-color: #1976d2 !important;
+  color: #ffffff !important;
+  background: #1976d2 !important;
+  transform: translateY(-1px);
+}
+
+:root[data-theme="light"] .chat-background-library-empty {
+  border-color: #b9d7ef !important;
+  color: #486176 !important;
+  background: #f7fbff !important;
+}
+
+:root[data-theme="light"] .chat-background-library-empty:hover {
+  border-color: #75b8f5 !important;
+  color: #0969da !important;
+  background: #eaf5ff !important;
+}
+
+:root[data-theme="light"] .chat-background-image-item {
+  border-color: #d0d7de !important;
+  background: #ffffff !important;
+  box-shadow: 0 4px 12px rgba(31, 35, 40, 0.06);
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+:root[data-theme="light"] .chat-background-image-item:hover {
+  border-color: #8fc5f2 !important;
+  box-shadow: 0 7px 18px rgba(33, 100, 154, 0.12);
+  transform: translateY(-1px);
+}
+
+:root[data-theme="light"] .chat-background-image-item.is-active {
+  border-color: #2196f3 !important;
+  box-shadow:
+    0 0 0 2px rgba(33, 150, 243, 0.13),
+    0 7px 18px rgba(33, 100, 154, 0.12) !important;
+}
+
+:root[data-theme="light"] .chat-background-image-select {
+  color: var(--text-soft) !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .chat-background-image-select span {
+  border-top: 1px solid #eaeef2;
+  color: var(--text-soft) !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .chat-background-image-remove {
+  border-color: rgba(255, 255, 255, 0.82) !important;
+  color: #cf222e !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  box-shadow: 0 3px 10px rgba(31, 35, 40, 0.12);
+}
+
+:root[data-theme="light"] .chat-background-image-remove:hover {
+  border-color: #cf222e !important;
+  color: #ffffff !important;
+  background: #dc2626 !important;
+}
+
+:root[data-theme="light"] .chat-background-motion-panel {
+  padding-top: 16px;
+  border-top: 1px solid var(--border) !important;
+}
+
+:root[data-theme="light"] .chat-background-motion-settings {
+  gap: 0;
+  border-color: var(--border) !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .chat-background-motion-setting {
+  border: 0 !important;
+  border-bottom: 1px solid #eaeef2 !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .chat-background-motion-setting:nth-last-child(-n + 2) {
+  border-bottom: 0 !important;
+}
+
+:root[data-theme="light"] .chat-background-motion-setting:hover {
+  background: #f7fbff !important;
+}
+
+:root[data-theme="light"] .chat-background-toggle > span,
+:root[data-theme="light"] .chat-background-motion-setting .chat-background-toggle > span {
+  border-color: #afb8c1 !important;
+  background: #eaeef2 !important;
+}
+
+:root[data-theme="light"] .chat-background-toggle > span::after {
+  background: #ffffff !important;
+  box-shadow: 0 1px 3px rgba(31, 35, 40, 0.18);
+}
+
+:root[data-theme="light"] .chat-background-toggle input:checked + span,
+:root[data-theme="light"] .chat-background-motion-setting .chat-background-toggle input:checked + span {
+  border-color: #2196f3 !important;
+  background: #2196f3 !important;
+}
+
+:root[data-theme="light"] .chat-background-toggle em {
+  color: var(--text-muted) !important;
+}
+
+:root[data-theme="light"] .chat-background-segmented {
+  border-color: #d0d7de !important;
+  background: #f6f8fa !important;
+}
+
+:root[data-theme="light"] .chat-background-segmented button {
+  border: 0 !important;
+  color: var(--text-soft) !important;
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .chat-background-segmented button:hover {
+  color: #0969da !important;
+  background: #edf6ff !important;
+}
+
+:root[data-theme="light"] .chat-background-segmented button.active {
+  color: #075eaa !important;
+  background: #dceeff !important;
+  box-shadow: 0 1px 4px rgba(33, 100, 154, 0.12) !important;
+}
+
+:root[data-theme="light"] .chat-background-visual-controls,
+:root[data-theme="light"] .chat-background-surface-group {
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .chat-background-control-label output,
+:root[data-theme="light"] .chat-background-surface-controls output,
+:root[data-theme="light"] .chat-background-rotation-interval output {
+  color: #0969da !important;
+  font-weight: 600;
+}
+
+:root[data-theme="light"] .chat-background-surface-group {
+  padding-top: 18px;
+  border-top: 1px solid var(--border) !important;
+}
+
+:root[data-theme="light"] .chat-background-surface-controls {
+  gap: 11px;
+}
+
+:root[data-theme="light"] .chat-background-surface-controls label,
+:root[data-theme="light"] .chat-background-rotation-interval {
+  color: var(--text-soft) !important;
+}
+
+:root[data-theme="light"] .settings-body :is(
+  .chat-background-control-group,
+  .chat-background-rotation-interval
+) input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: light;
+  accent-color: #2196f3;
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .settings-body :is(
+  .chat-background-control-group,
+  .chat-background-rotation-interval
+) input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #2196f3 0 var(--range-progress, 0%),
+    #d8e3ec var(--range-progress, 0%) 100%
+  );
+}
+
+:root[data-theme="light"] .settings-body :is(
+  .chat-background-control-group,
+  .chat-background-rotation-interval
+) input[type="range"]::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  -webkit-appearance: none;
+  background: #2196f3;
+  box-shadow: 0 1px 4px rgba(9, 105, 218, 0.3);
+}
+
+:root[data-theme="light"] .settings-body :is(
+  .chat-background-control-group,
+  .chat-background-rotation-interval
+) input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.18), 0 1px 4px rgba(9, 105, 218, 0.3);
+}
+
+:root[data-theme="light"] .settings-body :is(
+  .chat-background-control-group,
+  .chat-background-rotation-interval
+) input[type="range"]:disabled::-webkit-slider-runnable-track {
+  filter: saturate(0.3);
+}
+
+:root[data-theme="light"] .chat-background-actions {
+  border-top-color: var(--border) !important;
+}
+
+:root[data-theme="light"] .chat-background-actions button {
+  border-color: #b9d7ef !important;
+  color: #0969da !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="light"] .chat-background-actions button:hover:not(:disabled) {
+  border-color: #75b8f5 !important;
+  color: #075eaa !important;
+  background: #edf6ff !important;
+}
+
+:root[data-theme="light"] .chat-background-actions .background-action-danger {
+  border-color: #f1b8bd !important;
+  color: #cf222e !important;
+  background: #fff5f5 !important;
+}
+
+:root[data-theme="light"] .chat-background-actions .background-action-danger:hover:not(:disabled) {
+  border-color: #dc2626 !important;
+  color: #ffffff !important;
+  background: #dc2626 !important;
+}
+
+/* Keep every light image-background surface connected to its opacity control.
+   Apply the mask once on the owning surface; nested regions stay transparent
+   so their alpha values do not compound into an apparently solid white UI. */
+:root[data-theme="light"] .app-shell.has-app-background .windowbar {
+  background: rgba(255, 255, 255, var(--app-bg-windowbar)) !important;
+  backdrop-filter: blur(8px);
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .sidebar {
+  background: rgba(255, 255, 255, var(--app-bg-sidebar)) !important;
+  backdrop-filter: blur(8px);
+}
+
+/* Do not repaint the full sidebar footer when either footer action is hovered
+   over an image. The main Settings action uses color-only feedback; Help keeps
+   its feedback inside the compact icon button. */
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .sidebar-settings,
+  .sidebar-settings:hover,
+  .sidebar-settings-button,
+  .sidebar-settings-button:hover
+) {
+  background: transparent !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .sidebar-settings-button:hover .sidebar-settings-main {
+  color: #0969da !important;
+}
+
+/* Sidebar help stays a plain icon action in every light background mode. */
+:root[data-theme="light"] .sidebar-settings-help,
+:root[data-theme="light"] .sidebar-settings-help:hover,
+:root[data-theme="light"] .sidebar-settings-help:focus-visible,
+:root[data-theme="light"] .app-shell.has-app-background .sidebar-settings-help,
+:root[data-theme="light"] .app-shell.has-app-background .sidebar-settings-help:hover,
+:root[data-theme="light"] .app-shell.has-app-background .sidebar-settings-help:focus-visible {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .sidebar-settings-help:hover,
+:root[data-theme="light"] .sidebar-settings-help:focus-visible,
+:root[data-theme="light"] .app-shell.has-app-background .sidebar-settings-help:hover,
+:root[data-theme="light"] .app-shell.has-app-background .sidebar-settings-help:focus-visible {
+  color: #0969da !important;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .workspace {
+  background: rgba(255, 255, 255, var(--app-bg-workspace)) !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .right-workspace-panel {
+  background: rgba(255, 255, 255, var(--app-bg-right-panel)) !important;
+  backdrop-filter: blur(5px);
+}
+
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .right-workspace-header,
+  .right-workspace-tabs,
+  .right-workspace-content,
+  .right-workspace-view,
+  .project-files-workspace,
+  .project-preview-workspace,
+  .browser-workspace,
+  .git-changes-workspace,
+  .right-workspace-empty-state
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .workspace-terminal-drawer {
+  background: rgba(255, 255, 255, var(--app-bg-terminal)) !important;
+  backdrop-filter: blur(5px);
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .terminal-workspace :is(
+  .terminal-heading,
+  .terminal-output,
+  .terminal-composer
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+/* A light image background needs a light scrim. The legacy dark scrim turns
+   translucent dialogs gray before their own surface opacity is applied. */
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .settings-overlay,
+  .project-sheet-overlay,
+  .history-search-overlay,
+  .fetch-models-overlay,
+  .quick-notes-confirm-overlay
+) {
+  background: rgba(246, 248, 250, min(0.28, calc(var(--app-bg-dialog) * 0.3))) !important;
+  backdrop-filter: blur(8px);
+}
+
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .settings-dialog,
+  .project-sheet,
+  .history-search-dialog,
+  .fetch-models-dialog,
+  .quick-notes-sheet,
+  .quick-notes-confirm-dialog,
+  .message-image-lightbox-content,
+  .file-preview-lightbox-content,
+  .message-chart-dialog,
+  .gpa-popover,
+  .workspace-context-menu
+) {
+  background: rgba(255, 255, 255, var(--app-bg-dialog)) !important;
+  backdrop-filter: blur(18px);
+}
+
+/* Keep the configured dialog mask as one continuous surface. Title, sidebar,
+   layout, and content regions inherit it without repainting themselves. */
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .settings-layout,
+  .settings-body,
+  .settings-tab-strip,
+  .settings-section,
+  .provider-settings-section,
+  .provider-settings-layout,
+  .quick-notes-sheet > .project-sheet-header,
+  .quick-notes-layout,
+  .quick-notes-list,
+  .quick-notes-editor,
+  .quick-notes-items,
+  .quick-notes-footer,
+  .quick-notes-markdown-bar
+) {
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .settings-topbar,
+  .settings-sidebar
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .provider-list-panel,
+  .provider-detail-panel
+) {
+  border-color: rgba(208, 215, 222, 0.82) !important;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none;
+}
+
+/* Settings navigation follows the dark-mode interaction model: quiet rows at
+   rest, then a single local surface for hover and selection. */
+:root[data-theme="light"] .app-shell.has-app-background .settings-tab-strip.settings-tab-strip-vertical,
+:root[data-theme="light"] .app-shell.has-app-background .settings-strip-tab {
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .settings-strip-tab:hover {
+  border-color: rgba(182, 217, 248, 0.72) !important;
+  background: rgba(243, 248, 252, min(0.68, calc(var(--app-bg-dialog) * 0.78))) !important;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .settings-strip-tab.active {
+  border-color: rgba(117, 184, 245, 0.72) !important;
+  color: #0969da !important;
+  background: rgba(221, 244, 255, min(0.76, calc(var(--app-bg-dialog) * 0.86))) !important;
+}
+
+/* The dialog shell is the only owner of the configured opacity. Every inner
+   settings, notes, and history surface stays transparent to avoid compounding
+   the mask or introducing an independent white fill. */
+:root[data-theme="light"] .app-shell.has-app-background {
+  --light-dialog-hover: rgba(33, 150, 243, calc(var(--app-bg-dialog) * 0.08));
+  --light-dialog-selected: rgba(33, 150, 243, calc(var(--app-bg-dialog) * 0.14));
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .settings-dialog :is(
+  .settings-topbar,
+  .settings-sidebar,
+  .config-block,
+  .stack-card,
+  .summary-card,
+  .provider-list-panel,
+  .provider-detail-panel,
+  .knowledge-import-panel,
+  .knowledge-binding-panel,
+  .knowledge-management-panel,
+  .memory-management-panel,
+  .skills-config-block,
+  .user-skill-library-block,
+  .general-overview-stats,
+  .knowledge-source-list,
+  .api-card,
+  .general-tone-segmented,
+  .skill-lab-mode-choice,
+  .chat-background-mode-panel,
+  .chat-background-library,
+  .chat-background-motion-panel,
+  .usage-statistics-panel
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .settings-dialog :is(
+  .provider-list-card,
+  .provider-model-box,
+  .provider-model-row,
+  .mcp-server-row,
+  .mcp-tool-row,
+  .knowledge-source-item,
+  .knowledge-binding-item,
+  .knowledge-base-row,
+  .memory-solution-card,
+  .memory-compact-row,
+  .database-connection-card,
+  .api-favorites-card,
+  .skill-row,
+  .capability-list .capability-list-item
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .settings-dialog :is(
+  .settings-subtab-bar,
+  .chat-background-mode-option,
+  .chat-background-control-group,
+  .chat-background-motion-settings,
+  .chat-background-motion-setting,
+  .chat-background-segmented,
+  .skills-toolbar,
+  .skills-search-input,
+  .skills-sort-trigger,
+  .provider-remove-button,
+  .settings-close-button,
+  .settings-mini-button,
+  .settings-icon-button,
+  .model-add-button,
+  .chat-background-actions button:not(.background-action-danger),
+  .button.secondary,
+  .button.ghost,
+  .form-select .composer-select-trigger,
+  .mcp-select .composer-select-trigger,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .settings-dialog :is(
+  .composer-select-menu,
+  .composer-select-option,
+  .skills-sort-popover,
+  .skills-sort-option
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .quick-notes-sheet .quick-notes-item,
+  .quick-notes-sheet .quick-notes-plain-editor,
+  .quick-notes-sheet .quick-notes-title-input,
+  .quick-notes-sheet .quick-notes-list-context-menu,
+  .quick-notes-sheet .quick-notes-list-context-menu button,
+  .history-search-dialog .history-search-input-wrap,
+  .history-search-dialog .history-search-result,
+  .history-search-dialog .history-search-close,
+  .fetch-models-dialog .fetch-models-head,
+  .fetch-models-dialog .fetch-models-list,
+  .fetch-models-dialog .fetch-models-actions,
+  .fetch-models-dialog .fetch-models-item
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .quick-notes-sheet .project-sheet-close,
+  .quick-notes-sheet .quick-notes-add,
+  .quick-notes-sheet input,
+  .quick-notes-sheet textarea
+) {
+  background: transparent !important;
+  background-image: none !important;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .settings-dialog :is(
+  .provider-list-card:hover,
+  .provider-model-row:hover,
+  .mcp-server-row:hover,
+  .mcp-tool-row:hover,
+  .knowledge-source-item:hover,
+  .knowledge-binding-item:hover,
+  .knowledge-base-row:hover,
+  .memory-solution-card:hover,
+  .memory-compact-row:hover,
+  .database-connection-card:hover,
+  .api-favorites-card:hover,
+  .skill-row:hover,
+  .capability-list .capability-list-item:hover,
+  .chat-background-mode-option:hover:not(.is-disabled),
+  .chat-background-motion-setting:hover,
+  .skills-sort-trigger:hover,
+  .skills-sort-option:hover
+),
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .quick-notes-sheet .quick-notes-item:hover,
+  .history-search-dialog .history-search-result:hover,
+  .history-search-dialog .history-search-close:hover
+) {
+  background: var(--light-dialog-hover) !important;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .settings-dialog :is(
+  .provider-list-card.selected,
+  .mcp-server-row.is-editing,
+  .memory-solution-card.is-expanded,
+  .skill-row.is-selected,
+  .settings-subtab-bar button.active,
+  .chat-background-mode-option.is-selected:not(.is-disabled),
+  .chat-background-segmented button.active,
+  .composer-select-option.selected,
+  .skills-sort-option.is-selected
+),
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .quick-notes-sheet .quick-notes-item.selected,
+  .history-search-dialog .history-search-result.is-current
+) {
+  background: var(--light-dialog-selected) !important;
+}
+
+/* The composer surround belongs to the conversation surface. Let the image
+   and its configured workspace mask continue behind this area; only the
+   actual input card remains an opaque, glowing reading surface. */
+:root[data-theme="light"] .app-shell.has-app-background :is(
+  .composer-shell,
+  .composer-meta-row
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
 }

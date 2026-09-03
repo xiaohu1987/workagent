@@ -26,6 +26,10 @@ const app = readFileSync(
   new URL("../apps/desktop/src/renderer/App.tsx", import.meta.url),
   "utf8"
 );
+const appearanceSettingsPage = readFileSync(
+  new URL("../apps/desktop/src/renderer/settings/pages/application/appearance-page.tsx", import.meta.url),
+  "utf8"
+);
 const timelineStyles = readFileSync(
   new URL("../apps/desktop/src/renderer/timeline.css", import.meta.url),
   "utf8"
@@ -283,19 +287,112 @@ describe("renderer theme", () => {
     expect(timelineStyles).toContain('.message-user-content.is-editing .message-user-edit-button.primary');
   });
 
-  it("keeps the light conversation surface white in every background mode", () => {
+  it("keeps normal light chat white while allowing image backgrounds", () => {
     expect(app).toContain('const showImageBackground = backgroundMode === "image" && chatBackgroundImages.length > 0');
-    expect(app).toContain('const showRealtimeBackground = backgroundMode === "dynamic"');
-    expect(styles).toContain('The conversation canvas should not add a blue-gray wash');
+    expect(app).toContain('const showRealtimeBackground = appTheme === "dark" && backgroundMode === "dynamic"');
+    expect(styles).toContain('Keep the normal light conversation canvas pure white');
     expect(styles).toContain(':root[data-theme="light"] :is(.chat-canvas, .chat-scroll)');
     expect(styles).toContain('background: #ffffff !important;');
-    expect(styles).toContain(':root[data-theme="light"] .app-shell:is(.has-app-background, .has-realtime-character) :is(.chat-canvas, .chat-scroll, .chat-transcript)');
-    expect(styles).toContain('media preferences cannot tint the transcript');
+    expect(styles).toContain('Image backgrounds remain available in light mode');
+    expect(styles).toContain(':root[data-theme="light"] .app-shell.has-app-background .workspace');
+    expect(styles).toContain('background: rgba(255, 255, 255, var(--app-bg-workspace)) !important;');
+    expect(styles).toContain(':root[data-theme="light"] .app-shell.has-app-background :is(.chat-canvas, .chat-scroll, .chat-transcript)');
+    expect(styles).toContain('background: transparent !important;');
     expect(styles).toContain('background-image: none !important;');
     expect(styles).toContain('Structural chrome must');
     expect(styles).toContain('  .right-workspace-view,');
     expect(styles).toContain('  .composer-shell');
     expect(styles).toContain('backdrop-filter: none;');
+  });
+
+  it("disables dynamic backgrounds in light mode and resets them during theme changes", () => {
+    expect(app).toContain('if (backgroundMode === "dynamic" && isLightTheme)');
+    expect(app).toContain('if (mode === "dynamic" && resolveAppTheme(config?.desktop.theme) === "light")');
+    expect(app).toContain('const shouldResetDynamicBackground = nextTheme === "light" && backgroundMode === "dynamic"');
+    expect(app).toContain('updateChatBackgroundSettings({ mode: "none", enabled: false });');
+    expect(app).toContain('updateChatBackgroundSettings({ mode: "dynamic", enabled: previousBackgroundEnabled });');
+    expect(app).toContain('dynamicBackgroundDisabled={appTheme === "light"}');
+    expect(appearanceSettingsPage).toContain('const disabled = option.value === "dynamic" && dynamicBackgroundDisabled;');
+    expect(appearanceSettingsPage).toContain('disabled={disabled}');
+    expect(appearanceSettingsPage).toContain('if (disabled) return;');
+    expect(styles).toContain(':root[data-theme="light"] .chat-background-mode-option.is-disabled:hover');
+    expect(styles).toContain('cursor: not-allowed;');
+  });
+
+  it("uses the shared blue-white control language throughout the light appearance editor", () => {
+    expect(appearanceSettingsPage).toContain('function getRangeProgressStyle');
+    expect(appearanceSettingsPage).toContain('style={getRangeProgressStyle(settings.opacity, 0, 100)}');
+    expect(styles).toContain('Light appearance editor: use the same blue-white control language');
+    expect(styles).toContain(':root[data-theme="light"] .chat-background-mode-option.is-selected:not(.is-disabled)');
+    expect(styles).toContain(':root[data-theme="light"] .chat-background-preview-bar');
+    expect(styles).toContain(':root[data-theme="light"] .preview-bubble-user');
+    expect(styles).toContain(':root[data-theme="light"] .chat-background-add-button');
+    expect(styles).toContain(':root[data-theme="light"] .chat-background-image-item.is-active');
+    expect(styles).toContain(':root[data-theme="light"] .chat-background-toggle input:checked + span,');
+    expect(styles).toContain('input[type="range"]::-webkit-slider-runnable-track');
+    expect(styles).toContain('#2196f3 0 var(--range-progress, 0%)');
+    expect(styles).toContain(':root[data-theme="light"] .chat-background-actions .background-action-danger:hover:not(:disabled)');
+  });
+
+  it("applies every image-background opacity control to its light-theme surface", () => {
+    expect(styles).toContain('Keep every light image-background surface connected to its opacity control');
+    expect(styles).toContain('background: rgba(255, 255, 255, var(--app-bg-windowbar)) !important;');
+    expect(styles).toContain('background: rgba(255, 255, 255, var(--app-bg-sidebar)) !important;');
+    expect(styles).toContain('background: rgba(255, 255, 255, var(--app-bg-workspace)) !important;');
+    expect(styles).toContain('background: rgba(255, 255, 255, var(--app-bg-right-panel)) !important;');
+    expect(styles).toContain('background: rgba(255, 255, 255, var(--app-bg-terminal)) !important;');
+    expect(styles).toContain('background: rgba(255, 255, 255, var(--app-bg-dialog)) !important;');
+    expect(styles).toContain(':root[data-theme="light"] .app-shell.has-app-background .right-workspace-panel');
+    expect(styles).toContain(':root[data-theme="light"] .app-shell.has-app-background .workspace-terminal-drawer');
+    expect(styles).toContain('nested regions stay transparent');
+    expect(styles).toContain('Do not repaint the full sidebar footer');
+    expect(styles).toContain('  .sidebar-settings:hover,');
+    expect(styles).toContain('  .sidebar-settings-button:hover');
+    expect(styles).toContain('.sidebar-settings-button:hover .sidebar-settings-main');
+    expect(styles).toContain('Sidebar help stays a plain icon action');
+    expect(styles).toContain(':root[data-theme="light"] .sidebar-settings-help:hover,');
+    expect(styles).toContain('.app-shell.has-app-background .sidebar-settings-help:focus-visible {');
+    expect(styles).toContain('border: 0 !important;');
+    expect(styles).toContain('background: transparent !important;');
+    expect(styles).toContain('A light image background needs a light scrim');
+    expect(styles).toContain('  .settings-overlay,');
+    expect(styles).toContain('  .project-sheet-overlay,');
+    expect(styles).toContain('background: rgba(246, 248, 250, min(0.28, calc(var(--app-bg-dialog) * 0.3))) !important;');
+    expect(styles).toContain("Keep the configured dialog mask as one continuous surface");
+    expect(styles).toContain('  .provider-settings-layout,');
+    expect(styles).toContain('  .settings-topbar,\n  .settings-sidebar');
+    expect(styles).toContain('  .provider-list-panel,\n  .provider-detail-panel');
+    expect(styles).toContain("Settings navigation follows the dark-mode interaction model");
+    expect(styles).toContain('.app-shell.has-app-background .settings-strip-tab.active');
+    expect(styles).toContain('  .quick-notes-sheet > .project-sheet-header,');
+    expect(styles).toContain('  .quick-notes-footer,');
+    expect(styles).toContain('The composer surround belongs to the conversation surface');
+    expect(styles).toContain('  .composer-shell,\n  .composer-meta-row');
+  });
+
+  it("lets the configured dialog shell own opacity without inner background fills", () => {
+    const start = styles.indexOf("The dialog shell is the only owner of the configured opacity");
+    const end = styles.indexOf("The composer surround belongs to the conversation surface", start);
+    const dialogSurfaceRules = styles.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(dialogSurfaceRules).toContain("--light-dialog-hover: rgba(33, 150, 243, calc(var(--app-bg-dialog) * 0.08));");
+    expect(dialogSurfaceRules).toContain("--light-dialog-selected: rgba(33, 150, 243, calc(var(--app-bg-dialog) * 0.14));");
+    expect(dialogSurfaceRules).toContain("  .settings-topbar,");
+    expect(dialogSurfaceRules).toContain("  .settings-sidebar,");
+    expect(dialogSurfaceRules).toContain("  .knowledge-import-panel,");
+    expect(dialogSurfaceRules).toContain("  .knowledge-source-list,");
+    expect(dialogSurfaceRules).toContain("  .mcp-server-row,");
+    expect(dialogSurfaceRules).toContain("  .skill-row,");
+    expect(dialogSurfaceRules).toContain("  .chat-background-motion-setting,");
+    expect(dialogSurfaceRules).toContain("  .quick-notes-sheet .quick-notes-item,");
+    expect(dialogSurfaceRules).toContain("  .history-search-dialog .history-search-result,");
+    expect(dialogSurfaceRules).toContain("  .fetch-models-dialog .fetch-models-item");
+    expect(dialogSurfaceRules).toContain("background: transparent !important;");
+    expect(dialogSurfaceRules).not.toContain("--light-dialog-layer:");
+    expect(dialogSurfaceRules).not.toContain("--light-dialog-control:");
+    expect(dialogSurfaceRules).not.toContain("background: #ffffff");
   });
 
   it("uses pure white for every normal light-mode application region", () => {
@@ -373,6 +470,24 @@ describe("renderer theme", () => {
     expect(timelineStyles).not.toContain(".streaming-reasoning-body {\n  display: block;\n  height: 200px;");
   });
 
+  it("distinguishes light reasoning text from the assistant response with neutral gray", () => {
+    expect(timelineStyles).toContain("Reasoning stays readable but uses a neutral gray");
+    expect(timelineStyles).toContain("  .streaming-reasoning > summary,");
+    expect(timelineStyles).toContain("  .streaming-reasoning-body");
+    expect(timelineStyles).toContain("color: #6e7781 !important;");
+    expect(timelineStyles).toContain("color: #24425d !important;");
+  });
+
+  it("matches the light project context pill to the white file-change summary", () => {
+    expect(styles).toContain("Match the project context to the adjacent file-change summary");
+    expect(styles).toContain(':root[data-theme="light"] .composer-project-pill {');
+    expect(styles).toContain("border: 1px solid #cfddea !important;");
+    expect(styles).toContain("background: #ffffff !important;");
+    expect(styles).toContain("box-shadow: none !important;");
+    expect(styles).toContain(':root[data-theme="light"] .composer-project-pill:hover,');
+    expect(styles).toContain("background: #eaf5ff !important;");
+  });
+
   it("renders every supported Markdown primitive with a light document hierarchy", () => {
     expect(styles).toContain('Markdown reads as a document');
     expect(styles).toContain('font-size: 14px;');
@@ -427,7 +542,7 @@ describe("renderer theme", () => {
     expect(styles).toContain('.settings-dialog .provider-list-card:is(:hover, .selected)');
   });
 
-  it("places the active thread title in the window bar", () => {
+  it("places the plain active thread title above the main workspace", () => {
     const windowbarStart = app.indexOf('<header className="windowbar">');
     const windowbarEnd = app.indexOf("</header>", windowbarStart);
     const titleIndex = app.indexOf("workspace-thread-title windowbar-thread-title");
@@ -438,9 +553,19 @@ describe("renderer theme", () => {
     expect(titleIndex).toBeLessThan(windowbarEnd);
     expect(workspaceStart).toBeGreaterThan(windowbarEnd);
     expect(styles).toContain(".windowbar > .windowbar-thread-title {");
-    expect(styles).toContain("left: clamp(132px, calc(var(--sidebar-pane-width) / 2 + 36px), 360px);");
+    expect(styles).toContain("left: calc(var(--sidebar-pane-width) + 28px);");
+    expect(styles).toContain("padding: 0;");
+    expect(styles).toContain("border: 0 !important;");
+    expect(styles).toContain("background: transparent !important;");
+    expect(styles).toContain("box-shadow: none !important;");
+    expect(styles).toContain("-webkit-user-select: none;");
+    expect(styles).toContain("user-select: none;");
+    expect(styles).toContain(".windowbar > .windowbar-thread-title::selection,");
+    expect(styles).toContain(".windowbar > .windowbar-thread-title *::selection {");
+    expect(styles).toContain(':root[data-theme="light"] .windowbar > .windowbar-thread-title {');
     expect(styles).toContain("transform: translateY(-50%);");
     expect(styles).toContain(".app-shell.sidebar-collapsed .windowbar > .windowbar-thread-title {");
+    expect(styles).toContain(".app-shell.has-app-background .windowbar > .windowbar-thread-title {");
   });
 
   it("keeps light Markdown code blocks vertically compact", () => {
