@@ -41,7 +41,7 @@ describe("ToolActivityGroup", () => {
   it("keeps long expanded tool histories inside a bounded scroll area", () => {
     const detailsRule = timelineCss.match(/\.tool-activity-details\s*\{([^}]*)\}/)?.[1] ?? "";
 
-    expect(detailsRule).toContain("max-height: min(360px, 46vh)");
+    expect(detailsRule).toContain("max-height: min(240px, 32vh)");
     expect(detailsRule).toContain("overflow-y: auto");
     expect(detailsRule).toContain("overscroll-behavior: contain");
   });

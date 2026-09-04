@@ -44,6 +44,7 @@ import {
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
   normalizeGpaStateForThread,
+  replaceThreadSnapshotGpa,
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
@@ -1838,6 +1839,18 @@ export function App() {
         return;
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
+        if (typed.threadId) {
+          const gpaThreadId = typed.threadId;
+          // GPA access flags are durable thread preferences. Commit them to
+          // every renderer snapshot and reject any older request that could
+          // otherwise restore the pre-toggle value after a task completes.
+          invalidateSnapshotRequest(gpaThreadId);
+          const cached = snapshotCacheByThreadRef.current.get(gpaThreadId);
+          if (cached) {
+            cacheThreadSnapshot(replaceThreadSnapshotGpa(cached, gpaThreadId, typed.payload.gpa) ?? cached);
+          }
+          setSnapshot((current) => replaceThreadSnapshotGpa(current, gpaThreadId, typed.payload.gpa));
+        }
         if (typed.threadId === currentSelectedThreadId) {
           if (
             gpaConfirmationPendingStageRef.current &&
@@ -2321,7 +2334,12 @@ export function App() {
         const rawIssue = Array.isArray(typed.payload.issues)
           ? typed.payload.issues.find((issue): issue is string => typeof issue === "string" && Boolean(issue.trim()))
           : undefined;
-        const issue = rawIssue === "No runnable unit-test command was found, but the final summary does not disclose that unit tests were unavailable."
+        const missingArtifact = rawIssue?.match(/^No verified (.+) deliverable was found in the current thread output directory or project workspace\.$/);
+        const issue = missingArtifact
+          ? `未在当前任务输出目录或项目中找到已生成且可打开的 ${missingArtifact[1]} 文件`
+          : rawIssue === "The requested deliverable exists but could not be opened or its content is empty."
+            ? "交付文件存在，但无法打开或内容为空"
+          : rawIssue === "No runnable unit-test command was found, but the final summary does not disclose that unit tests were unavailable."
           ? "最终总结未说明单元测试不可用"
           : rawIssue === "The requested project file change has no verified file delivery."
             ? "未确认项目文件已经交付"
@@ -5987,7 +6005,7 @@ export function App() {
 
   async function runGitAction(action: () => Promise<GitActionResult>) {
     const actionThreadId = selectedThreadIdRef.current;
-    if (gitActionBusy || !actionThreadId) return;
+    if (gitActionBusy || !actionThreadId) return undefined;
     setGitActionBusy(true);
     setGitActionMessage(null);
     try {
@@ -5997,10 +6015,12 @@ export function App() {
         setGitSnapshotThreadId(`${actionThreadId}:${gitRoot}`);
         setGitActionMessage(result.message);
       }
+      return result;
     } catch (error) {
       if (selectedThreadIdRef.current === actionThreadId) {
         setGitActionMessage(error instanceof Error ? error.message : String(error));
       }
+      return undefined;
     } finally {
       setGitActionBusy(false);
     }

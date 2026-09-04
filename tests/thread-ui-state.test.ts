@@ -8,6 +8,7 @@ import {
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
   normalizeGpaStateForThread,
+  replaceThreadSnapshotGpa,
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
@@ -240,6 +241,30 @@ describe("thread UI state helpers", () => {
       awaitingConfirmation: null,
       planTasks: []
     });
+  });
+
+  it("keeps a completed task's full-access preference in the matching snapshot", () => {
+    const snapshot = {
+      ...createOptimisticThreadSnapshot(makeThread({ mode: "project" })),
+      gpa: {
+        stage: "act",
+        fullAccess: false,
+        knowledgeEnabled: false,
+        awaitingConfirmation: null,
+        planTasks: [],
+        updatedAt: "2026-08-06T00:00:00.000Z"
+      }
+    };
+    const completedGpa = {
+      ...snapshot.gpa!,
+      stage: "off" as const,
+      fullAccess: true,
+      updatedAt: "2026-08-06T00:01:00.000Z"
+    };
+
+    expect(replaceThreadSnapshotGpa(snapshot, snapshot.thread.id, completedGpa)?.gpa)
+      .toEqual(completedGpa);
+    expect(replaceThreadSnapshotGpa(snapshot, "another-thread", completedGpa)).toBe(snapshot);
   });
 
   it("forces an authoritative snapshot after interrupt without clearing other threads", () => {

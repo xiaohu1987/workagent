@@ -179,6 +179,8 @@ import {
   writeTurnContextMarkdown,
   readLatestTurnContextMarkdown,
   resolveRequestedDeliverableExtensions,
+  snapshotRequestedArtifactFiles,
+  findChangedRequestedArtifactPaths,
   extractTaskTopicAnchors,
   collectRequestedArtifactEvidence,
   validateRequestedArtifactAlignment,
@@ -1412,7 +1414,7 @@ describe("premature completion recovery", () => {
 
 describe("standard completion validation", () => {
   it("caps evidence recovery at five attempts instead of running indefinitely", () => {
-    expect(MAX_STANDARD_COMPLETION_RECOVERIES).toBe(5);
+    expect(MAX_STANDARD_COMPLETION_RECOVERIES).toBe(3);
   });
 
   it("limits model-based completion audits and gives them a finite timeout", () => {
@@ -1537,6 +1539,53 @@ describe("standard completion validation", () => {
     expect(buildStandardCompletionTextToolFallbackInstruction(result)).toContain("end_turn and goal_completed to false");
   });
 
+  it("does not mistake a source Word document for a requested Word deliverable", () => {
+    expect(resolveRequestedDeliverableExtensions("读取并总结附件 report.docx 的内容")).toEqual([]);
+    expect(resolveRequestedDeliverableExtensions("分析这个 Word 文档中存在的问题")).toEqual([]);
+    expect(resolveRequestedDeliverableExtensions("把分析结果生成 Word 文档")).toEqual([".docx"]);
+  });
+
+  it("finds changed requested artifacts in a deeply nested project folder", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-deep-artifact-"));
+    const nested = path.join(root, "deliverables", "customer", "2026", "final", "word");
+    const artifactPath = path.join(nested, "report.docx");
+    try {
+      await fs.mkdir(nested, { recursive: true });
+      const baseline = await snapshotRequestedArtifactFiles(root, [".docx"]);
+      await fs.writeFile(artifactPath, "test artifact", "utf8");
+
+      await expect(findChangedRequestedArtifactPaths({
+        root,
+        baseline,
+        requestedExtensions: [".docx"]
+      })).resolves.toEqual([path.resolve(artifactPath)]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a missing Word deliverable with a real binary generation command", () => {
+    const result = validateStandardCompletion({
+      decision: {
+        assistantMessage: "Word 文档已完成。",
+        toolCalls: [],
+        endTurn: true,
+        goalCompleted: true
+      },
+      requiresFileDelivery: true,
+      deliveredPaths: [],
+      successfulEvidence: []
+    });
+
+    const recovery = buildStandardCompletionRecoveryInstruction(result, [".docx"]);
+    const fallback = buildStandardCompletionTextToolFallbackInstruction(result, [".docx"]);
+    expect(recovery).toContain("appropriate document/spreadsheet workflow and shell.exec");
+    expect(recovery).toContain("real, openable binary file");
+    expect(recovery).not.toContain("Perform the requested file change now with search_replace");
+    expect(fallback).toContain("exactly one shell.exec call");
+    expect(fallback).toContain("real .docx file");
+  });
+
   it("accepts a file-change completion only after delivery and post-delivery verification", () => {
     const verification = classifySuccessfulToolEvidence({
       toolCallId: "test-1",
@@ -1560,6 +1609,10 @@ describe("standard completion validation", () => {
 
   it("recognizes source code deliveries, successful unit tests, and test reports", () => {
     expect(isProjectSourceCodePath("D:\\project\\src\\App.tsx")).toBe(true);
+    expect(isProjectSourceCodePath("D:\\project\\src\\styles.css")).toBe(false);
+    expect(isProjectSourceCodePath("D:\\project\\temp\\scratch.ts")).toBe(false);
+    expect(isProjectSourceCodePath("/project/.tmp/generated.js")).toBe(false);
+    expect(isProjectSourceCodePath("/project/src/cache/service.ts")).toBe(true);
     expect(isProjectSourceCodePath("D:\\project\\README.md")).toBe(false);
     expect(hasSuccessfulUnitTestResult(
       { name: "shell.exec", arguments: { command: "pnpm vitest run tests/app.test.ts" } },
@@ -2939,6 +2992,46 @@ describe("GPA ACT completion evidence", () => {
     expect(result.valid).toBe(false);
     expect(result.missingUnitTest).toBe(true);
     expect(result.missingTestReport).toBe(true);
+  });
+
+  it("does not require unit-test evidence for style-only or temporary GPA deliveries", () => {
+    for (const deliveredPath of [
+      "C:\\project\\src\\styles.css",
+      "C:\\project\\tmp\\generated.ts",
+      "/project/.cache/generated.js"
+    ]) {
+      const delivery = classifySuccessfulToolEvidence({
+        toolCallId: "patch-1",
+        toolName: "apply_patch",
+        hasPriorDelivery: false,
+        requiresVerifiedPath: true,
+        verifiedPaths: [deliveredPath]
+      });
+      const verification = classifySuccessfulToolEvidence({
+        toolCallId: "verify-1",
+        toolName: "shell.exec",
+        hasPriorDelivery: true
+      });
+      const result = validateActCompletion({
+        decision: {
+          assistantMessage: "The non-code project change is complete.",
+          toolCalls: [],
+          endTurn: true,
+          goalCompleted: true,
+          completedTaskIds: ["T1"],
+          completionEvidence: [
+            { taskId: "T1", toolCallId: "patch-1", kind: "delivery" },
+            { taskId: "T1", toolCallId: "verify-1", kind: "verification" }
+          ]
+        },
+        planTasks,
+        successfulEvidence: [delivery, verification],
+        requiresUnitTest: delivery.verifiedPaths?.some(isProjectSourceCodePath)
+      });
+
+      expect(result.valid, deliveredPath).toBe(true);
+      expect(result.missingUnitTest, deliveredPath).toBe(false);
+    }
   });
 
   it("continues from the partial draft instead of forcing a short completed summary", () => {

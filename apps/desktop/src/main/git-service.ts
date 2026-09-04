@@ -32,11 +32,18 @@ type ParsedStatus = {
   files: Map<string, Omit<GitFileChange, "binary" | "additions" | "deletions" | "stagedHunks" | "unstagedHunks">>;
 };
 
+type BranchRefs = {
+  local: Set<string>;
+  remote: Set<string>;
+};
+
 const EMPTY_SNAPSHOT: GitSnapshot = {
   available: false,
   ahead: 0,
   behind: 0,
   branches: [],
+  localBranches: [],
+  remoteBranches: [],
   canCreatePullRequest: false,
   files: []
 };
@@ -79,7 +86,7 @@ export class GitService {
         ? runGit(root, ["diff", "--no-ext-diff", "--no-color", "--unified=3"])
         : Promise.resolve(emptyDiff),
       status.branch ? runGit(root, ["remote", "get-url", "origin"]) : Promise.resolve(emptyDiff),
-      runGit(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+      runGit(root, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"])
     ]);
     const stagedDiffs = parseDiff(stagedResult.stdout, "staged");
     const unstagedDiffs = parseDiff(unstagedResult.stdout, "unstaged");
@@ -100,6 +107,10 @@ export class GitService {
     const remoteUrl = remoteResult.code === 0 ? remoteResult.stdout.trim() : "";
     const comparison = buildPullRequestUrl(remoteUrl, status.branch, status.upstream);
 
+    const branchRefs = branchesResult.code === 0
+      ? parseBranchRefs(branchesResult.stdout)
+      : { local: new Set(status.branch ? [status.branch] : []), remote: new Set<string>() };
+
     return {
       available: true,
       root,
@@ -108,9 +119,9 @@ export class GitService {
       upstream: status.upstream,
       ahead: status.ahead,
       behind: status.behind,
-      branches: branchesResult.code === 0
-        ? branchesResult.stdout.split(/\r?\n/).map((branch) => branch.trim()).filter(Boolean)
-        : status.branch ? [status.branch] : [],
+      branches: getSwitchableBranchNames(branchRefs),
+      localBranches: [...branchRefs.local].sort((left, right) => left.localeCompare(right)),
+      remoteBranches: [...branchRefs.remote].sort((left, right) => left.localeCompare(right)),
       canCreatePullRequest: Boolean(comparison),
       files
     };
@@ -194,18 +205,52 @@ export class GitService {
   public async switchBranch(cwd: string, branch: string): Promise<GitActionResult> {
     const root = await this.getRoot(cwd);
     if (!root) return this.failure(cwd, "当前项目不是 Git 仓库。");
-    const name = branch.trim();
-    if (!name) return this.failure(root, "请选择要切换的分支。");
-    const branches = await runGit(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
-    const available = branches.code === 0
-      ? branches.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
-      : [];
-    if (!available.includes(name)) return this.failure(root, `本地分支不存在：${name}`);
-    const result = await runGit(root, ["switch", name]);
+    const requested = branch.trim();
+    if (!requested) return this.failure(root, "请选择要切换的分支。");
+    const branches = await runGit(root, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]);
+    const refs = branches.code === 0 ? parseBranchRefs(branches.stdout) : { local: new Set<string>(), remote: new Set<string>() };
+    const target = resolveSwitchBranchTarget(requested, refs);
+    if (!target) return this.failure(root, `分支不存在：${requested}`);
+
+    let displayName = target.name;
+    let args: string[];
+    if (target.kind === "local") {
+      args = ["switch", target.name];
+    } else {
+      const separator = target.name.indexOf("/");
+      const localName = target.name.slice(separator + 1);
+      if (!localName || localName === "HEAD") return this.failure(root, `无法直接切换远端引用：${target.name}`);
+      if (refs.local.has(localName)) {
+        displayName = localName;
+        args = ["switch", localName];
+      } else {
+        displayName = localName;
+        args = ["switch", "--track", "-c", localName, target.name];
+      }
+    }
+    const result = await runGit(root, args);
     if (result.code !== 0) {
       return this.failure(root, result.stderr.trim() || "切换分支失败，请先处理会被覆盖的本地修改。");
     }
-    return { ok: true, message: `已切换到分支 ${name}`, snapshot: await this.snapshot(root) };
+    return { ok: true, message: `已切换到分支 ${displayName}`, snapshot: await this.snapshot(root) };
+  }
+
+  public async createBranch(cwd: string, branch: string): Promise<GitActionResult> {
+    const root = await this.getRoot(cwd);
+    if (!root) return this.failure(cwd, "当前项目不是 Git 仓库。");
+    const name = branch.trim();
+    if (!name) return this.failure(root, "请输入新分支名称。");
+
+    const valid = await runGit(root, ["check-ref-format", "--branch", name]);
+    if (valid.code !== 0) return this.failure(root, `分支名称无效：${name}`);
+
+    const existing = await runGit(root, ["show-ref", "--verify", "--quiet", `refs/heads/${name}`]);
+    if (existing.code === 0) return this.failure(root, `本地分支已存在：${name}`);
+    if (existing.code !== 1) return this.failure(root, existing.stderr.trim() || "无法检查分支是否存在。");
+
+    const result = await runGit(root, ["switch", "-c", name]);
+    if (result.code !== 0) return this.failure(root, result.stderr.trim() || "创建分支失败。");
+    return { ok: true, message: `已创建并切换到分支 ${name}`, snapshot: await this.snapshot(root) };
   }
 
   public async createPullRequest(cwd: string): Promise<GitActionResult> {
@@ -233,6 +278,46 @@ export class GitService {
     const result = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
     return result.code === 0 ? result.stdout.trim() : null;
   }
+}
+
+function parseBranchRefs(output: string): BranchRefs {
+  const refs: BranchRefs = { local: new Set(), remote: new Set() };
+  for (const line of output.split(/\r?\n/)) {
+    const ref = line.trim();
+    if (ref.startsWith("refs/heads/")) {
+      refs.local.add(ref.slice("refs/heads/".length));
+    } else if (ref.startsWith("refs/remotes/")) {
+      const name = ref.slice("refs/remotes/".length);
+      if (!name.endsWith("/HEAD")) refs.remote.add(name);
+    }
+  }
+  return refs;
+}
+
+function getSwitchableBranchNames(refs: BranchRefs): string[] {
+  return [...new Set([...refs.local, ...refs.remote])].sort((left, right) => left.localeCompare(right));
+}
+
+function resolveSwitchBranchTarget(
+  requested: string,
+  refs: BranchRefs
+): { kind: "local" | "remote"; name: string } | null {
+  const explicitLocal = requested.startsWith("refs/heads/")
+    ? requested.slice("refs/heads/".length)
+    : requested.startsWith("heads/")
+      ? requested.slice("heads/".length)
+      : null;
+  if (explicitLocal && refs.local.has(explicitLocal)) return { kind: "local", name: explicitLocal };
+
+  const explicitRemote = requested.startsWith("refs/remotes/")
+    ? requested.slice("refs/remotes/".length)
+    : requested.startsWith("remotes/")
+      ? requested.slice("remotes/".length)
+      : null;
+  if (explicitRemote && refs.remote.has(explicitRemote)) return { kind: "remote", name: explicitRemote };
+  if (refs.local.has(requested)) return { kind: "local", name: requested };
+  if (refs.remote.has(requested)) return { kind: "remote", name: requested };
+  return null;
 }
 
 function emptyFile(path: string): Omit<GitFileChange, "binary" | "additions" | "deletions" | "stagedHunks" | "unstagedHunks"> {

@@ -2,10 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveAppTheme } from "../apps/desktop/src/renderer/theme";
 
-const styles = readFileSync(
-  new URL("../apps/desktop/src/renderer/styles.css", import.meta.url),
-  "utf8"
-);
+const readText = (url: URL): string => readFileSync(url, "utf8").replace(/\r\n/g, "\n");
+
+const styles = readText(new URL("../apps/desktop/src/renderer/styles.css", import.meta.url));
 const preload = readFileSync(
   new URL("../apps/desktop/src/preload/index.ts", import.meta.url),
   "utf8"
@@ -261,6 +260,14 @@ describe("renderer theme", () => {
     expect(styles).toContain("background: transparent !important;");
     expect(styles).toContain(':root[data-theme="light"] .history-item.selected,');
     expect(styles).toContain("box-shadow: inset 2px 0 0 var(--accent-blue) !important;");
+  });
+
+  it("keeps the running history item highlight animated in the light theme", () => {
+    expect(styles).toContain('--history-flow-color: rgba(33, 150, 243, 0.96);');
+    expect(styles).toContain('from var(--history-flow-angle)');
+    expect(styles).toContain('animation: history-item-running-flow 2.1s linear infinite;');
+    expect(styles).toContain('@keyframes history-item-running-flow');
+    expect(styles).toContain('@media (prefers-reduced-motion: reduce)');
   });
 
   it("keeps changed-files compact until its file panel is explicitly expanded", () => {
@@ -578,6 +585,23 @@ describe("renderer theme", () => {
     expect(styles).toContain("  .project-file-row,");
     expect(styles).toContain("  .composer-queue-item");
     expect(styles).toContain("border-left: 3px solid var(--list-accent) !important;");
+  });
+
+  it("colors project file rails by file type in light mode", () => {
+    expect(styles).toContain("Project file rows keep the shared rail geometry but take the rail color");
+    expect(styles).toContain(':root[data-theme="light"] .project-file-row.type-folder { border-left-color: #e6b45e !important; }');
+    expect(styles).toContain(':root[data-theme="light"] .project-file-row.type-script { border-left-color: #78b8f6 !important; }');
+    expect(styles).toContain(':root[data-theme="light"] .project-file-row.type-markdown { border-left-color: #7ecab3 !important; }');
+    expect(styles).toContain(':root[data-theme="light"] .project-file-row.type-config { border-left-color: #d89b75 !important; }');
+  });
+
+  it("uses red semantic accents for failed notification rows", () => {
+    expect(styles).toContain("Failure is the semantic exception to the shared blue list rail");
+    expect(styles).toContain(':root[data-theme="light"] .notification-center-item.is-failed,');
+    expect(styles).toContain("border-left-color: var(--accent-red) !important;");
+    expect(styles).toContain('.notification-center-item.is-failed .notification-item-status {');
+    expect(styles).toContain("background: var(--accent-red-soft) !important;");
+    expect(styles).toContain('.notification-center-item.is-failed .notification-item-heading small {');
   });
 
   it("renders fetched-model choices with the shared light list hierarchy", () => {

@@ -536,6 +536,9 @@ function registerIpc(): void {
   ipcMain.handle("git:switch-branch", (_event, payload: { threadId: string; rootPath?: string; branch: string }) =>
     backend.switchGitBranch(payload.threadId, payload.branch, payload.rootPath)
   );
+  ipcMain.handle("git:create-branch", (_event, payload: { threadId: string; rootPath?: string; branch: string }) =>
+    backend.createGitBranch(payload.threadId, payload.branch, payload.rootPath)
+  );
   ipcMain.handle("git:create-pr", (_event, payload: { threadId: string; rootPath?: string }) => backend.createGitPullRequest(payload.threadId, payload.rootPath));
   ipcMain.handle("threads:delete", (_event, threadId: string) => backend.deleteThread(threadId));
   ipcMain.handle("threads:clear-conversation", (_event, threadId: string) =>

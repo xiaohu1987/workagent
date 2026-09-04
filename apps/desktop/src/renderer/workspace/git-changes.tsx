@@ -1,9 +1,10 @@
 import type { GitActionResult, GitDiffLine, GitFileChange, GitHunk, GitSnapshot } from "@shared-types";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowDown,
   IconArrowUp,
   IconCheck,
+  IconChevronDown,
   IconChevronLeft,
   IconComment,
   IconEye,
@@ -11,6 +12,7 @@ import {
   IconFileChanges,
   IconPlus,
   IconRefresh,
+  IconSearch,
   IconSpinner,
   IconTrash,
   IconUndo
@@ -87,6 +89,192 @@ export async function runOneClickGitCommit({
   }
 }
 
+export function GitBranchPicker({
+  snapshot,
+  threadId,
+  rootPath,
+  busy,
+  onAction
+}: {
+  snapshot: GitSnapshot;
+  threadId: string | null;
+  rootPath: string;
+  busy: boolean;
+  onAction: (action: () => Promise<GitActionResult>) => Promise<GitActionResult | undefined>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<"local" | "remote">("local");
+  const [query, setQuery] = useState("");
+  const [createMode, setCreateMode] = useState(false);
+  const [newBranchName, setNewBranchName] = useState("");
+  const [branchError, setBranchError] = useState<string | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  const localBranches = snapshot.localBranches ?? snapshot.branches;
+  const remoteBranches = snapshot.remoteBranches ?? [];
+  const branches = tab === "local" ? localBranches : remoteBranches;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleBranches = normalizedQuery
+    ? branches.filter((branch) => branch.toLocaleLowerCase().includes(normalizedQuery))
+    : branches;
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    setOpen(false);
+    setQuery("");
+    setCreateMode(false);
+    setNewBranchName("");
+    setBranchError(null);
+  }, [rootPath, threadId]);
+
+  const openPicker = () => {
+    setOpen((current) => {
+      const next = !current;
+      if (next) {
+        setBranchError(null);
+        window.setTimeout(() => searchRef.current?.focus(), 0);
+      }
+      return next;
+    });
+  };
+  const finishBranchAction = (result: GitActionResult | undefined) => {
+    if (!result?.ok) {
+      if (result?.message) setBranchError(result.message);
+      return;
+    }
+    setOpen(false);
+    setQuery("");
+    setCreateMode(false);
+    setNewBranchName("");
+    setBranchError(null);
+  };
+  const switchBranch = async (branch: string) => {
+    if (!threadId || busy) return;
+    if (tab === "local" && branch === snapshot.branch) {
+      setOpen(false);
+      return;
+    }
+    setBranchError(null);
+    finishBranchAction(await onAction(() => window.codexh.switchGitBranch({ threadId, rootPath, branch }) as Promise<GitActionResult>));
+  };
+  const createBranch = async () => {
+    if (!threadId || busy || !newBranchName.trim()) return;
+    setBranchError(null);
+    finishBranchAction(await onAction(() => window.codexh.createGitBranch({
+      threadId,
+      rootPath,
+      branch: newBranchName.trim()
+    }) as Promise<GitActionResult>));
+  };
+
+  return (
+    <div className="git-branch-picker" ref={pickerRef}>
+      <button
+        type="button"
+        className="git-branch-trigger"
+        title="切换或新建分支"
+        aria-label="切换或新建 Git 分支"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        disabled={busy || !threadId}
+        onClick={openPicker}
+      >
+        <IconFileChanges />
+        <span>{snapshot.branch ?? "detached HEAD"}</span>
+        <IconChevronDown />
+      </button>
+      {open ? (
+        <div className="git-branch-popover" role="dialog" aria-label="选择 Git 分支">
+          <div className="git-branch-search-row">
+            <label className="git-branch-search">
+              <IconSearch />
+              <input
+                ref={searchRef}
+                value={query}
+                placeholder="筛选分支"
+                aria-label="筛选分支"
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              className="git-branch-create-button"
+              disabled={busy || !threadId}
+              onClick={() => {
+                setCreateMode(true);
+                setBranchError(null);
+                window.setTimeout(() => pickerRef.current?.querySelector<HTMLInputElement>(".git-branch-create-form input")?.focus(), 0);
+              }}
+            >
+              <IconPlus />
+              <span>新建分支</span>
+            </button>
+          </div>
+          {createMode ? (
+            <form className="git-branch-create-form" onSubmit={(event) => { event.preventDefault(); void createBranch(); }}>
+              <input
+                value={newBranchName}
+                placeholder="输入新分支名称"
+                aria-label="新分支名称"
+                disabled={busy}
+                onChange={(event) => { setNewBranchName(event.target.value); setBranchError(null); }}
+              />
+              <button type="submit" disabled={busy || !newBranchName.trim()}>创建并切换</button>
+              <button type="button" className="git-branch-create-cancel" disabled={busy} onClick={() => { setCreateMode(false); setNewBranchName(""); }}>取消</button>
+            </form>
+          ) : null}
+          {branchError ? <p className="git-branch-error" role="alert">{branchError}</p> : null}
+          <div className="git-branch-tabs" role="tablist" aria-label="分支来源">
+            <button type="button" role="tab" aria-selected={tab === "local"} className={tab === "local" ? "active" : ""} onClick={() => setTab("local")}>本地 <span>{localBranches.length}</span></button>
+            <button type="button" role="tab" aria-selected={tab === "remote"} className={tab === "remote" ? "active" : ""} onClick={() => setTab("remote")}>远程 <span>{remoteBranches.length}</span></button>
+          </div>
+          <div className="git-branch-list" role="tabpanel" aria-label={tab === "local" ? "本地分支" : "远程分支"}>
+            {visibleBranches.map((branch) => {
+              const remoteSeparator = branch.indexOf("/");
+              const remoteName = tab === "remote" && remoteSeparator > 0 ? branch.slice(0, remoteSeparator) : null;
+              const displayName = remoteName ? branch.slice(remoteSeparator + 1) : branch;
+              const current = tab === "local" && branch === snapshot.branch;
+              return (
+                <button
+                  type="button"
+                  key={`${tab}:${branch}`}
+                  className={`git-branch-option ${current ? "is-current" : ""}`}
+                  title={branch}
+                  aria-current={current ? "true" : undefined}
+                  disabled={busy}
+                  onClick={() => void switchBranch(branch)}
+                >
+                  <IconFileChanges />
+                  <span>{displayName}</span>
+                  {remoteName ? <small>{remoteName}</small> : null}
+                  {current ? <IconCheck /> : null}
+                </button>
+              );
+            })}
+            {visibleBranches.length === 0 ? <p className="git-branch-empty">{normalizedQuery ? "没有匹配的分支" : `没有${tab === "local" ? "本地" : "远程"}分支`}</p> : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   threadId,
   workspaceRoots,
@@ -109,7 +297,7 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   busy: boolean;
   message: string | null;
   onRefresh: () => void;
-  onAction: (action: () => Promise<GitActionResult>) => void;
+  onAction: (action: () => Promise<GitActionResult>) => Promise<GitActionResult | undefined>;
   onComment: (content: string) => void;
 }) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -153,8 +341,8 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   }
 
   const run = (action: () => Promise<GitActionResult>) => {
-    if (!threadId || busy) return;
-    onAction(action);
+    if (!threadId || busy) return Promise.resolve(undefined);
+    return onAction(action);
   };
   const fileAction = (action: "stage" | "unstage" | "revert", file: GitFileChange) => {
     if (!threadId) return;
@@ -180,23 +368,7 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
       <header className="git-changes-header">
         {rootSelector ? <div className="git-header-root-row">{rootSelector}</div> : null}
         <div className="git-header-branch-row">
-          <label className="git-branch-select" title="切换分支">
-            <IconFileChanges />
-            <select
-              aria-label="切换 Git 分支"
-              value={snapshot.branch ?? ""}
-              disabled={busy || !threadId || snapshot.branches.length === 0}
-              onChange={(event) => {
-                const branch = event.target.value;
-                if (threadId && branch && branch !== snapshot.branch) {
-                  run(() => window.codexh.switchGitBranch({ threadId, rootPath, branch }) as Promise<GitActionResult>);
-                }
-              }}
-            >
-              {!snapshot.branch ? <option value="">detached HEAD</option> : null}
-              {snapshot.branches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
-            </select>
-          </label>
+          <GitBranchPicker snapshot={snapshot} threadId={threadId} rootPath={rootPath} busy={busy} onAction={onAction} />
           <div className="git-header-actions">
             <button type="button" className="git-icon-button" title="拉取" aria-label="拉取" disabled={busy || !threadId || !snapshot.upstream} onClick={() => threadId && run(() => window.codexh.pullGitChanges({ threadId, rootPath }) as Promise<GitActionResult>)}><IconArrowDown /></button>
             <button type="button" className="git-icon-button" title="推送" aria-label="推送" disabled={busy || !threadId || !canPush} onClick={() => threadId && run(() => window.codexh.pushGitChanges({ threadId, rootPath }) as Promise<GitActionResult>)}><IconArrowUp /></button>

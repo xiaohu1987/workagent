@@ -343,7 +343,7 @@ export function ProjectFileTreeRows({
       <div key={`${node.kind}:${node.path}`} className="project-file-tree-item">
         <button
           type="button"
-          className={`project-file-row ${isDirectory ? "directory" : "file"} ${changeKind ? `changed-${changeKind}` : ""} ${selectedPath === node.path ? "selected" : ""}`}
+          className={`project-file-row ${isDirectory ? "directory" : "file"} type-${getProjectFileGlyphClass(node)} ${changeKind ? `changed-${changeKind}` : ""} ${selectedPath === node.path ? "selected" : ""}`}
           style={{ "--project-file-depth": depth } as React.CSSProperties}
           role="treeitem"
           aria-level={depth + 1}

@@ -67,7 +67,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   gitActionBusy: boolean;
   gitActionMessage: string | null;
   onGitRefresh: () => void;
-  onGitAction: (action: () => Promise<GitActionResult>) => void;
+  onGitAction: (action: () => Promise<GitActionResult>) => Promise<GitActionResult | undefined>;
   onGitComment: (content: string) => void;
   selectedProjectFile: string | null;
   projectToolCalls: ToolCallRecord[];

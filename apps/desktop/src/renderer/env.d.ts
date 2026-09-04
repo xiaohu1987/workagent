@@ -108,6 +108,7 @@ declare global {
       pushGitChanges: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
       pullGitChanges: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
       switchGitBranch: (payload: { threadId: string; rootPath?: string; branch: string }) => Promise<any>;
+      createGitBranch: (payload: { threadId: string; rootPath?: string; branch: string }) => Promise<any>;
       createGitPullRequest: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
       deleteThread: (threadId: string) => Promise<void>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;

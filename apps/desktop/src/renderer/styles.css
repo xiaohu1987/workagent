@@ -12910,11 +12910,14 @@ input[type="radio"]:focus-visible {
 }
 
 .git-changes-header {
+  position: relative;
+  z-index: 40;
   flex: 0 0 auto;
   align-items: stretch;
   flex-direction: column;
   min-height: 0;
   gap: 6px;
+  overflow: visible;
   padding: 7px 8px 8px 10px;
 }
 
@@ -25047,12 +25050,22 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 }
 
 :root[data-theme="light"] :is(.history-item.running, .history-item-project.running) {
+  --history-flow-color: rgba(33, 150, 243, 0.96);
   border-color: #b6d9f8 !important;
   background: #f0f7ff !important;
 }
 :root[data-theme="light"] :is(.history-item.running, .history-item-project.running)::after {
-  background: var(--accent-blue);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-blue) 18%, transparent) !important;
+  background: conic-gradient(
+    from var(--history-flow-angle),
+    transparent 0deg,
+    transparent 246deg,
+    color-mix(in srgb, var(--history-flow-color) 18%, transparent) 278deg,
+    var(--history-flow-color) 324deg,
+    transparent 360deg
+  ) !important;
+  box-shadow: none !important;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--history-flow-color) 46%, transparent));
+  animation: history-item-running-flow 2.1s linear infinite;
 }
 :root[data-theme="light"] .history-item-pin { color: var(--accent-amber) !important; }
 
@@ -26208,6 +26221,33 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   border-left: 3px solid var(--list-accent) !important;
 }
 
+/* Project file rows keep the shared rail geometry but take the rail color
+   from the file type, matching the glyph palette so folders, scripts, and
+   documents stay distinguishable at a glance. */
+:root[data-theme="light"] .project-file-row.type-folder { border-left-color: #e6b45e !important; }
+:root[data-theme="light"] .project-file-row.type-json { border-left-color: #e9bd68 !important; }
+:root[data-theme="light"] .project-file-row.type-script { border-left-color: #78b8f6 !important; }
+:root[data-theme="light"] .project-file-row.type-style { border-left-color: #b98cf3 !important; }
+:root[data-theme="light"] .project-file-row.type-markdown { border-left-color: #7ecab3 !important; }
+:root[data-theme="light"] .project-file-row.type-config { border-left-color: #d89b75 !important; }
+:root[data-theme="light"] .project-file-row.type-default { border-left-color: #a6c0df !important; }
+
+/* Failure is the semantic exception to the shared blue list rail. Keep the
+   content neutral while the rail, status icon, and status label signal red. */
+:root[data-theme="light"] .notification-center-item.is-failed,
+:root[data-theme="light"] .notification-center-item.is-failed:is(:hover, :focus-visible, .is-highlighted) {
+  border-left-color: var(--accent-red) !important;
+}
+
+:root[data-theme="light"] .notification-center-item.is-failed .notification-item-status {
+  color: #cf222e !important;
+  background: var(--accent-red-soft) !important;
+}
+
+:root[data-theme="light"] .notification-center-item.is-failed .notification-item-heading small {
+  color: #cf222e !important;
+}
+
 /* Model discovery and multimodal pickers use the same compact list rows as
    every other repeated entity list. Selection changes the local surface while
    the shared blue rail remains stable, so the list does not become one block. */
@@ -27086,4 +27126,409 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   background: transparent !important;
   background-image: none !important;
   backdrop-filter: none;
+}
+
+/* Git branch picker: shared local/remote branch presentation. */
+.git-branch-picker {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.git-branch-trigger {
+  display: grid;
+  width: 100%;
+  height: 28px;
+  min-width: 0;
+  grid-template-columns: 16px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 4px;
+  color: #e5e7eb;
+  background: #17191c;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.git-branch-trigger > span {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-branch-trigger svg {
+  width: 15px;
+  height: 15px;
+  color: #83b7ff;
+}
+
+.git-branch-trigger:focus-visible,
+.git-branch-trigger[aria-expanded="true"] {
+  border-color: rgba(108, 174, 255, 0.58);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(74, 146, 231, 0.16);
+}
+
+.git-branch-trigger:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.git-branch-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(360px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  color: #e7eaf0;
+  background: #17191c;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+.git-branch-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  padding: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.git-branch-search {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.git-branch-search > svg {
+  position: absolute;
+  left: 8px;
+  width: 14px;
+  height: 14px;
+  color: rgba(226, 232, 240, 0.5);
+  pointer-events: none;
+}
+
+.git-branch-search input,
+.git-branch-create-form input {
+  min-width: 0;
+  width: 100%;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  outline: none;
+  color: #e5e7eb;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: #101215;
+}
+
+.git-branch-search input { padding: 0 8px 0 28px; }
+.git-branch-create-form input { padding: 0 8px; }
+
+.git-branch-search input:focus,
+.git-branch-create-form input:focus {
+  border-color: rgba(108, 174, 255, 0.58);
+  box-shadow: 0 0 0 2px rgba(74, 146, 231, 0.14);
+}
+
+.git-branch-create-button,
+.git-branch-create-form button {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid #2f8ee5;
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: 11px;
+  white-space: nowrap;
+  background: #2787dd;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, opacity 140ms ease;
+}
+
+.git-branch-create-button svg { width: 14px; height: 14px; }
+
+.git-branch-create-button:hover:not(:disabled),
+.git-branch-create-form button:hover:not(:disabled) {
+  border-color: #55a6ef;
+  background: #3396ed;
+}
+
+.git-branch-create-button:disabled,
+.git-branch-create-form button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.git-branch-create-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(69, 139, 214, 0.08);
+}
+
+.git-branch-create-form .git-branch-create-cancel {
+  border-color: rgba(255, 255, 255, 0.1);
+  color: rgba(231, 234, 240, 0.72);
+  background: transparent;
+}
+
+.git-branch-tabs {
+  display: flex;
+  height: 36px;
+  align-items: stretch;
+  gap: 16px;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.git-branch-tabs button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 2px;
+  border: 0;
+  color: rgba(226, 232, 240, 0.58);
+  font-size: 12px;
+  font-weight: 650;
+  background: transparent;
+  cursor: pointer;
+}
+
+.git-branch-tabs button::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: transparent;
+  content: "";
+}
+
+.git-branch-tabs button:hover,
+.git-branch-tabs button.active { color: #86bdff; }
+.git-branch-tabs button.active::after { background: #4c9ff0; }
+
+.git-branch-tabs button span {
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.68;
+}
+
+.git-branch-list {
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 5px;
+}
+
+.git-branch-option {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  grid-template-columns: 17px minmax(0, 1fr) auto 15px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  color: rgba(236, 239, 244, 0.82);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.git-branch-option:hover:not(:disabled) {
+  color: #ffffff;
+  background: rgba(76, 159, 240, 0.12);
+}
+
+.git-branch-option.is-current {
+  color: #9dccff;
+  background: rgba(76, 159, 240, 0.16);
+}
+
+.git-branch-option > svg {
+  width: 15px;
+  height: 15px;
+  color: #76b7ff;
+}
+
+.git-branch-option > span {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-branch-option small {
+  padding: 2px 5px;
+  border-radius: 3px;
+  color: #6ed8c6;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  background: rgba(57, 184, 161, 0.1);
+}
+
+.git-branch-option > svg:last-child { color: #67b0f4; }
+
+.git-branch-empty {
+  margin: 0;
+  padding: 22px 8px;
+  color: rgba(226, 232, 240, 0.48);
+  font-size: 11px;
+  text-align: center;
+}
+
+.git-branch-error {
+  margin: 0;
+  padding: 7px 9px;
+  border-bottom: 1px solid rgba(239, 68, 68, 0.18);
+  color: #f58a8a;
+  font-size: 10px;
+  line-height: 1.4;
+  background: rgba(220, 38, 38, 0.08);
+}
+
+:root[data-theme="light"] .git-branch-trigger,
+:root[data-theme="light"] .git-branch-popover,
+:root[data-theme="light"] .git-branch-search input,
+:root[data-theme="light"] .git-branch-create-form input {
+  border-color: #d0d7de;
+  color: #1f2937;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .git-branch-popover {
+  box-shadow: 0 12px 28px rgba(42, 85, 123, 0.17);
+}
+
+:root[data-theme="light"] .git-branch-search-row,
+:root[data-theme="light"] .git-branch-tabs,
+:root[data-theme="light"] .git-branch-create-form {
+  border-color: #dbe7f3;
+}
+
+:root[data-theme="light"] .git-branch-create-form { background: #f3f7fb; }
+:root[data-theme="light"] .git-branch-search > svg { color: #71869a; }
+:root[data-theme="light"] .git-branch-tabs button { color: #687b8e; }
+:root[data-theme="light"] .git-branch-tabs button:hover,
+:root[data-theme="light"] .git-branch-tabs button.active { color: #0969da; }
+:root[data-theme="light"] .git-branch-tabs button.active::after { background: #2196f3; }
+
+:root[data-theme="light"] .git-branch-option { color: #334155; }
+:root[data-theme="light"] .git-branch-option:hover:not(:disabled) {
+  color: #135f9d;
+  background: #eef7ff;
+}
+:root[data-theme="light"] .git-branch-option.is-current {
+  color: #0969da;
+  background: #ddf4ff;
+}
+:root[data-theme="light"] .git-branch-option small {
+  color: #0f766e;
+  background: #e5f6f2;
+}
+:root[data-theme="light"] .git-branch-empty { color: #71869a; }
+:root[data-theme="light"] .git-branch-error {
+  border-color: #ffd1d1;
+  color: #b42318;
+  background: #fff1f0;
+}
+:root[data-theme="light"] .git-branch-create-form .git-branch-create-cancel {
+  border-color: #d0d7de;
+  color: #52677a;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .app-shell .git-branch-create-button,
+:root[data-theme="light"] .app-shell .git-branch-create-form button:not(.git-branch-create-cancel) {
+  border-color: var(--action-primary) !important;
+  color: #ffffff !important;
+  background: var(--action-primary) !important;
+}
+
+:root[data-theme="light"] .app-shell .git-branch-create-button:hover:not(:disabled),
+:root[data-theme="light"] .app-shell .git-branch-create-form button:not(.git-branch-create-cancel):hover:not(:disabled) {
+  border-color: var(--action-primary-hover) !important;
+  background: var(--action-primary-hover) !important;
+}
+
+:root[data-theme="light"] .app-shell .git-branch-create-button svg {
+  color: currentColor !important;
+}
+
+.app-shell.has-app-background .git-branch-trigger,
+.app-shell.has-app-background .git-branch-popover,
+.app-shell.has-app-background .git-branch-search input,
+.app-shell.has-app-background .git-branch-create-form input {
+  background: rgba(18, 18, 22, var(--app-bg-right-panel));
+  backdrop-filter: blur(10px);
+}
+
+.app-shell.has-app-background .git-branch-create-form {
+  background: transparent;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .git-branch-trigger,
+:root[data-theme="light"] .app-shell.has-app-background .git-branch-popover,
+:root[data-theme="light"] .app-shell.has-app-background .git-branch-search input,
+:root[data-theme="light"] .app-shell.has-app-background .git-branch-create-form input {
+  background: rgba(255, 255, 255, var(--app-bg-right-panel)) !important;
+  backdrop-filter: blur(12px);
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .git-branch-create-form {
+  background: transparent !important;
+}
+
+/* The right workspace opacity setting has a single owner: its outer panel.
+   Keep file and Git content transparent so nested white/dark surfaces do not
+   compound the configured mask and hide the selected image background. */
+.app-shell.has-app-background :is(
+  .right-workspace-content,
+  .right-workspace-view,
+  .project-files-workspace,
+  .project-root-list,
+  .project-root-accordion,
+  .project-files-list,
+  .project-files-filter,
+  .git-changes-workspace,
+  .git-changes-header,
+  .git-sync-summary,
+  .git-commit-panel,
+  .git-commit-panel textarea,
+  .git-change-list,
+  .git-diff-pane,
+  .git-diff-scroll,
+  .right-workspace-empty-state
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+.app-shell.has-app-background .project-root-row:not(:hover):not(.active),
+.app-shell.has-app-background .project-file-row:not(:hover):not(.selected),
+.app-shell.has-app-background .git-file-row {
+  background: transparent !important;
 }

@@ -1,4 +1,4 @@
-import type { GpaState, ThreadRecord } from "@shared-types";
+import type { GpaState, RuntimeThreadSnapshot, ThreadRecord } from "@shared-types";
 
 const RENDERER_DEFAULT_GPA_STATE: GpaState = {
   stage: "off",
@@ -26,6 +26,15 @@ export function normalizeGpaStateForThread(
     };
   }
   return next;
+}
+
+export function replaceThreadSnapshotGpa(
+  snapshot: RuntimeThreadSnapshot | null,
+  threadId: string,
+  gpa: GpaState
+): RuntimeThreadSnapshot | null {
+  if (!snapshot || snapshot.thread.id !== threadId) return snapshot;
+  return { ...snapshot, gpa };
 }
 
 export type HistoryItemAffordance =

@@ -272,7 +272,7 @@ export const AGENT_PROTOCOL_RECOVERY_TOOL_SPEC: ToolSpecDefinition = {
 export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 10;
 // Explicit audit rejections may revise a base-valid candidate, but the audit
 // itself must never create an unbounded completion loop.
-export const MAX_STANDARD_COMPLETION_RECOVERIES = 5;
+export const MAX_STANDARD_COMPLETION_RECOVERIES = 3;
 export const MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES = 1;
 export const MAX_STANDARD_COMPLETION_AUDIT_NO_PROGRESS_RECOVERIES = 3;
 export const STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS = 2;
@@ -4305,7 +4305,10 @@ class ThreadSessionRuntime {
               });
               transcript.push({
                 role: "user",
-                content: buildStandardCompletionTextToolFallbackInstruction(standardCompletion)
+                content: buildStandardCompletionTextToolFallbackInstruction(
+                  standardCompletion,
+                  requestedDeliverableExtensions
+                )
               });
               await retryDraft();
               decision.assistantMessage = undefined;
@@ -4345,7 +4348,10 @@ class ThreadSessionRuntime {
               await scheduleStandardCompletionRecovery("completion_validation", standardCompletion.reasons);
               transcript.push({
                 role: "user",
-                content: buildStandardCompletionRecoveryInstruction(standardCompletion)
+                content: buildStandardCompletionRecoveryInstruction(
+                  standardCompletion,
+                  requestedDeliverableExtensions
+                )
               });
               await retryDraft();
               decision.assistantMessage = undefined;
@@ -8329,13 +8335,24 @@ export function buildGpaPlanProgressCheckpointInstruction(task: GpaState["planTa
 
 export function resolveRequestedDeliverableExtensions(request: string): string[] {
   const extensions = new Set<string>();
-  if (/(?:\bdocx?\b|\bword\b|word\s*文档|doc\s*文档)/i.test(request)) extensions.add(".docx");
-  if (/\bpdf\b/i.test(request)) extensions.add(".pdf");
-  if (/\b(?:pptx?|powerpoint)\b/i.test(request)) extensions.add(".pptx");
-  if (/\b(?:xlsx?|excel)\b/i.test(request)) extensions.add(".xlsx");
-  if (/\bcsv\b/i.test(request)) extensions.add(".csv");
-  if (/(?:\bmarkdown\b|\.md\b)/i.test(request)) extensions.add(".md");
+  const requested = (format: RegExp) => isExplicitArtifactOutputRequest(request, format);
+  if (requested(/(?:\bdocx?\b|\bword\b|word\s*文档|doc\s*文档)/i)) extensions.add(".docx");
+  if (requested(/\bpdf\b/i)) extensions.add(".pdf");
+  if (requested(/\b(?:pptx?|powerpoint)\b/i)) extensions.add(".pptx");
+  if (requested(/\b(?:xlsx?|excel)\b/i)) extensions.add(".xlsx");
+  if (requested(/\bcsv\b/i)) extensions.add(".csv");
+  if (requested(/(?:\bmarkdown\b|\.md\b)/i)) extensions.add(".md");
   return [...extensions];
+}
+
+function isExplicitArtifactOutputRequest(request: string, format: RegExp): boolean {
+  const prose = request.replace(/```[\s\S]*?```/g, " ").replace(/\s+/g, " ");
+  const formatSource = format.source;
+  const chineseAction = "(?:创建|新建|生成|导出|保存|制作|编写|输出|交付|提供|给我|需要|要一份|修改|编辑|更新|转(?:换)?成|转换为)";
+  const englishAction = "(?:create|generate|export|save|write|produce|deliver|provide|edit|modify|update)";
+  const beforeFormat = new RegExp(`(?:${chineseAction}|\\b${englishAction}\\b)[^。！？;；\\n]{0,56}(?:${formatSource})`, "i");
+  const formatBeforeOutput = new RegExp(`(?:${formatSource})[^。！？;；\\n]{0,32}(?:格式)?(?:输出|导出|保存|生成|交付|制作|\\bexport\\b|\\bsave\\b|\\bgenerate\\b|\\bdeliver\\b)`, "i");
+  return beforeFormat.test(prose) || formatBeforeOutput.test(prose);
 }
 
 export function extractTaskTopicAnchors(request: string): string[] {
@@ -8394,13 +8411,14 @@ const ARTIFACT_SCAN_IGNORED_DIRECTORIES = new Set([
   "build",
   "coverage"
 ]);
+const MAX_REQUESTED_ARTIFACT_SCAN_DEPTH = 8;
 
 async function listRequestedArtifactFiles(
   root: string,
   requestedExtensions: string[],
   depth = 0
 ): Promise<string[]> {
-  if (requestedExtensions.length === 0 || depth > 3) return [];
+  if (requestedExtensions.length === 0 || depth > MAX_REQUESTED_ARTIFACT_SCAN_DEPTH) return [];
   const requested = new Set(requestedExtensions.map((extension) => extension.toLowerCase()));
   let entries: Array<import("node:fs").Dirent>;
   try {
@@ -8419,7 +8437,7 @@ async function listRequestedArtifactFiles(
   return files;
 }
 
-async function snapshotRequestedArtifactFiles(
+export async function snapshotRequestedArtifactFiles(
   root: string,
   requestedExtensions: string[]
 ): Promise<Map<string, string>> {
@@ -8435,7 +8453,7 @@ async function snapshotRequestedArtifactFiles(
   return snapshot;
 }
 
-async function findChangedRequestedArtifactPaths(input: {
+export async function findChangedRequestedArtifactPaths(input: {
   root: string;
   baseline: ReadonlyMap<string, string>;
   requestedExtensions: string[];
@@ -9198,16 +9216,24 @@ export function hasSubstantiveTestCaseDeliverable(content: string): boolean {
 }
 
 export function buildStandardCompletionRecoveryInstruction(
-  result: StandardCompletionValidationResult
+  result: StandardCompletionValidationResult,
+  requestedDeliverableExtensions: readonly string[] = []
 ): string {
+  const requiresBinaryArtifact = requestedDeliverableExtensions.some((extension) =>
+    [".docx", ".pdf", ".pptx", ".xlsx", ".xls"].includes(extension.toLowerCase())
+  );
   return [
     "[Internal completion gate. Do not display or quote this instruction to the user.]",
     `The previous response was rejected: ${result.reasons.join(" ")}`,
     ...(result.missingDelivery
-      ? ["Perform the requested file change now with search_replace, apply_patch, or fs.write_file."]
+      ? [requiresBinaryArtifact
+          ? `Generate the requested ${requestedDeliverableExtensions.join("/")} artifact now with the appropriate document/spreadsheet workflow and shell.exec. Write a real, openable binary file inside the current task output directory or project workspace; never rename plain text to a binary extension.`
+          : "Perform the requested file change now with search_replace, apply_patch, or fs.write_file."]
       : []),
     ...(result.missingVerification
-      ? ["After the file change, run a targeted read-back, diff, build, or test and require it to succeed."]
+      ? [requiresBinaryArtifact
+          ? "After generation, use shell.exec to run the artifact workflow's parser/render validation and require it to succeed before completing."
+          : "After the file change, run a targeted read-back, diff, build, or test and require it to succeed."]
       : []),
     ...(result.missingUnitTest
       ? ["Run the relevant unit-test command now and wait for a successful tool result; a build, typecheck, or read-back cannot substitute for it."]
@@ -9234,10 +9260,16 @@ export function shouldSwitchStandardCompletionToTextToolProtocol(input: {
 }
 
 export function buildStandardCompletionTextToolFallbackInstruction(
-  result: StandardCompletionValidationResult
+  result: StandardCompletionValidationResult,
+  requestedDeliverableExtensions: readonly string[] = []
 ): string {
+  const requiresBinaryArtifact = requestedDeliverableExtensions.some((extension) =>
+    [".docx", ".pdf", ".pptx", ".xlsx", ".xls"].includes(extension.toLowerCase())
+  );
   const requiredAction = result.missingDelivery
-    ? "Your next decision must contain exactly one search_replace, apply_patch, or fs.write_file call that performs the requested file change."
+    ? requiresBinaryArtifact
+      ? `Your next decision must contain exactly one shell.exec call that generates a real ${requestedDeliverableExtensions.join("/")} file inside the current task output directory or project workspace using the appropriate artifact workflow.`
+      : "Your next decision must contain exactly one search_replace, apply_patch, or fs.write_file call that performs the requested file change."
     : result.missingUnitTest
       ? "Your next decision must contain exactly one shell.exec or project.verify call that runs the relevant unit tests."
     : "Your next decision must contain exactly one targeted fs.read_file, shell.exec, or other listed verification tool call.";
@@ -10061,12 +10093,21 @@ export function isProjectFileMutationRequest(content: string): boolean {
 }
 
 const PROJECT_SOURCE_CODE_EXTENSIONS = new Set([
-  ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".java", ".js", ".jsx",
-  ".kt", ".kts", ".mjs", ".php", ".py", ".rb", ".rs", ".scss", ".svelte",
+  ".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx",
+  ".kt", ".kts", ".mjs", ".php", ".py", ".rb", ".rs", ".svelte",
   ".swift", ".ts", ".tsx", ".vue"
 ]);
 
+const NON_PROJECT_SOURCE_DIRECTORY_NAMES = new Set([
+  ".cache", ".next", ".temp", ".tmp", ".vite", "coverage", "dist",
+  "node_modules", "temp", "tmp"
+]);
+
 export function isProjectSourceCodePath(filePath: string): boolean {
+  const pathSegments = filePath.replace(/\\/g, "/").split("/");
+  if (pathSegments.some((segment) => NON_PROJECT_SOURCE_DIRECTORY_NAMES.has(segment.toLowerCase()))) {
+    return false;
+  }
   return PROJECT_SOURCE_CODE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 

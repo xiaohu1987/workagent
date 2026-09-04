@@ -1327,6 +1327,8 @@ export interface GitSnapshot {
   ahead: number;
   behind: number;
   branches: string[];
+  localBranches?: string[];
+  remoteBranches?: string[];
   canCreatePullRequest: boolean;
   files: GitFileChange[];
 }

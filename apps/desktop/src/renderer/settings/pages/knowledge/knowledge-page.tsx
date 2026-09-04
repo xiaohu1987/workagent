@@ -34,6 +34,10 @@ type Props = {
   formatRelativeTime: (value: string) => string;
 };
 
+export function isDatabaseManagedKnowledgeBase(base: Pick<KnowledgeBaseSummary, "bundleRoot">): boolean {
+  return base.bundleRoot.replace(/\\/g, "/").split("/").pop() === "quick-notes";
+}
+
 export function KnowledgePage({ knowledgeSources, knowledgeName, setKnowledgeName, knowledgeScope, setKnowledgeScope, canImportProjectKnowledge, isKnowledgeUrlEditorOpen, setIsKnowledgeUrlEditorOpen, knowledgeUrlInput, setKnowledgeUrlInput, onAddUrls: addKnowledgeUrls, onChooseSources: chooseKnowledgeSources, onRemoveSource: removeKnowledgeSource, getSourceKey: knowledgeSourceKey, isKnowledgeImporting, onImport: importKnowledge, snapshot, knowledgeBases, knowledgeDocuments, knowledgeBusyId, onRefreshBases: refreshKnowledgeBases, onToggleDocuments: toggleKnowledgeDocuments, onRefreshBase: refreshKnowledgeBase, onDeleteBase: deleteKnowledgeBase, formatScope: formatKnowledgeScope, formatStatus: formatKnowledgeStatus, formatBytes: formatKnowledgeBytes, formatRelativeTime }: Props) {
   return (
   <div className="settings-section knowledge-settings-section">
@@ -173,9 +177,11 @@ placeholder="选择可见范围"
                 <button className="button ghost" onClick={() => void toggleKnowledgeDocuments(knowledgeBase.id)}>
                   {documents ? "收起文档" : "查看文档"}
                 </button>
-                <button className="button ghost" onClick={() => void refreshKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
-                  {isBusy ? "处理中" : "刷新"}
-                </button>
+                {isDatabaseManagedKnowledgeBase(knowledgeBase) ? null : (
+                  <button className="button ghost" onClick={() => void refreshKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
+                    {isBusy ? "处理中" : "刷新"}
+                  </button>
+                )}
                 <button className="button ghost danger-icon-button" onClick={() => void deleteKnowledgeBase(knowledgeBase.id)} disabled={isBusy} title="删除知识库">
                   <IconTrash />
                 </button>

@@ -85,6 +85,7 @@ const api = {
   pushGitChanges: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:push", payload),
   pullGitChanges: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:pull", payload),
   switchGitBranch: (payload: { threadId: string; rootPath?: string; branch: string }) => ipcRenderer.invoke("git:switch-branch", payload),
+  createGitBranch: (payload: { threadId: string; rootPath?: string; branch: string }) => ipcRenderer.invoke("git:create-branch", payload),
   createGitPullRequest: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:create-pr", payload),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
   clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),

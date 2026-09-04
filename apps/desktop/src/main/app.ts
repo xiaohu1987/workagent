@@ -1067,6 +1067,10 @@ export class DesktopBackend {
     return this.#git.switchBranch(this.getProjectDirectory(threadId, rootPath), branch);
   }
 
+  public createGitBranch(threadId: string, branch: string, rootPath?: string): Promise<GitActionResult> {
+    return this.#git.createBranch(this.getProjectDirectory(threadId, rootPath), branch);
+  }
+
   public async createGitPullRequest(threadId: string, rootPath?: string): Promise<GitActionResult> {
     const result = await this.#git.createPullRequest(this.getProjectDirectory(threadId, rootPath));
     if (result.ok && result.pullRequestUrl) {

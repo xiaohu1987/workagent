@@ -828,7 +828,7 @@
 .tool-activity-details {
   display: grid;
   min-height: 0;
-  max-height: min(360px, 46vh);
+  max-height: min(240px, 32vh);
   gap: 1px;
   overflow-x: hidden;
   overflow-y: auto;
