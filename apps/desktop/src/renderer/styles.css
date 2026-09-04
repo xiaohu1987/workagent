@@ -24914,6 +24914,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .git-diff-header,
   .workspace-subtab-strip,
   .project-preview-header,
+  .browser-location,
   .browser-toolbar,
   .browser-tabs,
   .settings-topbar,
@@ -24924,6 +24925,14 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   color: var(--text-soft) !important;
   background: var(--surface-soft) !important;
   box-shadow: none !important;
+}
+
+/* The browser address row has its own legacy dark surface; keep it in the
+   shared light toolbar layer so URLs remain readable in light mode. */
+:root[data-theme="light"] .browser-location {
+  border-bottom-color: var(--border) !important;
+  color: var(--text-soft) !important;
+  background: var(--surface-soft) !important;
 }
 
 /* Shared compact interactive states. */
@@ -25061,7 +25070,8 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .api-favorites-card,
   .history-search-result,
   .notification-center-item,
-  .composer-task-change-file
+  .composer-task-change-file,
+  .fetch-models-item
 ) {
   border-color: var(--border) !important;
   border-radius: 6px !important;
@@ -25090,7 +25100,10 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .history-search-result.is-current,
   .notification-center-item:hover,
   .composer-task-change-file:hover,
-  .composer-task-change-file.has-diff-preview[aria-pressed="true"]
+  .composer-task-change-file.has-diff-preview[aria-pressed="true"],
+  .fetch-models-item:not(.is-existed):hover,
+  .fetch-models-item.is-checked,
+  .fetch-models-item:not(.is-existed):focus-within
 ) {
   border-color: #b6d9f8 !important;
   color: #0969da !important;
@@ -26180,6 +26193,8 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .notification-center-item,
   .skill-row,
   .capability-list .capability-list-item,
+  .provider-list-card,
+  .provider-model-row,
   .database-connection-card,
   .api-favorites-card,
   .project-file-row,
@@ -26187,21 +26202,81 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .quick-notes-item,
   .history-search-result,
   .composer-task-change-file,
-  .composer-queue-item
+  .composer-queue-item,
+  .fetch-models-item
 ) {
   border-left: 3px solid var(--list-accent) !important;
 }
 
-/* Provider and model configuration rows use the requested red identity rail. */
+/* Model discovery and multimodal pickers use the same compact list rows as
+   every other repeated entity list. Selection changes the local surface while
+   the shared blue rail remains stable, so the list does not become one block. */
+:root[data-theme="light"] .fetch-models-list {
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--surface) !important;
+}
+
+:root[data-theme="light"] .fetch-models-item {
+  min-height: 52px;
+  padding: 9px 12px;
+  border: 1px solid var(--border) !important;
+  border-left: 3px solid var(--list-accent) !important;
+  border-radius: 6px !important;
+  color: var(--text-soft) !important;
+  background: var(--surface) !important;
+  box-shadow: none !important;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+:root[data-theme="light"] .fetch-models-item:not(.is-existed):hover,
+:root[data-theme="light"] .fetch-models-item:not(.is-existed):focus-within {
+  border-color: #b6d9f8 !important;
+  border-left-color: var(--list-accent) !important;
+  color: #0969da !important;
+  background: var(--surface-card-hover) !important;
+}
+
+:root[data-theme="light"] .fetch-models-item.is-checked {
+  border-color: #b6d9f8 !important;
+  border-left-color: var(--list-accent) !important;
+  color: #0969da !important;
+  background: var(--accent-blue-soft) !important;
+}
+
+:root[data-theme="light"] .fetch-models-item.is-existed {
+  color: var(--text-muted) !important;
+  background: var(--surface) !important;
+  opacity: 0.54;
+}
+
+:root[data-theme="light"] .fetch-models-copy strong {
+  color: inherit !important;
+  font-weight: 650;
+}
+
+:root[data-theme="light"] .fetch-models-item input[type="checkbox"]:checked::after {
+  border-color: #ffffff !important;
+}
+
+/* Provider and model configuration rows now follow the same blue identity
+   rail as every other repeated list in the application. */
 :root[data-theme="light"] .settings-dialog :is(
   .provider-list-card,
   .provider-model-row
 ) {
-  border-left: 3px solid var(--accent-red) !important;
+  border-left: 3px solid var(--list-accent) !important;
 }
 
-:root[data-theme="light"] .settings-dialog .provider-list-card:is(:hover, .selected) {
-  border-left-color: var(--accent-red) !important;
+:root[data-theme="light"] .settings-dialog :is(
+  .provider-list-card:hover,
+  .provider-list-card.selected,
+  .provider-model-row:hover
+) {
+  border-left-color: var(--list-accent) !important;
 }
 
 /* Align the active thread title with the main workspace. The title is plain
@@ -26933,6 +27008,17 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   background: transparent !important;
   background-image: none !important;
   backdrop-filter: none;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .fetch-models-dialog :is(
+  .fetch-models-item:not(.is-existed):hover,
+  .fetch-models-item:not(.is-existed):focus-within
+) {
+  background: var(--light-dialog-hover) !important;
+}
+
+:root[data-theme="light"] .app-shell.has-app-background .fetch-models-dialog .fetch-models-item.is-checked {
+  background: var(--light-dialog-selected) !important;
 }
 
 :root[data-theme="light"] .app-shell.has-app-background :is(

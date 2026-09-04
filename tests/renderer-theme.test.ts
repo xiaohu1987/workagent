@@ -461,6 +461,13 @@ describe("renderer theme", () => {
     expect(styles).toContain('box-shadow: 0 8px 22px rgba(31, 35, 40, 0.12) !important;');
   });
 
+  it("keeps the browser URL row on the light toolbar surface", () => {
+    expect(styles).toContain("  .browser-location,");
+    expect(styles).toContain(':root[data-theme="light"] .browser-location {');
+    expect(styles).toContain("color: var(--text-soft) !important;");
+    expect(styles).toContain("background: var(--surface-soft) !important;");
+  });
+
   it("uses the shared light popover treatment for conversation rail previews", () => {
     expect(timelineStyles).toContain("conversation rail preview aligned with the shared light popover");
     expect(timelineStyles).toContain(':root[data-theme="light"] .conversation-turn-preview {');
@@ -573,13 +580,27 @@ describe("renderer theme", () => {
     expect(styles).toContain("border-left: 3px solid var(--list-accent) !important;");
   });
 
-  it("uses a red identification rail for provider and model configuration rows", () => {
-    expect(styles).toContain("Provider and model configuration rows use the requested red identity rail");
+  it("renders fetched-model choices with the shared light list hierarchy", () => {
+    expect(styles).toContain("Model discovery and multimodal pickers use the same compact list rows");
+    expect(styles).toContain(':root[data-theme="light"] .fetch-models-list {');
+    expect(styles).toContain(':root[data-theme="light"] .fetch-models-item {');
+    expect(styles).toContain("border: 1px solid var(--border) !important;");
+    expect(styles).toContain("border-left: 3px solid var(--list-accent) !important;");
+    expect(styles).toContain('.fetch-models-item:not(.is-existed):hover,');
+    expect(styles).toContain(':root[data-theme="light"] .fetch-models-item.is-checked {');
+    expect(styles).toContain(':root[data-theme="light"] .fetch-models-item.is-existed {');
+    expect(styles).toContain('.app-shell.has-app-background .fetch-models-dialog .fetch-models-item.is-checked');
+  });
+
+  it("uses the shared blue identification rail for provider and model configuration rows", () => {
+    expect(styles).toContain("Provider and model configuration rows now follow the same blue identity");
     expect(styles).toContain(':root[data-theme="light"] .settings-dialog :is(');
     expect(styles).toContain("  .provider-list-card,");
     expect(styles).toContain("  .provider-model-row");
-    expect(styles).toContain("border-left: 3px solid var(--accent-red) !important;");
-    expect(styles).toContain('.settings-dialog .provider-list-card:is(:hover, .selected)');
+    expect(styles).toContain("border-left: 3px solid var(--list-accent) !important;");
+    expect(styles).toContain("  .provider-list-card.selected,");
+    expect(styles).toContain("  .provider-model-row:hover");
+    expect(styles).not.toContain("border-left: 3px solid var(--accent-red) !important;");
   });
 
   it("places the plain active thread title above the main workspace", () => {
