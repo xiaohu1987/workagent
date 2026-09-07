@@ -397,6 +397,31 @@ describe("renderer theme", () => {
     expect(styles).toContain('  .composer-shell,\n  .composer-meta-row');
   });
 
+  it("keeps nested right-workspace surfaces transparent under a realtime character background", () => {
+    expect(styles).toContain(".app-shell.has-app-background,\n.app-shell.has-realtime-character {");
+    expect(styles).toContain("Dynamic (realtime character) backgrounds follow the same single-owner mask");
+    expect(styles).toContain(':root[data-theme="light"] .app-shell.has-realtime-character :is(');
+    expect(styles).toContain('  .project-root-list,\n  .project-root-accordion,');
+    expect(styles).toContain('  .project-root-row,\n  .workspace-root-select,');
+    expect(styles).toContain('  .git-changes-header,\n  .git-sync-summary,');
+    expect(styles).toContain('  .git-commit-panel,\n  .git-commit-panel textarea,');
+    expect(styles).toContain('  .git-branch-select select,');
+    expect(styles).toContain(':root:not([data-theme="light"]) .app-shell.has-realtime-character :is(');
+    expect(styles).toContain(':root:not([data-theme="light"]) .app-shell.has-realtime-character .right-workspace-panel {');
+    expect(styles).toContain(':root[data-theme="light"] .app-shell.has-realtime-character .right-workspace-panel {');
+    expect(styles).toContain("background: rgba(8, 9, 11, var(--app-bg-right-panel));");
+  });
+
+  it("keeps the reasoning effort picker light and translucent", () => {
+    expect(styles).toContain("The reasoning picker is a standalone dark control in the base theme");
+    expect(styles).toContain(':root[data-theme="light"] .reasoning-effort-trigger {');
+    expect(styles).toContain("background: rgba(255, 255, 255, 0.72) !important;");
+    expect(styles).toContain(':root[data-theme="light"] .reasoning-effort-picker.open .reasoning-effort-trigger');
+    expect(styles).toContain(':root[data-theme="light"] .reasoning-effort-menu {');
+    expect(styles).toContain("background: rgba(255, 255, 255, 0.94) !important;");
+    expect(styles).toContain(':root[data-theme="light"] .reasoning-effort-option.selected');
+  });
+
   it("lets the configured dialog shell own opacity without inner background fills", () => {
     const start = styles.indexOf("The dialog shell is the only owner of the configured opacity");
     const end = styles.indexOf("The composer surround belongs to the conversation surface", start);

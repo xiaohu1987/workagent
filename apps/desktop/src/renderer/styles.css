@@ -21285,7 +21285,8 @@ select option:checked {
   z-index: 1;
 }
 
-.app-shell.has-app-background {
+.app-shell.has-app-background,
+.app-shell.has-realtime-character {
   position: relative;
   isolation: isolate;
   background: #0b0c0e;
@@ -27531,4 +27532,114 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 .app-shell.has-app-background .project-file-row:not(:hover):not(.selected),
 .app-shell.has-app-background .git-file-row {
   background: transparent !important;
+}
+
+/* Dynamic (realtime character) backgrounds follow the same single-owner mask
+   architecture as image backgrounds: the outer right panel carries the mask,
+   nested file/Git surfaces stay transparent so alpha values do not compound
+   into an apparently solid pane that hides the background. */
+:root[data-theme="light"] .app-shell.has-realtime-character :is(
+  .right-workspace-header,
+  .right-workspace-tabs,
+  .right-workspace-content,
+  .right-workspace-view,
+  .project-files-workspace,
+  .project-root-list,
+  .project-root-accordion,
+  .project-files-list,
+  .project-files-filter,
+  .project-root-row,
+  .workspace-root-select,
+  .project-file-row,
+  .project-preview-workspace,
+  .browser-workspace,
+  .git-changes-workspace,
+  .git-changes-header,
+  .git-sync-summary,
+  .git-commit-panel,
+  .git-commit-panel textarea,
+  .git-branch-select select,
+  .git-change-list,
+  .git-diff-pane,
+  .git-diff-scroll,
+  .right-workspace-empty-state
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root:not([data-theme="light"]) .app-shell.has-realtime-character :is(
+  .right-workspace-content,
+  .right-workspace-view,
+  .project-files-workspace,
+  .project-root-list,
+  .project-root-accordion,
+  .project-files-list,
+  .project-files-filter,
+  .git-changes-workspace,
+  .git-changes-header,
+  .git-sync-summary,
+  .git-commit-panel,
+  .git-commit-panel textarea,
+  .git-change-list,
+  .git-diff-pane,
+  .git-diff-scroll,
+  .right-workspace-empty-state
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+:root:not([data-theme="light"]) .app-shell.has-realtime-character .right-workspace-panel {
+  background: rgba(8, 9, 11, var(--app-bg-right-panel));
+  backdrop-filter: blur(5px);
+}
+
+:root[data-theme="light"] .app-shell.has-realtime-character .right-workspace-panel {
+  background: rgba(255, 255, 255, var(--app-bg-right-panel)) !important;
+  backdrop-filter: blur(5px);
+}
+
+/* The reasoning picker is a standalone dark control in the base theme. Keep
+   it readable in the light workbench without letting its dark surface cover
+   the selected image or realtime background. */
+:root[data-theme="light"] .reasoning-effort-trigger {
+  border-color: #cfddea !important;
+  color: #45637c !important;
+  background: rgba(255, 255, 255, 0.72) !important;
+  backdrop-filter: blur(10px);
+}
+
+:root[data-theme="light"] .reasoning-effort-trigger:hover:not(:disabled),
+:root[data-theme="light"] .reasoning-effort-picker.open .reasoning-effort-trigger {
+  border-color: #9dcaf0 !important;
+  color: #1f5f92 !important;
+  background: rgba(226, 241, 255, 0.86) !important;
+}
+
+:root[data-theme="light"] .reasoning-effort-menu {
+  border-color: #cfddea !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  box-shadow: 0 14px 34px rgba(42, 85, 123, 0.18) !important;
+  backdrop-filter: blur(18px);
+}
+
+:root[data-theme="light"] .reasoning-effort-title {
+  color: #57718a !important;
+}
+
+:root[data-theme="light"] .reasoning-effort-option {
+  color: #45637c !important;
+}
+
+:root[data-theme="light"] .reasoning-effort-option:hover,
+:root[data-theme="light"] .reasoning-effort-option.selected {
+  color: #1f5f92 !important;
+  background: #e3f1ff !important;
+}
+
+:root[data-theme="light"] .reasoning-effort-check {
+  color: #2196f3 !important;
 }
