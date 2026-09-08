@@ -207,10 +207,17 @@ export class GitService {
     if (!root) return this.failure(cwd, "当前项目不是 Git 仓库。");
     const requested = branch.trim();
     if (!requested) return this.failure(root, "请选择要切换的分支。");
-    const branches = await runGit(root, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]);
-    const refs = branches.code === 0 ? parseBranchRefs(branches.stdout) : { local: new Set<string>(), remote: new Set<string>() };
-    const target = resolveSwitchBranchTarget(requested, refs);
-    if (!target) return this.failure(root, `分支不存在：${requested}`);
+    let refs = await this.readBranchRefs(root);
+    let target = resolveSwitchBranchTarget(requested, refs);
+    let remoteRefsFresh = false;
+    if (!target) {
+      // 本地还没有该分支的远程引用（例如远端新建的分支）：先抓取一次再重试。
+      const discovery = await this.fetchRemoteRefs(root, null);
+      remoteRefsFresh = discovery.code === 0;
+      refs = await this.readBranchRefs(root, refs);
+      target = resolveSwitchBranchTarget(requested, refs);
+      if (!target) return this.failure(root, `分支不存在：${requested}`);
+    }
 
     let displayName = target.name;
     let args: string[];
@@ -218,8 +225,20 @@ export class GitService {
       args = ["switch", target.name];
     } else {
       const separator = target.name.indexOf("/");
+      const remoteName = target.name.slice(0, separator);
       const localName = target.name.slice(separator + 1);
-      if (!localName || localName === "HEAD") return this.failure(root, `无法直接切换远端引用：${target.name}`);
+      if (!remoteName || !localName || localName === "HEAD") return this.failure(root, `无法直接切换远端引用：${target.name}`);
+      if (!remoteRefsFresh) {
+        // 先把远端分支拉取到本地，避免基于过期的远程引用创建无用的跟踪分支。
+        const fetched = await this.fetchRemoteRefs(root, remoteName);
+        if (fetched.code !== 0) {
+          return this.failure(root, fetched.stderr.trim() || "从远端获取分支失败，请检查网络后重试。");
+        }
+        refs = await this.readBranchRefs(root, refs);
+        if (!refs.remote.has(target.name)) {
+          return this.failure(root, `分支不存在：${requested}（远端可能已删除该分支）`);
+        }
+      }
       if (refs.local.has(localName)) {
         displayName = localName;
         args = ["switch", localName];
@@ -233,6 +252,20 @@ export class GitService {
       return this.failure(root, result.stderr.trim() || "切换分支失败，请先处理会被覆盖的本地修改。");
     }
     return { ok: true, message: `已切换到分支 ${displayName}`, snapshot: await this.snapshot(root) };
+  }
+
+  private async readBranchRefs(root: string, fallback?: BranchRefs): Promise<BranchRefs> {
+    const result = await runGit(root, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]);
+    if (result.code !== 0) return fallback ?? { local: new Set<string>(), remote: new Set<string>() };
+    return parseBranchRefs(result.stdout);
+  }
+
+  /** 拉取远端引用：指定远端时用通配 refspec 确保所有分支可见，否则抓取全部已配置远端。 */
+  private async fetchRemoteRefs(root: string, remote: string | null): Promise<GitCommandResult> {
+    const env = { GIT_TERMINAL_PROMPT: "0" };
+    return remote
+      ? runGit(root, ["fetch", "--prune", remote, `+refs/heads/*:refs/remotes/${remote}/*`], undefined, env)
+      : runGit(root, ["fetch", "--all", "--prune"], undefined, env);
   }
 
   public async createBranch(cwd: string, branch: string): Promise<GitActionResult> {
@@ -448,9 +481,9 @@ function buildPullRequestUrl(remoteUrl: string, branch?: string, upstream?: stri
   return `https://github.com/${match[1]}/${match[2]}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`;
 }
 
-function runGit(cwd: string, args: string[], input?: string): Promise<GitCommandResult> {
+function runGit(cwd: string, args: string[], input?: string, env?: Record<string, string>): Promise<GitCommandResult> {
   return new Promise((resolve) => {
-    const child = spawn("git", args, { cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("git", args, { cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: env ? { ...process.env, ...env } : undefined });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });

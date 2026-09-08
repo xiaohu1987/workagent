@@ -178,7 +178,9 @@ export class McpManager {
         options.onToolsChanged?.(serverId);
       }
     }));
-    this.#toolCacheTtlMs = options.toolCacheTtlMs ?? 30_000;
+    // A longer default keeps repeat tool calls off the network; config changes
+    // and ToolListChangedNotifications still invalidate the cache.
+    this.#toolCacheTtlMs = options.toolCacheTtlMs ?? 300_000;
     this.setConfigs(configs);
   }
 
@@ -319,8 +321,9 @@ export class McpManager {
     if (!managed?.client.callTool) {
       throw new Error(`MCP server ${serverId} is not connected.`);
     }
+    const invokeCallTool = managed.client.callTool;
     try {
-      return await managed.client.callTool({ name: toolName, arguments: argumentsJson });
+      return await withToolCallTimeout(() => invokeCallTool({ name: toolName, arguments: argumentsJson }));
     } catch (error) {
       if (isMcpSessionInvalidError(error)) {
         const recovered = await this.reconnectInvalidSession(serverId, managed);
@@ -331,7 +334,8 @@ export class McpManager {
         if (!refreshedTools.some((tool) => tool.name === toolName)) {
           throw new Error(`MCP tool ${serverId}:${toolName} is not available after reconnecting.`);
         }
-        return recovered.client.callTool({ name: toolName, arguments: argumentsJson });
+        const retryCallTool = recovered.client.callTool;
+        return withToolCallTimeout(() => retryCallTool({ name: toolName, arguments: argumentsJson }));
       }
       if (!isMissingToolError(error)) throw error;
       await this.refreshToolDirectory([serverId]);
@@ -538,6 +542,22 @@ export class McpManager {
         this.#sessionReconnects.delete(serverId);
       }
     }
+  }
+}
+
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 120_000;
+
+async function withToolCallTimeout<T>(operation: () => Promise<T>, timeoutMs: number = DEFAULT_TOOL_CALL_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`MCP tool call timed out after ${timeoutMs}ms.`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

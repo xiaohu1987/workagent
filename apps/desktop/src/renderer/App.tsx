@@ -43,6 +43,7 @@ import {
   getThreadContentView,
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
+  mergeDurableGpaFlags,
   normalizeGpaStateForThread,
   replaceThreadSnapshotGpa,
   shouldCommitThreadSnapshotImmediately,
@@ -709,6 +710,7 @@ export function App() {
   const gpaPlanResumeRetryRequiredRef = useRef<Set<string>>(new Set());
   const gpaRevisionRef = useRef<HTMLTextAreaElement | null>(null);
   const gpaConfirmationPendingStageRef = useRef<Exclude<GpaStage, "off" | "act"> | null>(null);
+  const gpaDurableRestoreEpochRef = useRef(0);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
 
@@ -1495,11 +1497,23 @@ export function App() {
     if (!selectedThreadId) {
       return;
     }
-    const root = threadsRef.current.find((thread) => thread.id === selectedThreadId)?.cwd ?? "";
+    // The reset above is unconditional, but the cached-snapshot GPA restore
+    // commits in a low-priority transition this effect can outrun, and the
+    // fallback timer skips already-committed snapshots. Restore the durable
+    // per-thread flags directly so switching chats cannot drop full access.
+    const threadId = selectedThreadId;
+    const restoreEpoch = ++gpaDurableRestoreEpochRef.current;
+    void (window.codexh.getGpaState(threadId) as Promise<GpaState>).then((persisted) => {
+      if (selectedThreadIdRef.current !== threadId || restoreEpoch !== gpaDurableRestoreEpochRef.current) {
+        return;
+      }
+      setGpaState((prev) => mergeDurableGpaFlags(prev, persisted));
+    }).catch(() => undefined);
+    const root = threadsRef.current.find((thread) => thread.id === threadId)?.cwd ?? "";
     setActiveFilesRoot(root);
     setActiveGitRoot(root);
     setActiveTerminalRoot(root);
-    ensureTerminalTab(selectedThreadId, "default", root);
+    ensureTerminalTab(threadId, "default", root);
   }, [selectedThreadId]);
 
   useEffect(() => {
@@ -5422,6 +5436,7 @@ export function App() {
     }
   }
   async function setFullAccess(fullAccess: boolean) {
+    gpaDurableRestoreEpochRef.current += 1;
     setGpaState((prev) => ({ ...prev, fullAccess }));
     setGpaMenuOpen(false);
     setGpaMenuPos(null);

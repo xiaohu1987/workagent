@@ -282,6 +282,8 @@ export const CONTEXT_COMPACTION_TARGET = 0.45;
 export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
 /** Bound every persisted tool result before it is replayed into a model request. */
 export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 8_000;
+/** Cap persisted mcp.call payloads so oversized tool results cannot stall the main process or renderer. */
+export const MAX_MCP_PERSISTED_RESULT_CHARACTERS = 4_096;
 /** Keep desktop provider requests responsive even when a model advertises a huge context window. */
 export const MAX_RAW_HISTORY_TOKENS_PER_REQUEST = 48_000;
 /** Limit full-text draft snapshots so long streamed replies do not starve the desktop renderer. */
@@ -6130,9 +6132,11 @@ class ThreadSessionRuntime {
           }
           const persistedResult = toolCall.name.startsWith("database.")
             ? summarizeDatabaseToolResultForPersistence(sanitizedResult)
-            : { ...result, json: sanitizedResult.json };
-          const resultJson = redactSensitiveText(JSON.stringify(persistedResult));
+            : toolCall.name === "mcp.call"
+              ? summarizeMcpToolResultForPersistence(sanitizedResult)
+              : { ...result, json: sanitizedResult.json };
           const eventResultJson = redactSensitiveText(JSON.stringify(persistedResult));
+          const resultJson = eventResultJson;
           const status = result.ok ? "completed" : "failed";
           await this.services.persistence.finishToolCall(toolRecord.id, {
             status,
@@ -11817,6 +11821,44 @@ function summarizeDatabaseToolResultForPersistence(result: ToolResult): ToolResu
       federated: json.federated,
       sourceCount: json.sourceCount
     }
+  };
+}
+
+const MCP_PERSISTED_RAW_RESULT_PREVIEW_CHARACTERS = 600;
+
+/**
+ * Keeps oversized mcp.call payloads out of SQLite and IPC events. The model
+ * context path already truncates via summarizeToolResultForModel; this bounds
+ * the persistence/event copy the renderer receives in real time.
+ */
+export function summarizeMcpToolResultForPersistence(result: ToolResult): ToolResult {
+  const json = isRecordValue(result.json) ? result.json : {};
+  const rawResult = "result" in json ? compactMcpRawResultForPersistence(json.result) : undefined;
+  return {
+    ok: result.ok,
+    content: truncateCharacters(result.content, MAX_MCP_PERSISTED_RESULT_CHARACTERS),
+    json: {
+      truncated: result.content.length > MAX_MCP_PERSISTED_RESULT_CHARACTERS,
+      contentLength: result.content.length,
+      ...(rawResult !== undefined ? { result: rawResult } : {}),
+      ...(json.repository !== undefined ? { repository: json.repository } : {})
+    }
+  };
+}
+
+function compactMcpRawResultForPersistence(raw: unknown): unknown {
+  if (!isRecordValue(raw)) return raw;
+  if (JSON.stringify(raw).length <= MCP_PERSISTED_RAW_RESULT_PREVIEW_CHARACTERS) return raw;
+  const textItems = Array.isArray(raw.content)
+    ? raw.content
+        .filter(isRecordValue)
+        .map((item) => (typeof item.text === "string" ? item.text : ""))
+        .filter(Boolean)
+    : [];
+  return {
+    isError: raw.isError === true,
+    contentItemCount: Array.isArray(raw.content) ? raw.content.length : 0,
+    textPreview: truncateCharacters(textItems.join("\n"), MCP_PERSISTED_RAW_RESULT_PREVIEW_CHARACTERS)
   };
 }
 

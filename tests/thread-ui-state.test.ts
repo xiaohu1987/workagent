@@ -7,6 +7,7 @@ import {
   getThreadContentView,
   invalidateThreadSnapshotForFullRefresh,
   isThreadExecutionInProgress,
+  mergeDurableGpaFlags,
   normalizeGpaStateForThread,
   replaceThreadSnapshotGpa,
   shouldCommitThreadSnapshotImmediately,
@@ -241,6 +242,24 @@ describe("thread UI state helpers", () => {
       awaitingConfirmation: null,
       planTasks: []
     });
+  });
+
+  it("restores durable GPA flags after a thread switch reset", () => {
+    const resetState = normalizeGpaStateForThread("chat", null);
+    expect(resetState.fullAccess).toBe(false);
+
+    const restored = mergeDurableGpaFlags(resetState, { fullAccess: true, knowledgeEnabled: true });
+
+    expect(restored.fullAccess).toBe(true);
+    expect(restored.knowledgeEnabled).toBe(true);
+    expect(restored.stage).toBe("off");
+    expect(restored.planTasks).toEqual([]);
+  });
+
+  it("keeps the same GPA state reference when durable flags already match", () => {
+    const state = normalizeGpaStateForThread("chat", null);
+
+    expect(mergeDurableGpaFlags(state, { fullAccess: false, knowledgeEnabled: false })).toBe(state);
   });
 
   it("keeps a completed task's full-access preference in the matching snapshot", () => {

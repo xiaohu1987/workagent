@@ -61,6 +61,43 @@ describe("GitService", () => {
     });
   });
 
+  it("fetches a newly pushed remote branch before creating its tracking branch", async () => {
+    await withGitRepository(async (root) => {
+      const remote = path.join(root, ".test-remote.git");
+      await git(root, "init", "--bare", remote);
+      await git(root, "remote", "add", "origin", remote);
+      await git(root, "push", "origin", "main:refs/heads/main");
+      await git(root, "fetch", "origin");
+      // 远端新增分支，本地尚未抓取到对应引用
+      await git(root, "push", "origin", "main:refs/heads/new-remote");
+
+      const result = await new GitService().switchBranch(root, "origin/new-remote");
+
+      expect(result.ok).toBe(true);
+      expect(result.snapshot.branch).toBe("new-remote");
+      await expect(git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"))
+        .resolves.toBe("origin/new-remote");
+    });
+  });
+
+  it("does not create a local branch when the remote branch no longer exists", async () => {
+    await withGitRepository(async (root) => {
+      const remote = path.join(root, ".test-remote.git");
+      await git(root, "init", "--bare", remote);
+      await git(root, "remote", "add", "origin", remote);
+      await git(root, "push", "origin", "main:refs/heads/gone");
+      await git(root, "fetch", "origin");
+      await git(root, "push", "origin", ":refs/heads/gone");
+
+      const result = await new GitService().switchBranch(root, "origin/gone");
+
+      expect(result.ok).toBe(false);
+      expect(result.snapshot.branch).toBe("main");
+      expect(result.snapshot.localBranches).toEqual(["main"]);
+      await expect(git(root, "branch", "--show-current")).resolves.toBe("main");
+    });
+  });
+
   it("normalizes a full local ref before passing it to git switch", async () => {
     await withGitRepository(async (root) => {
       await git(root, "branch", "feature/full-ref");

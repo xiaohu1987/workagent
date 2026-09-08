@@ -2719,7 +2719,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       const repository = extractMcpRepositoryToolResult(result);
       return {
         ok: true,
-        content: JSON.stringify(result, null, 2),
+        content: JSON.stringify(result),
         json: { result, ...(repository ? { repository } : {}) }
       };
     }

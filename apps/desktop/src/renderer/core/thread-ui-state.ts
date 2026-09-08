@@ -28,6 +28,21 @@ export function normalizeGpaStateForThread(
   return next;
 }
 
+/**
+ * fullAccess / knowledgeEnabled are durable per-thread preferences. A thread
+ * switch resets the renderer GPA state first and restores the rest from
+ * snapshots asynchronously, so these two flags are merged back explicitly.
+ */
+export function mergeDurableGpaFlags(
+  current: GpaState,
+  persisted: Pick<GpaState, "fullAccess" | "knowledgeEnabled">
+): GpaState {
+  if (current.fullAccess === persisted.fullAccess && current.knowledgeEnabled === persisted.knowledgeEnabled) {
+    return current;
+  }
+  return { ...current, fullAccess: persisted.fullAccess, knowledgeEnabled: persisted.knowledgeEnabled };
+}
+
 export function replaceThreadSnapshotGpa(
   snapshot: RuntimeThreadSnapshot | null,
   threadId: string,
