@@ -1,11 +1,87 @@
 import type { Dispatch, SetStateAction } from "react";
-import type { AppConfig } from "@shared-types";
+import type { AppConfig, CompletionAuditMode } from "@shared-types";
+import { DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS, MAX_COMPLETION_AUDIT_MAX_ATTEMPTS, MIN_COMPLETION_AUDIT_MAX_ATTEMPTS, defaultCompletionAuditSettings } from "@shared-types";
 import { ComposerSelect } from "../../../workspace/composer-select";
 import { IconChart, IconChecklist, IconGear, IconGlobe, IconSkills } from "../../../icons";
 import { getProviderDisplayName, modelKey } from "../../../lib/config-utils";
 
-type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: () => Promise<void>; onSetLlmLogViewerEnabled: (enabled: boolean) => void };
-export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave, onSetLlmLogViewerEnabled }: Props) { return (
+function CompletionAuditModeFields({
+  mode,
+  label,
+  hint,
+  configDraft,
+  setConfigDraft
+}: {
+  mode: CompletionAuditMode;
+  label: string;
+  hint: string;
+  configDraft: AppConfig;
+  setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>;
+}) {
+  const settings = configDraft.desktop.completionAudit?.[mode] ?? defaultCompletionAuditSettings()[mode];
+  const enabled = settings.enabled !== false;
+  return (
+    <div className="completion-audit-mode-row">
+      <div className="completion-audit-mode-controls">
+        <div className="settings-field general-permission-field completion-audit-mode-toggle">
+          <span>{label}</span>
+          <label className={`mcp-enable-switch ${enabled ? "is-on" : ""}`}>
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(event) => setConfigDraft((current) => {
+                if (!current) return current;
+                const completionAudit = {
+                  ...defaultCompletionAuditSettings(),
+                  ...current.desktop.completionAudit,
+                  [mode]: {
+                    ...(current.desktop.completionAudit?.[mode] ?? defaultCompletionAuditSettings()[mode]),
+                    enabled: event.target.checked
+                  }
+                };
+                return { ...current, desktop: { ...current.desktop, completionAudit } };
+              })}
+            />
+            <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
+            <span className="mcp-enable-label">{enabled ? "启用" : "禁用"}</span>
+          </label>
+        </div>
+        {enabled ? (
+          <label className="settings-field completion-audit-mode-count">
+            <span>{label}审计次数</span>
+            <input
+              type="number"
+              min={MIN_COMPLETION_AUDIT_MAX_ATTEMPTS}
+              max={MAX_COMPLETION_AUDIT_MAX_ATTEMPTS}
+              value={settings.maxAttempts ?? DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS}
+              onChange={(event) => setConfigDraft((current) => {
+                if (!current) return current;
+                const completionAudit = {
+                  ...defaultCompletionAuditSettings(),
+                  ...current.desktop.completionAudit,
+                  [mode]: {
+                    ...(current.desktop.completionAudit?.[mode] ?? defaultCompletionAuditSettings()[mode]),
+                    maxAttempts: Number(event.target.value) || DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS
+                  }
+                };
+                return { ...current, desktop: { ...current.desktop, completionAudit } };
+              })}
+            />
+          </label>
+        ) : null}
+      </div>
+      <div className="completion-audit-mode-hints">
+        <small className="settings-field-hint">{hint}</small>
+        {enabled ? (
+          <small className="settings-field-hint">{MIN_COMPLETION_AUDIT_MAX_ATTEMPTS}–{MAX_COMPLETION_AUDIT_MAX_ATTEMPTS} · 该模式未通过时自动重审的次数，默认 {DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS} 次</small>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: () => Promise<void> };
+export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave }: Props) { return (
       <div className="settings-section">
         <div className="general-overview">
           <div className="general-overview-heading">
@@ -103,18 +179,28 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
             </div>
             <div className="settings-save-row"><span className="subtle-inline">更改会在保存后应用于后续网页打开。</span><button className="button warm" type="button" onClick={() => void onSave()}>保存</button></div>
           </div>
-          <div className="config-block">
-            <div className="section-copy section-copy-with-action">
-              <div>
-                <strong>对话日志</strong>
-                <span>开启后打开独立日志窗口，实时查看当前对话的完整 LLM、工具和错误日志。</span>
-              </div>
-              <label className={`mcp-enable-switch ${configDraft.desktop.llmLogViewer ? "is-on" : ""}`}>
-                <input type="checkbox" checked={configDraft.desktop.llmLogViewer} onChange={(event) => onSetLlmLogViewerEnabled(event.target.checked)} />
-                <span className="mcp-enable-track" aria-hidden="true"><span className="mcp-enable-thumb" /></span>
-                <span className="mcp-enable-label">{configDraft.desktop.llmLogViewer ? "启用" : "禁用"}</span>
-              </label>
+          <div className="config-block general-subagent-settings">
+            <div className="section-copy">
+              <strong><IconChecklist />模型输出审计</strong>
+              <span>项目模式和普通对话分开设置。开启后该模式仍按现有规则审计最终回复；关闭后该模式直接采用模型输出。</span>
             </div>
+            <div className="completion-audit-settings">
+              <CompletionAuditModeFields
+                mode="project"
+                label="项目模式"
+                hint="默认开启。关闭后项目任务不再做完成审计。"
+                configDraft={configDraft}
+                setConfigDraft={setConfigDraft}
+              />
+              <CompletionAuditModeFields
+                mode="chat"
+                label="普通对话"
+                hint="默认开启。关闭后普通对话不再做完成审计。"
+                configDraft={configDraft}
+                setConfigDraft={setConfigDraft}
+              />
+            </div>
+            <div className="settings-save-row"><span className="subtle-inline">更改会在保存后应用于后续任务。</span><button className="button warm" type="button" onClick={() => void onSave()}>保存</button></div>
           </div>
           <div className="config-block general-subagent-settings">
             <div className="section-copy">

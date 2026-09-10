@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { isConfigurableGptReasoningModel, normalizeResponseTone, resolveModelReasoningEffort, withGptReasoningCapabilities } from "@shared-types";
+import { isConfigurableGptReasoningModel, isConfigurableReasoningEffortModel, normalizeCompletionAuditEnabled, normalizeCompletionAuditMaxAttempts, normalizeCompletionAuditSettings, resolveCompletionAuditModeSettings, normalizeResponseTone, resolveModelReasoningEffort, withGptReasoningCapabilities } from "@shared-types";
 import type { ModelProfile } from "@shared-types";
 import { defaultConfig, loadConfig, saveConfig } from "../apps/desktop/src/main/storage";
 import { PROVIDER_TEMPLATE_OPTIONS, buildConfigToSave, createEmptyProvider, hasProviderTestEndpoint, normalizeDraftConfig, providerTemplatePatch, resolveSelectionFromConfig } from "../apps/desktop/src/renderer/lib/config-utils";
@@ -107,6 +107,26 @@ describe("model configuration storage", () => {
     expect(config.defaultModel).toBe("mock-codexh");
     expect(config.responseTone).toBe("concise");
     expect(config.desktop.liveEditPreview).toBe(false);
+    expect(config.desktop.completionAudit).toEqual({
+      project: { enabled: true, maxAttempts: 3 },
+      chat: { enabled: true, maxAttempts: 3 }
+    });
+    expect(normalizeCompletionAuditEnabled(undefined)).toBe(true);
+    expect(normalizeCompletionAuditEnabled(false)).toBe(false);
+    expect(normalizeCompletionAuditMaxAttempts(undefined)).toBe(3);
+    expect(normalizeCompletionAuditMaxAttempts(0)).toBe(1);
+    expect(normalizeCompletionAuditMaxAttempts(99)).toBe(8);
+    expect(normalizeCompletionAuditSettings({
+      completionAuditEnabled: false,
+      completionAuditMaxAttempts: 5
+    })).toEqual({
+      project: { enabled: false, maxAttempts: 5 },
+      chat: { enabled: false, maxAttempts: 5 }
+    });
+    expect(resolveCompletionAuditModeSettings({
+      project: { enabled: true, maxAttempts: 2 },
+      chat: { enabled: false, maxAttempts: 6 }
+    }, "chat")).toEqual({ enabled: false, maxAttempts: 6 });
     expect(config.providers).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "anthropic", baseUrl: "https://api.anthropic.com/v1" }),
       expect.objectContaining({ id: "openai", apiFormat: "auto" }),
@@ -129,6 +149,54 @@ describe("model configuration storage", () => {
     const loaded = await loadConfig(configFile);
 
     expect(loaded.responseTone).toBe("friendly");
+  });
+
+  it("persists completion audit settings and defaults them on for older configs", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-audit-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    const config = defaultConfig();
+    config.desktop.completionAudit = {
+      project: { enabled: false, maxAttempts: 5 },
+      chat: { enabled: true, maxAttempts: 2 }
+    };
+
+    await saveConfig(configFile, config);
+    const loaded = await loadConfig(configFile);
+    expect(loaded.desktop.completionAudit).toEqual({
+      project: { enabled: false, maxAttempts: 5 },
+      chat: { enabled: true, maxAttempts: 2 }
+    });
+
+    const raw = await fs.readFile(configFile, "utf8");
+    const withoutAudit = raw
+      .replace(/\[desktop\.completionAudit(?:\.project|\.chat)?\][\s\S]*?(?=\n\[|\n*$)/g, "\n")
+      .replace(/\s*completionAuditEnabled\s*=\s*\w+\s*/g, "\n")
+      .replace(/\s*completionAuditMaxAttempts\s*=\s*\d+\s*/g, "\n");
+    await fs.writeFile(configFile, withoutAudit, "utf8");
+    const migrated = await loadConfig(configFile);
+    expect(migrated.desktop.completionAudit).toEqual({
+      project: { enabled: true, maxAttempts: 3 },
+      chat: { enabled: true, maxAttempts: 3 }
+    });
+  });
+
+  it("migrates a legacy global completion-audit flag into both modes", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-audit-legacy-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    const config = defaultConfig();
+    await saveConfig(configFile, config);
+    const raw = await fs.readFile(configFile, "utf8");
+    const withLegacy = raw
+      .replace(/\[desktop\.completionAudit(?:\.project|\.chat)?\][\s\S]*?(?=\n\[|\n*$)/g, "\n")
+      .replace(/(\[desktop\]\r?\n)/, "$1completionAuditEnabled = false\ncompletionAuditMaxAttempts = 4\n");
+    await fs.writeFile(configFile, withLegacy, "utf8");
+    const loaded = await loadConfig(configFile);
+    expect(loaded.desktop.completionAudit).toEqual({
+      project: { enabled: false, maxAttempts: 4 },
+      chat: { enabled: false, maxAttempts: 4 }
+    });
   });
 
   it("keeps hidden provider transport overrides compatible with existing configs", async () => {
@@ -299,6 +367,14 @@ describe("model configuration storage", () => {
     expect(isConfigurableGptReasoningModel({ ...base, id: "claude-opus-4-5" })).toBe(false);
     expect(isConfigurableGptReasoningModel({ ...base, role: "image" })).toBe(false);
     expect(resolveModelReasoningEffort({ ...base, id: "claude-opus-4-5", defaultReasoningEffort: "high" }, "low")).toBe("high");
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "deepseek-flash" })).toBe(true);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "glm-5.3-flash" })).toBe(true);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "grok-4.5" })).toBe(true);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "claude-opus-4-5" })).toBe(false);
+    expect(resolveModelReasoningEffort({ ...base, id: "deepseek-flash", defaultReasoningEffort: "medium" }, "xhigh")).toBe("xhigh");
+    expect(withGptReasoningCapabilities({ ...base, id: "glm-5.3-flash" }).supportedReasoningEfforts).toEqual([
+      "low", "medium", "high", "xhigh"
+    ]);
   });
 
   it("migrates legacy response tones to a supported option", () => {

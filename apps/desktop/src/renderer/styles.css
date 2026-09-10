@@ -18104,6 +18104,61 @@ body.panel-resizing {
 .general-subagent-settings-grid .settings-field-hint { flex: 1 1 100%; }
 .general-permission-field .memory-switch { flex: 0 0 auto; min-height: 36px; }
 
+.completion-audit-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.completion-audit-mode-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(145, 170, 205, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.completion-audit-mode-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+.completion-audit-mode-toggle {
+  flex: 0 1 auto;
+  margin: 0;
+}
+.completion-audit-mode-toggle > span {
+  flex: 0 0 auto;
+  min-width: 72px;
+}
+.completion-audit-mode-count {
+  flex: 0 1 auto;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px 10px;
+}
+.completion-audit-mode-count > span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.completion-audit-mode-count input[type="number"] {
+  flex: 0 0 76px;
+  width: 76px;
+  min-height: 36px;
+  padding: 0 8px;
+}
+.completion-audit-mode-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+.completion-audit-mode-hints .settings-field-hint {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
 .memory-list-heading {
   display: flex;
   align-items: center;

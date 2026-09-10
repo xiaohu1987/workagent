@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, resolveModelReasoningEffort } from "@shared-types";
+import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, normalizeCompletionAuditEnabled, resolveCompletionAuditModeSettings, resolveModelReasoningEffort } from "@shared-types";
 import type {
   AppConfig,
   AssistantDraftPhase,
@@ -39,7 +39,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, isGrokModel, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, isGrokModel, isProgressOnlyAssistantMessage, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isChildReadOnlyForbiddenTool, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
@@ -273,7 +273,7 @@ export const MAX_PROGRESS_ONLY_COMPLETION_RECOVERIES = 10;
 // Explicit audit rejections may revise a base-valid candidate, but the audit
 // itself must never create an unbounded completion loop.
 export const MAX_STANDARD_COMPLETION_RECOVERIES = 3;
-export const MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES = 1;
+export const MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES = 3;
 export const MAX_STANDARD_COMPLETION_AUDIT_NO_PROGRESS_RECOVERIES = 3;
 export const STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS = 2;
 export const RECOVERY_MODEL_DECISION_TIMEOUT_MS = 30_000;
@@ -282,6 +282,10 @@ export const CONTEXT_COMPACTION_TARGET = 0.45;
 export const MAX_MCP_TOOL_RESULT_CHARACTERS = 8_000;
 /** Bound every persisted tool result before it is replayed into a model request. */
 export const MAX_MODEL_TOOL_RESULT_CHARACTERS = 8_000;
+/** Keep typical OpenAPI/JSON attachments intact; line paging cannot slice a single long line. */
+export const MAX_FILE_READ_TOOL_RESULT_CHARACTERS = 80_000;
+/** Keep one reply under the provider output cap when generating many interactive cards. */
+export const MAX_API_CARDS_PER_REPLY = 8;
 /** Cap persisted mcp.call payloads so oversized tool results cannot stall the main process or renderer. */
 export const MAX_MCP_PERSISTED_RESULT_CHARACTERS = 4_096;
 /** Keep desktop provider requests responsive even when a model advertises a huge context window. */
@@ -299,6 +303,29 @@ export function shouldPublishAssistantDraftUpdate(
   force = false
 ): boolean {
   return force || nowMs - lastPublishedAtMs >= ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS;
+}
+
+export type AssistantDraftRetryMode = "retain" | "clear";
+
+/**
+ * Automatic provider retries must not blank the chat bubble. DeepSeek Flash
+ * (and other thinking models) often stream a usable reply first, then fail
+ * protocol/output-limit checks; clearing that text looks like the answer
+ * vanished. Only hide the draft when the visible text is off-protocol junk.
+ */
+export function resolveRetainedAssistantDraft(input: {
+  mode?: AssistantDraftRetryMode;
+  lastPublishedContent: string;
+  lastPublishedReasoning?: string;
+}): { content: string; reasoning: string; phase: AssistantDraftPhase } {
+  if (input.mode === "clear") {
+    return { content: "", reasoning: "", phase: "retrying" };
+  }
+  return {
+    content: input.lastPublishedContent,
+    reasoning: input.lastPublishedReasoning ?? "",
+    phase: "retrying"
+  };
 }
 
 export function splitNonStreamingAssistantDraft(content: string): string[] {
@@ -511,6 +538,7 @@ export function buildProviderOutputLimitRecoveryInstruction(partialDraft = ""): 
   return (
     "The previous response reached the provider output limit. Continue the original answer from the existing verified context. " +
     "Preserve the user's requested level of detail and do not replace the answer with a brief summary. " +
+    `If you were emitting api-card blocks, continue with the next compact batch of at most ${MAX_API_CARDS_PER_REPLY} cards; do not restart or dump every remaining card at once. ` +
     "Do not repeat analysis, logs, source text, or completed work. Return only the remaining answer, one compact next tool call, or a final answer when the original response is complete." +
     draftContext
   );
@@ -1739,6 +1767,11 @@ class ThreadSessionRuntime {
         });
     const workspaceCwd = modePolicy.workspaceRoot;
     const workspaceRoots = modePolicy.mode === "project" ? (thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : [])) : [workspaceCwd];
+    const allowedReadPaths = collectAllowedReadPaths({
+      attachments,
+      request: [effectiveRequest, displayContent ?? ""].filter(Boolean).join("\n"),
+      priorMessages: priorMessagesBeforeTurn
+    });
     // Spreadsheets and other artifacts are commonly produced by scripts rather
     // than managed write tools, so retain a narrow, requested-format baseline.
     const workspaceRequestedArtifactsBeforeTurn = modePolicy.mode === "project"
@@ -1841,7 +1874,8 @@ class ThreadSessionRuntime {
       ? tools.filter((tool) =>
           tool.name === "mcp.list_tools" ||
           tool.name === "mcp.call" ||
-          tool.name === AGENT_PROTOCOL_RECOVERY_TOOL_NAME
+          tool.name === AGENT_PROTOCOL_RECOVERY_TOOL_NAME ||
+          (allowedReadPaths.length > 0 && isAttachedLocalReadTool(tool.name))
         )
       : this.services.config.selfImprovement.dedicatedTools ? tools : tools.filter((tool) => !tool.name.startsWith("memories."));
     const turn = await this.services.persistence.startTurn({
@@ -2181,6 +2215,8 @@ class ThreadSessionRuntime {
       let standardCompletionAuditRecoveryGaps: string[] = [];
       let modelAwaitReason: "turn_start" | "after_tools" | "recovery" = "turn_start";
       let draftSequence = 0;
+      let retainedVisibleDraft = "";
+      let retainedReasoningDraft = "";
       let useTextToolProtocol = false;
       let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
@@ -2626,7 +2662,7 @@ class ThreadSessionRuntime {
           ? standardCompletionAuditAttempts
           : standardCompletionAttempts;
         const maxAttempts = reason === "completion_audit"
-          ? MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES
+          ? resolveCompletionAuditModeSettings(this.services.config.desktop.completionAudit, modePolicy.mode).maxAttempts
           : MAX_STANDARD_COMPLETION_RECOVERIES;
         await this.services.emit({
           type: "agent.retrying",
@@ -2730,7 +2766,8 @@ class ThreadSessionRuntime {
           requestTools.some((tool) => tool.name === "video.generate"),
           availableSkills.filter((skill) => recommendedSkillIds.includes(skill.id)),
           selectedMcpServerIds,
-          modePolicy.systemPrompt
+          modePolicy.systemPrompt,
+          allowedReadPaths
         );
         const adapter = this.services.providerFactory.create(provider);
         const modelTurnAbortController = createChildAbortController(abortController.signal);
@@ -2815,12 +2852,21 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
         };
-        const retryDraft = async () => {
+        const retryDraft = async (mode: AssistantDraftRetryMode = "retain") => {
+          const retained = resolveRetainedAssistantDraft({
+            mode,
+            lastPublishedContent: lastPublishedDraftContent,
+            lastPublishedReasoning: lastPublishedDraftReasoning
+          });
+          retainedVisibleDraft = retained.content;
+          retainedReasoningDraft = retained.reasoning;
           streamedVisibleContent = "";
-          lastPublishedDraftContent = "";
           streamedReasoningContent = "";
-          lastPublishedDraftReasoning = "";
-          draftReasoningDeltaSequence = 0;
+          if (mode === "clear") {
+            lastPublishedDraftContent = "";
+            lastPublishedDraftReasoning = "";
+            draftReasoningDeltaSequence = 0;
+          }
           await this.services.emit({
             type: "assistant.draft.updated",
             threadId: this.threadId,
@@ -2828,13 +2874,15 @@ class ThreadSessionRuntime {
               turnRunId: turn.id,
               draftId,
               sequence,
-              phase: "retrying",
-              reasoning: "",
+              phase: retained.phase,
+              content: retained.content,
+              ...(retained.reasoning ? { reasoning: retained.reasoning } : mode === "clear" ? { reasoning: "" } : {}),
               startedAt: draftStartedAt
             },
             createdAt: new Date().toISOString()
           });
-          await updateDraft("retrying", "", { force: true });
+          await updateDraft("retrying", retained.content, { force: true });
+          streamedVisibleContent = "";
         };
         const revealNonStreamingDraft = async (content: string) => {
           const chunks = splitNonStreamingAssistantDraft(content);
@@ -2861,7 +2909,27 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
         };
-        await updateDraft("generating", "", { force: true });
+        const openingDraftPhase = retainedVisibleDraft.trim() ? "retrying" : "generating";
+        await updateDraft(openingDraftPhase, retainedVisibleDraft, { force: true });
+        streamedVisibleContent = "";
+        if (retainedReasoningDraft) {
+          lastPublishedDraftReasoning = retainedReasoningDraft;
+          draftReasoningDeltaSequence += 1;
+          await this.services.emit({
+            type: "assistant.draft.updated",
+            threadId: this.threadId,
+            payload: {
+              turnRunId: turn.id,
+              draftId,
+              sequence,
+              phase: openingDraftPhase,
+              reasoning: retainedReasoningDraft,
+              reasoningDeltaSequence: draftReasoningDeltaSequence,
+              startedAt: draftStartedAt
+            },
+            createdAt: new Date().toISOString()
+          });
+        }
         const multiAgentDirective = buildMultiAgentDirective(thread);
         const borrowedCapsuleTokens = Math.max(
           0,
@@ -3570,7 +3638,7 @@ class ThreadSessionRuntime {
 
         const returnedVisibleContent = resolveVisibleAssistantContent(
           decision.assistantMessage,
-          streamedVisibleContent
+          streamedVisibleContent.trim() ? streamedVisibleContent : retainedVisibleDraft
         );
         // Some compatible providers stream the visible reply but return an
         // empty assistant_message in the terminal decision envelope. Preserve
@@ -4236,10 +4304,15 @@ class ThreadSessionRuntime {
           }
         }
 
+        const auditSettings = resolveCompletionAuditModeSettings(
+          this.services.config.desktop.completionAudit,
+          modePolicy.mode
+        );
         const auditRequired = shouldRunStandardCompletionAudit({
           mode: modePolicy.mode,
           request: effectiveRequest,
-          requestedDeliverableExtensions
+          requestedDeliverableExtensions,
+          enabled: auditSettings.enabled
         });
         const requiresGoalCompletion =
           modePolicy.mode === "project" ||
@@ -4476,7 +4549,7 @@ class ThreadSessionRuntime {
             deliveredPaths,
             successfulEvidenceCount: successfulToolEvidence.length
           });
-          await updateDraft("auditing", assistantMessage ?? streamedVisibleContent);
+          await updateDraft("auditing", assistantMessage ?? (streamedVisibleContent.trim() || retainedVisibleDraft));
 
           const auditInstruction = buildStandardCompletionAuditInstruction({
             originalRequest: effectiveRequest,
@@ -4687,7 +4760,8 @@ class ThreadSessionRuntime {
               });
               const disposition = resolveStandardCompletionAuditDisposition({
                 outcome: "rejected",
-                attempt: standardCompletionAuditAttempts
+                attempt: standardCompletionAuditAttempts,
+                maxAttempts: auditSettings.maxAttempts
               });
               if (disposition === "retry") {
                 await scheduleStandardCompletionRecovery("completion_audit", auditResult.gaps);
@@ -5146,7 +5220,7 @@ class ThreadSessionRuntime {
               recordedToolBatchAnchor = true;
               await settleDraft({ messageId: commentaryMessage.id });
             } else {
-              await retryDraft();
+              await retryDraft("clear");
               await this.recordMessage(
                 "assistant",
                 "",
@@ -5157,11 +5231,11 @@ class ThreadSessionRuntime {
               await settleDraft({ discarded: true });
             }
           } else {
-            await retryDraft();
+            await retryDraft("clear");
           }
           decision.assistantMessage = undefined;
         } else if (decision.assistantMessage && decision.toolCalls.length > 0 && !preservesGpaAnalysis) {
-          await retryDraft();
+          await retryDraft("clear");
           decision.assistantMessage = undefined;
         }
 
@@ -5741,6 +5815,7 @@ class ThreadSessionRuntime {
             toolContext = {
               cwd: workspaceCwd,
               workspaceRoots,
+              allowedReadPaths,
               appHome: "",
               threadId: this.threadId,
               turnRunId: turn.id,
@@ -8784,26 +8859,37 @@ export function shouldRunStandardCompletionAudit(input: {
   mode: "project" | "chat";
   request: string;
   requestedDeliverableExtensions: readonly string[];
+  enabled?: boolean;
 }): boolean {
+  if (normalizeCompletionAuditEnabled(input.enabled) === false) return false;
   if (input.mode === "project") return true;
   // In ordinary chat, a wording match for a mutation verb is not sufficient
   // to hold a completed textual response behind a project-style audit.
   return input.requestedDeliverableExtensions.length > 0;
 }
 
+export const API_CARD_OUTPUT_INSTRUCTION =
+  "When the user provides an API/interface document and wants to try the endpoint interactively, include one or more fenced `api-card` code blocks, each containing one strict JSON object (no comments, no functions) so the chat renders an interactive form card that calls the API. Schema: { title, description?, method (GET|POST|PUT|PATCH|DELETE), url (http/https, may embed {{fieldName}} path params), auth?, headers?, query?, bodyTemplate?, fields: [...] }. Each field: { name (identifier, unique), label, type, required?, defaultValue?, placeholder?, help?, options? }. Supported field types: text, textarea, number, password, select, radio, checkbox, switch, date, time, keyvalue (key-value rows rendered as a JSON object), json (raw JSON text). select/radio/checkbox require options: [{ label, value }]. Placeholder rule: write {{fieldName}} inside url/query/header values/bodyTemplate. bodyTemplate MUST be one string containing JSON text with escaped inner quotes (e.g. \"bodyTemplate\": \"{\\\"name\\\": \\\"{{name}}\\\", \\\"age\\\": {{age}}}\"), never a nested JSON object or array; inside it quote string fields like \\\"{{name}}\\\", while number/switch/checkbox/keyvalue/json fields are inserted as raw JSON and must NOT be quoted. If the endpoint needs credentials, declare auth: { type: \"bearer\" | \"apiKey\" | \"basic\", in?: \"header\" | \"query\" (apiKey only, default header), name?: string (apiKey parameter name or Authorization override), label?, placeholder?, help?, required? } so the card shows a dedicated token input; never invent or embed real tokens, keys, or secrets in the config — the user fills them in. Map the document's parameters to fields faithfully (path params in url, query params in query, body fields in bodyTemplate), mark required fields per the document, and after the blocks briefly explain in normal text what the cards do. When the user asks for one endpoint, emit one api-card block. When they ask to generate cards for many or all endpoints, emit up to " +
+  String(MAX_API_CARDS_PER_REPLY) +
+  " compact api-card blocks in the same reply (one fence per endpoint). Keep each card compact: omit unused optional fields and do not paste long token examples. If more endpoints remain, list the remaining names in one short sentence and stop; do not call tools just to continue, and do not wrap the cards in a giant JSON envelope. Only emit cards when interactive input is useful; answer ordinary questions in plain text.";
+
 /**
- * An api-card code block is the user-visible deliverable for this request.
- * It does not need a file write or an external API call before the turn can
- * complete, so the generic evidence audit must not turn it into a retry loop.
+ * One or more api-card code blocks are the user-visible deliverable for this
+ * request. They do not need a file write or an external API call before the
+ * turn can complete, so the generic evidence audit must not turn them into a
+ * retry loop.
  */
 export function hasValidApiCardDeliverable(request: string, content: string): boolean {
   if (!/(?:\bapi\b|接口\s*(?:调用|请求)?\s*卡片)/i.test(request)) return false;
 
   const blocks = [...content.matchAll(/```api-card\s*([\s\S]*?)```/gi)];
-  if (blocks.length !== 1) return false;
+  if (blocks.length === 0 || blocks.length > MAX_API_CARDS_PER_REPLY) return false;
+  return blocks.every((block) => isValidApiCardJson(block[1]));
+}
 
+function isValidApiCardJson(source: string): boolean {
   try {
-    const value: unknown = JSON.parse(blocks[0][1].trim());
+    const value: unknown = JSON.parse(source.trim());
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     const card = value as {
       method?: unknown;
@@ -10000,20 +10086,7 @@ export class AgentModelCompatibilityError extends Error {
   }
 }
 
-export function isProgressOnlyAssistantMessage(content: string): boolean {
-  const normalized = content.trim().replace(/\s+/g, " ");
-  if (!normalized) {
-    return false;
-  }
-  if (/<event\s+type=["']commentary["'][^>]*>/i.test(normalized) &&
-      !/<event\s+type=["']final["'][^>]*>/i.test(normalized)) {
-    return true;
-  }
-  return /^(?:[.…:：,，。!！?？-]+\s*)*(?:(?:好的|好|嗯)[，,。!！?？:\s]*)?(?:让我(?:先|继续)?|计划已确认|开始实施|开始执行|正在|接下来|下一步|准备(?:开始)?|我(?:将|会|先)|先(?:来|从)|starting\b|working\s+on\b|fetching\b|next\s+i\s+will\b|i\s+will\b)/i.test(normalized)
-    || /\b(?:let me|i(?:'ll| will)|we(?:'ll| will))\s+(?:look|check|inspect|search|use|dig|continue|investigate)\b/i.test(normalized)
-    || /(?:^|[。！？；：!?;:]\s*)(?:(?:接下来|下一步|然后|之后)\s*(?:我\s*)?(?:会|将|要|准备|先|再|继续|接着)?|让我(?:先|继续)?|我(?:会|将|要|准备|先|再|继续|接着))\s*(?:读|读取|看|查看|检查|确认|核对|验证|搜索|查找|分析|调查|定位|打开|运行|执行|测试|修改|实现|处理|整理|补充|完善|继续)[^。！？!?]*(?:[。！？!?])?$/i.test(normalized)
-    || /(?:^|[。！？；：!?;:]\s*)我\s*(?:读|读取|看|查看|检查|确认|核对|验证|搜索|查找|分析|调查|定位|打开|运行|执行|测试|处理|整理)(?:一下|一遍|下)[^。！？!?]*(?:[。！？!?])?$/i.test(normalized);
-}
+export { isProgressOnlyAssistantMessage } from "@provider-adapters";
 
 export function shouldRejectProgressOnlyCompletion(input: {
   assistantMessage: string | undefined;
@@ -10747,7 +10820,8 @@ function buildRuntimePrompt(
   videoGenerateAvailable = false,
   recommendedSkills: Array<{ id: string; qualifiedName: string; domain?: string }> = [],
   selectedMcpServerIds: string[] = [],
-  modeSystemPrompt: string | null = null
+  modeSystemPrompt: string | null = null,
+  attachedLocalPaths: string[] = []
 ): RuntimePromptBundle {
   const blocks = [
     "You are codexh, a desktop agent for project and chat workflows.",
@@ -10759,6 +10833,10 @@ function buildRuntimePrompt(
   ];
   if (modeSystemPrompt) {
     blocks.push(modeSystemPrompt);
+  }
+  const attachedFilePrompt = buildAttachedLocalFilePrompt(attachedLocalPaths);
+  if (attachedFilePrompt) {
+    blocks.push(attachedFilePrompt);
   }
   if (imageGenerateAvailable) {
     blocks.push(
@@ -10784,8 +10862,12 @@ function buildRuntimePrompt(
   }
   blocks.push(
     selectedMcpServerIds.length > 0
-      ? `The user explicitly selected MCP server(s): ${selectedMcpServerIds.join(", ")}. This request requires an MCP-backed answer. First call mcp.list_tools with the selected server id, then call mcp.call with a discovered tool before answering. Do not use filesystem, browser, web-search, or knowledge tools for the initial lookup.`
-      : "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
+      ? attachedLocalPaths.length > 0
+        ? `The user also selected MCP server(s): ${selectedMcpServerIds.join(", ")}. Read the attached local files with fs.read_file first. Use those MCP servers only if the attached files cannot answer the request.`
+        : `The user explicitly selected MCP server(s): ${selectedMcpServerIds.join(", ")}. This request requires an MCP-backed answer. First call mcp.list_tools with the selected server id, then call mcp.call with a discovered tool before answering. Do not use filesystem, browser, web-search, or knowledge tools for the initial lookup.`
+      : attachedLocalPaths.length > 0
+        ? "Do not use MCP to locate, download, or re-read user-attached local files. For other MCP capabilities, call mcp.list_tools first, then call mcp.call only with a server and tool from that directory."
+        : "For MCP capabilities, call mcp.list_tools first. Then call mcp.call only with a server and tool from that directory. Use MCP resource tools only when a listed resource is needed.",
     "For browser automation, call browser.inspect_page before browser.click, browser.fill, browser.select_option, or browser.press_key. Use only element ids returned by the latest inspection, then inspect again after navigation or page changes. Never guess selectors or claim a browser action succeeded without a tool result."
   );
   if (knowledgeEnabled) {
@@ -10796,7 +10878,7 @@ function buildRuntimePrompt(
   blocks.push(
     "When using text extracted from a browser page, cite the page title or URL in your answer. The chat will show the page source automatically.",
     "When a process, hierarchy, sequence, or state transition is materially clearer as a diagram, include a fenced `mermaid` block using flowchart, sequenceDiagram, or stateDiagram-v2 syntax. When a report, database result, trend, category comparison, proportion, or distribution is materially clearer as a chart, include a fenced `echarts` code block containing one strict JSON ECharts option object. Use no JavaScript functions or expressions, no remote images, and keep chart data bounded. Include a meaningful title, tooltip, legend or axes when applicable, never invent numbers, aggregate more than 20 data points before charting, place one sentence before and one plain-text conclusion after each chart, and use no more than four charts in one answer. Do not add charts to ordinary answers, trivial single values, or data that is not usefully visualized.",
-    "When the user provides an API/interface document and wants to try the endpoint interactively, include one fenced `api-card` code block containing one strict JSON object (no comments, no functions) so the chat renders an interactive form card that calls the API. Schema: { title, description?, method (GET|POST|PUT|PATCH|DELETE), url (http/https, may embed {{fieldName}} path params), auth?, headers?, query?, bodyTemplate?, fields: [...] }. Each field: { name (identifier, unique), label, type, required?, defaultValue?, placeholder?, help?, options? }. Supported field types: text, textarea, number, password, select, radio, checkbox, switch, date, time, keyvalue (key-value rows rendered as a JSON object), json (raw JSON text). select/radio/checkbox require options: [{ label, value }]. Placeholder rule: write {{fieldName}} inside url/query/header values/bodyTemplate. bodyTemplate MUST be one string containing JSON text with escaped inner quotes (e.g. \"bodyTemplate\": \"{\\\"name\\\": \\\"{{name}}\\\", \\\"age\\\": {{age}}}\"), never a nested JSON object or array; inside it quote string fields like \\\"{{name}}\\\", while number/switch/checkbox/keyvalue/json fields are inserted as raw JSON and must NOT be quoted. If the endpoint needs credentials, declare auth: { type: \"bearer\" | \"apiKey\" | \"basic\", in?: \"header\" | \"query\" (apiKey only, default header), name?: string (apiKey parameter name or Authorization override), label?, placeholder?, help?, required? } so the card shows a dedicated token input; never invent or embed real tokens, keys, or secrets in the config — the user fills them in. Map the document's parameters to fields faithfully (path params in url, query params in query, body fields in bodyTemplate), mark required fields per the document, and after the block briefly explain in normal text what the card does. Emit at most one api-card block per reply and only when interactive input is useful; answer ordinary questions in plain text.",
+    API_CARD_OUTPUT_INSTRUCTION,
     "Use the Agent decision protocol for every response. Do not send a standalone commentary-only response.",
     "When work remains, include the next real tool call in the same decision as any short progress text. When no tool call is needed, return the final user-facing answer rather than a promise to continue.",
     "Do not expose chain-of-thought. Do not fabricate tool usage, file changes, or verification.",
@@ -10958,11 +11040,13 @@ function estimatePersistedMessageTokens(message: MessageRecord): number {
 function compactPersistedToolMessageForModel(message: MessageRecord): string {
   if (message.role !== "tool") return message.content;
   const content = message.content;
-  if (content.length <= MAX_MODEL_TOOL_RESULT_CHARACTERS) return content;
   const prefixEnd = content.indexOf("\n");
   const toolName = prefixEnd > 0 ? content.slice(0, prefixEnd) : "tool";
+  const characterBudget = resolveToolResultCharacterBudget(toolName);
+  if (content.length <= characterBudget) return content;
   const body = prefixEnd > 0 ? content.slice(prefixEnd + 1) : content;
-  return `${toolName}\nTool result was shortened before it entered model context. Use a focused read, diff, or search if more detail is needed.\n${truncateCharacters(body, MAX_MODEL_TOOL_RESULT_CHARACTERS - toolName.length - 140)}`;
+  const hint = shortenToolResultHint(toolName);
+  return `${toolName}\n${hint}\n${truncateCharacters(body, Math.max(256, characterBudget - toolName.length - hint.length - 8))}`;
 }
 
 function compactTranscript(messages: MessageRecord[]): ProviderTurnInput["transcript"] {
@@ -10981,6 +11065,56 @@ function isToolBatchAnchorMessage(message: MessageRecord): boolean {
   } catch {
     return false;
   }
+}
+
+export function isAttachedLocalReadTool(toolName: string): boolean {
+  return toolName === "fs.read_file" || toolName === "fs.read_directory";
+}
+
+export function buildAttachedLocalFilePrompt(paths: string[]): string | null {
+  if (paths.length === 0) return null;
+  return [
+    "## Attached Local Files",
+    "The user attached local files or folders as task context. These paths are already authorized for local read tools:",
+    ...paths.map((filePath) => `- ${filePath}`),
+    "Read them with fs.read_file using the exact absolute path. For an attached folder, call fs.read_directory on that exact path first.",
+    "A typical OpenAPI or JSON attachment is returned in full. If the file is one long line or the tool result says it was shortened, continue with charOffset and charLimit. Do not retry line offset/limit, MCP, browser, or a script just to re-read the attachment.",
+    "Do not call mcp.call, mcp.list_tools, browser, or web_search to locate, download, or re-read these attachments.",
+    "MCP is not a substitute for a user-attached local file unless the user explicitly asked to query MCP."
+  ].join("\n");
+}
+
+export function collectAllowedReadPaths(input: {
+  attachments?: MessageAttachment[];
+  request?: string;
+  priorMessages?: MessageRecord[];
+}): string[] {
+  const paths = new Set<string>();
+  const add = (value?: string | null) => {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    const resolved = path.resolve(trimmed);
+    if (path.isAbsolute(resolved)) paths.add(resolved);
+  };
+  for (const attachment of input.attachments ?? []) {
+    add(attachment.absolutePath);
+  }
+  for (const message of input.priorMessages ?? []) {
+    for (const attachment of getMessageAttachments(message) ?? []) {
+      add(attachment.absolutePath);
+    }
+  }
+  const request = input.request ?? "";
+  for (const match of request.matchAll(/\[Attached file\]\s*\r?\n([^\r\n]+)/gi)) {
+    add(match[1]);
+  }
+  for (const match of request.matchAll(/\[Attached image\]\s*\r?\n([^\r\n]+)/gi)) {
+    add(match[1]);
+  }
+  for (const match of request.matchAll(/\[Attached folder - required task context\]\s*\r?\npath:\s*([^\r\n]+)/gi)) {
+    add(match[1]);
+  }
+  return [...paths];
 }
 
 function getMessageAttachments(message: MessageRecord): MessageAttachment[] | undefined {
@@ -11852,17 +11986,38 @@ export function summarizeToolResultForModel(
           ].join("\n");
     }
   }
-  const budgeted = truncateToRuntimeTokenBudget(summarized, resolveModelToolResultTokenBudget(
+  const characterBudget = resolveToolResultCharacterBudget(toolName);
+  if (summarized.length > characterBudget) {
+    const hint = shortenToolResultHint(toolName);
+    summarized = [
+      hint,
+      truncateCharacters(summarized, Math.max(256, characterBudget - hint.length - 8))
+    ].join("\n");
+  }
+  return truncateToRuntimeTokenBudget(summarized, resolveModelToolResultTokenBudget(
     options.contextWindow,
     options.remainingInputTokens,
     options.providerMaxRequestBytes
   ));
-  if (budgeted.length <= MAX_MODEL_TOOL_RESULT_CHARACTERS) return budgeted;
+}
+
+export function resolveToolResultCharacterBudget(toolName: string): number {
+  return toolName === "fs.read_file" || toolName === "fs.read_directory"
+    ? MAX_FILE_READ_TOOL_RESULT_CHARACTERS
+    : MAX_MODEL_TOOL_RESULT_CHARACTERS;
+}
+
+function shortenToolResultHint(toolName: string): string {
+  if (toolName === "fs.read_file") {
+    return [
+      "Tool result was shortened before it entered model context.",
+      "If this file is a single long line, continue with fs.read_file charOffset/charLimit. Do not retry the same full read, MCP, or a script."
+    ].join(" ");
+  }
   return [
     "Tool result was shortened before it entered model context.",
-    "Use a focused read, diff, or search if more detail is needed.",
-    truncateCharacters(budgeted, MAX_MODEL_TOOL_RESULT_CHARACTERS - 130)
-  ].join("\n");
+    "Use a focused read, diff, or search if more detail is needed."
+  ].join(" ");
 }
 
 function summarizeDatabaseToolResultForPersistence(result: ToolResult): ToolResult {

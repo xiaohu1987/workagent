@@ -1,4 +1,4 @@
-import { DEFAULT_RESPONSE_TONE, withGptReasoningCapabilities } from "@shared-types";
+import { DEFAULT_RESPONSE_TONE, normalizeCompletionAuditSettings, withGptReasoningCapabilities } from "@shared-types";
 import type { ApiFormat, AppConfig, McpServerConfig, ModelProfile, ProviderDefinition, ProviderTemplate, ProviderType } from "@shared-types";
 
 export type ProviderTypeOption = {
@@ -96,7 +96,10 @@ export function cloneConfig(config: AppConfig): AppConfig {
       retentionDays: config.selfImprovement?.retentionDays ?? 180,
       maxMemories: config.selfImprovement?.maxMemories ?? 500
     },
-    desktop: { ...config.desktop },
+    desktop: {
+      ...config.desktop,
+      completionAudit: normalizeCompletionAuditSettings(config.desktop)
+    },
     mcpServers: config.mcpServers.map((server) => ({
       ...server,
       args: server.args ? [...server.args] : undefined,
@@ -241,6 +244,10 @@ export function createAvailableMcpId(servers: McpServerConfig[]): string {
 
 export function normalizeDraftConfig(config: AppConfig): AppConfig {
   const next = cloneConfig(config);
+  next.desktop = {
+    ...next.desktop,
+    completionAudit: normalizeCompletionAuditSettings(next.desktop)
+  };
   next.models = next.models.filter((model) =>
     next.providers.some((provider) => provider.id === model.providerId)
   );

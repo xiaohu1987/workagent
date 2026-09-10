@@ -59,7 +59,7 @@ import type {
   UserInputPrompt
 } from "@shared-types";
 import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy } from "./subagent-assignment";
-import { isGptReasoningEffort, normalizeResponseTone, withGptReasoningCapabilities } from "@shared-types";
+import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, withGptReasoningCapabilities } from "@shared-types";
 import {
   AgentRuntimeService,
   isUnitTestCommand,
@@ -5520,7 +5520,8 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       browserOpenMode: config.desktop?.browserOpenMode === "external_default" ? "external_default" : "in_app",
       silentBrowserOpen: config.desktop?.silentBrowserOpen !== false,
       liveEditPreview: config.desktop?.liveEditPreview === true,
-      llmLogViewer: config.desktop?.llmLogViewer === true
+      llmLogViewer: config.desktop?.llmLogViewer === true,
+      completionAudit: normalizeCompletionAuditSettings(config.desktop)
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     multiAgent: {

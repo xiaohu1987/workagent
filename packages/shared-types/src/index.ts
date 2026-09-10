@@ -916,8 +916,19 @@ export function isConfigurableGptReasoningModel(
   return major > 5 || (major === 5 && minor >= 4);
 }
 
+export function isConfigurableReasoningEffortModel(
+  model: Pick<ModelProfile, "id" | "displayName" | "role">
+): boolean {
+  if (isConfigurableGptReasoningModel(model)) return true;
+  if (model.role !== "reasoning") return false;
+  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  return /\bdeepseek\b/.test(identity)
+    || /\b(?:glm|chatglm)\b/.test(identity)
+    || /\bgrok\b/.test(identity);
+}
+
 export function withGptReasoningCapabilities<T extends ModelProfile>(model: T): T {
-  if (!isConfigurableGptReasoningModel(model)) return model;
+  if (!isConfigurableReasoningEffortModel(model)) return model;
   return {
     ...model,
     supportedReasoningEfforts: [...GPT_REASONING_EFFORTS],
@@ -928,13 +939,103 @@ export function withGptReasoningCapabilities<T extends ModelProfile>(model: T): 
 }
 
 export function resolveModelReasoningEffort(
-  model: Pick<ModelProfile, "id" | "role" | "defaultReasoningEffort">,
+  model: Pick<ModelProfile, "id" | "displayName" | "role" | "defaultReasoningEffort">,
   globalGptEffort: GptReasoningEffort
 ): ReasoningEffort | undefined {
-  return isConfigurableGptReasoningModel(model) ? globalGptEffort : model.defaultReasoningEffort;
+  return isConfigurableReasoningEffortModel(model) ? globalGptEffort : model.defaultReasoningEffort;
 }
 
 export type BrowserOpenMode = "in_app" | "external_default";
+
+export const DEFAULT_COMPLETION_AUDIT_ENABLED = true;
+export const DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS = 3;
+export const MIN_COMPLETION_AUDIT_MAX_ATTEMPTS = 1;
+export const MAX_COMPLETION_AUDIT_MAX_ATTEMPTS = 8;
+
+export type CompletionAuditMode = "project" | "chat";
+
+export type CompletionAuditModeSettings = {
+  enabled: boolean;
+  maxAttempts: number;
+};
+
+export type CompletionAuditSettings = {
+  project: CompletionAuditModeSettings;
+  chat: CompletionAuditModeSettings;
+};
+
+export function normalizeCompletionAuditEnabled(value: unknown): boolean {
+  return value !== false;
+}
+
+export function normalizeCompletionAuditMaxAttempts(value: unknown): number {
+  const raw = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(raw)) return DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS;
+  return Math.min(
+    MAX_COMPLETION_AUDIT_MAX_ATTEMPTS,
+    Math.max(MIN_COMPLETION_AUDIT_MAX_ATTEMPTS, Math.round(raw))
+  );
+}
+
+export function defaultCompletionAuditSettings(): CompletionAuditSettings {
+  return {
+    project: {
+      enabled: DEFAULT_COMPLETION_AUDIT_ENABLED,
+      maxAttempts: DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS
+    },
+    chat: {
+      enabled: DEFAULT_COMPLETION_AUDIT_ENABLED,
+      maxAttempts: DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS
+    }
+  };
+}
+
+function normalizeCompletionAuditModeSettings(
+  value: unknown,
+  fallbackEnabled?: boolean,
+  fallbackAttempts?: number
+): CompletionAuditModeSettings {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const hasEnabled = Object.prototype.hasOwnProperty.call(source, "enabled");
+  const hasAttempts = Object.prototype.hasOwnProperty.call(source, "maxAttempts");
+  return {
+    enabled: hasEnabled
+      ? normalizeCompletionAuditEnabled(source.enabled)
+      : fallbackEnabled ?? DEFAULT_COMPLETION_AUDIT_ENABLED,
+    maxAttempts: hasAttempts
+      ? normalizeCompletionAuditMaxAttempts(source.maxAttempts)
+      : fallbackAttempts ?? DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS
+  };
+}
+
+export function normalizeCompletionAuditSettings(input?: {
+  completionAudit?: unknown;
+  completionAuditEnabled?: unknown;
+  completionAuditMaxAttempts?: unknown;
+} | null): CompletionAuditSettings {
+  const nested = input?.completionAudit;
+  const hasNested = Boolean(nested && typeof nested === "object" && !Array.isArray(nested));
+  const legacyEnabled = !hasNested && input && Object.prototype.hasOwnProperty.call(input, "completionAuditEnabled")
+    ? normalizeCompletionAuditEnabled(input.completionAuditEnabled)
+    : undefined;
+  const legacyAttempts = !hasNested && input && Object.prototype.hasOwnProperty.call(input, "completionAuditMaxAttempts")
+    ? normalizeCompletionAuditMaxAttempts(input.completionAuditMaxAttempts)
+    : undefined;
+  const source = hasNested ? nested as Record<string, unknown> : {};
+  return {
+    project: normalizeCompletionAuditModeSettings(source.project, legacyEnabled, legacyAttempts),
+    chat: normalizeCompletionAuditModeSettings(source.chat, legacyEnabled, legacyAttempts)
+  };
+}
+
+export function resolveCompletionAuditModeSettings(
+  settings: CompletionAuditSettings | undefined,
+  mode: CompletionAuditMode
+): CompletionAuditModeSettings {
+  return normalizeCompletionAuditSettings({ completionAudit: settings })[mode];
+}
 
 export interface AppConfig {
   defaultModel: string;
@@ -965,6 +1066,7 @@ export interface AppConfig {
     silentBrowserOpen: boolean;
     liveEditPreview: boolean;
     llmLogViewer: boolean;
+    completionAudit: CompletionAuditSettings;
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;

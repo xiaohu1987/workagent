@@ -5,6 +5,7 @@ import os from "node:os";
 import {
   buildCodeSearchCommand,
   MAX_CODE_SEARCH_RESULT_LINES,
+  FS_READ_FILE_CHAR_PAGE,
   ToolRuntime,
   buildApplyPatchFailureMessage,
   canonicalizeToolName,
@@ -1006,6 +1007,23 @@ describe("ToolRuntime", () => {
     expect(readFile).toHaveBeenCalledTimes(1);
   });
 
+  it("reads user-attached files that sit outside the project folder", async () => {
+    const attachedPath = path.resolve(process.cwd(), "..", "attached-notes.json");
+    const readFile = vi.fn().mockResolvedValue('{"ok":true}');
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "call-attached", name: "fs.read_file", arguments: { path: attachedPath } },
+      {
+        cwd: process.cwd(),
+        allowedReadPaths: [attachedPath],
+        readFile
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result).toMatchObject({ ok: true, content: '{"ok":true}' });
+    expect(readFile).toHaveBeenCalledWith(attachedPath);
+  });
+
   it("accepts a model's patch_content Git diff when it adds one file", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
     const runtime = new ToolRuntime();
@@ -1373,6 +1391,47 @@ describe("ToolRuntime", () => {
       expect(outline.ok).toBe(true);
       expect(outline.content).toContain("function alpha");
       expect(outline.content).toContain("function beta");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("pages a single-line JSON file with charOffset instead of line slices", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
+    const runtime = new ToolRuntime();
+    const filePath = path.join(root, "openapi.json");
+    const payload = `{"openapi":"3.0.0","paths":{"${"a".repeat(FS_READ_FILE_CHAR_PAGE)}":{}}}`;
+    await fs.writeFile(filePath, payload, "utf8");
+    const context = {
+      cwd: root,
+      readFile: (target: string) => fs.readFile(target, "utf8")
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const firstPage = await runtime.execute(
+        { id: "read-long", name: "fs.read_file", arguments: { path: "openapi.json" } },
+        context
+      );
+      expect(firstPage.ok).toBe(true);
+      expect(firstPage.content).toContain("characters 1-");
+      expect(firstPage.content).toContain(`charOffset=${FS_READ_FILE_CHAR_PAGE + 1}`);
+      expect(firstPage.json).toMatchObject({
+        totalLines: 1,
+        startChar: 1,
+        endChar: FS_READ_FILE_CHAR_PAGE
+      });
+
+      const nextPage = await runtime.execute(
+        {
+          id: "read-next",
+          name: "fs.read_file",
+          arguments: { path: "openapi.json", charOffset: FS_READ_FILE_CHAR_PAGE + 1, charLimit: 20 }
+        },
+        context
+      );
+      expect(nextPage.ok).toBe(true);
+      expect(nextPage.content).toContain(`characters ${FS_READ_FILE_CHAR_PAGE + 1}-`);
+      expect(String(nextPage.json?.content ?? "")).toBe(payload.slice(FS_READ_FILE_CHAR_PAGE, FS_READ_FILE_CHAR_PAGE + 20));
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

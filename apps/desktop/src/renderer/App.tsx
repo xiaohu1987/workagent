@@ -34,7 +34,7 @@ import type {
   ToolCallSummary,
   UserInputPrompt
 } from "@shared-types";
-import { DEFAULT_RESPONSE_TONE, GPT_REASONING_EFFORTS, createEmptyTokenUsage, isConfigurableGptReasoningModel, withGptReasoningCapabilities } from "@shared-types";
+import { DEFAULT_RESPONSE_TONE, createEmptyTokenUsage, isConfigurableReasoningEffortModel } from "@shared-types";
 import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../packages/provider-adapters/src/models/media-protocol";
 import {
   canDeleteThread,
@@ -3516,7 +3516,7 @@ export function App() {
     [composerModelId, composerModels]
   );
   const showReasoningEffortPicker = selectedComposerModel
-    ? isConfigurableGptReasoningModel(selectedComposerModel)
+    ? isConfigurableReasoningEffortModel(selectedComposerModel)
     : false;
   const composerSupportsMultimodalInput = selectedComposerModel?.supportsMultimodalInput ?? false;
   const multimodalInputFallbackReady = useMemo(() => {
@@ -7054,7 +7054,6 @@ export function App() {
                   subagentDefaultModelOptions={subagentDefaultModelOptions}
                   setConfigDraft={setConfigDraft}
                   onSave={saveConfigDraft}
-                  onSetLlmLogViewerEnabled={(enabled) => void setLlmLogViewerEnabled(enabled)}
                 />
               ) : null}
 

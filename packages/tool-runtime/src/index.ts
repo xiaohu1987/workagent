@@ -46,11 +46,15 @@ export {
 } from "./browser-page-sanitize";
 
 export const MAX_CODE_SEARCH_RESULT_LINES = 500;
+/** Page single-line files that cannot be sliced by line offset/limit. */
+export const FS_READ_FILE_CHAR_PAGE = 80_000;
 
 export interface ToolRuntimeContext {
   cwd: string;
   /** Writable roots authorized for this task. Relative paths still resolve from cwd. */
   workspaceRoots?: string[];
+  /** User-attached files or folders that remain readable outside workspaceRoots. */
+  allowedReadPaths?: string[];
   appHome: string;
   threadId: string;
   turnRunId: string;
@@ -586,13 +590,15 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     {
       name: "fs.read_file",
       description:
-        "Read a UTF-8 text file from disk. Optional offset (1-based line) and limit (line count) return a numbered slice. For large files prefer code.outline first.",
+        "Read a UTF-8 text file from disk. Optional offset (1-based line) and limit (line count) return a numbered slice. For a single long line such as OpenAPI JSON, use charOffset (1-based) and charLimit instead of line paging. For large source files prefer code.outline first.",
       inputSchema: {
         type: "object",
         properties: {
           path: { type: "string" },
           offset: { type: "number", description: "1-based start line (optional)" },
-          limit: { type: "number", description: "Max lines to return (optional)" }
+          limit: { type: "number", description: "Max lines to return (optional)" },
+          charOffset: { type: "number", description: "1-based start character for single-line or minified files (optional)" },
+          charLimit: { type: "number", description: "Max characters to return (optional)" }
         },
         required: ["path"]
       },
@@ -600,17 +606,54 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       parallelSafe: true
     },
     async (args, ctx) => {
-      const filePath = resolveFromCwd(ctx.cwd, String(args.path), ctx.workspaceRoots);
+      const filePath = resolveReadablePath(ctx, String(args.path));
       const content = await ctx.readFile(filePath);
       const lines = content.split(/\r?\n/);
       const totalLines = lines.length;
+      const totalCharacters = content.length;
       const rawOffset = Number(args.offset);
       const rawLimit = Number(args.limit);
-      const hasSlice =
+      const rawCharOffset = Number(args.charOffset);
+      const rawCharLimit = Number(args.charLimit);
+      const hasCharSlice =
+        (Number.isFinite(rawCharOffset) && rawCharOffset >= 1) ||
+        (Number.isFinite(rawCharLimit) && rawCharLimit > 0);
+      const hasLineSlice =
         (Number.isFinite(rawOffset) && rawOffset >= 1) ||
         (Number.isFinite(rawLimit) && rawLimit > 0);
-      if (!hasSlice) {
-        return { ok: true, content, json: { path: filePath, content, totalLines, sha256: sha256(content) } };
+      if (hasCharSlice || (totalLines === 1 && totalCharacters > FS_READ_FILE_CHAR_PAGE)) {
+        const startChar = Number.isFinite(rawCharOffset) && rawCharOffset >= 1
+          ? Math.floor(rawCharOffset)
+          : 1;
+        const charLimit = Number.isFinite(rawCharLimit) && rawCharLimit > 0
+          ? Math.floor(rawCharLimit)
+          : FS_READ_FILE_CHAR_PAGE;
+        const slice = content.slice(startChar - 1, startChar - 1 + charLimit);
+        const endChar = startChar - 1 + slice.length;
+        const remaining = totalCharacters - endChar;
+        const header = remaining > 0
+          ? `File ${filePath} characters ${startChar}-${endChar} of ${totalCharacters}. Use charOffset=${endChar + 1} to continue; do not retry line offset/limit or MCP.`
+          : `File ${filePath} characters ${startChar}-${endChar} of ${totalCharacters}`;
+        return {
+          ok: true,
+          content: `${header}\n${slice}`,
+          json: {
+            path: filePath,
+            totalLines,
+            totalCharacters,
+            startChar,
+            endChar,
+            content: slice,
+            sha256: sha256(content)
+          }
+        };
+      }
+      if (!hasLineSlice) {
+        return {
+          ok: true,
+          content,
+          json: { path: filePath, content, totalLines, totalCharacters, sha256: sha256(content) }
+        };
       }
       const startLine = Number.isFinite(rawOffset) && rawOffset >= 1 ? Math.floor(rawOffset) : 1;
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : totalLines;
@@ -623,7 +666,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       return {
         ok: true,
         content: `${header}\n${numbered}`,
-        json: { path: filePath, totalLines, startLine, endLine, content: numbered, sha256: sha256(content) }
+        json: { path: filePath, totalLines, totalCharacters, startLine, endLine, content: numbered, sha256: sha256(content) }
       };
     }
   );
@@ -637,7 +680,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     ),
     async (args, ctx) => {
       const relativePath = String(args.path ?? "");
-      const filePath = resolveFromCwd(ctx.cwd, relativePath, ctx.workspaceRoots);
+      const filePath = resolveReadablePath(ctx, relativePath);
       const language = languageFromPath(filePath);
       if (!language) {
         return {
@@ -914,7 +957,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   runtime.register(
     spec("fs.read_directory", "List direct children under a directory.", ["path"], "low"),
     async (args, ctx) => {
-      const target = resolveFromCwd(ctx.cwd, String(args.path ?? "."), ctx.workspaceRoots);
+      const target = resolveReadablePath(ctx, String(args.path ?? "."));
       const entries = await ctx.listFiles(target);
       const content = entries.length > 0
         ? `Directory listing succeeded:\n${entries.join("\n")}`
@@ -939,7 +982,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       parallelSafe: true
     },
     async (args, ctx) => {
-      const searchRoot = resolveFromCwd(ctx.cwd, typeof args.path === "string" ? args.path : ".", ctx.workspaceRoots);
+      const searchRoot = resolveReadablePath(ctx, typeof args.path === "string" ? args.path : ".");
       const command = buildCodeSearchCommand(String(args.pattern ?? ""), searchRoot);
       const terminal = await runShell(command, ctx);
       const outputLines = terminal.output.replace(/\r\n/g, "\n").split("\n");
@@ -959,13 +1002,13 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     ),
     async (args, ctx) => {
       const relativePath = String(args.path ?? "");
-      const filePath = resolveFromCwd(ctx.cwd, relativePath, ctx.workspaceRoots);
+      const filePath = resolveReadablePath(ctx, relativePath);
       const after = await fs.readFile(filePath, "utf8");
       let before = "";
       let againstLabel = "empty";
 
       if (typeof args.against === "string" && args.against.trim()) {
-        const againstPath = resolveFromCwd(ctx.cwd, String(args.against), ctx.workspaceRoots);
+        const againstPath = resolveReadablePath(ctx, String(args.against));
         before = await fs.readFile(againstPath, "utf8");
         againstLabel = String(args.against);
       } else {
@@ -3110,6 +3153,10 @@ function resolveFromCwd(cwd: string, targetPath: string, workspaceRoots?: string
   return resolveWorkspacePath(cwd, targetPath, workspaceRoots ?? [cwd]);
 }
 
+function resolveReadablePath(ctx: ToolRuntimeContext, targetPath: string): string {
+  return resolveWorkspacePath(ctx.cwd, targetPath, ctx.workspaceRoots ?? [ctx.cwd], ctx.allowedReadPaths);
+}
+
 const FILE_SNAPSHOT_TEXT_LIMIT = 512_000;
 
 function createTextSnapshot(path: string, before: string, after: string) {
@@ -3362,12 +3409,17 @@ function resolvePatchRelativePath(diffPath: string, requestedPath: unknown): str
   return pathValue.replace(/^[/\\]+/, "").replace(/^[^/\\]+:[/\\]+/, "");
 }
 
-function resolveWorkspacePath(rootDir: string, targetPath: string, workspaceRoots: string[] = [rootDir]): string {
+function resolveWorkspacePath(
+  rootDir: string,
+  targetPath: string,
+  workspaceRoots: string[] = [rootDir],
+  allowedReadPaths: string[] = []
+): string {
   const root = path.resolve(rootDir);
   const resolved = path.isAbsolute(targetPath)
     ? path.resolve(targetPath)
     : path.resolve(root, targetPath);
-  if (workspaceRootForPath(resolved, workspaceRoots)) {
+  if (workspaceRootForPath(resolved, workspaceRoots) || workspaceRootForPath(resolved, allowedReadPaths)) {
     return resolved;
   }
   throw new Error("File path is outside the project folder.");

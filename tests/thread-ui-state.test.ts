@@ -1627,6 +1627,31 @@ describe("assistant draft lifecycle", () => {
     });
   });
 
+  it("keeps streamed reply text when the next retry draft is seeded with it", () => {
+    const older = {
+      draftId: "draft-1",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "已经写出的接口卡片",
+      reasoning: "先列出前 8 个接口",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: false
+    };
+    const newer = {
+      ...older,
+      draftId: "draft-2",
+      sequence: 2,
+      phase: "retrying" as const,
+      startedAt: "2026-07-27T07:25:29.000Z"
+    };
+
+    expect(reconcileAssistantDraftUpdate({ [older.draftId]: older }, newer)).toEqual({
+      [newer.draftId]: { ...newer, completed: false }
+    });
+  });
+
   it("removes a streamed draft as soon as runtime marks it discarded", () => {
     const draft = {
       draftId: "draft-1",

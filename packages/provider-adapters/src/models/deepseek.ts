@@ -10,7 +10,7 @@ import type { ModelCompatContext } from "./types";
 import { gptCompat } from "./gpt";
 import { preserveChineseOutputLanguage } from "./output-language";
 
-const DEEPSEEK_V4_PATTERN = /\bv4-(?:flash|pro)\b/;
+const DEEPSEEK_V4_PATTERN = /\b(?:v4-)?(?:flash|pro)\b/;
 const DEEPSEEK_REASONER_PATTERN = /reasoner|\br1\b|thinking/;
 
 function isDeepSeekV4Model(identity: string): boolean {

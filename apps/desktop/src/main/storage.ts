@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
-import { isGptReasoningEffort, normalizeResponseTone, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
+import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
 import type {
   AppConfig,
   ApprovalResolutionMode,
@@ -321,7 +321,8 @@ export function defaultConfig(): AppConfig {
       browserOpenMode: "in_app",
       silentBrowserOpen: true,
       liveEditPreview: false,
-      llmLogViewer: false
+      llmLogViewer: false,
+      completionAudit: normalizeCompletionAuditSettings()
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -530,7 +531,8 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       browserOpenMode,
       silentBrowserOpen,
       liveEditPreview: parsed.desktop?.liveEditPreview ?? false,
-      llmLogViewer: parsed.desktop?.llmLogViewer ?? false
+      llmLogViewer: parsed.desktop?.llmLogViewer ?? false,
+      completionAudit: normalizeCompletionAuditSettings(parsed.desktop)
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),

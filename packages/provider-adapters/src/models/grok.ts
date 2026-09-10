@@ -1,3 +1,4 @@
+import { isGptReasoningEffort } from "@shared-types";
 import { defineCompat } from "./types";
 import type { ImageGenerationPlan, ModelCompatContext, ModelCompatToolCallMode, ModelGenerationContext } from "./types";
 import type { ModelProfile, ProviderTurnDecision, ProviderTurnInput, RuntimeToolCall, ToolSpecDefinition } from "@shared-types";
@@ -260,7 +261,11 @@ export const grokCompat = defineCompat(gptCompat, {
   },
   normalizeRequestParams(context: ModelCompatContext, base: Record<string, unknown>): Record<string, unknown> {
     const request = gptCompat.normalizeRequestParams(context, base);
-    if (!isGrokCompletionAudit(context)) return request;
+    if (!isGrokCompletionAudit(context)) {
+      return isGptReasoningEffort(context.input.reasoningEffort)
+        ? { ...request, reasoning_effort: context.input.reasoningEffort }
+        : request;
+    }
 
     const { response_format: _responseFormat, ...withoutJsonFormat } = request;
     const messages = Array.isArray(withoutJsonFormat.messages)

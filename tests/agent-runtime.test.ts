@@ -146,7 +146,11 @@ import {
   STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
   MAX_REPOSITORY_COMPLETION_REJECTIONS,
   MAX_MODEL_TOOL_RESULT_CHARACTERS,
+  MAX_FILE_READ_TOOL_RESULT_CHARACTERS,
+  MAX_API_CARDS_PER_REPLY,
   MAX_RAW_HISTORY_TOKENS_PER_REQUEST,
+  API_CARD_OUTPUT_INSTRUCTION,
+  resolveToolResultCharacterBudget,
   LEGACY_MCP_OVERSIZED_FOLLOW_UP,
   createRepositoryExplorationState,
   applyLegacyMcpResultToRepositoryExploration,
@@ -192,6 +196,9 @@ import {
   createProjectRuntimePolicy,
   ProjectWorkspaceMissingError,
   resolveChatLocalAccess,
+  collectAllowedReadPaths,
+  buildAttachedLocalFilePrompt,
+  isAttachedLocalReadTool,
   isAgentToolEnabled,
   prioritizeUserInputToolCall,
   MAX_REPEATED_TASK_FAILURES,
@@ -205,6 +212,7 @@ import {
   NON_STREAMING_DRAFT_MAX_CHUNKS,
   NON_STREAMING_DRAFT_MIN_CHUNK_SIZE,
   shouldPublishAssistantDraftUpdate,
+  resolveRetainedAssistantDraft,
   splitNonStreamingAssistantDraft,
   shouldRevealNonStreamingAssistantDraft,
   isExplicitGitMutationRequest,
@@ -266,6 +274,29 @@ describe("assistant draft stream throttling", () => {
 
   it("allows streaming deltas and phase changes to publish immediately", () => {
     expect(shouldPublishAssistantDraftUpdate(1_000, 1_001, true)).toBe(true);
+  });
+
+  it("keeps streamed text and reasoning when a provider retry starts", () => {
+    expect(resolveRetainedAssistantDraft({
+      lastPublishedContent: "已经写出的接口卡片",
+      lastPublishedReasoning: "先列出前 8 个接口"
+    })).toEqual({
+      content: "已经写出的接口卡片",
+      reasoning: "先列出前 8 个接口",
+      phase: "retrying"
+    });
+  });
+
+  it("only blanks the draft when the visible text is off-protocol junk", () => {
+    expect(resolveRetainedAssistantDraft({
+      mode: "clear",
+      lastPublishedContent: "{\"assistant_message\":",
+      lastPublishedReasoning: "thinking"
+    })).toEqual({
+      content: "",
+      reasoning: "",
+      phase: "retrying"
+    });
   });
 
   it("splits non-streaming responses into paced, lossless display chunks", () => {
@@ -1117,6 +1148,18 @@ describe("ordinary and project runtime isolation", () => {
       request: "总结这个附件\n[Attached file]\nC:\\tmp\\notes.txt"
     })).toBe("read");
     expect(resolveChatLocalAccess({
+      request: "帮我看下这个文件",
+      attachments: [{
+        id: "att-1",
+        kind: "file",
+        name: "notes.json",
+        mimeType: "application/json",
+        absolutePath: "C:\\tmp\\notes.json",
+        sizeBytes: 12,
+        source: "user"
+      }]
+    })).toBe("read");
+    expect(resolveChatLocalAccess({
       request: "把结果生成 Word 文档",
       requestedDeliverableExtensions: [".docx"]
     })).toBe("write");
@@ -1166,6 +1209,47 @@ describe("ordinary and project runtime isolation", () => {
       toolName: "code.diagnostics",
       localWorkspaceInspectedBeforeDecision: false
     })).toMatchObject({ allowed: false });
+  });
+
+  it("collects user-attached files as readable paths outside the workspace sandbox", () => {
+    const attached = path.join("C:", "Users", "demo", "Downloads", "config.json");
+    const copied = path.join("C:", "Users", "demo", ".codexh", "attachments", "thread-1", "abc.json");
+    const folder = path.join("D:", "shared", "specs");
+    const paths = collectAllowedReadPaths({
+      attachments: [{
+        id: "att-1",
+        kind: "file",
+        name: "abc.json",
+        mimeType: "application/json",
+        absolutePath: copied,
+        sizeBytes: 20,
+        source: "user"
+      }],
+      request: [
+        `[Attached file]\n${attached}`,
+        "[Attached folder - required task context]",
+        `path: ${folder}`
+      ].join("\n")
+    });
+
+    expect(paths).toEqual(expect.arrayContaining([
+      path.resolve(copied),
+      path.resolve(attached),
+      path.resolve(folder)
+    ]));
+  });
+
+  it("tells the model to read attached files locally instead of calling MCP", () => {
+    const attached = path.join("C:", "Users", "demo", "openapi3.0.json");
+    const prompt = buildAttachedLocalFilePrompt([attached]);
+
+    expect(prompt).toContain("## Attached Local Files");
+    expect(prompt).toContain(attached);
+    expect(prompt).toContain("fs.read_file");
+    expect(prompt).toContain("charOffset");
+    expect(prompt).toContain("Do not call mcp.call");
+    expect(isAttachedLocalReadTool("fs.read_file")).toBe(true);
+    expect(isAttachedLocalReadTool("mcp.call")).toBe(false);
   });
 
   it("keeps the complete project tool set and refuses a project record without cwd", () => {
@@ -1420,7 +1504,7 @@ describe("standard completion validation", () => {
   });
 
   it("limits model-based completion audits and gives them a finite timeout", () => {
-    expect(MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES).toBe(1);
+    expect(MAX_STANDARD_COMPLETION_AUDIT_RECOVERIES).toBe(3);
     expect(RECOVERY_MODEL_DECISION_TIMEOUT_MS).toBeGreaterThan(0);
   });
 
@@ -1445,6 +1529,31 @@ describe("standard completion validation", () => {
       request: "Explain this function.",
       requestedDeliverableExtensions: []
     })).toBe(true);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "project",
+      request: "Explain this function.",
+      requestedDeliverableExtensions: [],
+      enabled: false
+    })).toBe(false);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "chat",
+      request: "Please create a file with the completed content.",
+      requestedDeliverableExtensions: [".md"],
+      enabled: false
+    })).toBe(false);
+  });
+
+  it("honors a configured completion-audit retry budget", () => {
+    expect(resolveStandardCompletionAuditDisposition({
+      outcome: "rejected",
+      attempt: 3,
+      maxAttempts: 3
+    })).toBe("retry");
+    expect(resolveStandardCompletionAuditDisposition({
+      outcome: "rejected",
+      attempt: 4,
+      maxAttempts: 3
+    })).toBe("reject_candidate");
   });
 
   it("recognizes a valid api-card as the chat deliverable", () => {
@@ -1473,6 +1582,34 @@ describe("standard completion validation", () => {
       "请总结这段文字",
       "```api-card\n{\"method\":\"POST\",\"url\":\"https://example.test\",\"fields\":[]}\n```"
     )).toBe(false);
+  });
+
+  it("accepts a batch of valid api-cards as the chat deliverable", () => {
+    const card = (title: string) => [
+      "```api-card",
+      JSON.stringify({
+        title,
+        method: "POST",
+        url: `https://example.test/${title}`,
+        fields: [{ name: "id", label: "ID", type: "text" }]
+      }),
+      "```"
+    ].join("\n");
+
+    expect(hasValidApiCardDeliverable(
+      "把这里面的接口全部生成api卡片",
+      [card("refresh"), card("ledger")].join("\n\n")
+    )).toBe(true);
+    expect(hasValidApiCardDeliverable(
+      "把这里面的接口全部生成api卡片",
+      [card("refresh"), "```api-card\n{\"method\":\"POST\"}\n```"].join("\n")
+    )).toBe(false);
+    expect(hasValidApiCardDeliverable(
+      "把这里面的接口全部生成api卡片",
+      Array.from({ length: MAX_API_CARDS_PER_REPLY + 1 }, (_, index) => card(`ep-${index}`)).join("\n")
+    )).toBe(false);
+    expect(API_CARD_OUTPUT_INSTRUCTION).toContain(`up to ${MAX_API_CARDS_PER_REPLY} compact api-card`);
+    expect(API_CARD_OUTPUT_INSTRUCTION).not.toContain("Emit at most one api-card");
   });
 
   it("recognizes direct project mutation requests without classifying diagnostic questions", () => {
@@ -3040,6 +3177,7 @@ describe("GPA ACT completion evidence", () => {
     const instruction = buildProviderOutputLimitRecoveryInstruction("第一部分已经生成，最后一句被截断");
     expect(instruction).toContain("Preserve the user's requested level of detail");
     expect(instruction).toContain("第一部分已经生成，最后一句被截断");
+    expect(instruction).toContain(`at most ${MAX_API_CARDS_PER_REPLY} cards`);
     expect(instruction).not.toContain("under 500 words");
   });
 
@@ -3738,6 +3876,32 @@ describe("context overflow recovery", () => {
 
     expect(summarized.length).toBeLessThanOrEqual(MAX_MODEL_TOOL_RESULT_CHARACTERS);
     expect(summarized).toContain("Tool result was shortened");
+  });
+
+  it("keeps a typical attached OpenAPI file intact for the model", () => {
+    const openApi = `{"openapi":"3.0.0","paths":{${"\"/ep\":{},".repeat(1_200)}}}`;
+    expect(openApi.length).toBeGreaterThan(MAX_MODEL_TOOL_RESULT_CHARACTERS);
+    expect(openApi.length).toBeLessThan(MAX_FILE_READ_TOOL_RESULT_CHARACTERS);
+    expect(resolveToolResultCharacterBudget("fs.read_file")).toBe(MAX_FILE_READ_TOOL_RESULT_CHARACTERS);
+
+    const summarized = summarizeToolResultForModel("fs.read_file", {
+      ok: true,
+      content: openApi
+    });
+
+    expect(summarized).toBe(openApi);
+    expect(summarized).not.toContain("Tool result was shortened");
+  });
+
+  it("pages oversized file reads instead of sending the model to MCP", () => {
+    const summarized = summarizeToolResultForModel("fs.read_file", {
+      ok: true,
+      content: "x".repeat(MAX_FILE_READ_TOOL_RESULT_CHARACTERS + 4_000)
+    }, { contextWindow: 528_000 });
+
+    expect(summarized.length).toBeLessThanOrEqual(MAX_FILE_READ_TOOL_RESULT_CHARACTERS);
+    expect(summarized).toContain("charOffset/charLimit");
+    expect(summarized).toContain("Do not retry the same full read, MCP, or a script");
   });
 
   it("keeps raw history bounded when the model advertises a very large context window", () => {

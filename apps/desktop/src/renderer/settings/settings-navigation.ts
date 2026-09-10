@@ -11,7 +11,7 @@ export type SettingsMenuGroup = {
 };
 
 export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
-  { id: "general", label: "智能运行", hint: "自动恢复、运行概览和响应风格" },
+  { id: "general", label: "智能运行", hint: "运行概览、输出审计和响应风格" },
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
   { id: "multimodal", label: "多模态", hint: "配置默认多模态识别、生图与视频模型" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
@@ -26,7 +26,7 @@ export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string
 ];
 
 export const SETTINGS_MENU_GROUPS: SettingsMenuGroup[] = [
-  { id: "general", label: "智能运行", hint: "自动恢复和运行策略", tabs: ["general"], icon: IconGear },
+  { id: "general", label: "智能运行", hint: "运行策略和输出审计", tabs: ["general"], icon: IconGear },
   { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"], icon: IconGlobe },
   { id: "connections", label: "连接", hint: "MCP 与数据库", tabs: ["mcp", "database"], icon: IconMcp },
   { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory", "apiFavorites"], icon: IconKnowledge },

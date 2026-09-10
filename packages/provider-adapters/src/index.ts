@@ -916,7 +916,7 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
       return compat.normalizeDecision(applyReasoning(withTokenUsage(
         nativeTools
           ? nativeTextDecision(text.trim(), input.availableTools)
-          : parseDecisionFromText(text.trim()),
+          : parseDecisionFromText(text.trim(), { acceptPlaintext: true }),
         streamUsage
       )), ctx);
     }
@@ -1583,7 +1583,7 @@ export function parseOpenAiCompatibleResponse(
   return withTokenUsage(
     hasNativeTools
       ? nativeTextDecision(content, input.availableTools)
-      : parseDecisionFromText(content),
+      : parseDecisionFromText(content, { acceptPlaintext: true }),
     response.usage
   );
 }
@@ -1626,6 +1626,13 @@ function nativeTextDecision(
       toolCalls: normalizeToolCallsForAvailableTools(structuredDecision.toolCalls, availableTools)
     };
   }
+  const recovered = recoverDecisionFromPartialEnvelope(cleaned);
+  if (recovered) {
+    return {
+      ...recovered,
+      toolCalls: normalizeToolCallsForAvailableTools(recovered.toolCalls, availableTools)
+    };
+  }
   if (looksLikeMalformedDecisionProtocol(cleaned)) {
     // A native-tool model can emit a partial or malformed text envelope when
     // it loses the tool-call protocol. Treating that text as a final answer
@@ -1647,6 +1654,22 @@ function nativeTextDecision(
     goalCompleted: true,
     isStructured: true
   };
+}
+
+export function isProgressOnlyAssistantMessage(content: string): boolean {
+  const normalized = content.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return false;
+  }
+  if (/<event\s+type=["']commentary["'][^>]*>/i.test(normalized) &&
+      !/<event\s+type=["']final["'][^>]*>/i.test(normalized)) {
+    return true;
+  }
+  return /^(?:[.…:：,，。!！?？-]+\s*)*(?:(?:好的|好|嗯)[，,。!！?？:\s]*)?(?:让我(?:先|继续)?|计划已确认|开始实施|开始执行|正在|接下来|下一步|准备(?:开始)?|我(?:将|会|先)|先(?:来|从)|starting\b|working\s+on\b|fetching\b|next\s+i\s+will\b|i\s+will\b)/i.test(normalized)
+    || /\b(?:let me|i(?:'ll| will)|we(?:'ll| will))\s+(?:look|check|inspect|search|use|dig|continue|investigate)\b/i.test(normalized)
+    || /(?:^|[。！？；：!?;:]\s*)(?:(?:接下来|下一步|然后|之后)\s*(?:我\s*)?(?:会|将|要|准备|先|再|继续|接着)?|让我(?:先|继续)?|我(?:会|将|要|准备|先|再|继续|接着))\s*(?:读|读取|看|查看|检查|确认|核对|验证|搜索|查找|分析|调查|定位|打开|运行|执行|测试|修改|实现|处理|整理|补充|完善|继续)[^。！？!?]*(?:[。！？!?])?$/i.test(normalized)
+    || /(?:^|[。！？；：!?;:]\s*)我\s*(?:读|读取|看|查看|检查|确认|核对|验证|搜索|查找|分析|调查|定位|打开|运行|执行|测试|处理|整理)(?:一下|一遍|下)[^。！？!?]*(?:[。！？!?])?$/i.test(normalized)
+    || /\b(?:will now start|start the next task|then start the next)\b/i.test(normalized);
 }
 
 function looksLikeMalformedDecisionProtocol(text: string): boolean {
@@ -1754,7 +1777,7 @@ function parseAnthropicResponse(
       }
     : hasNativeTools
       ? nativeTextDecision(text)
-      : parseDecisionFromText(text);
+      : parseDecisionFromText(text, { acceptPlaintext: true });
   const withUsage = withTokenUsage(decision, response?.usage);
   const withReasoning = reasoning && !withUsage.reasoningSummary
     ? { ...withUsage, reasoningSummary: reasoning }
@@ -1843,7 +1866,7 @@ async function consumeAnthropicStream(
     ? { assistantMessage: text || undefined, toolCalls, endTurn: false, goalCompleted: false, isStructured: true }
     : hasNativeTools
       ? nativeTextDecision(text)
-      : parseDecisionFromText(text);
+      : parseDecisionFromText(text, { acceptPlaintext: true });
   const withUsage = withTokenUsage(decision, usage);
   const withReasoning = reasoning ? { ...withUsage, reasoningSummary: reasoning } : withUsage;
   const context: ModelCompatContext = { model: input.model, input };
@@ -1968,7 +1991,7 @@ class GeminiProvider implements ProviderAdapter {
     const text = parts.map((part) => part.text ?? "").join("\n").trim();
     const usesNativeTools = !input.forceTextToolProtocol && input.model.supportsToolCalling && input.availableTools.length > 0;
     const decision = withTokenUsage(
-      usesNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text),
+      usesNativeTools ? nativeTextDecision(text) : parseDecisionFromText(text, { acceptPlaintext: true }),
       json.usageMetadata
     );
     const context: ModelCompatContext = { model: input.model, input };
@@ -2874,7 +2897,107 @@ export function surfaceThinkBlocksInStream(text: string): string {
   return dropTrailingPartialThinkTag(reasoning + rest);
 }
 
-export function parseDecisionFromText(text: string): ProviderTurnDecision {
+function decodeJsonStringLiteral(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch {
+    return value
+      .replace(/\\n/g, "\n")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, "\"")
+      .replace(/\\\\/g, "\\");
+  }
+}
+
+function extractCompleteAssistantMessage(text: string): string | null {
+  const patterns = [
+    /"assistant_message"\s*:\s*"((?:\\.|[^"\\])*)"/s,
+    /'assistant_message'\s*:\s*'((?:\\.|[^'\\])*)'/s,
+    /assistant_message\s*:\s*"((?:\\.|[^"\\])*)"/s,
+    /assistant_message\s*:\s*'((?:\\.|[^'\\])*)'/s
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1] == null) continue;
+    const decoded = decodeJsonStringLiteral(match[1]).trim();
+    if (decoded) return decoded;
+  }
+  return null;
+}
+
+function sliceBalancedJsonValue(text: string): string | null {
+  const source = text.trimStart();
+  if (!source.startsWith("{") && !source.startsWith("[")) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === "\"") inString = false;
+      continue;
+    }
+    if (character === "\"") {
+      inString = true;
+      continue;
+    }
+    if (character === "{" || character === "[") depth += 1;
+    else if (character === "}" || character === "]") {
+      depth -= 1;
+      if (depth === 0) return source.slice(0, index + 1);
+      if (depth < 0) return null;
+    }
+  }
+  return null;
+}
+
+function extractCompleteToolCalls(
+  text: string
+): Array<{ name: string; arguments?: Record<string, unknown> }> | "absent" | "empty" | "truncated" {
+  const match = text.match(/["']?tool_calls["']?\s*:/i);
+  if (!match || match.index === undefined) return "absent";
+  const after = text.slice(match.index + match[0].length).trimStart();
+  if (after.startsWith("null")) return "empty";
+  if (!after.startsWith("[")) return "truncated";
+  const arraySlice = sliceBalancedJsonValue(after);
+  if (!arraySlice) return "truncated";
+  const parsed = tryParseModelJson(arraySlice);
+  if (!Array.isArray(parsed)) return "truncated";
+  if (parsed.length === 0) return "empty";
+  const calls = parsed.filter((call): call is { name: string; arguments?: Record<string, unknown> } =>
+    !!call && typeof call === "object" && typeof (call as { name?: unknown }).name === "string"
+  );
+  return calls.length === parsed.length ? calls : "truncated";
+}
+
+function recoverDecisionFromPartialEnvelope(text: string): ProviderTurnDecision | null {
+  const assistantMessage = extractCompleteAssistantMessage(text);
+  if (!assistantMessage) return null;
+  const tools = extractCompleteToolCalls(text);
+  if (tools === "truncated") return null;
+  const toolCalls = tools === "absent" || tools === "empty"
+    ? []
+    : tools.map((call) => ({
+        id: crypto.randomUUID(),
+        name: canonicalizeProviderToolName(call.name),
+        arguments: call.arguments ?? {}
+      }));
+  const finishing = toolCalls.length === 0;
+  return {
+    assistantMessage,
+    toolCalls,
+    endTurn: finishing,
+    goalCompleted: finishing,
+    isStructured: true
+  };
+}
+
+export function parseDecisionFromText(
+  text: string,
+  options: { acceptPlaintext?: boolean } = {}
+): ProviderTurnDecision {
   // Reasoning-style models may wrap or precede the payload with a <think>
   // block; strip it before any protocol parsing so neither the envelope
   // extractor nor the visible-text fallback ever surfaces reasoning.
@@ -2914,8 +3037,9 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
 
   const parsed = tryParseJsonDecision(content);
   if (parsed) {
+    const parsedMessage = typeof parsed.assistant_message === "string" ? parsed.assistant_message : undefined;
     return {
-      assistantMessage: typeof parsed.assistant_message === "string" ? parsed.assistant_message : undefined,
+      assistantMessage: parsedMessage?.trim() || extractCompleteAssistantMessage(content) || undefined,
       clarification: parseClarification(parsed.clarification),
       toolCalls: Array.isArray(parsed.tool_calls)
         ? parsed.tool_calls
@@ -2940,8 +3064,27 @@ export function parseDecisionFromText(text: string): ProviderTurnDecision {
     };
   }
 
+  const recovered = recoverDecisionFromPartialEnvelope(content);
+  if (recovered) return recovered;
+
+  const plaintext = content.trim();
+  if (
+    options.acceptPlaintext &&
+    plaintext &&
+    !looksLikeMalformedDecisionProtocol(plaintext) &&
+    !isProgressOnlyAssistantMessage(plaintext)
+  ) {
+    return {
+      assistantMessage: plaintext,
+      toolCalls: [],
+      endTurn: true,
+      goalCompleted: true,
+      isStructured: true
+    };
+  }
+
   return {
-    assistantMessage: content.trim() || "模型未返回结构化结果。",
+    assistantMessage: plaintext || "模型未返回结构化结果。",
     toolCalls: [],
     endTurn: false,
     goalCompleted: false,
@@ -3007,16 +3150,7 @@ export function extractVisibleStreamText(text: string): string {
   const { reasoning, rest } = splitSurfacedThinkStream(text);
   const match = rest.match(/"assistant_message"\s*:\s*"((?:\\.|[^"\\])*)/s);
   if (match?.[1]) {
-    let decoded: string;
-    try {
-      decoded = JSON.parse(`"${match[1]}"`);
-    } catch {
-      decoded = match[1]
-        .replace(/\\n/g, "\n")
-        .replace(/\\t/g, "\t")
-        .replace(/\\"/g, "\"")
-        .replace(/\\\\/g, "\\");
-    }
+    const decoded = decodeJsonStringLiteral(match[1]);
     return reasoning ? `${reasoning}\n\n${decoded}` : decoded;
   }
 

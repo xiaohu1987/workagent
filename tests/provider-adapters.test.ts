@@ -2345,6 +2345,62 @@ describe("OpenAiCompatibleProvider", () => {
     expect(mocks.chatCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("reasoning_effort");
   });
 
+  it("sends reasoning_effort for DeepSeek, GLM, and Grok the same way as the composer picker", async () => {
+    mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "Done." }, finish_reason: "stop" }] });
+    const run = async (modelId: string, displayName: string, provider: ProviderDefinition) => {
+      await new ProviderFactory().create(provider).runTurn({
+        systemPrompt: "Answer.",
+        transcript: [{ role: "user", content: "Hello" }],
+        availableTools: [],
+        model: {
+          id: modelId,
+          providerId: provider.id,
+          displayName,
+          contextWindow: 128_000,
+          supportsStreaming: false,
+          supportsToolCalling: true,
+          supportsParallelToolCalls: true,
+          supportsJsonOutput: true,
+          supportsMultimodalInput: false,
+          supportsReasoningSummary: true,
+          role: "reasoning"
+        },
+        provider,
+        reasoningEffort: "xhigh",
+        stream: false
+      });
+      return mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    };
+
+    const deepseek = await run("deepseek-flash", "DeepSeek Flash", {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      compatibilityProfile: "deepseek",
+      apiKey: "secret"
+    });
+    expect(deepseek).toMatchObject({
+      thinking: { type: "enabled" },
+      reasoning_effort: "max"
+    });
+
+    const glm = await run("glm-5.3-flash", "GLM 5.3 Flash", {
+      id: "glm-gateway",
+      type: "openai-compatible",
+      apiKey: "secret"
+    });
+    expect(glm).toMatchObject({
+      thinking: { type: "enabled" },
+      reasoning_effort: "high"
+    });
+
+    const grok = await run("grok-4.5", "Grok 4.5", {
+      id: "grok-gateway",
+      type: "openai-compatible",
+      apiKey: "secret"
+    });
+    expect(grok).toMatchObject({ reasoning_effort: "xhigh" });
+  });
+
   it("uses Grok's plain-text completion-audit compatibility protocol", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: "APPROVED" } }]
@@ -5097,6 +5153,53 @@ describe("parseDecisionFromText", () => {
     const decision = parseDecisionFromText("<tool_calls>{not valid</tool_calls>");
 
     expect(decision).toMatchObject({ isStructured: false, toolCalls: [] });
+  });
+
+  it("recovers a finished reply from a truncated decision envelope", () => {
+    const decision = parseDecisionFromText(
+      '{"assistant_message":"查到了，这款一体变形大力神大约 88 元。","tool_calls":[],"end_turn":true,"goal_completed":'
+    );
+
+    expect(decision).toMatchObject({
+      isStructured: true,
+      assistantMessage: "查到了，这款一体变形大力神大约 88 元。",
+      toolCalls: [],
+      endTurn: true
+    });
+  });
+
+  it("recovers a finished reply when the envelope is missing after assistant_message", () => {
+    const decision = parseDecisionFromText(
+      '{"assistant_message":"根据评测，更建议买星将 ST10。"'
+    );
+
+    expect(decision).toMatchObject({
+      isStructured: true,
+      assistantMessage: "根据评测，更建议买星将 ST10。",
+      toolCalls: [],
+      endTurn: true
+    });
+  });
+
+  it("accepts a finished plaintext reply when the caller allows it", () => {
+    const decision = parseDecisionFromText(
+      "根据评测和比价，这款一体变形大力神大约 88 元，更建议买星将 ST10。",
+      { acceptPlaintext: true }
+    );
+
+    expect(decision).toMatchObject({
+      isStructured: true,
+      assistantMessage: "根据评测和比价，这款一体变形大力神大约 88 元，更建议买星将 ST10。",
+      toolCalls: [],
+      endTurn: true,
+      goalCompleted: true
+    });
+  });
+
+  it("does not treat reasoning-only plaintext as a structured decision by default", () => {
+    const decision = parseDecisionFromText("The user wants a price comparison, I should keep thinking.");
+
+    expect(decision.isStructured).toBe(false);
   });
 });
 

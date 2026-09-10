@@ -1,4 +1,5 @@
 import { defineCompat } from "./types";
+import type { ModelCompatContext } from "./types";
 import { gptCompat } from "./gpt";
 
 /**
@@ -21,7 +22,25 @@ import { gptCompat } from "./gpt";
  * Tune here when you need to set reasoning_effort, force thinking on/off via
  * thinking.type, enable tool_stream, or adjust tool-call behaviour.
  */
+function mapGlmReasoningEffort(value: unknown): "low" | "medium" | "high" | undefined {
+  if (value === "none" || value === "minimal") return undefined;
+  if (value === "low" || value === "medium" || value === "high") return value;
+  if (value === "xhigh" || value === "max") return "high";
+  return undefined;
+}
+
 export const glmCompat = defineCompat(gptCompat, {
   id: "glm",
-  keywords: ["glm", "chatglm"]
+  keywords: ["glm", "chatglm"],
+  normalizeRequestParams(ctx: ModelCompatContext, base: Record<string, unknown>): Record<string, unknown> {
+    const effort = ctx.input.reasoningEffort;
+    if (effort === undefined) return base;
+    const enabled = effort !== "none" && effort !== "minimal";
+    const mapped = mapGlmReasoningEffort(effort);
+    return {
+      ...base,
+      thinking: { type: enabled ? "enabled" : "disabled" },
+      ...(mapped ? { reasoning_effort: mapped } : {})
+    };
+  }
 });
