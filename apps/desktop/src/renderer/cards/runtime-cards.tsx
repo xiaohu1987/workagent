@@ -20,6 +20,50 @@ function useElapsedClock(startedAt: string | null | undefined, active: boolean, 
   return Math.max(0, end - Date.parse(startedAt));
 }
 
+const RUNTIME_STATUS_ROLL_MS = 320;
+
+export function RollingStatusText({
+  text,
+  as: Tag = "strong"
+}: {
+  text: string;
+  as?: "strong" | "code";
+}) {
+  const [current, setCurrent] = useState(text);
+  const [previous, setPrevious] = useState<string | null>(null);
+  const [rolling, setRolling] = useState(false);
+  const currentRef = useRef(text);
+
+  useEffect(() => {
+    if (text === currentRef.current) return;
+    const previousText = currentRef.current;
+    currentRef.current = text;
+    const prefersReducedMotion = typeof window !== "undefined"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReducedMotion) {
+      setPrevious(null);
+      setCurrent(text);
+      setRolling(false);
+      return;
+    }
+    setPrevious(previousText);
+    setCurrent(text);
+    setRolling(true);
+    const timer = window.setTimeout(() => {
+      setPrevious(null);
+      setRolling(false);
+    }, RUNTIME_STATUS_ROLL_MS);
+    return () => window.clearTimeout(timer);
+  }, [text]);
+
+  return (
+    <span className={`runtime-activity-rolling${rolling ? " is-rolling" : ""}`} title={current}>
+      {previous ? <Tag className="runtime-activity-rolling-out" aria-hidden="true">{previous}</Tag> : null}
+      <Tag className="runtime-activity-rolling-in">{current}</Tag>
+    </span>
+  );
+}
+
 function formatElapsedClock(durationMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -732,9 +776,9 @@ export function RuntimeActivityPanel({
       {runningCommand && !runningToolLabel ? (
         <span className="runtime-activity-command">
           <span>正在运行</span>
-          <code title={runningCommand}>{runningCommand}</code>
+          <RollingStatusText text={runningCommand} as="code" />
         </span>
-      ) : <strong>{primaryLabel}</strong>}
+      ) : <RollingStatusText text={primaryLabel} />}
       {currentDetail ? <span className="runtime-activity-current-detail">{currentDetail}</span> : null}
     </span>
     <time>{formatElapsedClock(elapsedMs)}</time>

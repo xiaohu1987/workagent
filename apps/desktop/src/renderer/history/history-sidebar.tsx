@@ -22,7 +22,7 @@ import {
   IconSkills,
   IconTrash
 } from "../icons";
-import { HISTORY_STANDALONE_GROUP_KEY, HISTORY_THREADS_PREVIEW_COUNT, normalizeHistoryGroupKey, pickVisibleHistoryThreads } from "./history-utils";
+import { HISTORY_STANDALONE_GROUP_KEY, HISTORY_THREADS_PREVIEW_COUNT, isHistoryProjectGroupCollapsed, normalizeHistoryGroupKey, pickVisibleHistoryThreads } from "./history-utils";
 import { WorkspaceContextMenu } from "../workspace/panels";
 
 type ProjectGroup = { cwd: string; threads: ThreadRecord[] };
@@ -38,8 +38,8 @@ type Props = {
   standaloneThreads: ThreadRecord[];
   selectedThreadId: string | null;
   deletingThreadId: string | null;
-  collapsedGroups: Set<string>;
-  setCollapsedGroups: Dispatch<SetStateAction<Set<string>>>;
+  expandedProjectGroups: Set<string>;
+  setExpandedProjectGroups: Dispatch<SetStateAction<Set<string>>>;
   expandedGroups: Set<string>;
   setExpandedGroups: Dispatch<SetStateAction<Set<string>>>;
   renamingThread: RenameState;
@@ -64,7 +64,7 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, collapsedGroups, setCollapsedGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [historyView, setHistoryView] = useState<HistoryView>(() => (
@@ -95,11 +95,11 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
 
   function renderGroup(groupKey: string, groupThreads: ThreadRecord[], options?: { heading?: ReactNode; title?: string; ariaLabel: string; className?: string; collapsible?: boolean }) {
     const collapsible = options?.collapsible !== false;
-    const collapsed = collapsible && collapsedGroups.has(groupKey);
+    const collapsed = isHistoryProjectGroupCollapsed(expandedProjectGroups, groupKey, collapsible);
     const expanded = expandedGroups.has(groupKey);
     const { visibleThreads, hiddenCount, canExpand } = pickVisibleHistoryThreads(groupThreads, { expanded, previewCount: HISTORY_THREADS_PREVIEW_COUNT, selectedThreadId });
     return <section key={groupKey} className={`history-project-group ${options?.className ?? ""} ${collapsed ? "is-collapsed" : ""}`} aria-label={options?.ariaLabel}>
-      {options?.heading ? (collapsible ? <button type="button" className="history-project-heading" title={options.title} aria-expanded={!collapsed} onClick={() => toggleGroup(setCollapsedGroups, groupKey)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setProjectContextMenu({ x: event.clientX, y: event.clientY, cwd: options.title ?? "" }); }}><span className={`history-project-disclosure ${collapsed ? "" : "is-expanded"}`} aria-hidden><IconChevronRight /></span>{options.heading}</button> : <div className="history-standalone-heading" title={options.title}>{options.heading}</div>) : null}
+      {options?.heading ? (collapsible ? <button type="button" className="history-project-heading" title={options.title} aria-expanded={!collapsed} onClick={() => toggleGroup(setExpandedProjectGroups, groupKey)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setProjectContextMenu({ x: event.clientX, y: event.clientY, cwd: options.title ?? "" }); }}><span className={`history-project-disclosure ${collapsed ? "" : "is-expanded"}`} aria-hidden><IconChevronRight /></span>{options.heading}</button> : <div className="history-standalone-heading" title={options.title}>{options.heading}</div>) : null}
       {!collapsed ? <div className="history-project-threads">{visibleThreads.map(renderThread)}{canExpand ? <button type="button" className={`history-project-more ${expanded ? "is-expanded" : ""}`} aria-expanded={expanded} onClick={() => toggleGroup(setExpandedGroups, groupKey)}><span>{expanded ? "收起" : `展开更多 (${hiddenCount})`}</span><IconChevronDown /></button> : null}</div> : null}
     </section>;
   }

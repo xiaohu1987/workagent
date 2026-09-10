@@ -87,18 +87,18 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
     <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="Right workspace" aria-hidden={hidden}>
       <div className="right-workspace-tabs" role="tablist" aria-label="工作区切换">
         <WorkspaceTabButton
-          id="files"
-          label="文件夹"
-          icon={<IconFolder />}
-          active={activeTab === "files"}
-          onClick={() => selectWorkspaceTab("files", onTabChange, onExpandedTabChange)}
-        />
-        <WorkspaceTabButton
           id="browser"
           label="浏览器"
           icon={<IconGlobe />}
           active={activeTab === "browser"}
           onClick={() => selectWorkspaceTab("browser", onTabChange, onExpandedTabChange)}
+        />
+        <WorkspaceTabButton
+          id="files"
+          label="文件夹"
+          icon={<IconFolder />}
+          active={activeTab === "files"}
+          onClick={() => selectWorkspaceTab("files", onTabChange, onExpandedTabChange)}
         />
         {showGitWorkspace ? (
           <WorkspaceTabButton

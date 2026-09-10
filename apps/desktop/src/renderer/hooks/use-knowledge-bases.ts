@@ -12,11 +12,29 @@ export function useKnowledgeBases(
   const [documents, setDocuments] = useState<Record<string, KnowledgeDocumentRecord[]>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  async function refreshBases() {
+  async function refreshBases(options?: { notify?: boolean }) {
     try {
-      setBases((await window.codexh.listKnowledgeBases()) as KnowledgeBaseSummary[]);
+      const next = (await window.codexh.listKnowledgeBases()) as KnowledgeBaseSummary[];
+      setBases(next);
+      if (options?.notify) {
+        showNotice("知识库列表已刷新", {
+          tone: "success",
+          message: next.length ? `当前共 ${next.length} 个知识库` : "当前没有知识库"
+        });
+      }
     } catch (error) {
       showNotice("加载知识库失败", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function openFolder(knowledgeBase: Pick<KnowledgeBaseSummary, "displayName" | "bundleRoot" | "bundleExists">) {
+    if (!knowledgeBase.bundleExists || !knowledgeBase.bundleRoot) {
+      showNotice("未找到本地知识库文件夹", { message: knowledgeBase.displayName });
+      return;
+    }
+    const error = await window.codexh.openFolder(knowledgeBase.bundleRoot);
+    if (error) {
+      showNotice("无法打开知识库文件夹", { message: error });
     }
   }
 
@@ -73,5 +91,5 @@ export function useKnowledgeBases(
     }
   }
 
-  return { bases, documents, busyId, refreshBases, toggleDocuments, refreshBase, deleteBase };
+  return { bases, documents, busyId, refreshBases, toggleDocuments, refreshBase, deleteBase, openFolder };
 }

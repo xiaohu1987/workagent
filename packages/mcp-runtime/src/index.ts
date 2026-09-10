@@ -321,9 +321,9 @@ export class McpManager {
     if (!managed?.client.callTool) {
       throw new Error(`MCP server ${serverId} is not connected.`);
     }
-    const invokeCallTool = managed.client.callTool;
+    const client = managed.client;
     try {
-      return await withToolCallTimeout(() => invokeCallTool({ name: toolName, arguments: argumentsJson }));
+      return await withToolCallTimeout(() => client.callTool({ name: toolName, arguments: argumentsJson }));
     } catch (error) {
       if (isMcpSessionInvalidError(error)) {
         const recovered = await this.reconnectInvalidSession(serverId, managed);
@@ -334,8 +334,8 @@ export class McpManager {
         if (!refreshedTools.some((tool) => tool.name === toolName)) {
           throw new Error(`MCP tool ${serverId}:${toolName} is not available after reconnecting.`);
         }
-        const retryCallTool = recovered.client.callTool;
-        return withToolCallTimeout(() => retryCallTool({ name: toolName, arguments: argumentsJson }));
+        const retryClient = recovered.client;
+        return withToolCallTimeout(() => retryClient.callTool({ name: toolName, arguments: argumentsJson }));
       }
       if (!isMissingToolError(error)) throw error;
       await this.refreshToolDirectory([serverId]);

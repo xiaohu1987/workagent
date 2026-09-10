@@ -228,7 +228,38 @@ export interface ToolRuntimeContext {
     title: string;
     content: string;
     knowledgeBaseId?: string;
+    knowledgeBaseName?: string;
+    category?: string;
   }) => Promise<{ conceptId?: string; documentId: string; knowledgeBaseId: string; sourcePath: string }>;
+  queryKnowledgeNotes?: (input: { knowledgeBaseId?: string; category?: string }) => Promise<Array<{
+    documentId: string;
+    knowledgeBaseId: string;
+    knowledgeBaseName?: string;
+    knowledgeBaseCategory?: string;
+    title: string;
+    sourcePath: string;
+    status?: string;
+    updatedAt: string;
+  }>>;
+  updateKnowledgeNote?: (input: {
+    documentId: string;
+    title?: string;
+    content?: string;
+  }) => Promise<{ documentId: string; knowledgeBaseId: string; sourcePath: string; title: string }>;
+  deleteKnowledgeNote?: (input: { documentId: string }) => Promise<{ documentId: string; knowledgeBaseId: string; title: string }>;
+  createKnowledgeBase?: (input: {
+    name: string;
+    category?: string;
+    scope?: "global" | "project";
+  }) => Promise<{ knowledgeBaseId: string; name: string; category: string; scope: string; created: boolean }>;
+  updateKnowledgeBase?: (input: {
+    knowledgeBaseId: string;
+    name?: string;
+    category?: string;
+  }) => Promise<{ knowledgeBaseId: string; name: string; category: string }>;
+  deleteKnowledgeBaseForAgent?: (input: {
+    knowledgeBaseId: string;
+  }) => Promise<{ knowledgeBaseId: string; name: string }>;
   readThreadTodos?: () => Promise<Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>>;
   writeThreadTodos?: (
     items: Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>
@@ -288,7 +319,7 @@ const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
   "apply_patch", "fs.write_file", "search_replace", "fs.mkdir", "fs.rename", "fs.delete", "fs.copy", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
   "skills.install", "plugins.install", "mcp.install",
   "image.generate", "video.generate",
-  "knowledge.add", "todo.write",
+  "knowledge.create", "knowledge.add", "knowledge.update", "knowledge.delete", "todo.write",
   "git.stage_file", "git.stage_all", "git.unstage_file", "git.revert_file", "git.apply_hunk",
   "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
   "browser.open_tab", "browser.click", "browser.fill", "browser.select_option", "browser.press_key",
@@ -1523,14 +1554,59 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
 
   runtime.register(
     {
+      name: "knowledge.create",
+      description: "Create a named local knowledge base with optional category and scope. Reuses an existing base with the same name.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          category: { type: "string" },
+          scope: { type: "string", description: "global or project. Defaults to global." }
+        },
+        required: ["name"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      if (!ctx.createKnowledgeBase) {
+        return { ok: false, content: "Knowledge write is unavailable for this task." };
+      }
+      const name = String(args.name ?? "").trim();
+      if (!name) {
+        return { ok: false, content: "name 不能为空。" };
+      }
+      const category = typeof args.category === "string" ? args.category.trim() : undefined;
+      const scope = args.scope === "project" ? "project" : args.scope === "global" ? "global" : undefined;
+      const approved = await ctx.requestApproval({
+        title: "新建知识库",
+        description: category ? `${name}（${category}）` : name,
+        riskLevel: "medium",
+        payload: { name, category, scope }
+      });
+      if (!approved) return { ok: false, content: "新建知识库被拒绝。" };
+      const saved = await ctx.createKnowledgeBase({ name, category, scope });
+      return {
+        ok: true,
+        content: saved.created
+          ? `已新建知识库：${saved.name}${saved.category ? `（${saved.category}）` : ""}`
+          : `已复用现有知识库：${saved.name}${saved.category ? `（${saved.category}）` : ""}`,
+        json: saved
+      };
+    }
+  );
+
+  runtime.register(
+    {
       name: "knowledge.add",
-      description: "Add a Markdown note into an accessible knowledge base so later searches can retrieve it. Prefer an existing knowledgeBaseId when known.",
+      description: "Add a Markdown note into an accessible knowledge base so later searches can retrieve it. Prefer knowledgeBaseId; otherwise pass knowledgeBaseName and/or category.",
       inputSchema: {
         type: "object",
         properties: {
           title: { type: "string" },
           content: { type: "string" },
-          knowledgeBaseId: { type: "string" }
+          knowledgeBaseId: { type: "string" },
+          knowledgeBaseName: { type: "string" },
+          category: { type: "string" }
         },
         required: ["title", "content"]
       },
@@ -1546,18 +1622,194 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         return { ok: false, content: "title 和 content 不能为空。" };
       }
       const knowledgeBaseId = typeof args.knowledgeBaseId === "string" ? args.knowledgeBaseId : undefined;
+      const knowledgeBaseName = typeof args.knowledgeBaseName === "string" ? args.knowledgeBaseName.trim() : undefined;
+      const category = typeof args.category === "string" ? args.category.trim() : undefined;
       const approved = await ctx.requestApproval({
         title: "写入知识库",
         description: title,
         riskLevel: "medium",
-        payload: { title, knowledgeBaseId }
+        payload: { title, knowledgeBaseId, knowledgeBaseName, category }
       });
       if (!approved) return { ok: false, content: "写入知识库被拒绝。" };
-      const saved = await ctx.addKnowledgeNote({ title, content, knowledgeBaseId });
+      const saved = await ctx.addKnowledgeNote({ title, content, knowledgeBaseId, knowledgeBaseName, category });
       return {
         ok: true,
         content: `已写入知识库：${title}\n${saved.sourcePath}`,
         json: saved
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "knowledge.query",
+      description: "List accessible knowledge bases and their documents. Filter by knowledgeBaseId or category. Use knowledge.search for content-level retrieval.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          knowledgeBaseId: { type: "string" },
+          category: { type: "string" }
+        },
+        required: []
+      },
+      riskLevel: "low",
+      parallelSafe: true
+    },
+    async (args, ctx) => {
+      if (!ctx.queryKnowledgeNotes) {
+        return { ok: false, content: "Knowledge query is unavailable for this task." };
+      }
+      const knowledgeBaseId = typeof args.knowledgeBaseId === "string" ? args.knowledgeBaseId : undefined;
+      const category = typeof args.category === "string" ? args.category.trim() : undefined;
+      const bases = (ctx.knowledgeBases ?? []).filter((base) =>
+        (!knowledgeBaseId || base.id === knowledgeBaseId) &&
+        (!category || base.category === category)
+      ).map((base) => ({
+        knowledgeBaseId: base.id,
+        name: base.displayName,
+        category: base.category || "",
+        scope: base.scope,
+        status: base.status,
+        updatedAt: base.updatedAt
+      }));
+      const documents = await ctx.queryKnowledgeNotes({ knowledgeBaseId, category });
+      return {
+        ok: true,
+        content: bases.length || documents.length
+          ? JSON.stringify({ bases, documents }, null, 2)
+          : "没有找到知识库或文档。",
+        json: { bases, documents }
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "knowledge.update",
+      description: "Update a knowledge note by documentId, or update a knowledge base name/category by knowledgeBaseId.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          documentId: { type: "string" },
+          knowledgeBaseId: { type: "string" },
+          title: { type: "string" },
+          content: { type: "string" },
+          name: { type: "string" },
+          category: { type: "string" }
+        },
+        required: []
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      const documentId = String(args.documentId ?? "").trim();
+      const knowledgeBaseId = String(args.knowledgeBaseId ?? "").trim();
+      if (documentId) {
+        if (!ctx.updateKnowledgeNote) {
+          return { ok: false, content: "Knowledge write is unavailable for this task." };
+        }
+        const title = typeof args.title === "string" ? args.title.trim() : undefined;
+        const content = typeof args.content === "string" ? args.content : undefined;
+        if (!title && content === undefined) {
+          return { ok: false, content: "title 和 content 至少提供一个。" };
+        }
+        if (content !== undefined && !content.trim()) {
+          return { ok: false, content: "content 不能为空。" };
+        }
+        const approved = await ctx.requestApproval({
+          title: "更新知识库",
+          description: title ?? documentId,
+          riskLevel: "medium",
+          payload: { documentId, title }
+        });
+        if (!approved) return { ok: false, content: "更新知识库被拒绝。" };
+        const saved = await ctx.updateKnowledgeNote({ documentId, title, content });
+        return {
+          ok: true,
+          content: `已更新知识库文档：${saved.title}\n${saved.sourcePath}`,
+          json: saved
+        };
+      }
+      if (!knowledgeBaseId) {
+        return { ok: false, content: "documentId 或 knowledgeBaseId 至少提供一个。" };
+      }
+      if (!ctx.updateKnowledgeBase) {
+        return { ok: false, content: "Knowledge write is unavailable for this task." };
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : undefined;
+      const category = typeof args.category === "string" ? args.category.trim() : undefined;
+      if (!name && category === undefined) {
+        return { ok: false, content: "更新知识库时 name 和 category 至少提供一个。" };
+      }
+      const approved = await ctx.requestApproval({
+        title: "更新知识库",
+        description: name ?? knowledgeBaseId,
+        riskLevel: "medium",
+        payload: { knowledgeBaseId, name, category }
+      });
+      if (!approved) return { ok: false, content: "更新知识库被拒绝。" };
+      const saved = await ctx.updateKnowledgeBase({ knowledgeBaseId, name, category });
+      return {
+        ok: true,
+        content: `已更新知识库：${saved.name}${saved.category ? `（${saved.category}）` : ""}`,
+        json: saved
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "knowledge.delete",
+      description: "Delete one knowledge note by documentId, or delete an entire knowledge base by knowledgeBaseId. This is irreversible.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          documentId: { type: "string" },
+          knowledgeBaseId: { type: "string" }
+        },
+        required: []
+      },
+      riskLevel: "high"
+    },
+    async (args, ctx) => {
+      const documentId = String(args.documentId ?? "").trim();
+      const knowledgeBaseId = String(args.knowledgeBaseId ?? "").trim();
+      if (documentId) {
+        if (!ctx.deleteKnowledgeNote) {
+          return { ok: false, content: "Knowledge write is unavailable for this task." };
+        }
+        const approved = await ctx.requestApproval({
+          title: "删除知识库文档",
+          description: documentId,
+          riskLevel: "high",
+          payload: { documentId }
+        });
+        if (!approved) return { ok: false, content: "删除知识库文档被拒绝。" };
+        const deleted = await ctx.deleteKnowledgeNote({ documentId });
+        return {
+          ok: true,
+          content: `已删除知识库文档：${deleted.title}（${deleted.documentId}）`,
+          json: deleted
+        };
+      }
+      if (!knowledgeBaseId) {
+        return { ok: false, content: "documentId 或 knowledgeBaseId 至少提供一个。" };
+      }
+      if (!ctx.deleteKnowledgeBaseForAgent) {
+        return { ok: false, content: "Knowledge write is unavailable for this task." };
+      }
+      const approved = await ctx.requestApproval({
+        title: "删除知识库",
+        description: knowledgeBaseId,
+        riskLevel: "high",
+        payload: { knowledgeBaseId }
+      });
+      if (!approved) return { ok: false, content: "删除知识库被拒绝。" };
+      const deleted = await ctx.deleteKnowledgeBaseForAgent({ knowledgeBaseId });
+      return {
+        ok: true,
+        content: `已删除知识库：${deleted.name}（${deleted.knowledgeBaseId}）`,
+        json: deleted
       };
     }
   );

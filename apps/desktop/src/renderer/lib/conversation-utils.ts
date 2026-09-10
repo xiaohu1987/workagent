@@ -582,7 +582,26 @@ export function shouldKeepTimelineEntryWhenTurnCollapsed(
   }
   return entry.id === turn.userEntryId
     || entry.id === turn.summaryEntryId
-    || entry.kind === "file-summary";
+    || entry.kind === "file-summary"
+    || timelineEntryHasGeneratedMedia(entry);
+}
+
+export function timelineEntryHasGeneratedMedia(entry: TimelineEntry): boolean {
+  if (entry.kind !== "message" || entry.message.role !== "assistant") {
+    return false;
+  }
+  return listMessageAttachments(entry.message).some((attachment) =>
+    attachment.source === "generated" || attachment.kind === "image" || attachment.kind === "video"
+  );
+}
+
+function listMessageAttachments(message: Pick<MessageRecord, "metadataJson">): MessageAttachment[] {
+  try {
+    const attachments = JSON.parse(message.metadataJson ?? "{}").attachments;
+    return Array.isArray(attachments) ? attachments as MessageAttachment[] : [];
+  } catch {
+    return [];
+  }
 }
 
 export function getDefaultCollapsedConversationTurnIds(
@@ -1196,7 +1215,22 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", s
   if (toolName === "knowledge.read") {
     return target ? `正在读取知识库 ${target}` : "正在读取知识库";
   }
+  if (toolName === "knowledge.create") {
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    return name ? `正在创建知识库 ${name}` : "正在创建知识库";
+  }
   if (toolName === "knowledge.add") return target ? `正在写入知识库 ${target}` : "正在写入知识库";
+  if (toolName === "knowledge.query") {
+    const category = typeof input.category === "string" ? input.category.trim() : "";
+    return category ? `正在查询知识库 ${category}` : "正在查询知识库";
+  }
+  if (toolName === "knowledge.update") return target ? `正在更新知识库 ${target}` : "正在更新知识库";
+  if (toolName === "knowledge.delete") {
+    if (typeof input.knowledgeBaseId === "string" && input.knowledgeBaseId.trim() && !input.documentId) {
+      return "正在删除知识库";
+    }
+    return target ? `正在删除知识库文档 ${target}` : "正在删除知识库文档";
+  }
   if (toolName === "todo.read") return "正在查看任务清单";
   if (toolName === "todo.write") return "正在更新任务清单";
   if (toolName === "web_search.search_query") {
@@ -1261,18 +1295,19 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", s
 
 export function getPostToolDecisionLabel(
   completedTools: readonly Pick<ToolCallRecord, "toolName" | "argumentsJson">[],
-  skillNames?: SkillNameMap,
+  _skillNames?: SkillNameMap,
   hasActiveSubagents?: boolean
 ): string {
   const latestTool = completedTools.at(-1);
   if (!latestTool) return "正在处理工具结果";
-  if (isSubagentWaitTool(latestTool.toolName) && hasActiveSubagents === false) {
-    return "正在汇总子任务结果";
+  if (isSubagentWaitTool(latestTool.toolName)) {
+    return hasActiveSubagents === false ? "正在汇总子任务结果" : "正在等待子智能体";
   }
-  const action = getToolProcessingLabel(latestTool.toolName, latestTool.argumentsJson, skillNames).replace(/^正在/, "");
+  // The latest tool group already names the action. This line is only the
+  // "still working" heartbeat after that tool finished.
   return completedTools.length > 1
-    ? `已完成 ${completedTools.length} 项操作，正在${action}`
-    : `正在${action}`;
+    ? `已完成 ${completedTools.length} 项操作，正在思考`
+    : "正在思考";
 }
 
 export function compactRuntimeTarget(value: string): string {
@@ -1396,7 +1431,7 @@ export function getToolActivitySubject(counts: { search: number; read: number; w
 
 export function getToolActivityKind(toolCall: ToolCallRecord): "search" | "read" | "write" | "verify" | "browser" | "other" {
   const { toolName } = toolCall;
-  if (isFileWriteTool(toolName) || toolName === "knowledge.add" || toolName === "todo.write") return "write";
+  if (isFileWriteTool(toolName) || toolName === "knowledge.create" || toolName === "knowledge.add" || toolName === "knowledge.update" || toolName === "knowledge.delete" || toolName === "todo.write") return "write";
   if (
     toolName === "code.search" ||
     toolName === "knowledge.search" ||

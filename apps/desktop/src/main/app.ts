@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -399,6 +400,12 @@ export class DesktopBackend {
       searchKnowledge: async (query, ids) => this.#db.searchKnowledgeChunks(query, ids),
       readKnowledgeConcept: async (conceptId) => this.#db.getKnowledgeChunk(conceptId) ?? this.#db.getKnowledgeConcept(conceptId),
       addKnowledgeNote: async (input) => this.addAgentKnowledgeNote(input),
+      queryKnowledgeNotes: async (input) => this.listAgentKnowledgeNotes(input),
+      updateKnowledgeNote: async (input) => this.updateAgentKnowledgeNote(input),
+      deleteKnowledgeNote: async (input) => this.deleteAgentKnowledgeNote(input),
+      createKnowledgeBase: async (input) => this.createAgentKnowledgeBase(input),
+      updateKnowledgeBase: async (input) => this.updateAgentKnowledgeBase(input),
+      deleteKnowledgeBaseForAgent: async (input) => this.deleteAgentKnowledgeBase(input),
       readThreadTodos: async (threadId) => this.readThreadTodos(threadId),
       writeThreadTodos: async (threadId, items) => this.writeThreadTodos(threadId, items),
       openExternalUrl: async (url) => {
@@ -2554,11 +2561,21 @@ export class DesktopBackend {
       requestedOpenMode
     );
     const opened = await this.#browser.openTab(threadId, url);
+    for (const closed of opened.closedTabs) {
+      this.releaseBrowserTabContents(threadId, closed.id);
+    }
     this.persistBrowserTabs(threadId);
     await this.emit({
       type: "browser.updated",
       threadId,
-      payload: { action: "open", tab: opened.tab, browserOpenMode, silentBrowserOpen },
+      payload: {
+        action: "open",
+        tab: opened.tab,
+        closedTabIds: opened.closedTabs.map((tab) => tab.id),
+        tabs: this.#browser.listTabs(threadId),
+        browserOpenMode,
+        silentBrowserOpen
+      },
       createdAt: new Date().toISOString()
     });
     if (browserOpenMode === "external_default") {
@@ -3389,6 +3406,7 @@ export class DesktopBackend {
   public async importKnowledge(input: {
     displayName: string;
     scope: "global" | "project" | "imported";
+    category?: string;
     sourcePaths?: string[];
     sources?: KnowledgeImportSource[];
     threadId?: string;
@@ -3410,6 +3428,7 @@ export class DesktopBackend {
       scope: input.scope,
       projectId,
       displayName: input.displayName,
+      category: normalizeKnowledgeCategory(input.category),
       bundleRoot,
       okfVersion: "0.1",
       status: "importing"
@@ -3469,14 +3488,16 @@ export class DesktopBackend {
   public listKnowledgeBaseSummaries(): KnowledgeBaseSummary[] {
     const threads = this.#db.listThreads();
     return this.#db.listKnowledgeBaseSummaries().map((knowledgeBase) => {
+      const bundleExists = Boolean(knowledgeBase.bundleRoot) && existsSync(knowledgeBase.bundleRoot);
       if (knowledgeBase.scope === "global") {
-        return { ...knowledgeBase, scopeTargetLabel: "所有聊天" };
+        return { ...knowledgeBase, scopeTargetLabel: "所有聊天", bundleExists };
       }
       if (knowledgeBase.scope === "project") {
         const projectThread = threads.find((thread) => thread.projectId === knowledgeBase.projectId);
         return {
           ...knowledgeBase,
-          scopeTargetLabel: projectThread?.cwd ? `项目：${projectThread.cwd}` : "原项目已删除"
+          scopeTargetLabel: projectThread?.cwd ? `项目：${projectThread.cwd}` : "原项目已删除",
+          bundleExists
         };
       }
       const owners = threads.filter((thread) => thread.knowledgeBaseIds.includes(knowledgeBase.id));
@@ -3484,7 +3505,8 @@ export class DesktopBackend {
         ...knowledgeBase,
         scopeTargetLabel: owners.length > 0
           ? `对话：${owners.slice(0, 2).map((thread) => thread.title).join("、")}${owners.length > 2 ? ` 等 ${owners.length} 个` : ""}`
-          : "原对话已删除"
+          : "原对话已删除",
+        bundleExists
       };
     });
   }
@@ -3503,6 +3525,7 @@ export class DesktopBackend {
       scope: "global",
       projectId: null,
       displayName: "随手记",
+      category: "",
       bundleRoot: path.join(this.#layout.globalBundlesDir, "quick-notes"),
       okfVersion: "0.1",
       status: "ready"
@@ -3746,25 +3769,139 @@ export class DesktopBackend {
     }, chunks);
   }
 
-  public addAgentKnowledgeNote(input: {
+  public async createAgentKnowledgeBase(input: {
+    name: string;
+    category?: string;
+    scope?: "global" | "project";
+    threadId?: string;
+  }): Promise<{ knowledgeBaseId: string; name: string; category: string; scope: string; created: boolean }> {
+    const name = input.name.trim();
+    if (!name) {
+      throw new Error("知识库名称不能为空。");
+    }
+    const category = normalizeKnowledgeCategory(input.category);
+    const scope = input.scope === "project" ? "project" : "global";
+    const thread = input.threadId ? this.#db.getThread(input.threadId) : null;
+    if (scope === "project" && (!thread?.cwd || !thread.projectId)) {
+      throw new Error("项目知识库需要先切换到项目聊天。");
+    }
+    const existing = this.#db.findKnowledgeBase(scope, name);
+    if (existing && (scope === "global" || existing.projectId === (thread?.projectId ?? null))) {
+      if (category && existing.category !== category) {
+        this.#db.updateKnowledgeBase(existing.id, { category });
+      }
+      if (thread) this.bindKnowledgeBaseToThread(thread.id, existing.id);
+      await this.emitKnowledgeChanged(input.threadId, { knowledgeBaseId: existing.id, title: name });
+      return {
+        knowledgeBaseId: existing.id,
+        name: existing.displayName,
+        category: category || existing.category,
+        scope: existing.scope,
+        created: false
+      };
+    }
+    const created = this.#db.createKnowledgeBase({
+      scope,
+      projectId: scope === "project" ? thread?.projectId ?? null : null,
+      displayName: name,
+      category,
+      bundleRoot: scope === "project"
+        ? resolveProjectKnowledgeBundleRoot(thread, name)
+        : path.join(this.#layout.globalBundlesDir, randomUUID()),
+      okfVersion: "0.1",
+      status: "ready"
+    });
+    if (thread) this.bindKnowledgeBaseToThread(thread.id, created.id);
+    await this.emitKnowledgeChanged(input.threadId, { knowledgeBaseId: created.id, title: name });
+    return {
+      knowledgeBaseId: created.id,
+      name: created.displayName,
+      category: created.category,
+      scope: created.scope,
+      created: true
+    };
+  }
+
+  public async updateAgentKnowledgeBase(input: {
+    knowledgeBaseId: string;
+    name?: string;
+    category?: string;
+    threadId?: string;
+  }): Promise<{ knowledgeBaseId: string; name: string; category: string }> {
+    const knowledgeBaseId = input.knowledgeBaseId.trim();
+    const current = this.#db.getKnowledgeBase(knowledgeBaseId);
+    if (!current) {
+      throw new Error("未找到指定的知识库。");
+    }
+    if (input.threadId && !this.listVisibleKnowledgeBases(input.threadId).some((base) => base.id === knowledgeBaseId)) {
+      throw new Error("指定的知识库对当前对话不可用。");
+    }
+    const name = input.name !== undefined ? input.name.trim() : current.displayName;
+    if (!name) {
+      throw new Error("知识库名称不能为空。");
+    }
+    const category = input.category !== undefined ? normalizeKnowledgeCategory(input.category) : current.category;
+    this.#db.updateKnowledgeBase(knowledgeBaseId, { displayName: name, category });
+    await this.emitKnowledgeChanged(input.threadId, { knowledgeBaseId, title: name });
+    return { knowledgeBaseId, name, category };
+  }
+
+  public async deleteAgentKnowledgeBase(input: {
+    knowledgeBaseId: string;
+    threadId?: string;
+  }): Promise<{ knowledgeBaseId: string; name: string }> {
+    const knowledgeBaseId = input.knowledgeBaseId.trim();
+    const current = this.#db.getKnowledgeBase(knowledgeBaseId);
+    if (!current) {
+      throw new Error("未找到指定的知识库。");
+    }
+    if (input.threadId && !this.listVisibleKnowledgeBases(input.threadId).some((base) => base.id === knowledgeBaseId)) {
+      throw new Error("指定的知识库对当前对话不可用。");
+    }
+    await this.deleteKnowledgeBase(knowledgeBaseId);
+    await this.emitKnowledgeChanged(input.threadId, { knowledgeBaseId, title: current.displayName, deleted: true });
+    return { knowledgeBaseId, name: current.displayName };
+  }
+
+  public async addAgentKnowledgeNote(input: {
     title: string;
     content: string;
     knowledgeBaseId?: string;
+    knowledgeBaseName?: string;
+    category?: string;
     threadId?: string;
-  }): { documentId: string; knowledgeBaseId: string; sourcePath: string } {
+  }): Promise<{ documentId: string; knowledgeBaseId: string; sourcePath: string }> {
     const title = input.title.trim();
     const content = input.content.trim();
     if (!title || !content) {
       throw new Error("知识库笔记标题和内容不能为空。");
     }
     const visible = input.threadId ? this.listVisibleKnowledgeBases(input.threadId) : this.#db.listKnowledgeBases();
-    const selected = input.knowledgeBaseId
+    const category = normalizeKnowledgeCategory(input.category);
+    const requestedName = input.knowledgeBaseName?.trim();
+    let selected = input.knowledgeBaseId
       ? visible.find((base) => base.id === input.knowledgeBaseId) ?? this.#db.getKnowledgeBase(input.knowledgeBaseId)
-      : visible[0] ?? this.#db.findKnowledgeBase("global", "随手记");
+      : requestedName
+        ? visible.find((base) => base.displayName === requestedName)
+          ?? this.#db.findKnowledgeBase("global", requestedName)
+          ?? this.#db.findKnowledgeBase("project", requestedName)
+        : category
+          ? visible.find((base) => base.category === category)
+          : visible[0] ?? this.#db.findKnowledgeBase("global", "随手记");
+    if (!selected && requestedName) {
+      const created = await this.createAgentKnowledgeBase({
+        name: requestedName,
+        category,
+        scope: "global",
+        threadId: input.threadId
+      });
+      selected = this.#db.getKnowledgeBase(created.knowledgeBaseId);
+    }
     const base = selected ?? this.#db.createKnowledgeBase({
       scope: "global",
       projectId: null,
       displayName: "随手记",
+      category,
       bundleRoot: path.join(this.#layout.globalBundlesDir, "quick-notes"),
       okfVersion: "0.1",
       status: "ready"
@@ -3798,7 +3935,125 @@ export class DesktopBackend {
       updatedAt: now
     }, chunks);
     this.#db.updateKnowledgeBase(base.id, { status: "ready" });
+    await this.emit({
+      type: "knowledge.imported",
+      threadId: input.threadId,
+      payload: { knowledgeBaseId: base.id, documentId, sourcePath, title },
+      createdAt: new Date().toISOString()
+    });
     return { documentId, knowledgeBaseId: base.id, sourcePath };
+  }
+
+  public listAgentKnowledgeNotes(input: {
+    knowledgeBaseId?: string;
+    category?: string;
+    threadId?: string;
+  }): Array<{
+    documentId: string;
+    knowledgeBaseId: string;
+    knowledgeBaseName: string;
+    knowledgeBaseCategory: string;
+    title: string;
+    sourcePath: string;
+    status: string;
+    updatedAt: string;
+  }> {
+    const visible = input.threadId ? this.listVisibleKnowledgeBases(input.threadId) : this.#db.listKnowledgeBases();
+    const category = normalizeKnowledgeCategory(input.category);
+    const bases = visible.filter((base) =>
+      (!input.knowledgeBaseId || base.id === input.knowledgeBaseId) &&
+      (!category || base.category === category)
+    );
+    const documents = bases.flatMap((base) => this.#db.listKnowledgeDocuments(base.id).map((doc) => ({
+      documentId: doc.id,
+      knowledgeBaseId: base.id,
+      knowledgeBaseName: base.displayName,
+      knowledgeBaseCategory: base.category,
+      title: doc.title,
+      sourcePath: doc.sourcePath,
+      status: doc.status,
+      updatedAt: doc.updatedAt
+    })));
+    documents.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return documents.slice(0, 50);
+  }
+
+  public async updateAgentKnowledgeNote(input: {
+    documentId: string;
+    title?: string;
+    content?: string;
+    threadId?: string;
+  }): Promise<{ documentId: string; knowledgeBaseId: string; sourcePath: string; title: string }> {
+    const documentId = input.documentId.trim();
+    const document = this.#db.getKnowledgeDocument(documentId);
+    if (!document) {
+      throw new Error("未找到指定的知识库文档。");
+    }
+    if (input.threadId && !this.listVisibleKnowledgeBases(input.threadId).some((base) => base.id === document.knowledgeBaseId)) {
+      throw new Error("指定的知识库文档对当前对话不可用。");
+    }
+    const title = (input.title !== undefined ? input.title.trim() : document.title) || document.title;
+    if (!title) {
+      throw new Error("知识库笔记标题不能为空。");
+    }
+    const now = new Date().toISOString();
+    const content = input.content !== undefined ? input.content.trim() : null;
+    const chunks: KnowledgeChunkRecord[] = content === null
+      ? this.#db.listKnowledgeChunksByDocument(documentId).map((chunk) => ({ ...chunk, title }))
+      : splitKnowledgeDocument(content).map((chunk, chunkIndex) => ({
+        id: randomUUID(),
+        knowledgeBaseId: document.knowledgeBaseId,
+        documentId,
+        chunkIndex,
+        title,
+        content: chunk,
+        sourcePath: document.sourcePath,
+        locator: getChunkLocator(chunk, chunkIndex),
+        createdAt: now
+      } satisfies KnowledgeChunkRecord));
+    if (content !== null && !content) {
+      throw new Error("知识库笔记内容不能为空。");
+    }
+    const sourceHash = createHash("sha256")
+      .update(`${title}\n${chunks.map((chunk) => chunk.content).join("\n")}`)
+      .digest("hex");
+    this.#db.replaceKnowledgeDocument({
+      ...document,
+      title,
+      sourceHash,
+      updatedAt: now
+    }, chunks);
+    this.#db.updateKnowledgeBase(document.knowledgeBaseId, { status: "ready" });
+    await this.emit({
+      type: "knowledge.imported",
+      threadId: input.threadId,
+      payload: { knowledgeBaseId: document.knowledgeBaseId, documentId, sourcePath: document.sourcePath, title },
+      createdAt: new Date().toISOString()
+    });
+    return { documentId, knowledgeBaseId: document.knowledgeBaseId, sourcePath: document.sourcePath, title };
+  }
+
+  public async deleteAgentKnowledgeNote(input: {
+    documentId: string;
+    threadId?: string;
+  }): Promise<{ documentId: string; knowledgeBaseId: string; title: string }> {
+    const documentId = input.documentId.trim();
+    const document = this.#db.getKnowledgeDocument(documentId);
+    if (!document) {
+      throw new Error("未找到指定的知识库文档。");
+    }
+    if (input.threadId && !this.listVisibleKnowledgeBases(input.threadId).some((base) => base.id === document.knowledgeBaseId)) {
+      throw new Error("指定的知识库文档对当前对话不可用。");
+    }
+    this.#db.deleteKnowledgeDocumentBySourcePath(document.knowledgeBaseId, document.sourcePath);
+    this.#db.updateKnowledgeBase(document.knowledgeBaseId, {});
+    await this.emit({
+      type: "knowledge.imported",
+      threadId: input.threadId,
+      payload: { knowledgeBaseId: document.knowledgeBaseId, documentId, sourcePath: document.sourcePath, title: document.title, deleted: true },
+      createdAt: new Date().toISOString()
+    });
+    return { documentId, knowledgeBaseId: document.knowledgeBaseId, title: document.title };
   }
 
   private threadTodosPath(threadId: string): string {
@@ -5034,6 +5289,18 @@ export class DesktopBackend {
     });
   }
 
+  private async emitKnowledgeChanged(
+    threadId: string | undefined,
+    payload: Record<string, unknown>
+  ): Promise<void> {
+    await this.emit({
+      type: "knowledge.imported",
+      threadId,
+      payload,
+      createdAt: new Date().toISOString()
+    });
+  }
+
   private persistBrowserTabs(threadId: string): void {
     this.#db.replaceBrowserTabs(threadId, this.#browser.listTabs(threadId));
   }
@@ -5516,6 +5783,10 @@ function readPngDimensions(buffer: Buffer): { width: number; height: number } {
     throw new Error("Browser screenshot is not a valid PNG image.");
   }
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+function normalizeKnowledgeCategory(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function resolveProjectKnowledgeBundleRoot(

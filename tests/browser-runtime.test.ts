@@ -2,7 +2,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BrowserRuntime, isBrowserErrorPageUrl, resolveBrowserOpenPreferences } from "@browser-runtime";
+import {
+  BrowserRuntime,
+  MAX_BROWSER_TABS_PER_THREAD,
+  isBrowserErrorPageUrl,
+  resolveBrowserOpenPreferences,
+  selectUnusedBrowserTabsToClose
+} from "@browser-runtime";
 
 const tempDirs: string[] = [];
 
@@ -110,7 +116,15 @@ describe("BrowserRuntime", () => {
     expect(second.tab.url).toContain("v=2");
   });
 
-  it("caps agent tabs at three per thread", async () => {
+  it("selects unused tabs before recently used or active ones", () => {
+    expect(selectUnusedBrowserTabsToClose([
+      { id: "keep", isActive: true, lastUsedAt: "2026-01-01T00:00:05.000Z", createdAt: "2026-01-01T00:00:05.000Z", index: 0 },
+      { id: "recent", isActive: false, lastUsedAt: "2026-01-01T00:00:04.000Z", createdAt: "2026-01-01T00:00:01.000Z", index: 1 },
+      { id: "idle", isActive: false, lastUsedAt: "2026-01-01T00:00:01.000Z", createdAt: "2026-01-01T00:00:02.000Z", index: 2 }
+    ], ["keep"], 2)).toEqual(["idle"]);
+  });
+
+  it("caps agent tabs at five per thread and evicts unused tabs first", async () => {
     const browser = new BrowserRuntime(async (target) => ({
       title: target,
       url: target,
@@ -119,13 +133,43 @@ describe("BrowserRuntime", () => {
       fetchedAt: new Date().toISOString()
     }));
     const threadId = "thread-cap";
-    await browser.openTab(threadId, "http://a.test/");
-    await browser.openTab(threadId, "http://b.test/");
-    await browser.openTab(threadId, "http://c.test/");
-    await browser.openTab(threadId, "http://d.test/");
+    const opened = [];
+    for (const host of ["a", "b", "c", "d", "e"]) {
+      opened.push(await browser.openTab(threadId, `http://${host}.test/`));
+    }
+    browser.focusTab(threadId, opened[0]!.tab.id);
+    const sixth = await browser.openTab(threadId, "http://f.test/");
 
-    expect(browser.listTabs(threadId)).toHaveLength(3);
+    expect(MAX_BROWSER_TABS_PER_THREAD).toBe(5);
+    expect(browser.listTabs(threadId)).toHaveLength(5);
+    expect(sixth.closedTabs.map((tab) => tab.url)).toEqual(["http://b.test/"]);
     expect(browser.listTabs(threadId).map((tab) => tab.url)).toEqual([
+      "http://f.test/",
+      "http://e.test/",
+      "http://d.test/",
+      "http://c.test/",
+      "http://a.test/"
+    ]);
+  });
+
+  it("evicts the oldest unused tab when opening the sixth tab", async () => {
+    const browser = new BrowserRuntime(async (target) => ({
+      title: target,
+      url: target,
+      text: "ok",
+      html: "<html></html>",
+      fetchedAt: new Date().toISOString()
+    }));
+    const threadId = "thread-fifo";
+    for (const host of ["a", "b", "c", "d", "e"]) {
+      await browser.openTab(threadId, `http://${host}.test/`);
+    }
+    const sixth = await browser.openTab(threadId, "http://f.test/");
+
+    expect(sixth.closedTabs.map((tab) => tab.url)).toEqual(["http://a.test/"]);
+    expect(browser.listTabs(threadId).map((tab) => tab.url)).toEqual([
+      "http://f.test/",
+      "http://e.test/",
       "http://d.test/",
       "http://c.test/",
       "http://b.test/"

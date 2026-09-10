@@ -13,6 +13,7 @@ import {
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
+  shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
   shouldShowTaskProcessing
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
@@ -53,6 +54,7 @@ import {
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
   shouldKeepTimelineEntryWhenTurnCollapsed,
+  timelineEntryHasGeneratedMedia,
   upsertRuntimeUserInputPrompt,
   upsertRuntimeToolCallSummary
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
@@ -191,6 +193,12 @@ describe("thread UI state helpers", () => {
       "parent-thread"
     )).toBe(true);
     expect(shouldRefreshSelectedSnapshotForRuntimeEvent("parent-thread")).toBe(true);
+  });
+
+  it("refreshes the knowledge base list when knowledge content changes", () => {
+    expect(shouldRefreshKnowledgeBasesForRuntimeEvent("knowledge.imported")).toBe(true);
+    expect(shouldRefreshKnowledgeBasesForRuntimeEvent("tool.completed")).toBe(false);
+    expect(shouldRefreshKnowledgeBasesForRuntimeEvent("thread.updated")).toBe(false);
   });
 
   it("keeps child-agent runtime updates out of the history list", () => {
@@ -519,7 +527,12 @@ describe("tool processing labels", () => {
     expect(getToolProcessingLabel("fs.delete")).toBe("正在删除文件");
     expect(getToolProcessingLabel("fs.copy")).toBe("正在复制文件");
     expect(getToolProcessingLabel("code.diagnostics")).toBe("正在读取诊断");
+    expect(getToolProcessingLabel("knowledge.create")).toBe("正在创建知识库");
     expect(getToolProcessingLabel("knowledge.add")).toBe("正在写入知识库");
+    expect(getToolProcessingLabel("knowledge.query")).toBe("正在查询知识库");
+    expect(getToolProcessingLabel("knowledge.update")).toBe("正在更新知识库");
+    expect(getToolProcessingLabel("knowledge.delete")).toBe("正在删除知识库文档");
+    expect(getToolProcessingLabel("knowledge.delete", JSON.stringify({ knowledgeBaseId: "kb-1" }))).toBe("正在删除知识库");
     expect(getToolProcessingLabel("todo.read")).toBe("正在查看任务清单");
     expect(getToolProcessingLabel("todo.write")).toBe("正在更新任务清单");
     expect(getToolProcessingLabel("git.stage_file")).toBe("正在暂存变更");
@@ -543,15 +556,19 @@ describe("tool processing labels", () => {
     ).toBe("正在修改 src/App.tsx");
   });
 
-  it("describes processing after a tool result with grammatical status text", () => {
+  it("describes processing after a tool result without repeating the last action", () => {
     expect(getPostToolDecisionLabel([])).toBe("正在处理工具结果");
     expect(getPostToolDecisionLabel([
       { toolName: "fs.read_file", argumentsJson: JSON.stringify({ path: "src/App.tsx" }) }
-    ])).toBe("正在读取 src/App.tsx");
+    ])).toBe("正在思考");
     expect(getPostToolDecisionLabel([
       { toolName: "fs.read_file", argumentsJson: JSON.stringify({ path: "src/App.tsx" }) },
       { toolName: "shell.exec", argumentsJson: JSON.stringify({ command: "pnpm test" }) }
-    ])).toBe("已完成 2 项操作，正在运行 pnpm test");
+    ])).toBe("已完成 2 项操作，正在思考");
+    expect(getPostToolDecisionLabel([
+      { toolName: "knowledge.add", argumentsJson: "{}" },
+      { toolName: "knowledge.add", argumentsJson: "{}" }
+    ])).toBe("已完成 2 项操作，正在思考");
     expect(getPostToolDecisionLabel([
       { toolName: "wait_agent", argumentsJson: "{}" }
     ], undefined, false)).toBe("正在汇总子任务结果");
@@ -906,6 +923,51 @@ describe("tool timeline grouping", () => {
     expect(toolGroup).toBeDefined();
     expect(shouldKeepTimelineEntryWhenTurnCollapsed(fileSummary!, section, new Set([section!.id]))).toBe(true);
     expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, section, new Set([section!.id]))).toBe(false);
+  });
+
+  it("keeps generated images visible when a completed turn is collapsed", () => {
+    const makeMessage = (id: string, role: MessageRecord["role"], createdAt: string, metadataJson: string | null = null): MessageRecord => ({
+      id,
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      role,
+      content: id,
+      metadataJson,
+      createdAt
+    });
+    const imageMessage = makeMessage(
+      "image-1",
+      "assistant",
+      "2026-07-15T00:00:01.000Z",
+      JSON.stringify({
+        attachments: [{
+          id: "att-1",
+          kind: "image",
+          name: "generated.png",
+          mimeType: "image/png",
+          absolutePath: "C:\\\\output\\\\generated.png",
+          sizeBytes: 12,
+          source: "generated"
+        }]
+      })
+    );
+    const entries = buildTimelineEntries([
+      makeMessage("user-1", "user", "2026-07-15T00:00:00.000Z"),
+      {
+        ...makeMessage("progress-1", "assistant", "2026-07-15T00:00:00.500Z"),
+        metadataJson: JSON.stringify({ displayKind: "commentary", toolCallIds: [] })
+      },
+      { ...imageMessage, content: "已生成图片。" },
+      makeMessage("assistant-1", "assistant", "2026-07-15T00:00:02.000Z")
+    ], [], []);
+    const section = buildConversationTurnSections(entries)[0];
+    const imageEntry = entries.find((entry) => entry.kind === "message" && entry.message.id === "image-1");
+    const commentary = entries.find((entry) => entry.kind === "message" && entry.message.id === "progress-1");
+
+    expect(section?.summaryEntryId).toBe("message-assistant-1");
+    expect(timelineEntryHasGeneratedMedia(imageEntry!)).toBe(true);
+    expect(shouldKeepTimelineEntryWhenTurnCollapsed(imageEntry!, section, new Set([section!.id]))).toBe(true);
+    expect(shouldKeepTimelineEntryWhenTurnCollapsed(commentary!, section, new Set([section!.id]))).toBe(false);
   });
 
   it("builds message, elapsed-control, and response sections for every user turn", () => {

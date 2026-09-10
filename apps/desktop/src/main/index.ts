@@ -741,6 +741,7 @@ function registerIpc(): void {
   ipcMain.handle("mcp:login", (_event, serverId: string) => backend.loginMcpServer(serverId));
   ipcMain.handle("mcp:logout", (_event, serverId: string) => backend.logoutMcpServer(serverId));
   ipcMain.handle("knowledge:import", (_event, payload) => backend.importKnowledge(payload));
+  ipcMain.handle("knowledge:create", (_event, payload) => backend.createAgentKnowledgeBase(payload));
   ipcMain.handle("knowledge:list", () => backend.listKnowledgeBaseSummaries());
   ipcMain.handle("knowledge:documents", (_event, knowledgeBaseId: string) =>
     backend.listKnowledgeBaseDocuments(knowledgeBaseId)

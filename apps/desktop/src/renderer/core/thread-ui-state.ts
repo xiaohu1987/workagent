@@ -106,6 +106,11 @@ export function shouldRefreshSelectedSnapshotForRuntimeEvent(
   );
 }
 
+/** Knowledge content changes (imports or agent note writes) must refresh the knowledge base list. */
+export function shouldRefreshKnowledgeBasesForRuntimeEvent(eventType: string): boolean {
+  return eventType === "knowledge.imported";
+}
+
 export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRuntimeMessages>(
   threadId: string,
   state: {

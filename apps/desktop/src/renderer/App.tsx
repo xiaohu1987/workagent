@@ -49,6 +49,7 @@ import {
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
+  shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
   shouldShowTaskProcessing
 } from "./core/thread-ui-state";
@@ -109,7 +110,6 @@ import {
   getSubagentWaitLabel,
   getThreadDeleteFailureMessage,
   getToolActivityKind,
-  getToolActivityPresentation,
   getToolActivityTarget,
   getToolProcessingLabel,
   isAssistantDraftPhase,
@@ -323,10 +323,10 @@ import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfir
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
 import { TimelineEntries } from "./timeline/timeline-entries";
-import { ApprovalCard, AssistantDraftMessage, getConciseToolActivityLabel, getMessageAttachments, reuseEquivalentRecordArray, ToolActivityGroup, ToolActivityIcon, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
+import { ApprovalCard, AssistantDraftMessage, AssistantDraftReasoning, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
 import {
-  HISTORY_COLLAPSED_GROUPS_STORAGE_KEY,
+  HISTORY_EXPANDED_GROUPS_STORAGE_KEY,
   normalizeHistoryGroupKey,
   readStoredStringSet,
   writeStoredStringSet
@@ -661,8 +661,8 @@ export function App() {
     loading: isHistorySearchLoading,
     open: openHistorySearch
   } = historySearch;
-  const [collapsedHistoryGroups, setCollapsedHistoryGroups] = useState<Set<string>>(() =>
-    readStoredStringSet(HISTORY_COLLAPSED_GROUPS_STORAGE_KEY)
+  const [expandedHistoryGroups, setExpandedHistoryGroups] = useState<Set<string>>(() =>
+    readStoredStringSet(HISTORY_EXPANDED_GROUPS_STORAGE_KEY)
   );
   const [expandedHistoryThreadGroups, setExpandedHistoryThreadGroups] = useState<Set<string>>(() => new Set());
   const [renamingHistoryThread, setRenamingHistoryThread] = useState<{ id: string; title: string } | null>(null);
@@ -813,7 +813,8 @@ export function App() {
     refreshBases: refreshKnowledgeBases,
     toggleDocuments: toggleKnowledgeDocuments,
     refreshBase: refreshKnowledgeBase,
-    deleteBase: deleteKnowledgeBase
+    deleteBase: deleteKnowledgeBase,
+    openFolder: openKnowledgeBaseFolder
   } = knowledgeBaseState;
   const selfImprovementMemoryState = useSelfImprovementMemories(showNotice);
   const {
@@ -1203,8 +1204,8 @@ export function App() {
   }, [rightWorkspaceWidth]);
 
   useEffect(() => {
-    writeStoredStringSet(HISTORY_COLLAPSED_GROUPS_STORAGE_KEY, collapsedHistoryGroups);
-  }, [collapsedHistoryGroups]);
+    writeStoredStringSet(HISTORY_EXPANDED_GROUPS_STORAGE_KEY, expandedHistoryGroups);
+  }, [expandedHistoryGroups]);
 
   useEffect(() => {
     if (!resizingPane) {
@@ -1806,6 +1807,7 @@ export function App() {
           passed?: boolean;
           automatic?: boolean;
           tabs?: RuntimeThreadSnapshot["browserTabs"];
+          closedTabIds?: string[];
           browserOpenMode?: "in_app" | "external_default";
           silentBrowserOpen?: boolean;
           queueItemId?: string;
@@ -2666,7 +2668,8 @@ export function App() {
       )) {
         scheduleRuntimeRefresh(typed.threadId, notificationThreadId);
       }
-      if (typed.type === "knowledge.imported") {
+      if (shouldRefreshKnowledgeBasesForRuntimeEvent(typed.type)) {
+        void refreshKnowledgeBases();
         void refreshSkills();
       }
     });
@@ -3068,10 +3071,13 @@ export function App() {
     setIsUrlEditorOpen: setIsKnowledgeUrlEditorOpen,
     name: knowledgeName,
     setName: setKnowledgeName,
+    category: knowledgeCategory,
+    setCategory: setKnowledgeCategory,
     scope: knowledgeScope,
     setScope: setKnowledgeScope,
     isImporting: isKnowledgeImporting,
     importKnowledge,
+    createEmpty: createEmptyKnowledge,
     chooseSources: chooseKnowledgeSources,
     removeSource: removeKnowledgeSource,
     addUrls: addKnowledgeUrls,
@@ -3362,10 +3368,6 @@ export function App() {
     );
     return hasReplacementReply ? null : group.toolCalls;
   }, [isTaskProcessing, latestRootRuntimeTool, timelineEntries, visibleMessages]);
-  const completedDeferredRuntimeToolGroup = deferredRuntimeToolGroup &&
-    !getToolActivityPresentation(deferredRuntimeToolGroup).runningCall
-    ? deferredRuntimeToolGroup
-    : null;
   const shouldRenderRuntimeTailPanel = Boolean(
     showRuntimeActivityPanel &&
     !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id))
@@ -6176,10 +6178,10 @@ export function App() {
     if (!selectedThread || selectedThread.mode !== "project" || !selectedThread.cwd) return;
 
     const groupKey = normalizeHistoryGroupKey(selectedThread.cwd);
-    setCollapsedHistoryGroups((current) => {
-      if (!current.has(groupKey)) return current;
+    setExpandedHistoryGroups((current) => {
+      if (current.has(groupKey)) return current;
       const next = new Set(current);
-      next.delete(groupKey);
+      next.add(groupKey);
       return next;
     });
   }, [selectedThreadId, threads]);
@@ -6372,8 +6374,8 @@ export function App() {
         standaloneThreads={standaloneHistoryThreads}
         selectedThreadId={selectedThreadId}
         deletingThreadId={deletingThreadId}
-        collapsedGroups={collapsedHistoryGroups}
-        setCollapsedGroups={setCollapsedHistoryGroups}
+        expandedProjectGroups={expandedHistoryGroups}
+        setExpandedProjectGroups={setExpandedHistoryGroups}
         expandedGroups={expandedHistoryThreadGroups}
         setExpandedGroups={setExpandedHistoryThreadGroups}
         renamingThread={renamingHistoryThread}
@@ -6594,8 +6596,6 @@ export function App() {
                     assistantLabel={activeAssistantLabel}
                     content={activeDraftContent}
                     chunks={activeAssistantDraft.chunks}
-                    reasoning={activeAssistantDraft.reasoning}
-                    reasoningChunks={activeAssistantDraft.reasoningChunks}
                     draftId={activeAssistantDraft.draftId}
                     phase={activeAssistantDraft.phase}
                     startedAt={activeAssistantDraft.startedAt}
@@ -6646,24 +6646,26 @@ export function App() {
                     onConfirm={() => void confirmGpaPlanResumeRetry()}
                   />
                 ) : null}
-                {(completedDeferredRuntimeToolGroup || shouldRenderRuntimeTailPanel) ? (
+                {shouldRenderRuntimeTailPanel ? (
                   <div className="runtime-tail">
-                    {completedDeferredRuntimeToolGroup ? (
-                      <ToolActivityGroup toolCalls={completedDeferredRuntimeToolGroup} skillNames={skillNames} />
-                    ) : null}
-                    {shouldRenderRuntimeTailPanel ? (
-                      <RuntimeActivityPanel
-                        key={activeSnapshotThreadId ?? "runtime-activity"}
-                        label={taskProcessingLabel}
-                        entries={activeRuntimeActivity?.entries ?? []}
-                        startedAt={activeRuntimeActivity?.startedAt ?? null}
-                        phase={localRuntimeProgress?.phase ?? null}
-                        skillNames={skillNames}
-                        preferLabel={isWaitingForSubagents}
-                        hideCurrentStatus={false}
-                      />
-                    ) : null}
+                    <RuntimeActivityPanel
+                      key={activeSnapshotThreadId ?? "runtime-activity"}
+                      label={taskProcessingLabel}
+                      entries={activeRuntimeActivity?.entries ?? []}
+                      startedAt={activeRuntimeActivity?.startedAt ?? null}
+                      phase={localRuntimeProgress?.phase ?? null}
+                      skillNames={skillNames}
+                      preferLabel={isWaitingForSubagents}
+                      hideCurrentStatus={false}
+                    />
                   </div>
+                ) : null}
+                {activeAssistantDraft?.reasoning?.trim() ? (
+                  <AssistantDraftReasoning
+                    draftId={activeAssistantDraft.draftId}
+                    reasoning={activeAssistantDraft.reasoning}
+                    reasoningChunks={activeAssistantDraft.reasoningChunks}
+                  />
                 ) : null}
                 {showPendingResumeCard && pendingResumeThread ? (
                   <PendingResumeCard
@@ -7093,6 +7095,8 @@ export function App() {
                   knowledgeSources={knowledgeSources}
                   knowledgeName={knowledgeName}
                   setKnowledgeName={setKnowledgeName}
+                  knowledgeCategory={knowledgeCategory}
+                  setKnowledgeCategory={setKnowledgeCategory}
                   knowledgeScope={knowledgeScope}
                   setKnowledgeScope={setKnowledgeScope}
                   canImportProjectKnowledge={canImportProjectKnowledge}
@@ -7106,13 +7110,15 @@ export function App() {
                   getSourceKey={knowledgeSourceKey}
                   isKnowledgeImporting={isKnowledgeImporting}
                   onImport={importKnowledge}
+                  onCreateEmpty={createEmptyKnowledge}
                   snapshot={snapshot}
                   knowledgeBases={knowledgeBases}
                   knowledgeDocuments={knowledgeDocuments}
                   knowledgeBusyId={knowledgeBusyId}
-                  onRefreshBases={refreshKnowledgeBases}
+                  onRefreshBases={() => refreshKnowledgeBases({ notify: true })}
                   onToggleDocuments={toggleKnowledgeDocuments}
                   onRefreshBase={refreshKnowledgeBase}
+                  onOpenFolder={openKnowledgeBaseFolder}
                   onDeleteBase={deleteKnowledgeBase}
                   formatScope={formatKnowledgeScope}
                   formatStatus={formatKnowledgeStatus}

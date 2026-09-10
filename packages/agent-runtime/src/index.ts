@@ -879,8 +879,50 @@ interface RuntimeServices {
     title: string;
     content: string;
     knowledgeBaseId?: string;
+    knowledgeBaseName?: string;
+    category?: string;
     threadId?: string;
   }): Promise<{ documentId: string; knowledgeBaseId: string; sourcePath: string }>;
+  queryKnowledgeNotes?(input: {
+    knowledgeBaseId?: string;
+    category?: string;
+    threadId?: string;
+  }): Promise<Array<{
+    documentId: string;
+    knowledgeBaseId: string;
+    knowledgeBaseName: string;
+    knowledgeBaseCategory?: string;
+    title: string;
+    sourcePath: string;
+    status: string;
+    updatedAt: string;
+  }>>;
+  updateKnowledgeNote?(input: {
+    documentId: string;
+    title?: string;
+    content?: string;
+    threadId?: string;
+  }): Promise<{ documentId: string; knowledgeBaseId: string; sourcePath: string; title: string }>;
+  deleteKnowledgeNote?(input: {
+    documentId: string;
+    threadId?: string;
+  }): Promise<{ documentId: string; knowledgeBaseId: string; title: string }>;
+  createKnowledgeBase?(input: {
+    name: string;
+    category?: string;
+    scope?: "global" | "project";
+    threadId?: string;
+  }): Promise<{ knowledgeBaseId: string; name: string; category: string; scope: string; created: boolean }>;
+  updateKnowledgeBase?(input: {
+    knowledgeBaseId: string;
+    name?: string;
+    category?: string;
+    threadId?: string;
+  }): Promise<{ knowledgeBaseId: string; name: string; category: string }>;
+  deleteKnowledgeBaseForAgent?(input: {
+    knowledgeBaseId: string;
+    threadId?: string;
+  }): Promise<{ knowledgeBaseId: string; name: string }>;
   readThreadTodos?(threadId: string): Promise<Array<{ id: string; content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }>>;
   writeThreadTodos?(
     threadId: string,
@@ -5714,6 +5756,24 @@ class ThreadSessionRuntime {
               addKnowledgeNote: this.services.addKnowledgeNote
                 ? (input) => this.services.addKnowledgeNote!({ ...input, threadId: this.threadId })
                 : undefined,
+              queryKnowledgeNotes: this.services.queryKnowledgeNotes
+                ? (input) => this.services.queryKnowledgeNotes!({ ...input, threadId: this.threadId })
+                : undefined,
+              updateKnowledgeNote: this.services.updateKnowledgeNote
+                ? (input) => this.services.updateKnowledgeNote!({ ...input, threadId: this.threadId })
+                : undefined,
+              deleteKnowledgeNote: this.services.deleteKnowledgeNote
+                ? (input) => this.services.deleteKnowledgeNote!({ ...input, threadId: this.threadId })
+                : undefined,
+              createKnowledgeBase: this.services.createKnowledgeBase
+                ? (input) => this.services.createKnowledgeBase!({ ...input, threadId: this.threadId })
+                : undefined,
+              updateKnowledgeBase: this.services.updateKnowledgeBase
+                ? (input) => this.services.updateKnowledgeBase!({ ...input, threadId: this.threadId })
+                : undefined,
+              deleteKnowledgeBaseForAgent: this.services.deleteKnowledgeBaseForAgent
+                ? (input) => this.services.deleteKnowledgeBaseForAgent!({ ...input, threadId: this.threadId })
+                : undefined,
               readThreadTodos: this.services.readThreadTodos
                 ? () => this.services.readThreadTodos!(this.threadId)
                 : undefined,
@@ -5944,7 +6004,7 @@ class ThreadSessionRuntime {
               readOnlyAgent: thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
               hiddenToolNames: [
                 ...modeHiddenToolNames,
-                ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read", "knowledge.add"]),
+                ...(knowledgeEnabled ? [] : ["knowledge.search", "knowledge.read", "knowledge.create", "knowledge.add", "knowledge.query", "knowledge.update", "knowledge.delete"]),
                 ...(resolveDefaultModalityModel(this.services.config, "image") ? [] : ["image.generate"]),
                 ...(resolveDefaultModalityModel(this.services.config, "video") ? [] : ["video.generate"]),
                 ...(isGrokModel(model) ? ["apply_patch", "fs.write_file"] : [])
@@ -6822,22 +6882,13 @@ class ThreadSessionRuntime {
           });
         }
       }
+      // Keep in-app tabs after the turn. Overflow is evicted when a new tab is opened.
       if (agentOpenedBrowserTabIds.size > 0) {
-        const tabIds = [...agentOpenedBrowserTabIds];
-        try {
-          await this.services.closeBrowserTabs(this.threadId, tabIds);
-          await this.services.log("browser.task_tabs_released", this.threadId, {
-            turnRunId: turn.id,
-            tabIds,
-            count: tabIds.length
-          });
-        } catch (error) {
-          await this.services.log("browser.task_tabs_release_failed", this.threadId, {
-            turnRunId: turn.id,
-            tabIds,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
+        await this.services.log("browser.task_tabs_kept", this.threadId, {
+          turnRunId: turn.id,
+          tabIds: [...agentOpenedBrowserTabIds],
+          count: agentOpenedBrowserTabIds.size
+        });
       }
       this.#activeTurnRunId = null;
       this.#acceptingGuidance = false;
@@ -6928,7 +6979,11 @@ class ThreadSessionRuntime {
       : direct.filter((tool) =>
           tool.name !== "knowledge.search"
           && tool.name !== "knowledge.read"
+          && tool.name !== "knowledge.create"
           && tool.name !== "knowledge.add"
+          && tool.name !== "knowledge.query"
+          && tool.name !== "knowledge.update"
+          && tool.name !== "knowledge.delete"
         );
     const withMedia = withKnowledge.filter((tool) => {
       if (tool.name === "image.generate") return imageReady;
@@ -6947,7 +7002,10 @@ class ThreadSessionRuntime {
       "shell.exec",
       "shell.cancel_active",
       "request_user_input",
+      "knowledge.create",
       "knowledge.add",
+      "knowledge.update",
+      "knowledge.delete",
       "todo.write",
       "git.stage_file",
       "git.stage_all",
@@ -7820,6 +7878,7 @@ const OBSERVATION_TOOL_NAMES = new Set([
   "git.diff",
   "knowledge.search",
   "knowledge.read",
+  "knowledge.query",
   "web_search.search_query",
   "web_search.open_page",
   "web_search.find_in_page",
@@ -10731,7 +10790,7 @@ function buildRuntimePrompt(
   );
   if (knowledgeEnabled) {
     blocks.push(
-      "For local knowledge questions, call knowledge.search first. It returns ranked document chunks with source_path and locator; use knowledge.read only for the relevant chunk. Cite the source file and locator in your answer when you rely on retrieved material. Never use fs.read_file on a knowledge Bundle or index path. If search returns no results, refine the query once or explain that no matching local material was found; do not repeat the same progress reply."
+      "For local knowledge questions, call knowledge.search first. It returns ranked document chunks with source_path and locator; use knowledge.read only for the relevant chunk. Cite the source file and locator in your answer when you rely on retrieved material. Never use fs.read_file on a knowledge Bundle or index path. If search returns no results, refine the query once or explain that no matching local material was found; do not repeat the same progress reply. To manage knowledge bases, call knowledge.query to list bases and documents (filter by category), knowledge.create to add a named/categorized base, knowledge.add to write a note, knowledge.update to revise a note or rename/recategorize a base, and knowledge.delete to remove a note or an entire base."
     );
   }
   blocks.push(

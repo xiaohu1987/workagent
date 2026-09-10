@@ -1538,8 +1538,196 @@ describe("browser page sanitize", () => {
     expect(addKnowledgeNote).toHaveBeenCalledWith({
       title: "Note",
       content: "Remember this.",
-      knowledgeBaseId: undefined
+      knowledgeBaseId: undefined,
+      knowledgeBaseName: undefined,
+      category: undefined
     });
+  });
+
+  it("creates a categorized knowledge base after approval", async () => {
+    const createKnowledgeBase = vi.fn().mockResolvedValue({
+      knowledgeBaseId: "kb-1",
+      name: "产品手册",
+      category: "产品文档",
+      scope: "global",
+      created: true
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "knowledge-create",
+        name: "knowledge.create",
+        arguments: { name: "产品手册", category: "产品文档" }
+      },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        createKnowledgeBase
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(true);
+    expect(createKnowledgeBase).toHaveBeenCalledWith({
+      name: "产品手册",
+      category: "产品文档",
+      scope: undefined
+    });
+    expect(result.content).toContain("产品手册");
+  });
+
+  it("queries knowledge bases and documents without approval", async () => {
+    const queryKnowledgeNotes = vi.fn().mockResolvedValue([
+      {
+        documentId: "doc-1",
+        knowledgeBaseId: "kb-1",
+        knowledgeBaseName: "产品手册",
+        knowledgeBaseCategory: "产品文档",
+        title: "Note",
+        sourcePath: "agent-notes/1.md",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      }
+    ]);
+    const requestApproval = vi.fn();
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "knowledge-query", name: "knowledge.query", arguments: { category: "产品文档" } },
+      {
+        cwd: process.cwd(),
+        requestApproval,
+        queryKnowledgeNotes,
+        knowledgeBases: [{
+          id: "kb-1",
+          scope: "global",
+          projectId: null,
+          displayName: "产品手册",
+          category: "产品文档",
+          bundleRoot: "/tmp/kb",
+          okfVersion: "0.1",
+          status: "ready",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z"
+        }]
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(true);
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(queryKnowledgeNotes).toHaveBeenCalledWith({ knowledgeBaseId: undefined, category: "产品文档" });
+    expect(result.content).toContain("doc-1");
+    expect(result.content).toContain("产品手册");
+    expect(result.json).toMatchObject({
+      bases: [expect.objectContaining({ knowledgeBaseId: "kb-1", category: "产品文档" })]
+    });
+  });
+
+  it("updates a knowledge note after approval", async () => {
+    const updateKnowledgeNote = vi.fn().mockResolvedValue({
+      documentId: "doc-1",
+      knowledgeBaseId: "kb-1",
+      sourcePath: "agent-notes/1.md",
+      title: "Renamed"
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "knowledge-update",
+        name: "knowledge.update",
+        arguments: { documentId: "doc-1", title: "Renamed" }
+      },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        updateKnowledgeNote
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(true);
+    expect(updateKnowledgeNote).toHaveBeenCalledWith({
+      documentId: "doc-1",
+      title: "Renamed",
+      content: undefined
+    });
+  });
+
+  it("rejects knowledge.update without title or content", async () => {
+    const updateKnowledgeNote = vi.fn();
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "knowledge-update", name: "knowledge.update", arguments: { documentId: "doc-1" } },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        updateKnowledgeNote
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(false);
+    expect(updateKnowledgeNote).not.toHaveBeenCalled();
+  });
+
+  it("updates a knowledge base category after approval", async () => {
+    const updateKnowledgeBase = vi.fn().mockResolvedValue({
+      knowledgeBaseId: "kb-1",
+      name: "产品手册",
+      category: "技术规范"
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "knowledge-update-base",
+        name: "knowledge.update",
+        arguments: { knowledgeBaseId: "kb-1", category: "技术规范" }
+      },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        updateKnowledgeBase
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(true);
+    expect(updateKnowledgeBase).toHaveBeenCalledWith({
+      knowledgeBaseId: "kb-1",
+      name: undefined,
+      category: "技术规范"
+    });
+  });
+
+  it("deletes a knowledge base after approval", async () => {
+    const deleteKnowledgeBaseForAgent = vi.fn().mockResolvedValue({
+      knowledgeBaseId: "kb-1",
+      name: "产品手册"
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      {
+        id: "knowledge-delete-base",
+        name: "knowledge.delete",
+        arguments: { knowledgeBaseId: "kb-1" }
+      },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        deleteKnowledgeBaseForAgent
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(true);
+    expect(deleteKnowledgeBaseForAgent).toHaveBeenCalledWith({ knowledgeBaseId: "kb-1" });
+    expect(result.content).toContain("产品手册");
+  });
+
+  it("deletes a knowledge note after approval", async () => {
+    const deleteKnowledgeNote = vi.fn().mockResolvedValue({
+      documentId: "doc-1",
+      knowledgeBaseId: "kb-1",
+      title: "Note"
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "knowledge-delete", name: "knowledge.delete", arguments: { documentId: "doc-1" } },
+      {
+        cwd: process.cwd(),
+        requestApproval: vi.fn().mockResolvedValue(true),
+        deleteKnowledgeNote
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(true);
+    expect(deleteKnowledgeNote).toHaveBeenCalledWith({ documentId: "doc-1" });
   });
 
   it("parses compiler diagnostics from verification output", () => {

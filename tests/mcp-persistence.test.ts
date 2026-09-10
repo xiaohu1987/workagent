@@ -71,6 +71,30 @@ describe("McpManager responsiveness", () => {
     }
   });
 
+  it("invokes callTool as a bound method so SDK internals can read `this`", async () => {
+    class SdkLikeClient {
+      #knownTaskTools = new Set<string>(["other_tool"]);
+      async listTools() {
+        return { tools: [{ name: "task_tool", inputSchema: { type: "object" } }] };
+      }
+      isToolTaskRequired(toolName: string): boolean {
+        if (!this) throw new TypeError("Cannot read properties of undefined (reading 'isToolTaskRequired')");
+        return this.#knownTaskTools.has(toolName);
+      }
+      async callTool(params: { name: string; arguments: Record<string, unknown> }) {
+        if (this.isToolTaskRequired(params.name)) {
+          throw new Error(`Tool "${params.name}" requires task-based execution.`);
+        }
+        return { ok: true, name: params.name };
+      }
+    }
+    const client = new SdkLikeClient() as unknown as McpClient;
+    const manager = new McpManager([baseConfig], vi.fn().mockResolvedValue(client));
+    await manager.refresh(["stocks"]);
+
+    await expect(manager.callTool("stocks", "task_tool", {})).resolves.toEqual({ ok: true, name: "task_tool" });
+  });
+
   it("keeps the tool directory cached beyond the previous 30-second window", async () => {
     vi.useFakeTimers();
     try {

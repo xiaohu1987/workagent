@@ -1082,7 +1082,8 @@ describe("ordinary and project runtime isolation", () => {
     tool("git.push"),
     tool("todo.read"),
     tool("todo.write"),
-    tool("knowledge.add")
+    tool("knowledge.add"),
+    tool("knowledge.create")
   ];
 
   it("keeps a website-search chat projectless and hides every local project tool", () => {
@@ -1101,7 +1102,8 @@ describe("ordinary and project runtime isolation", () => {
       "skills.load",
       "todo.read",
       "todo.write",
-      "knowledge.add"
+      "knowledge.add",
+      "knowledge.create"
     ]);
     expect(policy.validateToolCall({
       toolName: "fs.read_directory",

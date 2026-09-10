@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 import type { KnowledgeBaseSummary, KnowledgeDocumentRecord, KnowledgeImportSource, KnowledgeScope, RuntimeThreadSnapshot } from "@shared-types";
 import { ComposerSelect } from "../../../workspace/composer-select";
 import { IconClose, IconFile, IconFolder, IconGlobe, IconKnowledge, IconPlus, IconRefresh, IconSpinner, IconTrash } from "../../../icons";
@@ -7,6 +7,8 @@ type Props = {
   knowledgeSources: KnowledgeImportSource[];
   knowledgeName: string;
   setKnowledgeName: Dispatch<SetStateAction<string>>;
+  knowledgeCategory: string;
+  setKnowledgeCategory: Dispatch<SetStateAction<string>>;
   knowledgeScope: KnowledgeScope;
   setKnowledgeScope: Dispatch<SetStateAction<KnowledgeScope>>;
   canImportProjectKnowledge: boolean;
@@ -20,6 +22,7 @@ type Props = {
   getSourceKey: (source: KnowledgeImportSource) => string;
   isKnowledgeImporting: boolean;
   onImport: () => Promise<unknown>;
+  onCreateEmpty: () => Promise<unknown>;
   snapshot: RuntimeThreadSnapshot | null;
   knowledgeBases: KnowledgeBaseSummary[];
   knowledgeDocuments: Record<string, KnowledgeDocumentRecord[] | undefined>;
@@ -27,6 +30,7 @@ type Props = {
   onRefreshBases: () => Promise<unknown>;
   onToggleDocuments: (id: string) => Promise<unknown>;
   onRefreshBase: (id: string) => Promise<unknown>;
+  onOpenFolder: (knowledgeBase: KnowledgeBaseSummary) => Promise<unknown>;
   onDeleteBase: (id: string) => Promise<unknown>;
   formatScope: (scope: KnowledgeScope) => string;
   formatStatus: (status: KnowledgeBaseSummary["status"]) => string;
@@ -38,14 +42,23 @@ export function isDatabaseManagedKnowledgeBase(base: Pick<KnowledgeBaseSummary, 
   return base.bundleRoot.replace(/\\/g, "/").split("/").pop() === "quick-notes";
 }
 
-export function KnowledgePage({ knowledgeSources, knowledgeName, setKnowledgeName, knowledgeScope, setKnowledgeScope, canImportProjectKnowledge, isKnowledgeUrlEditorOpen, setIsKnowledgeUrlEditorOpen, knowledgeUrlInput, setKnowledgeUrlInput, onAddUrls: addKnowledgeUrls, onChooseSources: chooseKnowledgeSources, onRemoveSource: removeKnowledgeSource, getSourceKey: knowledgeSourceKey, isKnowledgeImporting, onImport: importKnowledge, snapshot, knowledgeBases, knowledgeDocuments, knowledgeBusyId, onRefreshBases: refreshKnowledgeBases, onToggleDocuments: toggleKnowledgeDocuments, onRefreshBase: refreshKnowledgeBase, onDeleteBase: deleteKnowledgeBase, formatScope: formatKnowledgeScope, formatStatus: formatKnowledgeStatus, formatBytes: formatKnowledgeBytes, formatRelativeTime }: Props) {
+export function canOpenKnowledgeBaseFolder(base: Pick<KnowledgeBaseSummary, "bundleRoot" | "bundleExists">): boolean {
+  return Boolean(base.bundleExists && base.bundleRoot.trim());
+}
+
+export function KnowledgePage({ knowledgeSources, knowledgeName, setKnowledgeName, knowledgeCategory, setKnowledgeCategory, knowledgeScope, setKnowledgeScope, canImportProjectKnowledge, isKnowledgeUrlEditorOpen, setIsKnowledgeUrlEditorOpen, knowledgeUrlInput, setKnowledgeUrlInput, onAddUrls: addKnowledgeUrls, onChooseSources: chooseKnowledgeSources, onRemoveSource: removeKnowledgeSource, getSourceKey: knowledgeSourceKey, isKnowledgeImporting, onImport: importKnowledge, onCreateEmpty: createEmptyKnowledge, snapshot, knowledgeBases, knowledgeDocuments, knowledgeBusyId, onRefreshBases: refreshKnowledgeBases, onToggleDocuments: toggleKnowledgeDocuments, onRefreshBase: refreshKnowledgeBase, onOpenFolder: openKnowledgeFolder, onDeleteBase: deleteKnowledgeBase, formatScope: formatKnowledgeScope, formatStatus: formatKnowledgeStatus, formatBytes: formatKnowledgeBytes, formatRelativeTime }: Props) {
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const categories = [...new Set(knowledgeBases.map((base) => base.category.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right, "zh-CN"));
+  const filteredBases = categoryFilter
+    ? knowledgeBases.filter((base) => base.category === categoryFilter)
+    : knowledgeBases;
   return (
   <div className="settings-section knowledge-settings-section">
     <div className={`config-block knowledge-import-panel ${isKnowledgeImporting ? "is-importing" : ""}`}>
       <div className="section-copy section-copy-row knowledge-import-heading">
         <div>
           <strong>新建知识库</strong>
-          <span>从本地文件、网页或当前浏览器页面创建可检索资料。</span>
+          <span>先创建空知识库并分类，或从本地文件、网页导入可检索资料。</span>
         </div>
         <span className="knowledge-source-count">{knowledgeSources.length} 个来源</span>
       </div>
@@ -55,6 +68,15 @@ export function KnowledgePage({ knowledgeSources, knowledgeName, setKnowledgeNam
           <label className="settings-field">
             <span>名称</span>
             <input value={knowledgeName} onChange={(event) => setKnowledgeName(event.target.value)} placeholder="知识库名称" />
+          </label>
+          <label className="settings-field">
+            <span>分类</span>
+            <input value={knowledgeCategory} onChange={(event) => setKnowledgeCategory(event.target.value)} placeholder="例如：产品文档、技术规范" list="knowledge-category-options" />
+            {categories.length ? (
+              <datalist id="knowledge-category-options">
+                {categories.map((category) => <option key={category} value={category} />)}
+              </datalist>
+            ) : null}
           </label>
           <label className="settings-field">
             <span>可见范围</span>
@@ -105,10 +127,15 @@ placeholder="选择可见范围"
         </section>
       </div>
       <div className="knowledge-import-footer">
-        <span>{knowledgeSources.length ? `将处理 ${knowledgeSources.length} 个来源` : "添加来源后即可导入"}</span>
-        <button className="button primary" onClick={() => void importKnowledge()} disabled={isKnowledgeImporting || knowledgeSources.length === 0 || (knowledgeScope === "project" && !canImportProjectKnowledge)}>
-          {isKnowledgeImporting ? <><IconSpinner />正在导入...</> : "导入并生成 Bundle"}
-        </button>
+        <span>{knowledgeSources.length ? `将处理 ${knowledgeSources.length} 个来源` : "可先创建空知识库，或添加来源后导入"}</span>
+        <div className="knowledge-import-actions">
+          <button className="button ghost" type="button" onClick={() => void createEmptyKnowledge()} disabled={isKnowledgeImporting || !knowledgeName.trim() || (knowledgeScope === "project" && !canImportProjectKnowledge)}>
+            创建空知识库
+          </button>
+          <button className="button primary" onClick={() => void importKnowledge()} disabled={isKnowledgeImporting || knowledgeSources.length === 0 || (knowledgeScope === "project" && !canImportProjectKnowledge)}>
+            {isKnowledgeImporting ? <><IconSpinner />正在导入...</> : "导入并生成 Bundle"}
+          </button>
+        </div>
       </div>
       {isKnowledgeImporting ? (
         <div className="knowledge-import-progress" role="status" aria-live="polite">
@@ -152,8 +179,18 @@ placeholder="选择可见范围"
           <IconRefresh />
         </button>
       </div>
+      {categories.length ? (
+        <div className="knowledge-category-filter" aria-label="按分类筛选">
+          <button type="button" className={`knowledge-category-chip ${categoryFilter === "" ? "is-active" : ""}`} onClick={() => setCategoryFilter("")}>全部</button>
+          {categories.map((category) => (
+            <button key={category} type="button" className={`knowledge-category-chip ${categoryFilter === category ? "is-active" : ""}`} onClick={() => setCategoryFilter(category)}>
+              {category}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="knowledge-base-list">
-        {knowledgeBases.length ? knowledgeBases.map((knowledgeBase) => {
+        {filteredBases.length ? filteredBases.map((knowledgeBase) => {
           const documents = knowledgeDocuments[knowledgeBase.id];
           const isBusy = knowledgeBusyId === knowledgeBase.id;
           return (
@@ -161,6 +198,7 @@ placeholder="选择可见范围"
               <div className="knowledge-base-main">
                 <div className="knowledge-base-title">
                   <strong>{knowledgeBase.displayName}</strong>
+                  {knowledgeBase.category ? <span className="knowledge-category-pill">{knowledgeBase.category}</span> : null}
                   <span className={`knowledge-scope-pill ${knowledgeBase.scope}`}>{formatKnowledgeScope(knowledgeBase.scope)}</span>
                   <span className={`knowledge-status ${knowledgeBase.status}`}>{formatKnowledgeStatus(knowledgeBase.status)}</span>
                 </div>
@@ -177,6 +215,11 @@ placeholder="选择可见范围"
                 <button className="button ghost" onClick={() => void toggleKnowledgeDocuments(knowledgeBase.id)}>
                   {documents ? "收起文档" : "查看文档"}
                 </button>
+                {canOpenKnowledgeBaseFolder(knowledgeBase) ? (
+                  <button className="button ghost" type="button" title={knowledgeBase.bundleRoot} onClick={() => void openKnowledgeFolder(knowledgeBase)}>
+                    打开文件夹
+                  </button>
+                ) : null}
                 {isDatabaseManagedKnowledgeBase(knowledgeBase) ? null : (
                   <button className="button ghost" onClick={() => void refreshKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
                     {isBusy ? "处理中" : "刷新"}
@@ -199,7 +242,7 @@ placeholder="选择可见范围"
               ) : null}
             </article>
           );
-        }) : <div className="detail-empty">尚未导入本地知识库。</div>}
+        }) : <div className="detail-empty">{categoryFilter ? `没有「${categoryFilter}」分类的知识库。` : "尚未导入本地知识库。"}</div>}
       </div>
     </div>
   </div>

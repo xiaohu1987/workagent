@@ -268,12 +268,19 @@ declare global {
       importKnowledge: (payload: {
         displayName: string;
         scope: "global" | "project" | "imported";
+        category?: string;
         sourcePaths?: string[];
         sources?: Array<
           | { kind: "file" | "folder"; path: string }
           | { kind: "url"; url: string }
           | { kind: "browser"; url: string; threadId: string; tabId: string }
         >;
+        threadId?: string;
+      }) => Promise<any>;
+      createKnowledgeBase: (payload: {
+        name: string;
+        category?: string;
+        scope?: "global" | "project";
         threadId?: string;
       }) => Promise<any>;
       listKnowledgeBases: () => Promise<any[]>;

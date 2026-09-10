@@ -217,6 +217,7 @@ const api = {
   importKnowledge: (payload: {
     displayName: string;
     scope: "global" | "project" | "imported";
+    category?: string;
     sourcePaths?: string[];
     sources?: Array<
       | { kind: "file" | "folder"; path: string }
@@ -225,6 +226,12 @@ const api = {
     >;
     threadId?: string;
   }) => ipcRenderer.invoke("knowledge:import", payload),
+  createKnowledgeBase: (payload: {
+    name: string;
+    category?: string;
+    scope?: "global" | "project";
+    threadId?: string;
+  }) => ipcRenderer.invoke("knowledge:create", payload),
   listKnowledgeBases: () => ipcRenderer.invoke("knowledge:list"),
   listQuickNotes: () => ipcRenderer.invoke("quick-notes:list"),
   saveQuickNote: (payload: { id?: string; title?: string; content: string }) => ipcRenderer.invoke("quick-notes:save", payload),

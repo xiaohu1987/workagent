@@ -1,5 +1,149 @@
 # Conversation Turn Context
 
+- Turn run: `5af73330-0fd0-4313-ad57-ecf16032d40a`
+- Completed at: `2026-09-08T10:10:36.030Z`
+- MCP sources: none
+
+## User Request
+
+修复
+
+## Effective Task Context
+
+修复
+
+## Assistant Result
+
+修复完成并验证通过：钉钉 MCP「全部工具调用失败」的根因已定位在本地上一个性能修复引入的调用回归，现已修复。
+
+## 根因
+
+上一轮给 `McpManager.callTool` 加超时包装时，把 SDK 客户端方法摘下来后单独调用：
+
+```ts
+const invokeCallTool = client.callTool;
+invokeCallTool({ ... });
+```
+
+这种写法丢失了 `this`。项目所用 MCP SDK 1.29.0 的 `Client.callTool` 第一行会执行 `this.isToolTaskRequired(...)`，`this` 变成 `undefined` 后就抛出你看到的统一错误。因此三个证据完全吻合：
+
+- 源码和 node_modules 里都搜不到 `isToolTaskRequired`，它只存在于打进 `app.asar` 的 SDK 代码中；
+- 用原始 HTTP 直连钉钉网关，同一个无参工具调用成功返回 `rootDentryUuid`，证明网关、密钥、工具本身全部正常；
+- 修复前的回归测试在脱绑写法下精确复现 `Cannot read properties of undefined (reading 'isToolTaskRequired')`。
+
+## 修复内容
+
+- `packages/mcp-runtime/src/index.ts`：改为以方法调用形式保留接收者——`client.callTool({ name, arguments })`，超时包装 `withToolCallTimeout` 只包住这次调用；会话失效重连后的重试路径做同样处理。超时（120 秒）和工具目录缓存等上轮改动全部保留。
+- `tests/mcp-persistence.test.ts`：新增回归测试，用模拟 SDK 类客户端（方法内部读取 `this`）锁定修复，防止再次退回脱绑写法。
+
+## 验证结果
+
+按红绿流程做了完整验证：临时还原旧写法时新测试失败并复现原错误；恢复修复后相关单元测试全部通过——
+
+| 测试文件 | 结果 |
+|---|---|
+| `tests/mcp-persistence.test.ts`（含新回归用例） | 5/5 通过 |
+| `tests/mcp-runtime.test.ts` | 10/10 通过 |
+| `tests/tool-runtime.test.ts` | 64/64 通过 |
+| `tests/agent-runtime.test.ts` | 283/283 通过 |
+
+合计 4 个文件、362 个用例全部绿色。现在可以重启应用后重试钉钉知识库 MCP 的实际调用（例如获取「我的文档」根目录 ID），预期恢复为「全通」。
+
+## Verified Sources And Deliverables
+
+- `D:\workagent\packages\mcp-runtime\src\index.ts`
+- `D:\workagent\tests\mcp-persistence.test.ts`
+
+---
+
+# Conversation Turn Context
+
+- Turn run: `8b5c9a73-92ae-4146-bc9c-23e48c8f1b2b`
+- Completed at: `2026-09-08T09:14:13.632Z`
+- MCP sources: `dingtalk-docs`
+
+## User Request
+
+测试做完了，结论：这个 MCP 目前是「半通」状态——配置和工具发现正常，但所有工具调用都执行失败，问题出在本地调用层，不是钉钉网关本身。
+
+测试结果
+测试项	结果	说明
+服务器配置/工具发现	✅ 通过	服务器已注册，能正常列出全部 6 个工具（文档搜索、读取、写入、创建等）
+实际工具调用	❌ 全部失败	用 3 个不同工具、不同参数做了多轮测试，无一成功
+调用失败的表现很一致：无论是搜索文档、读取文档，还是最简单的无参接口（获取「我的文档」根目录 ID），全部返回同一个内部错误
+
+[Selected MCP server]
+id: dingtalk-docs
+钉钉知识库: https://mcp-gw.dingtalk.com/server/5157df99e46899c3c5bfcaa710442ec68382104fbb23052ee5c435c597d11117?key=c8e6645b0ebf595a36168f3830c89fb7
+This request requires querying this MCP server before answering.
+
+## Effective Task Context
+
+测试做完了，结论：这个 MCP 目前是「半通」状态——配置和工具发现正常，但所有工具调用都执行失败，问题出在本地调用层，不是钉钉网关本身。
+
+测试结果
+测试项	结果	说明
+服务器配置/工具发现	✅ 通过	服务器已注册，能正常列出全部 6 个工具（文档搜索、读取、写入、创建等）
+实际工具调用	❌ 全部失败	用 3 个不同工具、不同参数做了多轮测试，无一成功
+调用失败的表现很一致：无论是搜索文档、读取文档，还是最简单的无参接口（获取「我的文档」根目录 ID），全部返回同一个内部错误
+
+[Selected MCP server]
+id: dingtalk-docs
+钉钉知识库: https://mcp-gw.dingtalk.com/server/5157df99e46899c3c5bfcaa710442ec68382104fbb23052ee5c435c597d11117?key=c8e6645b0ebf595a36168f3830c89fb7
+This request requires querying this MCP server before answering.
+
+## Assistant Result
+
+你的测试结论是对的，我这边也复现确认了：这个 MCP 当前确实是“半通”状态。
+
+## 结论
+
+- **配置与工具发现正常**：服务器已连接，能够列出 6 个工具。
+- **实际调用失败在本地调用层**：调用尚未真正进入钉钉网关，就在本地处理工具调用元数据时抛错。
+- **不是参数问题**：我分别调用了无参数的 `get_my_docs_root_dentry_uuid` 和带参数的 `list_accessible_documents`，两者都返回完全相同的错误：
+
+```text
+Cannot read properties of undefined (reading 'isToolTaskRequired')
+```
+
+## 根因边界
+
+`isToolTaskRequired` 看起来属于本地的工具审批/任务判定逻辑。当前 `mcp.call` 执行路径很可能在读取某个未初始化的工具任务配置或审批上下文时，直接调用了该对象的方法，没有做空值保护。
+
+因此现在的链路是：
+
+```mermaid
+flowchart LR
+    A[钉钉 MCP 配置] --> B[服务器连接]
+    B --> C[list_tools 工具发现]
+    C --> D[mcp.call 本地调度]
+    D --> E[读取工具任务/审批元数据]
+    E --> F[undefined.isToolTaskRequired 抛错]
+    F -.未到达.-> G[钉钉网关实际工具执行]
+```
+
+## 下一步修复重点
+
+1. 检查本地 `mcp.call` → 工具运行时 → 审批判定的调用链，定位 `isToolTaskRequired` 的所属对象。
+2. 确认 MCP 工具调用是否正确传递了工具描述、`approvalMode` 和任务上下文。
+3. 对缺失任务上下文增加安全分支，不能直接访问 `undefined.isToolTaskRequired`。
+4. 增加回归测试，至少覆盖：
+   - 无参数 MCP 工具调用；
+   - 带参数只读工具调用；
+   - `approvalMode: "prompt"` 时的工具调用；
+   - 工具任务元数据缺失时的明确错误或正常降级。
+5. 修复后再用 `get_my_docs_root_dentry_uuid` 做最小调用；只有收到钉钉返回的业务结果，才能确认网关执行链路恢复。
+
+所以目前不应继续排查钉钉文档权限或网关参数，优先修复本地调用层的 `isToolTaskRequired` 空对象问题。
+
+## Verified Sources And Deliverables
+
+- none
+
+---
+
+# Conversation Turn Context
+
 - Turn run: `6f6a8512-a6d7-4ab3-8c5f-f7410d44fe3b`
 - Completed at: `2026-09-08T07:32:30.491Z`
 - MCP sources: none

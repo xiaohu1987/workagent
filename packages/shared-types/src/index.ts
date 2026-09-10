@@ -688,6 +688,7 @@ export interface KnowledgeBaseRecord {
   scope: KnowledgeScope;
   projectId: string | null;
   displayName: string;
+  category: string;
   bundleRoot: string;
   okfVersion: string;
   status: "ready" | "importing" | "failed";
@@ -1064,6 +1065,7 @@ export interface KnowledgeBaseSummary extends KnowledgeBaseRecord {
   chunkCount: number;
   indexedBytes: number;
   scopeTargetLabel?: string;
+  bundleExists?: boolean;
 }
 
 export interface ProviderTurnInput {

@@ -463,7 +463,11 @@ export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], running
     has("code.diagnostics") || has("project.verify") ? "验证项目" : "",
     has("knowledge.search") ? "知识库搜索" : "",
     has("knowledge.read") ? "读取知识库" : "",
+    has("knowledge.create") ? "新建知识库" : "",
     has("knowledge.add") ? "写入知识库" : "",
+    has("knowledge.query") ? "查询知识库" : "",
+    has("knowledge.update") ? "更新知识库" : "",
+    has("knowledge.delete") ? "删除知识库" : "",
     has("todo.write") || has("todo.read") ? "更新任务清单" : "",
     hasPrefix("git.") ? "Git 操作" : "",
     has("web_search.search_query") ? "浏览器搜索" : "",
@@ -516,7 +520,11 @@ function getToolActivityLabel(toolName: string) {
   if (toolName === "code.diagnostics") return "读取诊断";
   if (toolName === "knowledge.search") return "知识库搜索";
   if (toolName === "knowledge.read") return "读取知识库";
+  if (toolName === "knowledge.create") return "新建知识库";
   if (toolName === "knowledge.add") return "写入知识库";
+  if (toolName === "knowledge.query") return "查询知识库";
+  if (toolName === "knowledge.update") return "更新知识库";
+  if (toolName === "knowledge.delete") return "删除知识库";
   if (toolName === "todo.read") return "查看任务清单";
   if (toolName === "todo.write") return "更新任务清单";
   if (toolName === "web_search.search_query") return "浏览器搜索";
@@ -855,25 +863,21 @@ type AssistantDraftMessageProps = {
   assistantLabel: string;
   content: string;
   chunks?: string[];
-  reasoning?: string;
-  reasoningChunks?: string[];
   draftId: string;
   phase: AssistantDraftPhase;
   startedAt: string;
   completed: boolean;
 };
 
-export const AssistantDraftMessage = memo(function AssistantDraftMessage({
-  assistantLabel,
-  content,
-  chunks,
-  reasoning,
-  reasoningChunks,
+export function AssistantDraftReasoning({
   draftId,
-  phase,
-  startedAt,
-  completed
-}: AssistantDraftMessageProps) {
+  reasoning,
+  reasoningChunks
+}: {
+  draftId: string;
+  reasoning?: string;
+  reasoningChunks?: string[];
+}) {
   const reasoningScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -884,7 +888,28 @@ export const AssistantDraftMessage = memo(function AssistantDraftMessage({
     return () => window.cancelAnimationFrame(frame);
   }, [reasoning, reasoningChunks]);
 
-  if (!content.trim() && !reasoning?.trim()) return null;
+  if (!reasoning?.trim()) return null;
+
+  return (
+    <details className="streaming-reasoning" open>
+      <summary>思考过程</summary>
+      <div ref={reasoningScrollRef} className="streaming-reasoning-body">
+        {reasoningChunks?.length ? reasoningChunks.map((chunk, index) => <span key={`${draftId}-reasoning-${index}`}>{chunk}</span>) : reasoning}
+      </div>
+    </details>
+  );
+}
+
+export const AssistantDraftMessage = memo(function AssistantDraftMessage({
+  assistantLabel,
+  content,
+  chunks,
+  draftId,
+  phase,
+  startedAt,
+  completed
+}: AssistantDraftMessageProps) {
+  if (!content.trim()) return null;
 
   return (
     <article className={`message-card assistant live-assistant-message phase-${phase}`} aria-live="polite" aria-busy={!completed}>
@@ -892,21 +917,11 @@ export const AssistantDraftMessage = memo(function AssistantDraftMessage({
         <span className="message-author assistant">{assistantLabel}</span>
       </div>
       <div className="message-flat-body streaming-assistant-body">
-        {reasoning?.trim() ? (
-          <details className="streaming-reasoning" open>
-            <summary>思考过程</summary>
-            <div ref={reasoningScrollRef} className="streaming-reasoning-body">
-              {reasoningChunks?.length ? reasoningChunks.map((chunk, index) => <span key={`${draftId}-reasoning-${index}`}>{chunk}</span>) : reasoning}
-            </div>
-          </details>
-        ) : null}
-        {content.trim() ? (
-          <div className="streaming-assistant-content">
-            <span className="streaming-assistant-plain-body" data-draft-id={draftId}>
-              {chunks?.length ? chunks.map((chunk, index) => <span key={`${draftId}-${index}`}>{chunk}</span>) : content}
-            </span>
-          </div>
-        ) : null}
+        <div className="streaming-assistant-content">
+          <span className="streaming-assistant-plain-body" data-draft-id={draftId}>
+            {chunks?.length ? chunks.map((chunk, index) => <span key={`${draftId}-${index}`}>{chunk}</span>) : content}
+          </span>
+        </div>
         {phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}
       </div>
     </article>

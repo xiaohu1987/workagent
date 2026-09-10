@@ -18,9 +18,41 @@ interface BrowserTabSession {
   record: BrowserTabRecord;
   history: PageSnapshot[];
   historyIndex: number;
+  lastUsedAt: string;
 }
 
-export const MAX_BROWSER_TABS_PER_THREAD = 3;
+export const MAX_BROWSER_TABS_PER_THREAD = 5;
+
+export interface BrowserTabEvictionCandidate {
+  id: string;
+  isActive: boolean;
+  lastUsedAt: string;
+  createdAt: string;
+  index: number;
+}
+
+export function selectUnusedBrowserTabsToClose(
+  tabs: BrowserTabEvictionCandidate[],
+  keepIds: Iterable<string>,
+  limit: number
+): string[] {
+  const overflow = tabs.length - limit;
+  if (overflow <= 0) return [];
+
+  const protectedIds = new Set(keepIds);
+  return [...tabs]
+    .filter((tab) => !protectedIds.has(tab.id))
+    .sort((left, right) => {
+      if (left.isActive !== right.isActive) return left.isActive ? 1 : -1;
+      const used = left.lastUsedAt.localeCompare(right.lastUsedAt);
+      if (used !== 0) return used;
+      const created = left.createdAt.localeCompare(right.createdAt);
+      if (created !== 0) return created;
+      return right.index - left.index;
+    })
+    .slice(0, overflow)
+    .map((tab) => tab.id);
+}
 
 export function resolveBrowserOpenPreferences(
   defaultOpenMode: BrowserOpenMode,
@@ -59,13 +91,14 @@ export function isBrowserErrorPageUrl(url: string): boolean {
 
 export class BrowserRuntime {
   readonly #tabsByThread = new Map<string, BrowserTabSession[]>();
+  #usageClock = 0;
 
   public constructor(private readonly pageLoader: PageLoader = loadPage) {}
 
   public async openTab(
     threadId: string,
     target: string
-  ): Promise<{ tab: BrowserTabRecord; page: PageSnapshot; reused: boolean }> {
+  ): Promise<{ tab: BrowserTabRecord; page: PageSnapshot; reused: boolean; closedTabs: BrowserTabRecord[] }> {
     const tabs = this.#tabsByThread.get(threadId) ?? [];
     const provisionalOrigin = browserTabOriginKey(target);
     const reusable = tabs.find((session) =>
@@ -73,7 +106,7 @@ export class BrowserRuntime {
     );
     if (reusable) {
       const navigated = await this.navigate(threadId, reusable.record.id, target);
-      return { ...navigated, reused: true };
+      return { ...navigated, reused: true, closedTabs: [] };
     }
 
     const page = await this.pageLoader(target);
@@ -84,7 +117,7 @@ export class BrowserRuntime {
     );
     if (reuseAfterLoad) {
       const navigated = await this.navigate(threadId, reuseAfterLoad.record.id, target);
-      return { ...navigated, reused: true };
+      return { ...navigated, reused: true, closedTabs: [] };
     }
 
     const tab: BrowserTabRecord = {
@@ -99,22 +132,42 @@ export class BrowserRuntime {
     const session: BrowserTabSession = {
       record: tab,
       history: [page],
-      historyIndex: 0
+      historyIndex: 0,
+      lastUsedAt: now
     };
+    this.markTabUsed(session, now);
 
     for (const existing of tabs) {
       existing.record.isActive = false;
-      existing.record.updatedAt = now;
     }
     tabs.unshift(session);
 
-    while (tabs.length > MAX_BROWSER_TABS_PER_THREAD) {
-      const oldest = tabs.pop();
-      if (!oldest) break;
+    const evictedIds = new Set(selectUnusedBrowserTabsToClose(
+      tabs.map((item, index) => ({
+        id: item.record.id,
+        isActive: item.record.isActive,
+        lastUsedAt: item.lastUsedAt,
+        createdAt: item.record.createdAt,
+        index
+      })),
+      [tab.id],
+      MAX_BROWSER_TABS_PER_THREAD
+    ));
+    const closedTabs: BrowserTabRecord[] = [];
+    if (evictedIds.size > 0) {
+      const remaining: BrowserTabSession[] = [];
+      for (const item of tabs) {
+        if (evictedIds.has(item.record.id)) {
+          closedTabs.push({ ...item.record });
+          continue;
+        }
+        remaining.push(item);
+      }
+      tabs.splice(0, tabs.length, ...remaining);
     }
 
     this.#tabsByThread.set(threadId, tabs);
-    return { tab, page, reused: false };
+    return { tab, page, reused: false, closedTabs };
   }
 
   public async navigate(threadId: string, tabId: string, target: string): Promise<{ tab: BrowserTabRecord; page: PageSnapshot }> {
@@ -125,7 +178,7 @@ export class BrowserRuntime {
     session.historyIndex = session.history.length - 1;
     session.record.title = page.title;
     session.record.url = page.url;
-    session.record.updatedAt = new Date().toISOString();
+    this.markTabUsed(session);
     this.focusTab(threadId, tabId);
     return { tab: session.record, page };
   }
@@ -140,7 +193,7 @@ export class BrowserRuntime {
     session.history[session.historyIndex] = reloaded;
     session.record.title = reloaded.title;
     session.record.url = reloaded.url;
-    session.record.updatedAt = new Date().toISOString();
+    this.markTabUsed(session);
     return { tab: session.record, page: reloaded };
   }
 
@@ -153,7 +206,7 @@ export class BrowserRuntime {
     const page = session.history[session.historyIndex]!;
     session.record.title = page.title;
     session.record.url = page.url;
-    session.record.updatedAt = new Date().toISOString();
+    this.markTabUsed(session);
     return { tab: session.record, page };
   }
 
@@ -166,20 +219,18 @@ export class BrowserRuntime {
     const page = session.history[session.historyIndex]!;
     session.record.title = page.title;
     session.record.url = page.url;
-    session.record.updatedAt = new Date().toISOString();
+    this.markTabUsed(session);
     return { tab: session.record, page };
   }
 
   public focusTab(threadId: string, tabId: string): BrowserTabRecord {
     const tabs = this.#tabsByThread.get(threadId) ?? [];
-    const now = new Date().toISOString();
-    let focused: BrowserTabRecord | null = null;
+    let focused: BrowserTabSession | null = null;
 
     for (const tab of tabs) {
       tab.record.isActive = tab.record.id === tabId;
-      tab.record.updatedAt = now;
       if (tab.record.id === tabId) {
-        focused = tab.record;
+        focused = tab;
       }
     }
 
@@ -187,7 +238,8 @@ export class BrowserRuntime {
       throw new Error(`Browser tab ${tabId} not found.`);
     }
 
-    return focused;
+    this.markTabUsed(focused);
+    return focused.record;
   }
 
   public closeTab(threadId: string, tabId: string): BrowserTabRecord[] {
@@ -206,8 +258,9 @@ export class BrowserRuntime {
       const nextIndex = Math.max(0, index - 1);
       tabs.forEach((session, sessionIndex) => {
         session.record.isActive = sessionIndex === nextIndex;
-        session.record.updatedAt = new Date().toISOString();
       });
+      const nextActive = tabs[nextIndex];
+      if (nextActive) this.markTabUsed(nextActive);
     }
 
     this.#tabsByThread.set(threadId, tabs);
@@ -247,7 +300,7 @@ export class BrowserRuntime {
     }
     session.record.title = next.title;
     session.record.url = next.url;
-    session.record.updatedAt = next.fetchedAt;
+    this.markTabUsed(session, next.fetchedAt);
     return { ...session.record };
   }
 
@@ -291,7 +344,8 @@ export class BrowserRuntime {
             fetchedAt: tab.updatedAt
           }
         ],
-        historyIndex: 0
+        historyIndex: 0,
+        lastUsedAt: tab.updatedAt
       };
     });
     this.#tabsByThread.set(threadId, merged);
@@ -299,6 +353,12 @@ export class BrowserRuntime {
 
   public clearThread(threadId: string): void {
     this.#tabsByThread.delete(threadId);
+  }
+
+  private markTabUsed(session: BrowserTabSession, at = new Date().toISOString()): void {
+    this.#usageClock += 1;
+    session.lastUsedAt = `${at}#${String(this.#usageClock).padStart(8, "0")}`;
+    session.record.updatedAt = at;
   }
 
   private requireTab(threadId: string, tabId: string): BrowserTabSession {

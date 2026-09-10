@@ -41,6 +41,27 @@ describe("seedSystemSkills", () => {
     expect(metadata).toContain("default_prompt: 检查最终代码改动");
   });
 
+  it("installs Knowledge Base as an implicitly available document skill", async () => {
+    const skillsRoot = await makeTempDir();
+
+    await seedSystemSkills(skillsRoot);
+
+    const skills = await loadSkillsFromRoots([{ path: skillsRoot, scope: "system" }]);
+    const skill = skills.find((entry) => entry.name === "knowledge-base");
+    const metadata = await fs.readFile(
+      path.join(skillsRoot, "platform", "knowledge-base", "agents", "openai.yaml"),
+      "utf8"
+    );
+
+    expect(skill).toMatchObject({
+      displayName: "Knowledge Base",
+      domain: "文档",
+      allowImplicitInvocation: true
+    });
+    expect(skill?.description).toContain("知识库");
+    expect(metadata).toContain("knowledge.create");
+  });
+
   it("does not overwrite a customized Code Change Test Report skill", async () => {
     const skillsRoot = await makeTempDir();
     const skillDirectory = path.join(skillsRoot, "programming", "code-change-test-report");

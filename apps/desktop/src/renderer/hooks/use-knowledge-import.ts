@@ -23,6 +23,7 @@ export function useKnowledgeImport({
   const [urlInput, setUrlInput] = useState("");
   const [isUrlEditorOpen, setIsUrlEditorOpen] = useState(false);
   const [name, setName] = useState("Imported Knowledge");
+  const [category, setCategory] = useState("");
   const [scope, setScope] = useState<KnowledgeScope>("global");
   const [isImporting, setIsImporting] = useState(false);
 
@@ -37,16 +38,44 @@ export function useKnowledgeImport({
       await window.codexh.importKnowledge({
         displayName: name.trim() || "Imported Knowledge",
         scope,
+        category: category.trim() || undefined,
         sources,
         threadId: selectedThreadId ?? undefined
       });
       setSources([]);
       setUrlInput("");
       setName("Imported Knowledge");
+      setCategory("");
       await Promise.all([refreshSnapshot(selectedThreadId), refreshKnowledgeBases()]);
       showNotice("知识库已导入", { tone: "success" });
     } catch (error) {
       showNotice("知识库导入失败", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsImporting(false);
+    }
+  }
+
+  async function createEmpty() {
+    if (scope === "project" && !canImportProjectKnowledge) return;
+    const displayName = name.trim();
+    if (!displayName) {
+      showNotice("请先填写知识库名称。");
+      return;
+    }
+    setIsImporting(true);
+    try {
+      await window.codexh.createKnowledgeBase({
+        name: displayName,
+        category: category.trim() || undefined,
+        scope: scope === "imported" ? "global" : scope,
+        threadId: selectedThreadId ?? undefined
+      });
+      setName("Imported Knowledge");
+      setCategory("");
+      await Promise.all([refreshSnapshot(selectedThreadId), refreshKnowledgeBases()]);
+      showNotice("知识库已创建", { tone: "success" });
+    } catch (error) {
+      showNotice("创建知识库失败", { message: error instanceof Error ? error.message : String(error) });
     } finally {
       setIsImporting(false);
     }
@@ -102,10 +131,13 @@ export function useKnowledgeImport({
     setIsUrlEditorOpen,
     name,
     setName,
+    category,
+    setCategory,
     scope,
     setScope,
     isImporting,
     importKnowledge,
+    createEmpty,
     chooseSources,
     removeSource,
     addUrls,

@@ -9392,6 +9392,11 @@ input[type="radio"]:focus-visible {
   margin: 0;
 }
 
+.chat-transcript > .streaming-reasoning {
+  width: min(100%, 920px);
+  margin-top: 8px;
+}
+
 .runtime-activity-current-toggle {
   padding: 0;
   border: 0;
@@ -9461,6 +9466,39 @@ input[type="radio"]:focus-visible {
   min-width: 0;
   align-items: baseline;
   gap: 7px;
+}
+
+.runtime-activity-rolling {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  height: 1.25em;
+  align-items: center;
+}
+
+.runtime-activity-rolling > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.runtime-activity-rolling.is-rolling .runtime-activity-rolling-out {
+  animation: runtime-status-roll-out 320ms ease forwards;
+}
+
+.runtime-activity-rolling.is-rolling .runtime-activity-rolling-in {
+  animation: runtime-status-roll-in 320ms ease forwards;
+}
+
+@keyframes runtime-status-roll-out {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(-110%); opacity: 0; }
+}
+
+@keyframes runtime-status-roll-in {
+  from { transform: translateY(110%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
 }
 
 .runtime-activity-command {
@@ -9881,6 +9919,11 @@ input[type="radio"]:focus-visible {
   .runtime-activity-command code {
     color: var(--runtime-text-base);
     background: none;
+    animation: none;
+  }
+
+  .runtime-activity-rolling.is-rolling .runtime-activity-rolling-out,
+  .runtime-activity-rolling.is-rolling .runtime-activity-rolling-in {
     animation: none;
   }
 }
@@ -16950,8 +16993,183 @@ input[type="radio"]:focus-visible {
 }
 
 .browser-workspace {
+  position: relative;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.browser-tab-switcher {
+  position: relative;
+  z-index: 12;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  min-width: 0;
+  gap: 6px;
+  padding: 6px 8px;
+  overflow: visible;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: #101010;
+}
+
+.browser-tab-switcher-field {
+  position: relative;
+  min-width: 0;
+}
+
+.browser-tab-switcher-trigger,
+.browser-tab-switcher-option,
+.browser-tab-switcher-option-main {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+  color: inherit;
+  text-align: left;
+}
+
+.browser-tab-switcher-trigger,
+.browser-tab-switcher-option {
+  height: 44px;
+  min-height: 44px;
+  max-height: 44px;
+  padding: 0 6px 0 10px;
+  border: 0;
+  border-radius: 8px;
+  color: #f4f4f5;
+  background: #1b1b1b;
+  box-sizing: border-box;
+}
+
+.browser-tab-switcher-trigger {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.browser-tab-switcher-trigger:hover,
+.browser-tab-switcher.is-open .browser-tab-switcher-trigger,
+.browser-tab-switcher-option:hover,
+.browser-tab-switcher-option.is-selected {
+  background: #262626;
+}
+
+.browser-tab-switcher-icon,
+.browser-tab-switcher-chevron,
+.browser-tab-switcher-close,
+.browser-tab-switcher-option-close {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.browser-tab-switcher-icon,
+.browser-tab-switcher-chevron {
+  width: 14px;
+  height: 14px;
+  color: rgba(238, 238, 240, 0.72);
+}
+
+.browser-tab-switcher-icon svg,
+.browser-tab-switcher-chevron svg,
+.browser-tab-switcher-close svg,
+.browser-tab-switcher-option-close svg {
+  width: 14px;
+  height: 14px;
+}
+
+.browser-tab-switcher-copy {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
+.browser-tab-switcher-copy strong,
+.browser-tab-switcher-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-tab-switcher-copy strong {
+  color: #f4f4f5;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.browser-tab-switcher-copy small {
+  color: rgba(238, 238, 240, 0.52);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.browser-tab-switcher-chevron {
+  margin-left: 4px;
+  transition: transform 140ms ease;
+}
+
+.browser-tab-switcher.is-open .browser-tab-switcher-chevron {
+  transform: rotate(180deg);
+}
+
+.browser-tab-switcher-close,
+.browser-tab-switcher-option-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: rgba(242, 242, 244, 0.52);
+}
+
+.browser-tab-switcher-close {
+  align-self: center;
+}
+
+.browser-tab-switcher-close:hover,
+.browser-tab-switcher-option-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.browser-tab-switcher-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 14;
+  display: grid;
+  width: 100%;
+  gap: 2px;
+  max-height: min(240px, 36vh);
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: #1b1b1b;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+  box-sizing: border-box;
+  scrollbar-color: rgba(126, 145, 168, 0.5) transparent;
+  scrollbar-width: thin;
+}
+
+.browser-tab-switcher-option {
+  width: 100%;
+}
+
+.browser-tab-switcher-option.is-selected {
+  box-shadow: inset 0 0 0 1px rgba(108, 174, 255, 0.38);
+}
+
+.browser-tab-switcher-option-main {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  width: auto;
+  padding: 0;
+}
+
+.browser-workspace.is-picking .browser-page-host.is-visible {
+  top: var(--browser-tab-menu-shift, 0px);
 }
 
 .browser-workspace.is-background {
@@ -17429,6 +17647,38 @@ body.panel-resizing {
   font-size: 11px;
 }
 
+.knowledge-import-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.knowledge-import-actions .button { min-height: 34px; }
+.knowledge-category-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 2px;
+}
+.knowledge-category-chip,
+.knowledge-category-pill {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.knowledge-category-chip {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+}
+.knowledge-category-chip.is-active,
+.knowledge-category-pill {
+  color: #d7c4ff;
+  background: rgba(139, 108, 216, 0.2);
+  border-color: transparent;
+}
 .knowledge-import-footer {
   display: flex;
   align-items: center;
@@ -18559,6 +18809,8 @@ body.panel-resizing {
   .knowledge-import-sources { padding-left: 0; }
   .knowledge-import-footer { align-items: stretch; flex-direction: column; }
   .knowledge-import-footer .button { width: 100%; }
+  .knowledge-import-actions { flex-direction: column; }
+  .knowledge-import-actions .button { width: 100%; }
   .knowledge-base-row { grid-template-columns: 1fr; }
   .knowledge-base-actions { justify-content: flex-start; }
 }
@@ -21442,6 +21694,7 @@ select option:checked {
 .app-shell.has-app-background .workspace-subtab-strip,
 .app-shell.has-app-background .project-preview-header,
 .app-shell.has-app-background .browser-location,
+.app-shell.has-app-background .browser-tab-switcher,
 .app-shell.has-app-background .git-changes-header,
 .app-shell.has-app-background .git-diff-header,
 .app-shell.has-app-background .git-sync-summary,
@@ -23086,6 +23339,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 :root[data-theme="light"] .browser-workspace,
 :root[data-theme="light"] .browser-workspace .browser-tabs,
 :root[data-theme="light"] .browser-workspace .browser-toolbar,
+:root[data-theme="light"] .browser-workspace .browser-tab-switcher,
 :root[data-theme="light"] .right-workspace-empty-state {
   border-color: #d7e4ef !important;
   background: #ffffff !important;
@@ -24921,6 +25175,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .browser-location,
   .browser-toolbar,
   .browser-tabs,
+  .browser-tab-switcher,
   .settings-topbar,
   .settings-tab-strip,
   .conversation-log-toolbar
@@ -24937,6 +25192,33 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   border-bottom-color: var(--border) !important;
   color: var(--text-soft) !important;
   background: var(--surface-soft) !important;
+}
+
+:root[data-theme="light"] .browser-tab-switcher-trigger,
+:root[data-theme="light"] .browser-tab-switcher-menu,
+:root[data-theme="light"] .browser-tab-switcher-option {
+  border-color: var(--border) !important;
+  background: var(--surface) !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .browser-tab-switcher-trigger:hover,
+:root[data-theme="light"] .browser-tab-switcher.is-open .browser-tab-switcher-trigger,
+:root[data-theme="light"] .browser-tab-switcher-option.is-selected {
+  background: var(--accent-blue-soft) !important;
+  box-shadow: inset 0 0 0 1px rgba(117, 184, 245, 0.55) !important;
+}
+
+:root[data-theme="light"] .browser-tab-switcher-copy strong,
+:root[data-theme="light"] .browser-tab-switcher-icon,
+:root[data-theme="light"] .browser-tab-switcher-chevron {
+  color: var(--text) !important;
+}
+
+:root[data-theme="light"] .browser-tab-switcher-copy small,
+:root[data-theme="light"] .browser-tab-switcher-close,
+:root[data-theme="light"] .browser-tab-switcher-option-close {
+  color: var(--text-soft) !important;
 }
 
 /* Shared compact interactive states. */

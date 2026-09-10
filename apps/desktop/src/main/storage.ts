@@ -822,6 +822,7 @@ export class DatabaseService {
         scope TEXT NOT NULL,
         project_id TEXT,
         display_name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT '',
         bundle_root TEXT NOT NULL,
         okf_version TEXT NOT NULL,
         status TEXT NOT NULL,
@@ -1051,6 +1052,7 @@ export class DatabaseService {
     this.ensureColumn("error_solutions", "last_recall_outcome", "TEXT");
     this.ensureColumn("error_solutions", "last_observed_at", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("error_solutions", "expires_at", "TEXT");
+    this.ensureColumn("knowledge_bases", "category", "TEXT NOT NULL DEFAULT ''");
     this.#db.prepare("UPDATE error_solutions SET last_observed_at = updated_at WHERE last_observed_at = ''").run();
     this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_error_solutions_preflight
       ON error_solutions(project_id, tool_name, target_key_pattern, strategy_fingerprint, scope_mode, model_id)`);
@@ -2959,19 +2961,21 @@ export class DatabaseService {
   public createKnowledgeBase(input: Omit<KnowledgeBaseRecord, "id" | "createdAt" | "updatedAt">): KnowledgeBaseRecord {
     const record: KnowledgeBaseRecord = {
       ...input,
+      category: normalizeKnowledgeCategory(input.category),
       id: randomUUID(),
       createdAt: nowIso(),
       updatedAt: nowIso()
     };
     this.#db
       .prepare(
-        "INSERT INTO knowledge_bases (id, scope, project_id, display_name, bundle_root, okf_version, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO knowledge_bases (id, scope, project_id, display_name, category, bundle_root, okf_version, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       .run(
         record.id,
         record.scope,
         record.projectId,
         record.displayName,
+        record.category,
         record.bundleRoot,
         record.okfVersion,
         record.status,
@@ -2983,7 +2987,7 @@ export class DatabaseService {
 
   public findKnowledgeBase(scope: string, displayName: string): KnowledgeBaseRecord | null {
     const row = this.#db.prepare("SELECT * FROM knowledge_bases WHERE scope = ? AND display_name = ? ORDER BY created_at LIMIT 1").get(scope, displayName) as any;
-    return row ? { id: row.id, scope: row.scope, projectId: row.project_id, displayName: row.display_name, bundleRoot: row.bundle_root, okfVersion: row.okf_version, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at } : null;
+    return row ? mapKnowledgeBaseRow(row) : null;
   }
 
   public listQuickNotes(): QuickNoteRecord[] {
@@ -3026,40 +3030,27 @@ export class DatabaseService {
     }
     const next = {
       displayName: patch.displayName ?? current.display_name,
+      category: patch.category !== undefined ? normalizeKnowledgeCategory(patch.category) : (current.category ?? ""),
       status: patch.status ?? current.status,
       updatedAt: nowIso()
     };
     this.#db
       .prepare(
-        "UPDATE knowledge_bases SET display_name = ?, status = ?, updated_at = ? WHERE id = ?"
+        "UPDATE knowledge_bases SET display_name = ?, category = ?, status = ?, updated_at = ? WHERE id = ?"
       )
-      .run(next.displayName, next.status, next.updatedAt, id);
+      .run(next.displayName, next.category, next.status, next.updatedAt, id);
   }
 
   public listKnowledgeBases(): KnowledgeBaseRecord[] {
     return this.#db
       .prepare("SELECT * FROM knowledge_bases ORDER BY updated_at DESC")
       .all()
-      .map((row: any) => ({
-        id: row.id,
-        scope: row.scope,
-        projectId: row.project_id,
-        displayName: row.display_name,
-        bundleRoot: row.bundle_root,
-        okfVersion: row.okf_version,
-        status: row.status,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at
-      }));
+      .map((row: any) => mapKnowledgeBaseRow(row));
   }
 
   public getKnowledgeBase(id: string): KnowledgeBaseRecord | null {
     const row = this.#db.prepare("SELECT * FROM knowledge_bases WHERE id = ?").get(id) as any;
-    return row ? {
-      id: row.id, scope: row.scope, projectId: row.project_id, displayName: row.display_name,
-      bundleRoot: row.bundle_root, okfVersion: row.okf_version, status: row.status,
-      createdAt: row.created_at, updatedAt: row.updated_at
-    } : null;
+    return row ? mapKnowledgeBaseRow(row) : null;
   }
 
   public listKnowledgeBaseSummaries(): KnowledgeBaseSummary[] {
@@ -3072,9 +3063,7 @@ export class DatabaseService {
       GROUP BY kb.id
       ORDER BY kb.updated_at DESC
     `).all().map((row: any) => ({
-      id: row.id, scope: row.scope, projectId: row.project_id, displayName: row.display_name,
-      bundleRoot: row.bundle_root, okfVersion: row.okf_version, status: row.status,
-      createdAt: row.created_at, updatedAt: row.updated_at,
+      ...mapKnowledgeBaseRow(row),
       documentCount: Number(row.document_count), chunkCount: Number(row.chunk_count), indexedBytes: Number(row.indexed_bytes)
     }));
   }
@@ -3161,6 +3150,19 @@ export class DatabaseService {
   public listKnowledgeDocuments(knowledgeBaseId: string): KnowledgeDocumentRecord[] {
     return this.#db.prepare("SELECT * FROM knowledge_documents WHERE knowledge_base_id = ? ORDER BY source_path").all(knowledgeBaseId).map((row: any) => ({
       id: row.id, knowledgeBaseId: row.knowledge_base_id, sourcePath: row.source_path, sourceHash: row.source_hash, title: row.title, mimeHint: row.mime_hint, status: row.status, updatedAt: row.updated_at
+    }));
+  }
+
+  public getKnowledgeDocument(id: string): KnowledgeDocumentRecord | null {
+    const row = this.#db.prepare("SELECT * FROM knowledge_documents WHERE id = ?").get(id) as any;
+    return row ? {
+      id: row.id, knowledgeBaseId: row.knowledge_base_id, sourcePath: row.source_path, sourceHash: row.source_hash, title: row.title, mimeHint: row.mime_hint, status: row.status, updatedAt: row.updated_at
+    } : null;
+  }
+
+  public listKnowledgeChunksByDocument(documentId: string): KnowledgeChunkRecord[] {
+    return this.#db.prepare("SELECT * FROM knowledge_chunks WHERE document_id = ? ORDER BY chunk_index").all(documentId).map((row: any) => ({
+      id: row.id, knowledgeBaseId: row.knowledge_base_id, documentId: row.document_id, chunkIndex: row.chunk_index, title: row.title, content: row.content, sourcePath: row.source_path, locator: row.locator, createdAt: row.created_at
     }));
   }
 
@@ -3555,6 +3557,75 @@ policy:
 `
     },
     {
+      dir: path.join(skillsSystemDir, "platform", "knowledge-base"),
+      force: true,
+      skill: `---
+name: knowledge-base
+description: Manage local knowledge bases — create, categorize, write, update, query, and delete. Use when the user mentions 知识库, 新增知识库, 知识库分类, 写入/更新/查询/删除知识库, or wants to save notes into a knowledge base.
+domain: 文档
+metadata:
+  short-description: Create, categorize, write, query, update, and delete local knowledge bases
+---
+# 知识库操作
+
+本地知识库工具只在当前对话开启「知识库」后可用。先确认开关，再按用户意图选工具。
+
+## 工具
+
+| 意图 | 工具 | 关键参数 |
+| --- | --- | --- |
+| 新增知识库 | \`knowledge.create\` | \`name\` 必填；\`category\`、\`scope\`（global/project）可选 |
+| 查询知识库/文档 | \`knowledge.query\` | \`knowledgeBaseId\` 或 \`category\` 可选；返回 bases + documents |
+| 写入笔记 | \`knowledge.add\` | \`title\`、\`content\` 必填；优先 \`knowledgeBaseId\`，否则 \`knowledgeBaseName\` / \`category\` |
+| 更新笔记或库 | \`knowledge.update\` | 文档：\`documentId\` + \`title\`/\`content\`；库：\`knowledgeBaseId\` + \`name\`/\`category\` |
+| 删除笔记或库 | \`knowledge.delete\` | 文档用 \`documentId\`；整库用 \`knowledgeBaseId\`（不可逆） |
+| 检索内容 | \`knowledge.search\` → \`knowledge.read\` | 先搜再读 chunk，不要用 \`fs.read_file\` 读 Bundle |
+
+## 工作流
+
+1. 用户要新建或指定分类时，先 \`knowledge.create\`，记下返回的 \`knowledgeBaseId\`。
+2. 写入前若不知道目标库，先 \`knowledge.query\`（可按 \`category\` 过滤），再 \`knowledge.add\`。
+3. 更新/删除前用 \`knowledge.query\` 拿到 \`documentId\` 或 \`knowledgeBaseId\`，不要猜测 ID。
+4. 问已有资料时用 \`knowledge.search\`，只对相关 chunk 调用 \`knowledge.read\`，并引用 source_path / locator。
+5. 写、改、删都会弹出确认；被拒绝后向用户说明，不要改用文件系统绕过。
+
+## 分类
+
+- \`category\` 是知识库标签，例如「产品文档」「技术规范」「会议纪要」。
+- 同一分类可有多个库。查询时传 \`category\` 只看该类。
+- 改分类用 \`knowledge.update\`（\`knowledgeBaseId\` + \`category\`），不要重建库。
+
+## 约束
+
+- 子代理只读，不能 create/add/update/delete。
+- 不传目标时，\`knowledge.add\` 可能落到「随手记」；用户指定了库名或分类时必须带上。
+- 删除整库会清掉其中全部文档，先用一句话确认对象再调用。
+`,
+      meta: `interface:
+  display_name: Knowledge Base
+  short_description: 创建、分类、写入、查询、更新和删除本地知识库
+  default_prompt: 按用户意图调用 knowledge.create / query / add / update / delete，分类用 category，检索用 knowledge.search。
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: builtin
+      value: knowledge.create
+    - type: builtin
+      value: knowledge.query
+    - type: builtin
+      value: knowledge.add
+    - type: builtin
+      value: knowledge.update
+    - type: builtin
+      value: knowledge.delete
+    - type: builtin
+      value: knowledge.search
+    - type: builtin
+      value: knowledge.read
+`
+    },
+    {
       dir: path.join(skillsSystemDir, "generate_image"),
       force: true,
       skill: `---
@@ -3656,6 +3727,25 @@ async function exists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function normalizeKnowledgeCategory(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function mapKnowledgeBaseRow(row: any): KnowledgeBaseRecord {
+  return {
+    id: row.id,
+    scope: row.scope,
+    projectId: row.project_id,
+    displayName: row.display_name,
+    category: typeof row.category === "string" ? row.category : "",
+    bundleRoot: row.bundle_root,
+    okfVersion: row.okf_version,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
 }
 
 function mapThreadRow(row: any, workspaceRoots: string[] = []): ThreadRecord {

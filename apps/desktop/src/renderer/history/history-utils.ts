@@ -2,7 +2,15 @@ import type { ThreadRecord } from "@shared-types";
 
 export const HISTORY_THREADS_PREVIEW_COUNT = 10;
 export const HISTORY_STANDALONE_GROUP_KEY = "__standalone__";
-export const HISTORY_COLLAPSED_GROUPS_STORAGE_KEY = "codexh.history-collapsed-groups";
+export const HISTORY_EXPANDED_GROUPS_STORAGE_KEY = "codexh.history-expanded-groups";
+
+export function isHistoryProjectGroupCollapsed(
+  expandedGroupKeys: ReadonlySet<string>,
+  groupKey: string,
+  collapsible = true
+): boolean {
+  return collapsible && !expandedGroupKeys.has(groupKey);
+}
 
 export function normalizeHistoryGroupKey(cwd: string): string {
   return cwd.replace(/\\/g, "/").toLocaleLowerCase();
