@@ -34,7 +34,14 @@ import type {
   ToolCallSummary,
   UserInputPrompt
 } from "@shared-types";
-import { DEFAULT_RESPONSE_TONE, createEmptyTokenUsage, isConfigurableReasoningEffortModel } from "@shared-types";
+import {
+  DEFAULT_RESPONSE_TONE,
+  GPT_REASONING_EFFORTS,
+  createEmptyTokenUsage,
+  isConfigurableReasoningEffortModel,
+  isGptReasoningEffort,
+  resolveModelReasoningEffort
+} from "@shared-types";
 import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../packages/provider-adapters/src/models/media-protocol";
 import {
   canDeleteThread,
@@ -51,6 +58,9 @@ import {
   shouldPreservePreparingRuntime,
   shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
+  shouldInvalidateSnapshotForThreadUpdate,
+  upsertSubagentIntoSnapshot,
+  mergeSnapshotSubagents,
   shouldShowTaskProcessing
 } from "./core/thread-ui-state";
 import { useMotionPresence } from "./core/motion-presence";
@@ -319,7 +329,7 @@ import { RealtimeBackgroundLayer } from "./workspace/realtime-background-layer";
 import { RealtimeCharacterLayer } from "./workspace/realtime-character-layer";
 import { WorkspaceControls } from "./workspace/workspace-controls";
 import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEffortPicker, type ComposerModelGroup } from "./composer/model-controls";
-import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, SubagentStatusDock, SubagentTaskGroup, getSubagentGroupSummary, shouldShowSubagentStatusDock } from "./cards/runtime-cards";
+import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, SubagentSwitchRow, buildSubagentPresentations, resolveSelectedSubagentId } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
 import { TimelineEntries } from "./timeline/timeline-entries";
@@ -689,7 +699,7 @@ export function App() {
   const [gpaComposerSelected, setGpaComposerSelected] = useState(false);
   const [composerMediaIntent, setComposerMediaIntent] = useState<"image" | "video" | null>(null);
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
-  const [isSubagentPanelOpen, setIsSubagentPanelOpen] = useState(false);
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
   const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp" | "database" | "apiCards">("root");
   const [skillsMenuQuery, setSkillsMenuQuery] = useState("");
@@ -2564,11 +2574,22 @@ export function App() {
       if (!isPluginStateUpdate && typed.type === "thread.updated" && typed.threadId && typed.payload?.thread) {
         applyThreadStatusNotification(runtimeEvent);
         const runtimeThreadId = typed.threadId;
+        const childThread = typed.payload.childThread ?? null;
         const runtimeThread = latestRuntimeThreadsRef.current[runtimeThreadId]
           ? resolveLatestThreadRecord(latestRuntimeThreadsRef.current[runtimeThreadId], typed.payload.thread)
           : typed.payload.thread;
         latestRuntimeThreadsRef.current[runtimeThreadId] = runtimeThread;
-        invalidateSnapshotRequest(runtimeThreadId);
+        if (shouldInvalidateSnapshotForThreadUpdate({ childThread })) {
+          invalidateSnapshotRequest(runtimeThreadId);
+        }
+        if (childThread) {
+          const cached = snapshotCacheByThreadRef.current.get(runtimeThreadId);
+          if (cached) cacheThreadSnapshot(upsertSubagentIntoSnapshot(cached, childThread));
+          setSnapshot((current) => {
+            if (!current || current.thread.id !== runtimeThreadId) return current;
+            return upsertSubagentIntoSnapshot(current, childThread);
+          });
+        }
         if (shouldIncludeRuntimeThreadInHistory(runtimeThread)) {
           setThreads((current) => {
             let found = false;
@@ -3184,9 +3205,16 @@ export function App() {
     ]),
     [snapshot?.approvals, snapshot?.prompts]
   );
-  const subagentGroupSummary = useMemo(
-    () => getSubagentGroupSummary(currentSubagents, queuedSubagentIds, subagentResultsById, waitingInputAgentIds),
-    [currentSubagents, queuedSubagentIds, subagentResultsById, waitingInputAgentIds]
+  const subagentPresentations = useMemo(
+    () => buildSubagentPresentations({
+      agents: currentSubagents,
+      queuedAgentIds: queuedSubagentIds,
+      resultsById: subagentResultsById,
+      waitingInputAgentIds,
+      runtimeActivities,
+      skillNames
+    }),
+    [currentSubagents, queuedSubagentIds, runtimeActivities, skillNames, subagentResultsById, waitingInputAgentIds]
   );
   const activeAssistantDraft = useMemo(() => {
     return selectActiveAssistantDraft(
@@ -3229,11 +3257,18 @@ export function App() {
   }, [currentTaskTurnRunId, snapshotWorkspaceRoot, snapshot?.toolCalls]);
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
+  const workspaceSubagentPresentations = useMemo(
+    () => isTaskProcessing ? subagentPresentations : [],
+    [isTaskProcessing, subagentPresentations]
+  );
   useEffect(() => {
-    if (!isTaskProcessing || multiAgentMode !== "proactive") {
-      setIsSubagentPanelOpen(false);
+    const nextSelectedId = resolveSelectedSubagentId(workspaceSubagentPresentations, selectedSubagentId);
+    if (nextSelectedId !== selectedSubagentId) setSelectedSubagentId(nextSelectedId);
+    if (subagentPresentations.length === 0 && rightWorkspaceTab === "subagents") {
+      setRightWorkspaceTab("files");
+      setRightWorkspaceExpandedTab("files");
     }
-  }, [activeSnapshotThreadId, isTaskProcessing, multiAgentMode]);
+  }, [activeSnapshotThreadId, rightWorkspaceTab, selectedSubagentId, subagentPresentations, workspaceSubagentPresentations]);
   // Active-task submissions stay in the queue until the runtime reaches the
   // next safe decision boundary instead of appearing as already sent messages.
   // Queued items must remain available while the current turn runs so they
@@ -3518,6 +3553,11 @@ export function App() {
   const showReasoningEffortPicker = selectedComposerModel
     ? isConfigurableReasoningEffortModel(selectedComposerModel)
     : false;
+  const composerReasoningEfforts = selectedComposerModel?.supportedReasoningEfforts
+    ?.filter(isGptReasoningEffort) ?? GPT_REASONING_EFFORTS;
+  const composerReasoningEffort = selectedComposerModel
+    ? resolveModelReasoningEffort(selectedComposerModel, config?.reasoningEffort ?? "medium")
+    : config?.reasoningEffort ?? "medium";
   const composerSupportsMultimodalInput = selectedComposerModel?.supportsMultimodalInput ?? false;
   const multimodalInputFallbackReady = useMemo(() => {
     const input = config?.multimodal?.input;
@@ -4101,8 +4141,19 @@ export function App() {
       const artifacts = next.snapshotMode === "delta" && base
         ? mergeSnapshotRecords(base.artifacts, next.artifacts, (artifact) => artifact.createdAt, "descending")
         : next.artifacts;
+      const mergedAgents = mergeSnapshotSubagents(
+        {
+          subagents: base?.subagents ?? [],
+          queuedSubagentIds: base?.queuedSubagentIds ?? []
+        },
+        {
+          subagents: next.subagents,
+          queuedSubagentIds: next.queuedSubagentIds
+        }
+      );
       const mergedSnapshot = reconcileSnapshotWithRuntimeEvents({
         ...next,
+        ...mergedAgents,
         messages: base ? reuseEquivalentRecordArray(base.messages, messages) : messages,
         toolCalls: base ? reuseEquivalentRecordArray(base.toolCalls, toolCalls) : toolCalls,
         artifacts: base ? reuseEquivalentRecordArray(base.artifacts, artifacts) : artifacts,
@@ -6263,6 +6314,12 @@ export function App() {
   const commitRenameHistoryThreadEvent = useStableEvent(commitRenameHistoryThread);
   const cancelRenameHistoryThreadEvent = useStableEvent(cancelRenameHistoryThread);
   const hideRightWorkspaceEvent = useStableEvent(() => setIsRightWorkspaceOpen(false));
+  const selectSubagentEvent = useStableEvent((agentId: string) => {
+    setSelectedSubagentId(agentId);
+    setRightWorkspaceTab("subagents");
+    setRightWorkspaceExpandedTab("subagents");
+    setIsRightWorkspaceOpen(true);
+  });
   const addComposerAttachmentEvent = useStableEvent(addComposerAttachment);
   const refreshGitEvent = useStableEvent(() => {
     if (!selectedThreadId || gitLoading) return;
@@ -6437,7 +6494,6 @@ export function App() {
           tokenUsageButtonRef={tokenUsageButtonRef}
           tokenUsagePanelRef={tokenUsagePanelRef}
           onToggleTokenUsage={() => {
-            setIsSubagentPanelOpen(false);
             setIsTokenUsagePanelOpen((current) => !current);
           }}
           notifications={notificationCenterState.items}
@@ -6449,7 +6505,6 @@ export function App() {
           notificationButtonRef={notificationButtonRef}
           notificationPanelRef={notificationCenterRef}
           onToggleNotifications={() => {
-            setIsSubagentPanelOpen(false);
             toggleNotificationCenter();
           }}
           onOpenNotification={openNotificationItem}
@@ -6459,52 +6514,6 @@ export function App() {
           onToggleTerminal={() => setIsTerminalOpen((current) => !current)}
           rightWorkspaceOpen={isRightWorkspaceOpen}
           onOpenRightWorkspace={() => { setRightWorkspaceTab("files"); setRightWorkspaceExpandedTab("files"); setIsRightWorkspaceOpen(true); }}
-          subagentControl={!showWelcome && !isThreadSwitchPlaceholderVisible && shouldShowSubagentStatusDock(isTaskProcessing, multiAgentMode, currentSubagents.length) ? (
-            <SubagentStatusDock
-              summary={subagentGroupSummary}
-              count={currentSubagents.length}
-              expanded={isSubagentPanelOpen}
-              onToggle={() => {
-                setIsTokenUsagePanelOpen(false);
-                setIsNotificationCenterOpen(false);
-                setIsSubagentPanelOpen((current) => !current);
-              }}
-            >
-              {currentSubagents.length > 0 ? (
-                <SubagentTaskGroup
-                  agents={currentSubagents}
-                  queuedAgentIds={queuedSubagentIds}
-                  resultsById={subagentResultsById}
-                  waitingInputAgentIds={waitingInputAgentIds}
-                  runtimeActivities={runtimeActivities}
-                  skillNames={skillNames}
-                  onInterrupt={(agent) => {
-                    const parentThreadId = activeSnapshotThreadId ?? selectedThreadId;
-                    if (!parentThreadId) return;
-                    void window.codexh.interruptAgent({ threadId: parentThreadId, agent: agent.agentPath })
-                      .then(() => refreshSnapshot(parentThreadId));
-                  }}
-                  onSendInstruction={async (agent, instruction) => {
-                    const parentThreadId = activeSnapshotThreadId ?? selectedThreadId;
-                    if (!parentThreadId) throw new Error("当前主任务不可用。");
-                    await window.codexh.sendAgentMessage({ threadId: parentThreadId, agent: agent.agentPath, message: instruction });
-                    await refreshSnapshot(parentThreadId);
-                  }}
-                  onRetry={async (agent) => {
-                    const parentThreadId = activeSnapshotThreadId ?? selectedThreadId;
-                    if (!parentThreadId) throw new Error("当前主任务不可用。");
-                    await window.codexh.retryAgent({
-                      threadId: parentThreadId,
-                      agent: agent.agentPath,
-                      prompt: "请重新执行原任务，先复核失败原因，并返回新的结果摘要。"
-                    });
-                    await refreshSnapshot(parentThreadId);
-                  }}
-                  onTakeOver={(agent) => void openThread(agent.id, { scrollToLatest: true })}
-                />
-              ) : null}
-            </SubagentStatusDock>
-          ) : null}
         />
         {pendingInteractionsPresence.value ? (
           <div className="pending-strip" data-motion={pendingInteractionsPresence.phase}>
@@ -6648,16 +6657,24 @@ export function App() {
                 ) : null}
                 {shouldRenderRuntimeTailPanel ? (
                   <div className="runtime-tail">
-                    <RuntimeActivityPanel
-                      key={activeSnapshotThreadId ?? "runtime-activity"}
-                      label={taskProcessingLabel}
-                      entries={activeRuntimeActivity?.entries ?? []}
-                      startedAt={activeRuntimeActivity?.startedAt ?? null}
-                      phase={localRuntimeProgress?.phase ?? null}
-                      skillNames={skillNames}
-                      preferLabel={isWaitingForSubagents}
-                      hideCurrentStatus={false}
-                    />
+                    {isWaitingForSubagents && subagentPresentations.length > 0 ? null : (
+                      <RuntimeActivityPanel
+                        key={activeSnapshotThreadId ?? "runtime-activity"}
+                        label={taskProcessingLabel}
+                        entries={activeRuntimeActivity?.entries ?? []}
+                        startedAt={activeRuntimeActivity?.startedAt ?? null}
+                        phase={localRuntimeProgress?.phase ?? null}
+                        skillNames={skillNames}
+                        preferLabel={isWaitingForSubagents}
+                      />
+                    )}
+                    {subagentPresentations.length > 0 ? (
+                      <SubagentSwitchRow
+                        items={subagentPresentations}
+                        selectedId={selectedSubagentId}
+                        onSelect={selectSubagentEvent}
+                      />
+                    ) : null}
                   </div>
                 ) : null}
                 {activeAssistantDraft?.reasoning?.trim() ? (
@@ -6906,7 +6923,8 @@ export function App() {
                   />
                   {showReasoningEffortPicker ? (
                     <ReasoningEffortPicker
-                      value={config?.reasoningEffort ?? "medium"}
+                      value={isGptReasoningEffort(composerReasoningEffort) ? composerReasoningEffort : "medium"}
+                      efforts={composerReasoningEfforts}
                       onChange={(value) => void updateGlobalReasoningEffort(value)}
                       disabled={isUpdatingReasoningEffort || isActiveThreadExecuting || isPreparingRuntime}
                     />
@@ -6966,7 +6984,12 @@ export function App() {
       <RightWorkspacePanel
           hidden={!isRightWorkspaceOpen}
           activeTab={rightWorkspaceTab}
-          onTabChange={setRightWorkspaceTab}
+          onTabChange={(tab) => {
+            if (tab === "subagents") {
+              setSelectedSubagentId((current) => resolveSelectedSubagentId(workspaceSubagentPresentations, current));
+            }
+            setRightWorkspaceTab(tab);
+          }}
           expandedTab={rightWorkspaceExpandedTab}
           onExpandedTabChange={setRightWorkspaceExpandedTab}
           onHide={hideRightWorkspaceEvent}
@@ -6993,6 +7016,10 @@ export function App() {
           onLoadProjectDirectory={loadProjectDirectoryEvent}
           browserTabsByThread={browserTabsByThread}
           onCloseBrowserTab={closeBrowserTabEvent}
+          showSubagentTab={subagentPresentations.length > 0}
+          subagentItems={workspaceSubagentPresentations}
+          selectedSubagentId={selectedSubagentId}
+          onSelectSubagent={selectSubagentEvent}
           threadId={selectedThreadId}
         />
 

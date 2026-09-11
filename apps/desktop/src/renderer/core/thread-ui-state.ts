@@ -106,6 +106,66 @@ export function shouldRefreshSelectedSnapshotForRuntimeEvent(
   );
 }
 
+/** Child-status echoes must not abort an in-flight parent snapshot refresh. */
+export function shouldInvalidateSnapshotForThreadUpdate(payload: {
+  childThread?: ThreadRecord | null;
+}): boolean {
+  return !payload.childThread;
+}
+
+function isLiveSubagent(
+  child: Pick<ThreadRecord, "id" | "status">,
+  queuedSubagentIds: readonly string[]
+): boolean {
+  return child.status === "running"
+    || child.status === "waiting"
+    || child.status === "idle"
+    || queuedSubagentIds.includes(child.id);
+}
+
+export function upsertSubagentIntoSnapshot(
+  snapshot: RuntimeThreadSnapshot,
+  child: ThreadRecord
+): RuntimeThreadSnapshot {
+  const parentId = child.parentThreadId ?? child.rootThreadId;
+  if (snapshot.thread.id !== parentId && snapshot.thread.id !== child.rootThreadId) {
+    return snapshot;
+  }
+  const subagents = snapshot.subagents.some((item) => item.id === child.id)
+    ? snapshot.subagents.map((item) => item.id === child.id ? child : item)
+    : [...snapshot.subagents, child];
+  const isQueued = child.status === "idle";
+  const queuedSubagentIds = isQueued
+    ? Array.from(new Set([...snapshot.queuedSubagentIds, child.id]))
+    : snapshot.queuedSubagentIds.filter((id) => id !== child.id);
+  return { ...snapshot, subagents, queuedSubagentIds };
+}
+
+/** Keep spawned children visible when a stale/empty parent snapshot arrives. */
+export function mergeSnapshotSubagents(
+  known: Pick<RuntimeThreadSnapshot, "subagents" | "queuedSubagentIds">,
+  incoming: Pick<RuntimeThreadSnapshot, "subagents" | "queuedSubagentIds">
+): Pick<RuntimeThreadSnapshot, "subagents" | "queuedSubagentIds"> {
+  if (incoming.subagents.length === 0) {
+    const subagents = known.subagents.filter((item) => isLiveSubagent(item, known.queuedSubagentIds));
+    return {
+      subagents,
+      queuedSubagentIds: known.queuedSubagentIds.filter((id) => subagents.some((item) => item.id === id))
+    };
+  }
+  const incomingIds = new Set(incoming.subagents.map((item) => item.id));
+  const leftovers = known.subagents.filter((item) =>
+    !incomingIds.has(item.id) && isLiveSubagent(item, known.queuedSubagentIds)
+  );
+  return {
+    subagents: [...incoming.subagents, ...leftovers],
+    queuedSubagentIds: Array.from(new Set([
+      ...incoming.queuedSubagentIds,
+      ...leftovers.filter((item) => known.queuedSubagentIds.includes(item.id)).map((item) => item.id)
+    ]))
+  };
+}
+
 /** Knowledge content changes (imports or agent note writes) must refresh the knowledge base list. */
 export function shouldRefreshKnowledgeBasesForRuntimeEvent(eventType: string): boolean {
   return eventType === "knowledge.imported";

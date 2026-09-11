@@ -372,7 +372,10 @@ describe("model configuration storage", () => {
     expect(isConfigurableReasoningEffortModel({ ...base, id: "glm-5.3-flash" })).toBe(true);
     expect(isConfigurableReasoningEffortModel({ ...base, id: "grok-4.5" })).toBe(true);
     expect(isConfigurableReasoningEffortModel({ ...base, id: "claude-opus-4-5" })).toBe(false);
-    expect(resolveModelReasoningEffort({ ...base, id: "deepseek-flash", defaultReasoningEffort: "medium" }, "xhigh")).toBe("xhigh");
+    const deepseek = withGptReasoningCapabilities({ ...base, id: "deepseek-flash" });
+    expect(deepseek.supportedReasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(deepseek.defaultReasoningEffort).toBe("high");
+    expect(resolveModelReasoningEffort(deepseek, "max")).toBe("max");
     expect(withGptReasoningCapabilities({ ...base, id: "glm-5.3-flash" }).supportedReasoningEfforts).toEqual([
       "low", "medium", "high", "xhigh"
     ]);

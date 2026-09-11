@@ -1400,7 +1400,7 @@ function isDeepSeekModel(
 }
 
 function isDeepSeekThinkingModel(
-  model: Pick<ModelProfile, "id" | "displayName">,
+  model: Pick<ModelProfile, "id" | "displayName" | "role">,
   provider?: Pick<ProviderDefinition, "id" | "name" | "baseUrl" | "compatibilityProfile">
 ): boolean {
   const identity = [
@@ -1410,8 +1410,9 @@ function isDeepSeekThinkingModel(
     provider?.name ?? "",
     provider?.baseUrl ?? ""
   ].join(" ").toLowerCase();
-  return provider?.compatibilityProfile === "deepseek" &&
-    isDeepSeekModel(model, provider) && /reasoner|\br1\b|thinking|\bv4-(?:flash|pro)\b/.test(identity);
+  return isDeepSeekModel(model, provider) && (
+    model.role === "reasoning" || /reasoner|\br1\b|thinking|\bv4-(?:flash|pro)\b/.test(identity)
+  );
 }
 
 function originalToolName(nativeName: string, availableTools: ProviderTurnInput["availableTools"]): string | null {

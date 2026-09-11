@@ -58,10 +58,11 @@ import type {
   UserInputQuestion,
   UserInputPrompt
 } from "@shared-types";
-import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy } from "./subagent-assignment";
+import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy, selectRequestSubagents, selectVisibleSubagents } from "./subagent-assignment";
 import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, withGptReasoningCapabilities } from "@shared-types";
 import {
   AgentRuntimeService,
+  isSubagentWatchdogProgressEvent,
   isUnitTestCommand,
   parseGpaState,
   resolveSubagentWatchdogDecision,
@@ -937,7 +938,7 @@ export class DesktopBackend {
     // Keep every child from the current request in the UI snapshot. The root
     // task can still be waiting after a child completes, and filtering terminal
     // children here made the subagent status dock disappear at that moment.
-    const subagents = this.getCurrentRequestSubagents(thread);
+    const subagents = this.getVisibleSubagents(thread);
     const childApprovals = thread.parentThreadId
       ? []
       : subagents.flatMap((child) => this.#db.listApprovals(child.id).filter((approval) => approval.status === "pending"));
@@ -4365,7 +4366,7 @@ export class DesktopBackend {
     }
     const tree = this.#db.listAgentTree(parent.rootThreadId);
     const root = this.#db.getThread(parent.rootThreadId);
-    const latestRootUserMessage = this.#db.getLatestMessage(root.id, "user");
+    const latestRootUserMessage = this.#db.getLatestUserRequestMessage(root.id);
     const assignedPrompt = normalizeSubagentMcpPolicy(input.prompt, {
       projectMode: parent.mode === "project" && Boolean(parent.cwd),
       userExplicitlyForbidsMcp: isExplicitMcpProhibition(latestRootUserMessage?.content ?? "")
@@ -4379,13 +4380,15 @@ export class DesktopBackend {
     if (delegatedForCurrentRequest.length >= this.#config.multiAgent.maxSubagentsPerRoot) {
       throw new Error(`Maximum child-agent count (${this.#config.multiAgent.maxSubagentsPerRoot}) reached for this user request.`);
     }
-    const duplicate = delegatedForCurrentRequest.find((item) => isOverlappingSubagentAssignment(normalizedInput, item));
+    const duplicate = delegatedForCurrentRequest.find((item) =>
+      this.isSubagentActive(item) && isOverlappingSubagentAssignment(normalizedInput, item)
+    );
     if (duplicate) {
       return { threadId: duplicate.id, agentPath: duplicate.agentPath, status: duplicate.status, reused: true };
     }
 
-    const activeCount = tree.filter((item) =>
-      item.id !== parent.rootThreadId && this.isSubagentActive(item) && !this.#db.isSubagentPendingDispatch(item.id)
+    const activeCount = delegatedForCurrentRequest.filter((item) =>
+      this.isSubagentActive(item) && !this.#db.isSubagentPendingDispatch(item.id)
     ).length;
     const childCapacity = Math.max(1, this.#config.multiAgent.maxConcurrentSubagents - 1);
     const queued = activeCount >= childCapacity;
@@ -4448,7 +4451,8 @@ export class DesktopBackend {
       undefined,
       !queued
     );
-    await this.emitAgentTreeUpdated(parent.rootThreadId);
+    if (queued) this.schedulePendingSubagentDispatch(parent.rootThreadId);
+    await this.emitAgentTreeUpdated(parent.rootThreadId, thread);
     return { threadId: thread.id, agentPath: thread.agentPath, status: thread.status, queued };
   }
 
@@ -4614,7 +4618,7 @@ export class DesktopBackend {
   public async sendAgentMessage(parentThreadId: string, input: { agent: string; message: string }): Promise<SubagentResultEnvelope> {
     const child = this.resolveAgent(parentThreadId, input.agent);
     await this.sendMessage(child.id, input.message, [], undefined, false);
-    await this.emitAgentTreeUpdated(child.rootThreadId);
+    await this.emitAgentTreeUpdated(child.rootThreadId, child);
     return this.buildSubagentEnvelope(child);
   }
 
@@ -4626,7 +4630,7 @@ export class DesktopBackend {
 
   public async listSubagents(parentThreadId: string): Promise<ThreadRecord[]> {
     const parent = this.#db.getThread(parentThreadId);
-    return this.getCurrentRequestSubagents(parent);
+    return this.getVisibleSubagents(parent);
   }
 
   private async hasActiveSubagents(parentThreadId: string): Promise<boolean> {
@@ -4740,6 +4744,7 @@ export class DesktopBackend {
   private isSubagentActive(thread: ThreadRecord): boolean {
     return thread.status === "running"
       || thread.status === "waiting"
+      || this.#db.isSubagentPendingDispatch(thread.id)
       || this.#db.listQueuedMessages(thread.id).some((message) => message.status === "queued" || message.status === "dispatching");
   }
 
@@ -4774,27 +4779,30 @@ export class DesktopBackend {
   private async dispatchPendingSubagents(rootThreadId: string): Promise<void> {
     const childCapacity = Math.max(1, this.#config.multiAgent.maxConcurrentSubagents - 1);
     const tree = this.#db.listAgentTree(rootThreadId);
-    let activeCount = tree.filter((item) =>
-      item.id !== rootThreadId && this.isSubagentActive(item) && !this.#db.isSubagentPendingDispatch(item.id)
+    const root = this.#db.getThread(rootThreadId);
+    const current = this.getCurrentRequestSubagents(root, tree);
+    let activeCount = current.filter((item) =>
+      this.isSubagentActive(item) && !this.#db.isSubagentPendingDispatch(item.id)
     ).length;
     for (const pending of this.#db.listSubagentPendingDispatches(rootThreadId)) {
       if (activeCount >= childCapacity) break;
       this.#db.clearSubagentPendingDispatch(pending.threadId);
       this.#runtime.wakeQueuedMessages(pending.threadId);
       activeCount += 1;
-      await this.emitAgentTreeUpdated(rootThreadId);
+      await this.emitAgentTreeUpdated(rootThreadId, this.#db.getThread(pending.threadId));
     }
   }
 
   private getCurrentRequestSubagents(parent: ThreadRecord, tree = this.#db.listAgentTree(parent.rootThreadId)): ThreadRecord[] {
-    const latestRootUserMessage = this.#db.getLatestMessage(parent.rootThreadId, "user");
+    const latestRootUserMessage = this.#db.getLatestUserRequestMessage(parent.rootThreadId);
     const requestStartedAt = latestRootUserMessage ? Date.parse(latestRootUserMessage.createdAt) : Number.NEGATIVE_INFINITY;
+    return selectRequestSubagents(parent, tree, requestStartedAt);
+  }
 
-    return tree.filter((item) =>
-      item.id !== parent.id
-      && item.agentPath.startsWith(`${parent.agentPath}/`)
-      && Date.parse(item.createdAt) >= requestStartedAt
-    );
+  private getVisibleSubagents(parent: ThreadRecord, tree = this.#db.listAgentTree(parent.rootThreadId)): ThreadRecord[] {
+    const latestRootUserMessage = this.#db.getLatestUserRequestMessage(parent.rootThreadId);
+    const requestStartedAt = latestRootUserMessage ? Date.parse(latestRootUserMessage.createdAt) : Number.NEGATIVE_INFINITY;
+    return selectVisibleSubagents(parent, tree, requestStartedAt, (item) => this.isSubagentActive(item));
   }
 
   public async interruptAgent(parentThreadId: string, agent: string): Promise<SubagentResultEnvelope> {
@@ -4803,12 +4811,12 @@ export class DesktopBackend {
     return this.buildSubagentEnvelope(this.#db.getThread(child.id));
   }
 
-  private async emitAgentTreeUpdated(rootThreadId: string): Promise<void> {
+  private async emitAgentTreeUpdated(rootThreadId: string, childThread?: ThreadRecord): Promise<void> {
     const root = this.#db.getThread(rootThreadId);
     await this.emit({
       type: "thread.updated",
       threadId: root.id,
-      payload: { thread: root },
+      payload: childThread ? { thread: root, childThread } : { thread: root },
       createdAt: new Date().toISOString()
     });
   }
@@ -5007,6 +5015,7 @@ export class DesktopBackend {
       phase: "starting" as const
     };
     if (previous.interruptionReason && event.type !== "agent.watchdog") return;
+    if (!isSubagentWatchdogProgressEvent(event.type)) return;
 
     const next: SubagentProgress = { ...previous };
     const toolName = typeof event.payload.toolName === "string" ? event.payload.toolName : null;
@@ -5043,6 +5052,9 @@ export class DesktopBackend {
     } else if (event.type === "agent.retrying") {
       next.lastProgressAt = now;
       next.phase = "retrying";
+    } else if (event.type === "assistant.draft.updated" || event.type === "agent.tool_call_preparing") {
+      next.lastProgressAt = now;
+      if (!next.currentTool) next.phase = "awaiting_model";
     } else if (event.type === "agent.watchdog") {
       next.lastProgressAt = now;
       next.interruptionReason = typeof event.payload.reason === "string"

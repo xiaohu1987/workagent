@@ -15,6 +15,9 @@ import {
   shouldPreservePreparingRuntime,
   shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
+  shouldInvalidateSnapshotForThreadUpdate,
+  upsertSubagentIntoSnapshot,
+  mergeSnapshotSubagents,
   shouldShowTaskProcessing
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
 import {
@@ -193,6 +196,77 @@ describe("thread UI state helpers", () => {
       "parent-thread"
     )).toBe(true);
     expect(shouldRefreshSelectedSnapshotForRuntimeEvent("parent-thread")).toBe(true);
+  });
+
+  it("does not abort a parent snapshot refresh for child-status echoes", () => {
+    expect(shouldInvalidateSnapshotForThreadUpdate({})).toBe(true);
+    expect(shouldInvalidateSnapshotForThreadUpdate({ childThread: null })).toBe(true);
+    expect(shouldInvalidateSnapshotForThreadUpdate({
+      childThread: makeThread({ id: "child-1", parentThreadId: "parent-thread" })
+    })).toBe(false);
+  });
+
+  it("inserts spawned children into the parent snapshot immediately", () => {
+    const parent = makeThread({ id: "parent-thread" });
+    const child = makeThread({
+      id: "child-1",
+      parentThreadId: parent.id,
+      rootThreadId: parent.id,
+      status: "running",
+      agentPath: "/root/api"
+    });
+    const queued = makeThread({
+      id: "child-2",
+      parentThreadId: parent.id,
+      rootThreadId: parent.id,
+      status: "idle",
+      agentPath: "/root/quality"
+    });
+    const snapshot = createOptimisticThreadSnapshot(parent);
+    const withRunning = upsertSubagentIntoSnapshot(snapshot, child);
+    const withQueued = upsertSubagentIntoSnapshot(withRunning, queued);
+
+    expect(withQueued.subagents.map((item) => item.id)).toEqual(["child-1", "child-2"]);
+    expect(withQueued.queuedSubagentIds).toEqual(["child-2"]);
+    expect(upsertSubagentIntoSnapshot(withQueued, { ...queued, status: "running" }).queuedSubagentIds).toEqual([]);
+  });
+
+  it("keeps live children when a stale parent snapshot has not listed them yet", () => {
+    const parent = makeThread({ id: "parent-thread", status: "waiting" });
+    const running = makeThread({
+      id: "child-1",
+      parentThreadId: parent.id,
+      rootThreadId: parent.id,
+      status: "running",
+      agentPath: "/root/api"
+    });
+    const queued = makeThread({
+      id: "child-2",
+      parentThreadId: parent.id,
+      rootThreadId: parent.id,
+      status: "idle",
+      agentPath: "/root/quality"
+    });
+    const completed = makeThread({
+      id: "child-old",
+      parentThreadId: parent.id,
+      rootThreadId: parent.id,
+      status: "completed",
+      agentPath: "/root/docs"
+    });
+    const known = {
+      subagents: [running, queued, completed],
+      queuedSubagentIds: [queued.id]
+    };
+
+    expect(mergeSnapshotSubagents(known, { subagents: [], queuedSubagentIds: [] })).toEqual({
+      subagents: [running, queued],
+      queuedSubagentIds: [queued.id]
+    });
+    expect(mergeSnapshotSubagents(known, {
+      subagents: [queued],
+      queuedSubagentIds: [queued.id]
+    }).subagents.map((item) => item.id)).toEqual(["child-2", "child-1"]);
   });
 
   it("refreshes the knowledge base list when knowledge content changes", () => {
@@ -1145,6 +1219,31 @@ describe("tool timeline grouping", () => {
     ]);
 
     expect(visible.map((message) => message.id)).toEqual(["result"]);
+  });
+
+  it("keeps published child-agent summaries in the parent process conversation", () => {
+    const visible = filterTranscriptMessages([
+      {
+        id: "legacy-subagent-summary",
+        threadId: "thread-1",
+        turnRunId: "turn-1",
+        role: "assistant",
+        content: "子智能体 security review 已完成\n\n鉴权边界缺少租户校验。",
+        metadataJson: JSON.stringify({ displayKind: "subagent-summary", childThreadId: "child-1" }),
+        createdAt: "2026-07-15T00:00:01.000Z"
+      },
+      {
+        id: "result",
+        threadId: "thread-1",
+        turnRunId: "turn-1",
+        role: "assistant",
+        content: "主任务已经完成。",
+        metadataJson: null,
+        createdAt: "2026-07-15T00:00:02.000Z"
+      }
+    ]);
+
+    expect(visible.map((message) => message.id)).toEqual(["legacy-subagent-summary", "result"]);
   });
 
   it("keeps a context compaction notice in chronological transcript order", () => {

@@ -3,7 +3,10 @@ import {
   extractDelegatedFileScopes,
   isExplicitMcpProhibition,
   isOverlappingSubagentAssignment,
-  normalizeSubagentMcpPolicy
+  isRootUserRequestMessage,
+  normalizeSubagentMcpPolicy,
+  selectRequestSubagents,
+  selectVisibleSubagents
 } from "../apps/desktop/src/main/subagent-assignment";
 
 describe("subagent assignment overlap detection", () => {
@@ -18,6 +21,59 @@ describe("subagent assignment overlap detection", () => {
     const existingPrompt = "Inspect apps/desktop/src/main/app.ts and packages/agent-runtime/src/index.ts.";
     const requestedPrompt = "Review packages/agent-runtime/src/index.ts together with apps/desktop/src/main/app.ts.";
     expect(isOverlappingSubagentAssignment({ role: "reviewer", prompt: requestedPrompt }, { agentRole: "researcher", lastTaskMessage: existingPrompt })).toBe(true);
+  });
+});
+
+describe("subagent request visibility", () => {
+  it("ignores guidance and internal root messages when identifying the user request", () => {
+    expect(isRootUserRequestMessage({ role: "user", content: "分析这个项目", metadataJson: null })).toBe(true);
+    expect(isRootUserRequestMessage({ role: "user", content: "先看安全", metadataJson: JSON.stringify({ displayKind: "guidance" }) })).toBe(false);
+    expect(isRootUserRequestMessage({ role: "user", content: "[internal:gpa-confirm] continue", metadataJson: null })).toBe(false);
+    expect(isRootUserRequestMessage({ role: "assistant", content: "分析这个项目", metadataJson: null })).toBe(false);
+  });
+
+  it("keeps the current request children and still surfaces older active children", () => {
+    const parent = { id: "root", agentPath: "/root" };
+    const current = {
+      id: "child-new",
+      agentPath: "/root/api",
+      createdAt: "2026-09-11T08:00:10.000Z"
+    } as const;
+    const staleActive = {
+      id: "child-old",
+      agentPath: "/root/security",
+      createdAt: "2026-09-11T07:00:00.000Z"
+    } as const;
+    const staleDone = {
+      id: "child-done",
+      agentPath: "/root/docs",
+      createdAt: "2026-09-11T07:00:00.000Z"
+    } as const;
+    const tree = [
+      { id: "root", agentPath: "/root", createdAt: "2026-09-11T07:00:00.000Z" },
+      current,
+      staleActive,
+      staleDone
+    ] as Array<{ id: string; agentPath: string; createdAt: string }>;
+
+    expect(selectRequestSubagents(parent, tree as never, Date.parse("2026-09-11T08:00:00.000Z")).map((item) => item.id)).toEqual(["child-new"]);
+    expect(selectVisibleSubagents(
+      parent,
+      tree as never,
+      Date.parse("2026-09-11T08:00:00.000Z"),
+      (item) => item.id === "child-old" || item.id === "child-new"
+    ).map((item) => item.id)).toEqual(["child-new", "child-old"]);
+  });
+
+  it("includes children linked by parentThreadId even when agentPath is not nested", () => {
+    const parent = { id: "root", agentPath: "/root" };
+    const child = {
+      id: "child-1",
+      parentThreadId: "root",
+      agentPath: "/orphan",
+      createdAt: "2026-09-11T08:00:10.000Z"
+    };
+    expect(selectRequestSubagents(parent, [child] as never, Date.parse("2026-09-11T08:00:00.000Z")).map((item) => item.id)).toEqual(["child-1"]);
   });
 });
 

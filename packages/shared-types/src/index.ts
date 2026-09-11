@@ -45,12 +45,15 @@ export type InteractionResolutionSource = "user" | "timeout" | "interrupted";
 export type SkillScope = "repo" | "user" | "system" | "admin";
 export type KnowledgeScope = "global" | "project" | "imported";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type GptReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type GptReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export const GPT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const satisfies readonly GptReasoningEffort[];
+export const DEEPSEEK_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const satisfies readonly GptReasoningEffort[];
 
 export function isGptReasoningEffort(value: unknown): value is GptReasoningEffort {
-  return typeof value === "string" && (GPT_REASONING_EFFORTS as readonly string[]).includes(value);
+  return typeof value === "string" && (
+    (GPT_REASONING_EFFORTS as readonly string[]).includes(value) || value === "max"
+  );
 }
 
 export interface QuickNoteRecord {
@@ -932,20 +935,29 @@ export function isConfigurableReasoningEffortModel(
 
 export function withGptReasoningCapabilities<T extends ModelProfile>(model: T): T {
   if (!isConfigurableReasoningEffortModel(model)) return model;
+  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  const isDeepSeek = /\bdeepseek\b/.test(identity);
+  const supportedReasoningEfforts: readonly GptReasoningEffort[] = isDeepSeek
+    ? DEEPSEEK_REASONING_EFFORTS
+    : GPT_REASONING_EFFORTS;
   return {
     ...model,
-    supportedReasoningEfforts: [...GPT_REASONING_EFFORTS],
-    defaultReasoningEffort: isGptReasoningEffort(model.defaultReasoningEffort)
+    supportedReasoningEfforts: [...supportedReasoningEfforts],
+    defaultReasoningEffort: supportedReasoningEfforts.includes(model.defaultReasoningEffort as GptReasoningEffort)
       ? model.defaultReasoningEffort
-      : "medium"
+      : isDeepSeek ? "high" : "medium"
   };
 }
 
 export function resolveModelReasoningEffort(
-  model: Pick<ModelProfile, "id" | "displayName" | "role" | "defaultReasoningEffort">,
+  model: Pick<ModelProfile, "id" | "displayName" | "role" | "supportedReasoningEfforts" | "defaultReasoningEffort">,
   globalGptEffort: GptReasoningEffort
 ): ReasoningEffort | undefined {
-  return isConfigurableReasoningEffortModel(model) ? globalGptEffort : model.defaultReasoningEffort;
+  if (!isConfigurableReasoningEffortModel(model)) return model.defaultReasoningEffort;
+  const supported = model.supportedReasoningEfforts;
+  return supported?.length && !supported.includes(globalGptEffort)
+    ? model.defaultReasoningEffort ?? supported[0]
+    : globalGptEffort;
 }
 
 export type BrowserOpenMode = "in_app" | "external_default";

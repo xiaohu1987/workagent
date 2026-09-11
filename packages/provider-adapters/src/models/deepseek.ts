@@ -17,10 +17,10 @@ function isDeepSeekV4Model(identity: string): boolean {
   return DEEPSEEK_V4_PATTERN.test(identity);
 }
 
-function mapDeepSeekReasoningEffort(value: unknown): "low" | "high" | "max" | undefined {
+function mapDeepSeekReasoningEffort(value: unknown): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
   if (value === "none") return undefined;
   if (value === "minimal" || value === "low") return "low";
-  if (value === "medium" || value === "high" || value === "xhigh") return "high";
+  if (value === "medium" || value === "high" || value === "xhigh") return value;
   if (value === "max") return "max";
   return undefined;
 }
@@ -101,8 +101,13 @@ export const deepseekCompat = defineCompat(gptCompat, {
       ctx.input.provider.baseUrl ?? ""
     ].join(" ").toLowerCase();
     const isV4 = isDeepSeekV4Model(identity);
-    const usesNativeProtocol = ctx.input.provider.compatibilityProfile === "deepseek";
-    const reasoningEffort = ctx.input.reasoningEffort;
+    const modelIdentity = `${ctx.model.id} ${ctx.model.displayName ?? ""}`.toLowerCase();
+    // Custom OpenAI-compatible gateways commonly keep the provider profile at
+    // `standard` even when the selected model is DeepSeek. Model identity is
+    // sufficient to opt into DeepSeek's documented thinking body parameters.
+    const usesNativeProtocol = ctx.input.provider.compatibilityProfile === "deepseek" ||
+      /\bdeepseek\b/.test(modelIdentity);
+    const reasoningEffort = ctx.input.reasoningEffort ?? ctx.model.defaultReasoningEffort ?? "high";
     // V4 is a thinking model even when the catalog display name does not
     // include the word "thinking" (for example, deepseek-v4-flash-0731).
     // Keep enabled V4 requests in the same sanitization branch as
@@ -119,7 +124,9 @@ export const deepseekCompat = defineCompat(gptCompat, {
     const useStrictJsonRecovery = usesNativeProtocol && Boolean(
       ctx.input.forceTextToolProtocol && ctx.model.supportsJsonOutput && isV4
     );
-    const isNativeReasoningModel = usesNativeProtocol && (isV4 || DEEPSEEK_REASONER_PATTERN.test(identity));
+    const isNativeReasoningModel = usesNativeProtocol && (
+      ctx.model.role === "reasoning" || isV4 || DEEPSEEK_REASONER_PATTERN.test(identity)
+    );
     const isThinkingRequest = isNativeReasoningModel && !useStrictJsonRecovery && reasoningEffort !== "none";
 
     // 1. Reasoning models: strip fields the thinking API rejects (HTTP 400).
@@ -148,9 +155,9 @@ export const deepseekCompat = defineCompat(gptCompat, {
       next = rest;
     }
 
-    // DeepSeek V4 defaults to thinking mode, but compatible gateways do not
-    // always apply that default consistently. Make the mode explicit and map
-    // the app's reasoning levels to the V4 API's low/high/max values.
+    // DeepSeek-compatible gateways do not apply thinking defaults consistently.
+    // Make the mode explicit and pass low/medium/high/xhigh/max through.
+    // Legacy `minimal` is normalized to `low`.
     if (isNativeReasoningModel) {
       next = {
         ...next,

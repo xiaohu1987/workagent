@@ -171,9 +171,26 @@ export const MODEL_DECISION_TIMEOUT_MS = 120_000;
 export const SUBAGENT_MODEL_DECISION_TIMEOUT_MS = 120_000;
 export const SUBAGENT_INSPECTION_DELAY_MS = 60_000;
 export const SUBAGENT_IDLE_TIMEOUT_MS = 120_000;
+/** Silent model waits can outlast a tool-idle window; keep generating children alive. */
+export const SUBAGENT_AWAITING_MODEL_IDLE_TIMEOUT_MS = 300_000;
 export const SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS = 600_000;
 export const SUBAGENT_SHELL_TEST_REINSPECTION_MS = 300_000;
 export const SUBAGENT_MAX_RUNTIME_MS = 1_800_000;
+
+export const SUBAGENT_WATCHDOG_PROGRESS_EVENT_TYPES = [
+  "tool.started",
+  "tool.completed",
+  "terminal.output",
+  "agent.awaiting_model",
+  "agent.retrying",
+  "agent.watchdog",
+  "assistant.draft.updated",
+  "agent.tool_call_preparing"
+] as const;
+
+export function isSubagentWatchdogProgressEvent(type: string): boolean {
+  return (SUBAGENT_WATCHDOG_PROGRESS_EVENT_TYPES as readonly string[]).includes(type);
+}
 
 export type SubagentWatchdogDecision = {
   action: "continue" | "interrupt";
@@ -202,8 +219,11 @@ export function resolveSubagentWatchdogDecision(input: {
   const lastProgressAtMs = Number.isFinite(progressAtMs) ? progressAtMs : safeStartedAtMs;
   const runtimeMs = Math.max(0, input.nowMs - safeStartedAtMs);
   const idleForMs = Math.max(0, input.nowMs - lastProgressAtMs);
+  const idleTimeoutMs = input.baseState === "awaiting_model" && !input.currentTool
+    ? SUBAGENT_AWAITING_MODEL_IDLE_TIMEOUT_MS
+    : SUBAGENT_IDLE_TIMEOUT_MS;
   const absoluteDeadlineMs = safeStartedAtMs + SUBAGENT_MAX_RUNTIME_MS;
-  const idleDeadlineMs = lastProgressAtMs + SUBAGENT_IDLE_TIMEOUT_MS;
+  const idleDeadlineMs = lastProgressAtMs + idleTimeoutMs;
 
   if (!input.active) {
     return { action: "continue", state: "completed", nextInspectionAt: null, automaticInterruptAt: null };
@@ -225,13 +245,14 @@ export function resolveSubagentWatchdogDecision(input: {
       automaticInterruptAt: new Date(Math.min(idleDeadlineMs, absoluteDeadlineMs)).toISOString()
     };
   }
-  if (idleForMs >= SUBAGENT_IDLE_TIMEOUT_MS) {
+  if (idleForMs >= idleTimeoutMs) {
+    const idleMinutes = Math.max(1, Math.round(idleTimeoutMs / 60_000));
     return {
       action: "interrupt",
       state: "stalled",
       nextInspectionAt: null,
       automaticInterruptAt: new Date(Math.min(idleDeadlineMs, absoluteDeadlineMs)).toISOString(),
-      reason: "Subagent made no tool, output, or process-state progress for 2 minutes."
+      reason: `Subagent made no tool, output, or process-state progress for ${idleMinutes} minutes.`
     };
   }
 
@@ -369,6 +390,15 @@ export function shouldRevealNonStreamingAssistantDraft(input: {
     input.endTurn &&
     Boolean(input.content) &&
     !isPatchPayload(input.content);
+}
+
+export function resolveReturnedReasoningCheckpoint(
+  returnedReasoning: string | undefined,
+  streamedReasoning: string
+): string | undefined {
+  return returnedReasoning?.trim() && returnedReasoning !== streamedReasoning
+    ? returnedReasoning
+    : undefined;
 }
 
 export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
@@ -1732,6 +1762,7 @@ class ThreadSessionRuntime {
     // not let a transient gateway error permanently change later turns.
     this.#useFunctionCallCompatibilityTranscript = false;
     const thread = await this.services.persistence.getThread(this.threadId);
+    const isChildAgent = Boolean(thread.parentThreadId);
     const turnOutputDir = await this.services.getThreadOutputDir(this.threadId);
     const storedTurnContextMarkdown = await readLatestTurnContextMarkdown(turnOutputDir);
     const priorMessagesBeforeTurn = await this.services.persistence.listMessages(this.threadId);
@@ -2852,6 +2883,26 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
         };
+        const checkpointDraftReasoning = async (reasoning: string) => {
+          if (!reasoning || draftSettled || suppressStreamingForActiveSubagents) return;
+          streamedReasoningContent = reasoning;
+          lastPublishedDraftReasoning = reasoning;
+          draftReasoningDeltaSequence += 1;
+          await this.services.emit({
+            type: "assistant.draft.updated",
+            threadId: this.threadId,
+            payload: {
+              turnRunId: turn.id,
+              draftId,
+              sequence,
+              phase: "generating",
+              reasoning,
+              reasoningDeltaSequence: draftReasoningDeltaSequence,
+              startedAt: draftStartedAt
+            },
+            createdAt: new Date().toISOString()
+          });
+        };
         const retryDraft = async (mode: AssistantDraftRetryMode = "retain") => {
           const retained = resolveRetainedAssistantDraft({
             mode,
@@ -3636,6 +3687,13 @@ class ThreadSessionRuntime {
           throw new Error("Turn interrupted.");
         }
 
+        const returnedReasoningCheckpoint = resolveReturnedReasoningCheckpoint(
+          decision.reasoningSummary,
+          streamedReasoningContent
+        );
+        if (returnedReasoningCheckpoint) {
+          await checkpointDraftReasoning(returnedReasoningCheckpoint);
+        }
         const returnedVisibleContent = resolveVisibleAssistantContent(
           decision.assistantMessage,
           streamedVisibleContent.trim() ? streamedVisibleContent : retainedVisibleDraft
@@ -4312,15 +4370,18 @@ class ThreadSessionRuntime {
           mode: modePolicy.mode,
           request: effectiveRequest,
           requestedDeliverableExtensions,
-          enabled: auditSettings.enabled
+          enabled: auditSettings.enabled,
+          isChildAgent
         });
-        const requiresGoalCompletion =
+        const requiresGoalCompletion = !isChildAgent && (
           modePolicy.mode === "project" ||
           isProjectFileMutationRequest(effectiveRequest) ||
-          requestedDeliverableExtensions.length > 0;
+          requestedDeliverableExtensions.length > 0
+        );
           let bypassStandardCompletionAudit = !auditRequired || resolveModelCompat(model, provider)
           .shouldBypassStandardCompletionAudit(model);
         if (
+          !isChildAgent &&
           this.#gpa.stage === "off" &&
           decision.toolCalls.length === 0 &&
           decision.endTurn
@@ -4896,6 +4957,7 @@ class ThreadSessionRuntime {
         }
 
         if (
+          !isChildAgent &&
           this.#gpa.stage === "act" &&
           decision.toolCalls.length === 0 &&
           decision.endTurn
@@ -5049,6 +5111,7 @@ class ThreadSessionRuntime {
           : [];
         let effectivePlanTasks = parsedPlanTasks;
         if (
+          !isChildAgent &&
           (this.#gpa.stage === "goal" || this.#gpa.stage === "plan") &&
           decision.toolCalls.length === 0 &&
           decision.endTurn &&
@@ -5137,8 +5200,8 @@ class ThreadSessionRuntime {
           endTurn: decision.endTurn,
           goalCompleted: decision.goalCompleted,
           requiresGoalCompletion,
-          gpaStage: this.#gpa.stage,
-          gpaActCompletedSuccessfully
+          gpaStage: isChildAgent ? "off" : this.#gpa.stage,
+          gpaActCompletedSuccessfully: isChildAgent || gpaActCompletedSuccessfully
         });
 
         if (terminalDisposition === "wait_for_subagents") {
@@ -8860,7 +8923,9 @@ export function shouldRunStandardCompletionAudit(input: {
   request: string;
   requestedDeliverableExtensions: readonly string[];
   enabled?: boolean;
+  isChildAgent?: boolean;
 }): boolean {
+  if (input.isChildAgent) return false;
   if (normalizeCompletionAuditEnabled(input.enabled) === false) return false;
   if (input.mode === "project") return true;
   // In ordinary chat, a wording match for a mutation verb is not sufficient

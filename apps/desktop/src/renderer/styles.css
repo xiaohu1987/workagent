@@ -9649,182 +9649,6 @@ input[type="radio"]:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.subagent-status-dock {
-  position: relative;
-  z-index: 4;
-  display: flex;
-  flex: 0 0 auto;
-  width: auto;
-  min-height: 0;
-}
-
-.subagent-status-dock-toggle {
-  position: relative;
-}
-
-.subagent-status-dock-toggle:hover,
-.subagent-status-dock-toggle:focus-visible,
-.subagent-status-dock.is-expanded .subagent-status-dock-toggle {
-  color: inherit;
-  outline: none;
-}
-
-.subagent-status-dock-icon { display: inline-grid; flex: 0 0 auto; place-items: center; }
-.subagent-status-dock-count {
-  position: absolute;
-  top: -5px;
-  right: -5px;
-  display: grid;
-  min-width: 16px;
-  height: 16px;
-  place-items: center;
-  padding: 0 3px;
-  border: 2px solid #12161b;
-  border-radius: 8px;
-  color: #f2f7fb;
-  background: #4f91bf;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  line-height: 1;
-}
-
-.subagent-status-panel {
-  position: absolute;
-  top: 40px;
-  right: 0;
-  z-index: 1;
-  width: min(820px, calc(100vw - 52px));
-  max-height: min(66vh, 620px);
-  overflow: auto;
-  border: 1px solid rgba(111, 148, 183, 0.3);
-  border-radius: 6px;
-  background: rgba(13, 16, 20, 0.985);
-  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
-  overscroll-behavior: contain;
-}
-
-.subagent-status-panel-empty {
-  display: grid;
-  min-height: 72px;
-  place-items: center;
-  color: #84909d;
-  font-size: 11px;
-}
-
-.subagent-status-panel .subagent-task-group {
-  width: 100%;
-  margin: 0;
-  border-block: 0;
-  background: transparent;
-}
-
-.subagent-task-group {
-  width: min(820px, calc(100% - 32px));
-  margin: 18px auto;
-  overflow: hidden;
-  border-block: 1px solid rgba(255, 255, 255, 0.09);
-  color: #c7d0da;
-  background: rgba(13, 16, 20, 0.72);
-}
-
-.subagent-task-group-header {
-  display: flex;
-  min-height: 46px;
-  align-items: center;
-  padding: 8px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-  background: rgba(255, 255, 255, 0.018);
-}
-
-.subagent-task-group-header > div { display: grid; min-width: 0; gap: 2px; }
-.subagent-task-group-kicker { color: #788594; font-size: 10px; }
-.subagent-task-group-header strong { color: #e2e8ef; font-size: 12px; font-weight: 600; }
-.subagent-task-list { display: grid; }
-
-.subagent-task {
-  --subagent-state-color: #72b3df;
-  min-width: 0;
-  border-left: 2px solid var(--subagent-state-color);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.065);
-  background: rgba(255, 255, 255, 0.012);
-}
-
-.subagent-task:last-child { border-bottom: 0; }
-.subagent-task.queued { --subagent-state-color: #d8b56b; }
-.subagent-task.waiting_input { --subagent-state-color: #e0a75d; }
-.subagent-task.completed { --subagent-state-color: #65bd88; }
-.subagent-task.failed { --subagent-state-color: #e27878; }
-.subagent-task.cancelled { --subagent-state-color: #929aa5; }
-.subagent-task[open] { background: rgba(255, 255, 255, 0.025); }
-
-.subagent-task > summary {
-  display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) max-content max-content 16px;
-  min-height: 54px;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 11px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.subagent-task > summary::-webkit-details-marker { display: none; }
-.subagent-task > summary:hover { background: rgba(255, 255, 255, 0.025); }
-.subagent-task > summary:focus-visible { outline: 1px solid rgba(115, 175, 224, 0.55); outline-offset: -1px; }
-
-.subagent-task-status {
-  display: inline-flex;
-  width: fit-content;
-  align-items: center;
-  gap: 5px;
-  color: var(--subagent-state-color);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.subagent-task-status > span { display: inline-grid; width: 15px; height: 15px; place-items: center; }
-.subagent-task-status svg { width: 14px; height: 14px; }
-.subagent-task-summary-copy { display: grid; min-width: 0; gap: 3px; }
-.subagent-task-summary-copy strong { overflow: hidden; color: #e0e6ed; font-size: 12px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-task-summary-copy > span { overflow: hidden; color: #8f9aa7; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-task.failed .subagent-task-summary-copy > span { color: #d99a9a; }
-.subagent-task-freshness { color: #78838f; font-size: 10px; white-space: nowrap; }
-.subagent-task-freshness .is-idle { color: #d1a563; }
-.subagent-task-view-label { color: #82a9c8; font-size: 10px; white-space: nowrap; }
-.subagent-task-quick-retry {
-  display: inline-flex;
-  min-height: 26px;
-  align-items: center;
-  gap: 4px;
-  padding: 0 7px;
-  border: 1px solid rgba(226, 120, 120, 0.28);
-  border-radius: 4px;
-  color: #dfa0a0;
-  background: rgba(226, 120, 120, 0.055);
-  cursor: pointer;
-  font-size: 10px;
-}
-.subagent-task-quick-retry:hover { border-color: rgba(226, 120, 120, 0.52); color: #f3c1c1; }
-.subagent-task-quick-retry:disabled { cursor: not-allowed; opacity: 0.45; }
-.subagent-task-quick-retry svg { width: 12px; height: 12px; }
-.subagent-task-chevron { display: inline-grid; color: #74808d; transition: transform 160ms ease; }
-.subagent-task-chevron svg { width: 14px; height: 14px; }
-.subagent-task[open] .subagent-task-chevron { transform: rotate(90deg); }
-
-.subagent-task-detail {
-  display: grid;
-  gap: 13px;
-  padding: 11px 14px 13px 101px;
-  border-top: 1px solid rgba(255, 255, 255, 0.055);
-}
-
-.subagent-task-section { display: grid; min-width: 0; gap: 6px; }
-.subagent-task-section-head { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; }
-.subagent-task-section-label { color: #82909f; font-size: 10px; font-weight: 650; }
-.subagent-task-section p { margin: 0; color: #bdc6d0; font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
-.subagent-task-metric { color: #8ea5b8; font-family: var(--font-mono); font-size: 10px; }
-
 .subagent-phase-track { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 5px; }
 .subagent-phase { display: inline-flex; align-items: center; gap: 5px; color: #76818d; font-size: 11px; }
 .subagent-phase i { display: inline-grid; width: 14px; height: 14px; place-items: center; border: 1px solid currentColor; border-radius: 50%; font-style: normal; font-size: 8px; }
@@ -9833,84 +9657,6 @@ input[type="radio"]:focus-visible {
 .subagent-phase.current { color: #75b8e6; }
 .subagent-phase.failed { color: #dd7e7e; }
 .subagent-phase.cancelled { color: #969faa; }
-
-.subagent-task-output {
-  padding-left: 9px;
-  border-left: 2px solid var(--subagent-state-color);
-  color: #d1d8e0 !important;
-}
-
-.subagent-task-history { display: grid; gap: 4px; }
-.subagent-task-history span { overflow: hidden; color: #99a4b0; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-task-history span::before { margin-right: 7px; color: #5f6c79; content: "·"; }
-
-.subagent-task-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 7px; color: #77838f; font-size: 10px; }
-.subagent-task-meta > time { font-family: var(--font-mono); }
-.subagent-task-identity { position: relative; }
-.subagent-task-identity > summary { color: #82a9c8; cursor: pointer; list-style: none; }
-.subagent-task-identity > summary::-webkit-details-marker { display: none; }
-.subagent-task-identity[open] { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
-.subagent-task-identity code { color: #75818d; font-family: var(--font-mono); font-size: 10px; overflow-wrap: anywhere; }
-
-.subagent-instruction-form {
-  display: grid;
-  gap: 7px;
-  padding: 9px;
-  border: 1px solid rgba(115, 175, 224, 0.22);
-  border-radius: 5px;
-  background: rgba(7, 10, 13, 0.46);
-}
-
-.subagent-instruction-form textarea {
-  width: 100%;
-  min-height: 66px;
-  resize: vertical;
-  border: 0;
-  outline: 0;
-  color: #d8dfe7;
-  background: transparent;
-  font: inherit;
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.subagent-instruction-form > div,
-.subagent-task-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.subagent-instruction-form button,
-.subagent-task-actions button {
-  display: inline-flex;
-  min-height: 28px;
-  align-items: center;
-  gap: 5px;
-  padding: 0 9px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  color: #b8c3ce;
-  background: rgba(255, 255, 255, 0.035);
-  cursor: pointer;
-  font-size: 10px;
-}
-
-.subagent-instruction-form button:hover,
-.subagent-task-actions button:hover { border-color: rgba(115, 175, 224, 0.38); color: #e1e8ef; background: rgba(115, 175, 224, 0.08); }
-.subagent-task-actions button.danger { color: #dc9292; }
-.subagent-task-actions button.danger:hover { border-color: rgba(226, 120, 120, 0.38); background: rgba(226, 120, 120, 0.08); }
-.subagent-task-actions button:disabled,
-.subagent-instruction-form button:disabled { cursor: not-allowed; opacity: 0.45; }
-.subagent-task-actions svg { width: 13px; height: 13px; }
-.subagent-action-error { padding: 7px 9px; border-left: 2px solid #e27878; color: #e3aaaa; background: rgba(226, 120, 120, 0.07); font-size: 10px; }
-
-@media (max-width: 760px) {
-  .subagent-status-panel { width: calc(100vw - 20px); max-height: 68vh; }
-  .subagent-task-group { width: calc(100% - 20px); }
-  .subagent-status-panel .subagent-task-group { width: 100%; }
-  .subagent-task > summary { grid-template-columns: 82px minmax(0, 1fr) 14px; gap: 7px; }
-  .subagent-task-freshness { grid-column: 2; grid-row: 2; white-space: normal; }
-  .subagent-task-view-label { display: none; }
-  .subagent-task-quick-retry { grid-column: 1; grid-row: 2; justify-self: start; }
-  .subagent-task-chevron { grid-column: 3; grid-row: 1 / span 2; }
-  .subagent-task-detail { padding-left: 12px; }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .runtime-activity-current strong,
@@ -24641,109 +24387,6 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   color: #ef4444 !important;
 }
 
-/* Subagent status popover and task details use a standalone dark palette in
-   the runtime cards; align them with the rest of the light-theme surfaces. */
-:root[data-theme="light"] .subagent-status-dock-toggle {
-  border-color: #cfddea !important;
-  color: #45637c !important;
-  background: #ffffff !important;
-}
-:root[data-theme="light"] .subagent-status-dock-toggle:hover,
-:root[data-theme="light"] .subagent-status-dock-toggle:focus-visible,
-:root[data-theme="light"] .subagent-status-dock.is-expanded .subagent-status-dock-toggle {
-  border-color: #9dcaf0 !important;
-  color: #1f5f92 !important;
-  background: #e2f1ff !important;
-}
-:root[data-theme="light"] .subagent-status-dock-count {
-  border-color: #ffffff !important;
-  color: #1f5f92 !important;
-  background: #a9d6fb !important;
-}
-:root[data-theme="light"] .subagent-status-panel,
-:root[data-theme="light"] .subagent-task-group {
-  border-color: #cfddea !important;
-  color: var(--text) !important;
-  background: #ffffff !important;
-  box-shadow: 0 14px 32px rgba(42, 85, 123, 0.18) !important;
-}
-:root[data-theme="light"] .subagent-task-group-header {
-  border-bottom-color: #dbe7f3 !important;
-  background: #f7fbff !important;
-}
-:root[data-theme="light"] .subagent-task-group-kicker,
-:root[data-theme="light"] .subagent-task-freshness,
-:root[data-theme="light"] .subagent-task-section-label,
-:root[data-theme="light"] .subagent-task-meta,
-:root[data-theme="light"] .subagent-task-metric,
-:root[data-theme="light"] .subagent-task-history span,
-:root[data-theme="light"] .subagent-task-chevron {
-  color: #6f879d !important;
-}
-:root[data-theme="light"] .subagent-task-group-header strong,
-:root[data-theme="light"] .subagent-task-summary-copy strong {
-  color: #1f3850 !important;
-}
-:root[data-theme="light"] .subagent-task {
-  border-bottom-color: #e3edf5 !important;
-  background: #ffffff !important;
-}
-:root[data-theme="light"] .subagent-task[open],
-:root[data-theme="light"] .subagent-task > summary:hover {
-  background: #f7fbff !important;
-}
-:root[data-theme="light"] .subagent-task > summary:focus-visible {
-  outline-color: #78b9ef !important;
-}
-:root[data-theme="light"] .subagent-task-summary-copy > span,
-:root[data-theme="light"] .subagent-task-view-label,
-:root[data-theme="light"] .subagent-task-identity > summary {
-  color: #56748f !important;
-}
-:root[data-theme="light"] .subagent-task-detail {
-  border-top-color: #dbe7f3 !important;
-}
-:root[data-theme="light"] .subagent-task-section p,
-:root[data-theme="light"] .subagent-task-output {
-  color: #34516b !important;
-}
-:root[data-theme="light"] .subagent-task-history span::before {
-  color: #8ba1b3 !important;
-}
-:root[data-theme="light"] .subagent-instruction-form {
-  border-color: #cfddea !important;
-  background: #f7fbff !important;
-}
-:root[data-theme="light"] .subagent-instruction-form textarea {
-  color: var(--text) !important;
-}
-:root[data-theme="light"] .subagent-instruction-form button,
-:root[data-theme="light"] .subagent-task-actions button {
-  border-color: #cfddea !important;
-  color: #486176 !important;
-  background: #ffffff !important;
-}
-:root[data-theme="light"] .subagent-instruction-form button:hover,
-:root[data-theme="light"] .subagent-task-actions button:hover {
-  border-color: #9dcaf0 !important;
-  color: #1f5f92 !important;
-  background: #e2f1ff !important;
-}
-:root[data-theme="light"] .subagent-task-actions button.danger {
-  border-color: #efb7b7 !important;
-  color: #a44b4b !important;
-  background: #fff5f5 !important;
-}
-:root[data-theme="light"] .subagent-task-actions button.danger:hover {
-  border-color: #e49a9a !important;
-  background: #ffeaea !important;
-}
-:root[data-theme="light"] .subagent-action-error {
-  border-left-color: #df7e7e !important;
-  color: #a44b4b !important;
-  background: #fff5f5 !important;
-}
-
 /* Welcome-page styles are declared late in the legacy sheet. Reapply the
    light palette here so its standalone panel and prompt cards never fall back
    to dark surfaces after the theme changes. */
@@ -25468,18 +25111,6 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 }
 :root[data-theme="light"] .right-workspace-tab:hover { color: var(--text) !important; background: var(--surface) !important; }
 :root[data-theme="light"] .right-workspace-tab.active { color: #0969da !important; background: var(--accent-blue-soft) !important; box-shadow: inset 0 -2px 0 var(--accent-blue) !important; }
-
-/* Semantic state accents stay local to their domain. */
-:root[data-theme="light"] :is(.subagent-status-panel, .subagent-task-group, .subagent-task, .subagent-task-detail, .subagent-instruction-form) {
-  border-color: color-mix(in srgb, var(--accent-purple) 30%, var(--border)) !important;
-  color: var(--text-soft) !important;
-  background: var(--surface) !important;
-  box-shadow: none !important;
-}
-:root[data-theme="light"] .subagent-task-group-header { background: var(--accent-purple-soft) !important; }
-:root[data-theme="light"] :is(.subagent-task-group-header strong, .subagent-task-view-label, .subagent-task-identity > summary) { color: #6d28d9 !important; }
-:root[data-theme="light"] .subagent-task > summary:hover,
-:root[data-theme="light"] .subagent-task[open] { background: #faf5ff !important; }
 
 /* Phase progress uses compact semantic color rather than one undifferentiated
    text color: completed green, active blue, waiting amber, and errors red. */
@@ -26467,7 +26098,6 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .quick-notes-sheet,
   .notification-center-panel,
   .token-usage-panel,
-  .subagent-status-panel,
   .workspace-context-menu,
   .gpa-popover,
   .composer-model-picker-menu
@@ -27979,4 +27609,581 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
 :root[data-theme="light"] .reasoning-effort-check {
   color: #2196f3 !important;
+}
+
+/* Subagent progress reads like ordinary transcript prose. The linked name is
+   the only navigation affordance; details remain in the right workspace. */
+.subagent-narrative-feed,
+.subagent-switch-row,
+.subagent-workspace-shell,
+.subagent-workspace {
+  --subagent-purple: #9d7bea;
+  --subagent-purple-soft: rgba(157, 123, 234, 0.11);
+  --subagent-running: #77aef7;
+  --subagent-completed: #62bc83;
+  --subagent-waiting: #dda958;
+  --subagent-failed: #df7777;
+  --subagent-cancelled: #8b96a3;
+}
+
+.subagent-narrative-feed {
+  display: contents;
+}
+
+.task-timeline .subagent-narrative-message.message-card {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  padding-left: 24px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  animation: subagent-narrative-enter 180ms ease-out both;
+}
+
+.task-timeline .subagent-narrative-message.message-card::before { display: none; }
+
+.task-timeline .subagent-narrative-message .message-flat-body {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.subagent-narrative-copy {
+  margin: 0;
+  color: #c8d1dc;
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+@keyframes subagent-narrative-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.subagent-narrative-link {
+  --subagent-name: #b9a4f4;
+  display: inline;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-weight: 650;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.subagent-narrative-icon {
+  display: inline-grid;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--subagent-name) 40%, transparent);
+  border-radius: 4px;
+  color: var(--subagent-name);
+  background: color-mix(in srgb, var(--subagent-name) 10%, transparent);
+}
+
+.subagent-narrative-icon svg {
+  width: 11px;
+  height: 11px;
+}
+
+.subagent-narrative-name {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--subagent-name) 42%, transparent);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 140ms ease;
+}
+
+.subagent-narrative-link:hover,
+.subagent-narrative-link.is-selected {
+  color: var(--subagent-name);
+}
+
+.subagent-narrative-link:hover .subagent-narrative-name,
+.subagent-narrative-link.is-selected .subagent-narrative-name {
+  text-decoration-color: currentColor;
+}
+
+.subagent-narrative-link.tone-0,
+.subagent-switch-chip.tone-0,
+.subagent-workspace-title.tone-0 { --subagent-name: #b9a4f4; }
+.subagent-narrative-link.tone-1,
+.subagent-switch-chip.tone-1,
+.subagent-workspace-title.tone-1 { --subagent-name: #75b8f5; }
+.subagent-narrative-link.tone-2,
+.subagent-switch-chip.tone-2,
+.subagent-workspace-title.tone-2 { --subagent-name: #60cdb8; }
+.subagent-narrative-link.tone-3,
+.subagent-switch-chip.tone-3,
+.subagent-workspace-title.tone-3 { --subagent-name: #ed8fbd; }
+.subagent-narrative-link.tone-4,
+.subagent-switch-chip.tone-4,
+.subagent-workspace-title.tone-4 { --subagent-name: #e2ad5f; }
+.subagent-narrative-link.tone-5,
+.subagent-switch-chip.tone-5,
+.subagent-workspace-title.tone-5 { --subagent-name: #75c990; }
+
+.subagent-narrative-link:focus-visible {
+  border-radius: 2px;
+  outline: 1px solid rgba(185, 164, 244, 0.72);
+  outline-offset: 2px;
+}
+
+.right-workspace-tab#right-workspace-tab-subagents.active {
+  color: #c8b4ff;
+  background: rgba(157, 123, 234, 0.12);
+  box-shadow: inset 0 -2px 0 var(--subagent-purple, #9d7bea);
+}
+
+.right-workspace-tab#right-workspace-tab-subagents.active > svg { color: #c8b4ff; }
+
+.subagent-workspace-shell {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.subagent-switch-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+
+.runtime-tail > .subagent-switch-row {
+  width: 100%;
+  margin: 2px 0 4px;
+}
+
+.subagent-workspace-shell > .subagent-switch-row {
+  padding: 6px 10px 4px;
+}
+
+.subagent-switch-chip {
+  --subagent-name: #b9a4f4;
+  display: inline-flex;
+  flex: 1 1 0;
+  min-width: 96px;
+  max-width: 100%;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--subagent-name) 32%, transparent);
+  border-radius: 6px;
+  color: var(--subagent-name);
+  background: color-mix(in srgb, var(--subagent-name) 10%, transparent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.subagent-switch-chip:hover {
+  border-color: color-mix(in srgb, var(--subagent-name) 58%, transparent);
+  background: color-mix(in srgb, var(--subagent-name) 16%, transparent);
+}
+
+.subagent-switch-chip.is-selected {
+  border-color: color-mix(in srgb, var(--subagent-name) 78%, transparent);
+  background: color-mix(in srgb, var(--subagent-name) 22%, transparent);
+  box-shadow: inset 0 -2px 0 var(--subagent-name);
+}
+
+.subagent-switch-chip:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--subagent-name) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.subagent-switch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--subagent-name);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.subagent-switch-state {
+  flex: 0 0 auto;
+  color: var(--subagent-running);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.subagent-workspace-title {
+  --subagent-name: #b9a4f4;
+  color: var(--subagent-name);
+}
+
+.subagent-workspace-heading > div strong.subagent-workspace-title {
+  color: var(--subagent-name);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.subagent-switch-chip.queued .subagent-switch-state,
+.subagent-switch-chip.waiting_input .subagent-switch-state { color: var(--subagent-waiting); }
+.subagent-switch-chip.completed .subagent-switch-state { color: var(--subagent-completed); }
+.subagent-switch-chip.failed .subagent-switch-state { color: var(--subagent-failed); }
+.subagent-switch-chip.cancelled .subagent-switch-state { color: var(--subagent-cancelled); }
+
+.subagent-workspace {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  color: #c8d0da;
+  background: #0a0a0a;
+}
+
+.subagent-workspace-heading {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) max-content;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  min-height: 58px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+  background: rgba(157, 123, 234, 0.055);
+}
+
+.subagent-workspace-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid rgba(157, 123, 234, 0.32);
+  border-radius: 6px;
+  color: #bea7fa;
+  background: rgba(157, 123, 234, 0.1);
+}
+
+.subagent-workspace-mark svg { width: 17px; height: 17px; }
+.subagent-workspace-heading > div { display: grid; min-width: 0; gap: 3px; }
+.subagent-workspace-heading > div strong,
+.subagent-workspace-heading > div span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-workspace-heading > div strong { color: #e2e7ee; font-size: 12px; font-weight: 650; }
+.subagent-workspace-heading > div span { color: #8995a3; font-size: 10px; }
+
+.subagent-workspace-status {
+  --subagent-state-color: var(--subagent-running);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--subagent-state-color);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.subagent-workspace-status.queued,
+.subagent-workspace-status.waiting_input { --subagent-state-color: var(--subagent-waiting); }
+.subagent-workspace-status.completed { --subagent-state-color: var(--subagent-completed); }
+.subagent-workspace-status.failed { --subagent-state-color: var(--subagent-failed); }
+.subagent-workspace-status.cancelled { --subagent-state-color: var(--subagent-cancelled); }
+.subagent-workspace-status svg { width: 13px; height: 13px; }
+
+.subagent-workspace-phases {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 11px 14px 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+  background: rgba(157, 123, 234, 0.08);
+}
+
+.subagent-workspace-phases h3 {
+  margin: 0;
+  color: #e8eef6;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.subagent-workspace-phases .subagent-workspace-section-heading > span {
+  color: #b7c2ce;
+  font-size: 11px;
+}
+
+.subagent-workspace-phases .subagent-phase-track {
+  gap: 8px;
+}
+
+.subagent-workspace-phases .subagent-phase {
+  color: #a7b3c0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.subagent-workspace-phases .subagent-phase i {
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.subagent-workspace-phases .subagent-phase b {
+  margin-left: 4px;
+  color: #8b96a3;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.subagent-workspace-phases .subagent-phase.completed { color: #86e4a8; }
+.subagent-workspace-phases .subagent-phase.current { color: #93c9ff; }
+.subagent-workspace-phases .subagent-phase.current.is-waiting { color: #f0c36b; }
+.subagent-workspace-phases .subagent-phase.failed { color: #f09a9a; }
+.subagent-workspace-phases .subagent-phase.cancelled { color: #b0b8c2; }
+
+.subagent-workspace-scroll {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.subagent-workspace-section {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 15px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+}
+
+.subagent-workspace-section h3 {
+  margin: 0;
+  color: #8996a4;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.subagent-workspace-section p {
+  margin: 0;
+  color: #c2cad4;
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.subagent-workspace-section-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.subagent-workspace-section-heading > span {
+  color: #8596a6;
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.subagent-phase-track { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 5px; }
+.subagent-phase { display: inline-flex; align-items: center; gap: 5px; color: #76818d; font-size: 10px; }
+.subagent-phase i { display: inline-grid; width: 14px; height: 14px; place-items: center; border: 1px solid currentColor; border-radius: 50%; font-style: normal; font-size: 8px; }
+.subagent-phase b { margin-left: 2px; color: #56606b; font-weight: 400; }
+.subagent-phase.completed { color: var(--subagent-completed); }
+.subagent-phase.current { color: var(--subagent-running); }
+.subagent-phase.current.is-waiting { color: var(--subagent-waiting); }
+.subagent-phase.failed { color: var(--subagent-failed); }
+.subagent-phase.cancelled { color: var(--subagent-cancelled); }
+
+.subagent-workspace-output {
+  padding-left: 9px;
+  border-left: 2px solid var(--subagent-running);
+}
+.subagent-workspace-output.completed { border-left-color: var(--subagent-completed); }
+.subagent-workspace-output.failed { border-left-color: var(--subagent-failed); color: #e4aaaa; }
+.subagent-workspace-output.waiting_input,
+.subagent-workspace-output.queued { border-left-color: var(--subagent-waiting); }
+.subagent-workspace-output.cancelled { border-left-color: var(--subagent-cancelled); }
+
+.subagent-workspace-history { display: grid; gap: 7px; }
+.subagent-workspace-history span {
+  position: relative;
+  padding-left: 13px;
+  color: #9da8b4;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.subagent-workspace-history span::before {
+  position: absolute;
+  top: 0.55em;
+  left: 1px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--subagent-purple);
+  content: "";
+}
+
+.subagent-workspace-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 14px 18px;
+  color: #77828f;
+  font-size: 9px;
+}
+.subagent-workspace-meta > time { font-family: var(--font-mono); }
+.subagent-workspace-meta code { color: #77828f; font-family: var(--font-mono); overflow-wrap: anywhere; }
+
+.subagent-workspace-empty {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  align-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 24px;
+  color: #818d9a;
+  text-align: center;
+}
+.subagent-workspace-empty > span { color: var(--subagent-purple, #9d7bea); }
+.subagent-workspace-empty svg { width: 24px; height: 24px; }
+.subagent-workspace-empty strong { color: #c7d0da; font-size: 12px; }
+.subagent-workspace-empty p { margin: 0; font-size: 10px; }
+
+:root[data-theme="light"] .subagent-narrative-feed,
+:root[data-theme="light"] .subagent-switch-row,
+:root[data-theme="light"] .subagent-workspace-shell,
+:root[data-theme="light"] .subagent-workspace {
+  --subagent-purple: #8b5cf6;
+  --subagent-purple-soft: rgba(139, 92, 246, 0.08);
+  --subagent-running: #2196f3;
+  --subagent-completed: #16a34a;
+  --subagent-waiting: #d97706;
+  --subagent-failed: #dc2626;
+  --subagent-cancelled: #6e7781;
+}
+
+:root[data-theme="light"] .task-timeline .subagent-narrative-message.message-card,
+:root[data-theme="light"] .task-timeline .subagent-narrative-message .message-flat-body {
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+:root[data-theme="light"] .subagent-narrative-copy {
+  color: var(--text-soft) !important;
+  background: transparent !important;
+}
+:root[data-theme="light"] .subagent-narrative-link { color: var(--subagent-name); }
+:root[data-theme="light"] .subagent-narrative-name { text-decoration-color: color-mix(in srgb, var(--subagent-name) 35%, transparent); }
+:root[data-theme="light"] .subagent-narrative-link:hover,
+:root[data-theme="light"] .subagent-narrative-link.is-selected { color: var(--subagent-name); }
+:root[data-theme="light"] .subagent-narrative-link:hover .subagent-narrative-name,
+:root[data-theme="light"] .subagent-narrative-link.is-selected .subagent-narrative-name { text-decoration-color: currentColor; }
+:root[data-theme="light"] .subagent-narrative-link.tone-0,
+:root[data-theme="light"] .subagent-switch-chip.tone-0,
+:root[data-theme="light"] .subagent-workspace-title.tone-0 { --subagent-name: #6d28d9; }
+:root[data-theme="light"] .subagent-narrative-link.tone-1,
+:root[data-theme="light"] .subagent-switch-chip.tone-1,
+:root[data-theme="light"] .subagent-workspace-title.tone-1 { --subagent-name: #0969da; }
+:root[data-theme="light"] .subagent-narrative-link.tone-2,
+:root[data-theme="light"] .subagent-switch-chip.tone-2,
+:root[data-theme="light"] .subagent-workspace-title.tone-2 { --subagent-name: #0f766e; }
+:root[data-theme="light"] .subagent-narrative-link.tone-3,
+:root[data-theme="light"] .subagent-switch-chip.tone-3,
+:root[data-theme="light"] .subagent-workspace-title.tone-3 { --subagent-name: #b4236c; }
+:root[data-theme="light"] .subagent-narrative-link.tone-4,
+:root[data-theme="light"] .subagent-switch-chip.tone-4,
+:root[data-theme="light"] .subagent-workspace-title.tone-4 { --subagent-name: #9a6700; }
+:root[data-theme="light"] .subagent-narrative-link.tone-5,
+:root[data-theme="light"] .subagent-switch-chip.tone-5,
+:root[data-theme="light"] .subagent-workspace-title.tone-5 { --subagent-name: #1a7f37; }
+:root[data-theme="light"] .right-workspace-tab#right-workspace-tab-subagents.active,
+:root[data-theme="light"] .right-workspace-panel .right-workspace-tab#right-workspace-tab-subagents.active {
+  color: #6d28d9 !important;
+  background: var(--accent-purple-soft) !important;
+  box-shadow: inset 0 -2px 0 var(--accent-purple) !important;
+}
+:root[data-theme="light"] .right-workspace-tab#right-workspace-tab-subagents.active > svg { color: #7c3aed !important; }
+
+:root[data-theme="light"] .subagent-workspace {
+  color: var(--text-soft) !important;
+  background: var(--surface) !important;
+}
+:root[data-theme="light"] .subagent-switch-chip {
+  border-color: color-mix(in srgb, var(--subagent-name) 28%, var(--border));
+  color: var(--subagent-name);
+  background: color-mix(in srgb, var(--subagent-name) 8%, var(--surface));
+}
+:root[data-theme="light"] .subagent-switch-chip.is-selected {
+  border-color: color-mix(in srgb, var(--subagent-name) 55%, var(--border));
+  background: color-mix(in srgb, var(--subagent-name) 14%, var(--surface));
+}
+:root[data-theme="light"] .subagent-workspace-heading > div strong.subagent-workspace-title {
+  color: var(--subagent-name) !important;
+}
+:root[data-theme="light"] .subagent-workspace-heading {
+  border-bottom-color: var(--border) !important;
+  background: rgba(139, 92, 246, 0.055) !important;
+}
+:root[data-theme="light"] .subagent-workspace-phases {
+  border-bottom-color: var(--border) !important;
+  background: rgba(139, 92, 246, 0.08) !important;
+}
+:root[data-theme="light"] .subagent-workspace-phases h3 { color: var(--text) !important; }
+:root[data-theme="light"] .subagent-workspace-phases .subagent-workspace-section-heading > span { color: var(--text-muted) !important; }
+:root[data-theme="light"] .subagent-workspace-mark {
+  border-color: rgba(139, 92, 246, 0.25);
+  color: #7c3aed;
+  background: rgba(139, 92, 246, 0.08);
+}
+:root[data-theme="light"] .subagent-workspace-heading > div strong { color: var(--text) !important; }
+:root[data-theme="light"] .subagent-workspace-heading > div span,
+:root[data-theme="light"] .subagent-workspace-section h3,
+:root[data-theme="light"] .subagent-workspace-section-heading > span,
+:root[data-theme="light"] .subagent-workspace-meta,
+:root[data-theme="light"] .subagent-workspace-meta code { color: var(--text-muted) !important; }
+:root[data-theme="light"] .subagent-workspace-section { border-bottom-color: var(--border) !important; }
+:root[data-theme="light"] .subagent-workspace-section p { color: var(--text-soft) !important; }
+:root[data-theme="light"] .subagent-workspace-output.failed { color: #a40e26 !important; }
+:root[data-theme="light"] .subagent-workspace-history span { color: var(--text-soft) !important; }
+:root[data-theme="light"] .subagent-workspace-empty { color: var(--text-muted) !important; background: transparent !important; }
+:root[data-theme="light"] .subagent-workspace-empty strong { color: var(--text) !important; }
+
+.app-shell:is(.has-app-background, .has-realtime-character) :is(
+  .subagent-narrative-feed,
+  .subagent-narrative-message,
+  .subagent-narrative-copy,
+  .subagent-workspace-shell,
+  .subagent-workspace,
+  .subagent-workspace-heading,
+  .subagent-workspace-phases,
+  .subagent-workspace-scroll,
+  .subagent-workspace-section,
+  .subagent-workspace-empty
+) {
+  background: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-timeline .subagent-narrative-message.message-card { animation: none !important; }
+  .subagent-narrative-link,
+  .subagent-narrative-name { transition: none; }
 }

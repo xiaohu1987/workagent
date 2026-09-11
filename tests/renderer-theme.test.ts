@@ -29,9 +29,8 @@ const appearanceSettingsPage = readFileSync(
   new URL("../apps/desktop/src/renderer/settings/pages/application/appearance-page.tsx", import.meta.url),
   "utf8"
 );
-const timelineStyles = readFileSync(
-  new URL("../apps/desktop/src/renderer/timeline.css", import.meta.url),
-  "utf8"
+const timelineStyles = readText(
+  new URL("../apps/desktop/src/renderer/timeline.css", import.meta.url)
 );
 const apiCardStyles = readFileSync(
   new URL("../apps/desktop/src/renderer/cards/api-card-message.css", import.meta.url),
@@ -180,9 +179,10 @@ describe("renderer theme", () => {
     expect(styles).toContain(':root[data-theme="light"] .composer-attachment-icon');
     expect(styles).toContain(':root[data-theme="light"] .sidebar-brand .sidebar-brand-accent');
     expect(styles).toContain('color: #ef4444 !important');
-    expect(styles).toContain(':root[data-theme="light"] .subagent-status-panel');
-    expect(styles).toContain(':root[data-theme="light"] .subagent-task');
-    expect(styles).toContain(':root[data-theme="light"] .subagent-instruction-form');
+    expect(styles).toContain(':root[data-theme="light"] .subagent-narrative-feed');
+    expect(styles).toContain(':root[data-theme="light"] .subagent-narrative-link');
+    expect(styles).toContain(':root[data-theme="light"] .subagent-switch-row');
+    expect(styles).toContain(':root[data-theme="light"] .subagent-workspace');
     expect(styles).toContain(':root[data-theme="light"] .welcome-panel');
     expect(styles).toContain(':root[data-theme="light"] .welcome-card');
     expect(styles).toContain(':root[data-theme="light"] .welcome-card:hover,');
@@ -513,11 +513,11 @@ describe("renderer theme", () => {
 
   it("distinguishes subagent phase progress with semantic light-theme colors", () => {
     expect(styles).toContain("Phase progress uses compact semantic color");
-    expect(styles).toContain(':root[data-theme="light"] .subagent-phase.completed { color: #1a7f37 !important; }');
-    expect(styles).toContain(':root[data-theme="light"] .subagent-phase.current { color: #0969da !important; }');
-    expect(styles).toContain(':root[data-theme="light"] .subagent-phase.current.is-waiting { color: #9a6700 !important; }');
-    expect(styles).toContain(':root[data-theme="light"] .subagent-phase.failed { color: #cf222e !important; }');
-    expect(styles).toContain(':root[data-theme="light"] .subagent-phase.cancelled { color: #6e7781 !important; }');
+    expect(styles).toContain('--subagent-completed: #16a34a;');
+    expect(styles).toContain('--subagent-running: #2196f3;');
+    expect(styles).toContain('--subagent-waiting: #d97706;');
+    expect(styles).toContain('--subagent-failed: #dc2626;');
+    expect(styles).toContain('--subagent-cancelled: #6e7781;');
     expect(runtimeCards).toContain('getSubagentPhaseToneClass(phase)');
   });
 

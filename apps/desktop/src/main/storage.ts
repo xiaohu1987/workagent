@@ -5,6 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
 import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
+import { isRootUserRequestMessage } from "./subagent-assignment";
 import type {
   AppConfig,
   ApprovalResolutionMode,
@@ -1635,6 +1636,14 @@ export class DatabaseService {
           .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1")
           .get(threadId);
     return row ? mapMessageRow(row) : null;
+  }
+
+  public getLatestUserRequestMessage(threadId: string): MessageRecord | null {
+    const rows = this.#db
+      .prepare("SELECT * FROM messages WHERE thread_id = ? AND role = 'user' ORDER BY created_at DESC, rowid DESC LIMIT 20")
+      .all(threadId)
+      .map(mapMessageRow);
+    return rows.find((message) => isRootUserRequestMessage(message)) ?? null;
   }
 
   public enqueueQueuedMessage(

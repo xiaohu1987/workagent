@@ -139,9 +139,11 @@ import {
   RECOVERY_MODEL_DECISION_TIMEOUT_MS,
   SUBAGENT_INSPECTION_DELAY_MS,
   SUBAGENT_IDLE_TIMEOUT_MS,
+  SUBAGENT_AWAITING_MODEL_IDLE_TIMEOUT_MS,
   SUBAGENT_MAX_RUNTIME_MS,
   SUBAGENT_MODEL_DECISION_TIMEOUT_MS,
   SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS,
+  isSubagentWatchdogProgressEvent,
   resolveSubagentWatchdogDecision,
   STANDARD_COMPLETION_TEXT_TOOL_FALLBACK_ATTEMPTS,
   MAX_REPOSITORY_COMPLETION_REJECTIONS,
@@ -212,6 +214,7 @@ import {
   NON_STREAMING_DRAFT_MAX_CHUNKS,
   NON_STREAMING_DRAFT_MIN_CHUNK_SIZE,
   shouldPublishAssistantDraftUpdate,
+  resolveReturnedReasoningCheckpoint,
   resolveRetainedAssistantDraft,
   splitNonStreamingAssistantDraft,
   shouldRevealNonStreamingAssistantDraft,
@@ -274,6 +277,12 @@ describe("assistant draft stream throttling", () => {
 
   it("allows streaming deltas and phase changes to publish immediately", () => {
     expect(shouldPublishAssistantDraftUpdate(1_000, 1_001, true)).toBe(true);
+  });
+
+  it("publishes reasoning returned only in the completed provider response", () => {
+    expect(resolveReturnedReasoningCheckpoint("完整思考内容", "")).toBe("完整思考内容");
+    expect(resolveReturnedReasoningCheckpoint("完整思考内容", "完整思考内容")).toBeUndefined();
+    expect(resolveReturnedReasoningCheckpoint(undefined, "已流式显示")).toBeUndefined();
   });
 
   it("keeps streamed text and reasoning when a provider retry starts", () => {
@@ -383,12 +392,35 @@ describe("subagent watchdog policy", () => {
   it("uses the documented inspection, idle, soft, and absolute limits", () => {
     expect(SUBAGENT_INSPECTION_DELAY_MS).toBe(60_000);
     expect(SUBAGENT_IDLE_TIMEOUT_MS).toBe(120_000);
+    expect(SUBAGENT_AWAITING_MODEL_IDLE_TIMEOUT_MS).toBe(300_000);
     expect(SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS).toBe(600_000);
     expect(SUBAGENT_MAX_RUNTIME_MS).toBe(1_800_000);
     expect(SUBAGENT_MODEL_DECISION_TIMEOUT_MS).toBeGreaterThan(0);
   });
 
-  it("interrupts a child with no progress after two minutes", () => {
+  it("treats streaming drafts and tool-call preparation as watchdog progress", () => {
+    expect(isSubagentWatchdogProgressEvent("assistant.draft.updated")).toBe(true);
+    expect(isSubagentWatchdogProgressEvent("agent.tool_call_preparing")).toBe(true);
+    expect(isSubagentWatchdogProgressEvent("agent.awaiting_model")).toBe(true);
+    expect(isSubagentWatchdogProgressEvent("message.created")).toBe(false);
+  });
+
+  it("interrupts a starting child with no progress after two minutes", () => {
+    const result = resolveSubagentWatchdogDecision({
+      nowMs: at(120_000),
+      startedAt,
+      lastProgressAt: startedAt,
+      currentTool: null,
+      isShellOrTest: false,
+      active: true,
+      baseState: "starting"
+    });
+    expect(result.action).toBe("interrupt");
+    expect(result.state).toBe("stalled");
+    expect(result.reason).toBe("Subagent made no tool, output, or process-state progress for 2 minutes.");
+  });
+
+  it("keeps a generating child alive through a two-minute model wait", () => {
     const result = resolveSubagentWatchdogDecision({
       nowMs: at(120_000),
       startedAt,
@@ -398,8 +430,38 @@ describe("subagent watchdog policy", () => {
       active: true,
       baseState: "awaiting_model"
     });
+    expect(result.action).toBe("continue");
+    expect(result.state).toBe("awaiting_model");
+  });
+
+  it("interrupts a silent model wait after five minutes", () => {
+    const result = resolveSubagentWatchdogDecision({
+      nowMs: at(300_000),
+      startedAt,
+      lastProgressAt: startedAt,
+      currentTool: null,
+      isShellOrTest: false,
+      active: true,
+      baseState: "awaiting_model"
+    });
     expect(result.action).toBe("interrupt");
     expect(result.state).toBe("stalled");
+    expect(result.reason).toBe("Subagent made no tool, output, or process-state progress for 5 minutes.");
+  });
+
+  it("still interrupts a stuck tool after two minutes", () => {
+    const result = resolveSubagentWatchdogDecision({
+      nowMs: at(120_000),
+      startedAt,
+      lastProgressAt: startedAt,
+      currentTool: "file.read",
+      isShellOrTest: false,
+      active: true,
+      baseState: "executing_tool"
+    });
+    expect(result.action).toBe("interrupt");
+    expect(result.state).toBe("stalled");
+    expect(result.reason).toBe("Subagent made no tool, output, or process-state progress for 2 minutes.");
   });
 
   it("allows progressing shell/test work beyond the soft limit", () => {
@@ -1552,6 +1614,20 @@ describe("standard completion validation", () => {
       request: "Please create a file with the completed content.",
       requestedDeliverableExtensions: [".md"],
       enabled: false
+    })).toBe(false);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "project",
+      request: "把分析结果生成 Word 文档",
+      requestedDeliverableExtensions: [".docx"],
+      enabled: true,
+      isChildAgent: true
+    })).toBe(false);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "chat",
+      request: "Please create a file with the completed content.",
+      requestedDeliverableExtensions: [".md"],
+      enabled: true,
+      isChildAgent: true
     })).toBe(false);
   });
 
@@ -2967,6 +3043,19 @@ describe("terminal turn state machine", () => {
       requiresGoalCompletion: false,
       gpaStage: "off",
       gpaActCompletedSuccessfully: false
+    })).toBe("complete_task");
+  });
+
+  it("lets a child agent finish without root completion or GPA gates", () => {
+    expect(resolveTerminalTurnDisposition({
+      isRootThread: false,
+      hasActiveSubagents: false,
+      toolCallCount: 0,
+      endTurn: true,
+      goalCompleted: false,
+      requiresGoalCompletion: false,
+      gpaStage: "off",
+      gpaActCompletedSuccessfully: true
     })).toBe("complete_task");
   });
 });

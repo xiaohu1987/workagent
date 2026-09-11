@@ -3,13 +3,14 @@ import type { ReactNode } from "react";
 import type { GitActionResult, GitSnapshot, RuntimeThreadSnapshot, ToolCallRecord } from "@shared-types";
 import type { ComposerAttachmentInput } from "../lib/conversation-utils";
 import { getProjectRelativeGitFiles, type ProjectFileEntry } from "../lib/project-files";
-import { IconChevronRight, IconFileChanges, IconFolder, IconGlobe } from "../icons";
+import { IconChevronRight, IconFileChanges, IconFolder, IconGlobe, IconGuide } from "../icons";
+import { SubagentDetailWorkspace, SubagentSwitchRow, type SubagentPresentation } from "../cards/runtime-cards";
 import { BrowserWorkspace } from "./browser-workspace";
 import { GitChangesWorkspace } from "./git-changes";
 import { WorkspaceEmptyState } from "./panels";
 import { ProjectFilesWorkspace } from "./project-files";
 
-export type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes";
+export type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes" | "subagents";
 
 export function hasRecognizedGitRepository(snapshot: GitSnapshot | null, projectRoot: string): boolean {
   if (snapshot?.available !== true || !snapshot.root?.trim() || !projectRoot.trim()) return false;
@@ -45,6 +46,10 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onLoadProjectDirectory,
   browserTabsByThread,
   onCloseBrowserTab,
+  showSubagentTab,
+  subagentItems,
+  selectedSubagentId,
+  onSelectSubagent,
   threadId
 }: {
   hidden: boolean;
@@ -76,12 +81,20 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onLoadProjectDirectory: (path: string) => Promise<boolean>;
   browserTabsByThread: Record<string, RuntimeThreadSnapshot["browserTabs"]>;
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
+  showSubagentTab: boolean;
+  subagentItems: SubagentPresentation[];
+  selectedSubagentId: string | null;
+  onSelectSubagent: (agentId: string) => void;
   threadId: string | null;
 }) {
   const showGitWorkspace = true;
   const projectGitFiles = useMemo(
     () => getProjectRelativeGitFiles(gitSnapshot, projectRoot),
     [gitSnapshot, projectRoot]
+  );
+  const selectedSubagent = useMemo(
+    () => subagentItems.find((item) => item.agent.id === selectedSubagentId) ?? null,
+    [selectedSubagentId, subagentItems]
   );
   return (
     <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="Right workspace" aria-hidden={hidden}>
@@ -107,6 +120,15 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
             icon={<IconFileChanges />}
             active={activeTab === "changes"}
             onClick={() => selectWorkspaceTab("changes", onTabChange, onExpandedTabChange)}
+          />
+        ) : null}
+        {showSubagentTab ? (
+          <WorkspaceTabButton
+            id="subagents"
+            label="子智能体"
+            icon={<IconGuide />}
+            active={activeTab === "subagents"}
+            onClick={() => selectWorkspaceTab("subagents", onTabChange, onExpandedTabChange)}
           />
         ) : null}
       </div>
@@ -160,6 +182,14 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
               <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里。" />
             ) : null}
         </div>
+        {showSubagentTab ? (
+          <div id="right-workspace-content-subagents" className={`right-workspace-view ${activeTab === "subagents" ? "active" : ""}`} role={activeTab === "subagents" ? "tabpanel" : undefined} aria-labelledby={activeTab === "subagents" ? "right-workspace-tab-subagents" : undefined} aria-hidden={activeTab !== "subagents"} inert={activeTab !== "subagents"}>
+            <div className="subagent-workspace-shell">
+              <SubagentSwitchRow items={subagentItems} selectedId={selectedSubagentId} onSelect={onSelectSubagent} />
+              <SubagentDetailWorkspace item={selectedSubagent} />
+            </div>
+          </div>
+        ) : null}
       </div>
       <button
         type="button"

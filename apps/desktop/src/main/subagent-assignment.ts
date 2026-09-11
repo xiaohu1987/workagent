@@ -29,6 +29,66 @@ export function isOverlappingSubagentAssignment(
   return sharedFiles >= 2;
 }
 
+export function isRootUserRequestMessage(message: {
+  role: string;
+  content: string;
+  metadataJson?: string | null;
+}): boolean {
+  if (message.role !== "user") return false;
+  if (message.content.trimStart().startsWith("[internal:")) return false;
+  const metadata = parseMessageMetadata(message.metadataJson);
+  return metadata?.displayKind !== "guidance";
+}
+
+export function selectRequestSubagents(
+  parent: Pick<ThreadRecord, "id" | "agentPath">,
+  tree: ThreadRecord[],
+  requestStartedAt: number
+): ThreadRecord[] {
+  return tree.filter((item) =>
+    isChildOfAgent(parent, item) && Date.parse(item.createdAt) >= requestStartedAt
+  );
+}
+
+export function selectVisibleSubagents(
+  parent: Pick<ThreadRecord, "id" | "agentPath">,
+  tree: ThreadRecord[],
+  requestStartedAt: number,
+  isActive: (thread: ThreadRecord) => boolean
+): ThreadRecord[] {
+  const visible: ThreadRecord[] = [];
+  const seen = new Set<string>();
+  for (const item of selectRequestSubagents(parent, tree, requestStartedAt)) {
+    seen.add(item.id);
+    visible.push(item);
+  }
+  for (const item of tree) {
+    if (seen.has(item.id) || !isChildOfAgent(parent, item)) continue;
+    if (!isActive(item)) continue;
+    visible.push(item);
+  }
+  return visible;
+}
+
+function isChildOfAgent(
+  parent: Pick<ThreadRecord, "id" | "agentPath">,
+  item: Pick<ThreadRecord, "id" | "parentThreadId" | "agentPath">
+): boolean {
+  if (item.id === parent.id) return false;
+  if (item.parentThreadId === parent.id) return true;
+  return item.agentPath.startsWith(`${parent.agentPath}/`);
+}
+
+function parseMessageMetadata(metadataJson: string | null | undefined): { displayKind?: string } | null {
+  if (!metadataJson?.trim()) return null;
+  try {
+    const parsed = JSON.parse(metadataJson) as { displayKind?: unknown };
+    return parsed && typeof parsed === "object" ? { displayKind: typeof parsed.displayKind === "string" ? parsed.displayKind : undefined } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function extractDelegatedFileScopes(prompt: string): Set<string> {
   const scopes = new Set<string>();
   const normalized = prompt.toLowerCase().replace(/\\/g, "/");

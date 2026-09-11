@@ -2380,7 +2380,7 @@ describe("OpenAiCompatibleProvider", () => {
     });
     expect(deepseek).toMatchObject({
       thinking: { type: "enabled" },
-      reasoning_effort: "high"
+      reasoning_effort: "xhigh"
     });
 
     const glm = await run("glm-5.3-flash", "GLM 5.3 Flash", {
@@ -2729,6 +2729,7 @@ describe("OpenAiCompatibleProvider", () => {
         ],
         // The DeepSeek compat preserves the model's configured output limit.
         max_tokens: 4096,
+        reasoning_effort: "high",
         thinking: { type: "enabled" }
       },
       {
@@ -3173,7 +3174,7 @@ describe("OpenAiCompatibleProvider", () => {
 
     const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     expect(request.thinking).toEqual({ type: "enabled" });
-    expect(request.reasoning_effort).toBe("high");
+    expect(request.reasoning_effort).toBe("xhigh");
     expect(request.messages).toContainEqual(expect.objectContaining({
       role: "assistant",
       content: "",
@@ -3182,7 +3183,7 @@ describe("OpenAiCompatibleProvider", () => {
     }));
   });
 
-  it("passes mapped effort for non-V4 DeepSeek reasoning models", async () => {
+  it("passes max effort through for non-V4 DeepSeek reasoning models", async () => {
     mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "done" } }] });
     const provider: ProviderDefinition = {
       id: "deepseek-gateway",
@@ -3194,7 +3195,7 @@ describe("OpenAiCompatibleProvider", () => {
       systemPrompt: "Answer.",
       transcript: [{ role: "user", content: "Hello" }],
       availableTools: [],
-      reasoningEffort: "xhigh",
+      reasoningEffort: "max",
       model: {
         id: "deepseek-reasoner",
         providerId: provider.id,
@@ -3211,11 +3212,44 @@ describe("OpenAiCompatibleProvider", () => {
     });
     expect(mocks.chatCreate.mock.calls.at(-1)?.[0]).toMatchObject({
       thinking: { type: "enabled" },
+      reasoning_effort: "max"
+    });
+  });
+
+  it("defaults DeepSeek reasoning requests to high and enables custom reasoning model ids", async () => {
+    mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "done" } }] });
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      compatibilityProfile: "deepseek",
+      apiKey: "secret"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      model: {
+        id: "custom-thinking-model",
+        providerId: provider.id,
+        displayName: "Custom Thinking Model",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: false,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: false,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true,
+        role: "reasoning"
+      },
+      provider
+    });
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0]).toMatchObject({
+      thinking: { type: "enabled" },
       reasoning_effort: "high"
     });
   });
 
-  it("uses standard OpenAI fields for DeepSeek models behind a compatible gateway", async () => {
+  it("enables DeepSeek thinking by model identity behind a standard compatible gateway", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: "done" } }]
     });
@@ -3267,15 +3301,17 @@ describe("OpenAiCompatibleProvider", () => {
     });
 
     const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    expect(request).not.toHaveProperty("thinking");
-    expect(request).not.toHaveProperty("reasoning_effort");
+    expect(request).toMatchObject({
+      thinking: { type: "enabled" },
+      reasoning_effort: "xhigh"
+    });
     const messages = request.messages as Array<Record<string, unknown>>;
     expect(messages).toContainEqual(expect.objectContaining({
       role: "assistant",
       content: "",
+      reasoning_content: "I need to read the file first.",
       tool_calls: expect.any(Array)
     }));
-    expect(messages.some((message) => "reasoning_content" in message)).toBe(false);
   });
 
   it("does not treat an unstructured progress message as a completed decision", async () => {

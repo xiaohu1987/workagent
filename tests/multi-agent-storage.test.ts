@@ -120,6 +120,45 @@ describe("multi-agent thread storage", () => {
     });
   });
 
+  it("ignores guidance and internal messages when locating the current user request", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-user-request-test-"));
+    directories.push(directory);
+    const database = new DatabaseService(path.join(directory, "codexh.sqlite"));
+    databases.push(database);
+    const thread = database.createThread({
+      title: "Root",
+      mode: "project",
+      workspaceKind: "project",
+      cwd: directory,
+      modelId: "mock-codexh",
+      providerId: "mock"
+    });
+    const request = database.createMessage({
+      threadId: thread.id,
+      turnRunId: null,
+      role: "user",
+      content: "分析这个项目",
+      metadataJson: null
+    });
+    database.createMessage({
+      threadId: thread.id,
+      turnRunId: "turn-1",
+      role: "user",
+      content: "先看安全",
+      metadataJson: JSON.stringify({ displayKind: "guidance" })
+    });
+    database.createMessage({
+      threadId: thread.id,
+      turnRunId: "turn-1",
+      role: "user",
+      content: "[internal:gpa-confirm] continue",
+      metadataJson: null
+    });
+
+    expect(database.getLatestMessage(thread.id, "user")?.content).toBe("[internal:gpa-confirm] continue");
+    expect(database.getLatestUserRequestMessage(thread.id)?.id).toBe(request.id);
+  });
+
   it("aggregates usage by provider-scoped model and time bucket", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-usage-analytics-test-"));
     directories.push(directory);

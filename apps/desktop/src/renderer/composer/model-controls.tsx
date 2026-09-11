@@ -12,15 +12,18 @@ const GPT_REASONING_EFFORT_LABELS: Record<GptReasoningEffort, string> = {
   low: "轻度",
   medium: "中",
   high: "高",
-  xhigh: "极高"
+  xhigh: "极高",
+  max: "最大"
 };
 
 export function ReasoningEffortPicker({
   value,
+  efforts = GPT_REASONING_EFFORTS,
   onChange,
   disabled
 }: {
   value: GptReasoningEffort;
+  efforts?: readonly GptReasoningEffort[];
   onChange: (value: GptReasoningEffort) => void;
   disabled: boolean;
 }) {
@@ -66,7 +69,7 @@ export function ReasoningEffortPicker({
       {menuPresence.value ? (
         <div className="reasoning-effort-menu" data-motion={menuPresence.phase} role="listbox" aria-label="推理强度">
           <div className="reasoning-effort-title">推理强度</div>
-          {GPT_REASONING_EFFORTS.map((effort) => (
+          {efforts.map((effort) => (
             <button
               key={effort}
               type="button"

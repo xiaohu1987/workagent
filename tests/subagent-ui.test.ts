@@ -1,21 +1,27 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { SubagentResultEnvelope, ThreadRecord, ToolCallRecord } from "@shared-types";
 import type { RuntimeActivity } from "../apps/desktop/src/renderer/core/app-types";
 import {
-  SubagentStatusDock,
-  SubagentTaskGroup,
+  SubagentDetailWorkspace,
+  SubagentSwitchRow,
+  SUBAGENT_COURTESY_NAMES,
+  assignSubagentCourtesyNames,
+  buildSubagentPresentations,
   getSubagentGroupSummary,
   getSubagentPhases,
   getSubagentTaskName,
   resolveSubagentDisplayState,
-  shouldShowSubagentStatusDock
+  resolveSelectedSubagentId
 } from "../apps/desktop/src/renderer/cards/runtime-cards";
 
 const rendererStylesCss = readFileSync(new URL("../apps/desktop/src/renderer/styles.css", import.meta.url), "utf8");
 const backendSource = readFileSync(new URL("../apps/desktop/src/main/app.ts", import.meta.url), "utf8");
+const rendererAppSource = readFileSync(new URL("../apps/desktop/src/renderer/App.tsx", import.meta.url), "utf8");
+const workspaceControlsSource = readFileSync(new URL("../apps/desktop/src/renderer/workspace/workspace-controls.tsx", import.meta.url), "utf8");
+const rightWorkspaceSource = readFileSync(new URL("../apps/desktop/src/renderer/workspace/right-workspace.tsx", import.meta.url), "utf8");
 
 function createAgent(id: string, status: ThreadRecord["status"], role: string): ThreadRecord {
   return {
@@ -75,10 +81,63 @@ function createToolCall(id: string, toolName: string, argumentsJson: string, sta
 }
 
 describe("subagent task UI", () => {
-  it("turns internal task keys into user-facing task names", () => {
+  it("keeps task names for details while chat uses short courtesy names", () => {
     expect(getSubagentTaskName({ agentRole: "api_docs_analysis", lastTaskMessage: null })).toBe("API 文档分析");
     expect(getSubagentTaskName({ agentRole: "test_coverage_check", lastTaskMessage: null })).toBe("测试覆盖检查");
+    expect(getSubagentTaskName({ agentRole: "api_layer_analysis", lastTaskMessage: null })).toBe("API 层分析");
+    expect(getSubagentTaskName({ agentRole: "APIlayer分析", lastTaskMessage: null })).toBe("API 层分析");
+    expect(getSubagentTaskName({ agentRole: "测试andquality分析", lastTaskMessage: null })).toBe("测试与质量分析");
     expect(getSubagentTaskName({ agentRole: "spawn_agent", lastTaskMessage: "检查登录接口的鉴权边界。" })).toBe("检查登录接口的鉴权边界");
+    expect(getSubagentTaskName({ agentRole: "api_layer_analysis", lastTaskMessage: "你在分析位于 D:\\Code\\PmpfinOps 的项目" })).toBe("API 层分析");
+    expect(getSubagentTaskName({
+      agentRole: "你是一个只读代码分析子智能体",
+      lastTaskMessage: "你是一个只读代码分析子智能体"
+    })).toBe("代码分析");
+  });
+
+  it("assigns unique 2-to-4-character courtesy names in spawn order", () => {
+    expect(SUBAGENT_COURTESY_NAMES.every((name) => /^[\u4e00-\u9fff]{2,4}$/.test(name))).toBe(true);
+    const names = assignSubagentCourtesyNames([
+      { id: "later", createdAt: "2026-09-01T00:00:02.000Z" },
+      { id: "first", createdAt: "2026-09-01T00:00:00.000Z" },
+      { id: "middle", createdAt: "2026-09-01T00:00:01.000Z" }
+    ]);
+    expect([...names.values()]).toEqual(["青雀", "白驹", "疏影"]);
+    expect(names.get("first")).toBe("青雀");
+    expect(names.get("middle")).toBe("白驹");
+    expect(names.get("later")).toBe("疏影");
+  });
+
+  it("invents distinct names when child agents reuse the same persona", () => {
+    const persona = "你是一个只读代码分析子智能体";
+    const layered = buildSubagentPresentations({
+      agents: [
+        { ...createAgent("api", "running", persona), lastTaskMessage: "请分析 API 层的控制器与路由。" },
+        { ...createAgent("domain", "running", persona), lastTaskMessage: "请分析 Domain 层的实体与业务规则。" },
+        { ...createAgent("quality", "running", persona), lastTaskMessage: "请分析测试项目与工程质量。" }
+      ],
+      queuedAgentIds: new Set<string>(),
+      resultsById: new Map(),
+      waitingInputAgentIds: new Set<string>(),
+      runtimeActivities: {}
+    });
+    expect(layered.map((item) => item.title)).toEqual(["青雀", "白驹", "疏影"]);
+    expect(layered.map((item) => item.taskName)).toEqual(["API 层分析", "领域层分析", "测试质量分析"]);
+
+    const numbered = buildSubagentPresentations({
+      agents: [
+        { ...createAgent("one", "running", persona), lastTaskMessage: persona },
+        { ...createAgent("two", "running", persona), lastTaskMessage: persona },
+        { ...createAgent("three", "running", persona), lastTaskMessage: persona }
+      ],
+      queuedAgentIds: new Set<string>(),
+      resultsById: new Map(),
+      waitingInputAgentIds: new Set<string>(),
+      runtimeActivities: {}
+    });
+    expect(numbered.map((item) => item.title)).toEqual(["青雀", "疏影", "白驹"]);
+    expect(new Set(numbered.map((item) => item.title)).size).toBe(3);
+    expect(numbered.every((item) => item.taskName === "代码分析")).toBe(true);
   });
 
   it("distinguishes all six user-visible lifecycle states", () => {
@@ -159,11 +218,11 @@ describe("subagent task UI", () => {
     ]);
   });
 
-  it("renders scan-friendly results, failure recovery, and takeover controls", () => {
+  it("builds one shared presentation for workspace details", () => {
     const completed = createAgent("done", "completed", "api_docs_analysis");
     const failed = createAgent("failed", "failed", "test_coverage_check");
     const running = createAgent("running", "running", "security_review");
-    const html = renderToStaticMarkup(createElement(SubagentTaskGroup, {
+    const items = buildSubagentPresentations({
       agents: [completed, failed, running],
       queuedAgentIds: new Set<string>(),
       resultsById: new Map([
@@ -171,74 +230,116 @@ describe("subagent task UI", () => {
         [failed.id, createResult(failed, "failed", "测试没有完成", ["测试进程退出码为 1"])]
       ]),
       waitingInputAgentIds: new Set<string>(),
-      runtimeActivities: {},
-      onInterrupt: vi.fn(),
-      onSendInstruction: vi.fn(async () => undefined),
-      onRetry: vi.fn(async () => undefined),
-      onTakeOver: vi.fn()
+      runtimeActivities: {}
+    });
+    const detailHtml = renderToStaticMarkup(createElement(SubagentDetailWorkspace, { item: items[1] }));
+
+    expect(items.map((item) => item.title)).toEqual(["青雀", "白驹", "疏影"]);
+    expect(items.map((item) => item.taskName)).toEqual(["API 文档分析", "测试覆盖检查", "安全审查"]);
+    expect(items[0].summary).toBe("发现 2 个阻塞问题");
+    expect(items[1].detailOutput).toContain("测试进程退出码为 1");
+    expect(detailHtml).toContain("测试进程退出码为 1");
+    expect(detailHtml).toContain("任务结果");
+    expect(detailHtml).toContain("subagent-workspace-phases");
+    expect(detailHtml).toContain("测试覆盖检查");
+    expect(detailHtml.indexOf("阶段进度")).toBeLessThan(detailHtml.indexOf("任务目标"));
+    expect(detailHtml).not.toContain("<button");
+
+    const switchHtml = renderToStaticMarkup(createElement(SubagentSwitchRow, {
+      items,
+      selectedId: items[1].agent.id,
+      onSelect: () => undefined
     }));
-
-    expect(html).toContain("API 文档分析");
-    expect(html).toContain("测试覆盖检查");
-    expect(html).toContain("发现 2 个阻塞问题");
-    expect(html).toContain("测试进程退出码为 1");
-    expect(html).toContain("查看结果");
-    expect(html).toContain("subagent-task-quick-retry");
-    expect(html).toContain("追加指令");
-    expect(html).toContain("重试");
-    expect(html).toContain("停止");
-    expect(html).toContain("接管");
-    expect(html).toContain("代理详情");
+    expect(switchHtml).toContain("aria-label=\"切换子智能体\"");
+    expect(switchHtml).toMatch(/subagent-switch-name">青雀</);
+    expect(switchHtml).toMatch(/subagent-switch-name">白驹</);
+    expect(switchHtml).toMatch(/subagent-switch-name">疏影</);
+    expect(switchHtml).toContain("运行中");
+    expect(switchHtml).toContain("已完成");
+    expect(switchHtml).not.toMatch(/subagent-switch-name">[^<]*(?:API|测试覆盖|安全审查)/);
+    expect(switchHtml).toContain("tone-0");
+    expect(switchHtml).toContain("tone-1");
+    expect(switchHtml).toContain("tone-2");
+    expect(switchHtml).toContain("is-selected");
+    expect(switchHtml).toContain("aria-current=\"true\"");
   });
 
-  it("shows only a small collapsible icon while the enabled task is running", () => {
-    const collapsedHtml = renderToStaticMarkup(createElement(SubagentStatusDock, {
-      summary: "子任务 1 已完成 · 2 运行中",
-      count: 3,
-      expanded: false,
-      onToggle: vi.fn()
-    }, createElement("div", null, "任务详情")));
-    const expandedHtml = renderToStaticMarkup(createElement(SubagentStatusDock, {
-      summary: "子任务 1 已完成 · 2 运行中",
-      count: 3,
-      expanded: true,
-      onToggle: vi.fn()
-    }, createElement("div", null, "任务详情")));
-    const dockRule = rendererStylesCss.match(/\.subagent-status-dock\s*\{([^}]*)\}/)?.[1] ?? "";
-    const toggleRule = rendererStylesCss.match(/\.subagent-status-dock-toggle\s*\{([^}]*)\}/)?.[1] ?? "";
+  it("keeps the selected child and otherwise prioritizes active work", () => {
+    const completed = createAgent("done", "completed", "review");
+    const queued = createAgent("queued", "idle", "docs");
+    const waiting = createAgent("waiting", "waiting", "security");
+    const running = createAgent("running", "running", "analysis");
+    const items = buildSubagentPresentations({
+      agents: [completed, queued, waiting, running],
+      queuedAgentIds: new Set([queued.id]),
+      resultsById: new Map([[completed.id, createResult(completed, "completed", "done")]]),
+      waitingInputAgentIds: new Set([waiting.id]),
+      runtimeActivities: {}
+    });
 
-    expect(collapsedHtml).toContain('aria-expanded="false"');
-    expect(collapsedHtml).toContain("展开子智能体详情");
-    expect(collapsedHtml).toContain("subagent-status-dock-count");
-    expect(collapsedHtml).not.toContain("任务详情</div>");
-    expect(expandedHtml).toContain('aria-expanded="true"');
-    expect(expandedHtml).toContain("收起子智能体详情");
-    expect(expandedHtml).toContain("subagent-status-panel");
-    expect(expandedHtml).toContain("任务详情</div>");
-    expect(dockRule).toContain("position: relative");
-    expect(dockRule).not.toContain("position: sticky");
-    expect(collapsedHtml).toContain("workspace-control-button subagent-status-dock-toggle");
-    expect(toggleRule).not.toContain("width: 34px");
-    expect(toggleRule).not.toContain("height: 34px");
+    expect(resolveSelectedSubagentId(items, waiting.id)).toBe(waiting.id);
+    expect(resolveSelectedSubagentId(items, "missing")).toBe(running.id);
+    expect(resolveSelectedSubagentId([], running.id)).toBeNull();
   });
 
-  it("does not render an empty panel while child tasks are being created", () => {
-    const html = renderToStaticMarkup(createElement(SubagentStatusDock, {
-      summary: "子任务 尚未启动",
-      count: 0,
-      expanded: true,
-      onToggle: vi.fn()
-    }));
+  it("updates transcript and detail output from the same changed state", () => {
+    const agent = createAgent("worker", "running", "analysis");
+    const initial = buildSubagentPresentations({
+      agents: [agent],
+      queuedAgentIds: new Set(),
+      resultsById: new Map(),
+      waitingInputAgentIds: new Set(),
+      runtimeActivities: {}
+    })[0];
+    const completedAgent = { ...agent, status: "completed" as const };
+    const completed = buildSubagentPresentations({
+      agents: [completedAgent],
+      queuedAgentIds: new Set(),
+      resultsById: new Map([[agent.id, createResult(completedAgent, "completed", "分析已经完成")]]),
+      waitingInputAgentIds: new Set(),
+      runtimeActivities: {}
+    })[0];
 
-    expect(html).toBe("");
+    expect(initial.state).toBe("running");
+    expect(completed.state).toBe("completed");
+    expect(completed.summary).toBe("分析已经完成");
+    expect(completed.detailOutput).toBe("分析已经完成");
   });
 
-  it("shows the subagent control only while at least one child task is in progress", () => {
-    expect(shouldShowSubagentStatusDock(true, "proactive", 1)).toBe(true);
-    expect(shouldShowSubagentStatusDock(true, "proactive", 0)).toBe(false);
-    expect(shouldShowSubagentStatusDock(false, "proactive", 1)).toBe(false);
-    expect(shouldShowSubagentStatusDock(true, "disabled", 1)).toBe(false);
-    expect(getSubagentGroupSummary([], new Set(), new Map(), new Set())).toBe("子任务 尚未启动");
+  it("moves the child-agent entry out of the top-right controls and into the workspace", () => {
+    expect(workspaceControlsSource).not.toContain("subagentControl");
+    expect(rendererAppSource).not.toContain("SubagentStatusDock");
+    expect(rendererAppSource).not.toContain("SubagentNarrativeUpdates");
+    expect(rightWorkspaceSource).toContain('id="subagents"');
+    expect(rightWorkspaceSource).toContain("showSubagentTab ?");
+    expect(rightWorkspaceSource).toContain("SubagentSwitchRow");
+    expect(rightWorkspaceSource).toContain("onSelectSubagent");
+    expect(rendererAppSource).toContain("SubagentSwitchRow");
+    expect(rendererAppSource).toContain("onSelect={selectSubagentEvent}");
+    expect(renderToStaticMarkup(createElement(SubagentDetailWorkspace, { item: null }))).toContain("无正在执行的子智能体");
+  });
+
+  it("publishes child-agent results into the parent process conversation", () => {
+    expect(backendSource).toContain("publishSubagentCompletionSummary");
+    expect(backendSource).toContain('displayKind: "subagent-summary"');
+    expect(backendSource).toContain("subagent.completion_summary_published");
+    expect(readFileSync(new URL("../apps/desktop/src/renderer/lib/conversation-utils.ts", import.meta.url), "utf8"))
+      .not.toContain('getMessageDisplayKind(message) === "subagent-summary"');
+  });
+
+  it("styles workspace states, reduced motion, and transparent background modes", () => {
+    expect(rendererStylesCss).toContain(".subagent-workspace-status.completed");
+    expect(rendererStylesCss).toContain(".subagent-workspace-status.failed");
+    expect(rendererStylesCss).toContain(".subagent-workspace-status.waiting_input");
+    expect(rendererStylesCss).toContain(".subagent-switch-row");
+    expect(rendererStylesCss).toContain("flex-wrap: nowrap");
+    expect(rendererStylesCss).toContain(".subagent-switch-chip.tone-0");
+    expect(rendererStylesCss).toContain(".subagent-switch-chip.is-selected");
+    expect(rendererAppSource).toContain("subagentItems={workspaceSubagentPresentations}");
+    expect(rendererStylesCss).toContain(".app-shell:is(.has-app-background, .has-realtime-character) :is(");
+    expect(rendererStylesCss).toContain(".subagent-workspace-phases");
+    expect(rendererStylesCss).toContain(".subagent-workspace-scroll");
+    expect(rendererStylesCss).toContain("@media (prefers-reduced-motion: reduce)");
   });
 
   it("keeps completed child tasks in the current-request snapshot while the parent is still running", () => {
@@ -247,7 +348,16 @@ describe("subagent task UI", () => {
       backendSource.indexOf("public getGpaState")
     );
 
-    expect(snapshotImplementation).toContain("const subagents = this.getCurrentRequestSubagents(thread);");
-    expect(snapshotImplementation).not.toContain("getCurrentRequestSubagents(thread).filter((child) => this.isSubagentActive(child))");
+    expect(snapshotImplementation).toContain("const subagents = this.getVisibleSubagents(thread);");
+    expect(snapshotImplementation).not.toContain("getVisibleSubagents(thread).filter((child) => this.isSubagentActive(child))");
+    expect(backendSource).toContain("this.isSubagentActive(item) && isOverlappingSubagentAssignment");
+    expect(backendSource).toContain("schedulePendingSubagentDispatch(parent.rootThreadId)");
+    expect(backendSource).toContain("await this.emitAgentTreeUpdated(parent.rootThreadId, thread)");
+    expect(backendSource).toContain("payload: childThread ? { thread: root, childThread } : { thread: root }");
+    expect(backendSource).toContain("thread.status === \"waiting\"");
+    expect(backendSource).toContain("this.#db.isSubagentPendingDispatch(thread.id)");
+    expect(rendererAppSource).toContain("upsertSubagentIntoSnapshot");
+    expect(rendererAppSource).toContain("shouldInvalidateSnapshotForThreadUpdate");
+    expect(rendererAppSource).toContain("mergeSnapshotSubagents");
   });
 });
