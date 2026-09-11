@@ -188,14 +188,14 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
               <CompletionAuditModeFields
                 mode="project"
                 label="项目模式"
-                hint="默认开启。关闭后项目任务不再做完成审计。"
+                hint="默认禁用。开启后项目任务会执行完成审计。"
                 configDraft={configDraft}
                 setConfigDraft={setConfigDraft}
               />
               <CompletionAuditModeFields
                 mode="chat"
                 label="普通对话"
-                hint="默认开启。关闭后普通对话不再做完成审计。"
+                hint="默认禁用。开启后普通对话会执行完成审计。"
                 configDraft={configDraft}
                 setConfigDraft={setConfigDraft}
               />

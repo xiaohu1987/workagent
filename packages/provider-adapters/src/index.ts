@@ -1140,6 +1140,10 @@ class OpenAiResponsesProvider implements ProviderAdapter {
         }))
       : undefined;
     const requestedReasoningEffort = input.reasoningEffort ?? input.model.defaultReasoningEffort;
+    // OpenAI Responses does not define the DeepSeek-only `max` value.
+    const responsesReasoningEffort = isGptFamilyModel(input.model) && requestedReasoningEffort === "max"
+      ? "xhigh"
+      : requestedReasoningEffort;
     // A resumed tool turn must include the exact preceding reasoning item. Older
     // transcripts cannot supply it, so continuing in thinking mode would produce
     // a deterministic 400 from Responses-compatible gateways.
@@ -1149,14 +1153,14 @@ class OpenAiResponsesProvider implements ProviderAdapter {
           Boolean(message.toolCalls?.length) &&
           !message.responseReasoningItem
       );
-    const reasoningEffort = hasIncompleteReasoningHistory ? "none" : requestedReasoningEffort;
+    const reasoningEffort = hasIncompleteReasoningHistory ? "none" : responsesReasoningEffort;
     const baseRequest: Record<string, unknown> = {
       model: input.model.id,
       instructions: input.systemPrompt || undefined,
       input: await buildResponsesInput(input),
       max_output_tokens: input.model.defaultMaxOutputTokens,
       ...(nativeTools ? { tools: nativeTools, parallel_tool_calls: input.model.supportsParallelToolCalls } : {}),
-      ...(reasoningEffort && reasoningEffort !== "none" && reasoningEffort !== "minimal"
+      ...(reasoningEffort
         ? { reasoning: { effort: reasoningEffort, summary: "concise" } }
         : {})
     };
@@ -1713,6 +1717,7 @@ class AnthropicProvider implements ProviderAdapter {
         }))
       : undefined;
     const reasoningEffort = input.reasoningEffort ?? input.model.defaultReasoningEffort;
+    const anthropicThinking = buildAnthropicThinkingConfig(input.model, reasoningEffort, input.model.defaultMaxOutputTokens ?? 2048);
     const request: Record<string, unknown> = {
       model: input.model.id,
       system: appendGrokCompletionAuditInstruction(compatContext, input.systemPrompt),
@@ -1722,9 +1727,7 @@ class AnthropicProvider implements ProviderAdapter {
         tools: nativeTools,
         tool_choice: { type: "auto", disable_parallel_tool_use: !input.model.supportsParallelToolCalls }
       } : {}),
-      ...(reasoningEffort && reasoningEffort !== "none" && reasoningEffort !== "minimal"
-        ? { thinking: { type: "adaptive" }, output_config: { effort: reasoningEffort } }
-        : {})
+      ...(anthropicThinking ?? {})
     };
     if (input.stream && input.model.supportsStreaming) {
       const limitedRequest = applyProviderRequestLimits({ ...request, stream: true }, this.provider, input.model);
@@ -1740,6 +1743,40 @@ class AnthropicProvider implements ProviderAdapter {
     const response = await this.#client.messages.create(limitedRequest as any, { signal: input.abortSignal });
     return parseAnthropicResponse(response, input, Boolean(nativeTools));
   }
+}
+
+function buildAnthropicThinkingConfig(
+  model: Pick<ModelProfile, "id" | "displayName">,
+  effort: ProviderTurnInput["reasoningEffort"] | undefined,
+  maxTokens: number
+): Record<string, unknown> | undefined {
+  if (!effort) return undefined;
+  if (effort === "none") return { thinking: { type: "disabled" } };
+
+  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  const supportsAdaptive = /claude-(?:opus|sonnet|haiku)-(?:4-6(?:[-.\s]|$)|5(?:[-.\s]|$))/.test(identity);
+  if (supportsAdaptive) {
+    return {
+      thinking: { type: "adaptive" },
+      output_config: { effort: effort === "minimal" ? "low" : effort }
+    };
+  }
+
+  // Legacy Claude models use a token budget instead of output_config.effort.
+  // Keep the budget below max_tokens as required by the Messages API.
+  const ratio = effort === "minimal" || effort === "low"
+    ? 0.2
+    : effort === "medium"
+      ? 0.4
+      : effort === "high"
+        ? 0.7
+        : effort === "xhigh"
+          ? 0.8
+          : 0.9;
+  const safeMaxTokens = Math.max(0, Math.floor(maxTokens));
+  if (safeMaxTokens <= 1024) return { thinking: { type: "disabled" } };
+  const budget = Math.min(safeMaxTokens - 1, Math.max(1024, Math.floor(safeMaxTokens * ratio)));
+  return { thinking: { type: "enabled", budget_tokens: budget } };
 }
 
 function parseAnthropicResponse(
@@ -1897,6 +1934,7 @@ class GeminiProvider implements ProviderAdapter {
     const endpoint = this.provider.baseUrl
       ? `${this.provider.baseUrl.replace(/\/$/, "")}/models/${input.model.id}:generateContent?key=${apiKey}`
       : `https://generativelanguage.googleapis.com/v1beta/models/${input.model.id}:generateContent?key=${apiKey}`;
+    const generationConfig = buildGeminiNativeGenerationConfig(input.model, input.reasoningEffort ?? input.model.defaultReasoningEffort);
 
     const response = await fetch(endpoint, {
       method: "POST",
@@ -1909,6 +1947,7 @@ class GeminiProvider implements ProviderAdapter {
           parts: [{ text: input.systemPrompt }]
         },
         contents: await buildGeminiContents(input),
+        ...(generationConfig ? { generationConfig } : {}),
         ...(input.model.supportsToolCalling && input.availableTools.length > 0
           ? {
               tools: [{
@@ -1997,6 +2036,37 @@ class GeminiProvider implements ProviderAdapter {
     const context: ModelCompatContext = { model: input.model, input };
     return resolveModelCompat(input.model, input.provider).normalizeDecision(decision, context);
   }
+}
+
+function buildGeminiNativeGenerationConfig(
+  model: Pick<ModelProfile, "id" | "displayName">,
+  effort: ProviderTurnInput["reasoningEffort"] | undefined
+): Record<string, unknown> | undefined {
+  if (!effort) return undefined;
+  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+  if (/gemini-3(?:[-.]|\b)/.test(identity)) {
+    const thinkingLevel = effort === "none" || effort === "minimal"
+      ? "MINIMAL"
+      : effort === "low"
+        ? "LOW"
+        : effort === "medium"
+          ? "MEDIUM"
+          : "HIGH";
+    return { thinkingConfig: { thinkingLevel } };
+  }
+
+  const thinkingBudget = effort === "none"
+    ? 0
+    : effort === "minimal"
+      ? 512
+      : effort === "low"
+        ? 1024
+        : effort === "medium"
+          ? 4096
+          : effort === "high"
+            ? 8192
+            : 16384;
+  return { thinkingConfig: { thinkingBudget } };
 }
 
 function resolveApiKey(provider: ProviderDefinition): string {

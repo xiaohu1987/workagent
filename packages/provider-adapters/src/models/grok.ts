@@ -262,8 +262,10 @@ export const grokCompat = defineCompat(gptCompat, {
   normalizeRequestParams(context: ModelCompatContext, base: Record<string, unknown>): Record<string, unknown> {
     const request = gptCompat.normalizeRequestParams(context, base);
     if (!isGrokCompletionAudit(context)) {
-      return isGptReasoningEffort(context.input.reasoningEffort)
-        ? { ...request, reasoning_effort: context.input.reasoningEffort }
+      const effort = context.input.reasoningEffort;
+      const mappedEffort = effort === "xhigh" ? "high" : effort;
+      return isGptReasoningEffort(mappedEffort)
+        ? { ...request, reasoning_effort: mappedEffort }
         : request;
     }
 

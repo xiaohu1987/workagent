@@ -1508,7 +1508,7 @@ describe("standard completion validation", () => {
     expect(RECOVERY_MODEL_DECISION_TIMEOUT_MS).toBeGreaterThan(0);
   });
 
-  it("skips the optional audit for ordinary chat while retaining it for project delivery", () => {
+  it("disables completion audit by default and applies its scope when explicitly enabled", () => {
     expect(shouldRunStandardCompletionAudit({
       mode: "chat",
       request: "请根据我的目标起草一份清晰、可直接使用的内容。",
@@ -1523,11 +1523,23 @@ describe("standard completion validation", () => {
       mode: "chat",
       request: "Please create a file with the completed content.",
       requestedDeliverableExtensions: [".md"]
-    })).toBe(true);
+    })).toBe(false);
     expect(shouldRunStandardCompletionAudit({
       mode: "project",
       request: "Explain this function.",
       requestedDeliverableExtensions: []
+    })).toBe(false);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "chat",
+      request: "Please create a file with the completed content.",
+      requestedDeliverableExtensions: [".md"],
+      enabled: true
+    })).toBe(true);
+    expect(shouldRunStandardCompletionAudit({
+      mode: "project",
+      request: "Explain this function.",
+      requestedDeliverableExtensions: [],
+      enabled: true
     })).toBe(true);
     expect(shouldRunStandardCompletionAudit({
       mode: "project",
@@ -1944,7 +1956,8 @@ describe("standard completion validation", () => {
     expect(shouldRunStandardCompletionAudit({
       mode: "chat",
       request: "请生成 xlsx 报表",
-      requestedDeliverableExtensions: [".xlsx"]
+      requestedDeliverableExtensions: [".xlsx"],
+      enabled: true
     })).toBe(true);
   });
 

@@ -2380,7 +2380,7 @@ describe("OpenAiCompatibleProvider", () => {
     });
     expect(deepseek).toMatchObject({
       thinking: { type: "enabled" },
-      reasoning_effort: "max"
+      reasoning_effort: "high"
     });
 
     const glm = await run("glm-5.3-flash", "GLM 5.3 Flash", {
@@ -2398,7 +2398,7 @@ describe("OpenAiCompatibleProvider", () => {
       type: "openai-compatible",
       apiKey: "secret"
     });
-    expect(grok).toMatchObject({ reasoning_effort: "xhigh" });
+    expect(grok).toMatchObject({ reasoning_effort: "high" });
   });
 
   it("uses Grok's plain-text completion-audit compatibility protocol", async () => {
@@ -3173,13 +3173,46 @@ describe("OpenAiCompatibleProvider", () => {
 
     const request = mocks.chatCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     expect(request.thinking).toEqual({ type: "enabled" });
-    expect(request.reasoning_effort).toBe("max");
+    expect(request.reasoning_effort).toBe("high");
     expect(request.messages).toContainEqual(expect.objectContaining({
       role: "assistant",
       content: "",
       reasoning_content: "",
       tool_calls: expect.any(Array)
     }));
+  });
+
+  it("passes mapped effort for non-V4 DeepSeek reasoning models", async () => {
+    mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "done" } }] });
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      compatibilityProfile: "deepseek",
+      apiKey: "secret"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      reasoningEffort: "xhigh",
+      model: {
+        id: "deepseek-reasoner",
+        providerId: provider.id,
+        displayName: "DeepSeek Reasoner",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: false,
+        supportsParallelToolCalls: false,
+        supportsJsonOutput: false,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true
+      },
+      provider
+    });
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0]).toMatchObject({
+      thinking: { type: "enabled" },
+      reasoning_effort: "high"
+    });
   });
 
   it("uses standard OpenAI fields for DeepSeek models behind a compatible gateway", async () => {
@@ -3916,6 +3949,70 @@ describe("native provider tool protocols", () => {
       .toEqual(["openai_chat"]);
     expect(defaultOpenAiApiFormatsForModel({ id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro" }))
       .toEqual(["openai_chat"]);
+    expect(defaultOpenAiApiFormatsForModel({ id: "o3-mini", displayName: "o3 mini" }))
+      .toEqual(["openai_responses", "openai_chat"]);
+  });
+
+  it("uses the legacy enabled thinking budget for older Claude models", async () => {
+    mocks.anthropicCreate.mockResolvedValue({ content: [{ type: "text", text: "Done." }], usage: { output_tokens: 1 } });
+    const provider: ProviderDefinition = { id: "provider", type: "anthropic", apiKey: "secret" };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      model: {
+        ...model,
+        id: "claude-sonnet-4-20250514",
+        displayName: "Claude Sonnet 4",
+        defaultMaxOutputTokens: 8192,
+        defaultReasoningEffort: "medium"
+      },
+      provider
+    });
+    expect(mocks.anthropicCreate.mock.calls.at(-1)?.[0]).toMatchObject({
+      thinking: { type: "enabled", budget_tokens: 3276 }
+    });
+    expect(mocks.anthropicCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("output_config");
+
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "Hello" }],
+      availableTools: [],
+      model: {
+        ...model,
+        id: "claude-opus-4-6",
+        displayName: "Claude Opus 4.6",
+        defaultMaxOutputTokens: 8192,
+        defaultReasoningEffort: "high"
+      },
+      provider
+    });
+    expect(mocks.anthropicCreate.mock.calls.at(-1)?.[0]).toMatchObject({
+      thinking: { type: "adaptive" },
+      output_config: { effort: "high" }
+    });
+  });
+
+  it("passes thinking configuration to the native Gemini API", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "Done." }] } }]
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const provider: ProviderDefinition = { id: "gemini", type: "gemini", apiFormat: "gemini", apiKey: "secret" };
+      await new ProviderFactory().create(provider).runTurn({
+        systemPrompt: "Answer.",
+        transcript: [{ role: "user", content: "Hello" }],
+        availableTools: [],
+        reasoningEffort: "high",
+        model: { ...model, id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", defaultMaxOutputTokens: 4096 },
+        provider
+      });
+      const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+      expect(body.generationConfig).toEqual({ thinkingConfig: { thinkingBudget: 8192 } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("uses Anthropic tool_use blocks instead of text JSON", async () => {
@@ -4369,7 +4466,9 @@ describe("native provider tool protocols", () => {
       reasoningEffort: "high"
     });
 
-    expect(mocks.responsesCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("reasoning");
+    expect(mocks.responsesCreate.mock.calls.at(-1)?.[0]).toMatchObject({
+      reasoning: { effort: "none", summary: "concise" }
+    });
   });
 
   it("demotes incomplete DeepSeek Responses tool history instead of replaying an invalid call", async () => {

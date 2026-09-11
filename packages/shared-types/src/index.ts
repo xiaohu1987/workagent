@@ -79,7 +79,8 @@ export type CompatibilityProfile = "standard" | "deepseek";
 
 export function isGptFamilyModel(model: Pick<ModelProfile, "id" | "displayName">): boolean {
   const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
-  return /(?:^|[^a-z0-9])(?:chat)?gpt(?:$|[^a-z0-9]|\d)/.test(identity);
+  return /(?:^|[^a-z0-9])(?:chat)?gpt(?:$|[^a-z0-9]|\d)/.test(identity)
+    || /(?:^|[^a-z0-9])o[134](?:$|[^a-z0-9]|\d)/.test(identity);
 }
 
 export function defaultOpenAiApiFormatsForModel(
@@ -904,16 +905,18 @@ export function normalizeResponseTone(value: unknown): ResponseTone {
   return DEFAULT_RESPONSE_TONE;
 }
 
-/** GPT-5.4 and newer reasoning models expose the four user-facing effort levels. */
+/** Current GPT-5.1+ and o-series reasoning models expose configurable effort. */
 export function isConfigurableGptReasoningModel(
   model: Pick<ModelProfile, "id" | "role">
 ): boolean {
   if (model.role !== "reasoning") return false;
-  const version = /\bgpt-(\d+)(?:\.(\d+))?/i.exec(model.id);
+  const identity = model.id.toLowerCase();
+  if (/(?:^|[^a-z0-9])o[134](?:$|[^a-z0-9]|\d)/.test(identity)) return true;
+  const version = /\bgpt-(\d+)(?:\.(\d+))?/i.exec(identity);
   if (!version) return false;
   const major = Number(version[1]);
-  const minor = Number(version[2] ?? 0);
-  return major > 5 || (major === 5 && minor >= 4);
+  const minor = version[2] === undefined ? 0 : Number(version[2]);
+  return major > 5 || (major === 5 && minor >= 1);
 }
 
 export function isConfigurableReasoningEffortModel(
@@ -947,7 +950,7 @@ export function resolveModelReasoningEffort(
 
 export type BrowserOpenMode = "in_app" | "external_default";
 
-export const DEFAULT_COMPLETION_AUDIT_ENABLED = true;
+export const DEFAULT_COMPLETION_AUDIT_ENABLED = false;
 export const DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS = 3;
 export const MIN_COMPLETION_AUDIT_MAX_ATTEMPTS = 1;
 export const MAX_COMPLETION_AUDIT_MAX_ATTEMPTS = 8;
@@ -965,7 +968,7 @@ export type CompletionAuditSettings = {
 };
 
 export function normalizeCompletionAuditEnabled(value: unknown): boolean {
-  return value !== false;
+  return typeof value === "boolean" ? value : DEFAULT_COMPLETION_AUDIT_ENABLED;
 }
 
 export function normalizeCompletionAuditMaxAttempts(value: unknown): number {

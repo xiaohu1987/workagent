@@ -108,10 +108,11 @@ describe("model configuration storage", () => {
     expect(config.responseTone).toBe("concise");
     expect(config.desktop.liveEditPreview).toBe(false);
     expect(config.desktop.completionAudit).toEqual({
-      project: { enabled: true, maxAttempts: 3 },
-      chat: { enabled: true, maxAttempts: 3 }
+      project: { enabled: false, maxAttempts: 3 },
+      chat: { enabled: false, maxAttempts: 3 }
     });
-    expect(normalizeCompletionAuditEnabled(undefined)).toBe(true);
+    expect(normalizeCompletionAuditEnabled(undefined)).toBe(false);
+    expect(normalizeCompletionAuditEnabled(true)).toBe(true);
     expect(normalizeCompletionAuditEnabled(false)).toBe(false);
     expect(normalizeCompletionAuditMaxAttempts(undefined)).toBe(3);
     expect(normalizeCompletionAuditMaxAttempts(0)).toBe(1);
@@ -151,7 +152,7 @@ describe("model configuration storage", () => {
     expect(loaded.responseTone).toBe("friendly");
   });
 
-  it("persists completion audit settings and defaults them on for older configs", async () => {
+  it("persists completion audit settings and defaults them off for older configs", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-audit-"));
     temporaryDirectories.push(directory);
     const configFile = path.join(directory, "config.toml");
@@ -176,8 +177,8 @@ describe("model configuration storage", () => {
     await fs.writeFile(configFile, withoutAudit, "utf8");
     const migrated = await loadConfig(configFile);
     expect(migrated.desktop.completionAudit).toEqual({
-      project: { enabled: true, maxAttempts: 3 },
-      chat: { enabled: true, maxAttempts: 3 }
+      project: { enabled: false, maxAttempts: 3 },
+      chat: { enabled: false, maxAttempts: 3 }
     });
   });
 

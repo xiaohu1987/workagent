@@ -17,11 +17,11 @@ function isDeepSeekV4Model(identity: string): boolean {
   return DEEPSEEK_V4_PATTERN.test(identity);
 }
 
-function mapDeepSeekReasoningEffort(value: unknown, isPro: boolean): "low" | "high" | "max" | undefined {
+function mapDeepSeekReasoningEffort(value: unknown): "low" | "high" | "max" | undefined {
   if (value === "none") return undefined;
-  if (value === "minimal" || value === "low") return isPro ? "high" : "low";
-  if (value === "medium" || value === "high") return "high";
-  if (value === "xhigh" || value === "max") return "max";
+  if (value === "minimal" || value === "low") return "low";
+  if (value === "medium" || value === "high" || value === "xhigh") return "high";
+  if (value === "max") return "max";
   return undefined;
 }
 
@@ -119,9 +119,8 @@ export const deepseekCompat = defineCompat(gptCompat, {
     const useStrictJsonRecovery = usesNativeProtocol && Boolean(
       ctx.input.forceTextToolProtocol && ctx.model.supportsJsonOutput && isV4
     );
-    const isThinkingRequest = usesNativeProtocol && !useStrictJsonRecovery && (isV4
-      ? reasoningEffort !== "none"
-      : DEEPSEEK_REASONER_PATTERN.test(identity));
+    const isNativeReasoningModel = usesNativeProtocol && (isV4 || DEEPSEEK_REASONER_PATTERN.test(identity));
+    const isThinkingRequest = isNativeReasoningModel && !useStrictJsonRecovery && reasoningEffort !== "none";
 
     // 1. Reasoning models: strip fields the thinking API rejects (HTTP 400).
     let next: Record<string, unknown> = base;
@@ -152,15 +151,14 @@ export const deepseekCompat = defineCompat(gptCompat, {
     // DeepSeek V4 defaults to thinking mode, but compatible gateways do not
     // always apply that default consistently. Make the mode explicit and map
     // the app's reasoning levels to the V4 API's low/high/max values.
-    if (usesNativeProtocol && isV4) {
-      const isPro = /\bv4-pro\b/.test(identity);
+    if (isNativeReasoningModel) {
       next = {
         ...next,
         thinking: { type: reasoningEffort === "none" || useStrictJsonRecovery ? "disabled" : "enabled" }
       };
       const mappedEffort = reasoningEffort === "none" || useStrictJsonRecovery
         ? undefined
-        : mapDeepSeekReasoningEffort(reasoningEffort, isPro);
+        : mapDeepSeekReasoningEffort(reasoningEffort);
       if (mappedEffort) {
         next = { ...next, reasoning_effort: mappedEffort };
       } else {
