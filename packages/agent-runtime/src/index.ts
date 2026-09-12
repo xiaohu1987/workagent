@@ -452,6 +452,11 @@ export const MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES = 5;
 export const MAX_PROVIDER_RESOURCE_RETRIES = 2;
 /** Zero denotes unbounded automatic recovery. */
 export const MAX_PROVIDER_STREAM_RECOVERY_RETRIES = 0;
+/** Child agents must converge instead of retrying forever on provider faults. */
+export const MAX_SUBAGENT_NETWORK_RETRIES = 3;
+export const MAX_SUBAGENT_TIMEOUT_RETRIES = MAX_MODEL_TIMEOUT_RETRIES;
+export const MAX_SUBAGENT_STREAM_RECOVERY_RETRIES = 2;
+export const MAX_SUBAGENT_REQUEST_LIMIT_RETRIES = 3;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_BASE_TOKENS = 8_192;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_MAX_TOKENS = 32_768;
 
@@ -2761,6 +2766,17 @@ class ThreadSessionRuntime {
               toolCallId: waitToolCall.id,
               toolResultOk: true
             });
+            const failedSubagents = waitResult.agents.filter((agent) =>
+              agent.status === "failed" || agent.status === "interrupted"
+            );
+            if (failedSubagents.length > 0) {
+              transcript.push({
+                role: "user",
+                content:
+                  `[Internal subagent failure notice] ${failedSubagents.length} child agent(s) failed or were interrupted. ` +
+                  "Do not call wait_agent again for these agents. Review their error details, continue the main task with the available evidence, or provide a clear partial-result explanation."
+              });
+            }
             rootSummaryDeferredForSubagents = false;
             await this.services.log("turn.summary_resumed_after_subagents", this.threadId, {
               turnRunId: turn.id,
@@ -3253,7 +3269,8 @@ class ThreadSessionRuntime {
           if (
             !abortController.signal.aborted &&
             requestLimit &&
-            shouldRecoverProviderRequestLimit(error, providerRequestLimitRecoveryAttempts)
+            shouldRecoverProviderRequestLimit(error, providerRequestLimitRecoveryAttempts) &&
+            (!isChildAgent || providerRequestLimitRecoveryAttempts < MAX_SUBAGENT_REQUEST_LIMIT_RETRIES)
           ) {
             providerRequestLimitRecoveryAttempts += 1;
             providerRequestSlimmingAttempts = Math.max(
@@ -3274,7 +3291,7 @@ class ThreadSessionRuntime {
             const recoveryPayload = {
               turnRunId: turn.id,
               attempt: providerRequestLimitRecoveryAttempts,
-              maxAttempts: 0,
+              maxAttempts: isChildAgent ? MAX_SUBAGENT_REQUEST_LIMIT_RETRIES : 0,
               beforeBytes: requestLimit.requestBytes,
               maxRequestBytes: requestLimit.maxRequestBytes,
               overageBytes: Math.max(0, requestLimit.requestBytes - requestLimit.maxRequestBytes),
@@ -3289,7 +3306,7 @@ class ThreadSessionRuntime {
               threadId: this.threadId,
               payload: {
                 attempt: providerRequestLimitRecoveryAttempts,
-                maxAttempts: 0,
+                maxAttempts: isChildAgent ? MAX_SUBAGENT_REQUEST_LIMIT_RETRIES : 0,
                 reason: "provider_request_limit",
                 overageBytes: recoveryPayload.overageBytes,
                 nextToolBudget,
@@ -3310,6 +3327,9 @@ class ThreadSessionRuntime {
               overageBytes: Math.max(0, requestLimit.requestBytes - requestLimit.maxRequestBytes),
               currentRequestPreserved: true
             });
+            if (isChildAgent && providerRequestLimitRecoveryAttempts >= MAX_SUBAGENT_REQUEST_LIMIT_RETRIES) {
+              throw error;
+            }
           }
           if (!abortController.signal.aborted && isProviderResourceError(error)) {
             if (providerResourceAttempts >= MAX_PROVIDER_RESOURCE_RETRIES) {
@@ -3406,6 +3426,15 @@ class ThreadSessionRuntime {
             error.reason === "missing_finish_reason"
           ) {
             providerStreamRecoveryAttempts += 1;
+            if (isChildAgent && providerStreamRecoveryAttempts > MAX_SUBAGENT_STREAM_RECOVERY_RETRIES) {
+              await this.services.log("provider.stream_recovery_exhausted", this.threadId, {
+                turnRunId: turn.id,
+                attempt: providerStreamRecoveryAttempts,
+                maxAttempts: MAX_SUBAGENT_STREAM_RECOVERY_RETRIES,
+                reason: error.reason
+              });
+              throw error;
+            }
             forceNonStreamingAfterIncompleteStream = true;
             const delayMs = resolveNetworkErrorDelayMs(providerStreamRecoveryAttempts);
             const recoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
@@ -3416,7 +3445,7 @@ class ThreadSessionRuntime {
             await this.services.log("provider.stream_recovery", this.threadId, {
               turnRunId: turn.id,
               attempt: providerStreamRecoveryAttempts,
-              maxAttempts: MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
+              maxAttempts: isChildAgent ? MAX_SUBAGENT_STREAM_RECOVERY_RETRIES : MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
               reason: error.reason,
               delayMs,
               recoveryCycle,
@@ -3428,7 +3457,7 @@ class ThreadSessionRuntime {
               threadId: this.threadId,
               payload: {
                 attempt: providerStreamRecoveryAttempts,
-                maxAttempts: MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
+                maxAttempts: isChildAgent ? MAX_SUBAGENT_STREAM_RECOVERY_RETRIES : MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
                 reason: "provider_missing_finish_reason",
                 delayMs,
                 streamingDisabled: true
@@ -3603,8 +3632,17 @@ class ThreadSessionRuntime {
             // a model decision. Unlike ModelDecisionTimeoutError these never
             // carry a partial result, so discard whatever was streamed so far
             // and retry with exponential back-off.
-            await retryDraft();
             networkErrorAttempts += 1;
+            if (isChildAgent && networkErrorAttempts > MAX_SUBAGENT_NETWORK_RETRIES) {
+              await this.services.log("provider.network_error_recovery_exhausted", this.threadId, {
+                turnRunId: turn.id,
+                attempt: networkErrorAttempts,
+                maxAttempts: MAX_SUBAGENT_NETWORK_RETRIES,
+                error: errorMessage
+              });
+              throw error;
+            }
+            await retryDraft();
             const delayMs = resolveNetworkErrorDelayMs(networkErrorAttempts);
             const retrying = true;
             await this.services.log("provider.network_error", this.threadId, {
@@ -3620,7 +3658,7 @@ class ThreadSessionRuntime {
               threadId: this.threadId,
               payload: {
                 attempt: networkErrorAttempts,
-                maxAttempts: 0,
+                maxAttempts: isChildAgent ? MAX_SUBAGENT_NETWORK_RETRIES : 0,
                 reason: "network_error",
                 delayMs
               },
@@ -3634,9 +3672,18 @@ class ThreadSessionRuntime {
           }
 
           // A request that makes no observable progress for the configured
-          // window is transient. Retry automatically and periodically compact
-          // the transcript until the user explicitly stops the task.
+          // window is transient. Root tasks may retry until the user explicitly
+          // stops them; child tasks use a finite retry budget below.
           modelTimeoutAttempts += 1;
+          if (isChildAgent && modelTimeoutAttempts > MAX_SUBAGENT_TIMEOUT_RETRIES) {
+            await this.services.log("provider.turn_timeout_recovery_exhausted", this.threadId, {
+              turnRunId: turn.id,
+              attempt: modelTimeoutAttempts,
+              maxAttempts: MAX_SUBAGENT_TIMEOUT_RETRIES,
+              timeoutMs: decisionTimeoutMs
+            });
+            throw error;
+          }
           const timeoutRecoveryWindow = MAX_MODEL_TIMEOUT_RETRIES;
           const recoveryCycle = Math.ceil(modelTimeoutAttempts / timeoutRecoveryWindow);
           const escalated = modelTimeoutAttempts % timeoutRecoveryWindow === 0;
@@ -3661,7 +3708,7 @@ class ThreadSessionRuntime {
             threadId: this.threadId,
             payload: {
               attempt: modelTimeoutAttempts,
-              maxAttempts: 0,
+              maxAttempts: isChildAgent ? MAX_SUBAGENT_TIMEOUT_RETRIES : 0,
               reason: "model_timeout",
               delayMs: Math.min(5_000, 1_000 * Math.min(modelTimeoutAttempts, 5))
             },
@@ -6418,6 +6465,28 @@ class ThreadSessionRuntime {
             await this.services.hasActiveSubagents(this.threadId)
           ) {
             rootSummaryDeferredForSubagents = true;
+          }
+          if (
+            result.ok &&
+            !thread.parentThreadId &&
+            (toolCall.name === "wait_agent" || toolCall.name === "multi_agents.wait")
+          ) {
+            const failedSubagents = Array.isArray(result.json?.agents)
+              ? result.json.agents.filter((agent) =>
+                agent && typeof agent === "object" &&
+                ((agent as { status?: unknown }).status === "failed" ||
+                  (agent as { status?: unknown }).status === "interrupted")
+              )
+              : [];
+            if (failedSubagents.length > 0) {
+              rootSummaryDeferredForSubagents = false;
+              transcript.push({
+                role: "user",
+                content:
+                  `[Internal subagent failure notice] ${failedSubagents.length} child agent(s) failed or were interrupted. ` +
+                  "Do not wait for them again. Review the returned error details and continue the main task or report the blocked portion clearly."
+              });
+            }
           }
           if (!result.ok && toolCall.name === "shell.exec" && isTerminalCommandTimeout(result.content)) {
             await this.services.log("terminal.command_timeout_recovery", this.threadId, {

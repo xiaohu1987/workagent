@@ -7,8 +7,10 @@ import { useMotionPresence } from "../core/motion-presence";
 import { getFileLeafName } from "../markdown";
 import {
   IconChatBubbles,
+  IconCheck,
   IconChevronDown,
   IconChevronRight,
+  IconClose,
   IconCompose,
   IconFolder,
   IconFolders,
@@ -58,20 +60,59 @@ type Props = {
   onGenerateUserSkill: (thread: ThreadRecord) => void;
   onTogglePinned: (thread: ThreadRecord) => Promise<void>;
   onRequestDelete: (thread: ThreadRecord) => void;
+  onRequestBatchDelete: (threadIds: string[]) => void;
+  batchDeleting?: boolean;
   onBeginRename: (thread: ThreadRecord) => void;
   onEditProject: (cwd: string) => void;
   onCreateProjectChat: (cwd: string) => void;
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [historyView, setHistoryView] = useState<HistoryView>(() => (
     selectedThreadId && standaloneThreads.some((thread) => thread.id === selectedThreadId) ? "tasks" : "projects"
   ));
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(new Set());
   const contextPresence = useMotionPresence(contextMenu, 140);
   const visibleContextMenu = contextMenu ?? contextPresence.value;
+  const currentViewThreads = historyView === "projects" ? projectGroups.flatMap((group) => group.threads) : standaloneThreads;
+  const allHistoryThreads = [...projectGroups.flatMap((group) => group.threads), ...standaloneThreads];
+  const selectableThreads = currentViewThreads.filter((thread) => canDeleteThread(thread.status, deletingThreadId) && !batchDeleting);
+  const selectedCount = allHistoryThreads.filter((thread) => selectedThreadIds.has(thread.id) && canDeleteThread(thread.status, deletingThreadId)).length;
+
+  function toggleThreadSelection(thread: ThreadRecord) {
+    if (!selectionMode || !canDeleteThread(thread.status, deletingThreadId) || batchDeleting) return;
+    setSelectedThreadIds((current) => {
+      const next = new Set(current);
+      if (next.has(thread.id)) next.delete(thread.id);
+      else next.add(thread.id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedThreadIds((current) => {
+      const next = new Set(current);
+      const allSelected = selectableThreads.length > 0 && selectableThreads.every((thread) => next.has(thread.id));
+      for (const thread of selectableThreads) {
+        if (allSelected) next.delete(thread.id);
+        else next.add(thread.id);
+      }
+      return next;
+    });
+  }
+
+  function requestBatchDelete() {
+    const ids = allHistoryThreads.filter((thread) => selectedThreadIds.has(thread.id)).map((thread) => thread.id);
+    if (ids.length > 0 && !batchDeleting) {
+      onRequestBatchDelete(ids);
+      setSelectionMode(false);
+      setSelectedThreadIds(new Set());
+    }
+  }
 
   function toggleGroup(setter: Dispatch<SetStateAction<Set<string>>>, groupKey: string) {
     setter((current) => {
@@ -88,7 +129,8 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
     const renaming = renamingThread?.id === thread.id;
     return (
       <div key={thread.id} className={`history-item history-item-${thread.mode} ${selectedThreadId === thread.id ? "selected" : ""} ${running ? "running" : ""} ${deletingThreadId === thread.id ? "is-removing" : ""}`} title={running ? affordance.title : undefined} aria-busy={running} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, thread }); }}>
-        {renaming ? <input className="history-item-rename-input" autoFocus value={renamingThread.title} aria-label="重命名任务" onFocus={(event) => event.currentTarget.select()} onChange={(event) => setRenamingThread({ id: thread.id, title: event.target.value })} onBlur={(event) => void onCommitRename(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); onCancelRename(); } }} onClick={(event) => event.stopPropagation()} /> : <button type="button" className="history-item-main" onClick={() => { setHistoryView(thread.mode === "project" && thread.cwd ? "projects" : "tasks"); void onOpenThread(thread.id, { scrollToLatest: true }); }}><span className="history-item-label">{thread.title}</span>{thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}</button>}
+        {selectionMode && !renaming ? <button type="button" className={`history-item-select ${selectedThreadIds.has(thread.id) ? "is-selected" : ""}`} aria-label={`${selectedThreadIds.has(thread.id) ? "取消选择" : "选择"} ${thread.title}`} aria-pressed={selectedThreadIds.has(thread.id)} disabled={!canDeleteThread(thread.status, deletingThreadId) || batchDeleting} onClick={() => toggleThreadSelection(thread)}><span aria-hidden="true">{selectedThreadIds.has(thread.id) ? <IconCheck /> : null}</span></button> : null}
+        {renaming ? <input className="history-item-rename-input" autoFocus value={renamingThread.title} aria-label="重命名任务" onFocus={(event) => event.currentTarget.select()} onChange={(event) => setRenamingThread({ id: thread.id, title: event.target.value })} onBlur={(event) => void onCommitRename(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); onCancelRename(); } }} onClick={(event) => event.stopPropagation()} /> : <button type="button" className="history-item-main" onClick={() => { if (selectionMode) { toggleThreadSelection(thread); return; } setHistoryView(thread.mode === "project" && thread.cwd ? "projects" : "tasks"); void onOpenThread(thread.id, { scrollToLatest: true }); }}><span className="history-item-label">{thread.title}</span>{thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}</button>}
       </div>
     );
   }
@@ -113,6 +155,14 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
         <button type="button" className={`sidebar-history-tab ${historyView === "tasks" ? "active" : ""}`} role="tab" aria-selected={historyView === "tasks"} title="普通聊天" aria-label="显示普通聊天" onClick={() => setHistoryView("tasks")}><IconChatBubbles /></button>
       </div>
       <div className={`history-list history-list-${historyView}`} aria-label={historyView === "projects" ? "项目" : "其他任务"}>
+        <div className="history-selection-toolbar" aria-label="批量删除历史对话">
+          {!selectionMode ? <button type="button" className="history-selection-toggle" onClick={() => setSelectionMode(true)} title="批量选择历史对话"><IconCheck /><span>批量选择</span></button> : <>
+            <span className="history-selection-count">已选择 {selectedCount}</span>
+            <button type="button" className="history-selection-action" onClick={toggleSelectAll} disabled={selectableThreads.length === 0 || batchDeleting}>{selectableThreads.length > 0 && selectableThreads.every((thread) => selectedThreadIds.has(thread.id)) ? "取消全选" : "全选"}</button>
+            <button type="button" className="history-selection-delete" onClick={requestBatchDelete} disabled={selectedCount === 0 || batchDeleting} title="删除选中的历史对话"><IconTrash /><span>删除</span></button>
+            <button type="button" className="history-selection-close" onClick={() => { setSelectionMode(false); setSelectedThreadIds(new Set()); }} disabled={batchDeleting} title="退出批量选择"><IconClose /></button>
+          </>}
+        </div>
         {historyView === "projects" ? (
           projectGroups.length > 0 ? projectGroups.map((group) => {
             const collaborationProject = group.threads.some(isCollaborationThread);

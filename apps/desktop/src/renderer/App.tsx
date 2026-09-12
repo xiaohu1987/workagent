@@ -1052,6 +1052,8 @@ export function App() {
   const [isTranscriptScrollbarDragging, setIsTranscriptScrollbarDragging] = useState(false);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [historyThreadDeleteConfirmation, setHistoryThreadDeleteConfirmation] = useState<ThreadRecord | null>(null);
+  const [historyBatchDeleteConfirmation, setHistoryBatchDeleteConfirmation] = useState<string[] | null>(null);
+  const [deletingHistoryBatch, setDeletingHistoryBatch] = useState(false);
   const [deletingQueuedMessageId, setDeletingQueuedMessageId] = useState<string | null>(null);
   const [isClearChatConfirmOpen, setIsClearChatConfirmOpen] = useState(false);
   const [isClearingChat, setIsClearingChat] = useState(false);
@@ -2829,7 +2831,7 @@ export function App() {
   }, [gitRefreshRevision, gitRoot, selectedThreadId]);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
       return;
     }
 
@@ -2890,6 +2892,11 @@ export function App() {
           return;
         }
 
+        if (historyBatchDeleteConfirmation && !deletingHistoryBatch) {
+          setHistoryBatchDeleteConfirmation(null);
+          return;
+        }
+
         if (updateConfirmDialog) {
           setUpdateConfirmDialog(null);
           return;
@@ -2921,7 +2928,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
+  }, [deletingHistoryBatch, deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyBatchDeleteConfirmation, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
 
   useLayoutEffect(() => {
     snapshotThreadIdRef.current = snapshot?.thread.id ?? null;
@@ -4837,6 +4844,48 @@ export function App() {
     }
   }
 
+  function requestBatchDeleteHistoryThreads(threadIds: string[]) {
+    if (deletingHistoryBatch || deletingThreadId || threadIds.length === 0) return;
+    const eligibleIds = threadIds.filter((threadId) => {
+      const thread = threadsRef.current.find((entry) => entry.id === threadId);
+      return thread ? canDeleteThread(thread.status, deletingThreadId) : false;
+    });
+    if (eligibleIds.length > 0) setHistoryBatchDeleteConfirmation(eligibleIds);
+  }
+
+  async function confirmBatchDeleteHistoryThreads() {
+    const threadIds = historyBatchDeleteConfirmation;
+    if (!threadIds || deletingHistoryBatch) return;
+    setDeletingHistoryBatch(true);
+    try {
+      const selectedId = selectedThreadIdRef.current;
+      const result = await window.codexh.deleteThreads(threadIds);
+      for (const threadId of result.deleted) {
+        snapshotCacheByThreadRef.current.delete(threadId);
+        delete snapshotCursorByThreadRef.current[threadId];
+        delete latestRuntimeThreadsRef.current[threadId];
+        delete persistedRuntimeMessagesRef.current[threadId];
+      }
+      setHistoryBatchDeleteConfirmation(null);
+      if (selectedId && result.deleted.includes(selectedId)) {
+        selectThreadId(null);
+        setSnapshot(null);
+        await refreshThreads({ fallbackToFirst: false });
+      } else {
+        await refreshThreads();
+      }
+      if (result.failed.length > 0) {
+        showNotice(`已删除 ${result.deleted.length} 个任务，${result.failed.length} 个任务失败。`, { message: result.failed.map((entry) => getThreadDeleteFailureMessage(entry.reason)).join("；") });
+      } else {
+        showNotice(`已删除 ${result.deleted.length} 个历史任务。`, { tone: "success" });
+      }
+    } catch (error) {
+      showNotice("暂时无法批量删除任务。", { message: getThreadDeleteFailureMessage(error) });
+    } finally {
+      setDeletingHistoryBatch(false);
+    }
+  }
+
   function requestClearCurrentChat() {
     if (!selectedThreadId) {
       return;
@@ -5781,17 +5830,18 @@ export function App() {
     }
   }
 
-  async function saveConfigDraft(options?: { showSuccessNotice?: boolean }) {
-    if (!config || !configDraft) {
+  async function saveConfigDraft(options?: { showSuccessNotice?: boolean; draft?: AppConfig }) {
+    const draft = options?.draft ?? configDraft;
+    if (!config || !draft) {
       return;
     }
 
-    if (configDraft.models.length === 0) {
+    if (draft.models.length === 0) {
       showNotice("请至少保留一个模型。");
       return;
     }
 
-    const nextConfig = buildConfigToSave(configDraft, config, providerSecretDrafts);
+    const nextConfig = buildConfigToSave(draft, config, providerSecretDrafts);
     const preferredProviderId = settingsProviderId;
     await window.codexh.saveConfig(nextConfig);
     setConfig(nextConfig);
@@ -6167,6 +6217,8 @@ export function App() {
   const visibleUpdateConfirmDialog = updateConfirmDialog ?? updateConfirmPresence.value;
   const historyThreadDeleteConfirmPresence = useMotionPresence(historyThreadDeleteConfirmation);
   const visibleHistoryThreadDeleteConfirmation = historyThreadDeleteConfirmation ?? historyThreadDeleteConfirmPresence.value;
+  const historyBatchDeleteConfirmPresence = useMotionPresence(historyBatchDeleteConfirmation);
+  const visibleHistoryBatchDeleteConfirmation = historyBatchDeleteConfirmation ?? historyBatchDeleteConfirmPresence.value;
   const userSkillGenerationDialogPresence = useMotionPresence(userSkillGenerationDialog);
   const visibleUserSkillGenerationDialog = userSkillGenerationDialog ?? userSkillGenerationDialogPresence.value;
   const managedRemovalPresence = useMotionPresence(managedRemoval);
@@ -6459,6 +6511,8 @@ export function App() {
         onGenerateUserSkill={generateUserSkillEvent}
         onTogglePinned={toggleThreadPinnedEvent}
         onRequestDelete={requestDeleteHistoryThreadEvent}
+        onRequestBatchDelete={requestBatchDeleteHistoryThreads}
+        batchDeleting={deletingHistoryBatch}
         onBeginRename={beginRenameHistoryThreadEvent}
         onEditProject={openProjectEditorEvent}
         onCreateProjectChat={createProjectChatEvent}
@@ -7393,6 +7447,18 @@ export function App() {
           busy={Boolean(deletingThreadId)}
           onClose={() => setHistoryThreadDeleteConfirmation(null)}
           onConfirm={() => void confirmDeleteHistoryThread()}
+        />
+      ) : null}
+      {visibleHistoryBatchDeleteConfirmation ? (
+        <ConfirmationSheet
+          motionPhase={historyBatchDeleteConfirmPresence.phase}
+          titleId="history-batch-delete-confirm-title"
+          title="批量删除历史任务"
+          description={`确定要永久删除选中的 ${visibleHistoryBatchDeleteConfirmation.length} 个任务吗？消息、执行记录、附件和子任务都将被删除，且无法恢复。`}
+          confirmLabel={deletingHistoryBatch ? "正在删除..." : "确认批量删除"}
+          busy={deletingHistoryBatch}
+          onClose={() => setHistoryBatchDeleteConfirmation(null)}
+          onConfirm={() => void confirmBatchDeleteHistoryThreads()}
         />
       ) : null}
 

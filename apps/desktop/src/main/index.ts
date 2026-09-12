@@ -541,6 +541,7 @@ function registerIpc(): void {
   );
   ipcMain.handle("git:create-pr", (_event, payload: { threadId: string; rootPath?: string }) => backend.createGitPullRequest(payload.threadId, payload.rootPath));
   ipcMain.handle("threads:delete", (_event, threadId: string) => backend.deleteThread(threadId));
+  ipcMain.handle("threads:delete-many", (_event, threadIds: string[]) => backend.deleteThreads(threadIds));
   ipcMain.handle("threads:clear-conversation", (_event, threadId: string) =>
     backend.clearThreadConversation(threadId)
   );

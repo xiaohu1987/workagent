@@ -818,6 +818,21 @@ export class DesktopBackend {
     await this.#runtime.forgetThread(threadId);
   }
 
+  public async deleteThreads(threadIds: string[]): Promise<{ deleted: string[]; failed: Array<{ threadId: string; reason: string }> }> {
+    const deleted: string[] = [];
+    const failed: Array<{ threadId: string; reason: string }> = [];
+    const uniqueIds = [...new Set((Array.isArray(threadIds) ? threadIds : []).filter((threadId) => typeof threadId === "string" && threadId.length > 0))];
+    for (const threadId of uniqueIds) {
+      try {
+        await this.deleteThread(threadId);
+        deleted.push(threadId);
+      } catch (error) {
+        failed.push({ threadId, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return { deleted, failed };
+  }
+
   public async clearThreadConversation(threadId: string): Promise<ThreadRecord> {
     const thread = this.#db.getThread(threadId);
     const descendants = this.#db.listAgentTree(thread.rootThreadId)
@@ -1537,7 +1552,11 @@ export class DesktopBackend {
     this.#runtime.wakeQueuedMessages(threadId);
   }
 
-  public async interruptThread(threadId: string): Promise<void> {
+  public async interruptThread(
+    threadId: string,
+    options: { resumeQueuedMessages?: boolean } = {}
+  ): Promise<void> {
+    const resumeQueuedMessages = options.resumeQueuedMessages ?? true;
     const thread = this.#db.getThread(threadId);
     const descendants = this.#db.listAgentTree(thread.rootThreadId)
       .filter((item) => item.id !== thread.id && item.agentPath.startsWith(`${thread.agentPath}/`))
@@ -1569,7 +1588,11 @@ export class DesktopBackend {
       cancelledQueueItemIds.set(id, this.#db.cancelQueuedMessages(id, queuedAtInterrupt.get(id) ?? []));
     }
 
-    await Promise.all(threadIds.map((id) => this.finishInterruptThread(id, cancelledQueueItemIds.get(id) ?? [])));
+    await Promise.all(threadIds.map((id) => this.finishInterruptThread(
+      id,
+      cancelledQueueItemIds.get(id) ?? [],
+      resumeQueuedMessages
+    )));
 
     await this.#logs.append("thread.interrupted", {
       targetThreadId: threadId,
@@ -1578,7 +1601,11 @@ export class DesktopBackend {
     }, threadId);
   }
 
-  private async finishInterruptThread(threadId: string, cancelledQueueItemIds: string[]): Promise<void> {
+  private async finishInterruptThread(
+    threadId: string,
+    cancelledQueueItemIds: string[],
+    resumeQueuedMessages: boolean
+  ): Promise<void> {
     try {
       // Explicit authorizations have no timeout. Resolve every pending approval
       // before waiting so a stopped task can release its suspended tool call.
@@ -1617,7 +1644,9 @@ export class DesktopBackend {
         });
       }
     } finally {
-      this.#runtime.resumeAfterInterrupt(threadId);
+      if (resumeQueuedMessages) {
+        this.#runtime.resumeAfterInterrupt(threadId);
+      }
     }
   }
 
@@ -4612,7 +4641,7 @@ export class DesktopBackend {
       createdAt: now
     });
     await this.#logs.append("subagent.watchdog_interrupted", { threadId: thread.id, agentPath: thread.agentPath, reason }, thread.id);
-    await this.interruptThread(thread.id);
+    await this.interruptThread(thread.id, { resumeQueuedMessages: false });
   }
 
   public async sendAgentMessage(parentThreadId: string, input: { agent: string; message: string }): Promise<SubagentResultEnvelope> {
@@ -4665,6 +4694,17 @@ export class DesktopBackend {
       const onAbort = () => finish({ agents: [], timedOut: false, diagnostics: [] });
       const onRuntimeEvent = (event: RuntimeEvent) => {
         if (event.threadId && targetIdSet.has(event.threadId)) void poll();
+        if (!event.threadId || !targetIdSet.has(event.threadId)) return;
+        const payload = event.payload as { state?: unknown; thread?: { status?: unknown } } | undefined;
+        const failed = event.type === "agent.watchdog"
+          ? payload?.state === "auto_interrupted"
+          : event.type === "thread.updated" && payload?.thread?.status === "failed";
+        if (!failed) return;
+        void snapshot(false, false).then((result) => finish({
+          agents: result.agents.map((item) => this.buildSubagentEnvelope(item)),
+          timedOut: false,
+          diagnostics: result.diagnostics
+        }));
       };
       const finish = (value: SubagentWaitResult) => {
         if (settled) return;

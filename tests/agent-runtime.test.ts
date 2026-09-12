@@ -105,6 +105,10 @@ import {
   resolveNetworkErrorDelayMs,
   resolveProviderOutputLimitRecoveryTokens,
   MAX_NETWORK_ERROR_RETRIES,
+  MAX_SUBAGENT_NETWORK_RETRIES,
+  MAX_SUBAGENT_TIMEOUT_RETRIES,
+  MAX_SUBAGENT_STREAM_RECOVERY_RETRIES,
+  MAX_SUBAGENT_REQUEST_LIMIT_RETRIES,
   MAX_PROVIDER_OUTPUT_LIMIT_RECOVERIES,
   MAX_PROVIDER_RESOURCE_RETRIES,
   MAX_PROVIDER_STREAM_RECOVERY_RETRIES,
@@ -2620,6 +2624,15 @@ describe("network error retries", () => {
   it("strips internal tool markers without treating them as a task failure", () => {
     expect(stripInternalToolCompatibilityMarkers("已检查完成 [Executed tools: fs.read_file, code.search]"))
       .toBe("已检查完成");
+  });
+});
+
+describe("subagent provider retry budgets", () => {
+  it("keeps child-agent recovery finite", () => {
+    expect(MAX_SUBAGENT_NETWORK_RETRIES).toBe(3);
+    expect(MAX_SUBAGENT_TIMEOUT_RETRIES).toBe(5);
+    expect(MAX_SUBAGENT_STREAM_RECOVERY_RETRIES).toBe(2);
+    expect(MAX_SUBAGENT_REQUEST_LIMIT_RETRIES).toBe(3);
   });
 });
 

@@ -10,13 +10,13 @@ function CompletionAuditModeFields({
   label,
   hint,
   configDraft,
-  setConfigDraft
+  updateAndSave
 }: {
   mode: CompletionAuditMode;
   label: string;
   hint: string;
   configDraft: AppConfig;
-  setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>;
+  updateAndSave: (update: (current: AppConfig) => AppConfig) => void;
 }) {
   const settings = configDraft.desktop.completionAudit?.[mode] ?? defaultCompletionAuditSettings()[mode];
   const enabled = settings.enabled !== false;
@@ -29,8 +29,7 @@ function CompletionAuditModeFields({
             <input
               type="checkbox"
               checked={enabled}
-              onChange={(event) => setConfigDraft((current) => {
-                if (!current) return current;
+              onChange={(event) => updateAndSave((current) => {
                 const completionAudit = {
                   ...defaultCompletionAuditSettings(),
                   ...current.desktop.completionAudit,
@@ -54,8 +53,7 @@ function CompletionAuditModeFields({
               min={MIN_COMPLETION_AUDIT_MAX_ATTEMPTS}
               max={MAX_COMPLETION_AUDIT_MAX_ATTEMPTS}
               value={settings.maxAttempts ?? DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS}
-              onChange={(event) => setConfigDraft((current) => {
-                if (!current) return current;
+              onChange={(event) => updateAndSave((current) => {
                 const completionAudit = {
                   ...defaultCompletionAuditSettings(),
                   ...current.desktop.completionAudit,
@@ -80,8 +78,18 @@ function CompletionAuditModeFields({
   );
 }
 
-type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: () => Promise<void> };
-export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave }: Props) { return (
+type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: (options?: { draft?: AppConfig; showSuccessNotice?: boolean }) => Promise<void> };
+export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave }: Props) {
+  const updateAndSave = (update: (current: AppConfig) => AppConfig) => {
+    if (!configDraft) return;
+    const nextDraft = update(configDraft);
+    setConfigDraft(nextDraft);
+    void onSave({ draft: nextDraft, showSuccessNotice: false }).catch((error) => {
+      console.error("[renderer] Failed to auto-save runtime settings", error);
+    });
+  };
+
+  return (
       <div className="settings-section">
         <div className="general-overview">
           <div className="general-overview-heading">
@@ -156,13 +164,13 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
                   className="form-select"
                   ariaLabel="浏览器默认打开方式"
                   value={configDraft.desktop.browserOpenMode}
-                  onChange={(value) => setConfigDraft((current) => current ? {
+                  onChange={(value) => updateAndSave((current) => ({
                     ...current,
                     desktop: {
                       ...current.desktop,
                       browserOpenMode: value === "external_default" ? "external_default" : "in_app"
                     }
-                  } : current)}
+                  }))}
                   options={[
                     { value: "in_app", label: "程序内浏览器" },
                     { value: "external_default", label: "系统默认浏览器" }
@@ -173,11 +181,11 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
               </label>
               <div className="settings-field general-permission-field">
                 <span>静默打开</span>
-                <label className="memory-switch"><input type="checkbox" checked={configDraft.desktop.silentBrowserOpen} onChange={(event) => setConfigDraft((current) => current ? { ...current, desktop: { ...current.desktop, silentBrowserOpen: event.target.checked } } : current)} /> <span>不自动展开程序内浏览器面板</span></label>
+                <label className="memory-switch"><input type="checkbox" checked={configDraft.desktop.silentBrowserOpen} onChange={(event) => updateAndSave((current) => ({ ...current, desktop: { ...current.desktop, silentBrowserOpen: event.target.checked } }))} /> <span>不自动展开程序内浏览器面板</span></label>
                 <small className="settings-field-hint">此选项不影响系统默认浏览器的前台行为。</small>
               </div>
             </div>
-            <div className="settings-save-row"><span className="subtle-inline">更改会在保存后应用于后续网页打开。</span><button className="button warm" type="button" onClick={() => void onSave()}>保存</button></div>
+            <div className="settings-save-row"><span className="subtle-inline">修改后自动保存，后续网页打开时生效。</span></div>
           </div>
           <div className="config-block general-subagent-settings">
             <div className="section-copy">
@@ -190,17 +198,17 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
                 label="项目模式"
                 hint="默认禁用。开启后项目任务会执行完成审计。"
                 configDraft={configDraft}
-                setConfigDraft={setConfigDraft}
+                updateAndSave={updateAndSave}
               />
               <CompletionAuditModeFields
                 mode="chat"
                 label="普通对话"
                 hint="默认禁用。开启后普通对话会执行完成审计。"
                 configDraft={configDraft}
-                setConfigDraft={setConfigDraft}
+                updateAndSave={updateAndSave}
               />
             </div>
-            <div className="settings-save-row"><span className="subtle-inline">更改会在保存后应用于后续任务。</span><button className="button warm" type="button" onClick={() => void onSave()}>保存</button></div>
+            <div className="settings-save-row"><span className="subtle-inline">修改后自动保存，后续任务立即使用。</span></div>
           </div>
           <div className="config-block general-subagent-settings">
             <div className="section-copy">

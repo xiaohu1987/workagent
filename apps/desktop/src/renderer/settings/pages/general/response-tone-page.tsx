@@ -2,8 +2,17 @@ import type { Dispatch, SetStateAction } from "react";
 import type { AppConfig } from "@shared-types";
 
 type ToneOption = { value: AppConfig["responseTone"]; label: string; description: string };
-type Props = { configDraft: AppConfig; options: ToneOption[]; defaultTone: AppConfig["responseTone"]; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: () => Promise<void> };
-export function ResponseTonePage({ configDraft, options, defaultTone, setConfigDraft, onSave }: Props) { return (
+type Props = { configDraft: AppConfig; options: ToneOption[]; defaultTone: AppConfig["responseTone"]; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: (options?: { draft?: AppConfig; showSuccessNotice?: boolean }) => Promise<void> };
+export function ResponseTonePage({ configDraft, options, defaultTone, setConfigDraft, onSave }: Props) {
+  const updateAndSave = (update: (current: AppConfig) => AppConfig) => {
+    const nextDraft = update(configDraft);
+    setConfigDraft(nextDraft);
+    void onSave({ draft: nextDraft, showSuccessNotice: false }).catch((error) => {
+      console.error("[renderer] Failed to auto-save response tone", error);
+    });
+  };
+
+  return (
                 <div className="settings-section">
                   <div className="config-block general-tone-settings">
                     <div className="section-copy">
@@ -20,7 +29,7 @@ export function ResponseTonePage({ configDraft, options, defaultTone, setConfigD
                             role="radio"
                             aria-checked={active}
                             className={active ? "active" : ""}
-                            onClick={() => setConfigDraft((current) => current ? { ...current, responseTone: option.value } : current)}
+                            onClick={() => updateAndSave((current) => ({ ...current, responseTone: option.value }))}
                           >
                             <strong>{option.label}</strong>
                             <span>{option.description}</span>
@@ -29,8 +38,7 @@ export function ResponseTonePage({ configDraft, options, defaultTone, setConfigD
                       })}
                     </div>
                     <div className="settings-save-row">
-                      <span className="subtle-inline">保存后立即应用于后续回复。</span>
-                      <button className="button warm" type="button" onClick={() => void onSave()}>保存</button>
+                      <span className="subtle-inline">修改后自动保存，后续回复立即使用。</span>
                     </div>
                   </div>
                 </div>

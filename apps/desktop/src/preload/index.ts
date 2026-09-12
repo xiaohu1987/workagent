@@ -88,6 +88,10 @@ const api = {
   createGitBranch: (payload: { threadId: string; rootPath?: string; branch: string }) => ipcRenderer.invoke("git:create-branch", payload),
   createGitPullRequest: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:create-pr", payload),
   deleteThread: (threadId: string) => ipcRenderer.invoke("threads:delete", threadId),
+  deleteThreads: (threadIds: string[]) => ipcRenderer.invoke("threads:delete-many", threadIds) as Promise<{
+    deleted: string[];
+    failed: Array<{ threadId: string; reason: string }>;
+  }>,
   clearThreadConversation: (threadId: string) => ipcRenderer.invoke("threads:clear-conversation", threadId),
   getThreadSnapshot: (threadId: string, cursor?: RuntimeThreadSnapshotCursor) =>
     ipcRenderer.invoke("threads:snapshot", threadId, cursor),

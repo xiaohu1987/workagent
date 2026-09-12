@@ -111,6 +111,10 @@ declare global {
       createGitBranch: (payload: { threadId: string; rootPath?: string; branch: string }) => Promise<any>;
       createGitPullRequest: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
       deleteThread: (threadId: string) => Promise<void>;
+      deleteThreads: (threadIds: string[]) => Promise<{
+        deleted: string[];
+        failed: Array<{ threadId: string; reason: string }>;
+      }>;
       clearThreadConversation: (threadId: string) => Promise<ThreadRecord>;
       getThreadSnapshot: (threadId: string, cursor?: import("@shared-types").RuntimeThreadSnapshotCursor) => Promise<any>;
       getToolCallDetails: (payload: { threadId: string; toolCallIds: string[] }) =>
