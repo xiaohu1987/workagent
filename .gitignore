@@ -7,6 +7,20 @@ release/
 log/
 .tmp-wts/
 
+# Runtime and generated task outputs are local artifacts, not source changes.
+/outputs/
+/graphify_run/
+
+# Editor, patch, and process leftovers.
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*.orig
+*.rej
+*.pid
+
 *.log
 coverage/
 

@@ -638,6 +638,29 @@ describe("ToolRuntime", () => {
     }
   });
 
+  it("normalizes Markdown-wrapped paths before reading files", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-path-formatting-"));
+    const filePath = path.join(root, "note.txt");
+    await fs.writeFile(filePath, "formatted path\n", "utf8");
+    const runtime = new ToolRuntime();
+    const context = {
+      cwd: root,
+      readFile: (target: string) => fs.readFile(target, "utf8")
+    } as unknown as ToolRuntimeContext;
+
+    try {
+      const result = await runtime.execute(
+        { id: "formatted-read", name: "fs.read_file", arguments: { path: "**note.txt**" } },
+        context
+      );
+      expect(result.ok).toBe(true);
+      expect(result.content).toContain("formatted path");
+      expect(result.json).toMatchObject({ path: filePath });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("runs only discovered typecheck and test scripts through project.verify", async () => {
     const runTerminalCommand = vi.fn().mockResolvedValue({ output: "ok" });
     const readFile = vi.fn(async (target: string) => {

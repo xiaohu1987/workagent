@@ -4020,7 +4020,15 @@ export function App() {
     if (nextSelection.modelId !== composerModelId) {
       setComposerModelId(nextSelection.modelId);
     }
-  }, [config, selectedThreadId, selectedThread]);
+  }, [
+    config?.defaultModel,
+    config?.defaultProvider,
+    config?.models,
+    config?.providers,
+    selectedThreadId,
+    selectedThread?.modelId,
+    selectedThread?.providerId
+  ]);
 
   async function refreshAll() {
     await Promise.all([refreshThreads(), refreshSkills(), refreshPlugins(), refreshConfig(), refreshMcpServers()]);
@@ -6926,7 +6934,7 @@ export function App() {
                       value={isGptReasoningEffort(composerReasoningEffort) ? composerReasoningEffort : "medium"}
                       efforts={composerReasoningEfforts}
                       onChange={(value) => void updateGlobalReasoningEffort(value)}
-                      disabled={isUpdatingReasoningEffort || isActiveThreadExecuting || isPreparingRuntime}
+                      disabled={isUpdatingReasoningEffort}
                     />
                   ) : null}
                   <ContextUsageControl

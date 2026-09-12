@@ -27775,12 +27775,13 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 .subagent-switch-chip {
   --subagent-name: #b9a4f4;
   display: inline-flex;
-  flex: 1 1 0;
-  min-width: 96px;
-  max-width: 100%;
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: 0;
+  max-width: none;
   align-items: baseline;
-  gap: 5px;
-  padding: 4px 7px;
+  gap: 4px;
+  padding: 3px 6px;
   border: 1px solid color-mix(in srgb, var(--subagent-name) 32%, transparent);
   border-radius: 6px;
   color: var(--subagent-name);
@@ -27806,13 +27807,13 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 }
 
 .subagent-switch-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  text-overflow: clip;
   white-space: nowrap;
   color: var(--subagent-name);
   font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
 }
 
 .subagent-switch-state {
@@ -27832,7 +27833,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   color: var(--subagent-name);
   font-size: 16px;
   font-weight: 700;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
 }
 
 .subagent-switch-chip.queued .subagent-switch-state,

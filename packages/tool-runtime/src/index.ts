@@ -3415,14 +3415,38 @@ function resolveWorkspacePath(
   workspaceRoots: string[] = [rootDir],
   allowedReadPaths: string[] = []
 ): string {
+  const cleanedTargetPath = stripMarkdownPathFormatting(targetPath);
   const root = path.resolve(rootDir);
-  const resolved = path.isAbsolute(targetPath)
-    ? path.resolve(targetPath)
-    : path.resolve(root, targetPath);
+  const resolved = path.isAbsolute(cleanedTargetPath)
+    ? path.resolve(cleanedTargetPath)
+    : path.resolve(root, cleanedTargetPath);
   if (workspaceRootForPath(resolved, workspaceRoots) || workspaceRootForPath(resolved, allowedReadPaths)) {
     return resolved;
   }
   throw new Error("File path is outside the project folder.");
+}
+
+/** Models sometimes wrap structured file paths in Markdown emphasis or code marks. */
+function stripMarkdownPathFormatting(targetPath: string): string {
+  let cleaned = targetPath.trim();
+  const wrappers = [
+    ["**", "**"],
+    ["__", "__"],
+    ["~~", "~~"],
+    ["`", "`"]
+  ] as const;
+  let changed = true;
+  while (changed && cleaned.length > 1) {
+    changed = false;
+    for (const [prefix, suffix] of wrappers) {
+      if (cleaned.startsWith(prefix) && cleaned.endsWith(suffix) && cleaned.length > prefix.length + suffix.length) {
+        cleaned = cleaned.slice(prefix.length, cleaned.length - suffix.length).trim();
+        changed = true;
+        break;
+      }
+    }
+  }
+  return cleaned;
 }
 
 function workspaceRootForPath(targetPath: string, workspaceRoots: string[]): string | null {

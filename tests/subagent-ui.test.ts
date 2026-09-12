@@ -95,17 +95,18 @@ describe("subagent task UI", () => {
     })).toBe("代码分析");
   });
 
-  it("assigns unique 2-to-4-character courtesy names in spawn order", () => {
-    expect(SUBAGENT_COURTESY_NAMES.every((name) => /^[\u4e00-\u9fff]{2,4}$/.test(name))).toBe(true);
+  it("assigns unique anime-character names in spawn order", () => {
+    expect(SUBAGENT_COURTESY_NAMES.every((name) => name.trim().length >= 2)).toBe(true);
+    expect(new Set(SUBAGENT_COURTESY_NAMES).size).toBe(SUBAGENT_COURTESY_NAMES.length);
     const names = assignSubagentCourtesyNames([
       { id: "later", createdAt: "2026-09-01T00:00:02.000Z" },
       { id: "first", createdAt: "2026-09-01T00:00:00.000Z" },
       { id: "middle", createdAt: "2026-09-01T00:00:01.000Z" }
     ]);
-    expect([...names.values()]).toEqual(["青雀", "白驹", "疏影"]);
-    expect(names.get("first")).toBe("青雀");
-    expect(names.get("middle")).toBe("白驹");
-    expect(names.get("later")).toBe("疏影");
+    expect([...names.values()]).toEqual(SUBAGENT_COURTESY_NAMES.slice(0, 3));
+    expect(names.get("first")).toBe(SUBAGENT_COURTESY_NAMES[0]);
+    expect(names.get("middle")).toBe(SUBAGENT_COURTESY_NAMES[1]);
+    expect(names.get("later")).toBe(SUBAGENT_COURTESY_NAMES[2]);
   });
 
   it("invents distinct names when child agents reuse the same persona", () => {
@@ -121,7 +122,7 @@ describe("subagent task UI", () => {
       waitingInputAgentIds: new Set<string>(),
       runtimeActivities: {}
     });
-    expect(layered.map((item) => item.title)).toEqual(["青雀", "白驹", "疏影"]);
+    expect(layered.map((item) => item.title)).toEqual(SUBAGENT_COURTESY_NAMES.slice(0, 3));
     expect(layered.map((item) => item.taskName)).toEqual(["API 层分析", "领域层分析", "测试质量分析"]);
 
     const numbered = buildSubagentPresentations({
@@ -135,7 +136,7 @@ describe("subagent task UI", () => {
       waitingInputAgentIds: new Set<string>(),
       runtimeActivities: {}
     });
-    expect(numbered.map((item) => item.title)).toEqual(["青雀", "疏影", "白驹"]);
+    expect(numbered.map((item) => item.title)).toEqual([SUBAGENT_COURTESY_NAMES[0], SUBAGENT_COURTESY_NAMES[2], SUBAGENT_COURTESY_NAMES[1]]);
     expect(new Set(numbered.map((item) => item.title)).size).toBe(3);
     expect(numbered.every((item) => item.taskName === "代码分析")).toBe(true);
   });
@@ -234,7 +235,7 @@ describe("subagent task UI", () => {
     });
     const detailHtml = renderToStaticMarkup(createElement(SubagentDetailWorkspace, { item: items[1] }));
 
-    expect(items.map((item) => item.title)).toEqual(["青雀", "白驹", "疏影"]);
+    expect(items.map((item) => item.title)).toEqual(SUBAGENT_COURTESY_NAMES.slice(0, 3));
     expect(items.map((item) => item.taskName)).toEqual(["API 文档分析", "测试覆盖检查", "安全审查"]);
     expect(items[0].summary).toBe("发现 2 个阻塞问题");
     expect(items[1].detailOutput).toContain("测试进程退出码为 1");
@@ -251,9 +252,9 @@ describe("subagent task UI", () => {
       onSelect: () => undefined
     }));
     expect(switchHtml).toContain("aria-label=\"切换子智能体\"");
-    expect(switchHtml).toMatch(/subagent-switch-name">青雀</);
-    expect(switchHtml).toMatch(/subagent-switch-name">白驹</);
-    expect(switchHtml).toMatch(/subagent-switch-name">疏影</);
+    for (const name of SUBAGENT_COURTESY_NAMES.slice(0, 3)) {
+      expect(switchHtml).toContain(`subagent-switch-name">${name}</`);
+    }
     expect(switchHtml).toContain("运行中");
     expect(switchHtml).toContain("已完成");
     expect(switchHtml).not.toMatch(/subagent-switch-name">[^<]*(?:API|测试覆盖|安全审查)/);
@@ -333,6 +334,8 @@ describe("subagent task UI", () => {
     expect(rendererStylesCss).toContain(".subagent-workspace-status.waiting_input");
     expect(rendererStylesCss).toContain(".subagent-switch-row");
     expect(rendererStylesCss).toContain("flex-wrap: nowrap");
+    expect(rendererStylesCss).toContain("flex: 0 0 auto");
+    expect(rendererStylesCss).toContain("width: max-content");
     expect(rendererStylesCss).toContain(".subagent-switch-chip.tone-0");
     expect(rendererStylesCss).toContain(".subagent-switch-chip.is-selected");
     expect(rendererAppSource).toContain("subagentItems={workspaceSubagentPresentations}");
