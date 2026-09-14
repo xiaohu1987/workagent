@@ -22,6 +22,9 @@ interface BrowserTabSession {
 }
 
 export const MAX_BROWSER_TABS_PER_THREAD = 5;
+export const MAX_BROWSER_TAB_HISTORY = 12;
+export const MAX_BROWSER_PAGE_HTML_CHARS = 400_000;
+export const MAX_BROWSER_PAGE_TEXT_CHARS = 80_000;
 
 export interface BrowserTabEvictionCandidate {
   id: string;
@@ -29,6 +32,35 @@ export interface BrowserTabEvictionCandidate {
   lastUsedAt: string;
   createdAt: string;
   index: number;
+}
+
+export function compactBrowserPageSnapshot(page: PageSnapshot, keepHtml = true): PageSnapshot {
+  const text = page.text.length > MAX_BROWSER_PAGE_TEXT_CHARS
+    ? page.text.slice(0, MAX_BROWSER_PAGE_TEXT_CHARS)
+    : page.text;
+  const html = !keepHtml
+    ? ""
+    : page.html.length > MAX_BROWSER_PAGE_HTML_CHARS
+      ? page.html.slice(0, MAX_BROWSER_PAGE_HTML_CHARS)
+      : page.html;
+  if (text === page.text && html === page.html) return page;
+  return { ...page, text, html };
+}
+
+export function retainBrowserTabHistory<T extends { history: PageSnapshot[]; historyIndex: number }>(
+  session: T,
+  limit = MAX_BROWSER_TAB_HISTORY
+): T {
+  const cap = Math.max(1, limit);
+  if (session.history.length > cap) {
+    const overflow = session.history.length - cap;
+    session.history = session.history.slice(overflow);
+    session.historyIndex = Math.max(0, session.historyIndex - overflow);
+  }
+  session.history = session.history.map((page, index) =>
+    compactBrowserPageSnapshot(page, Math.abs(index - session.historyIndex) <= 1)
+  );
+  return session;
 }
 
 export function selectUnusedBrowserTabsToClose(
@@ -135,6 +167,7 @@ export class BrowserRuntime {
       historyIndex: 0,
       lastUsedAt: now
     };
+    retainBrowserTabHistory(session);
     this.markTabUsed(session, now);
 
     for (const existing of tabs) {
@@ -176,11 +209,12 @@ export class BrowserRuntime {
     session.history = session.history.slice(0, session.historyIndex + 1);
     session.history.push(page);
     session.historyIndex = session.history.length - 1;
+    retainBrowserTabHistory(session);
     session.record.title = page.title;
     session.record.url = page.url;
     this.markTabUsed(session);
     this.focusTab(threadId, tabId);
-    return { tab: session.record, page };
+    return { tab: session.record, page: session.history[session.historyIndex]! };
   }
 
   public async reload(threadId: string, tabId: string): Promise<{ tab: BrowserTabRecord; page: PageSnapshot }> {
@@ -191,10 +225,12 @@ export class BrowserRuntime {
     }
     const reloaded = await this.pageLoader(current.url);
     session.history[session.historyIndex] = reloaded;
-    session.record.title = reloaded.title;
-    session.record.url = reloaded.url;
+    retainBrowserTabHistory(session);
+    const page = session.history[session.historyIndex]!;
+    session.record.title = page.title;
+    session.record.url = page.url;
     this.markTabUsed(session);
-    return { tab: session.record, page: reloaded };
+    return { tab: session.record, page };
   }
 
   public goBack(threadId: string, tabId: string): { tab: BrowserTabRecord; page: PageSnapshot } {
@@ -203,6 +239,7 @@ export class BrowserRuntime {
       throw new Error("Already at the oldest history entry.");
     }
     session.historyIndex -= 1;
+    retainBrowserTabHistory(session);
     const page = session.history[session.historyIndex]!;
     session.record.title = page.title;
     session.record.url = page.url;
@@ -216,6 +253,7 @@ export class BrowserRuntime {
       throw new Error("Already at the latest history entry.");
     }
     session.historyIndex += 1;
+    retainBrowserTabHistory(session);
     const page = session.history[session.historyIndex]!;
     session.record.title = page.title;
     session.record.url = page.url;
@@ -298,9 +336,11 @@ export class BrowserRuntime {
       session.history = [next];
       session.historyIndex = 0;
     }
-    session.record.title = next.title;
-    session.record.url = next.url;
-    this.markTabUsed(session, next.fetchedAt);
+    retainBrowserTabHistory(session);
+    const retained = session.history[session.historyIndex]!;
+    session.record.title = retained.title;
+    session.record.url = retained.url;
+    this.markTabUsed(session, retained.fetchedAt);
     return { ...session.record };
   }
 
@@ -376,13 +416,13 @@ export async function loadPage(target: string): Promise<PageSnapshot> {
   const $ = cheerio.load(html);
   const title = $("title").text().trim() || resolved.url;
   const text = $.text().replace(/\s+/g, " ").trim() || "(no readable text)";
-  return {
+  return compactBrowserPageSnapshot({
     title,
     url: resolved.url,
     text,
     html,
     fetchedAt: new Date().toISOString()
-  };
+  });
 }
 
 async function resolveTarget(target: string): Promise<{ url: string; html: string }> {

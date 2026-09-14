@@ -52,6 +52,7 @@ import {
   isThreadExecutionInProgress,
   mergeDurableGpaFlags,
   normalizeGpaStateForThread,
+  prunePersistedRuntimeMessageMap,
   replaceThreadSnapshotGpa,
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
@@ -313,7 +314,7 @@ import { parseWorkspaceFileKey, useProjectFilePreview } from "./hooks/use-projec
 import { useStableEvent } from "./hooks/use-stable-event";
 import { DATABASE_PERMISSION_OPTIONS, getSkillSortLabel, RESPONSE_TONE_OPTIONS, SKILL_SORT_OPTIONS } from "./settings/settings-options";
 import { reregisterBrowserWebviews } from "./workspace/browser-workspace";
-import { shouldRevealBrowserWorkspace } from "./workspace/browser-preferences";
+import { shouldRevealBrowserWorkspace, selectMountedBrowserThreadIds } from "./workspace/browser-preferences";
 import { RightWorkspacePanel, type RightWorkspaceTab } from "./workspace/right-workspace";
 import { NotificationCenter } from "./workspace/notification-center";
 import { HelpSheet } from "./workspace/help-sheet";
@@ -1279,6 +1280,15 @@ export function App() {
       if (!oldestThreadId) break;
       cache.delete(oldestThreadId);
       delete snapshotCursorByThreadRef.current[oldestThreadId];
+      if (oldestThreadId === selectedThreadIdRef.current) continue;
+      delete persistedRuntimeMessagesRef.current[oldestThreadId];
+      delete latestRuntimeThreadsRef.current[oldestThreadId];
+      setRuntimeActivities((current) => {
+        if (!(oldestThreadId in current)) return current;
+        const next = { ...current };
+        delete next[oldestThreadId];
+        return next;
+      });
     }
   }
 
@@ -3067,6 +3077,18 @@ export function App() {
 
   const activeSnapshotThreadId = snapshot?.thread.id ?? null;
   const activeSnapshotThreadStatus = snapshot?.thread.status ?? null;
+  const mountedBrowserThreadIds = useMemo(
+    () => selectMountedBrowserThreadIds({
+      selectedThreadId,
+      browserPanelVisible: isRightWorkspaceOpen && rightWorkspaceTab === "browser",
+      threads: [
+        ...threads,
+        ...(snapshot?.subagents ?? [])
+      ],
+      tabsByThread: browserTabsByThread
+    }),
+    [browserTabsByThread, isRightWorkspaceOpen, rightWorkspaceTab, selectedThreadId, snapshot?.subagents, threads]
+  );
   const pendingApprovals = useMemo(
     () => (snapshot?.approvals ?? []).filter((item) => item.status === "pending"),
     [snapshot]
@@ -4177,6 +4199,15 @@ export function App() {
         prompts: base ? reuseEquivalentRecordArray(base.prompts, next.prompts) : next.prompts
       });
       cacheThreadSnapshot(mergedSnapshot);
+      const prunedRuntimeMessages = prunePersistedRuntimeMessageMap(
+        persistedRuntimeMessagesRef.current[threadId],
+        mergedSnapshot.messages
+      );
+      if (prunedRuntimeMessages) {
+        persistedRuntimeMessagesRef.current[threadId] = prunedRuntimeMessages;
+      } else {
+        delete persistedRuntimeMessagesRef.current[threadId];
+      }
       if (selectedThreadIdRef.current === threadId) {
         const commitSelectedSnapshot = () => {
           setSnapshot((current) => selectedThreadIdRef.current === threadId
@@ -7077,6 +7108,7 @@ export function App() {
           onOpenProjectFile={openProjectPreviewEvent}
           onLoadProjectDirectory={loadProjectDirectoryEvent}
           browserTabsByThread={browserTabsByThread}
+          mountedBrowserThreadIds={mountedBrowserThreadIds}
           onCloseBrowserTab={closeBrowserTabEvent}
           showSubagentTab={subagentPresentations.length > 0}
           subagentItems={workspaceSubagentPresentations}

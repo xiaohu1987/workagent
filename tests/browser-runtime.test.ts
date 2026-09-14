@@ -5,8 +5,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   BrowserRuntime,
   MAX_BROWSER_TABS_PER_THREAD,
+  MAX_BROWSER_TAB_HISTORY,
+  MAX_BROWSER_PAGE_HTML_CHARS,
+  compactBrowserPageSnapshot,
   isBrowserErrorPageUrl,
   resolveBrowserOpenPreferences,
+  retainBrowserTabHistory,
   selectUnusedBrowserTabsToClose
 } from "@browser-runtime";
 
@@ -182,5 +186,33 @@ describe("BrowserRuntime", () => {
     expect(page.html.length).toBeGreaterThan(0);
     expect(page.text).toBe("(no readable text)");
     expect(page.text.includes("<html")).toBe(false);
+  });
+
+  it("caps tab history and drops HTML for pages that are no longer adjacent", () => {
+    const oversizedHtml = "x".repeat(MAX_BROWSER_PAGE_HTML_CHARS + 20);
+    expect(compactBrowserPageSnapshot({
+      title: "Huge",
+      url: "https://example.com",
+      text: "ok",
+      html: oversizedHtml,
+      fetchedAt: "2026-09-14T00:00:00.000Z"
+    }).html).toHaveLength(MAX_BROWSER_PAGE_HTML_CHARS);
+
+    const session = retainBrowserTabHistory({
+      history: Array.from({ length: MAX_BROWSER_TAB_HISTORY + 4 }, (_, index) => ({
+        title: `Page ${index}`,
+        url: `https://example.com/${index}`,
+        text: `text ${index}`,
+        html: `<html>${index}</html>`,
+        fetchedAt: "2026-09-14T00:00:00.000Z"
+      })),
+      historyIndex: MAX_BROWSER_TAB_HISTORY + 3
+    });
+
+    expect(session.history).toHaveLength(MAX_BROWSER_TAB_HISTORY);
+    expect(session.historyIndex).toBe(MAX_BROWSER_TAB_HISTORY - 1);
+    expect(session.history[0]?.html).toBe("");
+    expect(session.history.at(-1)?.html).toContain("html");
+    expect(session.history.at(-2)?.html).toContain("html");
   });
 });

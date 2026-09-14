@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { shouldRevealBrowserWorkspace } from "../apps/desktop/src/renderer/workspace/browser-preferences";
+import { shouldRevealBrowserWorkspace, selectMountedBrowserThreadIds } from "../apps/desktop/src/renderer/workspace/browser-preferences";
 import { BrowserWorkspace, getBrowserTabLabel } from "../apps/desktop/src/renderer/workspace/browser-workspace";
 
 function createTab(overrides: Partial<{
@@ -48,6 +48,54 @@ describe("browser workspace preferences", () => {
       payload: { action: "navigate", silentBrowserOpen: false }
     }, "thread-1")).toBe(false);
   });
+
+  it("mounts only the visible selected thread and a small number of running browser sessions", () => {
+    const tabsByThread = {
+      "thread-selected": [{ id: "tab-1" }],
+      "thread-running": [{ id: "tab-2" }],
+      "thread-idle": [{ id: "tab-3" }],
+      "thread-waiting": [{ id: "tab-4" }]
+    };
+
+    expect(selectMountedBrowserThreadIds({
+      selectedThreadId: "thread-selected",
+      browserPanelVisible: true,
+      threads: [
+        { id: "thread-selected", status: "idle" },
+        { id: "thread-running", status: "running" },
+        { id: "thread-idle", status: "idle" },
+        { id: "thread-waiting", status: "waiting" }
+      ],
+      tabsByThread
+    })).toEqual(["thread-selected", "thread-running"]);
+
+    expect(selectMountedBrowserThreadIds({
+      selectedThreadId: "thread-selected",
+      browserPanelVisible: false,
+      threads: [
+        { id: "thread-selected", status: "idle" },
+        { id: "thread-running", status: "running" }
+      ],
+      tabsByThread: {
+        "thread-selected": [{ id: "tab-1" }],
+        "thread-running": [{ id: "tab-2" }]
+      }
+    })).toEqual(["thread-running"]);
+
+    expect(selectMountedBrowserThreadIds({
+      selectedThreadId: "thread-selected",
+      browserPanelVisible: true,
+      threads: [
+        { id: "thread-selected", status: "idle" },
+        { id: "thread-parent", status: "running" }
+      ],
+      tabsByThread: {
+        "thread-idle-old": [{ id: "old" }],
+        "thread-selected": [{ id: "tab-1" }],
+        "thread-child": [{ id: "tab-child" }]
+      }
+    })).toEqual(["thread-selected", "thread-child"]);
+  });
 });
 
 describe("browser tab switcher", () => {
@@ -81,5 +129,26 @@ describe("browser tab switcher", () => {
     expect(markup).toContain("关闭 哔哩哔哩");
     expect(markup).not.toContain("is-picking");
     expect(markup).not.toContain("workspace-subtab-strip");
+  });
+
+  it("keeps only the active webview mounted when the browser workspace is hidden", () => {
+    const markup = renderToStaticMarkup(createElement(BrowserWorkspace, {
+      threadId: "thread-1",
+      visible: false,
+      onCloseTab: () => undefined,
+      tabs: [
+        createTab(),
+        createTab({
+          id: "tab-2",
+          title: "后台页",
+          url: "https://example.com/hidden",
+          isActive: false
+        })
+      ]
+    }));
+
+    expect(markup.match(/browser-frame/g)?.length ?? 0).toBe(1);
+    expect(markup).toContain("https://www.bilibili.com/");
+    expect(markup).not.toContain("https://example.com/hidden");
   });
 });

@@ -45,6 +45,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onOpenProjectFile,
   onLoadProjectDirectory,
   browserTabsByThread,
+  mountedBrowserThreadIds,
   onCloseBrowserTab,
   showSubagentTab,
   subagentItems,
@@ -80,6 +81,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   onOpenProjectFile: (path: string) => void;
   onLoadProjectDirectory: (path: string) => Promise<boolean>;
   browserTabsByThread: Record<string, RuntimeThreadSnapshot["browserTabs"]>;
+  mountedBrowserThreadIds: string[];
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
   showSubagentTab: boolean;
   subagentItems: SubagentPresentation[];
@@ -169,15 +171,18 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
           />
         </div>
         <div id="right-workspace-content-browser" className={`right-workspace-view ${activeTab === "browser" ? "active" : ""}`} role={activeTab === "browser" ? "tabpanel" : undefined} aria-labelledby={activeTab === "browser" ? "right-workspace-tab-browser" : undefined} aria-hidden={activeTab !== "browser"} inert={activeTab !== "browser"}>
-            {Object.entries(browserTabsByThread).map(([browserThreadId, tabs]) => tabs.length > 0 ? (
-              <BrowserWorkspace
-                key={browserThreadId}
-                tabs={tabs}
-                threadId={browserThreadId}
-                onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
-                visible={!hidden && activeTab === "browser" && browserThreadId === threadId}
-              />
-            ) : null)}
+            {mountedBrowserThreadIds.map((browserThreadId) => {
+              const tabs = browserTabsByThread[browserThreadId];
+              return tabs && tabs.length > 0 ? (
+                <BrowserWorkspace
+                  key={browserThreadId}
+                  tabs={tabs}
+                  threadId={browserThreadId}
+                  onCloseTab={(tabId) => onCloseBrowserTab(browserThreadId, tabId)}
+                  visible={!hidden && activeTab === "browser" && browserThreadId === threadId}
+                />
+              ) : null;
+            })}
             {threadId && (browserTabsByThread[threadId]?.length ?? 0) === 0 ? (
               <WorkspaceEmptyState icon={<IconGlobe />} title="打开网页" message="任务打开的网页会显示在这里。" />
             ) : null}

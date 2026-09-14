@@ -189,6 +189,22 @@ export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRunt
   }
 }
 
+export function prunePersistedRuntimeMessageMap<T extends { id: string; createdAt?: string }>(
+  persisted: Map<string, T> | undefined,
+  snapshotMessages: Array<{ id: string }>,
+  limit = 64
+): Map<string, T> | undefined {
+  if (!persisted || persisted.size === 0) return persisted;
+  const next = new Map(persisted);
+  for (const message of snapshotMessages) next.delete(message.id);
+  if (next.size === 0) return undefined;
+  if (next.size <= limit) return next;
+  const kept = [...next.values()]
+    .sort((left, right) => String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? "")))
+    .slice(-limit);
+  return new Map(kept.map((message) => [message.id, message]));
+}
+
 export function isThreadExecutionInProgress(status?: ThreadRecord["status"] | null) {
   return status === "running" || status === "waiting";
 }

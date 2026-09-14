@@ -66,7 +66,7 @@ export const BrowserWorkspace = memo(function BrowserWorkspace({
       />
       <div className="browser-location" title={activeTab.url}>{activeTab.url}</div>
       <div className="browser-page-stack">
-        {tabs.map((tab) => (
+        {tabs.filter((tab) => visible || tab.id === activeTab.id).map((tab) => (
           <BrowserTabWebview
             key={tab.id}
             tab={tab}
@@ -301,7 +301,7 @@ function BrowserTabWebview({
         ref: bindWebview,
         className: "browser-frame",
         src: tab.url,
-        webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
+        webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes,backgroundThrottling=yes,spellcheck=no",
         title: tab.title || "任务浏览器"
       })}
     </div>

@@ -363,4 +363,18 @@ describe("subagent task UI", () => {
     expect(rendererAppSource).toContain("shouldInvalidateSnapshotForThreadUpdate");
     expect(rendererAppSource).toContain("mergeSnapshotSubagents");
   });
+
+  it("loads the complete conversation snapshot instead of a truncated message window", () => {
+    const snapshotImplementation = backendSource.slice(
+      backendSource.indexOf("public getThreadSnapshot"),
+      backendSource.indexOf("public getGpaState")
+    );
+
+    expect(snapshotImplementation).toContain("this.#db.listRecentMessages(threadId, Math.max(1, messageCount))");
+    expect(snapshotImplementation).toContain("this.#db.listToolCallSummaries(threadId)");
+    expect(snapshotImplementation).not.toContain("THREAD_SNAPSHOT_MESSAGE_LIMIT");
+    expect(snapshotImplementation).not.toContain("capSnapshotRecordCount");
+    expect(rendererAppSource).not.toContain("THREAD_SNAPSHOT_MESSAGE_LIMIT");
+    expect(rendererAppSource).not.toContain("capRecentRecords");
+  });
 });

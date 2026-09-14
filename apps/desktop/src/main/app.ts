@@ -111,6 +111,7 @@ type SubagentProgress = {
 };
 const INTERACTION_TIMEOUT_MS = 30_000;
 const RUNTIME_TOOL_RESULT_LIMIT_BYTES = 4_096;
+const GPA_STATE_CACHE_LIMIT = 16;
 const MAX_APPLICATION_BACKGROUND_BYTES = 40 * 1024 * 1024;
 const APPLICATION_BACKGROUND_MIME_TYPES = new Set([
   "image/png",
@@ -1010,7 +1011,13 @@ export class DesktopBackend {
   public getGpaState(threadId: string): GpaState {
     const thread = this.#db.getThread(threadId);
     const state = parseGpaState(thread.gpaStateJson, this.#gpaStateCache.get(threadId));
+    this.#gpaStateCache.delete(threadId);
     this.#gpaStateCache.set(threadId, state);
+    while (this.#gpaStateCache.size > GPA_STATE_CACHE_LIMIT) {
+      const oldestThreadId = this.#gpaStateCache.keys().next().value;
+      if (!oldestThreadId || oldestThreadId === threadId) break;
+      this.#gpaStateCache.delete(oldestThreadId);
+    }
     return state;
   }
 

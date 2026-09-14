@@ -18,7 +18,8 @@ import {
   shouldInvalidateSnapshotForThreadUpdate,
   upsertSubagentIntoSnapshot,
   mergeSnapshotSubagents,
-  shouldShowTaskProcessing
+  shouldShowTaskProcessing,
+  prunePersistedRuntimeMessageMap
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
 import {
   buildTimelineEntries,
@@ -2044,5 +2045,20 @@ describe("desktop screenshot artifacts", () => {
         files: [expect.objectContaining({ kind: "generated-image", description: "桌面截图" })]
       })
     ]);
+  });
+});
+
+describe("renderer memory bounds", () => {
+  it("drops snapshot messages from the runtime map without discarding displayed history", () => {
+    const persisted = new Map([
+      ["old", { id: "old", createdAt: "2026-09-01T00:00:00.000Z" }],
+      ["live", { id: "live", createdAt: "2026-09-02T00:00:00.000Z" }],
+      ["newer", { id: "newer", createdAt: "2026-09-03T00:00:00.000Z" }]
+    ]);
+
+    expect(prunePersistedRuntimeMessageMap(persisted, [{ id: "old" }], 1)).toEqual(
+      new Map([["newer", { id: "newer", createdAt: "2026-09-03T00:00:00.000Z" }]])
+    );
+    expect(prunePersistedRuntimeMessageMap(new Map([["snap", { id: "snap" }]]), [{ id: "snap" }])).toBeUndefined();
   });
 });

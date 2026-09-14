@@ -1153,7 +1153,7 @@ export class DatabaseService {
     }
 
     const messages = this.#db
-      .prepare("SELECT thread_id, content FROM messages ORDER BY created_at DESC")
+      .prepare("SELECT thread_id, content FROM messages ORDER BY created_at DESC LIMIT 4000")
       .all() as Array<{ thread_id: string; content: string }>;
     const threadById = new Map(threads.map((thread) => [thread.id, thread]));
     const bestByThread = new Map<string, ThreadSearchResult>();
@@ -2104,6 +2104,25 @@ export class DatabaseService {
           .prepare(`${toolCallSummarySelectSql} WHERE thread_id = ? ORDER BY started_at ASC`)
           .all(TOOL_CALL_SUMMARY_RESULT_LIMIT_BYTES, threadId);
     return rows.map(mapToolCallSummaryRow);
+  }
+
+  public listRecentToolCallSummaries(threadId: string, limit: number): ToolCallSummary[] {
+    const cappedLimit = Math.max(1, Math.floor(limit));
+    return this.#db
+      .prepare(
+        `${toolCallSummarySelectSql}
+         WHERE thread_id = ? AND id IN (
+           SELECT id FROM (
+             SELECT id, started_at, rowid AS _rowid FROM tool_calls
+             WHERE thread_id = ?
+             ORDER BY started_at DESC, rowid DESC
+             LIMIT ?
+           )
+         )
+         ORDER BY started_at ASC, rowid ASC`
+      )
+      .all(TOOL_CALL_SUMMARY_RESULT_LIMIT_BYTES, threadId, threadId, cappedLimit)
+      .map(mapToolCallSummaryRow);
   }
 
   public listToolCallsChangedSince(threadId: string, observedAt: string): ToolCallRecord[] {

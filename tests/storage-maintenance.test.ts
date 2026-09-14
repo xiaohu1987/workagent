@@ -160,3 +160,56 @@ describe("DatabaseService storage maintenance", () => {
     expect(database.listErrorSolutions()).toEqual([]);
   });
 });
+
+describe("DatabaseService recent snapshot queries", () => {
+  it("returns only the newest tool call summaries for UI snapshots", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-recent-tool-calls-"));
+    temporaryDirectories.push(directory);
+    const database = new DatabaseService(path.join(directory, "codexh.sqlite"));
+    databases.push(database);
+    const thread = database.createThread({
+      title: "工具摘要窗口",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock",
+      providerId: "mock"
+    });
+
+    database.recordToolCall({
+      threadId: thread.id,
+      turnRunId: "turn-1",
+      toolName: "fs.read_file",
+      argumentsJson: "{\"path\":\"a.ts\"}",
+      resultJson: "first",
+      status: "completed",
+      riskLevel: "low",
+      approvalMode: "auto"
+    });
+    database.recordToolCall({
+      threadId: thread.id,
+      turnRunId: "turn-1",
+      toolName: "fs.read_file",
+      argumentsJson: "{\"path\":\"b.ts\"}",
+      resultJson: "second",
+      status: "completed",
+      riskLevel: "low",
+      approvalMode: "auto"
+    });
+    database.recordToolCall({
+      threadId: thread.id,
+      turnRunId: "turn-1",
+      toolName: "fs.read_file",
+      argumentsJson: "{\"path\":\"c.ts\"}",
+      resultJson: "third",
+      status: "completed",
+      riskLevel: "low",
+      approvalMode: "auto"
+    });
+
+    expect(database.listRecentToolCallSummaries(thread.id, 2).map((item) => item.argumentsJson)).toEqual([
+      "{\"path\":\"b.ts\"}",
+      "{\"path\":\"c.ts\"}"
+    ]);
+  });
+});

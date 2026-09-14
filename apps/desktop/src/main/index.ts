@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray, type Session } from "electron";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -37,6 +37,8 @@ protocol.registerSchemesAsPrivileged([
     }
   }
 ]);
+
+app.commandLine.appendSwitch("disk-cache-size", String(96 * 1024 * 1024));
 
 if (process.platform === "win32") {
   app.setAppUserModelId("com.codexh.desktop");
@@ -248,6 +250,18 @@ function notifyBackgroundSkillLabEvent(event: SkillLabEvent): void {
   deliverSystemNotification(resolveSkillLabSystemNotification(event));
 }
 
+const SESSION_CACHE_CLEAR_INTERVAL_MS = 15 * 60 * 1000;
+let sessionCacheClearTimer: ReturnType<typeof setInterval> | null = null;
+
+function configureSessionMemory(targetSession: Session): void {
+  targetSession.setSpellCheckerEnabled(false);
+  if (sessionCacheClearTimer) return;
+  sessionCacheClearTimer = setInterval(() => {
+    void targetSession.clearCache().catch(() => undefined);
+  }, SESSION_CACHE_CLEAR_INTERVAL_MS);
+  sessionCacheClearTimer.unref?.();
+}
+
 async function createWindow(): Promise<void> {
   await backend.initialize();
   for (const thread of backend.listThreads()) {
@@ -304,7 +318,9 @@ async function createWindow(): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       webviewTag: true,
-      sandbox: false
+      sandbox: false,
+      spellcheck: false,
+      backgroundThrottling: true
     }
   });
 
@@ -383,6 +399,7 @@ async function createWindow(): Promise<void> {
   }
 
   mainWindow.webContents.setZoomFactor(0.9);
+  configureSessionMemory(session.defaultSession);
   void updates.check();
 }
 
