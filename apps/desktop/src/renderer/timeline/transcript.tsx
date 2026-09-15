@@ -471,7 +471,7 @@ export function getConciseToolActivityLabel(toolCalls: ToolCallRecord[], running
     has("todo.write") || has("todo.read") ? "更新任务清单" : "",
     hasPrefix("git.") ? "Git 操作" : "",
     has("web_search.search_query") ? "浏览器搜索" : "",
-    has("web_search.open_page") ? "打开网页" : "",
+    has("web_search.open_page") ? "读取网页" : "",
     has("web_search.find_in_page") ? "页内查找" : "",
     has("image.generate") ? "生成图片" : "",
     has("video.generate") ? "生成视频" : "",
@@ -528,7 +528,7 @@ function getToolActivityLabel(toolName: string) {
   if (toolName === "todo.read") return "查看任务清单";
   if (toolName === "todo.write") return "更新任务清单";
   if (toolName === "web_search.search_query") return "浏览器搜索";
-  if (toolName === "web_search.open_page") return "打开网页";
+  if (toolName === "web_search.open_page") return "读取网页";
   if (toolName === "web_search.find_in_page") return "页内查找";
   if (toolName.startsWith("browser.")) return "操作浏览器";
   if (toolName === "image.generate") return "生成图片";

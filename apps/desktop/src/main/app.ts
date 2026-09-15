@@ -59,7 +59,7 @@ import type {
   UserInputPrompt
 } from "@shared-types";
 import { isExplicitMcpProhibition, isOverlappingSubagentAssignment, normalizeSubagentMcpPolicy, selectRequestSubagents, selectVisibleSubagents } from "./subagent-assignment";
-import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, withGptReasoningCapabilities } from "@shared-types";
+import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, normalizeSandboxMode, normalizeSandboxNetworkAccess, withGptReasoningCapabilities } from "@shared-types";
 import {
   AgentRuntimeService,
   isSubagentWatchdogProgressEvent,
@@ -68,7 +68,16 @@ import {
   resolveSubagentWatchdogDecision,
   toGpaPlanResumePreview
 } from "@agent-runtime";
-import { BrowserRuntime, isBrowserErrorPageUrl, loadPage, resolveBrowserOpenPreferences, type PageSnapshot } from "@browser-runtime";
+import {
+  BrowserRuntime,
+  BrowserPageLoadTimeoutError,
+  DEFAULT_BROWSER_PAGE_LOAD_TIMEOUT_MS,
+  isBrowserErrorPageUrl,
+  loadPage,
+  resolveBrowserOpenPreferences,
+  waitForBrowserPageOperation,
+  type PageSnapshot
+} from "@browser-runtime";
 import { buildOkfBundle, extractDocument, extractDocumentBuffer, extractHtmlReadableText, type ExtractedDocument } from "@knowledge-runtime";
 import { McpManager } from "@mcp-runtime";
 import { hashDirectory, PluginRuntime, type PluginInstallProgress } from "@plugin-runtime";
@@ -368,6 +377,7 @@ export class DesktopBackend {
 
     this.#runtime = new AgentRuntimeService({
       config: this.#config,
+      appHome: this.#layout.root,
       skills: this.#skills,
       toolRuntime: this.#toolRuntime,
       providerFactory: this.#providerFactory,
@@ -4230,13 +4240,14 @@ export class DesktopBackend {
       description: string;
       riskLevel: "low" | "medium" | "high";
       payload: Record<string, unknown>;
+      forcePrompt?: boolean;
     }
   ): Promise<boolean> {
     const thread = this.#db.getThread(threadId);
     const kind = input.kind ?? "permission";
     const requiresExplicitAuthorization = kind === "explicit_authorization";
     const canRememberExplicitAuthorization = requiresExplicitAuthorization && isRememberableExplicitAuthorization(input.payload);
-    if (!requiresExplicitAuthorization && this.getGpaState(threadId).fullAccess) {
+    if (!requiresExplicitAuthorization && this.getGpaState(threadId).fullAccess && !input.forcePrompt) {
       return true;
     }
     const approvalKey = canRememberExplicitAuthorization
@@ -4990,8 +5001,8 @@ export class DesktopBackend {
   }
 
   private async openPage(_threadId: string, url: string): Promise<{ title: string; url: string; text: string }> {
-    // web_search.open_page extracts text without surfacing a Browser tab. This
-    // keeps ordinary research silent and avoids a webview-attachment prompt.
+    // web_search.open_page is background extraction. User-visible navigation
+    // belongs to browser.open_tab and is surfaced in the Browser workspace.
     const page = await this.loadBrowserPage(url);
     return { title: page.title, url: page.url, text: page.text };
   }
@@ -5001,6 +5012,8 @@ export class DesktopBackend {
       return loadPage(target);
     }
 
+    const deadline = Date.now() + DEFAULT_BROWSER_PAGE_LOAD_TIMEOUT_MS;
+    const remainingMs = () => Math.max(0, deadline - Date.now());
     let extractor: BrowserWindow | null = null;
     try {
       extractor = new BrowserWindow({
@@ -5011,9 +5024,13 @@ export class DesktopBackend {
           sandbox: true
         }
       });
-      await extractor.loadURL(target);
+      await waitForBrowserPageOperation(
+        extractor.loadURL(target),
+        remainingMs(),
+        () => extractor?.webContents.stop()
+      );
       await new Promise((resolve) => setTimeout(resolve, 350));
-      const rendered = await extractor.webContents.executeJavaScript(`
+      const rendered = await waitForBrowserPageOperation(extractor.webContents.executeJavaScript(`
         (() => {
           const ignored = document.querySelectorAll("script, style, noscript, template");
           for (const node of ignored) node.remove();
@@ -5027,7 +5044,7 @@ export class DesktopBackend {
             html: document.documentElement?.outerHTML || ""
           };
         })();
-      `);
+      `), remainingMs());
       if (!rendered.text) {
         throw new Error("The rendered page did not contain readable text.");
       }
@@ -5037,7 +5054,11 @@ export class DesktopBackend {
         url: target,
         error: error instanceof Error ? error.message : String(error)
       });
-      return loadPage(target);
+      const fallbackTimeoutMs = remainingMs();
+      if (fallbackTimeoutMs <= 0) {
+        throw new BrowserPageLoadTimeoutError(DEFAULT_BROWSER_PAGE_LOAD_TIMEOUT_MS);
+      }
+      return loadPage(target, { timeoutMs: fallbackTimeoutMs });
     } finally {
       if (extractor && !extractor.isDestroyed()) {
         extractor.destroy();
@@ -5580,7 +5601,9 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       silentBrowserOpen: config.desktop?.silentBrowserOpen !== false,
       liveEditPreview: config.desktop?.liveEditPreview === true,
       llmLogViewer: config.desktop?.llmLogViewer === true,
-      completionAudit: normalizeCompletionAuditSettings(config.desktop)
+      completionAudit: normalizeCompletionAuditSettings(config.desktop),
+      sandboxMode: normalizeSandboxMode(config.desktop?.sandboxMode ?? fallback.desktop.sandboxMode),
+      sandboxNetworkAccess: normalizeSandboxNetworkAccess(config.desktop?.sandboxNetworkAccess ?? fallback.desktop.sandboxNetworkAccess)
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     multiAgent: {

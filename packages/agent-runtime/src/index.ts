@@ -96,11 +96,18 @@ import {
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
 import type { GpaStage, GpaState } from "@shared-types";
+import { normalizeSandboxMode, normalizeSandboxNetworkAccess } from "@shared-types";
 import { createChatRuntimePolicy } from "./chat-runtime";
 import {
   createProjectRuntimePolicy,
   PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE
 } from "./project-runtime";
+import {
+  buildSandboxSystemPrompt,
+  defaultAppHome,
+  resolveEffectiveSandbox,
+  resolveSandboxDecision
+} from "./sandbox-policy";
 
 export {
   buildChatRuntimePrompt,
@@ -118,6 +125,22 @@ export {
   type ProjectRuntimePolicy,
   type RuntimeWorkspacePriorityContext
 } from "./project-runtime";
+export {
+  buildSandboxSystemPrompt,
+  classifyShellRisk,
+  defaultAppHome,
+  isSecretFilesystemPath,
+  resolveEffectiveSandbox,
+  resolveSandboxDecision,
+  secretFilesystemPathError,
+  APP_CONFIG_SECRET_PATH_ERROR,
+  OUTSIDE_WORKSPACE_PATH_ERROR,
+  READ_ONLY_SANDBOX_WRITE_ERROR,
+  SANDBOX_NETWORK_DENIED_ERROR,
+  SECRET_FILESYSTEM_PATH_ERROR,
+  type EffectiveSandbox,
+  type SandboxDecision
+} from "./sandbox-policy";
 
 export {
   applyCompletedPlanTasks,
@@ -407,6 +430,100 @@ export function resolveReturnedReasoningCheckpoint(
 
 export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number): boolean {
   return blockedAttempts >= MAX_BLOCKED_IDENTICAL_TOOL_RETRIES;
+}
+
+export function isRecoverableInspectionToolFailure(toolName: string): boolean {
+  return toolName === "fs.read_file" || toolName === "fs.read_directory";
+}
+
+function getToolCallDisplayPath(argumentsJson: Record<string, unknown>): string {
+  const candidate = argumentsJson.path ?? argumentsJson.file_path;
+  if (typeof candidate !== "string" || !candidate.trim()) return "未指明的文件或目录";
+  return redactSensitiveText(candidate.trim()).slice(0, 500);
+}
+
+function summarizeInspectionFailureForUser(error: string): string {
+  const normalized = error.toLowerCase();
+  if (/outside (?:the )?(?:project|workspace)|工作区范围|项目文件夹/.test(normalized)) {
+    return "目标路径不在当前工作区范围内。";
+  }
+  if (/permission denied|access denied|权限|拒绝访问/.test(normalized)) {
+    return "当前没有读取该目标的权限。";
+  }
+  if (/enoent|not found|no such file|不存在|找不到/.test(normalized)) {
+    return "目标文件或目录不存在，或路径不正确。";
+  }
+  return "读取操作返回了错误。";
+}
+
+export function buildRepeatedInspectionFailurePrompt(input: {
+  toolName: string;
+  argumentsJson: Record<string, unknown>;
+  attempts: number;
+  error: string;
+}): { title: string; question: UserInputQuestion } {
+  const target = getToolCallDisplayPath(input.argumentsJson);
+  return {
+    title: "无法读取文件或目录",
+    question: {
+      id: "read_failure_recovery",
+      label: "如何继续？",
+      prompt: [
+        `读取目标“${target}”已连续失败 ${input.attempts} 次。`,
+        `原因：${summarizeInspectionFailureForUser(input.error)}`,
+        "我不会继续重复相同的读取操作，请选择下一步；也可以直接在输入框填写正确路径或其他处理方式。"
+      ].join("\n"),
+      options: [
+        {
+          id: "provide_path",
+          label: "提供正确路径",
+          description: "填写文件或目录的正确路径，然后继续任务。"
+        },
+        {
+          id: "adjust_scope",
+          label: "调整目标或权限",
+          description: "先修正工作区范围、权限或文件状态，再重试。"
+        },
+        {
+          id: "continue_alternative",
+          label: "换一种方式继续",
+          description: "不再读取这个目标，改用现有信息或其他工具完成任务。"
+        },
+        {
+          id: "stop",
+          label: "停止任务",
+          description: "结束本轮，不再继续重试。"
+        }
+      ],
+      allowFreeText: true
+    }
+  };
+}
+
+export function buildRepeatedInspectionFailureStoppedMessage(input: {
+  toolName: string;
+  argumentsJson: Record<string, unknown>;
+}): string {
+  return [
+    "任务已按你的选择停止。",
+    `读取工具 ${input.toolName} 无法读取目标：${getToolCallDisplayPath(input.argumentsJson)}。`,
+    "系统没有继续重复相同操作；修正路径、工作区范围或权限后，可以重新发送任务。"
+  ].join("\n");
+}
+
+function resolveInspectionFailureRecoveryAnswer(answers: Record<string, string>): {
+  shouldStop: boolean;
+  guidance: string;
+} {
+  const selected = answers.read_failure_recovery?.trim() ?? "";
+  const note = answers.read_failure_recovery__note
+    ?.replace(/^__note__:/, "")
+    .trim() ?? "";
+  if (selected === "stop") return { shouldStop: true, guidance: "stop" };
+  const guidance = [selected.replace(/^__custom__:/, "").trim(), note]
+    .filter(Boolean)
+    .join("；");
+  return { shouldStop: false, guidance: guidance || "换一种方式继续" };
 }
 
 export function buildIdenticalToolRetryError(input: {
@@ -929,6 +1046,7 @@ interface RuntimePersistence {
 
 interface RuntimeServices {
   config: AppConfig;
+  appHome?: string;
   skills: SkillsManager;
   toolRuntime: ToolRuntime;
   providerFactory: ProviderFactory;
@@ -1048,6 +1166,7 @@ interface RuntimeServices {
     description: string;
     riskLevel: "low" | "medium" | "high";
     payload: Record<string, unknown>;
+    forcePrompt?: boolean;
   }): Promise<boolean>;
   requestUserInput(threadId: string, turnRunId: string, input: {
     title: string;
@@ -1812,6 +1931,15 @@ class ThreadSessionRuntime {
       request: [effectiveRequest, displayContent ?? ""].filter(Boolean).join("\n"),
       priorMessages: priorMessagesBeforeTurn
     });
+    const sandboxNetworkAccess = normalizeSandboxNetworkAccess(this.services.config.desktop.sandboxNetworkAccess);
+    const effectiveSandbox = resolveEffectiveSandbox({
+      threadMode: modePolicy.mode,
+      sandboxMode: normalizeSandboxMode(this.services.config.desktop.sandboxMode),
+      gpaFullAccess: this.#gpa.fullAccess,
+      chatTurnWantsDeliverable: modePolicy.mode === "chat" && modePolicy.localAccess === "write"
+    });
+    const appHome = this.services.appHome ?? defaultAppHome();
+    const sandboxPrompt = buildSandboxSystemPrompt(effectiveSandbox.mode, sandboxNetworkAccess);
     // Spreadsheets and other artifacts are commonly produced by scripts rather
     // than managed write tools, so retain a narrow, requested-format baseline.
     const workspaceRequestedArtifactsBeforeTurn = modePolicy.mode === "project"
@@ -2200,6 +2328,7 @@ class ThreadSessionRuntime {
       const desktopOnlyBrowserVerification = /(?:desktop[- ]only|desktop only|仅桌面|桌面专用)/i.test(initialInput);
       const failedToolCallFingerprints = new Map<string, number>();
       const blockedToolCallFingerprints = new Map<string, number>();
+      const preflightBlockedToolCallFingerprints = new Map<string, number>();
       const originalToolCallFailures = new Map<string, string>();
       const successfullyCreatedFiles = new Set<string>();
       const successfulReusableToolResults = new Map<string, string>();
@@ -2222,7 +2351,12 @@ class ThreadSessionRuntime {
       let skillAutoLoadIssued = false;
       let terminalThread: ThreadRecord | null = null;
       const targetFailureCounts = new Map<string, number>();
-      let repeatedTaskFailure: { taskKey: string; attempts: number; lastError: string } | null = null;
+      let repeatedTaskFailure: {
+        taskKey: string;
+        attempts: number;
+        lastError: string;
+        userMessage?: string;
+      } | null = null;
       const requestBrowserTestChoice = async (reason: "browser_tool" | "frontend_delivery") => {
         if (browserVerificationEvidence.testChoice) {
           return browserVerificationEvidence.testChoice;
@@ -2247,6 +2381,7 @@ class ThreadSessionRuntime {
         taskKey: string;
         attempts: number;
         lastError: string;
+        userMessage?: string;
       } | null;
       let executionRecoveryAttempts = 0;
       let prematureCompletionAttempts = 0;
@@ -2610,7 +2745,7 @@ class ThreadSessionRuntime {
       const persistBlockedToolCall = async (
         toolCall: RuntimeToolCall,
         reason: string,
-        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope" | "explicit_authorization_denied"
+        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope" | "explicit_authorization_denied" | "sandbox_policy"
       ) => {
         const toolRecord = await this.services.persistence.recordToolCall({
           threadId: this.threadId,
@@ -2820,7 +2955,7 @@ class ThreadSessionRuntime {
           requestTools.some((tool) => tool.name === "video.generate"),
           availableSkills.filter((skill) => recommendedSkillIds.includes(skill.id)),
           selectedMcpServerIds,
-          modePolicy.systemPrompt,
+          [modePolicy.systemPrompt, sandboxPrompt].filter(Boolean).join("\n\n"),
           allowedReadPaths
         );
         const adapter = this.services.providerFactory.create(provider);
@@ -5527,6 +5662,95 @@ class ThreadSessionRuntime {
             ...rawToolCall,
             name: canonicalizeToolName(rawToolCall.name)
           };
+          const sandboxDecision = resolveSandboxDecision({
+            toolName: toolCall.name,
+            args: toolCall.arguments,
+            cwd: workspaceCwd,
+            mode: effectiveSandbox.mode,
+            networkAccess: sandboxNetworkAccess,
+            workspaceRoots,
+            allowedReadPaths,
+            appHome
+          });
+          if (sandboxDecision.action === "deny") {
+            appendBlockedToolCallResult(toolCall, sandboxDecision.reason);
+            await persistBlockedToolCall(toolCall, sandboxDecision.reason, "sandbox_policy");
+            const preflightFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
+            const preflightAttempts = (preflightBlockedToolCallFingerprints.get(preflightFingerprint) ?? 0) + 1;
+            preflightBlockedToolCallFingerprints.set(preflightFingerprint, preflightAttempts);
+            if (
+              isRecoverableInspectionToolFailure(toolCall.name) &&
+              shouldStopAfterBlockedIdenticalToolRetry(preflightAttempts)
+            ) {
+              const recoveryPrompt = buildRepeatedInspectionFailurePrompt({
+                toolName: toolCall.name,
+                argumentsJson: toolCall.arguments,
+                attempts: preflightAttempts,
+                error: sandboxDecision.reason
+              });
+              const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+                title: recoveryPrompt.title,
+                kind: "generic",
+                allowSkip: false,
+                questions: [recoveryPrompt.question]
+              });
+              const recoveryAnswer = resolveInspectionFailureRecoveryAnswer(answers);
+              if (!recoveryAnswer.shouldStop) {
+                preflightBlockedToolCallFingerprints.delete(preflightFingerprint);
+                transcript.push({
+                  role: "user",
+                  content: [
+                    "用户已处理读取失败提示。",
+                    `用户选择：${recoveryAnswer.guidance}`,
+                    "如果用户提供了新路径或处理方式，优先采用；不要再次调用原来失败的读取参数。"
+                  ].join("\n")
+                });
+                reevaluateAfterUserInput = true;
+                break;
+              }
+              repeatedTaskFailure = {
+                taskKey: getToolCallTaskKey(toolCall.name, toolCall.arguments),
+                attempts: preflightAttempts,
+                lastError: sandboxDecision.reason,
+                userMessage: buildRepeatedInspectionFailureStoppedMessage({
+                  toolName: toolCall.name,
+                  argumentsJson: toolCall.arguments
+                })
+              };
+              break;
+            }
+            transcript.push({ role: "user", content: sandboxDecision.reason });
+            await this.services.log("agent.sandbox_preflight_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              kind: sandboxDecision.kind,
+              reason: sandboxDecision.reason
+            });
+            continue;
+          }
+          if (sandboxDecision.action === "ask") {
+            const approvedOutsideRead = await this.services.requestApproval(this.threadId, turn.id, {
+              title: sandboxDecision.askTitle ?? "读取工作区外文件",
+              description: sandboxDecision.reason,
+              riskLevel: "high",
+              forcePrompt: true,
+              payload: {
+                sandboxAsk: true,
+                kind: sandboxDecision.kind,
+                path: sandboxDecision.addReadablePath ?? null
+              }
+            });
+            if (!approvedOutsideRead) {
+              const reason = "用户未批准读取工作区外的文件。不要重试该路径。";
+              appendBlockedToolCallResult(toolCall, reason);
+              await persistBlockedToolCall(toolCall, reason, "sandbox_policy");
+              transcript.push({ role: "user", content: reason });
+              continue;
+            }
+            if (sandboxDecision.addReadablePath) {
+              allowedReadPaths.push(sandboxDecision.addReadablePath);
+            }
+          }
           const explicitAuthorization = buildExplicitAuthorizationRequirement(toolCall, gitMutationRequested);
           let consumeExplicitAuthorization = false;
           if (explicitAuthorization) {
@@ -5762,11 +5986,59 @@ class ThreadSessionRuntime {
               })
             });
             if (shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts)) {
-              repeatedTaskFailure = {
-                taskKey: toolTaskKey,
-                attempts: failedCallAttempts + blockedAttempts,
-                lastError: `${lastError} The call was blocked ${blockedAttempts} times after the initial failure.`
-              };
+              if (isRecoverableInspectionToolFailure(toolCall.name)) {
+                const recoveryPrompt = buildRepeatedInspectionFailurePrompt({
+                  toolName: toolCall.name,
+                  argumentsJson: toolCall.arguments,
+                  attempts: failedCallAttempts + blockedAttempts,
+                  error: originalToolCallFailures.get(toolCallFingerprint) ?? lastError
+                });
+                const answers = await this.services.requestUserInput(this.threadId, turn.id, {
+                  title: recoveryPrompt.title,
+                  kind: "generic",
+                  allowSkip: false,
+                  questions: [recoveryPrompt.question]
+                });
+                const recoveryAnswer = resolveInspectionFailureRecoveryAnswer(answers);
+                if (!recoveryAnswer.shouldStop) {
+                  failedToolCallFingerprints.delete(toolCallFingerprint);
+                  blockedToolCallFingerprints.delete(toolCallFingerprint);
+                  originalToolCallFailures.delete(toolCallFingerprint);
+                  preflightBlockedToolCallFingerprints.delete(toolCallFingerprint);
+                  targetFailureCounts.delete(recoveryTargetKey);
+                  transcript.push({
+                    role: "user",
+                    content: [
+                      "用户已处理读取失败提示。",
+                      `用户选择：${recoveryAnswer.guidance}`,
+                      "如果用户提供了新路径或处理方式，优先采用；不要再次调用原来失败的读取参数。"
+                    ].join("\n")
+                  });
+                  await this.services.log("turn.repeated_inspection_failure_recovery_continued", this.threadId, {
+                    turnRunId: turn.id,
+                    toolName: toolCall.name,
+                    taskKey: toolTaskKey,
+                    answer: recoveryAnswer.guidance
+                  });
+                  reevaluateAfterUserInput = true;
+                  break;
+                }
+                repeatedTaskFailure = {
+                  taskKey: toolTaskKey,
+                  attempts: failedCallAttempts + blockedAttempts,
+                  lastError: `${lastError} The call was blocked ${blockedAttempts} times after the initial failure.`,
+                  userMessage: buildRepeatedInspectionFailureStoppedMessage({
+                    toolName: toolCall.name,
+                    argumentsJson: toolCall.arguments
+                  })
+                };
+              } else {
+                repeatedTaskFailure = {
+                  taskKey: toolTaskKey,
+                  attempts: failedCallAttempts + blockedAttempts,
+                  lastError: `${lastError} The call was blocked ${blockedAttempts} times after the initial failure.`
+                };
+              }
               await this.services.log("turn.identical_retry_limit_reached", this.threadId, {
                 turnRunId: turn.id,
                 toolName: toolCall.name,
@@ -5965,13 +6237,19 @@ class ThreadSessionRuntime {
               cwd: workspaceCwd,
               workspaceRoots,
               allowedReadPaths,
-              appHome: "",
+              appHome,
               threadId: this.threadId,
               turnRunId: turn.id,
               toolCallId: toolRecord.id,
               approvalMode: this.services.config.desktop.approvals,
               executionPolicy,
               expectedFileVersions,
+              sandbox: {
+                mode: effectiveSandbox.mode,
+                networkAccess: sandboxNetworkAccess,
+                skipInWorkspaceApprovals: effectiveSandbox.skipInWorkspaceApprovals,
+                appHome
+              },
               browserTabs,
               knowledgeBases: visibleKnowledgeBases,
               searchKnowledge: (query, knowledgeBaseIds) =>
@@ -6449,7 +6727,7 @@ class ThreadSessionRuntime {
             const clearedFailures = targetFailureCounts.get(recoveryTargetKey) ?? 0;
             if (clearedFailures > 0) {
               targetFailureCounts.delete(recoveryTargetKey);
-              if (repeatedTaskFailure?.taskKey === recoveryTargetKey) {
+              if (readRepeatedTaskFailure()?.taskKey === recoveryTargetKey) {
                 repeatedTaskFailure = null;
               }
               await this.services.log("turn.target_failure_reset_after_delivery", this.threadId, {
@@ -6661,6 +6939,7 @@ class ThreadSessionRuntime {
             }
             failedToolCallFingerprints.delete(toolCallFingerprint);
             blockedToolCallFingerprints.delete(toolCallFingerprint);
+            preflightBlockedToolCallFingerprints.delete(toolCallFingerprint);
             originalToolCallFailures.delete(toolCallFingerprint);
             if (
               toolCall.name === "browser.navigate" ||
@@ -6984,13 +7263,13 @@ class ThreadSessionRuntime {
           `Last error: ${terminalRepeatedTaskFailure.lastError}`;
         await this.recordMessage(
           "assistant",
-          buildRepeatedTaskRecoveryMessage(terminalRepeatedTaskFailure),
+          terminalRepeatedTaskFailure.userMessage ?? buildRepeatedTaskRecoveryMessage(terminalRepeatedTaskFailure),
           turn.id
         );
         await this.services.persistence.finishTurn(turn.id, {
           status: "failed",
           completedAt: new Date().toISOString(),
-          errorMessage
+          errorMessage: terminalRepeatedTaskFailure.userMessage ?? errorMessage
         });
         terminalThread = await this.services.persistence.updateThread(this.threadId, {
           // Keep the transcript available for a direct recovery instruction.
@@ -10933,6 +11212,8 @@ export function formatAvailableTools(
       ? `- ${tool.name}: ${tool.description} Input schema: ${JSON.stringify(tool.inputSchema)}.`
       : `- ${tool.name}: ${tool.description}`;
   });
+  const hasBackgroundPageReader = tools.some((tool) => tool.name === "web_search.open_page");
+  const hasVisibleBrowserOpener = tools.some((tool) => tool.name === "browser.open_tab");
 
   return [
     "## Available Executable Tools",
@@ -10944,6 +11225,9 @@ export function formatAvailableTools(
     ...(shellAvailable ? ["For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete."] : []),
     ...(shellAvailable && process.platform === "win32"
       ? ["This desktop executes shell.exec in Windows PowerShell. Use PowerShell syntax; recognizable CMD commands are adapted automatically. Do not use Bash syntax such as `||`, and never edit files through shell.exec: use apply_patch."]
+      : []),
+    ...(hasBackgroundPageReader && hasVisibleBrowserOpener
+      ? ["web_search.open_page only reads page text in the background and never appears in the right-side Browser workspace. When the user asks to open, show, watch, or interact with a website, use browser.open_tab instead."]
       : []),
     ...definitions
   ].join("\n");

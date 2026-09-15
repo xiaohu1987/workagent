@@ -251,7 +251,10 @@ export function getSubagentTaskName(agent: Pick<ThreadRecord, "agentRole" | "las
 }
 
 export const SUBAGENT_COURTESY_NAMES = [
-  "羲和", "常羲", "精卫", "烛龙", "英招", "陆吾", "鸾鸟", "毕方", "乘黄"
+  "羲和", "常羲", "精卫", "烛龙", "英招", "陆吾", "鸾鸟", "毕方", "乘黄",
+  "白泽", "应龙", "朱雀", "玄武", "青龙", "白虎", "麒麟", "凤凰",
+  "夔牛", "穷奇", "饕餮", "混沌", "梼杌", "鲲鹏", "金乌", "重明鸟",
+  "女娲", "伏羲", "祝融", "共工", "夸父", "后羿", "嫦娥", "刑天"
 ] as const;
 
 const COURTESY_NAME_ORDINALS = "壱弐参肆伍陸漆捌玖拾";

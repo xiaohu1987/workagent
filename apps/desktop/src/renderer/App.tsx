@@ -142,6 +142,7 @@ import {
   rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
+  shouldCommitRuntimeMessageImmediately,
   shouldShowRuntimeActivityPanel,
   upsertRuntimeUserInputPrompt,
   upsertRuntimeToolCallSummary,
@@ -1400,7 +1401,11 @@ export function App() {
     return { ...nextSnapshot, thread, messages, messageCount };
   }
 
-  function reconcileCachedAndSelectedSnapshot(threadId: string, consumedOptimisticIds?: ReadonlySet<string>) {
+  function reconcileCachedAndSelectedSnapshot(
+    threadId: string,
+    consumedOptimisticIds?: ReadonlySet<string>,
+    commitImmediately = false
+  ) {
     const cached = snapshotCacheByThreadRef.current.get(threadId);
     if (cached) {
       const reconciledCache = reconcileSnapshotWithRuntimeEvents(cached, consumedOptimisticIds);
@@ -1413,18 +1418,25 @@ export function App() {
         )
       });
     }
-    setSnapshot((current) => {
-      if (!current || current.thread.id !== threadId) return current;
-      const reconciled = reconcileSnapshotWithRuntimeEvents(current, consumedOptimisticIds);
-      return {
-        ...reconciled,
-        messages: mergeMessagesAfterOptimisticUserEdit(
-          current.messages,
-          reconciled.messages,
-          pendingUserMessagesRef.current[threadId] ?? []
-        )
-      };
-    });
+    const commitSelectedSnapshot = () => {
+      setSnapshot((current) => {
+        if (!current || current.thread.id !== threadId) return current;
+        const reconciled = reconcileSnapshotWithRuntimeEvents(current, consumedOptimisticIds);
+        return {
+          ...reconciled,
+          messages: mergeMessagesAfterOptimisticUserEdit(
+            current.messages,
+            reconciled.messages,
+            pendingUserMessagesRef.current[threadId] ?? []
+          )
+        };
+      });
+    };
+    if (commitImmediately && selectedThreadIdRef.current === threadId) {
+      flushSync(commitSelectedSnapshot);
+    } else {
+      commitSelectedSnapshot();
+    }
   }
 
   function restoreCachedThreadSnapshot(threadId: string): boolean {
@@ -2569,7 +2581,11 @@ export function App() {
         messages.set(message.id, message);
         persistedRuntimeMessagesRef.current[runtimeThreadId] = messages;
         invalidateSnapshotRequest(runtimeThreadId);
-        reconcileCachedAndSelectedSnapshot(runtimeThreadId, consumedOptimisticIds);
+        reconcileCachedAndSelectedSnapshot(
+          runtimeThreadId,
+          consumedOptimisticIds,
+          shouldCommitRuntimeMessageImmediately(message)
+        );
       }
       if (
         typed.type === "message.created" &&
@@ -2775,9 +2791,6 @@ export function App() {
     if (nextTab !== rightWorkspaceTab) {
       setRightWorkspaceTab(nextTab);
       setRightWorkspaceExpandedTab(nextTab);
-    }
-    if (!isProjectWorkspaceThread(selectedThread?.mode) && (rightWorkspaceTab === "files" || rightWorkspaceTab === "changes")) {
-      setIsRightWorkspaceOpen(false);
     }
   }, [rightWorkspaceTab, selectedThread?.mode]);
 
@@ -4240,6 +4253,13 @@ export function App() {
         approvals: base ? reuseEquivalentRecordArray(base.approvals, next.approvals) : next.approvals,
         prompts: base ? reuseEquivalentRecordArray(base.prompts, next.prompts) : next.prompts
       });
+      const renderedMessageIds = new Set((liveSnapshot?.messages ?? []).map((message) => message.id));
+      const hasNewMessages = mergedSnapshot.messages.some((message) => !renderedMessageIds.has(message.id));
+      const reachedTerminalState = Boolean(
+        liveSnapshot &&
+        isThreadExecutionInProgress(liveSnapshot.thread.status) &&
+        !isThreadExecutionInProgress(mergedSnapshot.thread.status)
+      );
       cacheThreadSnapshot(mergedSnapshot);
       const prunedRuntimeMessages = prunePersistedRuntimeMessageMap(
         persistedRuntimeMessagesRef.current[threadId],
@@ -4277,7 +4297,11 @@ export function App() {
           selectedThreadIdRef.current,
           snapshotThreadIdRef.current,
           threadId,
-          (pendingUserMessagesRef.current[threadId] ?? remaining).length > 0
+          {
+            hasPendingOptimisticMessages: (pendingUserMessagesRef.current[threadId] ?? remaining).length > 0,
+            hasNewMessages,
+            reachedTerminalState
+          }
         )) {
           // A transition can be starved by continuous runtime events. The first
           // snapshot must replace the loading placeholder at normal priority.

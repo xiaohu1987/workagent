@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { SandboxMode } from "@shared-types";
 import {
   applyLocatedHunk,
   astDiffSources,
@@ -10,6 +11,11 @@ import {
   locateHunk,
   type EntityChange
 } from "../ast";
+import {
+  defaultAppHome,
+  isSecretFilesystemPath,
+  secretFilesystemPathError
+} from "../sandbox-policy";
 
 type PatchOperation =
   | {
@@ -66,6 +72,8 @@ export interface ApplyPatchOptions {
   expectedVersions?: ReadonlyMap<string, string> | Record<string, string>;
   /** Additional authorized roots. Relative patch paths resolve from rootDir. */
   workspaceRoots?: string[];
+  appHome?: string;
+  sandboxMode?: SandboxMode;
   /** Test seam for deterministic commit and rollback failure coverage. */
   fileSystem?: PatchFileSystem;
 }
@@ -117,7 +125,15 @@ export async function applyCodexPatch(
 ): Promise<ApplyPatchResult> {
   const operations = parsePatch(patchText);
   const fileSystem = options.fileSystem ?? NODE_FILE_SYSTEM;
-  const planned = await preflightPatch(operations, rootDir, fileSystem, options.expectedVersions, options.workspaceRoots ?? [rootDir]);
+  const planned = await preflightPatch(
+    operations,
+    rootDir,
+    fileSystem,
+    options.expectedVersions,
+    options.workspaceRoots ?? [rootDir],
+    options.appHome,
+    options.sandboxMode
+  );
   await commitPatch(planned, fileSystem);
 
   return {
@@ -140,15 +156,17 @@ async function preflightPatch(
   rootDir: string,
   fileSystem: PatchFileSystem,
   expectedVersions?: ApplyPatchOptions["expectedVersions"],
-  workspaceRoots: string[] = [rootDir]
+  workspaceRoots: string[] = [rootDir],
+  appHome?: string,
+  sandboxMode?: SandboxMode
 ): Promise<PlannedFile[]> {
   const planned: PlannedFile[] = [];
   const occupiedPaths = new Set<string>();
 
   for (const [operationIndex, operation] of operations.entries()) {
-    const sourcePath = resolveWorkspacePath(rootDir, operation.file, workspaceRoots);
+    const sourcePath = resolveWorkspacePath(rootDir, operation.file, workspaceRoots, appHome, sandboxMode);
     const targetPath = operation.type === "update"
-      ? resolveWorkspacePath(rootDir, operation.moveTo ?? operation.file, workspaceRoots)
+      ? resolveWorkspacePath(rootDir, operation.moveTo ?? operation.file, workspaceRoots, appHome, sandboxMode)
       : sourcePath;
     if (operation.type === "update" && operation.moveTo && workspaceRootForPath(sourcePath, workspaceRoots) !== workspaceRootForPath(targetPath, workspaceRoots)) {
       throw new PatchApplyError("Cross-workspace moves are not supported.", "preflight_failed", operationIndex, [sourcePath, targetPath]);
@@ -345,11 +363,24 @@ function createSnapshot(path: string, before: string, after: string): ApplyPatch
   };
 }
 
-function resolveWorkspacePath(rootDir: string, targetPath: string, workspaceRoots: string[]): string {
+function resolveWorkspacePath(
+  rootDir: string,
+  targetPath: string,
+  workspaceRoots: string[],
+  appHome?: string,
+  sandboxMode?: SandboxMode
+): string {
   const root = path.resolve(rootDir);
   const resolved = path.isAbsolute(targetPath)
     ? path.resolve(targetPath)
     : path.resolve(root, targetPath);
+  const home = appHome || defaultAppHome();
+  if (isSecretFilesystemPath(resolved, home)) {
+    throw new Error(secretFilesystemPathError(resolved, home));
+  }
+  if (sandboxMode === "full-access") {
+    return resolved;
+  }
   if (workspaceRootForPath(resolved, workspaceRoots)) {
     return resolved;
   }

@@ -317,6 +317,10 @@ describe("subagent task UI", () => {
     expect(rightWorkspaceSource).toContain("onSelectSubagent");
     expect(rendererAppSource).toContain("SubagentSwitchRow");
     expect(rendererAppSource).toContain("onSelect={selectSubagentEvent}");
+    expect(workspaceControlsSource).toContain("onOpenRightWorkspace");
+    expect(workspaceControlsSource).toContain("显示右侧工作区（浏览器 / 子智能体）");
+    expect(workspaceControlsSource).not.toContain("!rightWorkspaceOpen && projectWorkspace");
+    expect(rendererAppSource).not.toContain("&& (rightWorkspaceTab === \"files\" || rightWorkspaceTab === \"changes\")");
     expect(renderToStaticMarkup(createElement(SubagentDetailWorkspace, { item: null }))).toContain("无正在执行的子智能体");
   });
 

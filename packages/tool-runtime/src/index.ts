@@ -26,6 +26,17 @@ import { applyCodexPatch } from "./handlers/applyPatch";
 import { astDiffSources, extractSymbols, isAstSupportedPath, languageFromPath } from "./ast";
 import { prepareShellCommandForWebFrontend, prepareShellCommandForWindows } from "./web-shell-policy";
 import {
+  classifyShellRisk,
+  defaultAppHome,
+  isSecretFilesystemPath,
+  OUTSIDE_WORKSPACE_PATH_ERROR,
+  READ_ONLY_SANDBOX_WRITE_ERROR,
+  SANDBOX_NETWORK_DENIED_ERROR,
+  secretFilesystemPathError,
+  shouldSkipWorkspaceMutationApproval,
+  type ToolRuntimeSandbox
+} from "./sandbox-policy";
+import {
   pageForModel,
   truncatePageText
 } from "./browser-page-sanitize";
@@ -38,6 +49,23 @@ export {
   rewritePythonHttpServer,
   WEB_FRONTEND_PYTHON_BLOCK_MESSAGE
 } from "./web-shell-policy";
+export {
+  APP_CONFIG_SECRET_PATH_ERROR,
+  authorizedRootForPath,
+  classifyShellRisk,
+  defaultAppHome,
+  isAppConfigSecretPath,
+  isPathInsideAuthorizedRoots,
+  isSecretFilesystemPath,
+  OUTSIDE_WORKSPACE_PATH_ERROR,
+  READ_ONLY_SANDBOX_WRITE_ERROR,
+  SANDBOX_NETWORK_DENIED_ERROR,
+  SECRET_FILESYSTEM_PATH_ERROR,
+  secretFilesystemPathError,
+  shouldSkipWorkspaceMutationApproval,
+  type ShellRiskKind,
+  type ToolRuntimeSandbox
+} from "./sandbox-policy";
 export {
   BROWSER_PAGE_TEXT_LIMIT,
   pageForModel,
@@ -63,6 +91,8 @@ export interface ToolRuntimeContext {
   executionPolicy?: ProjectExecutionPolicy;
   /** SHA-256 versions captured by fs.read_file during the current Agent turn. */
   expectedFileVersions?: ReadonlyMap<string, string>;
+  /** Policy-first sandbox. Secrets stay denied even in full-access. */
+  sandbox?: ToolRuntimeSandbox;
   browserTabs: BrowserTabRecord[];
   knowledgeBases: KnowledgeBaseRecord[];
   searchKnowledge: (query: string, knowledgeBaseIds?: string[]) => Promise<any[]>;
@@ -78,6 +108,7 @@ export interface ToolRuntimeContext {
     description: string;
     riskLevel: "low" | "medium" | "high";
     payload: Record<string, unknown>;
+    forcePrompt?: boolean;
   }) => Promise<boolean>;
   requestUserInput: (input: {
     title: string;
@@ -723,14 +754,14 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       "medium"
     ),
     async (args, ctx) => {
-      const filePath = resolveFromCwd(ctx.cwd, String(args.path), ctx.workspaceRoots);
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path), ctx.workspaceRoots, ctx);
       const content = String(args.content ?? "");
-      const approved = await ctx.requestApproval({
+      const approved = await requestMutationApproval(ctx, {
         title: "写入文件",
         description: filePath,
         riskLevel: "medium",
         payload: { path: filePath }
-      });
+      }, "write");
       if (!approved) {
         return { ok: false, content: "写入文件被拒绝。" };
       }
@@ -771,7 +802,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     },
     async (args, ctx) => {
       const requestedPath = String(args.file_path ?? "");
-      const filePath = resolveFromCwd(ctx.cwd, requestedPath, ctx.workspaceRoots);
+      const filePath = resolveFromCwd(ctx.cwd, requestedPath, ctx.workspaceRoots, ctx);
       const oldString = String(args.old_string ?? "");
       const newString = String(args.new_string ?? "");
       const replaceAll = args.replace_all === true;
@@ -826,12 +857,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           ? normalizedCurrent.split(normalizedOld).join(normalizedNew)
           : normalizedCurrent.replace(normalizedOld, normalizedNew);
       const after = lineEnding === "\r\n" ? replaced.replace(/\n/g, "\r\n") : replaced;
-      const approved = await ctx.requestApproval({
+      const approved = await requestMutationApproval(ctx, {
         title: "精确替换文件内容",
         description: filePath,
         riskLevel: "medium",
         payload: { path: filePath, replacements: replaceAll ? matches : 1 }
-      });
+      }, "write");
       if (!approved) return { ok: false, content: "search_replace 写入被拒绝。" };
       await ctx.writeFile(filePath, after);
       const relativePath = path.relative(ctx.cwd, filePath).split(path.sep).join("/");
@@ -851,13 +882,13 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium"
     },
     async (args, ctx) => {
-      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
-      const approved = await ctx.requestApproval({
+      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots, ctx);
+      const approved = await requestMutationApproval(ctx, {
         title: "创建目录",
         description: target,
         riskLevel: "medium",
         payload: { path: target }
-      });
+      }, "write");
       if (!approved) return { ok: false, content: "创建目录被拒绝。" };
       await fs.mkdir(target, { recursive: true });
       return { ok: true, content: `Created directory ${target}`, json: { path: target } };
@@ -876,17 +907,17 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium"
     },
     async (args, ctx) => {
-      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""), ctx.workspaceRoots);
-      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""), ctx.workspaceRoots);
+      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""), ctx.workspaceRoots, ctx);
+      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""), ctx.workspaceRoots, ctx);
       if (workspaceRootForPath(from, ctx.workspaceRoots ?? [ctx.cwd]) !== workspaceRootForPath(to, ctx.workspaceRoots ?? [ctx.cwd])) {
         return { ok: false, content: "跨协作目录移动文件暂不支持，请改用复制操作。" };
       }
-      const approved = await ctx.requestApproval({
+      const approved = await requestMutationApproval(ctx, {
         title: "重命名/移动",
         description: `${from} → ${to}`,
         riskLevel: "medium",
         payload: { from, to }
-      });
+      }, "write");
       if (!approved) return { ok: false, content: "重命名被拒绝。" };
       await fs.mkdir(path.dirname(to), { recursive: true });
       await fs.rename(from, to);
@@ -906,14 +937,14 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "high"
     },
     async (args, ctx) => {
-      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
+      const target = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots, ctx);
       const recursive = Boolean(args.recursive);
-      const approved = await ctx.requestApproval({
+      const approved = await requestMutationApproval(ctx, {
         title: "删除文件",
         description: target,
         riskLevel: "high",
         payload: { path: target, recursive }
-      });
+      }, "delete");
       if (!approved) return { ok: false, content: "删除被拒绝。" };
       await fs.rm(target, { recursive, force: false });
       return { ok: true, content: `Deleted ${target}`, json: { path: target, recursive } };
@@ -932,8 +963,8 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium"
     },
     async (args, ctx) => {
-      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""), ctx.workspaceRoots);
-      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""), ctx.workspaceRoots);
+      const from = resolveFromCwd(ctx.cwd, String(args.from ?? ""), ctx.workspaceRoots, ctx);
+      const to = resolveFromCwd(ctx.cwd, String(args.to ?? ""), ctx.workspaceRoots, ctx);
       if (workspacePathsMatch(from, to)) {
         return {
           ok: true,
@@ -941,12 +972,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           json: { from, to, skipped: true, reason: "same_path" }
         };
       }
-      const approved = await ctx.requestApproval({
+      const approved = await requestMutationApproval(ctx, {
         title: "复制文件",
         description: `${from} → ${to}`,
         riskLevel: "medium",
         payload: { from, to }
-      });
+      }, "write");
       if (!approved) return { ok: false, content: "复制被拒绝。" };
       await fs.mkdir(path.dirname(to), { recursive: true });
       await fs.cp(from, to, { recursive: true, errorOnExist: true, force: false });
@@ -1072,16 +1103,21 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           command = prepared.command;
         }
       }
-      const approved = await ctx.requestApproval({
+      const risk = classifyShellRisk(command);
+      if (risk === "outbound" && ctx.sandbox && !ctx.sandbox.networkAccess) {
+        return { ok: false, content: SANDBOX_NETWORK_DENIED_ERROR };
+      }
+      const approved = await requestMutationApproval(ctx, {
         title: "执行命令",
         description: command,
         riskLevel: "high",
-        payload: { command }
-      });
+        payload: { command },
+        forcePrompt: ctx.sandbox?.mode === "read-only"
+      }, risk === "routine" || risk === "git_mutation" ? "shell" : "delete");
       if (!approved) {
         return { ok: false, content: "命令执行被拒绝。" };
       }
-      const commandCwd = resolveFromCwd(ctx.cwd, typeof args.cwd === "string" ? args.cwd : ".", ctx.workspaceRoots);
+      const commandCwd = resolveFromCwd(ctx.cwd, typeof args.cwd === "string" ? args.cwd : ".", ctx.workspaceRoots, ctx);
       const terminal = await runShell(command, ctx, commandCwd);
       return {
         ok: true,
@@ -1107,13 +1143,17 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     ),
     async (args, ctx) => {
       const patchText = normalizeApplyPatchInput(args);
-      const requiresApproval = /^\*\*\* Delete File:/m.test(patchText) || ctx.executionPolicy?.mode !== "controlled";
-      const approved = !requiresApproval || await ctx.requestApproval({
+      const patchDeletes = /^\*\*\* Delete File:/m.test(patchText);
+      const requiresApproval = patchDeletes || (
+        ctx.executionPolicy?.mode !== "controlled" &&
+        !shouldSkipWorkspaceMutationApproval(ctx.sandbox, "write")
+      );
+      const approved = !requiresApproval || await requestMutationApproval(ctx, {
         title: "应用补丁",
         description: "将对多个文件写入或删除内容。",
         riskLevel: "high",
         payload: { patchPreview: patchText.slice(0, 500) }
-      });
+      }, patchDeletes ? "delete" : "write");
       if (!approved) {
         return { ok: false, content: "补丁应用被拒绝。" };
       }
@@ -1121,7 +1161,9 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       try {
         result = await applyCodexPatch(patchText, ctx.cwd, {
           expectedVersions: ctx.expectedFileVersions,
-          workspaceRoots: ctx.workspaceRoots
+          workspaceRoots: ctx.workspaceRoots,
+          appHome: ctx.sandbox?.appHome || ctx.appHome,
+          sandboxMode: ctx.sandbox?.mode
         });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
@@ -1289,7 +1331,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium",
       description: String(args.path ?? ""),
       payload: { path: args.path },
-      command: `git add -- "${escapeDoubleQuotes(resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots))}"`,
+      command: `git add -- "${escapeDoubleQuotes(resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots, ctx))}"`,
       successLabel: `已暂存 ${String(args.path ?? "")}`
     })
   );
@@ -1318,7 +1360,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "medium"
     },
     async (args, ctx) => {
-      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots, ctx);
       return runGitMutation(ctx, {
         title: "取消暂存",
         riskLevel: "medium",
@@ -1345,7 +1387,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       riskLevel: "high"
     },
     async (args, ctx) => {
-      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
+      const filePath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots, ctx);
       const untracked = Boolean(args.untracked);
       return runGitMutation(ctx, {
         title: untracked ? "删除未跟踪文件" : "撤销文件修改",
@@ -1530,7 +1572,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!probe.isGitRepository) {
         return { ...gitNotRepositoryResult(), ok: false };
       }
-      const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
+      const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots, ctx);
       const branch = String(args.branch ?? "");
       const base = typeof args.base === "string" ? args.base : "HEAD";
       const command = `git worktree add "${escapeDoubleQuotes(targetPath)}" -b "${escapeDoubleQuotes(branch)}" "${escapeDoubleQuotes(base)}"`;
@@ -1555,7 +1597,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
       if (!probe.isGitRepository) {
         return { ...gitNotRepositoryResult(), ok: false };
       }
-      const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots);
+      const targetPath = resolveFromCwd(ctx.cwd, String(args.path ?? ""), ctx.workspaceRoots, ctx);
       const command = `git worktree remove "${escapeDoubleQuotes(targetPath)}" --force`;
       const approved = await ctx.requestApproval({
         title: "移除 worktree",
@@ -1938,7 +1980,12 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("web_search.open_page", "Open a web page and extract text.", ["url"], "medium"),
+    spec(
+      "web_search.open_page",
+      "Read and extract a web page in the background. This never creates a visible Browser workspace tab; use browser.open_tab when the user asks to open, show, or interact with the page.",
+      ["url"],
+      "medium"
+    ),
     async (args, ctx) => {
       const page = await ctx.openPage(String(args.url ?? ""));
       const forModel = pageForModel(page) ?? { text: "" };
@@ -3149,12 +3196,35 @@ function fullyQualifiedName(spec: ToolSpecDefinition): string {
   return spec.namespace ? `${spec.namespace}:${spec.name}` : spec.name;
 }
 
-function resolveFromCwd(cwd: string, targetPath: string, workspaceRoots?: string[]): string {
-  return resolveWorkspacePath(cwd, targetPath, workspaceRoots ?? [cwd]);
+function resolveFromCwd(
+  cwd: string,
+  targetPath: string,
+  workspaceRoots?: string[],
+  ctx?: Pick<ToolRuntimeContext, "sandbox" | "appHome">
+): string {
+  return resolveWorkspacePath(cwd, targetPath, workspaceRoots ?? [cwd], [], ctx, "write");
 }
 
 function resolveReadablePath(ctx: ToolRuntimeContext, targetPath: string): string {
-  return resolveWorkspacePath(ctx.cwd, targetPath, ctx.workspaceRoots ?? [ctx.cwd], ctx.allowedReadPaths);
+  return resolveWorkspacePath(ctx.cwd, targetPath, ctx.workspaceRoots ?? [ctx.cwd], ctx.allowedReadPaths, ctx, "read");
+}
+
+async function requestMutationApproval(
+  ctx: ToolRuntimeContext,
+  input: {
+    title: string;
+    description: string;
+    riskLevel: "low" | "medium" | "high";
+    payload: Record<string, unknown>;
+    forcePrompt?: boolean;
+  },
+  kind: "write" | "delete" | "shell"
+): Promise<boolean> {
+  if (shouldSkipWorkspaceMutationApproval(ctx.sandbox, kind)) return true;
+  return ctx.requestApproval({
+    ...input,
+    forcePrompt: kind === "shell" && ctx.sandbox?.mode === "read-only" ? true : input.forcePrompt
+  });
 }
 
 const FILE_SNAPSHOT_TEXT_LIMIT = 512_000;
@@ -3413,17 +3483,31 @@ function resolveWorkspacePath(
   rootDir: string,
   targetPath: string,
   workspaceRoots: string[] = [rootDir],
-  allowedReadPaths: string[] = []
+  allowedReadPaths: string[] = [],
+  ctx?: Pick<ToolRuntimeContext, "sandbox" | "appHome">,
+  access: "read" | "write" = "read"
 ): string {
   const cleanedTargetPath = stripMarkdownPathFormatting(targetPath);
   const root = path.resolve(rootDir);
   const resolved = path.isAbsolute(cleanedTargetPath)
     ? path.resolve(cleanedTargetPath)
     : path.resolve(root, cleanedTargetPath);
-  if (workspaceRootForPath(resolved, workspaceRoots) || workspaceRootForPath(resolved, allowedReadPaths)) {
+  const appHome = ctx?.sandbox?.appHome || ctx?.appHome || defaultAppHome();
+  if (isSecretFilesystemPath(resolved, appHome)) {
+    throw new Error(secretFilesystemPathError(resolved, appHome));
+  }
+  const mode = ctx?.sandbox?.mode;
+  if (mode === "read-only" && access === "write") {
+    throw new Error(READ_ONLY_SANDBOX_WRITE_ERROR);
+  }
+  if (mode === "full-access") {
     return resolved;
   }
-  throw new Error("File path is outside the project folder.");
+  const readableRoots = access === "write" ? workspaceRoots : [...workspaceRoots, ...allowedReadPaths];
+  if (workspaceRootForPath(resolved, readableRoots)) {
+    return resolved;
+  }
+  throw new Error(OUTSIDE_WORKSPACE_PATH_ERROR);
 }
 
 /** Models sometimes wrap structured file paths in Markdown emphasis or code marks. */
@@ -3752,7 +3836,7 @@ async function buildGitDiffAstSummary(
       continue;
     }
     try {
-      const after = await fs.readFile(resolveFromCwd(ctx.cwd, relativePath, ctx.workspaceRoots), "utf8");
+      const after = await fs.readFile(resolveFromCwd(ctx.cwd, relativePath, ctx.workspaceRoots, ctx), "utf8");
       let before = "";
       try {
         before = (await runShell(`git show HEAD:${escapeDoubleQuotes(relativePath)}`, ctx)).output;

@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BrowserRuntime,
+  BrowserPageLoadTimeoutError,
   MAX_BROWSER_TABS_PER_THREAD,
   MAX_BROWSER_TAB_HISTORY,
   MAX_BROWSER_PAGE_HTML_CHARS,
@@ -11,6 +12,7 @@ import {
   isBrowserErrorPageUrl,
   resolveBrowserOpenPreferences,
   retainBrowserTabHistory,
+  waitForBrowserPageOperation,
   selectUnusedBrowserTabsToClose
 } from "@browser-runtime";
 
@@ -23,10 +25,23 @@ async function makeTempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
 describe("BrowserRuntime", () => {
+  it("stops a browser page operation at the deadline", async () => {
+    vi.useFakeTimers();
+    const onTimeout = vi.fn();
+    const pending = waitForBrowserPageOperation(new Promise<never>(() => {}), 500, onTimeout);
+    const rejected = expect(pending).rejects.toBeInstanceOf(BrowserPageLoadTimeoutError);
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    await rejected;
+    expect(onTimeout).toHaveBeenCalledOnce();
+  });
+
   it("uses the configured browser target unless an opening explicitly overrides it", () => {
     expect(resolveBrowserOpenPreferences("in_app", true)).toEqual({
       browserOpenMode: "in_app",

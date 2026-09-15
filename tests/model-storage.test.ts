@@ -107,6 +107,8 @@ describe("model configuration storage", () => {
     expect(config.defaultModel).toBe("mock-codexh");
     expect(config.responseTone).toBe("concise");
     expect(config.desktop.liveEditPreview).toBe(false);
+    expect(config.desktop.sandboxMode).toBe("read-only");
+    expect(config.desktop.sandboxNetworkAccess).toBe(false);
     expect(config.desktop.completionAudit).toEqual({
       project: { enabled: false, maxAttempts: 3 },
       chat: { enabled: false, maxAttempts: 3 }
@@ -150,6 +152,29 @@ describe("model configuration storage", () => {
     const loaded = await loadConfig(configFile);
 
     expect(loaded.responseTone).toBe("friendly");
+  });
+
+  it("persists sandbox settings and defaults older configs to read-only without network", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-sandbox-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    const config = defaultConfig();
+    config.desktop.sandboxMode = "workspace-write";
+    config.desktop.sandboxNetworkAccess = true;
+
+    await saveConfig(configFile, config);
+    const loaded = await loadConfig(configFile);
+    expect(loaded.desktop.sandboxMode).toBe("workspace-write");
+    expect(loaded.desktop.sandboxNetworkAccess).toBe(true);
+
+    const raw = await fs.readFile(configFile, "utf8");
+    const withoutSandbox = raw
+      .replace(/\s*sandboxMode\s*=\s*"[^"]+"\s*/g, "\n")
+      .replace(/\s*sandboxNetworkAccess\s*=\s*\w+\s*/g, "\n");
+    await fs.writeFile(configFile, withoutSandbox, "utf8");
+    const migrated = await loadConfig(configFile);
+    expect(migrated.desktop.sandboxMode).toBe("read-only");
+    expect(migrated.desktop.sandboxNetworkAccess).toBe(false);
   });
 
   it("persists completion audit settings and defaults them off for older configs", async () => {

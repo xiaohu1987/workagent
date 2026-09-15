@@ -82,6 +82,9 @@ import {
   buildErrorSolutionSummary,
   formatRememberedErrorSolutions,
   createFailedFileReadRecoveryToolCall,
+  isRecoverableInspectionToolFailure,
+  buildRepeatedInspectionFailurePrompt,
+  buildRepeatedInspectionFailureStoppedMessage,
   buildRepeatedTaskRecoveryMessage,
   buildRuntimeFailureRecoveryMessage,
   AgentModelCompatibilityError,
@@ -1230,7 +1233,7 @@ describe("ordinary and project runtime isolation", () => {
     tool("knowledge.create")
   ];
 
-  it("keeps a website-search chat projectless and hides every local project tool", () => {
+  it("keeps a website-search chat projectless and still hides git, code, and write tools", () => {
     const request = "给我找一下 国内有没有 一键生成精灵图的网站";
     const policy = createChatRuntimePolicy({
       outputDir: "C:\\task-output",
@@ -1244,6 +1247,9 @@ describe("ordinary and project runtime isolation", () => {
     expect(policy.filterTools(tools).map((entry) => entry.name)).toEqual([
       "web_search.search_query",
       "skills.load",
+      "fs.read_directory",
+      "fs.read_file",
+      "shell.exec",
       "todo.read",
       "todo.write",
       "knowledge.add",
@@ -1252,8 +1258,17 @@ describe("ordinary and project runtime isolation", () => {
     expect(policy.validateToolCall({
       toolName: "fs.read_directory",
       localWorkspaceInspectedBeforeDecision: false
+    })).toMatchObject({ allowed: true });
+    expect(policy.validateToolCall({
+      toolName: "fs.write_file",
+      localWorkspaceInspectedBeforeDecision: false
     })).toMatchObject({ allowed: false });
-    expect(policy.systemPrompt).toContain("Do not inspect the task output directory");
+    expect(policy.validateToolCall({
+      toolName: "git.status",
+      localWorkspaceInspectedBeforeDecision: false
+    })).toMatchObject({ allowed: false });
+    expect(policy.systemPrompt).toContain("You may read the task output directory");
+    expect(policy.systemPrompt).not.toContain("Do not inspect the task output directory");
   });
 
   it("grants the minimum ordinary-chat local capability for read, delivery, and execution requests", () => {
@@ -2999,6 +3014,16 @@ describe("native tool prompt budget", () => {
 
   it("keeps schemas available for the text-protocol fallback", () => {
     expect(formatAvailableTools(tools)).toContain("Input schema");
+  });
+
+  it("distinguishes background page reading from a visible browser tab", () => {
+    const browserTools = [
+      { ...tools[0]!, name: "web_search.open_page", description: "Read page text." },
+      { ...tools[0]!, name: "browser.open_tab", description: "Open a visible tab." }
+    ];
+
+    expect(formatAvailableTools(browserTools, { includeSchemas: false }))
+      .toContain("never appears in the right-side Browser workspace");
   });
 });
 
@@ -4860,6 +4885,40 @@ describe("strategy switching", () => {
 });
 
 describe("failure recovery messages", () => {
+  it("asks for a user decision after repeated inspection failures", () => {
+    expect(isRecoverableInspectionToolFailure("fs.read_file")).toBe(true);
+    expect(isRecoverableInspectionToolFailure("shell.exec")).toBe(false);
+    const prompt = buildRepeatedInspectionFailurePrompt({
+      toolName: "fs.read_file",
+      argumentsJson: { path: "C:\\project\\docs\\missing.md" },
+      attempts: 5,
+      error: "File path is outside the project folder"
+    });
+
+    expect(prompt.title).toBe("无法读取文件或目录");
+    expect(prompt.question.prompt).toContain("C:\\project\\docs\\missing.md");
+    expect(prompt.question.prompt).toContain("目标路径不在当前工作区范围内");
+    expect(prompt.question.prompt).not.toContain("File path is outside the project folder");
+    expect(prompt.question.prompt).toContain("不会继续重复相同的读取操作");
+    expect(prompt.question.options?.map((option) => option.id)).toEqual([
+      "provide_path",
+      "adjust_scope",
+      "continue_alternative",
+      "stop"
+    ]);
+  });
+
+  it("ends a repeated inspection failure without exposing the internal recovery error", () => {
+    const message = buildRepeatedInspectionFailureStoppedMessage({
+      toolName: "fs.read_file",
+      argumentsJson: { path: "docs/missing.md" }
+    });
+
+    expect(message).toContain("按你的选择停止");
+    expect(message).toContain("docs/missing.md");
+    expect(message).not.toContain("The identical tool call");
+  });
+
   it("gives a concrete recovery path for repeated executable failures", () => {
     const message = buildRepeatedTaskRecoveryMessage({
       taskKey: "apply_patch:src/app.ts",

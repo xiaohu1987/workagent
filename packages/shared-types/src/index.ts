@@ -38,6 +38,19 @@ export type MessageRole = "system" | "user" | "assistant" | "tool";
 export type ToolRiskLevel = "low" | "medium" | "high";
 export type ToolExposure = "direct" | "deferred";
 export type ApprovalMode = "auto" | "prompt" | "session" | "remembered";
+export type SandboxMode = "read-only" | "workspace-write" | "full-access";
+export const SANDBOX_MODES = ["read-only", "workspace-write", "full-access"] as const satisfies readonly SandboxMode[];
+export const DEFAULT_SANDBOX_MODE: SandboxMode = "read-only";
+
+export function normalizeSandboxMode(value: unknown): SandboxMode {
+  return value === "workspace-write" || value === "full-access" || value === "read-only"
+    ? value
+    : DEFAULT_SANDBOX_MODE;
+}
+
+export function normalizeSandboxNetworkAccess(value: unknown): boolean {
+  return value === true;
+}
 export type ApprovalDecision = "approved" | "denied";
 export type ApprovalResolutionMode = "once" | "session" | "remember";
 export type ApprovalRequestKind = "permission" | "explicit_authorization";
@@ -1082,6 +1095,13 @@ export interface AppConfig {
     liveEditPreview: boolean;
     llmLogViewer: boolean;
     completionAudit: CompletionAuditSettings;
+    /**
+     * Default sandbox for ordinary chats. Opening a project always promotes
+     * to workspace-write unless this is full-access. Secrets stay denied.
+     */
+    sandboxMode: SandboxMode;
+    /** When false, shell commands with outbound traits cannot auto-run. */
+    sandboxNetworkAccess: boolean;
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;

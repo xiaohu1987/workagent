@@ -10,6 +10,8 @@ import {
   buildApplyPatchFailureMessage,
   canonicalizeToolName,
   parseVerificationDiagnostics,
+  APP_CONFIG_SECRET_PATH_ERROR,
+  defaultAppHome,
   type ToolRuntimeContext
 } from "@tool-runtime";
 
@@ -83,12 +85,15 @@ describe("apply-patch failures", () => {
 
 describe("ToolRuntime", () => {
   it("exposes the optional browser opening target in the tool schema", () => {
-    const browserTool = new ToolRuntime().listToolSpecs().direct.find((tool) => tool.name === "browser.open_tab");
+    const directTools = new ToolRuntime().listToolSpecs().direct;
+    const browserTool = directTools.find((tool) => tool.name === "browser.open_tab");
+    const backgroundReader = directTools.find((tool) => tool.name === "web_search.open_page");
     expect(browserTool?.inputSchema).toMatchObject({
       properties: {
         openMode: { enum: ["in_app", "external_default"] }
       }
     });
+    expect(backgroundReader?.description).toContain("never creates a visible Browser workspace tab");
   });
 
   it("passes an explicit browser opening target through browser.open_tab", async () => {
@@ -1026,7 +1031,7 @@ describe("ToolRuntime", () => {
         { id: "call-2", name: "fs.read_file", arguments: { path: path.resolve(process.cwd(), "..", "outside.txt") } },
         context
       )
-    ).rejects.toThrow("outside the project folder");
+    ).rejects.toThrow("该路径不在当前工作区或已授权附件内");
     expect(readFile).toHaveBeenCalledTimes(1);
   });
 
@@ -1045,6 +1050,81 @@ describe("ToolRuntime", () => {
 
     expect(result).toMatchObject({ ok: true, content: '{"ok":true}' });
     expect(readFile).toHaveBeenCalledWith(attachedPath);
+  });
+
+  it("never reads the application config.toml even when attached as a readable path", async () => {
+    const configPath = path.join(defaultAppHome(), "config.toml");
+    const readFile = vi.fn().mockResolvedValue("api_key=secret");
+    const runtime = new ToolRuntime();
+
+    await expect(
+      runtime.execute(
+        { id: "call-secret", name: "fs.read_file", arguments: { path: configPath } },
+        {
+          cwd: process.cwd(),
+          allowedReadPaths: [configPath],
+          appHome: defaultAppHome(),
+          readFile
+        } as unknown as ToolRuntimeContext
+      )
+    ).rejects.toThrow(APP_CONFIG_SECRET_PATH_ERROR);
+    expect(readFile).not.toHaveBeenCalled();
+  });
+
+  it("skips in-workspace write approval under workspace-write sandbox", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-sandbox-write-"));
+    const requestApproval = vi.fn().mockResolvedValue(false);
+    const runtime = new ToolRuntime();
+    try {
+      const result = await runtime.execute(
+        { id: "write-auto", name: "fs.write_file", arguments: { path: "note.txt", content: "ok\n" } },
+        {
+          cwd: root,
+          workspaceRoots: [root],
+          appHome: defaultAppHome(),
+          sandbox: {
+            mode: "workspace-write",
+            networkAccess: false,
+            skipInWorkspaceApprovals: false,
+            appHome: defaultAppHome()
+          },
+          readFile: async () => {
+            throw new Error("missing");
+          },
+          writeFile: (filePath: string, content: string) => fs.writeFile(filePath, content, "utf8"),
+          requestApproval
+        } as unknown as ToolRuntimeContext
+      );
+      expect(result.ok).toBe(true);
+      expect(requestApproval).not.toHaveBeenCalled();
+      await expect(fs.readFile(path.join(root, "note.txt"), "utf8")).resolves.toBe("ok\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks outbound shell commands when sandbox network access is off", async () => {
+    const requestApproval = vi.fn().mockResolvedValue(true);
+    const runTerminalCommand = vi.fn();
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "curl-blocked", name: "shell.exec", arguments: { command: "curl https://example.com" } },
+      {
+        cwd: process.cwd(),
+        requestApproval,
+        runTerminalCommand,
+        sandbox: {
+          mode: "workspace-write",
+          networkAccess: false,
+          skipInWorkspaceApprovals: false,
+          appHome: defaultAppHome()
+        }
+      } as unknown as ToolRuntimeContext
+    );
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("禁止出站网络");
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(runTerminalCommand).not.toHaveBeenCalled();
   });
 
   it("accepts a model's patch_content Git diff when it adds one file", async () => {

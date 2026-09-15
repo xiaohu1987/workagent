@@ -100,7 +100,11 @@ export function shouldCommitThreadSnapshotImmediately(
   selectedThreadId: string | null,
   renderedSnapshotThreadId: string | null,
   incomingThreadId: string,
-  hasPendingOptimisticMessages = false
+  options?: boolean | {
+    hasPendingOptimisticMessages?: boolean;
+    hasNewMessages?: boolean;
+    reachedTerminalState?: boolean;
+  }
 ): boolean {
   if (selectedThreadId !== incomingThreadId) {
     return false;
@@ -108,9 +112,10 @@ export function shouldCommitThreadSnapshotImmediately(
   if (renderedSnapshotThreadId !== incomingThreadId) {
     return true;
   }
-  // A transition can be starved by runtime events. Keep an in-flight edited
-  // send visible instead of letting a later truncated snapshot replace it.
-  return hasPendingOptimisticMessages;
+  // A transition can be starved by runtime events. User sends, newly persisted
+  // replies, and the final running -> terminal render must commit synchronously.
+  if (typeof options === "boolean") return options;
+  return Boolean(options?.hasPendingOptimisticMessages || options?.hasNewMessages || options?.reachedTerminalState);
 }
 
 /** Whether a runtime event can change the currently selected task's snapshot. */

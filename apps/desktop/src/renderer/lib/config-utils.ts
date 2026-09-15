@@ -1,4 +1,4 @@
-import { DEFAULT_RESPONSE_TONE, normalizeCompletionAuditSettings, withGptReasoningCapabilities } from "@shared-types";
+import { DEFAULT_RESPONSE_TONE, normalizeCompletionAuditSettings, normalizeSandboxMode, normalizeSandboxNetworkAccess, withGptReasoningCapabilities } from "@shared-types";
 import type { ApiFormat, AppConfig, McpServerConfig, ModelProfile, ProviderDefinition, ProviderTemplate, ProviderType } from "@shared-types";
 
 export type ProviderTypeOption = {
@@ -112,7 +112,9 @@ export function cloneConfig(config: AppConfig): AppConfig {
     },
     desktop: {
       ...config.desktop,
-      completionAudit: normalizeCompletionAuditSettings(config.desktop)
+      completionAudit: normalizeCompletionAuditSettings(config.desktop),
+      sandboxMode: normalizeSandboxMode(config.desktop?.sandboxMode),
+      sandboxNetworkAccess: normalizeSandboxNetworkAccess(config.desktop?.sandboxNetworkAccess)
     },
     mcpServers: config.mcpServers.map((server) => ({
       ...server,
@@ -260,7 +262,9 @@ export function normalizeDraftConfig(config: AppConfig): AppConfig {
   const next = cloneConfig(config);
   next.desktop = {
     ...next.desktop,
-    completionAudit: normalizeCompletionAuditSettings(next.desktop)
+    completionAudit: normalizeCompletionAuditSettings(next.desktop),
+    sandboxMode: normalizeSandboxMode(next.desktop?.sandboxMode),
+    sandboxNetworkAccess: normalizeSandboxNetworkAccess(next.desktop?.sandboxNetworkAccess)
   };
   next.models = next.models.filter((model) =>
     next.providers.some((provider) => provider.id === model.providerId)

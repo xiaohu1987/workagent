@@ -52,22 +52,18 @@ function isProjectOnlyTool(toolName: string): boolean {
 function requiredChatAccess(toolName: string): ChatLocalAccess | "project" | null {
   if (isProjectOnlyTool(toolName)) return "project";
   if (CHAT_WRITE_TOOLS.has(toolName) && !CHAT_READ_TOOLS.has(toolName)) return "write";
-  if (CHAT_READ_TOOLS.has(toolName)) return "read";
-  if (CHAT_EXECUTE_TOOLS.has(toolName)) {
-    if (toolName === "shell.exec" || toolName === "shell.cancel_active") return "execute";
-  }
+  // Read tools and shell stay visible. Sandbox policy, not NLP, gates execution.
+  if (CHAT_READ_TOOLS.has(toolName) || CHAT_EXECUTE_TOOLS.has(toolName)) return null;
   return null;
 }
 
 function accessAllows(actual: ChatLocalAccess, required: ChatLocalAccess | "project" | null): boolean {
   if (required === null) return true;
   if (required === "project") return false;
-  // Execution is not an implicit file-write grant. A normal chat must ask to
-  // create or save a file before any mutating filesystem tool is exposed.
+  // Execution is not an implicit file-write grant. Ordinary chat only exposes
+  // mutating filesystem tools when the user asked for a file deliverable.
   if (required === "write") return actual === "write";
-  if (required === "execute") return actual === "write" || actual === "execute";
-  const levels: Record<ChatLocalAccess, number> = { none: 0, read: 1, write: 2, execute: 3 };
-  return levels[actual] >= levels[required];
+  return true;
 }
 
 function containsAttachedLocalContext(request: string, attachments: MessageAttachment[]): boolean {
@@ -128,13 +124,11 @@ export function resolveChatLocalAccess(input: {
 }
 
 export function buildChatRuntimePrompt(localAccess: ChatLocalAccess): string {
-  const accessInstruction = localAccess === "none"
-    ? "This request does not authorize local file or command access. Do not inspect the task output directory, search code, run shell commands, or use Git merely to confirm context."
-    : localAccess === "read"
-      ? "The user explicitly requested local reading. Read only the named or attached files and folders; do not treat them as a project repository."
-      : localAccess === "write"
-        ? "The user explicitly requested a file deliverable or edit. Use the task output directory for new deliverables and access only files relevant to that request."
-        : "The user explicitly requested local execution. Commands run from the task output directory; do not create, edit, rename, or delete files unless the request also explicitly asks for a file deliverable.";
+  const accessInstruction = localAccess === "write"
+    ? "The user requested a file deliverable or edit. Use the task output directory for new files and stay inside that folder unless the user approves another path."
+    : localAccess === "execute"
+      ? "The user requested local execution. Commands run from the task output directory. Do not create, edit, rename, or delete files unless the request also explicitly asks for a file deliverable."
+      : "You may read the task output directory and user-attached files. Do not write, patch, or delete files unless the user asked for a concrete deliverable. Shell commands require approval.";
   return [
     "## Ordinary Chat Runtime",
     "This is an ordinary chat without a project workspace. The local working directory is only this task's output directory.",
@@ -161,7 +155,7 @@ export function createChatRuntimePolicy(input: {
     }
     return {
       allowed: false,
-      message: "The current ordinary-chat request did not authorize local file or command access. Answer from the conversation and selected external sources without inspecting the task output directory."
+      message: "The current ordinary-chat request did not ask for a file deliverable. Answer without writing, patching, or deleting files."
     };
   };
   return {

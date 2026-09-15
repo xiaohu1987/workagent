@@ -140,6 +140,10 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
               <strong>{config?.desktop.approvals ?? "prompt"}</strong>
             </div>
             <div className="general-default-item">
+              <span><IconChecklist />沙箱档位</span>
+              <strong>{config?.desktop.sandboxMode === "workspace-write" ? "工作区读写" : config?.desktop.sandboxMode === "full-access" ? "完全访问" : "只读"}</strong>
+            </div>
+            <div className="general-default-item">
               <span><IconGlobe />浏览器打开方式</span>
               <strong className={config?.desktop.browserOpenMode === "external_default" ? "is-offline" : "is-online"}><i aria-hidden />{config?.desktop.browserOpenMode === "external_default" ? "系统默认浏览器" : "程序内浏览器"}</strong>
             </div>
@@ -186,6 +190,52 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
               </div>
             </div>
             <div className="settings-save-row"><span className="subtle-inline">修改后自动保存，后续网页打开时生效。</span></div>
+          </div>
+          <div className="config-block general-subagent-settings">
+            <div className="section-copy">
+              <strong><IconChecklist />沙箱策略</strong>
+              <span>对齐 Codex 的策略档位。第一版只做路径与审批控制，不做操作系统隔离。任务里的「完全访问」只跳过工作区内普通审批，不能读密钥，也不等于这里的完全访问。</span>
+            </div>
+            <div className="general-subagent-settings-grid">
+              <label className="settings-field">
+                <span>默认档位</span>
+                <ComposerSelect
+                  className="form-select"
+                  ariaLabel="沙箱默认档位"
+                  value={configDraft.desktop.sandboxMode ?? "read-only"}
+                  onChange={(value) => updateAndSave((current) => ({
+                    ...current,
+                    desktop: {
+                      ...current.desktop,
+                      sandboxMode: value === "workspace-write" || value === "full-access" ? value : "read-only"
+                    }
+                  }))}
+                  options={[
+                    { value: "read-only", label: "只读" },
+                    { value: "workspace-write", label: "工作区读写" },
+                    { value: "full-access", label: "完全访问" }
+                  ]}
+                  placeholder="选择沙箱档位"
+                />
+                <small className="settings-field-hint">普通聊天默认只读。打开项目会升为工作区读写；完全访问关闭路径白名单，但 .env、SSH、Git hooks 和应用配置仍拒绝读取。</small>
+              </label>
+              <div className="settings-field general-permission-field">
+                <span>允许 shell 出站</span>
+                <label className="memory-switch">
+                  <input
+                    type="checkbox"
+                    checked={configDraft.desktop.sandboxNetworkAccess === true}
+                    onChange={(event) => updateAndSave((current) => ({
+                      ...current,
+                      desktop: { ...current.desktop, sandboxNetworkAccess: event.target.checked }
+                    }))}
+                  />
+                  <span>允许 curl、wget、ssh、npm install 等出站命令自动通过策略检查</span>
+                </label>
+                <small className="settings-field-hint">关闭时带出站特征的命令会直接拒绝，不会在只读档位里自动执行。</small>
+              </div>
+            </div>
+            <div className="settings-save-row"><span className="subtle-inline">修改后自动保存，后续任务立即使用。</span></div>
           </div>
           <div className="config-block general-subagent-settings">
             <div className="section-copy">

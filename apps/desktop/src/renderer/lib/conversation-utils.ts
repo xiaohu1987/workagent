@@ -1237,7 +1237,7 @@ export function getToolProcessingLabel(toolName: string, argumentsJson = "{}", s
     return target ? `正在浏览器搜索 ${target}` : "正在浏览器搜索";
   }
   if (toolName === "web_search.open_page") {
-    return target ? `正在打开网页 ${target}` : "正在打开网页";
+    return target ? `正在读取网页 ${target}` : "正在读取网页";
   }
   if (toolName === "web_search.find_in_page") {
     return target ? `正在页内查找 ${target}` : "正在页内查找";
@@ -1866,6 +1866,13 @@ export function getMessageDisplayKind(message: MessageRecord): string | null {
   } catch {
     return null;
   }
+}
+
+/** Final/formal replies must paint before a following completion event clears live UI. */
+export function shouldCommitRuntimeMessageImmediately(message: MessageRecord): boolean {
+  if (message.role !== "assistant" || !message.content.trim()) return false;
+  const displayKind = getMessageDisplayKind(message);
+  return displayKind !== "commentary" && displayKind !== "tool_batch";
 }
 
 export function isCommentaryOnlyTranscriptMessage(message: MessageRecord) {

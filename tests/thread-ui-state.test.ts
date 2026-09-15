@@ -58,6 +58,7 @@ import {
   mergeMessagesAfterOptimisticUserEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
+  shouldCommitRuntimeMessageImmediately,
   shouldKeepTimelineEntryWhenTurnCollapsed,
   timelineEntryHasGeneratedMedia,
   upsertRuntimeUserInputPrompt,
@@ -186,8 +187,47 @@ describe("thread UI state helpers", () => {
     expect(shouldCommitThreadSnapshotImmediately("thread-2", null, "thread-2")).toBe(true);
     expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-1", "thread-2")).toBe(true);
     expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2")).toBe(false);
+    expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2", {
+      hasPendingOptimisticMessages: true
+    })).toBe(true);
     expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2", true)).toBe(true);
     expect(shouldCommitThreadSnapshotImmediately("thread-3", "thread-1", "thread-2")).toBe(false);
+  });
+
+  it("commits new replies and terminal renders without an interruptible transition", () => {
+    expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2", {
+      hasNewMessages: true
+    })).toBe(true);
+    expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2", {
+      reachedTerminalState: true
+    })).toBe(true);
+    expect(shouldCommitThreadSnapshotImmediately("thread-3", "thread-3", "thread-2", {
+      hasNewMessages: true,
+      reachedTerminalState: true
+    })).toBe(false);
+  });
+
+  it("commits formal runtime replies immediately but leaves progress updates batched", () => {
+    const message: MessageRecord = {
+      id: "final-message",
+      threadId: "thread-2",
+      turnRunId: "turn-2",
+      role: "assistant",
+      content: "最终总结",
+      metadataJson: null,
+      createdAt: "2026-09-15T02:00:00.000Z"
+    };
+    expect(shouldCommitRuntimeMessageImmediately(message)).toBe(true);
+    expect(shouldCommitRuntimeMessageImmediately({
+      ...message,
+      metadataJson: JSON.stringify({ displayKind: "commentary" })
+    })).toBe(false);
+    expect(shouldCommitRuntimeMessageImmediately({
+      ...message,
+      content: "",
+      metadataJson: JSON.stringify({ displayKind: "tool_batch" })
+    })).toBe(false);
+    expect(shouldCommitRuntimeMessageImmediately({ ...message, role: "user" })).toBe(false);
   });
 
   it("refreshes a parent task snapshot for runtime events from its subagents", () => {
@@ -673,7 +713,7 @@ describe("tool processing labels", () => {
     expect(getToolProcessingLabel("knowledge.search")).toBe("正在知识库搜索");
     expect(getToolProcessingLabel("knowledge.read")).toBe("正在读取知识库");
     expect(getToolProcessingLabel("web_search.search_query")).toBe("正在浏览器搜索");
-    expect(getToolProcessingLabel("web_search.open_page")).toBe("正在打开网页");
+    expect(getToolProcessingLabel("web_search.open_page")).toBe("正在读取网页");
     expect(getToolProcessingLabel("web_search.find_in_page")).toBe("正在页内查找");
     expect(getToolProcessingLabel("image.generate")).toBe("正在生成图片");
     expect(getToolProcessingLabel("video.generate")).toBe("正在生成视频");
@@ -907,7 +947,7 @@ describe("tool activity summaries", () => {
     ])).toBe("浏览器搜索");
     expect(getConciseToolActivityLabel([
       makeToolCall({ id: "open", toolName: "web_search.open_page", argumentsJson: JSON.stringify({ url: "https://example.com" }) })
-    ])).toBe("打开网页");
+    ])).toBe("读取网页");
     expect(getConciseToolActivityLabel([
       makeToolCall({ id: "image", toolName: "image.generate" })
     ])).toBe("生成图片");

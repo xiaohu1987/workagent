@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
-import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
+import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, normalizeSandboxMode, normalizeSandboxNetworkAccess, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
 import { isRootUserRequestMessage } from "./subagent-assignment";
 import type {
   AppConfig,
@@ -323,7 +323,9 @@ export function defaultConfig(): AppConfig {
       silentBrowserOpen: true,
       liveEditPreview: false,
       llmLogViewer: false,
-      completionAudit: normalizeCompletionAuditSettings()
+      completionAudit: normalizeCompletionAuditSettings(),
+      sandboxMode: "read-only",
+      sandboxNetworkAccess: false
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -533,7 +535,9 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       silentBrowserOpen,
       liveEditPreview: parsed.desktop?.liveEditPreview ?? false,
       llmLogViewer: parsed.desktop?.llmLogViewer ?? false,
-      completionAudit: normalizeCompletionAuditSettings(parsed.desktop)
+      completionAudit: normalizeCompletionAuditSettings(parsed.desktop),
+      sandboxMode: normalizeSandboxMode(parsed.desktop?.sandboxMode),
+      sandboxNetworkAccess: normalizeSandboxNetworkAccess(parsed.desktop?.sandboxNetworkAccess)
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),

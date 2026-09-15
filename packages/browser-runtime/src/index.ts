@@ -121,6 +121,46 @@ export function isBrowserErrorPageUrl(url: string): boolean {
   }
 }
 
+export const DEFAULT_BROWSER_PAGE_LOAD_TIMEOUT_MS = 20_000;
+
+export class BrowserPageLoadTimeoutError extends Error {
+  public constructor(readonly timeoutMs: number) {
+    super(`Web page loading timed out after ${timeoutMs}ms.`);
+    this.name = "BrowserPageLoadTimeoutError";
+  }
+}
+
+export function waitForBrowserPageOperation<T>(
+  operation: Promise<T>,
+  timeoutMs = DEFAULT_BROWSER_PAGE_LOAD_TIMEOUT_MS,
+  onTimeout?: () => void
+): Promise<T> {
+  if (timeoutMs <= 0) return Promise.reject(new BrowserPageLoadTimeoutError(timeoutMs));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      onTimeout?.();
+      reject(new BrowserPageLoadTimeoutError(timeoutMs));
+    }, timeoutMs);
+    operation.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 export class BrowserRuntime {
   readonly #tabsByThread = new Map<string, BrowserTabSession[]>();
   #usageClock = 0;
@@ -410,8 +450,11 @@ export class BrowserRuntime {
   }
 }
 
-export async function loadPage(target: string): Promise<PageSnapshot> {
-  const resolved = await resolveTarget(target);
+export async function loadPage(
+  target: string,
+  options: { timeoutMs?: number } = {}
+): Promise<PageSnapshot> {
+  const resolved = await resolveTarget(target, options.timeoutMs ?? DEFAULT_BROWSER_PAGE_LOAD_TIMEOUT_MS);
   const html = resolved.html;
   const $ = cheerio.load(html);
   const title = $("title").text().trim() || resolved.url;
@@ -425,7 +468,7 @@ export async function loadPage(target: string): Promise<PageSnapshot> {
   });
 }
 
-async function resolveTarget(target: string): Promise<{ url: string; html: string }> {
+async function resolveTarget(target: string, timeoutMs: number): Promise<{ url: string; html: string }> {
   if (target.startsWith("file://")) {
     const filePath = decodeURIComponent(new URL(target).pathname);
     const html = await fs.readFile(filePath, "utf8");
@@ -442,10 +485,14 @@ async function resolveTarget(target: string): Promise<{ url: string; html: strin
     return { url: target, html: await response.text() };
   }
 
-  const response = await fetch(target, {
-    headers: {
-      "user-agent": "codexh/0.1.0"
-    }
-  });
-  return { url: response.url || target, html: await response.text() };
+  const controller = new AbortController();
+  return waitForBrowserPageOperation((async () => {
+    const response = await fetch(target, {
+      headers: {
+        "user-agent": "codexh/0.1.0"
+      },
+      signal: controller.signal
+    });
+    return { url: response.url || target, html: await response.text() };
+  })(), timeoutMs, () => controller.abort());
 }
