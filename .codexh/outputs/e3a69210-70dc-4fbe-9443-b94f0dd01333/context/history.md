@@ -1,5 +1,60 @@
 # Conversation Turn Context
 
+- Turn run: `1fe4b255-871a-4065-b0ec-0a8c507f3184`
+- Completed at: `2026-09-15T02:05:39.353Z`
+- MCP sources: none
+
+## User Request
+
+我说的就是 把 这些替换成我刚才给的 名字， 之前配置代码已经还原 你只需要改  export const SUBAGENT_COURTESY_NAMES 即可
+
+## Effective Task Context
+
+Previous task that the current follow-up refers to:
+如果我不配置 config.toml 里面的 namePool   子智能体 会是什么名字 从哪里取值？
+Current follow-up request:
+我说的就是 把 这些替换成我刚才给的 名字， 之前配置代码已经还原 你只需要改  export const SUBAGENT_COURTESY_NAMES 即可
+
+## Assistant Result
+
+名单已经换成你给的那 9 个名字，相关用例 32 个全部通过。
+
+## 改动内容
+
+只动了 `apps/desktop/src/renderer/cards/runtime-cards.tsx` 里的 `SUBAGENT_COURTESY_NAMES`：
+
+```ts
+export const SUBAGENT_COURTESY_NAMES = [
+  "羲和", "常羲", "精卫", "烛龙", "英招", "陆吾", "鸾鸟", "毕方", "乘黄"
+] as const;
+```
+
+顺带把 `courtesyNameAt` 的兜底值从写死的 `"竈門炭治郎"` 改成 `SUBAGENT_COURTESY_NAMES[0]`，这样名单再换也不会残留旧名字。
+
+## 分配规则
+
+按子智能体创建时间顺序依次取名：第 1 个是「羲和」，第 2 个「常羲」，依此类推。9 个用完进入第二轮，名字后面加序号——「羲和壱」「常羲壱」……到第十轮之后改用阿拉伯数字。
+
+## 验证结果
+
+| 检查项 | 结果 |
+|---|---|
+| 读回文件内容 | 9 个名字完整无乱码，旧日文名已无残留 |
+| 单元测试 | `subagent-ui` 15 例 + `subagent-assignment` 8 例 + `multi-agent-storage` 9 例，共 32 例全部通过 |
+| 改动范围 | 仅渲染层名单与兜底值，未触碰主进程命名逻辑 |
+
+重启应用后生效。之前 `config.toml` 里的 `namePool` 已按你说的还原，现在命名完全由这份名单决定。
+
+## Verified Sources And Deliverables
+
+- `packages/tool-runtime/src/index.ts:2238`
+- `packages/shared-types`
+- `D:\workagent\apps\desktop\src\renderer\cards\runtime-cards.tsx`
+
+---
+
+# Conversation Turn Context
+
 - Turn run: `59aa1dd4-31d9-4048-b222-376b72e77699`
 - Completed at: `2026-09-14T01:23:29.862Z`
 - MCP sources: none

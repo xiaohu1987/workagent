@@ -251,10 +251,7 @@ export function getSubagentTaskName(agent: Pick<ThreadRecord, "agentRole" | "las
 }
 
 export const SUBAGENT_COURTESY_NAMES = [
-  "竈門炭治郎", "竈門禰豆子", "我妻善逸", "嘴平伊之助", "五条悟", "虎杖悠仁", "伏黒恵", "釘崎野薔薇",
-  "ルフィ", "ゾロ", "ナミ", "サンジ", "江戸川コナン", "灰原哀", "毛利蘭", "怪盗キッド",
-  "孫悟空", "ベジータ", "うずまきナルト", "うちはサスケ", "春野サクラ", "ルルーシュ", "C.C.", "キリト",
-  "アスナ", "エレン", "ミカサ", "リヴァイ", "日向翔陽", "影山飛雄", "千尋", "ハウル"
+  "羲和", "常羲", "精卫", "烛龙", "英招", "陆吾", "鸾鸟", "毕方", "乘黄"
 ] as const;
 
 const COURTESY_NAME_ORDINALS = "壱弐参肆伍陸漆捌玖拾";
@@ -262,7 +259,7 @@ const COURTESY_NAME_ORDINALS = "壱弐参肆伍陸漆捌玖拾";
 function courtesyNameAt(index: number): string {
   const base = SUBAGENT_COURTESY_NAMES[index];
   if (base) return base;
-  const name = SUBAGENT_COURTESY_NAMES[index % SUBAGENT_COURTESY_NAMES.length] ?? "竈門炭治郎";
+  const name = SUBAGENT_COURTESY_NAMES[index % SUBAGENT_COURTESY_NAMES.length] ?? SUBAGENT_COURTESY_NAMES[0];
   const cycle = Math.floor(index / SUBAGENT_COURTESY_NAMES.length);
   const ordinal = COURTESY_NAME_ORDINALS[cycle - 1] ?? String(cycle + 1);
   return `${name}${ordinal}`;
