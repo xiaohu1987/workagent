@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { isConfigurableGptReasoningModel, isConfigurableReasoningEffortModel, normalizeCompletionAuditEnabled, normalizeCompletionAuditMaxAttempts, normalizeCompletionAuditSettings, resolveCompletionAuditModeSettings, normalizeResponseTone, resolveModelReasoningEffort, withGptReasoningCapabilities } from "@shared-types";
 import type { ModelProfile } from "@shared-types";
 import { defaultConfig, loadConfig, saveConfig } from "../apps/desktop/src/main/storage";
-import { PROVIDER_TEMPLATE_OPTIONS, buildConfigToSave, createEmptyProvider, hasProviderTestEndpoint, normalizeDraftConfig, providerTemplatePatch, resolveSelectionFromConfig } from "../apps/desktop/src/renderer/lib/config-utils";
+import { MODEL_CONTEXT_WINDOW_STEP, PROVIDER_TEMPLATE_OPTIONS, buildConfigToSave, createEmptyProvider, hasProviderTestEndpoint, normalizeDraftConfig, parseModelContextWindowInput, providerTemplatePatch, resolveSelectionFromConfig, stepModelContextWindow } from "../apps/desktop/src/renderer/lib/config-utils";
 
 const temporaryDirectories: string[] = [];
 
@@ -427,5 +427,17 @@ describe("model configuration storage", () => {
     );
     expect(loaded.providers.some((provider) => provider.id === "xai")).toBe(false);
     expect(loaded.models.some((model) => model.providerId === "xai")).toBe(false);
+  });
+});
+
+describe("model context window stepping", () => {
+  it("adds or subtracts 128K from the current value without snapping a manual number", () => {
+    expect(stepModelContextWindow(128_000, 1)).toBe(256_000);
+    expect(stepModelContextWindow(256_000, 1)).toBe(384_000);
+    expect(stepModelContextWindow(500_736, 1)).toBe(628_736);
+    expect(stepModelContextWindow(500_000, -1)).toBe(372_000);
+    expect(stepModelContextWindow(MODEL_CONTEXT_WINDOW_STEP, -1)).toBe(MODEL_CONTEXT_WINDOW_STEP);
+    expect(parseModelContextWindowInput("500736")).toBe(500_736);
+    expect(parseModelContextWindowInput("abc")).toBe(128_000);
   });
 });

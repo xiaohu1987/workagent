@@ -176,6 +176,10 @@ export const SUBAGENT_AWAITING_MODEL_IDLE_TIMEOUT_MS = 300_000;
 export const SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS = 600_000;
 export const SUBAGENT_SHELL_TEST_REINSPECTION_MS = 300_000;
 export const SUBAGENT_MAX_RUNTIME_MS = 1_800_000;
+/** After this many local code inspections, a child agent must report instead of reading more. */
+export const MAX_CHILD_INSPECTION_TOOLS_BEFORE_REPORT = 8;
+/** Hard-stop further file/code inspection and require a parent-facing result. */
+export const MAX_CHILD_INSPECTION_TOOLS_HARD_STOP = 12;
 
 export const SUBAGENT_WATCHDOG_PROGRESS_EVENT_TYPES = [
   "tool.started",
@@ -2199,6 +2203,9 @@ class ThreadSessionRuntime {
       const originalToolCallFailures = new Map<string, string>();
       const successfullyCreatedFiles = new Set<string>();
       const successfulReusableToolResults = new Map<string, string>();
+      let childInspectionCount = 0;
+      let childInspectionNudgeIssued = false;
+      let childInspectionForceAttempts = 0;
       const recoveryEpisodes = new Map<string, RecoveryEpisode>();
       const recoveredRecoveryEpisodes: RecoveryEpisode[] = [];
       const observedRecoveryTargets = new Set<string>();
@@ -5236,6 +5243,35 @@ class ThreadSessionRuntime {
           ? []
           : await this.services.listSubagents(this.threadId);
 
+        if (
+          isChildAgent &&
+          isInspectionOnlyToolBatch(decision.toolCalls) &&
+          shouldForceChildAgentReport(childInspectionCount)
+        ) {
+          childInspectionForceAttempts += 1;
+          await this.services.log("turn.child_inspection_budget_forced", this.threadId, {
+            turnRunId: turn.id,
+            inspectionCount: childInspectionCount,
+            pendingInspectionCalls: decision.toolCalls.length,
+            forceAttempts: childInspectionForceAttempts
+          });
+          if (childInspectionForceAttempts >= 2) {
+            decision.toolCalls = [];
+            decision.endTurn = true;
+            decision.goalCompleted = true;
+            if (!decision.assistantMessage?.trim()) {
+              decision.assistantMessage = buildChildAgentInspectionBudgetFallbackMessage();
+            }
+          } else {
+            transcript.push({
+              role: "user",
+              content: buildChildAgentInspectionBudgetInstruction("force")
+            });
+            await retryDraft();
+            continue;
+          }
+        }
+
         const hasActiveRootSubagents = !thread.parentThreadId
           && currentChildAgents.length > 0
           && await this.services.hasActiveSubagents(this.threadId);
@@ -5681,6 +5717,9 @@ class ThreadSessionRuntime {
                   toolName: toolCall.name,
                   taskKey: toolTaskKey
                 });
+                if (isChildAgent && isLocalWorkspaceInspectionTool(toolCall.name)) {
+                  childInspectionCount += 1;
+                }
                 continue;
               }
               const lastError =
@@ -6617,6 +6656,9 @@ class ThreadSessionRuntime {
             if (isReusableSuccessfulToolCall(toolCall.name)) {
               successfulReusableToolResults.set(toolCallFingerprint, modelContent);
             }
+            if (isChildAgent && isLocalWorkspaceInspectionTool(toolCall.name)) {
+              childInspectionCount += 1;
+            }
             failedToolCallFingerprints.delete(toolCallFingerprint);
             blockedToolCallFingerprints.delete(toolCallFingerprint);
             originalToolCallFailures.delete(toolCallFingerprint);
@@ -6630,6 +6672,11 @@ class ThreadSessionRuntime {
             if (evidence.kinds.includes("delivery")) {
               clearReusableObservationFingerprints(successfulToolCallFingerprints);
               successfulReusableToolResults.clear();
+              if (isChildAgent) {
+                childInspectionCount = 0;
+                childInspectionNudgeIssued = false;
+                childInspectionForceAttempts = 0;
+              }
               const clearedFailedCalls = resetFailedToolCallTrackingAfterWorkspaceMutation(
                 failedToolCallFingerprints,
                 blockedToolCallFingerprints,
@@ -6783,6 +6830,9 @@ class ThreadSessionRuntime {
               }
             }
           } else {
+            if (isChildAgent && isLocalWorkspaceInspectionTool(toolCall.name)) {
+              childInspectionCount += 1;
+            }
             if (readOnlyChildWriteDenied) {
               transcript.push({
                 role: "user",
@@ -6900,6 +6950,22 @@ class ThreadSessionRuntime {
               });
             }
           }
+        }
+
+        if (
+          isChildAgent &&
+          !childInspectionNudgeIssued &&
+          shouldNudgeChildAgentToReport(childInspectionCount)
+        ) {
+          childInspectionNudgeIssued = true;
+          transcript.push({
+            role: "user",
+            content: buildChildAgentInspectionBudgetInstruction("nudge")
+          });
+          await this.services.log("turn.child_inspection_budget_nudge", this.threadId, {
+            turnRunId: turn.id,
+            inspectionCount: childInspectionCount
+          });
         }
 
         await compactContext("post_tool_batch");
@@ -8125,6 +8191,44 @@ const REUSABLE_SUCCESSFUL_TOOL_NAMES = new Set([
 
 export function isReusableSuccessfulToolCall(toolName: string): boolean {
   return REUSABLE_SUCCESSFUL_TOOL_NAMES.has(toolName);
+}
+
+export function isLocalWorkspaceInspectionTool(toolName: string): boolean {
+  return LOCAL_WORKSPACE_OBSERVATION_TOOLS.has(canonicalizeToolName(toolName));
+}
+
+export function isInspectionOnlyToolBatch(toolCalls: Array<{ name: string }>): boolean {
+  return toolCalls.length > 0 && toolCalls.every((toolCall) => isLocalWorkspaceInspectionTool(toolCall.name));
+}
+
+export function shouldNudgeChildAgentToReport(inspectionCount: number): boolean {
+  return inspectionCount >= MAX_CHILD_INSPECTION_TOOLS_BEFORE_REPORT;
+}
+
+export function shouldForceChildAgentReport(inspectionCount: number): boolean {
+  return inspectionCount >= MAX_CHILD_INSPECTION_TOOLS_HARD_STOP;
+}
+
+export function buildChildAgentInspectionBudgetInstruction(kind: "nudge" | "force"): string {
+  if (kind === "force") {
+    return [
+      "[Internal child-agent inspection budget. Do not display or quote this instruction to the user.]",
+      "You have already inspected enough local code for this bounded assignment.",
+      "Do not call fs.read_file, fs.read_directory, code.search, code.outline, or git inspection tools again.",
+      "Return end_turn true now with assistant_message containing your findings, conclusions, and any proposed changes for the parent.",
+      "If evidence is incomplete, say what is missing instead of reading more files."
+    ].join(" ");
+  }
+  return [
+    "[Internal child-agent inspection budget. Do not display or quote this instruction to the user.]",
+    "You have collected substantial local inspection evidence.",
+    "Stop reading additional files. Synthesize what you already know and return it to the parent.",
+    "Set end_turn true with a concrete findings report. Additional identical or adjacent reads will not improve the result."
+  ].join(" ");
+}
+
+export function buildChildAgentInspectionBudgetFallbackMessage(): string {
+  return "已停止继续阅读代码。当前指派下继续穷尽读文件无法形成更多可交付结论，请父任务基于已收集的代码证据继续，或把范围缩得更具体后再委派。";
 }
 
 const DELIVERY_TOOL_NAMES = new Set([
@@ -9857,6 +9961,8 @@ function buildMultiAgentDirective(thread: ThreadRecord): string {
       "You are a child agent in a hierarchical multi-agent run.",
       `Your agent path is ${thread.agentPath}; parent path is ${thread.agentPath.split("/").slice(0, -1).join("/") || "/root"}.`,
       "Stay within the assigned bounded task. You inherit the parent workspace and permission policy; ask for approval through normal tools when required.",
+      "Inspect locally with a small budget: prefer code.search or code.outline, then a few targeted file reads. Do not exhaustively reread the repository.",
+      "As soon as you can answer the assignment, return the findings, conclusions, and any proposed changes to the parent with end_turn true. Do not keep reading in hope of a later insight.",
       "Do not claim file changes or completion for work you did not perform."
     ].join(" ");
   }

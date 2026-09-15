@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  clampVirtualizedRange,
   resolveMeasurementScrollAdjustment,
   resolveVirtualizedRange,
   shouldDeferVirtualTimelineMeasurement
@@ -21,6 +22,13 @@ describe("virtualized timeline range", () => {
 
   it("keeps a partially visible first row mounted", () => {
     expect(resolveVirtualizedRange([0, 240], [240, 120], 200, 260)).toEqual({ start: 0, end: 2 });
+  });
+
+  it("pins the window to the new tail after a rewind shrinks the list", () => {
+    expect(clampVirtualizedRange({ start: 90, end: 110 }, 40)).toEqual({ start: 20, end: 40 });
+    expect(clampVirtualizedRange({ start: 85, end: 100 }, 90)).toEqual({ start: 85, end: 90 });
+    expect(clampVirtualizedRange({ start: 0, end: 20 }, 5)).toEqual({ start: 0, end: 5 });
+    expect(clampVirtualizedRange({ start: 4, end: 8 }, 0)).toEqual({ start: 0, end: 0 });
   });
 
   it("preserves the reading anchor when an earlier row changes height", () => {

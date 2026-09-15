@@ -47,6 +47,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   browserTabsByThread,
   mountedBrowserThreadIds,
   onCloseBrowserTab,
+  showProjectWorkspace,
   showSubagentTab,
   subagentItems,
   selectedSubagentId,
@@ -83,13 +84,14 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   browserTabsByThread: Record<string, RuntimeThreadSnapshot["browserTabs"]>;
   mountedBrowserThreadIds: string[];
   onCloseBrowserTab: (threadId: string, tabId: string) => void;
+  showProjectWorkspace: boolean;
   showSubagentTab: boolean;
   subagentItems: SubagentPresentation[];
   selectedSubagentId: string | null;
   onSelectSubagent: (agentId: string) => void;
   threadId: string | null;
 }) {
-  const showGitWorkspace = true;
+  const showGitWorkspace = showProjectWorkspace;
   const projectGitFiles = useMemo(
     () => getProjectRelativeGitFiles(gitSnapshot, projectRoot),
     [gitSnapshot, projectRoot]
@@ -108,13 +110,15 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
           active={activeTab === "browser"}
           onClick={() => selectWorkspaceTab("browser", onTabChange, onExpandedTabChange)}
         />
-        <WorkspaceTabButton
-          id="files"
-          label="文件夹"
-          icon={<IconFolder />}
-          active={activeTab === "files"}
-          onClick={() => selectWorkspaceTab("files", onTabChange, onExpandedTabChange)}
-        />
+        {showProjectWorkspace ? (
+          <WorkspaceTabButton
+            id="files"
+            label="文件夹"
+            icon={<IconFolder />}
+            active={activeTab === "files"}
+            onClick={() => selectWorkspaceTab("files", onTabChange, onExpandedTabChange)}
+          />
+        ) : null}
         {showGitWorkspace ? (
           <WorkspaceTabButton
             id="changes"
@@ -152,24 +156,26 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
             />
           </div>
         ) : null}
-        <div id="right-workspace-content-files" className={`right-workspace-view ${activeTab === "files" ? "active" : ""}`} role={activeTab === "files" ? "tabpanel" : undefined} aria-labelledby={activeTab === "files" ? "right-workspace-tab-files" : undefined} aria-hidden={activeTab !== "files"} inert={activeTab !== "files"}>
-          <ProjectFilesWorkspace
-            key={projectFilesRevision}
-            files={projectFiles}
-            toolCalls={projectToolCalls}
-            gitFiles={projectGitFiles}
-            loading={projectFilesLoading}
-            loadRevision={projectFilesRevision}
-            selectedPath={selectedProjectFile}
-            onSelect={onSelectProjectFile}
-            onOpen={onOpenProjectFile}
-            onLoadDirectory={onLoadProjectDirectory}
-            projectRoot={projectRoot}
-            workspaceRoots={workspaceRoots}
-            onProjectRootChange={onProjectRootChange}
-            onAddAttachment={onAddAttachment}
-          />
-        </div>
+        {showProjectWorkspace ? (
+          <div id="right-workspace-content-files" className={`right-workspace-view ${activeTab === "files" ? "active" : ""}`} role={activeTab === "files" ? "tabpanel" : undefined} aria-labelledby={activeTab === "files" ? "right-workspace-tab-files" : undefined} aria-hidden={activeTab !== "files"} inert={activeTab !== "files"}>
+            <ProjectFilesWorkspace
+              key={projectFilesRevision}
+              files={projectFiles}
+              toolCalls={projectToolCalls}
+              gitFiles={projectGitFiles}
+              loading={projectFilesLoading}
+              loadRevision={projectFilesRevision}
+              selectedPath={selectedProjectFile}
+              onSelect={onSelectProjectFile}
+              onOpen={onOpenProjectFile}
+              onLoadDirectory={onLoadProjectDirectory}
+              projectRoot={projectRoot}
+              workspaceRoots={workspaceRoots}
+              onProjectRootChange={onProjectRootChange}
+              onAddAttachment={onAddAttachment}
+            />
+          </div>
+        ) : null}
         <div id="right-workspace-content-browser" className={`right-workspace-view ${activeTab === "browser" ? "active" : ""}`} role={activeTab === "browser" ? "tabpanel" : undefined} aria-labelledby={activeTab === "browser" ? "right-workspace-tab-browser" : undefined} aria-hidden={activeTab !== "browser"} inert={activeTab !== "browser"}>
             {mountedBrowserThreadIds.map((browserThreadId) => {
               const tabs = browserTabsByThread[browserThreadId];
@@ -216,6 +222,36 @@ export function selectWorkspaceTab(
 ): void {
   onTabChange(tab);
   onExpandedTabChange(tab);
+}
+
+export function isProjectWorkspaceThread(mode: string | null | undefined): boolean {
+  return mode === "project";
+}
+
+export function getDefaultRightWorkspaceTab(mode: string | null | undefined): RightWorkspaceTab {
+  return isProjectWorkspaceThread(mode) ? "files" : "browser";
+}
+
+export function resolveRightWorkspaceTabForMode(
+  mode: string | null | undefined,
+  tab: RightWorkspaceTab
+): RightWorkspaceTab {
+  if (isProjectWorkspaceThread(mode)) {
+    return tab;
+  }
+  return tab === "files" || tab === "changes" ? "browser" : tab;
+}
+
+export function shouldLoadProjectWorkspaceResource(
+  mode: string | null | undefined,
+  workspaceOpen: boolean,
+  tab: RightWorkspaceTab,
+  resource: "files" | "git"
+): boolean {
+  if (!isProjectWorkspaceThread(mode) || !workspaceOpen) {
+    return false;
+  }
+  return resource === "files" ? tab === "files" : tab === "changes";
 }
 
 function WorkspaceTabButton({

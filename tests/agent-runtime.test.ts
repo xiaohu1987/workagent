@@ -125,6 +125,14 @@ import {
   clearReusableObservationFingerprints,
   resetFailedToolCallTrackingAfterWorkspaceMutation,
   isReusableSuccessfulToolCall,
+  isLocalWorkspaceInspectionTool,
+  isInspectionOnlyToolBatch,
+  shouldNudgeChildAgentToReport,
+  shouldForceChildAgentReport,
+  buildChildAgentInspectionBudgetInstruction,
+  buildChildAgentInspectionBudgetFallbackMessage,
+  MAX_CHILD_INSPECTION_TOOLS_BEFORE_REPORT,
+  MAX_CHILD_INSPECTION_TOOLS_HARD_STOP,
   MAX_AGENT_PROTOCOL_FAILURES,
   MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES,
   AGENT_PROTOCOL_RECOVERY_TOOL_NAME,
@@ -400,6 +408,8 @@ describe("subagent watchdog policy", () => {
     expect(SUBAGENT_SHELL_TEST_SOFT_LIMIT_MS).toBe(600_000);
     expect(SUBAGENT_MAX_RUNTIME_MS).toBe(1_800_000);
     expect(SUBAGENT_MODEL_DECISION_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(MAX_CHILD_INSPECTION_TOOLS_BEFORE_REPORT).toBe(8);
+    expect(MAX_CHILD_INSPECTION_TOOLS_HARD_STOP).toBe(12);
   });
 
   it("treats streaming drafts and tool-call preparation as watchdog progress", () => {
@@ -734,6 +744,43 @@ describe("blocked identical tool retries", () => {
     expect(failed.size).toBe(0);
     expect(blocked.size).toBe(0);
     expect(originalFailures.size).toBe(0);
+  });
+});
+
+describe("child agent inspection budget", () => {
+  it("treats local code reads as inspection tools and ignores deliveries", () => {
+    expect(isLocalWorkspaceInspectionTool("fs.read_file")).toBe(true);
+    expect(isLocalWorkspaceInspectionTool("fs.read_directory")).toBe(true);
+    expect(isLocalWorkspaceInspectionTool("code.search")).toBe(true);
+    expect(isLocalWorkspaceInspectionTool("code.outline")).toBe(true);
+    expect(isLocalWorkspaceInspectionTool("apply_patch")).toBe(false);
+    expect(isLocalWorkspaceInspectionTool("shell.exec")).toBe(false);
+  });
+
+  it("detects inspection-only batches without counting an empty or mixed turn", () => {
+    expect(isInspectionOnlyToolBatch([
+      { name: "fs.read_file" },
+      { name: "code.outline" }
+    ])).toBe(true);
+    expect(isInspectionOnlyToolBatch([
+      { name: "fs.read_file" },
+      { name: "apply_patch" }
+    ])).toBe(false);
+    expect(isInspectionOnlyToolBatch([])).toBe(false);
+  });
+
+  it("nudges after eight inspections and hard-stops further reads at twelve", () => {
+    expect(shouldNudgeChildAgentToReport(7)).toBe(false);
+    expect(shouldNudgeChildAgentToReport(8)).toBe(true);
+    expect(shouldNudgeChildAgentToReport(12)).toBe(true);
+    expect(shouldForceChildAgentReport(11)).toBe(false);
+    expect(shouldForceChildAgentReport(12)).toBe(true);
+  });
+
+  it("asks the child to return findings instead of reading more files", () => {
+    expect(buildChildAgentInspectionBudgetInstruction("nudge")).toContain("Stop reading additional files");
+    expect(buildChildAgentInspectionBudgetInstruction("force")).toContain("end_turn true");
+    expect(buildChildAgentInspectionBudgetFallbackMessage()).toContain("停止继续阅读代码");
   });
 });
 

@@ -74,7 +74,11 @@ export type ThreadContentView = "switching" | "welcome" | "transcript";
 export function getThreadContentView(
   selectedThreadId: string | null,
   snapshotThreadId: string | null,
-  timelineEntryCount: number
+  timelineEntryCount: number,
+  activity?: {
+    sending?: boolean;
+    threadStatus?: ThreadRecord["status"] | null;
+  }
 ): ThreadContentView {
   if (!selectedThreadId) {
     return "welcome";
@@ -82,15 +86,31 @@ export function getThreadContentView(
   if (snapshotThreadId !== selectedThreadId) {
     return "switching";
   }
-  return timelineEntryCount === 0 ? "welcome" : "transcript";
+  if (
+    timelineEntryCount > 0 ||
+    activity?.sending ||
+    isThreadExecutionInProgress(activity?.threadStatus)
+  ) {
+    return "transcript";
+  }
+  return "welcome";
 }
 
 export function shouldCommitThreadSnapshotImmediately(
   selectedThreadId: string | null,
   renderedSnapshotThreadId: string | null,
-  incomingThreadId: string
+  incomingThreadId: string,
+  hasPendingOptimisticMessages = false
 ): boolean {
-  return selectedThreadId === incomingThreadId && renderedSnapshotThreadId !== incomingThreadId;
+  if (selectedThreadId !== incomingThreadId) {
+    return false;
+  }
+  if (renderedSnapshotThreadId !== incomingThreadId) {
+    return true;
+  }
+  // A transition can be starved by runtime events. Keep an in-flight edited
+  // send visible instead of letting a later truncated snapshot replace it.
+  return hasPendingOptimisticMessages;
 }
 
 /** Whether a runtime event can change the currently selected task's snapshot. */

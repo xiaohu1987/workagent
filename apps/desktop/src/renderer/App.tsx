@@ -129,6 +129,7 @@ import {
   isPatchAssistantMessage,
   isPersistentComposerContextKind,
   isSubagentWaitTool,
+  mergeMessagesAfterOptimisticUserEdit,
   mergeSnapshotRecords,
   parseMessageEventBlocks,
   reconcileAssistantDraftCompletion,
@@ -315,7 +316,7 @@ import { useStableEvent } from "./hooks/use-stable-event";
 import { DATABASE_PERMISSION_OPTIONS, getSkillSortLabel, RESPONSE_TONE_OPTIONS, SKILL_SORT_OPTIONS } from "./settings/settings-options";
 import { reregisterBrowserWebviews } from "./workspace/browser-workspace";
 import { shouldRevealBrowserWorkspace, selectMountedBrowserThreadIds } from "./workspace/browser-preferences";
-import { RightWorkspacePanel, type RightWorkspaceTab } from "./workspace/right-workspace";
+import { RightWorkspacePanel, getDefaultRightWorkspaceTab, isProjectWorkspaceThread, resolveRightWorkspaceTabForMode, shouldLoadProjectWorkspaceResource, type RightWorkspaceTab } from "./workspace/right-workspace";
 import { NotificationCenter } from "./workspace/notification-center";
 import { HelpSheet } from "./workspace/help-sheet";
 import { QuickNotesSheet } from "./workspace/quick-notes-sheet";
@@ -599,9 +600,11 @@ export function App() {
   const filesRoot = workspaceRoots.includes(activeFilesRoot) ? activeFilesRoot : workspaceRoots[0] ?? "";
   const gitRoot = workspaceRoots.includes(activeGitRoot) ? activeGitRoot : workspaceRoots[0] ?? "";
   const terminalRoot = workspaceRoots.includes(activeTerminalRoot) ? activeTerminalRoot : workspaceRoots[0] ?? "";
+  const visibleRightWorkspaceTab = resolveRightWorkspaceTabForMode(selectedThread?.mode, rightWorkspaceTab);
   const timelineBuildCacheRef = useRef<TimelineIncrementalCache | null>(null);
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
+  const snapshotRef = useRef<RuntimeThreadSnapshot | null>(null);
   const snapshotCursorByThreadRef = useRef<Record<string, RuntimeThreadSnapshotCursor>>({});
   const snapshotCacheByThreadRef = useRef<Map<string, RuntimeThreadSnapshot>>(new Map());
   const threadTokenUsageRefreshTimerRef = useRef<number | null>(null);
@@ -1400,11 +1403,27 @@ export function App() {
   function reconcileCachedAndSelectedSnapshot(threadId: string, consumedOptimisticIds?: ReadonlySet<string>) {
     const cached = snapshotCacheByThreadRef.current.get(threadId);
     if (cached) {
-      cacheThreadSnapshot(reconcileSnapshotWithRuntimeEvents(cached, consumedOptimisticIds));
+      const reconciledCache = reconcileSnapshotWithRuntimeEvents(cached, consumedOptimisticIds);
+      cacheThreadSnapshot({
+        ...reconciledCache,
+        messages: mergeMessagesAfterOptimisticUserEdit(
+          cached.messages,
+          reconciledCache.messages,
+          pendingUserMessagesRef.current[threadId] ?? []
+        )
+      });
     }
     setSnapshot((current) => {
       if (!current || current.thread.id !== threadId) return current;
-      return reconcileSnapshotWithRuntimeEvents(current, consumedOptimisticIds);
+      const reconciled = reconcileSnapshotWithRuntimeEvents(current, consumedOptimisticIds);
+      return {
+        ...reconciled,
+        messages: mergeMessagesAfterOptimisticUserEdit(
+          current.messages,
+          reconciled.messages,
+          pendingUserMessagesRef.current[threadId] ?? []
+        )
+      };
     });
   }
 
@@ -2752,7 +2771,19 @@ export function App() {
   }, [activeTerminalSession?.output]);
 
   useEffect(() => {
-    if (!isRightWorkspaceOpen || !selectedThreadId || rightWorkspaceTab !== "files") {
+    const nextTab = resolveRightWorkspaceTabForMode(selectedThread?.mode, rightWorkspaceTab);
+    if (nextTab !== rightWorkspaceTab) {
+      setRightWorkspaceTab(nextTab);
+      setRightWorkspaceExpandedTab(nextTab);
+    }
+    if (!isProjectWorkspaceThread(selectedThread?.mode) && (rightWorkspaceTab === "files" || rightWorkspaceTab === "changes")) {
+      setIsRightWorkspaceOpen(false);
+    }
+  }, [rightWorkspaceTab, selectedThread?.mode]);
+
+  useEffect(() => {
+    if (!shouldLoadProjectWorkspaceResource(selectedThread?.mode, isRightWorkspaceOpen, rightWorkspaceTab, "files") || !selectedThreadId || !filesRoot) {
+      setIsProjectFilesLoading(false);
       return;
     }
 
@@ -2762,7 +2793,6 @@ export function App() {
     setProjectFilesRevision(revision);
     setProjectFiles([]);
     setIsProjectFilesLoading(true);
-    if (!filesRoot) return;
     void window.codexh.listProjectFiles({ threadId: selectedThreadId, rootPath: filesRoot, relativeDirectory: "" }).then((entries) => {
       if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
         return;
@@ -2783,7 +2813,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [clearSelectedFile, filesRoot, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThreadId]);
+  }, [clearSelectedFile, filesRoot, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThread?.mode, selectedThreadId]);
 
   const loadProjectDirectory = useCallback(async (relativeDirectory: string): Promise<boolean> => {
     const threadId = selectedThreadId;
@@ -2803,7 +2833,8 @@ export function App() {
   }, [filesRoot, selectedThreadId, showNotice]);
 
   useEffect(() => {
-    if (!selectedThreadId) {
+    if (!shouldLoadProjectWorkspaceResource(selectedThread?.mode, isRightWorkspaceOpen, rightWorkspaceTab, "git") || !selectedThreadId || !gitRoot) {
+      setGitLoading(false);
       return;
     }
     let cancelled = false;
@@ -2811,7 +2842,6 @@ export function App() {
     setGitActionMessage(null);
     const timer = window.setTimeout(() => {
       setGitLoading(true);
-      if (!gitRoot) return;
       void window.codexh.getGitSnapshot({ threadId: selectedThreadId, rootPath: gitRoot }).then((next) => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
           setGitSnapshot(next as GitSnapshot);
@@ -2838,7 +2868,7 @@ export function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [gitRefreshRevision, gitRoot, selectedThreadId]);
+  }, [gitRefreshRevision, gitRoot, isRightWorkspaceOpen, rightWorkspaceTab, selectedThread?.mode, selectedThreadId]);
 
   useEffect(() => {
     if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
@@ -2942,7 +2972,8 @@ export function App() {
 
   useLayoutEffect(() => {
     snapshotThreadIdRef.current = snapshot?.thread.id ?? null;
-  }, [snapshot?.thread.id]);
+    snapshotRef.current = snapshot;
+  }, [snapshot]);
   const selectedProjectCwd = selectedThread?.mode === "project" ? selectedThread.cwd ?? null : null;
 
   useEffect(() => {
@@ -3294,10 +3325,11 @@ export function App() {
     const nextSelectedId = resolveSelectedSubagentId(workspaceSubagentPresentations, selectedSubagentId);
     if (nextSelectedId !== selectedSubagentId) setSelectedSubagentId(nextSelectedId);
     if (subagentPresentations.length === 0 && rightWorkspaceTab === "subagents") {
-      setRightWorkspaceTab("files");
-      setRightWorkspaceExpandedTab("files");
+      const fallbackTab = getDefaultRightWorkspaceTab(selectedThread?.mode);
+      setRightWorkspaceTab(fallbackTab);
+      setRightWorkspaceExpandedTab(fallbackTab);
     }
-  }, [activeSnapshotThreadId, rightWorkspaceTab, selectedSubagentId, subagentPresentations, workspaceSubagentPresentations]);
+  }, [activeSnapshotThreadId, rightWorkspaceTab, selectedSubagentId, selectedThread?.mode, subagentPresentations, workspaceSubagentPresentations]);
   // Active-task submissions stay in the queue until the runtime reaches the
   // next safe decision boundary instead of appearing as already sent messages.
   // Queued items must remain available while the current turn runs so they
@@ -3476,7 +3508,11 @@ export function App() {
   const threadContentView = getThreadContentView(
     selectedThreadId,
     activeSnapshotThreadId,
-    timelineEntries.length
+    timelineEntries.length,
+    {
+      sending: Boolean(composerSubmission) || isPreparingRuntime,
+      threadStatus: selectedThreadStatus
+    }
   );
   const showWelcome = threadContentView === "welcome";
   const showDefaultHome = !selectedThreadId;
@@ -4154,24 +4190,30 @@ export function App() {
         snapshotCursorByThreadRef.current[threadId] = next.snapshotCursor;
       }
       const pending = pendingUserMessagesRef.current[threadId] ?? [];
-      const remaining = reconcilePendingUserMessages(pending, next.messages);
-      if (remaining.length > 0) {
-        pendingUserMessagesRef.current[threadId] = remaining;
-      } else {
-        delete pendingUserMessagesRef.current[threadId];
-      }
-      const nextMessages = remaining.length > 0 ? [...next.messages, ...remaining] : next.messages;
+      const nextMessages = pending.length > 0 ? [...next.messages, ...pending] : next.messages;
       const cached = snapshotCacheByThreadRef.current.get(threadId);
-      const base = cached ?? (snapshotThreadIdRef.current === threadId ? snapshot : null);
-      const messages = next.snapshotMode === "delta" && base
+      const liveSnapshot = snapshotRef.current?.thread.id === threadId ? snapshotRef.current : null;
+      const base = cached ?? (snapshotThreadIdRef.current === threadId ? liveSnapshot : null);
+      const mergedMessages = next.snapshotMode === "delta" && base
         ? mergeSnapshotRecords(
             base.messages.filter((message) =>
-              !message.id.startsWith("optimistic-") || remaining.some((item) => item.id === message.id)
+              !message.id.startsWith("optimistic-") || pending.some((item) => item.id === message.id)
             ),
             nextMessages,
             (message) => message.createdAt
           )
         : nextMessages;
+      const messages = mergeMessagesAfterOptimisticUserEdit(
+        liveSnapshot?.messages ?? base?.messages ?? [],
+        mergedMessages,
+        pending
+      );
+      const remaining = pending.filter((message) => messages.some((item) => item.id === message.id));
+      if (remaining.length > 0) {
+        pendingUserMessagesRef.current[threadId] = remaining;
+      } else {
+        delete pendingUserMessagesRef.current[threadId];
+      };
       const toolCalls = next.snapshotMode === "delta" && base
         ? mergeSnapshotRecords(base.toolCalls, next.toolCalls, (toolCall) => toolCall.startedAt)
         : next.toolCalls;
@@ -4210,9 +4252,19 @@ export function App() {
       }
       if (selectedThreadIdRef.current === threadId) {
         const commitSelectedSnapshot = () => {
-          setSnapshot((current) => selectedThreadIdRef.current === threadId
-            ? reconcileSnapshotWithRuntimeEvents(mergedSnapshot)
-            : current);
+          setSnapshot((current) => {
+            if (selectedThreadIdRef.current !== threadId) return current;
+            const reconciled = reconcileSnapshotWithRuntimeEvents(mergedSnapshot);
+            if (!current || current.thread.id !== threadId) return reconciled;
+            return {
+              ...reconciled,
+              messages: mergeMessagesAfterOptimisticUserEdit(
+                current.messages,
+                reconciled.messages,
+                pendingUserMessagesRef.current[threadId] ?? []
+              )
+            };
+          });
           if (selectedThreadIdRef.current !== threadId) return;
           const gpa = normalizeGpaStateForThread(mergedSnapshot.thread.mode, mergedSnapshot.gpa);
           setGpaState(gpa);
@@ -4224,7 +4276,8 @@ export function App() {
         if (shouldCommitThreadSnapshotImmediately(
           selectedThreadIdRef.current,
           snapshotThreadIdRef.current,
-          threadId
+          threadId,
+          (pendingUserMessagesRef.current[threadId] ?? remaining).length > 0
         )) {
           // A transition can be starved by continuous runtime events. The first
           // snapshot must replace the loading placeholder at normal priority.
@@ -4293,23 +4346,34 @@ export function App() {
       ...(pendingUserMessagesRef.current[threadId] ?? []),
       optimisticMessage
     ];
-    // The snapshot append forces the whole timeline derivation chain
-    // (visibleMessages -> timelineEntries -> turn sections -> ...) to recompute
-    // synchronously for long conversations. Mark it as a transition so the
-    // same-batch lightweight states (submission status, "正在理解任务"
-    // heartbeat) paint FIRST — the send click must never appear frozen while
-    // the message bubble render catches up.
-    startTransition(() => {
+    const applyOptimistic = () => {
       setSnapshot((current) => {
-        if (!current || current.thread.id !== threadId) {
-          return current;
+        const base = current?.thread.id === threadId
+          ? current
+          : selectedThreadIdRef.current === threadId
+            ? snapshotCacheByThreadRef.current.get(threadId) ?? current
+            : current;
+        if (!base || base.thread.id !== threadId) return current;
+        if (base.messages.some((message) => message.id === optimisticMessage.id)) {
+          return current?.thread.id === threadId ? current : base;
         }
-        return {
-          ...current,
-          messages: [...current.messages, optimisticMessage]
+        const next = {
+          ...base,
+          messages: [...base.messages, optimisticMessage],
+          messageCount: Math.max(base.messageCount, base.messages.length + 1)
         };
+        cacheThreadSnapshot(next);
+        return next;
       });
-    });
+    };
+    // Empty/welcome transcripts must leave the default screen in this click.
+    // Long conversations stay in a transition so the send click is not blocked
+    // by rebuilding a large timeline.
+    if (!snapshot || snapshot.thread.id !== threadId || snapshot.messages.length === 0) {
+      applyOptimistic();
+    } else {
+      startTransition(applyOptimistic);
+    }
     return optimisticMessage;
   }
 
@@ -4335,7 +4399,11 @@ export function App() {
     pendingUserMessagesRef.current[threadId] = [optimisticMessage];
     setSnapshot((current) => {
       if (!current || current.thread.id !== threadId) return current;
-      return rewindThreadSnapshotForMessageEdit(current, messageId, optimisticMessage);
+      const next = rewindThreadSnapshotForMessageEdit(current, messageId, optimisticMessage);
+      cacheThreadSnapshot(next);
+      snapshotRef.current = next;
+      snapshotThreadIdRef.current = threadId;
+      return next;
     });
     return optimisticMessage;
   }
@@ -5284,10 +5352,10 @@ export function App() {
     suppressRuntimeProgressRef.current[threadId] = false;
     startRuntimeActivity(threadId);
     setRuntimeProgress({ threadId, phase: "preparing", runtimeObserved: false });
+    clearAutoScrollReleaseTimer();
+    shouldAutoScrollRef.current = true;
     try {
       await window.codexh.replaceMessage({ threadId, messageId, content });
-      clearAutoScrollReleaseTimer();
-      shouldAutoScrollRef.current = true;
       window.setTimeout(() => {
         void refreshSnapshot(threadId);
       }, 120);
@@ -6606,7 +6674,13 @@ export function App() {
           terminalOpen={isTerminalOpen}
           onToggleTerminal={() => setIsTerminalOpen((current) => !current)}
           rightWorkspaceOpen={isRightWorkspaceOpen}
-          onOpenRightWorkspace={() => { setRightWorkspaceTab("files"); setRightWorkspaceExpandedTab("files"); setIsRightWorkspaceOpen(true); }}
+          onOpenRightWorkspace={() => {
+            const tab = getDefaultRightWorkspaceTab(selectedThread?.mode);
+            setRightWorkspaceTab(tab);
+            setRightWorkspaceExpandedTab(tab);
+            setIsRightWorkspaceOpen(true);
+          }}
+          projectWorkspace={isProjectWorkspaceThread(selectedThread?.mode)}
         />
         {pendingInteractionsPresence.value ? (
           <div className="pending-strip" data-motion={pendingInteractionsPresence.phase}>
@@ -7076,7 +7150,7 @@ export function App() {
 
       <RightWorkspacePanel
           hidden={!isRightWorkspaceOpen}
-          activeTab={rightWorkspaceTab}
+          activeTab={visibleRightWorkspaceTab}
           onTabChange={(tab) => {
             if (tab === "subagents") {
               setSelectedSubagentId((current) => resolveSelectedSubagentId(workspaceSubagentPresentations, current));
@@ -7110,6 +7184,7 @@ export function App() {
           browserTabsByThread={browserTabsByThread}
           mountedBrowserThreadIds={mountedBrowserThreadIds}
           onCloseBrowserTab={closeBrowserTabEvent}
+          showProjectWorkspace={isProjectWorkspaceThread(selectedThread?.mode)}
           showSubagentTab={subagentPresentations.length > 0}
           subagentItems={workspaceSubagentPresentations}
           selectedSubagentId={selectedSubagentId}

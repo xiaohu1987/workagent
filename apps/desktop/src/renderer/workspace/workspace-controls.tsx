@@ -29,15 +29,17 @@ type Props = {
   onToggleTerminal: () => void;
   rightWorkspaceOpen: boolean;
   onOpenRightWorkspace: () => void;
+  projectWorkspace?: boolean;
 };
 
-export function WorkspaceControls({ tokenUsage, tokenUsageOpen, tokenUsageMotionPhase, selectedThreadId, tokenUsageButtonRef, tokenUsagePanelRef, onToggleTokenUsage, notifications, notificationNow, notificationOpen, notificationVisible, notificationMotionPhase, highlightedNotificationTarget, notificationButtonRef, notificationPanelRef, onToggleNotifications, onOpenNotification, onClearFinishedNotifications, onMarkNotificationsRead, terminalOpen, onToggleTerminal, rightWorkspaceOpen, onOpenRightWorkspace }: Props) {
+export function WorkspaceControls({ tokenUsage, tokenUsageOpen, tokenUsageMotionPhase, selectedThreadId, tokenUsageButtonRef, tokenUsagePanelRef, onToggleTokenUsage, notifications, notificationNow, notificationOpen, notificationVisible, notificationMotionPhase, highlightedNotificationTarget, notificationButtonRef, notificationPanelRef, onToggleNotifications, onOpenNotification, onClearFinishedNotifications, onMarkNotificationsRead, terminalOpen, onToggleTerminal, rightWorkspaceOpen, onOpenRightWorkspace, projectWorkspace = true }: Props) {
+  const workspaceButtonTitle = projectWorkspace ? "显示右侧文件工作区" : "显示右侧工作区";
   return (
     <div className="workspace-controls">
       <TokenUsagePopover usage={tokenUsage} active={tokenUsageOpen} selectedThreadId={selectedThreadId} motionPhase={tokenUsageMotionPhase} buttonRef={tokenUsageButtonRef} panelRef={tokenUsagePanelRef} onToggle={onToggleTokenUsage} />
       <NotificationCenter items={notifications} now={notificationNow} isOpen={notificationOpen} visible={notificationVisible} motionPhase={notificationMotionPhase} highlightedTarget={highlightedNotificationTarget} buttonRef={notificationButtonRef} panelRef={notificationPanelRef} onToggle={onToggleNotifications} onOpenItem={onOpenNotification} onClearFinished={onClearFinishedNotifications} onMarkAllRead={onMarkNotificationsRead} />
       <button type="button" className={`workspace-control-button terminal-toggle ${terminalOpen ? "active" : ""}`} title={terminalOpen ? "收起终端" : "打开终端"} aria-label={terminalOpen ? "收起终端" : "打开终端"} onClick={onToggleTerminal}><IconTerminal /></button>
-      {!rightWorkspaceOpen ? <button type="button" className="workspace-control-button" title="显示右侧文件工作区" aria-label="显示右侧文件工作区" onClick={onOpenRightWorkspace}><IconFolder /></button> : null}
+      {!rightWorkspaceOpen && projectWorkspace ? <button type="button" className="workspace-control-button" title={workspaceButtonTitle} aria-label={workspaceButtonTitle} onClick={onOpenRightWorkspace}><IconFolder /></button> : null}
     </div>
   );
 }

@@ -6632,15 +6632,70 @@ input[type="radio"]:focus-visible {
   font-size: 11px;
 }
 
-.model-context-window-field input {
-  width: 78px;
+.model-context-window-control {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.model-context-window-field input,
+.model-context-window-control input {
+  width: 86px;
   min-height: 28px;
-  padding: 3px 6px;
+  padding: 3px 18px 3px 6px;
   border: 1px solid rgba(116, 181, 255, 0.22);
   border-radius: 6px;
   background: rgba(74, 139, 217, 0.08);
   color: rgba(243, 247, 255, 0.92);
   font: inherit;
+  appearance: textfield;
+}
+
+.model-context-window-control input::-webkit-outer-spin-button,
+.model-context-window-control input::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.model-context-window-stepper {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  display: grid;
+  width: 16px;
+  grid-template-rows: 1fr 1fr;
+}
+
+.model-context-window-stepper button {
+  display: grid;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  color: rgba(218, 232, 255, 0.72);
+  background: transparent;
+  cursor: pointer;
+}
+
+.model-context-window-stepper button::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-right: 3.5px solid transparent;
+  border-left: 3.5px solid transparent;
+}
+
+.model-context-window-stepper button:first-child::before {
+  border-bottom: 4px solid currentColor;
+}
+
+.model-context-window-stepper button:last-child::before {
+  border-top: 4px solid currentColor;
+}
+
+.model-context-window-stepper button:hover {
+  color: #fff;
+  background: rgba(116, 181, 255, 0.16);
 }
 
 .model-capability-toggle {
@@ -20846,6 +20901,244 @@ select option:checked {
   cursor: not-allowed;
 }
 
+.history-item.is-draggable .history-item-select,
+.history-item.is-draggable .history-item-select * {
+  cursor: pointer;
+}
+
+.history-item.is-checked {
+  background: rgba(183, 162, 255, 0.08);
+}
+
+.history-item.is-dragging-trash,
+.history-project-group.is-dragging-trash {
+  opacity: 0.38;
+}
+
+body.is-history-pressing,
+body.is-history-pressing *,
+body.is-history-trashing,
+body.is-history-trashing * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+body.is-history-trashing {
+  touch-action: none;
+}
+
+.history-trash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 240;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.history-trash-wash {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to bottom, rgba(255, 92, 78, 0.7), rgba(228, 83, 68, 0.22) 36%, transparent) top / 100% 72px no-repeat,
+    linear-gradient(to top, rgba(255, 92, 78, 0.7), rgba(228, 83, 68, 0.22) 36%, transparent) bottom / 100% 72px no-repeat,
+    linear-gradient(to right, rgba(255, 92, 78, 0.7), rgba(228, 83, 68, 0.22) 36%, transparent) left / 72px 100% no-repeat,
+    linear-gradient(to left, rgba(255, 92, 78, 0.7), rgba(228, 83, 68, 0.22) 36%, transparent) right / 72px 100% no-repeat;
+  box-shadow:
+    inset 0 0 28px 6px rgba(255, 80, 64, 0.28),
+    inset 0 0 72px 18px rgba(228, 70, 56, 0.18);
+  animation: history-trash-glow-in 180ms ease-out both;
+}
+
+.history-trash-overlay.is-hot .history-trash-wash {
+  background:
+    linear-gradient(to bottom, rgba(255, 110, 92, 0.86), rgba(255, 72, 56, 0.3) 40%, transparent) top / 100% 88px no-repeat,
+    linear-gradient(to top, rgba(255, 110, 92, 0.86), rgba(255, 72, 56, 0.3) 40%, transparent) bottom / 100% 88px no-repeat,
+    linear-gradient(to right, rgba(255, 110, 92, 0.86), rgba(255, 72, 56, 0.3) 40%, transparent) left / 88px 100% no-repeat,
+    linear-gradient(to left, rgba(255, 110, 92, 0.86), rgba(255, 72, 56, 0.3) 40%, transparent) right / 88px 100% no-repeat;
+  box-shadow:
+    inset 0 0 36px 8px rgba(255, 84, 68, 0.4),
+    inset 0 0 90px 22px rgba(255, 64, 48, 0.24);
+}
+
+.history-trash-drop {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: min(280px, calc(100vw - 48px));
+  padding: 28px 22px 20px;
+  border: 1px solid rgba(255, 146, 132, 0.38);
+  border-radius: 24px;
+  color: #ffd8d2;
+  background: rgba(46, 8, 10, 0.78);
+  box-shadow:
+    0 28px 80px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 90, 72, 0.12) inset;
+  text-align: center;
+  transform: scale(0.94);
+  animation: history-trash-drop-in 220ms cubic-bezier(0.2, 0.85, 0.2, 1) both;
+}
+
+.history-trash-drop.is-hot {
+  transform: scale(1.05);
+  border-color: rgba(255, 186, 176, 0.72);
+  box-shadow:
+    0 0 0 10px rgba(220, 40, 36, 0.16),
+    0 32px 90px rgba(90, 0, 0, 0.5);
+}
+
+.history-trash-drop strong {
+  font-size: 15px;
+  font-weight: 620;
+  color: #fff7f5;
+}
+
+.history-trash-drop > span {
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 214, 208, 0.72);
+}
+
+.history-trash-can {
+  width: 92px;
+  height: 92px;
+  overflow: visible;
+  filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.38));
+}
+
+.history-trash-lid {
+  transform-origin: 22px 22px;
+  fill: #ff8d7c;
+  transition: transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.history-trash-can.is-open .history-trash-lid {
+  transform: rotate(-48deg) translate(-2px, -8px);
+}
+
+.history-trash-body {
+  fill: #e45344;
+  stroke: #ffc8be;
+  stroke-width: 2;
+}
+
+.history-trash-ribs {
+  fill: none;
+  stroke: rgba(72, 12, 12, 0.48);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.history-trash-drop.is-swallowing .history-trash-can {
+  animation: history-trash-gulp 280ms ease-in-out both;
+}
+
+.history-trash-drop.is-swallowing .history-trash-can .history-trash-lid {
+  animation: history-trash-lid-close 160ms 110ms ease-in forwards;
+}
+
+.history-trash-ghost {
+  position: fixed;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 148px;
+  max-width: 228px;
+  padding: 8px 12px 8px 10px;
+  border: 1px solid rgba(255, 168, 156, 0.48);
+  border-radius: 12px;
+  color: #ffe8e4;
+  background: #321416;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.48);
+  transform: translate(-50%, -118%) rotate(-8deg);
+  pointer-events: none;
+}
+
+.history-trash-ghost-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 7px;
+  color: #ffb2a6;
+  background: rgba(255, 110, 96, 0.16);
+}
+
+.history-trash-ghost-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.history-trash-ghost-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.history-trash-ghost-label {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-trash-ghost small {
+  color: rgba(255, 214, 208, 0.7);
+  font-size: 11px;
+}
+
+.history-trash-ghost.is-swallowing {
+  animation: history-trash-swallow 280ms cubic-bezier(0.45, 0, 1, 0.45) forwards;
+}
+
+@keyframes history-trash-glow-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes history-trash-drop-in {
+  from { opacity: 0; transform: scale(0.82) translateY(12px); }
+  to { opacity: 1; transform: scale(0.94) translateY(0); }
+}
+
+@keyframes history-trash-gulp {
+  0% { transform: scale(1); }
+  38% { transform: scale(1.1, 0.88); }
+  72% { transform: scale(0.92, 1.1); }
+  100% { transform: scale(1); }
+}
+
+@keyframes history-trash-lid-close {
+  from { transform: rotate(-48deg) translate(-2px, -8px); }
+  to { transform: rotate(0) translate(0, 0); }
+}
+
+@keyframes history-trash-swallow {
+  0% { transform: translate(-50%, -118%) rotate(-8deg) scale(1); opacity: 1; }
+  58% { transform: translate(-50%, 6%) rotate(12deg) scale(0.34); opacity: 0.9; }
+  100% { transform: translate(-50%, 34%) rotate(18deg) scale(0.06); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history-trash-wash,
+  .history-trash-drop,
+  .history-trash-ghost,
+  .history-trash-can,
+  .history-trash-lid {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .history-trash-ghost.is-swallowing {
+    opacity: 0;
+  }
+}
+
 .history-project-threads .history-item.selected {
   background: rgba(183, 162, 255, 0.12);
   border-color: rgba(202, 183, 255, 0.12);
@@ -24069,6 +24362,68 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   color: #1f5f92 !important;
   background: #dceeff !important;
   border-color: #9dcaf0 !important;
+}
+
+:root[data-theme="light"] .history-item.is-checked {
+  background: #ffe9e6 !important;
+  border-color: #f3c4bf !important;
+}
+
+:root[data-theme="light"] .history-trash-wash {
+  background:
+    linear-gradient(to bottom, rgba(207, 34, 46, 0.42), rgba(207, 34, 46, 0.12) 40%, transparent) top / 100% 72px no-repeat,
+    linear-gradient(to top, rgba(207, 34, 46, 0.42), rgba(207, 34, 46, 0.12) 40%, transparent) bottom / 100% 72px no-repeat,
+    linear-gradient(to right, rgba(207, 34, 46, 0.42), rgba(207, 34, 46, 0.12) 40%, transparent) left / 72px 100% no-repeat,
+    linear-gradient(to left, rgba(207, 34, 46, 0.42), rgba(207, 34, 46, 0.12) 40%, transparent) right / 72px 100% no-repeat;
+  box-shadow:
+    inset 0 0 24px 6px rgba(207, 34, 46, 0.16),
+    inset 0 0 64px 16px rgba(207, 34, 46, 0.1);
+}
+
+:root[data-theme="light"] .history-trash-overlay.is-hot .history-trash-wash {
+  background:
+    linear-gradient(to bottom, rgba(232, 42, 56, 0.52), rgba(207, 34, 46, 0.16) 42%, transparent) top / 100% 88px no-repeat,
+    linear-gradient(to top, rgba(232, 42, 56, 0.52), rgba(207, 34, 46, 0.16) 42%, transparent) bottom / 100% 88px no-repeat,
+    linear-gradient(to right, rgba(232, 42, 56, 0.52), rgba(207, 34, 46, 0.16) 42%, transparent) left / 88px 100% no-repeat,
+    linear-gradient(to left, rgba(232, 42, 56, 0.52), rgba(207, 34, 46, 0.16) 42%, transparent) right / 88px 100% no-repeat;
+  box-shadow:
+    inset 0 0 32px 8px rgba(207, 34, 46, 0.22),
+    inset 0 0 80px 20px rgba(207, 34, 46, 0.14);
+}
+
+:root[data-theme="light"] .history-trash-drop {
+  border-color: rgba(207, 34, 46, 0.28);
+  color: #9b1c23;
+  background: rgba(255, 246, 245, 0.94);
+  box-shadow: 0 24px 64px rgba(120, 24, 24, 0.18);
+}
+
+:root[data-theme="light"] .history-trash-drop strong {
+  color: #82071a;
+}
+
+:root[data-theme="light"] .history-trash-drop > span {
+  color: rgba(130, 24, 28, 0.7);
+}
+
+:root[data-theme="light"] .history-trash-ghost {
+  border-color: rgba(207, 34, 46, 0.28);
+  color: #82071a;
+  background: #fff6f5;
+}
+
+:root[data-theme="light"] .history-trash-ghost small {
+  color: rgba(130, 24, 28, 0.66);
+}
+
+:root[data-theme="light"] .history-item-select {
+  border-color: #c7ddf1;
+  color: #fff;
+}
+
+:root[data-theme="light"] .history-item-select.is-selected {
+  border-color: #0969da;
+  background: #0969da;
 }
 
 /* Terminal tab strip was the remaining black band in the drawer screenshot. */

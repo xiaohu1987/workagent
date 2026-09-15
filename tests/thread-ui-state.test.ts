@@ -55,6 +55,7 @@ import {
   resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
   rewindThreadSnapshotForMessageEdit,
+  mergeMessagesAfterOptimisticUserEdit,
   selectActiveAssistantDraft,
   shouldKeepAssistantDraft,
   shouldKeepTimelineEntryWhenTurnCollapsed,
@@ -64,7 +65,7 @@ import {
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
 import { didTranscriptScrollUpWithoutContentShrink, getSidebarUpdateReminder, isPointerInTranscriptScrollbar, removeQueuedMessageById, shouldFollowLatestAfterTranscriptScroll } from "../apps/desktop/src/renderer/App";
-import { hasRecognizedGitRepository, selectWorkspaceTab } from "../apps/desktop/src/renderer/workspace/right-workspace";
+import { hasRecognizedGitRepository, getDefaultRightWorkspaceTab, isProjectWorkspaceThread, resolveRightWorkspaceTabForMode, selectWorkspaceTab, shouldLoadProjectWorkspaceResource } from "../apps/desktop/src/renderer/workspace/right-workspace";
 import type { MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, ToolCallSummary, UserInputPrompt } from "../packages/shared-types/src";
 
 it("removes a guided queue item without disturbing the remaining queue", () => {
@@ -174,10 +175,18 @@ describe("thread UI state helpers", () => {
     expect(getThreadContentView("thread-2", "thread-2", 3)).toBe("transcript");
   });
 
+  it("leaves the welcome screen as soon as a send or running task starts", () => {
+    expect(getThreadContentView("thread-2", "thread-2", 0, { sending: true })).toBe("transcript");
+    expect(getThreadContentView("thread-2", "thread-2", 0, { threadStatus: "running" })).toBe("transcript");
+    expect(getThreadContentView("thread-2", "thread-2", 0, { threadStatus: "waiting" })).toBe("transcript");
+    expect(getThreadContentView("thread-2", "thread-2", 0, { threadStatus: "idle" })).toBe("welcome");
+  });
+
   it("commits the first selected snapshot without a transition", () => {
     expect(shouldCommitThreadSnapshotImmediately("thread-2", null, "thread-2")).toBe(true);
     expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-1", "thread-2")).toBe(true);
     expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2")).toBe(false);
+    expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2", true)).toBe(true);
     expect(shouldCommitThreadSnapshotImmediately("thread-3", "thread-1", "thread-2")).toBe(false);
   });
 
@@ -296,6 +305,23 @@ describe("thread UI state helpers", () => {
     selectWorkspaceTab("browser", (tab) => selected.push(tab), (tab) => expanded.push(tab));
     expect(selected).toEqual(["browser", "browser"]);
     expect(expanded).toEqual(["browser", "browser"]);
+  });
+
+  it("keeps folder and git workspace resources off for ordinary chats", () => {
+    expect(isProjectWorkspaceThread("chat")).toBe(false);
+    expect(isProjectWorkspaceThread("project")).toBe(true);
+    expect(getDefaultRightWorkspaceTab("chat")).toBe("browser");
+    expect(getDefaultRightWorkspaceTab("project")).toBe("files");
+    expect(resolveRightWorkspaceTabForMode("chat", "files")).toBe("browser");
+    expect(resolveRightWorkspaceTabForMode("chat", "changes")).toBe("browser");
+    expect(resolveRightWorkspaceTabForMode("chat", "browser")).toBe("browser");
+    expect(resolveRightWorkspaceTabForMode("project", "files")).toBe("files");
+    expect(shouldLoadProjectWorkspaceResource("chat", true, "files", "files")).toBe(false);
+    expect(shouldLoadProjectWorkspaceResource("chat", true, "changes", "git")).toBe(false);
+    expect(shouldLoadProjectWorkspaceResource("project", false, "files", "files")).toBe(false);
+    expect(shouldLoadProjectWorkspaceResource("project", true, "files", "files")).toBe(true);
+    expect(shouldLoadProjectWorkspaceResource("project", true, "changes", "git")).toBe(true);
+    expect(shouldLoadProjectWorkspaceResource("project", true, "files", "git")).toBe(false);
   });
 
   it("isolates GPA stages from non-project chats", () => {
@@ -477,6 +503,65 @@ describe("thread UI state helpers", () => {
     expect(rewound.queuedMessages).toEqual([]);
     expect(rewound.contextCompaction).toBeNull();
     expect(rewound.contextMeasurement).toBeNull();
+  });
+
+  it("keeps an edited optimistic bubble when a truncated snapshot refresh arrives first", () => {
+    const prefix: MessageRecord = {
+      id: "user-keep",
+      threadId: "thread-1",
+      turnRunId: "turn-keep",
+      role: "user",
+      content: "keep this turn",
+      metadataJson: null,
+      createdAt: "2026-09-14T01:00:00.000Z"
+    };
+    const optimistic: MessageRecord = {
+      id: "optimistic-edit",
+      threadId: "thread-1",
+      turnRunId: null,
+      role: "user",
+      content: "仙岛湖有什么玩的",
+      metadataJson: null,
+      createdAt: "2026-09-14T01:10:00.000Z"
+    };
+    const staleAssistant: MessageRecord = {
+      id: "assistant-old",
+      threadId: "thread-1",
+      turnRunId: "turn-edit",
+      role: "assistant",
+      content: "旧回复",
+      metadataJson: null,
+      createdAt: "2026-09-14T01:05:00.000Z"
+    };
+
+    expect(mergeMessagesAfterOptimisticUserEdit(
+      [prefix, optimistic],
+      [prefix],
+      [optimistic]
+    )).toEqual([prefix, optimistic]);
+
+    expect(mergeMessagesAfterOptimisticUserEdit(
+      [prefix, optimistic],
+      [prefix, { ...prefix, id: "user-old-edit", content: optimistic.content, createdAt: "2026-09-14T01:04:00.000Z" }, staleAssistant],
+      [optimistic]
+    )).toEqual([prefix, optimistic]);
+
+    const persisted: MessageRecord = {
+      ...optimistic,
+      id: "persisted-edit",
+      createdAt: "2026-09-14T01:10:00.200Z"
+    };
+    expect(mergeMessagesAfterOptimisticUserEdit(
+      [prefix, optimistic],
+      [prefix, persisted],
+      [optimistic]
+    )).toEqual([prefix, persisted]);
+
+    expect(mergeMessagesAfterOptimisticUserEdit(
+      [optimistic],
+      [],
+      [optimistic]
+    )).toEqual([optimistic]);
   });
 
   it("hides incomplete agent decision JSON from the chat transcript", () => {

@@ -26,6 +26,20 @@ export const OPENAI_API_FORMAT_OPTIONS: Array<{ value: ApiFormat; label: string 
   { value: "openai_chat", label: "Chat Completions" }
 ];
 
+export const MODEL_CONTEXT_WINDOW_STEP = 128_000;
+export const MODEL_CONTEXT_WINDOW_MIN = 1_024;
+
+export function parseModelContextWindowInput(raw: string, fallback = MODEL_CONTEXT_WINDOW_STEP): number {
+  const next = Math.floor(Number(raw));
+  if (!Number.isFinite(next) || next <= 0) return fallback;
+  return Math.max(MODEL_CONTEXT_WINDOW_MIN, next);
+}
+
+export function stepModelContextWindow(current: number, direction: 1 | -1): number {
+  const base = Number.isFinite(current) && current > 0 ? Math.floor(current) : MODEL_CONTEXT_WINDOW_STEP;
+  return Math.max(MODEL_CONTEXT_WINDOW_STEP, base + direction * MODEL_CONTEXT_WINDOW_STEP);
+}
+
 export function providerTemplatePatch(template: ProviderTemplate): Partial<ProviderDefinition> {
   switch (template) {
     case "deepseek":

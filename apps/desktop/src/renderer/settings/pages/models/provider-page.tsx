@@ -2,7 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { isGptFamilyModel } from "@shared-types";
 import type { AppConfig, ModelProfile, ProviderDefinition, ProviderTemplate } from "@shared-types";
 import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../../../../packages/provider-adapters/src/models/media-protocol";
-import { OPENAI_API_FORMAT_OPTIONS, PROVIDER_TEMPLATE_OPTIONS, getModelProfileKey, getProviderDisplayName, hasProviderTestEndpoint, hasStoredSecret } from "../../../lib/config-utils";
+import { MODEL_CONTEXT_WINDOW_MIN, MODEL_CONTEXT_WINDOW_STEP, OPENAI_API_FORMAT_OPTIONS, PROVIDER_TEMPLATE_OPTIONS, getModelProfileKey, getProviderDisplayName, hasProviderTestEndpoint, hasStoredSecret, parseModelContextWindowInput, stepModelContextWindow } from "../../../lib/config-utils";
 import { ComposerSelect } from "../../../workspace/composer-select";
 import { IconCheck, IconClose, IconPlus } from "../../../icons";
 import type { ModelTestResult } from "../../../core/app-types";
@@ -272,17 +272,51 @@ export function ProviderSettingsPage({ configDraft, config, settingsProvider, se
                             </div>
                             <div className="provider-model-actions">
                               {!isMediaModel ? (
-                              <label className="model-context-window-field" title="模型上下文窗口，单位为 tokens">
+                              <label className="model-context-window-field" title="模型上下文窗口，单位为 tokens。点击加减按 128K 叠加，也可手动输入任意值。">
                                 <span>上下文</span>
-                                <input
-                                  type="number"
-                                  min={1_024}
-                                  step={1_024}
-                                  value={model.contextWindow}
-                                  onChange={(event) => onUpdateModel(settingsProvider.id, model.id, {
-                                    contextWindow: Math.max(1_024, Math.floor(Number(event.target.value) || 128_000))
-                                  })}
-                                />
+                                <span className="model-context-window-control">
+                                  <input
+                                    type="number"
+                                    min={MODEL_CONTEXT_WINDOW_MIN}
+                                    step={MODEL_CONTEXT_WINDOW_STEP}
+                                    value={model.contextWindow}
+                                    onChange={(event) => onUpdateModel(settingsProvider.id, model.id, {
+                                      contextWindow: parseModelContextWindowInput(event.target.value)
+                                    })}
+                                    onKeyDown={(event) => {
+                                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                                      event.preventDefault();
+                                      onUpdateModel(settingsProvider.id, model.id, {
+                                        contextWindow: stepModelContextWindow(model.contextWindow, event.key === "ArrowUp" ? 1 : -1)
+                                      });
+                                    }}
+                                    onWheel={(event) => {
+                                      if (document.activeElement !== event.currentTarget) return;
+                                      event.preventDefault();
+                                      onUpdateModel(settingsProvider.id, model.id, {
+                                        contextWindow: stepModelContextWindow(model.contextWindow, event.deltaY < 0 ? 1 : -1)
+                                      });
+                                    }}
+                                  />
+                                  <span className="model-context-window-stepper">
+                                    <button
+                                      type="button"
+                                      tabIndex={-1}
+                                      aria-label="增加 128K 上下文"
+                                      onClick={() => onUpdateModel(settingsProvider.id, model.id, {
+                                        contextWindow: stepModelContextWindow(model.contextWindow, 1)
+                                      })}
+                                    />
+                                    <button
+                                      type="button"
+                                      tabIndex={-1}
+                                      aria-label="减少 128K 上下文"
+                                      onClick={() => onUpdateModel(settingsProvider.id, model.id, {
+                                        contextWindow: stepModelContextWindow(model.contextWindow, -1)
+                                      })}
+                                    />
+                                  </span>
+                                </span>
                               </label>
                               ) : null}
                               <label className="model-capability-toggle" title="启用后，此模型可以接收文件、文件夹和图片附件。">

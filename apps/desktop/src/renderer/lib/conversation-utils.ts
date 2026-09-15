@@ -1936,6 +1936,55 @@ export function reconcilePendingUserMessagesDetailed(
   return { remaining, consumedIds };
 }
 
+export function mergeMessagesAfterOptimisticUserEdit(
+  currentMessages: MessageRecord[],
+  incomingMessages: MessageRecord[],
+  pending: MessageRecord[]
+): MessageRecord[] {
+  const optimisticById = new Map<string, MessageRecord>();
+  for (const message of pending) {
+    if (message.role === "user") {
+      optimisticById.set(message.id, message);
+    }
+  }
+  for (const message of currentMessages) {
+    if (message.role === "user" && message.id.startsWith("optimistic-")) {
+      optimisticById.set(message.id, message);
+    }
+  }
+  const optimistic = [...optimisticById.values()];
+  if (optimistic.length === 0) {
+    return incomingMessages;
+  }
+
+  const optimisticIds = new Set(optimistic.map((message) => message.id));
+  const rewindIndex = currentMessages.findIndex((message) => optimisticIds.has(message.id));
+  const prefix = rewindIndex >= 0
+    ? currentMessages.slice(0, rewindIndex)
+    : currentMessages.filter((message) => !optimisticIds.has(message.id));
+  const prefixIds = new Set(prefix.map((message) => message.id));
+  const oldestOptimisticAt = optimistic.reduce((earliest, message) => {
+    const timestamp = Date.parse(message.createdAt);
+    return Number.isFinite(timestamp) && timestamp < earliest ? timestamp : earliest;
+  }, Number.POSITIVE_INFINITY);
+
+  const incomingSuffix = incomingMessages.filter((message) => {
+    if (prefixIds.has(message.id) || optimisticIds.has(message.id)) {
+      return false;
+    }
+    const createdAt = Date.parse(message.createdAt);
+    return Number.isFinite(createdAt)
+      && Number.isFinite(oldestOptimisticAt)
+      && createdAt >= oldestOptimisticAt - 1_000;
+  });
+  const remaining = reconcilePendingUserMessages(optimistic, incomingSuffix);
+  return mergeSnapshotRecords(
+    [...prefix, ...remaining],
+    incomingSuffix,
+    (message) => message.createdAt
+  );
+}
+
 export function replaceConversationMessagesFromEdit(
   messages: MessageRecord[],
   messageId: string,

@@ -19,6 +19,23 @@ type VirtualizedTimelineProps<T> = {
 
 type VisibleRange = { start: number; end: number };
 
+export function clampVirtualizedRange(range: VisibleRange, itemCount: number): VisibleRange {
+  if (itemCount <= 0) {
+    return { start: 0, end: 0 };
+  }
+  if (range.start < itemCount) {
+    return {
+      start: Math.max(0, range.start),
+      end: Math.max(Math.min(range.end, itemCount), Math.min(range.start + 1, itemCount))
+    };
+  }
+  const windowSize = Math.max(1, range.end - range.start);
+  return {
+    start: Math.max(0, itemCount - windowSize),
+    end: itemCount
+  };
+}
+
 export function resolveVirtualizedRange(
   offsets: number[],
   sizes: number[],
@@ -236,11 +253,12 @@ export function VirtualizedTimeline<T>({
     return <>{items.map((item, index) => renderItem(item, index))}</>;
   }
 
-  const visibleItems = items.slice(range.start, range.end);
+  const visibleRange = clampVirtualizedRange(range, items.length);
+  const visibleItems = items.slice(visibleRange.start, visibleRange.end);
   return (
     <div ref={containerRef} className="virtual-timeline" style={{ height: `${layout.totalSize}px` }}>
       {getAnchorId ? items.map((item, index) => {
-        if (index >= range.start && index < range.end) return null;
+        if (index >= visibleRange.start && index < visibleRange.end) return null;
         const anchorId = getAnchorId(item);
         return anchorId ? (
           <span
@@ -252,7 +270,7 @@ export function VirtualizedTimeline<T>({
         ) : null;
       }) : null}
       {visibleItems.map((item, visibleIndex) => {
-        const index = range.start + visibleIndex;
+        const index = visibleRange.start + visibleIndex;
         const key = getKey(item);
         const style = { transform: `translateY(${layout.offsets[index]}px)` } as CSSProperties;
         return (
