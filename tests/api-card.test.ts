@@ -6,8 +6,11 @@ import {
   createInitialValues,
   formatApiResponseBody,
   parseApiCardConfig,
+  parseApiCardValuesJson,
+  serializeApiCardValuesToJson,
   substituteTemplate,
-  type ApiCardConfig
+  type ApiCardConfig,
+  type ApiCardField
 } from "../apps/desktop/src/renderer/cards/api-card";
 import { parseMarkdownBlocks } from "../apps/desktop/src/renderer/markdown";
 
@@ -209,6 +212,141 @@ describe("createInitialValues", () => {
       flag: true,
       tags: [],
       kv: []
+    });
+  });
+});
+
+describe("入参 JSON 模式", () => {
+  const fields: ApiCardField[] = [
+    { name: "name", label: "名称", type: "text" },
+    { name: "count", label: "数量", type: "number" },
+    { name: "enabled", label: "启用", type: "switch" },
+    { name: "tags", label: "标签", type: "checkbox", options: [{ label: "A", value: "a" }] },
+    { name: "attrs", label: "属性", type: "keyvalue" },
+    { name: "extra", label: "扩展", type: "json" }
+  ];
+
+  it("把控件取值序列化成可编辑的入参 JSON", () => {
+    const text = serializeApiCardValuesToJson(fields, {
+      name: "报表",
+      count: "3",
+      enabled: true,
+      tags: ["a", "b"],
+      attrs: [{ key: "color", value: "red" }],
+      extra: '{"nested":true}'
+    });
+    expect(JSON.parse(text)).toEqual({
+      name: "报表",
+      count: 3,
+      enabled: true,
+      tags: ["a", "b"],
+      attrs: { color: "red" },
+      extra: { nested: true }
+    });
+  });
+
+  it("解析 JSON 入参并按字段类型回填", () => {
+    const parsed = parseApiCardValuesJson(JSON.stringify({
+      name: "报表",
+      count: 3,
+      enabled: true,
+      tags: ["a", "b"],
+      attrs: { color: "red" },
+      extra: { nested: true }
+    }), fields);
+    expect(parsed).toEqual({
+      ok: true,
+      unknownKeys: [],
+      values: {
+        name: "报表",
+        count: "3",
+        enabled: true,
+        tags: ["a", "b"],
+        attrs: [{ key: "color", value: "red" }],
+        extra: '{\n  "nested": true\n}'
+      }
+    });
+  });
+
+  it("解析后的取值可直接驱动请求构建", () => {
+    const config: ApiCardConfig = {
+      title: "创建",
+      method: "POST",
+      url: "https://api.example.com/items",
+      bodyTemplate:
+        '{ "name": "{{name}}", "count": {{count}}, "enabled": {{enabled}}, "tags": {{tags}}, "attrs": {{attrs}} }',
+      fields
+    };
+    const parsed = parseApiCardValuesJson(JSON.stringify({
+      name: "报表",
+      count: 3,
+      enabled: true,
+      tags: ["a"],
+      attrs: { color: "red" },
+      extra: { n: 1 }
+    }), fields);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const built = buildApiRequest(config, parsed.values, "");
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    expect(JSON.parse(built.request.body ?? "")).toEqual({
+      name: "报表",
+      count: 3,
+      enabled: true,
+      tags: ["a"],
+      attrs: { color: "red" }
+    });
+  });
+
+  it("序列化与解析往返后取值保持不变", () => {
+    const values = createInitialValues({ title: "t", method: "GET", url: "https://a.com", fields });
+    const parsed = parseApiCardValuesJson(serializeApiCardValuesToJson(fields, values), fields);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.values).toEqual(values);
+  });
+
+  it("拒绝非法 JSON、非对象与危险键", () => {
+    expect(parseApiCardValuesJson("{ not json", fields)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("JSON")
+    });
+    expect(parseApiCardValuesJson("[1,2]", fields)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("对象")
+    });
+    expect(parseApiCardValuesJson('{"__proto__": {"x": 1}}', fields)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("__proto__")
+    });
+  });
+
+  it("把未定义的键单独收集而不是静默并入取值", () => {
+    expect(parseApiCardValuesJson('{"name":"a","ghost":1}', fields)).toEqual({
+      ok: true,
+      values: { name: "a" },
+      unknownKeys: ["ghost"]
+    });
+  });
+
+  it("空白文本视为没有填写任何入参", () => {
+    expect(parseApiCardValuesJson("   ", fields)).toEqual({ ok: true, values: {}, unknownKeys: [] });
+  });
+
+  it("缺失的必填字段在 JSON 模式下依然被拦下", () => {
+    const required: ApiCardField[] = [{ name: "userId", label: "用户 ID", type: "text", required: true }];
+    const parsed = parseApiCardValuesJson('{"other":"1"}', required);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(buildApiRequest({
+      title: "t",
+      method: "GET",
+      url: "https://a.com/{{userId}}",
+      fields: required
+    }, parsed.values, "")).toMatchObject({
+      ok: false,
+      fieldErrors: { userId: expect.stringContaining("用户 ID") }
     });
   });
 });

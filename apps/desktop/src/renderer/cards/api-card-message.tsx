@@ -4,9 +4,12 @@ import {
   createInitialValues,
   formatApiResponseBody,
   parseApiCardConfig,
+  parseApiCardValuesJson,
   resolveApiCardDownloadFileName,
+  serializeApiCardValuesToJson,
   type ApiCardConfig,
   type ApiCardField,
+  type ApiCardInputMode,
   type ApiCardValues,
   type FormattedApiResponse,
   type KeyValuePairValue
@@ -224,16 +227,28 @@ export function ApiCardMessage({
   const [result, setResult] = useState<ApiCardResult | null>(null);
   const [url, setUrl] = useState(config?.url ?? "");
   const [collapsed, setCollapsed] = useState(initialCollapsed);
+  /** 入参填写模式:控件模式(默认) / JSON 模式 */
+  const [inputMode, setInputMode] = useState<ApiCardInputMode>("controls");
+  const [jsonText, setJsonText] = useState(() =>
+    config ? serializeApiCardValuesToJson(config.fields, createInitialValues(config)) : ""
+  );
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const [jsonUnknownKeys, setJsonUnknownKeys] = useState<string[]>([]);
   const favorited = useIsApiCardFavorited(config);
 
   useEffect(() => {
     if (!config) return;
-    setValues(createInitialValues(config));
+    const initialValues = createInitialValues(config);
+    setValues(initialValues);
     setUrl(config.url);
     setAuthToken("");
     setFieldErrors({});
     setGlobalError(null);
     setResult(null);
+    setInputMode("controls");
+    setJsonText(serializeApiCardValuesToJson(config.fields, initialValues));
+    setJsonError(null);
+    setJsonUnknownKeys([]);
   }, [config]);
 
   useEffect(() => {
@@ -267,11 +282,42 @@ export function ApiCardMessage({
 
   const handleReset = () => {
     if (loading) return;
-    setValues(createInitialValues(config));
+    const initialValues = createInitialValues(config);
+    setValues(initialValues);
     setUrl(config.url);
     setFieldErrors({});
     setGlobalError(null);
     setResult(null);
+    setJsonText(serializeApiCardValuesToJson(config.fields, initialValues));
+    setJsonError(null);
+    setJsonUnknownKeys([]);
+  };
+
+  /**
+   * 切换入参填写模式。
+   * JSON → 控件时先校验,JSON 非法则保持原模式并提示,避免丢失已填内容;
+   * 校验通过后整体以 JSON 为准回填(与提交时的口径一致,JSON 里删掉的字段在控件里同样为空)。
+   */
+  const switchInputMode = (next: ApiCardInputMode) => {
+    if (next === inputMode || loading) return;
+    if (next === "json") {
+      setJsonText(serializeApiCardValuesToJson(config.fields, values));
+      setJsonError(null);
+      setJsonUnknownKeys([]);
+      setFieldErrors({});
+      setInputMode("json");
+      return;
+    }
+    const parsedJson = parseApiCardValuesJson(jsonText, config.fields);
+    if (!parsedJson.ok) {
+      setJsonError(`${parsedJson.error} 修正后才能切回控件模式。`);
+      return;
+    }
+    setValues(parsedJson.values);
+    setJsonError(null);
+    setJsonUnknownKeys([]);
+    setFieldErrors({});
+    setInputMode("controls");
   };
 
   const handleSubmit = async () => {
@@ -281,7 +327,19 @@ export function ApiCardMessage({
       setGlobalError("无法确定当前任务，不能保存接口返回文件。");
       return;
     }
-    const built = buildApiRequest({ ...config, url }, values, authToken);
+    let requestValues = values;
+    if (inputMode === "json") {
+      const parsedJson = parseApiCardValuesJson(jsonText, config.fields);
+      if (!parsedJson.ok) {
+        setJsonError(parsedJson.error);
+        return;
+      }
+      setJsonError(null);
+      setJsonUnknownKeys(parsedJson.unknownKeys);
+      requestValues = parsedJson.values;
+      setValues(parsedJson.values);
+    }
+    const built = buildApiRequest({ ...config, url }, requestValues, authToken);
     if (!built.ok) {
       setFieldErrors(built.fieldErrors);
       setGlobalError(built.error ?? null);
@@ -293,7 +351,7 @@ export function ApiCardMessage({
       const response = await window.codexh.requestHttp({
         threadId,
         ...built.request,
-        downloadFileName: resolveApiCardDownloadFileName(config, values)
+        downloadFileName: resolveApiCardDownloadFileName(config, requestValues)
       });
       if (!response.ok) {
         setResult(null);
@@ -317,6 +375,11 @@ export function ApiCardMessage({
       setLoading(false);
     }
   };
+
+  /** JSON 模式下把字段级校验错误集中回显(授权 Token 错误仍由上方授权区展示) */
+  const inputFieldErrors = Object.entries(fieldErrors)
+    .filter(([name]) => name !== "__auth")
+    .map(([name, message]) => ({ name, message }));
 
   return (
     <div className={`api-card${collapsed ? " is-collapsed" : ""}`}>
@@ -409,18 +472,76 @@ export function ApiCardMessage({
               />
             </div>
           ) : null}
-          <div className="api-card-fields">
-            {config.fields.map((field) => (
-              <ApiCardFieldControl
-                key={field.name}
-                field={field}
-                values={values}
-                error={fieldErrors[field.name] ?? null}
-                disabled={loading}
-                onValueChange={handleValueChange}
-              />
-            ))}
-          </div>
+          {config.fields.length > 0 ? (
+            <div className="api-card-input">
+              <div className="api-card-input-head">
+                <span className="api-card-input-title">入参</span>
+                <div className="api-card-mode-switch" role="group" aria-label="入参填写模式">
+                  <button
+                    type="button"
+                    className={`api-card-mode-option${inputMode === "controls" ? " is-active" : ""}`}
+                    aria-pressed={inputMode === "controls"}
+                    disabled={loading}
+                    onClick={() => switchInputMode("controls")}
+                  >
+                    控件模式
+                  </button>
+                  <button
+                    type="button"
+                    className={`api-card-mode-option${inputMode === "json" ? " is-active" : ""}`}
+                    aria-pressed={inputMode === "json"}
+                    disabled={loading}
+                    onClick={() => switchInputMode("json")}
+                  >
+                    JSON 模式
+                  </button>
+                </div>
+              </div>
+              {inputMode === "controls" ? (
+                <div className="api-card-fields">
+                  {config.fields.map((field) => (
+                    <ApiCardFieldControl
+                      key={field.name}
+                      field={field}
+                      values={values}
+                      error={fieldErrors[field.name] ?? null}
+                      disabled={loading}
+                      onValueChange={handleValueChange}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="api-card-json-input">
+                  <TextArea
+                    label="入参 JSON"
+                    mono
+                    rows={8}
+                    value={jsonText}
+                    placeholder={'{\n  "字段名": "值"\n}'}
+                    disabled={loading}
+                    error={jsonError}
+                    help="键名即卡片字段名，与控件模式共用同一份取值，切换模式时自动同步。"
+                    onChange={(value) => {
+                      setJsonText(value);
+                      setJsonError(null);
+                    }}
+                  />
+                  {jsonUnknownKeys.length > 0 ? (
+                    <div className="api-card-json-hint" role="status">
+                      以下键未在卡片字段中定义，不会参与本次调用：{jsonUnknownKeys.join("、")}
+                    </div>
+                  ) : null}
+                  {inputFieldErrors.length > 0 ? (
+                    <ul className="api-card-json-errors">
+                      {inputFieldErrors.map((item) => (
+                        <li key={item.name}>{item.message}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          ) : null}
           <div className="api-card-actions">
             <button type="button" className="api-card-button is-ghost" disabled={loading} onClick={handleReset}>
               重置

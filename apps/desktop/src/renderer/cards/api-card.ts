@@ -314,6 +314,146 @@ export function createInitialValues(config: ApiCardConfig): ApiCardValues {
   return values;
 }
 
+/** 入参填写模式:控件模式(默认,表单控件) / JSON 模式(整块 JSON 对象) */
+export type ApiCardInputMode = "controls" | "json";
+
+export type ParsedApiCardValuesJson =
+  | { ok: true; values: ApiCardValues; unknownKeys: string[] }
+  | { ok: false; error: string };
+
+function stringifyScalarText(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+/** 控件取值 → JSON 原生值:switch 转 boolean、checkbox 转数组、keyvalue 转对象、json/number 尝试解析。 */
+function apiCardValueToJsonValue(field: ApiCardField, value: ApiCardFieldValue | undefined): unknown {
+  switch (field.type) {
+    case "switch":
+      return value === true;
+    case "checkbox":
+      return Array.isArray(value) ? (value as string[]) : [];
+    case "keyvalue":
+      return keyValuePairsToObject(Array.isArray(value) ? (value as KeyValuePairValue[]) : []);
+    case "json": {
+      const text = stringifyScalarText(value).trim();
+      if (text === "") return null;
+      try {
+        return JSON.parse(text);
+      } catch {
+        return value;
+      }
+    }
+    case "number": {
+      const text = stringifyScalarText(value).trim();
+      if (text === "") return null;
+      const parsed = Number(text);
+      return Number.isNaN(parsed) ? text : parsed;
+    }
+    default:
+      return stringifyScalarText(value);
+  }
+}
+
+/** 把控件取值整理成可直接编辑/展示的入参 JSON 对象(仅包含已声明的字段)。 */
+export function apiCardValuesToJsonObject(
+  fields: ApiCardField[],
+  values: ApiCardValues
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const field of fields) {
+    const value = values[field.name];
+    if (value === undefined) continue;
+    result[field.name] = apiCardValueToJsonValue(field, value);
+  }
+  return result;
+}
+
+export function serializeApiCardValuesToJson(fields: ApiCardField[], values: ApiCardValues): string {
+  return JSON.stringify(apiCardValuesToJsonObject(fields, values), null, 2);
+}
+
+/** JSON 原生值 → 控件取值:按字段类型回填,保证 buildApiRequest 的类型化替换仍然生效。 */
+function jsonValueToApiCardValue(field: ApiCardField, raw: unknown): ApiCardFieldValue {
+  switch (field.type) {
+    case "switch":
+      if (typeof raw === "boolean") return raw;
+      if (typeof raw === "number") return raw !== 0;
+      if (typeof raw === "string") return raw.trim().toLowerCase() === "true";
+      return false;
+    case "checkbox":
+      if (Array.isArray(raw)) {
+        return raw.map((item) => (typeof item === "string" ? item : stringifyScalarText(item)));
+      }
+      if (typeof raw === "string") {
+        return raw.trim() === ""
+          ? []
+          : raw.split(",").map((item) => item.trim()).filter((item) => item !== "");
+      }
+      if (raw === undefined || raw === null) return [];
+      return [stringifyScalarText(raw)];
+    case "keyvalue": {
+      if (Array.isArray(raw)) {
+        return raw
+          .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+          .map((item) => {
+            const record = item as Record<string, unknown>;
+            return { key: stringifyScalarText(record.key), value: stringifyScalarText(record.value) };
+          });
+      }
+      if (raw && typeof raw === "object") {
+        return Object.entries(raw as Record<string, unknown>).map(([key, item]) => ({
+          key,
+          value: stringifyScalarText(item)
+        }));
+      }
+      return [];
+    }
+    case "json":
+      if (typeof raw === "string") return raw;
+      if (raw === undefined || raw === null) return "";
+      return JSON.stringify(raw, null, 2);
+    default:
+      return stringifyScalarText(raw);
+  }
+}
+
+/**
+ * 解析 JSON 模式下的入参文本。
+ * 键名必须与卡片 fields 对应,未声明的键会被收集到 unknownKeys(不参与请求,仅提示)。
+ */
+export function parseApiCardValuesJson(text: string, fields: ApiCardField[]): ParsedApiCardValuesJson {
+  const trimmed = text.trim();
+  if (trimmed === "") return { ok: true, values: {}, unknownKeys: [] };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (error) {
+    return { ok: false, error: `JSON 格式无效:${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, error: "入参 JSON 必须是一个对象(以 { 开头)。" };
+  }
+  const forbiddenKey = findForbiddenKey(parsed);
+  if (forbiddenKey) return { ok: false, error: `入参包含不允许的键:${forbiddenKey}。` };
+
+  const fieldByName = new Map(fields.map((field) => [field.name, field]));
+  const values: ApiCardValues = {};
+  const unknownKeys: string[] = [];
+  for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
+    const field = fieldByName.get(key);
+    if (!field) {
+      unknownKeys.push(key);
+      continue;
+    }
+    values[key] = jsonValueToApiCardValue(field, raw);
+  }
+  return { ok: true, values, unknownKeys };
+}
+
 function isEmptyValue(field: ApiCardField, value: ApiCardFieldValue | undefined): boolean {
   if (value === undefined || value === null) return true;
   if (typeof value === "string") return value.trim() === "";
