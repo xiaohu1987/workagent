@@ -64,15 +64,27 @@ export interface SandboxDecision {
 
 export interface EffectiveSandbox {
   mode: SandboxMode;
+  networkAccess: boolean;
   skipInWorkspaceApprovals: boolean;
 }
 
 export function resolveEffectiveSandbox(input: {
   threadMode: "project" | "chat";
   sandboxMode: SandboxMode;
+  sandboxNetworkAccess: boolean;
   gpaFullAccess: boolean;
   chatTurnWantsDeliverable: boolean;
 }): EffectiveSandbox {
+  // Match Codex's Full access preset: the user's explicit choice controls the
+  // whole turn and must not depend on natural-language deliverable detection.
+  if (input.gpaFullAccess) {
+    return {
+      mode: "full-access",
+      networkAccess: true,
+      skipInWorkspaceApprovals: true
+    };
+  }
+
   let mode: SandboxMode = input.sandboxMode;
   if (input.sandboxMode !== "full-access") {
     if (input.threadMode === "project" || input.chatTurnWantsDeliverable) {
@@ -81,13 +93,14 @@ export function resolveEffectiveSandbox(input: {
   }
   return {
     mode,
-    skipInWorkspaceApprovals: input.gpaFullAccess && mode !== "read-only"
+    networkAccess: input.sandboxNetworkAccess,
+    skipInWorkspaceApprovals: false
   };
 }
 
 export function buildSandboxSystemPrompt(mode: SandboxMode, networkAccess: boolean): string {
   const networkLine = networkAccess
-    ? "Outbound shell commands are allowed when the user approves them."
+    ? "Outbound shell commands are allowed by the current access policy."
     : "Outbound shell commands (curl, wget, ssh, npm install/publish, and similar) are blocked until Settings enables sandbox network access. Do not retry the same networked command.";
   const modeLine = mode === "read-only"
     ? "Sandbox is read-only: you may read the workspace and attached files. Do not write, patch, or delete files. Shell commands require user approval."

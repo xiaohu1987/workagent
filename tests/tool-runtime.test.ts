@@ -1127,6 +1127,64 @@ describe("ToolRuntime", () => {
     expect(runTerminalCommand).not.toHaveBeenCalled();
   });
 
+  it("runs outbound shell without routine approval under full access", async () => {
+    const requestApproval = vi.fn().mockResolvedValue(false);
+    const runTerminalCommand = vi.fn().mockResolvedValue({
+      command: "curl https://example.com",
+      cwd: process.cwd(),
+      shell: "powershell",
+      exitCode: 0,
+      output: "ok",
+      stdout: "ok",
+      stderr: "",
+      timedOut: false,
+      durationMs: 1
+    });
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "curl-full-access", name: "shell.exec", arguments: { command: "curl https://example.com" } },
+      {
+        cwd: process.cwd(),
+        requestApproval,
+        runTerminalCommand,
+        sandbox: {
+          mode: "full-access",
+          networkAccess: true,
+          skipInWorkspaceApprovals: true,
+          appHome: defaultAppHome()
+        }
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(true);
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(runTerminalCommand).toHaveBeenCalledOnce();
+  });
+
+  it("keeps destructive shell approval under full access", async () => {
+    const requestApproval = vi.fn().mockResolvedValue(false);
+    const runTerminalCommand = vi.fn();
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "delete-full-access", name: "shell.exec", arguments: { command: "rm -rf dist" } },
+      {
+        cwd: process.cwd(),
+        requestApproval,
+        runTerminalCommand,
+        sandbox: {
+          mode: "full-access",
+          networkAccess: true,
+          skipInWorkspaceApprovals: true,
+          appHome: defaultAppHome()
+        }
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(false);
+    expect(requestApproval).toHaveBeenCalledWith(expect.objectContaining({ forcePrompt: true }));
+    expect(runTerminalCommand).not.toHaveBeenCalled();
+  });
+
   it("accepts a model's patch_content Git diff when it adds one file", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-tool-runtime-"));
     const runtime = new ToolRuntime();

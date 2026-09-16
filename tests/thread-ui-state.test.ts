@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   canDeleteThread,
+  clearThreadSettingWrite,
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
   getHistoryItemAffordance,
   getThreadContentView,
   invalidateThreadSnapshotForFullRefresh,
+  invalidateThreadSnapshotForRuntimeCompletion,
   isThreadExecutionInProgress,
   mergeDurableGpaFlags,
   normalizeGpaStateForThread,
@@ -15,11 +17,14 @@ import {
   shouldPreservePreparingRuntime,
   shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
+  shouldForceFullSnapshotForRuntimeCompletion,
   shouldInvalidateSnapshotForThreadUpdate,
   upsertSubagentIntoSnapshot,
   mergeSnapshotSubagents,
   shouldShowTaskProcessing,
-  prunePersistedRuntimeMessageMap
+  prunePersistedRuntimeMessageMap,
+  queueThreadSettingWrite,
+  waitForPendingThreadSettingWrites
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
 import {
   buildTimelineEntries,
@@ -65,7 +70,7 @@ import {
   upsertRuntimeToolCallSummary
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
-import { didTranscriptScrollUpWithoutContentShrink, getSidebarUpdateReminder, isPointerInTranscriptScrollbar, removeQueuedMessageById, shouldFollowLatestAfterTranscriptScroll } from "../apps/desktop/src/renderer/App";
+import { didTranscriptScrollUpWithoutContentShrink, getSidebarUpdateReminder, isPointerInTranscriptScrollbar, removeQueuedMessageById, shouldFollowLatestAfterTranscriptContentChange, shouldFollowLatestAfterTranscriptScroll } from "../apps/desktop/src/renderer/App";
 import { hasRecognizedGitRepository, getDefaultRightWorkspaceTab, isProjectWorkspaceThread, resolveRightWorkspaceTabForMode, selectWorkspaceTab, shouldLoadProjectWorkspaceResource } from "../apps/desktop/src/renderer/workspace/right-workspace";
 import type { MessageRecord, RuntimeThreadSnapshot, ThreadRecord, ToolCallRecord, ToolCallSummary, UserInputPrompt } from "../packages/shared-types/src";
 
@@ -95,6 +100,9 @@ it("does not re-enable transcript auto-scroll during a manual drag near the bott
   )).toBe(false);
   expect(isPointerInTranscriptScrollbar(995, 1_000, 1_000, 988)).toBe(true);
   expect(isPointerInTranscriptScrollbar(970, 1_000, 1_000, 988)).toBe(false);
+  expect(shouldFollowLatestAfterTranscriptContentChange(false, true, false)).toBe(true);
+  expect(shouldFollowLatestAfterTranscriptContentChange(false, true, true)).toBe(false);
+  expect(shouldFollowLatestAfterTranscriptContentChange(true, false, true)).toBe(true);
 });
 
 function makeToolCall(overrides: Partial<ToolCallRecord> = {}): ToolCallRecord {
@@ -411,6 +419,37 @@ describe("thread UI state helpers", () => {
     expect(mergeDurableGpaFlags(state, { fullAccess: false, knowledgeEnabled: false })).toBe(state);
   });
 
+  it("waits for the latest queued full-access write before sending", async () => {
+    const pending = new Map<string, Promise<void>>();
+    const completed: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = queueThreadSettingWrite(pending, "thread-1", async () => {
+      await firstGate;
+      completed.push("enabled");
+    });
+    const second = queueThreadSettingWrite(pending, "thread-1", async () => {
+      completed.push("disabled");
+    });
+    const waiting = waitForPendingThreadSettingWrites(pending, "thread-1").then(() => {
+      completed.push("sent");
+    });
+
+    await Promise.resolve();
+    expect(completed).toEqual([]);
+    releaseFirst?.();
+    await Promise.all([first, second, waiting]);
+    expect(completed).toEqual(["enabled", "disabled", "sent"]);
+
+    clearThreadSettingWrite(pending, "thread-1", first);
+    expect(pending.get("thread-1")).toBe(second);
+    clearThreadSettingWrite(pending, "thread-1", second);
+    expect(pending.has("thread-1")).toBe(false);
+  });
+
   it("keeps a completed task's full-access preference in the matching snapshot", () => {
     const snapshot = {
       ...createOptimisticThreadSnapshot(makeThread({ mode: "project" })),
@@ -471,6 +510,85 @@ describe("thread UI state helpers", () => {
     }, { preserveRuntimeMessages: true });
 
     expect(runtimeMessagesByThread).toEqual({ "thread-1": ["new-message"] });
+  });
+
+  it("forces an authoritative snapshot after assistant or parent-thread completion", () => {
+    expect(shouldForceFullSnapshotForRuntimeCompletion({
+      type: "assistant.completed",
+      threadId: "thread-1",
+      payload: {}
+    })).toBe(true);
+    expect(shouldForceFullSnapshotForRuntimeCompletion({
+      type: "assistant.completed",
+      threadId: "thread-1",
+      payload: { discarded: true }
+    })).toBe(false);
+    expect(shouldForceFullSnapshotForRuntimeCompletion({
+      type: "thread.updated",
+      threadId: "thread-1",
+      payload: { thread: { status: "completed" } }
+    })).toBe(true);
+    expect(shouldForceFullSnapshotForRuntimeCompletion({
+      type: "thread.updated",
+      threadId: "thread-1",
+      payload: { thread: { status: "idle" } }
+    })).toBe(true);
+    expect(shouldForceFullSnapshotForRuntimeCompletion({
+      type: "thread.updated",
+      threadId: "thread-1",
+      payload: { thread: { status: "running" } }
+    })).toBe(false);
+  });
+
+  it("invalidates an old delta request but preserves runtime messages for completion", () => {
+    const cursorByThread = { "thread-1": "stale-cursor", "thread-2": "other-cursor" };
+    const requestIdsByThread = { "thread-1": 4 };
+    const cacheByThread = new Map([
+      ["thread-1", "stale-snapshot"],
+      ["thread-2", "other-snapshot"]
+    ]);
+    const runtimeMessagesByThread = { "thread-1": ["event-final-message"] };
+
+    expect(invalidateThreadSnapshotForRuntimeCompletion({
+      type: "assistant.completed",
+      threadId: "thread-1",
+      payload: { messageId: "final-message" }
+    }, {
+      cursorByThread,
+      requestIdsByThread,
+      cacheByThread,
+      runtimeMessagesByThread
+    })).toBe(true);
+
+    expect(cursorByThread).toEqual({ "thread-2": "other-cursor" });
+    expect(requestIdsByThread["thread-1"]).toBe(5);
+    expect(cacheByThread).toEqual(new Map([["thread-2", "other-snapshot"]]));
+    expect(runtimeMessagesByThread).toEqual({ "thread-1": ["event-final-message"] });
+  });
+
+  it("does not invalidate the parent snapshot for a child-status echo", () => {
+    const cursorByThread = { "thread-1": "parent-cursor" };
+    const requestIdsByThread = { "thread-1": 2 };
+    const cacheByThread = new Map([["thread-1", "parent-snapshot"]]);
+    const runtimeMessagesByThread = { "thread-1": ["parent-message"] };
+
+    expect(invalidateThreadSnapshotForRuntimeCompletion({
+      type: "thread.updated",
+      threadId: "thread-1",
+      payload: {
+        thread: { status: "completed" },
+        childThread: { id: "child-1", status: "completed" }
+      }
+    }, {
+      cursorByThread,
+      requestIdsByThread,
+      cacheByThread,
+      runtimeMessagesByThread
+    })).toBe(false);
+
+    expect(cursorByThread).toEqual({ "thread-1": "parent-cursor" });
+    expect(requestIdsByThread).toEqual({ "thread-1": 2 });
+    expect(cacheByThread).toEqual(new Map([["thread-1", "parent-snapshot"]]));
   });
 
   it("replaces the edited message and removes its stale conversation tail locally", () => {

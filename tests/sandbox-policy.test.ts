@@ -18,37 +18,42 @@ describe("sandbox policy", () => {
     expect(resolveEffectiveSandbox({
       threadMode: "chat",
       sandboxMode: "read-only",
+      sandboxNetworkAccess: false,
       gpaFullAccess: false,
       chatTurnWantsDeliverable: false
-    })).toEqual({ mode: "read-only", skipInWorkspaceApprovals: false });
+    })).toEqual({ mode: "read-only", networkAccess: false, skipInWorkspaceApprovals: false });
 
     expect(resolveEffectiveSandbox({
       threadMode: "project",
       sandboxMode: "read-only",
+      sandboxNetworkAccess: false,
       gpaFullAccess: false,
       chatTurnWantsDeliverable: false
-    })).toEqual({ mode: "workspace-write", skipInWorkspaceApprovals: false });
+    })).toEqual({ mode: "workspace-write", networkAccess: false, skipInWorkspaceApprovals: false });
 
     expect(resolveEffectiveSandbox({
       threadMode: "chat",
       sandboxMode: "read-only",
+      sandboxNetworkAccess: false,
       gpaFullAccess: true,
       chatTurnWantsDeliverable: true
-    })).toEqual({ mode: "workspace-write", skipInWorkspaceApprovals: true });
+    })).toEqual({ mode: "full-access", networkAccess: true, skipInWorkspaceApprovals: true });
 
     expect(resolveEffectiveSandbox({
       threadMode: "project",
       sandboxMode: "full-access",
+      sandboxNetworkAccess: false,
       gpaFullAccess: true,
       chatTurnWantsDeliverable: false
-    })).toEqual({ mode: "full-access", skipInWorkspaceApprovals: true });
+    })).toEqual({ mode: "full-access", networkAccess: true, skipInWorkspaceApprovals: true });
 
     expect(resolveEffectiveSandbox({
       threadMode: "chat",
       sandboxMode: "read-only",
+      sandboxNetworkAccess: false,
       gpaFullAccess: true,
       chatTurnWantsDeliverable: false
-    })).toEqual({ mode: "read-only", skipInWorkspaceApprovals: false });
+    })).toEqual({ mode: "full-access", networkAccess: true, skipInWorkspaceApprovals: true });
   });
 
   it("treats application config, env files, ssh keys, and git hooks as secrets", () => {
@@ -73,7 +78,7 @@ describe("sandbox policy", () => {
       toolName: "fs.read_file",
       args: { path: path.join(appHome, "config.toml") },
       cwd,
-      mode: "workspace-write",
+      mode: "full-access",
       networkAccess: false,
       workspaceRoots: [cwd],
       allowedReadPaths: [],

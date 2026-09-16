@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
-import { RollingStatusText } from "../apps/desktop/src/renderer/cards/runtime-cards";
+import { describe, expect, it, vi } from "vitest";
+import { RollingStatusText, RuntimeActivityPanel } from "../apps/desktop/src/renderer/cards/runtime-cards";
 import { AssistantDraftMessage, AssistantDraftReasoning } from "../apps/desktop/src/renderer/timeline/transcript";
 
 const runtimeCards = readFileSync(new URL("../apps/desktop/src/renderer/cards/runtime-cards.tsx", import.meta.url), "utf8");
@@ -51,5 +51,30 @@ describe("chat status roll and reasoning placement", () => {
     expect(runtimeCards).toContain("currentRef.current = text");
     expect(runtimeCards).toMatch(/}, \[text\]\);/);
     expect(runtimeCards).not.toMatch(/}, \[text, current\]\);/);
+  });
+
+  it("shows only the total elapsed time in the current activity row", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-09-15T08:02:40.000Z");
+
+    try {
+      const markup = renderToStaticMarkup(createElement(RuntimeActivityPanel, {
+        label: "正在思考",
+        startedAt: "2026-09-15T08:00:00.000Z",
+        entries: [{
+          id: "status-1",
+          kind: "status",
+          label: "正在读取文件",
+          createdAt: "2026-09-15T08:01:48.000Z"
+        }]
+      }));
+
+      expect(markup.match(/<time>/g) ?? []).toHaveLength(1);
+      expect(markup).toContain("2m 40s");
+      expect(markup).not.toContain("runtime-activity-current-detail");
+      expect(markup).not.toContain("52s");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

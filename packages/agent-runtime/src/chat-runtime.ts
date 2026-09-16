@@ -142,8 +142,9 @@ export function createChatRuntimePolicy(input: {
   request: string;
   attachments?: MessageAttachment[];
   requestedDeliverableExtensions?: string[];
+  fullAccess?: boolean;
 }): ChatRuntimePolicy {
-  const localAccess = resolveChatLocalAccess(input);
+  const localAccess = input.fullAccess ? "write" : resolveChatLocalAccess(input);
   const validateToolCall = ({ toolName }: RuntimeModeToolValidationInput): RuntimeModeToolValidationResult => {
     const required = requiredChatAccess(toolName);
     if (accessAllows(localAccess, required)) return { allowed: true };

@@ -12,6 +12,7 @@ type VirtualizedTimelineProps<T> = {
   renderItem: (item: T, index: number) => ReactNode;
   scrollElementRef: RefObject<HTMLElement | null>;
   scrollInteractionActive?: boolean;
+  followLatest?: boolean;
   estimatedRowHeight?: number;
   overscanPx?: number;
   threshold?: number;
@@ -28,6 +29,23 @@ export function clampVirtualizedRange(range: VisibleRange, itemCount: number): V
       start: Math.max(0, range.start),
       end: Math.max(Math.min(range.end, itemCount), Math.min(range.start + 1, itemCount))
     };
+  }
+  const windowSize = Math.max(1, range.end - range.start);
+  return {
+    start: Math.max(0, itemCount - windowSize),
+    end: itemCount
+  };
+}
+
+export function resolveVirtualizedRangeAfterItemCountChange(
+  range: VisibleRange,
+  previousItemCount: number,
+  itemCount: number,
+  followLatest: boolean
+): VisibleRange {
+  const clamped = clampVirtualizedRange(range, itemCount);
+  if (!followLatest || previousItemCount <= 0 || range.end < previousItemCount) {
+    return clamped;
   }
   const windowSize = Math.max(1, range.end - range.start);
   return {
@@ -73,6 +91,7 @@ export function VirtualizedTimeline<T>({
   renderItem,
   scrollElementRef,
   scrollInteractionActive = false,
+  followLatest = false,
   estimatedRowHeight = DEFAULT_ESTIMATED_ROW_HEIGHT,
   overscanPx = DEFAULT_OVERSCAN_PX,
   threshold = DEFAULT_VIRTUALIZATION_THRESHOLD
@@ -92,6 +111,7 @@ export function VirtualizedTimeline<T>({
     keyIndexes: new Map()
   });
   const frameRef = useRef(0);
+  const previousItemCountRef = useRef(items.length);
   const [measurementVersion, setMeasurementVersion] = useState(0);
   const [range, setRange] = useState<VisibleRange>(() => ({ start: 0, end: Math.min(items.length, 20) }));
   const virtualized = items.length > threshold;
@@ -138,6 +158,21 @@ export function VirtualizedTimeline<T>({
   useLayoutEffect(() => {
     scheduleRangeUpdate();
   }, [layout.totalSize, scheduleRangeUpdate]);
+
+  useLayoutEffect(() => {
+    const previousItemCount = previousItemCountRef.current;
+    previousItemCountRef.current = items.length;
+    if (!virtualized || previousItemCount === items.length) return;
+    setRange((current) => {
+      const next = resolveVirtualizedRangeAfterItemCountChange(
+        current,
+        previousItemCount,
+        items.length,
+        followLatest
+      );
+      return current.start === next.start && current.end === next.end ? current : next;
+    });
+  }, [followLatest, items.length, virtualized]);
 
   useLayoutEffect(() => {
     if (scrollInteractionActive) return;

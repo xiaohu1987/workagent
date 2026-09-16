@@ -819,16 +819,9 @@ export function RuntimeActivityPanel({
     : null;
   const activityStartedAt = startedAt ?? (visibleEntries[0] ? getRuntimeEntryCreatedAt(visibleEntries[0]) : null);
   const elapsedMs = useElapsedClock(activityStartedAt, true);
-  const latestEntry = visibleEntries.at(-1);
-  const latestActivityAt = latestEntry ? getRuntimeEntryCreatedAt(latestEntry) : activityStartedAt;
-  const unchangedMs = useElapsedClock(latestActivityAt, true);
   const primaryLabel = runningToolLabel ?? displayLabel;
-  const waitingForExternalInput = /等待|审批|选择/.test(primaryLabel);
-  const freshnessLabel = unchangedMs >= 10_000 && !waitingForExternalInput
-    ? formatElapsedClock(unchangedMs)
-    : null;
   const parallelToolLabel = runningToolCalls.length > 1 ? `另有 ${runningToolCalls.length - 1} 项操作正在执行` : null;
-  const currentDetail = parallelToolLabel ?? runningToolDetail ?? freshnessLabel;
+  const currentDetail = parallelToolLabel ?? runningToolDetail;
   const currentEntryIds = new Set([
     runningToolCall?.id,
     latestStatus?.id

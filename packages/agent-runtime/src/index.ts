@@ -1922,7 +1922,8 @@ class ThreadSessionRuntime {
           outputDir: turnOutputDir,
           request: effectiveRequest,
           attachments,
-          requestedDeliverableExtensions
+          requestedDeliverableExtensions,
+          fullAccess: gpa.fullAccess
         });
     const workspaceCwd = modePolicy.workspaceRoot;
     const workspaceRoots = modePolicy.mode === "project" ? (thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : [])) : [workspaceCwd];
@@ -1931,13 +1932,14 @@ class ThreadSessionRuntime {
       request: [effectiveRequest, displayContent ?? ""].filter(Boolean).join("\n"),
       priorMessages: priorMessagesBeforeTurn
     });
-    const sandboxNetworkAccess = normalizeSandboxNetworkAccess(this.services.config.desktop.sandboxNetworkAccess);
     const effectiveSandbox = resolveEffectiveSandbox({
       threadMode: modePolicy.mode,
       sandboxMode: normalizeSandboxMode(this.services.config.desktop.sandboxMode),
+      sandboxNetworkAccess: normalizeSandboxNetworkAccess(this.services.config.desktop.sandboxNetworkAccess),
       gpaFullAccess: this.#gpa.fullAccess,
       chatTurnWantsDeliverable: modePolicy.mode === "chat" && modePolicy.localAccess === "write"
     });
+    const sandboxNetworkAccess = effectiveSandbox.networkAccess;
     const appHome = this.services.appHome ?? defaultAppHome();
     const sandboxPrompt = buildSandboxSystemPrompt(effectiveSandbox.mode, sandboxNetworkAccess);
     // Spreadsheets and other artifacts are commonly produced by scripts rather

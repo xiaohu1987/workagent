@@ -52,6 +52,41 @@ export function replaceThreadSnapshotGpa(
   return { ...snapshot, gpa };
 }
 
+export type PendingThreadSettingWrites = Map<string, Promise<void>>;
+
+export function queueThreadSettingWrite(
+  pendingWrites: PendingThreadSettingWrites,
+  threadId: string,
+  write: () => Promise<void>
+): Promise<void> {
+  const previous = pendingWrites.get(threadId);
+  const current = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(write);
+  pendingWrites.set(threadId, current);
+  return current;
+}
+
+export function clearThreadSettingWrite(
+  pendingWrites: PendingThreadSettingWrites,
+  threadId: string,
+  write: Promise<void>
+): void {
+  if (pendingWrites.get(threadId) === write) {
+    pendingWrites.delete(threadId);
+  }
+}
+
+export async function waitForPendingThreadSettingWrites(
+  pendingWrites: PendingThreadSettingWrites,
+  threadId: string
+): Promise<void> {
+  while (true) {
+    const pending = pendingWrites.get(threadId);
+    if (!pending) return;
+    await pending;
+    if (pendingWrites.get(threadId) === pending) return;
+  }
+}
+
 export type HistoryItemAffordance =
   | {
       kind: "running-indicator";
@@ -138,6 +173,31 @@ export function shouldInvalidateSnapshotForThreadUpdate(payload: {
   return !payload.childThread;
 }
 
+export type RuntimeCompletionSnapshotEvent = {
+  type: string;
+  threadId?: string;
+  payload?: {
+    discarded?: unknown;
+    childThread?: unknown;
+    messageId?: unknown;
+    pluginChanged?: unknown;
+    thread?: Pick<ThreadRecord, "status"> | null;
+  };
+};
+
+/** Completion can race or replace the final message event, so its next read must be authoritative. */
+export function shouldForceFullSnapshotForRuntimeCompletion(
+  event: RuntimeCompletionSnapshotEvent
+): boolean {
+  if (!event.threadId || event.payload?.pluginChanged) return false;
+  if (event.type === "assistant.completed") {
+    return event.payload?.discarded !== true;
+  }
+  if (event.type !== "thread.updated" || event.payload?.childThread) return false;
+  const status = event.payload?.thread?.status;
+  return status === "idle" || status === "completed" || status === "failed";
+}
+
 function isLiveSubagent(
   child: Pick<ThreadRecord, "id" | "status">,
   queuedSubagentIds: readonly string[]
@@ -212,6 +272,20 @@ export function invalidateThreadSnapshotForFullRefresh<TCursor, TSnapshot, TRunt
   if (!options?.preserveRuntimeMessages) {
     delete state.runtimeMessagesByThread[threadId];
   }
+}
+
+export function invalidateThreadSnapshotForRuntimeCompletion<TCursor, TSnapshot, TRuntimeMessages>(
+  event: RuntimeCompletionSnapshotEvent,
+  state: {
+    cursorByThread: Record<string, TCursor>;
+    requestIdsByThread: Record<string, number>;
+    cacheByThread: Map<string, TSnapshot>;
+    runtimeMessagesByThread: Record<string, TRuntimeMessages>;
+  }
+): boolean {
+  if (!shouldForceFullSnapshotForRuntimeCompletion(event) || !event.threadId) return false;
+  invalidateThreadSnapshotForFullRefresh(event.threadId, state, { preserveRuntimeMessages: true });
+  return true;
 }
 
 export function prunePersistedRuntimeMessageMap<T extends { id: string; createdAt?: string }>(

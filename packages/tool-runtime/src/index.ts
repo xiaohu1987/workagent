@@ -1113,7 +1113,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
         riskLevel: "high",
         payload: { command },
         forcePrompt: ctx.sandbox?.mode === "read-only"
-      }, risk === "routine" || risk === "git_mutation" ? "shell" : "delete");
+      }, risk === "destructive" ? "delete" : "shell");
       if (!approved) {
         return { ok: false, content: "命令执行被拒绝。" };
       }
@@ -3223,7 +3223,9 @@ async function requestMutationApproval(
   if (shouldSkipWorkspaceMutationApproval(ctx.sandbox, kind)) return true;
   return ctx.requestApproval({
     ...input,
-    forcePrompt: kind === "shell" && ctx.sandbox?.mode === "read-only" ? true : input.forcePrompt
+    forcePrompt: kind === "delete" || (kind === "shell" && ctx.sandbox?.mode === "read-only")
+      ? true
+      : input.forcePrompt
   });
 }
 

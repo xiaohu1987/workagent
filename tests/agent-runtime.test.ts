@@ -1301,6 +1301,16 @@ describe("ordinary and project runtime isolation", () => {
     })).toBe("write");
     expect(resolveChatLocalAccess({ request: "运行这个脚本并告诉我输出" })).toBe("execute");
 
+    const fullAccessPolicy = createChatRuntimePolicy({
+      outputDir: "C:\\task-output",
+      request: "整理一下我的桌面，把文件文件夹都归类存放",
+      fullAccess: true
+    });
+    expect(fullAccessPolicy.localAccess).toBe("write");
+    expect(fullAccessPolicy.filterTools(tools).map((entry) => entry.name)).toEqual(
+      expect.arrayContaining(["fs.read_directory", "fs.mkdir", "fs.rename", "shell.exec"])
+    );
+
     const writePolicy = createChatRuntimePolicy({
       outputDir: "C:\\task-output",
       request: "把结果生成 Word 文档",

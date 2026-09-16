@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampVirtualizedRange,
   resolveMeasurementScrollAdjustment,
+  resolveVirtualizedRangeAfterItemCountChange,
   resolveVirtualizedRange,
   shouldDeferVirtualTimelineMeasurement
 } from "../apps/desktop/src/renderer/timeline/virtualized-timeline";
@@ -29,6 +30,27 @@ describe("virtualized timeline range", () => {
     expect(clampVirtualizedRange({ start: 85, end: 100 }, 90)).toEqual({ start: 85, end: 90 });
     expect(clampVirtualizedRange({ start: 0, end: 20 }, 5)).toEqual({ start: 0, end: 5 });
     expect(clampVirtualizedRange({ start: 4, end: 8 }, 0)).toEqual({ start: 0, end: 0 });
+  });
+
+  it("mounts an appended tail row immediately while the transcript follows latest", () => {
+    expect(resolveVirtualizedRangeAfterItemCountChange(
+      { start: 80, end: 100 },
+      100,
+      101,
+      true
+    )).toEqual({ start: 81, end: 101 });
+    expect(resolveVirtualizedRangeAfterItemCountChange(
+      { start: 80, end: 100 },
+      100,
+      101,
+      false
+    )).toEqual({ start: 80, end: 100 });
+    expect(resolveVirtualizedRangeAfterItemCountChange(
+      { start: 40, end: 60 },
+      100,
+      101,
+      true
+    )).toEqual({ start: 40, end: 60 });
   });
 
   it("preserves the reading anchor when an earlier row changes height", () => {

@@ -45,14 +45,17 @@ import {
 import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../packages/provider-adapters/src/models/media-protocol";
 import {
   canDeleteThread,
+  clearThreadSettingWrite,
   getComposerPrimaryActionState,
   getDeleteThreadBlockedMessage,
   getThreadContentView,
   invalidateThreadSnapshotForFullRefresh,
+  invalidateThreadSnapshotForRuntimeCompletion,
   isThreadExecutionInProgress,
   mergeDurableGpaFlags,
   normalizeGpaStateForThread,
   prunePersistedRuntimeMessageMap,
+  queueThreadSettingWrite,
   replaceThreadSnapshotGpa,
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
@@ -62,7 +65,8 @@ import {
   shouldInvalidateSnapshotForThreadUpdate,
   upsertSubagentIntoSnapshot,
   mergeSnapshotSubagents,
-  shouldShowTaskProcessing
+  shouldShowTaskProcessing,
+  waitForPendingThreadSettingWrites
 } from "./core/thread-ui-state";
 import { useMotionPresence } from "./core/motion-presence";
 import {
@@ -377,6 +381,14 @@ export function shouldFollowLatestAfterTranscriptScroll(
 ): boolean {
   const normalizedDistance = Math.max(0, distanceFromLatest);
   return manualScrollActive ? normalizedDistance <= 1 : normalizedDistance <= 48;
+}
+
+export function shouldFollowLatestAfterTranscriptContentChange(
+  autoScrollActive: boolean,
+  wasAtLatest: boolean,
+  manualScrollActive: boolean
+): boolean {
+  return autoScrollActive || (wasAtLatest && !manualScrollActive);
 }
 
 export function didTranscriptScrollUpWithoutContentShrink(
@@ -726,6 +738,7 @@ export function App() {
   const gpaRevisionRef = useRef<HTMLTextAreaElement | null>(null);
   const gpaConfirmationPendingStageRef = useRef<Exclude<GpaStage, "off" | "act"> | null>(null);
   const gpaDurableRestoreEpochRef = useRef(0);
+  const pendingGpaFullAccessWritesRef = useRef<Map<string, Promise<void>>>(new Map());
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
 
@@ -1875,6 +1888,12 @@ export function App() {
         setRightWorkspaceExpandedTab("browser");
       }
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
+      const forcedCompletionSnapshotRefresh = invalidateThreadSnapshotForRuntimeCompletion(typed, {
+        cursorByThread: snapshotCursorByThreadRef.current,
+        requestIdsByThread: snapshotRequestIdsRef.current,
+        cacheByThread: snapshotCacheByThreadRef.current,
+        runtimeMessagesByThread: persistedRuntimeMessagesRef.current
+      });
       if (
         typed.type === "queue.updated" &&
         typed.threadId &&
@@ -2626,7 +2645,7 @@ export function App() {
           ? resolveLatestThreadRecord(latestRuntimeThreadsRef.current[runtimeThreadId], typed.payload.thread)
           : typed.payload.thread;
         latestRuntimeThreadsRef.current[runtimeThreadId] = runtimeThread;
-        if (shouldInvalidateSnapshotForThreadUpdate({ childThread })) {
+        if (!forcedCompletionSnapshotRefresh && shouldInvalidateSnapshotForThreadUpdate({ childThread })) {
           invalidateSnapshotRequest(runtimeThreadId);
         }
         if (childThread) {
@@ -4011,10 +4030,18 @@ export function App() {
       return;
     }
 
-    if (!shouldAutoScrollRef.current) {
-      handleTranscriptScroll();
+    if (shouldFollowLatestAfterTranscriptContentChange(
+      shouldAutoScrollRef.current,
+      isTranscriptAtLatest,
+      manualTranscriptScrollRef.current
+    )) {
+      scrollTranscriptToLatest();
+      settleAutoScroll(activeSnapshotThreadStatus);
+      return;
     }
-  }, [activeSnapshotThreadId, latestVisibleMessageId, showWelcome]);
+
+    handleTranscriptScroll();
+  }, [activeSnapshotThreadId, activeSnapshotThreadStatus, isTranscriptAtLatest, latestVisibleMessageId, showWelcome]);
 
   useLayoutEffect(() => {
     if (!activeSnapshotThreadId || pendingLatestScrollThreadIdRef.current !== activeSnapshotThreadId) {
@@ -5109,16 +5136,45 @@ export function App() {
       }
     }
 
+    const targetThreadId = selectedThreadId;
+    if (targetThreadId) {
+      try {
+        await waitForPendingThreadSettingWrites(pendingGpaFullAccessWritesRef.current, targetThreadId);
+      } catch (error) {
+        showNotice("完全访问设置未保存", {
+          message: error instanceof Error ? error.message : "请重新设置后再发送。"
+        });
+        return;
+      }
+      if (selectedThreadIdRef.current !== targetThreadId) {
+        showNotice("当前聊天已切换，请重新发送。");
+        return;
+      }
+    }
+
     if (!options?.internal) {
       setComposerSubmission({ content: inputContent, startedAt: new Date().toISOString() });
     }
 
-    let threadId = selectedThreadId;
+    let threadId = targetThreadId;
     if (!threadId) {
       const thread = await createThreadRecord("chat", undefined, { useComposerSelection: true });
       threadId = thread.id;
       selectThreadId(thread.id);
       seedOptimisticThreadSnapshot(thread);
+      if (gpaState.fullAccess) {
+        try {
+          await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
+        } catch (error) {
+          setGpaState((prev) => ({ ...prev, fullAccess: false }));
+          void refreshThreads();
+          void refreshSnapshot(thread.id);
+          showNotice("完全访问设置未保存", {
+            message: error instanceof Error ? error.message : "请重新设置后再发送。"
+          });
+          return;
+        }
+      }
       void refreshThreads();
       void refreshSnapshot(thread.id);
     }
@@ -5669,12 +5725,33 @@ export function App() {
     }
   }
   async function setFullAccess(fullAccess: boolean) {
+    const threadId = selectedThreadId;
+    const previousFullAccess = gpaState.fullAccess;
     gpaDurableRestoreEpochRef.current += 1;
     setGpaState((prev) => ({ ...prev, fullAccess }));
     setGpaMenuOpen(false);
     setGpaMenuPos(null);
-    if (selectedThreadId) {
-      await window.codexh.setGpaFullAccess({ threadId: selectedThreadId, fullAccess });
+    if (!threadId) return;
+
+    const pendingWrite = queueThreadSettingWrite(
+      pendingGpaFullAccessWritesRef.current,
+      threadId,
+      () => window.codexh.setGpaFullAccess({ threadId, fullAccess })
+    );
+    try {
+      await pendingWrite;
+    } catch (error) {
+      if (
+        pendingGpaFullAccessWritesRef.current.get(threadId) === pendingWrite &&
+        selectedThreadIdRef.current === threadId
+      ) {
+        setGpaState((prev) => ({ ...prev, fullAccess: previousFullAccess }));
+      }
+      showNotice("完全访问设置失败", {
+        message: error instanceof Error ? error.message : "已恢复之前的权限设置。"
+      });
+    } finally {
+      clearThreadSettingWrite(pendingGpaFullAccessWritesRef.current, threadId, pendingWrite);
     }
   }
 
@@ -6787,6 +6864,7 @@ export function App() {
                   completedLatestTurnAt={completedTurnTimer?.completedAt ?? null}
                   scrollElementRef={chatScrollRef}
                   scrollInteractionActive={isTranscriptScrollbarDragging}
+                  followLatest={isTranscriptAtLatest}
                   onOpenFolder={openGeneratedFileLocationEvent}
                   onToggleTurn={toggleConversationTurnCollapsedEvent}
                 />
