@@ -33,6 +33,9 @@ import type {
   RememberedApprovalRecord,
   ErrorSolutionRecord,
   SelfImprovementMemoryRecord,
+  SelfImprovementMemoryScope,
+  SelfImprovementMemorySource,
+  SelfImprovementMemoryStats,
   TokenUsage,
   QueuedMessageRecord,
   ProviderDefinition,
@@ -109,6 +112,7 @@ function normalizeSelfImprovementSettings(value?: Partial<AppConfig["selfImprove
     generateMemories: source.generateMemories !== false,
     useMemories: source.useMemories !== false,
     dedicatedTools: source.dedicatedTools === true,
+    autoDistillOnComplete: source.autoDistillOnComplete !== false,
     processingModelId: typeof source.processingModelId === "string" ? source.processingModelId : undefined,
     idleMinutes: clamp(source.idleMinutes, 5, 1, 1440),
     retentionDays: clamp(source.retentionDays, 180, 7, 3650),
@@ -983,6 +987,8 @@ export class DatabaseService {
         title TEXT NOT NULL,
         content TEXT NOT NULL,
         source_thread_id TEXT,
+        fingerprint TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'distilled',
         usage_count INTEGER NOT NULL DEFAULT 0,
         last_used_at TEXT,
         created_at TEXT NOT NULL,
@@ -991,6 +997,8 @@ export class DatabaseService {
       CREATE VIRTUAL TABLE IF NOT EXISTS self_improvement_memory_fts USING fts5 (
         memory_id UNINDEXED, title, content
       );
+      CREATE INDEX IF NOT EXISTS idx_self_improvement_memories_scope
+        ON self_improvement_memories(scope, project_id, updated_at);
       CREATE TABLE IF NOT EXISTS self_improvement_jobs (
         thread_id TEXT PRIMARY KEY,
         status TEXT NOT NULL,
@@ -998,6 +1006,7 @@ export class DatabaseService {
         lease_until TEXT,
         last_error TEXT,
         processed_at TEXT,
+        content_hash TEXT,
         updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS subagent_pending_dispatch (
@@ -1059,6 +1068,29 @@ export class DatabaseService {
     this.ensureColumn("error_solutions", "last_recall_outcome", "TEXT");
     this.ensureColumn("error_solutions", "last_observed_at", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("error_solutions", "expires_at", "TEXT");
+    this.ensureColumn("self_improvement_memories", "fingerprint", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("self_improvement_memories", "source", "TEXT NOT NULL DEFAULT 'distilled'");
+    this.ensureColumn("self_improvement_jobs", "content_hash", "TEXT");
+    // Normalise the scope/project_id shape *before* deriving identities, so a
+    // fingerprint is computed exactly the way the partial index will key it.
+    this.#db.prepare("UPDATE self_improvement_memories SET project_id = NULL WHERE scope = 'global' AND project_id IS NOT NULL").run();
+    // Indexes over `ensureColumn`-added columns must be created *here*, never in
+    // the schema `exec` above: that block runs first, and on an existing install
+    // `CREATE TABLE IF NOT EXISTS` is a no-op, so the column would not exist yet.
+    this.backfillMemoryFingerprints();
+    this.#db.prepare(`CREATE INDEX IF NOT EXISTS idx_self_improvement_memories_scope
+      ON self_improvement_memories(scope, project_id, updated_at)`).run();
+    // The uniqueness guarantee is a nice-to-have; being unable to open the app
+    // is not. If legacy rows already violate it the merge path still works (it
+    // looks rows up by fingerprint, the index only backs it up), so degrade and
+    // retry on the next boot instead of failing the whole bootstrap.
+    try {
+      this.#db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_self_improvement_memories_fingerprint
+        ON self_improvement_memories(scope, IFNULL(project_id, ''), fingerprint)
+        WHERE fingerprint <> ''`).run();
+    } catch (error) {
+      console.warn("[storage] self-improvement memory fingerprint index could not be created; dedupe falls back to lookups:", error);
+    }
     this.ensureColumn("knowledge_bases", "category", "TEXT NOT NULL DEFAULT ''");
     this.#db.prepare("UPDATE error_solutions SET last_observed_at = updated_at WHERE last_observed_at = ''").run();
     this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_error_solutions_preflight
@@ -1112,6 +1144,46 @@ export class DatabaseService {
     } catch (error) {
       this.#db.exec("ROLLBACK");
       throw error;
+    }
+  }
+
+  /**
+   * Rows written before `fingerprint` existed carry an empty one, which no
+   * lookup ever matches — they would silently stop participating in the merge
+   * path and get duplicated on the next distillation. Give them a derived
+   * identity once.
+   *
+   * Two hard rules, both learned from a startup crash:
+   *  1. Identities already taken by another row count as collisions. This runs
+   *     again on every boot and only picks up the *blank* rows, so the rows that
+   *     already won an identity during an earlier boot are not in the batch —
+   *     deduping against the batch alone would collide with them.
+   *  2. Each write is individually guarded. A legacy row that cannot be given a
+   *     unique identity simply keeps the empty fingerprint, which the partial
+   *     index ignores. Startup must never depend on this backfill succeeding.
+   */
+  private backfillMemoryFingerprints(): void {
+    const rows = this.#db.prepare(
+      "SELECT id, scope, project_id, title FROM self_improvement_memories WHERE fingerprint = ''"
+    ).all() as Array<{ id: string; scope: string; project_id: string | null; title: string }>;
+    if (!rows.length) return;
+    const update = this.#db.prepare("UPDATE self_improvement_memories SET fingerprint = ? WHERE id = ?");
+    const taken = this.#db.prepare(
+      "SELECT scope, IFNULL(project_id, '') AS project_id, fingerprint FROM self_improvement_memories WHERE fingerprint <> ''"
+    ).all() as Array<{ scope: string; project_id: string; fingerprint: string }>;
+    const seen = new Set(taken.map((row) => `${row.scope}:${row.project_id}:${row.fingerprint}`));
+    for (const row of rows) {
+      const scope = row.scope === "project" ? "project" : "global";
+      const projectId = scope === "project" ? row.project_id ?? null : null;
+      const fingerprint = deriveMemoryFingerprint({ scope, projectId, title: row.title });
+      const identity = `${scope}:${projectId ?? ""}:${fingerprint}`;
+      if (seen.has(identity)) continue;
+      try {
+        update.run(fingerprint, row.id);
+      } catch {
+        continue;
+      }
+      seen.add(identity);
     }
   }
 
@@ -2736,46 +2808,153 @@ export class DatabaseService {
     return selfImprovement;
   }
 
-  public upsertSelfImprovementMemory(
-    input: Omit<SelfImprovementMemoryRecord, "id" | "createdAt" | "updatedAt" | "usageCount" | "lastUsedAt" | "score"> & { id?: string }
-  ): SelfImprovementMemoryRecord {
+  /** Create a memory, or refresh the existing one that carries the same identity. */
+  public upsertSelfImprovementMemory(input: SelfImprovementMemoryInput): SelfImprovementMemoryRecord {
+    return this.mergeSelfImprovementMemory(input).record;
+  }
+
+  /**
+   * Fingerprint-keyed write. Re-distilling a known fact refreshes its title,
+   * body and source thread in place, so memories converge instead of piling up
+   * as duplicates. `fingerprint` may be supplied by the distiller (stable topic
+   * key); otherwise it is derived from scope + project + title.
+   */
+  public mergeSelfImprovementMemory(input: SelfImprovementMemoryInput): {
+    record: SelfImprovementMemoryRecord;
+    action: "created" | "updated" | "unchanged";
+  } {
     const now = nowIso();
+    const scope: SelfImprovementMemoryScope = input.scope === "project" && input.projectId ? "project" : "global";
+    const projectId = scope === "project" ? input.projectId : null;
+    const nextTitle = redactStoredMemory(input.title).slice(0, 240);
+    const nextContent = redactStoredMemory(input.content).slice(0, 4_000);
+    const source: SelfImprovementMemorySource = input.source === "manual" ? "manual" : "distilled";
+    const fingerprint = (input.fingerprint?.trim() || deriveMemoryFingerprint({ scope, projectId, title: nextTitle })).slice(0, 200);
+    const existing = this.findSelfImprovementMemoryByFingerprint({ scope, projectId, fingerprint });
+    if (existing) {
+      if (existing.title === nextTitle && existing.content === nextContent) {
+        this.#db.prepare("UPDATE self_improvement_memories SET updated_at = ?, source_thread_id = COALESCE(?, source_thread_id) WHERE id = ?")
+          .run(now, input.sourceThreadId ?? null, existing.id);
+        return { record: { ...existing, updatedAt: now }, action: "unchanged" };
+      }
+      this.#db.prepare(`UPDATE self_improvement_memories
+        SET kind = ?, title = ?, content = ?, source_thread_id = COALESCE(?, source_thread_id), updated_at = ?
+        WHERE id = ?`)
+        .run(input.kind, nextTitle, nextContent, input.sourceThreadId ?? null, now, existing.id);
+      this.deleteSelfImprovementMemoryFts(existing.id);
+      this.#db.prepare("INSERT INTO self_improvement_memory_fts (memory_id, title, content) VALUES (?, ?, ?)")
+        .run(existing.id, nextTitle, nextContent);
+      return {
+        record: { ...existing, kind: input.kind, title: nextTitle, content: nextContent, updatedAt: now },
+        action: "updated"
+      };
+    }
     const record: SelfImprovementMemoryRecord = {
       id: input.id ?? randomUUID(),
-      scope: input.scope,
-      projectId: input.scope === "project" ? input.projectId : null,
+      scope,
+      projectId,
       kind: input.kind,
-      title: redactStoredMemory(input.title).slice(0, 240),
-      content: redactStoredMemory(input.content).slice(0, 4_000),
+      title: nextTitle,
+      content: nextContent,
       sourceThreadId: input.sourceThreadId,
+      fingerprint,
+      source,
       usageCount: 0,
       lastUsedAt: null,
       createdAt: now,
       updatedAt: now
     };
     this.#db.prepare(`INSERT INTO self_improvement_memories (
-      id, scope, project_id, kind, title, content, source_thread_id, usage_count, last_used_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(record.id, record.scope, record.projectId, record.kind, record.title, record.content, record.sourceThreadId, 0, null, now, now);
+      id, scope, project_id, kind, title, content, source_thread_id, fingerprint, source, usage_count, last_used_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(record.id, record.scope, record.projectId, record.kind, record.title, record.content, record.sourceThreadId, record.fingerprint, record.source, 0, null, now, now);
     this.#db.prepare("INSERT INTO self_improvement_memory_fts (memory_id, title, content) VALUES (?, ?, ?)")
       .run(record.id, record.title, record.content);
-    return record;
+    return { record, action: "created" };
   }
 
-  public listSelfImprovementMemories(input: { projectId?: string | null; limit?: number; all?: boolean } = {}): SelfImprovementMemoryRecord[] {
+  public findSelfImprovementMemoryByFingerprint(input: {
+    scope: SelfImprovementMemoryScope;
+    projectId: string | null;
+    fingerprint: string;
+  }): SelfImprovementMemoryRecord | null {
+    if (!input.fingerprint) return null;
+    const row = this.#db.prepare(`SELECT * FROM self_improvement_memories
+      WHERE scope = ? AND IFNULL(project_id, '') = ? AND fingerprint = ? LIMIT 1`)
+      .get(input.scope, input.projectId ?? "", input.fingerprint);
+    return row ? mapSelfImprovementMemoryRow(row) : null;
+  }
+
+  public listSelfImprovementMemories(input: {
+    projectId?: string | null;
+    limit?: number;
+    all?: boolean;
+    scope?: SelfImprovementMemoryScope;
+  } = {}): SelfImprovementMemoryRecord[] {
     const limit = Math.min(Math.max(input.limit ?? 100, 1), 1000);
-    const rows = input.all
-      ? this.#db.prepare("SELECT * FROM self_improvement_memories ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?").all(limit)
-      : input.projectId
-      ? this.#db.prepare("SELECT * FROM self_improvement_memories WHERE project_id = ? OR scope = 'global' ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?").all(input.projectId, limit)
-      : this.#db.prepare("SELECT * FROM self_improvement_memories WHERE scope = 'global' ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?").all(limit);
+    const order = "ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT ?";
+    let rows: unknown[];
+    if (input.scope === "project") {
+      rows = input.projectId
+        ? this.#db.prepare(`SELECT * FROM self_improvement_memories WHERE scope = 'project' AND project_id = ? ${order}`)
+            .all(input.projectId, limit)
+        : [];
+    } else if (input.scope === "global") {
+      rows = this.#db.prepare(`SELECT * FROM self_improvement_memories WHERE scope = 'global' AND project_id IS NULL ${order}`)
+        .all(limit);
+    } else if (input.all) {
+      rows = this.#db.prepare(`SELECT * FROM self_improvement_memories ${order}`).all(limit);
+    } else if (input.projectId) {
+      rows = this.#db.prepare(`SELECT * FROM self_improvement_memories WHERE (scope = 'project' AND project_id = ?) OR (scope = 'global' AND project_id IS NULL) ${order}`)
+        .all(input.projectId, limit);
+    } else {
+      rows = this.#db.prepare(`SELECT * FROM self_improvement_memories WHERE scope = 'global' AND project_id IS NULL ${order}`).all(limit);
+    }
     return (rows as any[]).map(mapSelfImprovementMemoryRow);
   }
 
-  public searchSelfImprovementMemories(input: { query: string; projectId?: string | null; limit?: number }): SelfImprovementMemoryRecord[] {
+  public countSelfImprovementMemories(): SelfImprovementMemoryStats {
+    const row = this.#db.prepare(`SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN scope = 'global' THEN 1 ELSE 0 END) AS global_count,
+      SUM(CASE WHEN scope = 'project' THEN 1 ELSE 0 END) AS project_count
+      FROM self_improvement_memories`).get() as any;
+    return {
+      total: Number(row?.total ?? 0),
+      global: Number(row?.global_count ?? 0),
+      project: Number(row?.project_count ?? 0)
+    };
+  }
+
+  /**
+   * Recall memories for prompt injection. Passing `scope` restricts the result
+   * to one scope; omitting it keeps the legacy behaviour of returning the
+   * project's own memories plus the shared global ones.
+   */
+  public searchSelfImprovementMemories(input: {
+    query: string;
+    projectId?: string | null;
+    limit?: number;
+    scope?: SelfImprovementMemoryScope;
+  }): SelfImprovementMemoryRecord[] {
     const limit = Math.min(Math.max(input.limit ?? 6, 1), 20);
-    const filter = input.projectId ? "(m.project_id = ? OR m.scope = 'global')" : "m.scope = 'global'";
-    const scopeParams: unknown[] = input.projectId ? [input.projectId] : [];
+    const projectId = input.projectId ?? null;
+    if (input.scope === "project" && !projectId) return [];
+    let filter: string;
+    let scopeParams: Array<string | null>;
+    if (input.scope === "project") {
+      filter = "m.scope = 'project' AND m.project_id = ?";
+      scopeParams = [projectId];
+    } else if (input.scope === "global") {
+      filter = "m.scope = 'global' AND m.project_id IS NULL";
+      scopeParams = [];
+    } else if (projectId) {
+      filter = "((m.scope = 'project' AND m.project_id = ?) OR (m.scope = 'global' AND m.project_id IS NULL))";
+      scopeParams = [projectId];
+    } else {
+      filter = "m.scope = 'global' AND m.project_id IS NULL";
+      scopeParams = [];
+    }
     const query = buildErrorSolutionFtsQuery(input.query);
     let rows: any[] = [];
     if (query) {
@@ -2799,26 +2978,68 @@ export class DatabaseService {
   }
 
   public deleteSelfImprovementMemory(id: string): void {
-    this.#db.prepare("DELETE FROM self_improvement_memory_fts WHERE memory_id = ?").run(id);
+    this.deleteSelfImprovementMemoryFts(id);
     this.#db.prepare("DELETE FROM self_improvement_memories WHERE id = ?").run(id);
   }
 
-  public pruneSelfImprovementMemories(retentionDays: number, maxMemories: number): number {
+  private deleteSelfImprovementMemoryFts(id: string): void {
+    this.#db.prepare("DELETE FROM self_improvement_memory_fts WHERE memory_id = ?").run(id);
+  }
+
+  /**
+   * Retention is enforced per scope bucket so an active project can never evict
+   * the shared global memories (and vice versa): global keeps at most 40% of the
+   * budget, each project keeps at most 60% of it.
+   */
+  public pruneSelfImprovementMemories(
+    retentionDays: number,
+    maxMemories: number,
+    budgets?: { global?: number; project?: number }
+  ): number {
     const before = new Date(Date.now() - retentionDays * 86_400_000).toISOString();
     const stale = this.#db.prepare("SELECT id FROM self_improvement_memories WHERE updated_at < ?").all(before) as Array<{ id: string }>;
-    const excess = this.#db.prepare("SELECT id FROM self_improvement_memories ORDER BY usage_count DESC, updated_at DESC LIMIT -1 OFFSET ?").all(maxMemories) as Array<{ id: string }>;
+    const globalBudget = Math.max(20, Math.round(budgets?.global ?? maxMemories * 0.4));
+    const projectBudget = Math.max(20, Math.round(budgets?.project ?? maxMemories * 0.6));
+    const excess: Array<{ id: string }> = [];
+    excess.push(...this.#db.prepare(`SELECT id FROM self_improvement_memories
+      WHERE scope = 'global' ORDER BY usage_count DESC, updated_at DESC LIMIT -1 OFFSET ?`).all(globalBudget) as Array<{ id: string }>);
+    const projectIds = (this.#db.prepare("SELECT DISTINCT project_id FROM self_improvement_memories WHERE scope = 'project' AND project_id IS NOT NULL")
+      .all() as Array<{ project_id: string }>).map((row) => row.project_id);
+    for (const projectId of projectIds) {
+      excess.push(...this.#db.prepare(`SELECT id FROM self_improvement_memories
+        WHERE scope = 'project' AND project_id = ? ORDER BY usage_count DESC, updated_at DESC LIMIT -1 OFFSET ?`)
+        .all(projectId, projectBudget) as Array<{ id: string }>);
+    }
     const ids = [...new Set([...stale, ...excess].map((row) => row.id))];
     for (const id of ids) this.deleteSelfImprovementMemory(id);
     return ids.length;
   }
 
-  public claimSelfImprovementJob(threadId: string, leaseMinutes = 10): boolean {
+  /**
+   * Claim the distillation slot for one thread. A completed job is only skipped
+   * while its recorded `contentHash` still matches the conversation, so new
+   * turns on an already-distilled thread are picked up again. `force` takes a
+   * fresh lease even when the content is unchanged.
+   */
+  public claimSelfImprovementJob(
+    threadId: string,
+    options: { leaseMinutes?: number; contentHash?: string; force?: boolean } = {}
+  ): boolean {
     const now = nowIso();
+    const leaseMinutes = options.leaseMinutes ?? 10;
     const leaseUntil = new Date(Date.now() + leaseMinutes * 60_000).toISOString();
-    const existing = this.#db.prepare("SELECT status, lease_until FROM self_improvement_jobs WHERE thread_id = ?").get(threadId) as { status?: string; lease_until?: string | null } | undefined;
-    if (existing?.status === "completed" || (existing?.lease_until && Date.parse(existing.lease_until) > Date.now())) return false;
-    this.#db.prepare(`INSERT INTO self_improvement_jobs (thread_id, status, attempts, lease_until, updated_at) VALUES (?, 'running', 1, ?, ?)
-      ON CONFLICT(thread_id) DO UPDATE SET status = 'running', attempts = attempts + 1, lease_until = excluded.lease_until, updated_at = excluded.updated_at`).run(threadId, leaseUntil, now);
+    const contentHash = options.contentHash ?? null;
+    const existing = this.#db.prepare("SELECT status, lease_until, content_hash FROM self_improvement_jobs WHERE thread_id = ?")
+      .get(threadId) as { status?: string; lease_until?: string | null; content_hash?: string | null } | undefined;
+    if (existing?.lease_until && Date.parse(existing.lease_until) > Date.now()) return false;
+    if (!options.force && contentHash && existing?.status === "completed" && existing.content_hash === contentHash) return false;
+    this.#db.prepare(`INSERT INTO self_improvement_jobs (thread_id, status, attempts, lease_until, content_hash, updated_at)
+      VALUES (?, 'running', 1, ?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET status = 'running', attempts = attempts + 1,
+        lease_until = excluded.lease_until,
+        content_hash = COALESCE(excluded.content_hash, self_improvement_jobs.content_hash),
+        last_error = NULL, updated_at = excluded.updated_at`)
+      .run(threadId, leaseUntil, contentHash, now);
     return true;
   }
 
@@ -3996,11 +4217,41 @@ function mapSelfImprovementMemoryRow(row: any): SelfImprovementMemoryRecord {
     title: row.title,
     content: row.content,
     sourceThreadId: row.source_thread_id ?? null,
+    fingerprint: row.fingerprint ?? "",
+    source: row.source === "manual" ? "manual" : "distilled",
     usageCount: Number(row.usage_count ?? 0),
     lastUsedAt: row.last_used_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+/** Memory write payload; identity fields are optional so manual notes also converge. */
+export type SelfImprovementMemoryInput = Omit<
+  SelfImprovementMemoryRecord,
+  "id" | "createdAt" | "updatedAt" | "usageCount" | "lastUsedAt" | "score" | "fingerprint" | "source"
+> & {
+  id?: string;
+  fingerprint?: string;
+  source?: SelfImprovementMemorySource;
+};
+
+/**
+ * Stable identity of one durable fact. Normalising away case, punctuation and
+ * whitespace keeps rephrased titles ("Use pnpm" / "use  pnpm.") on the same row.
+ */
+export function deriveMemoryFingerprint(input: {
+  scope: SelfImprovementMemoryScope;
+  projectId: string | null;
+  title: string;
+}): string {
+  const normalized = input.title
+    .toLowerCase()
+    .replace(/[\s\u3000]+/g, " ")
+    .replace(/[^\p{L}\p{N} ]+/gu, "")
+    .trim();
+  const key = `${input.scope}:${input.projectId ?? "__global__"}:${normalized || input.title.trim().toLowerCase()}`;
+  return createHash("sha256").update(key).digest("hex").slice(0, 32);
 }
 
 function mapQueuedMessageRow(row: any): QueuedMessageRecord {

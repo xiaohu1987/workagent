@@ -865,6 +865,10 @@ export function App() {
   const selfImprovementMemoryState = useSelfImprovementMemories(showNotice);
   const {
     memories: selfImprovementMemories,
+    visibleMemories: scopedSelfImprovementMemories,
+    stats: selfImprovementMemoryStats,
+    scopeFilter: memoryScopeFilter,
+    setScopeFilter: setMemoryScopeFilter,
     isRefreshing: isRefreshingSelfImprovementMemories,
     page: selfImprovementMemoryPage,
     setPage: setSelfImprovementMemoryPage,
@@ -3754,7 +3758,7 @@ export function App() {
   }, [config?.models, errorSolutions]);
   const selfImprovementMemoryPageCount = Math.max(
     1,
-    Math.ceil(selfImprovementMemories.length / MEMORY_LIST_PAGE_SIZE)
+    Math.ceil(scopedSelfImprovementMemories.length / MEMORY_LIST_PAGE_SIZE)
   );
   const errorSolutionPageCount = Math.max(
     1,
@@ -3769,11 +3773,11 @@ export function App() {
     errorSolutionPageCount - 1
   );
   const visibleSelfImprovementMemories = useMemo(
-    () => selfImprovementMemories.slice(
+    () => scopedSelfImprovementMemories.slice(
       safeSelfImprovementMemoryPage * MEMORY_LIST_PAGE_SIZE,
       (safeSelfImprovementMemoryPage + 1) * MEMORY_LIST_PAGE_SIZE
     ),
-    [selfImprovementMemories, safeSelfImprovementMemoryPage]
+    [scopedSelfImprovementMemories, safeSelfImprovementMemoryPage]
   );
   const visibleErrorSolutions = useMemo(
     () => errorSolutions.slice(
@@ -7622,7 +7626,7 @@ export function App() {
                 }} threadId={selectedThreadId} />
               ) : null}
               {settingsTab === "memory" ? (
-                <MemoryPage configDraft={configDraft} setConfigDraft={setConfigDraft} selfImprovementMemories={selfImprovementMemories} visibleSelfImprovementMemories={visibleSelfImprovementMemories} selfImprovementMemoryListRef={selfImprovementMemoryListRef} safeSelfImprovementMemoryPage={safeSelfImprovementMemoryPage} selfImprovementMemoryPageCount={selfImprovementMemoryPageCount} setSelfImprovementMemoryPage={setSelfImprovementMemoryPage} isRefreshingSelfImprovementMemories={isRefreshingSelfImprovementMemories} isClearingSelfImprovement={isClearingSelfImprovement} onRefreshMemories={refreshSelfImprovementNow} onOpenClearMemories={() => setIsClearSelfImprovementConfirmOpen(true)} onSaveConfig={saveConfigDraft} onDeleteMemory={deleteSelfImprovementMemory} errorSolutionModelFilter={errorSolutionModelFilter} setErrorSolutionModelFilter={setErrorSolutionModelFilter} setErrorSolutionPage={setErrorSolutionPage} onRefreshErrorSolutions={refreshErrorSolutions} errorSolutionModelOptions={errorSolutionModelOptions} errorSolutions={errorSolutions} visibleErrorSolutions={visibleErrorSolutions} errorSolutionListRef={errorSolutionListRef} safeErrorSolutionPage={safeErrorSolutionPage} errorSolutionPageCount={errorSolutionPageCount} isClearingErrorSolutions={isClearingErrorSolutions} errorSolutionBusyId={errorSolutionBusyId} expandedErrorSolutionIds={expandedErrorSolutionIds} resolveModelLabel={resolveErrorSolutionModelLabel} getRecallStatus={getErrorSolutionRecallStatus} formatRelativeTime={formatRelativeTime} onToggleExpanded={toggleErrorSolutionExpanded} onDeleteErrorSolution={deleteErrorSolution} onOpenClearErrorSolutions={() => setIsClearErrorSolutionsConfirmOpen(true)} />
+                <MemoryPage configDraft={configDraft} setConfigDraft={setConfigDraft} selfImprovementMemories={selfImprovementMemories} visibleSelfImprovementMemories={visibleSelfImprovementMemories} selfImprovementMemoryStats={selfImprovementMemoryStats} memoryScopeFilter={memoryScopeFilter} setMemoryScopeFilter={setMemoryScopeFilter} selfImprovementMemoryListRef={selfImprovementMemoryListRef} safeSelfImprovementMemoryPage={safeSelfImprovementMemoryPage} selfImprovementMemoryPageCount={selfImprovementMemoryPageCount} setSelfImprovementMemoryPage={setSelfImprovementMemoryPage} isRefreshingSelfImprovementMemories={isRefreshingSelfImprovementMemories} isClearingSelfImprovement={isClearingSelfImprovement} onRefreshMemories={refreshSelfImprovementNow} onOpenClearMemories={() => setIsClearSelfImprovementConfirmOpen(true)} onSaveConfig={saveConfigDraft} onDeleteMemory={deleteSelfImprovementMemory} errorSolutionModelFilter={errorSolutionModelFilter} setErrorSolutionModelFilter={setErrorSolutionModelFilter} setErrorSolutionPage={setErrorSolutionPage} onRefreshErrorSolutions={refreshErrorSolutions} errorSolutionModelOptions={errorSolutionModelOptions} errorSolutions={errorSolutions} visibleErrorSolutions={visibleErrorSolutions} errorSolutionListRef={errorSolutionListRef} safeErrorSolutionPage={safeErrorSolutionPage} errorSolutionPageCount={errorSolutionPageCount} isClearingErrorSolutions={isClearingErrorSolutions} errorSolutionBusyId={errorSolutionBusyId} expandedErrorSolutionIds={expandedErrorSolutionIds} resolveModelLabel={resolveErrorSolutionModelLabel} getRecallStatus={getErrorSolutionRecallStatus} formatRelativeTime={formatRelativeTime} onToggleExpanded={toggleErrorSolutionExpanded} onDeleteErrorSolution={deleteErrorSolution} onOpenClearErrorSolutions={() => setIsClearErrorSolutionsConfirmOpen(true)} />
               ) : null}
               {settingsTab === "capabilities" ? (
                 <CapabilitiesPage activeTab={capabilityTab} skillsCount={skills.length} userSkillsCount={userSkills.length} pluginsCount={plugins.length} onTabChange={setCapabilityTab} />

@@ -148,15 +148,35 @@ export interface MultiAgentSettings {
   defaultReasoningEffort?: ReasoningEffort;
 }
 
+/**
+ * Memory scope. `global` memories are project-independent and shared by every
+ * chat; `project` memories belong to exactly one project and must never leak
+ * into another project's tasks.
+ */
+export type SelfImprovementMemoryScope = "global" | "project";
+
+/** How a memory record entered the store. */
+export type SelfImprovementMemorySource = "distilled" | "manual";
+
+/** What kind of knowledge a memory record carries. */
+export type SelfImprovementMemoryKind = "experience" | "preference" | "error_solution" | "note";
+
 /** Long-lived, redacted experience distilled from completed root tasks. */
 export interface SelfImprovementMemoryRecord {
   id: string;
-  scope: "global" | "project";
+  scope: SelfImprovementMemoryScope;
   projectId: string | null;
-  kind: "experience" | "preference" | "error_solution" | "note";
+  kind: SelfImprovementMemoryKind;
   title: string;
   content: string;
   sourceThreadId: string | null;
+  /**
+   * Stable identity of the underlying fact, derived from scope + project +
+   * topic. Re-distilling the same fact refreshes this record instead of
+   * appending a duplicate.
+   */
+  fingerprint: string;
+  source: SelfImprovementMemorySource;
   usageCount: number;
   lastUsedAt: string | null;
   createdAt: string;
@@ -164,10 +184,19 @@ export interface SelfImprovementMemoryRecord {
   score?: number;
 }
 
+/** Aggregate counters used by the settings page to show the scope split. */
+export interface SelfImprovementMemoryStats {
+  total: number;
+  global: number;
+  project: number;
+}
+
 export interface SelfImprovementSettings {
   generateMemories: boolean;
   useMemories: boolean;
   dedicatedTools: boolean;
+  /** Distill memories as soon as a root task finishes. */
+  autoDistillOnComplete: boolean;
   processingModelId?: string;
   idleMinutes: number;
   retentionDays: number;
@@ -1275,6 +1304,7 @@ export interface RuntimeEvent {
     | "user-input.requested"
     | "user-input.resolved"
     | "knowledge.imported"
+    | "memory.updated"
     | "browser.updated"
     | "browser.verification_started"
     | "browser.assertion_completed"

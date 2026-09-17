@@ -305,9 +305,10 @@ declare global {
       deleteErrorSolution: (id: string) => Promise<void>;
       clearErrorSolutions: (modelId?: string | null) => Promise<number>;
       clearSelfImprovementMemories: () => Promise<number>;
-      listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean }) => Promise<any[]>;
+      listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean; scope?: "global" | "project" }) => Promise<any[]>;
+      countSelfImprovementMemories: () => Promise<{ total: number; global: number; project: number }>;
       deleteSelfImprovementMemory: (id: string) => Promise<void>;
-      refreshSelfImprovementMemories: () => Promise<{ processed: number; pruned: number }>;
+      refreshSelfImprovementMemories: (threadId?: string) => Promise<{ processed: number; pruned: number }>;
       openBrowserTab: (payload: { threadId: string; url: string; openMode?: "in_app" | "external_default" }) => Promise<any>;
       navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) => Promise<any>;
       focusBrowserTab: (payload: { threadId: string; tabId: string }) => Promise<any>;

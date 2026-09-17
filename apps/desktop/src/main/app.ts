@@ -98,6 +98,11 @@ import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime, type TerminalOutputHeartbeat } from "./terminal-runtime";
 import { GitService } from "./git-service";
 import { SkillLabService } from "./skill-lab";
+import {
+  MemoryDistillerService,
+  MEMORY_DISTILL_DEBOUNCE_MS,
+  type MemoryDistillStore
+} from "./memory-distiller";
 import { parseEditableMessageMetadata } from "./message-metadata";
 import { detectShareTargets, sendShareImage, sendShareToTarget } from "./share-service";
 import { isProjectAttachmentPath } from "./attachment-path";
@@ -314,6 +319,8 @@ export class DesktopBackend {
   #config!: AppConfig;
   #runtime!: AgentRuntimeService;
   #skillLab!: SkillLabService;
+  #memoryDistiller!: MemoryDistillerService;
+  #memorySweepTimer: ReturnType<typeof setInterval> | null = null;
   readonly #gpaStateCache = new Map<string, GpaState>();
   #mcp!: McpManager;
   #mcpOAuth!: McpOAuthService;
@@ -376,6 +383,15 @@ export class DesktopBackend {
       log: (kind, payload) => this.#logs.append(kind, payload)
     });
 
+    this.#memoryDistiller = new MemoryDistillerService({
+      config: () => this.#config,
+      providerFactory: this.#providerFactory,
+      store: this.#createMemoryDistillStore(),
+      log: (kind, payload) => this.#logs.append(kind, payload),
+      onMemoriesChanged: () => this.emitMemoryUpdated()
+    });
+    this.startMemorySweepLoop();
+
     this.#runtime = new AgentRuntimeService({
       config: this.#config,
       appHome: this.#layout.root,
@@ -385,7 +401,13 @@ export class DesktopBackend {
       mcp: this.#mcp,
       persistence: {
         getThread: async (threadId) => this.#db.getThread(threadId),
-        updateThread: async (threadId, patch) => this.#db.updateThread(threadId, patch),
+        updateThread: async (threadId, patch) => {
+          const thread = this.#db.updateThread(threadId, patch);
+          // A root task just reached a terminal state: distill it into durable
+          // memories once the burst of follow-up turns settles.
+          if (patch.status === "completed") this.scheduleMemoryDistillation(thread);
+          return thread;
+        },
         listMessages: async (threadId) => this.#db.listMessages(threadId),
         listQueuedMessages: async (threadId) => this.#db.listQueuedMessages(threadId),
         enqueueQueuedMessage: async (input) => this.#db.enqueueQueuedMessage(input),
@@ -3691,50 +3713,94 @@ export class DesktopBackend {
     return this.#db.clearSelfImprovementMemories();
   }
 
-  public listSelfImprovementMemories(input: { projectId?: string | null; limit?: number; all?: boolean } = {}) {
+  public listSelfImprovementMemories(input: {
+    projectId?: string | null;
+    limit?: number;
+    all?: boolean;
+    scope?: "global" | "project";
+  } = {}) {
     return this.#db.listSelfImprovementMemories(input);
+  }
+
+  public countSelfImprovementMemories() {
+    return this.#db.countSelfImprovementMemories();
   }
 
   public deleteSelfImprovementMemory(id: string): void {
     this.#db.deleteSelfImprovementMemory(id);
   }
 
-  public async refreshSelfImprovementMemories(): Promise<{ processed: number; pruned: number }> {
+  /** Distil one thread, or sweep every finished thread when no id is given. */
+  public async refreshSelfImprovementMemories(threadId?: string): Promise<{ processed: number; pruned: number }> {
+    if (threadId) {
+      const outcome = await this.#memoryDistiller.distillThread(threadId, { force: true });
+      if (outcome && (outcome.created > 0 || outcome.updated > 0)) this.emitMemoryUpdated();
+      return { processed: outcome && !outcome.skipped ? 1 : 0, pruned: 0 };
+    }
     return this.processSelfImprovementMemories();
+  }
+
+  /** Persistence view handed to the distiller; keeps it independent of DatabaseService. */
+  #createMemoryDistillStore(): MemoryDistillStore {
+    return {
+      getThread: (threadId) => {
+        try {
+          return this.#db.getThread(threadId);
+        } catch {
+          return null;
+        }
+      },
+      listMessages: (threadId) => this.#db.listMessages(threadId),
+      listToolCalls: (threadId) => this.#db.listToolCalls(threadId),
+      claimSelfImprovementJob: (threadId, options) => this.#db.claimSelfImprovementJob(threadId, options),
+      finishSelfImprovementJob: (threadId, error) => this.#db.finishSelfImprovementJob(threadId, error),
+      mergeSelfImprovementMemory: (input) => this.#db.mergeSelfImprovementMemory(input),
+      pruneSelfImprovementMemories: (retentionDays, maxMemories) =>
+        this.#db.pruneSelfImprovementMemories(retentionDays, maxMemories)
+    };
+  }
+
+  /**
+   * Called when a root task reaches `completed`. Subagent threads are skipped:
+   * their facts reach memory through the root task they belong to.
+   */
+  private scheduleMemoryDistillation(thread: ThreadRecord): void {
+    if (!this.#memoryDistiller || thread.parentThreadId) return;
+    if (!this.#config.selfImprovement.generateMemories) return;
+    if (!this.#config.selfImprovement.autoDistillOnComplete) return;
+    this.#memoryDistiller.schedule(thread.id, { delayMs: MEMORY_DISTILL_DEBOUNCE_MS });
+  }
+
+  /** Safety net: distil threads that finished without reporting it (crash, interrupt). */
+  private startMemorySweepLoop(): void {
+    if (this.#memorySweepTimer) return;
+    const intervalMs = 10 * 60_000;
+    const timer = setInterval(() => {
+      void this.#memoryDistiller
+        .sweep({ threads: this.#db.listThreads() })
+        .catch(() => undefined);
+    }, intervalMs);
+    timer.unref?.();
+    this.#memorySweepTimer = timer;
+  }
+
+  private emitMemoryUpdated(): void {
+    const stats = this.#db.countSelfImprovementMemories();
+    this.#events.emit("runtime-event", {
+      type: "memory.updated",
+      payload: { stats },
+      createdAt: new Date().toISOString()
+    } satisfies RuntimeEvent);
   }
 
   private async processSelfImprovementMemories(): Promise<{ processed: number; pruned: number }> {
     const settings = this.#config.selfImprovement;
-    const pruned = this.#db.pruneSelfImprovementMemories(settings.retentionDays, settings.maxMemories);
-    if (!settings.generateMemories) return { processed: 0, pruned };
-    const idleBefore = Date.now() - settings.idleMinutes * 60_000;
-    let processed = 0;
-    for (const thread of this.#db.listThreads()) {
-      if (thread.parentThreadId || thread.status === "running" || Date.parse(thread.updatedAt) > idleBefore) continue;
-      if (!this.#db.claimSelfImprovementJob(thread.id)) continue;
-      try {
-        const messages = this.#db.listMessages(thread.id);
-        const request = [...messages].reverse().find((message) => message.role === "user")?.content.trim();
-        const result = [...messages].reverse().find((message) => message.role === "assistant")?.content.trim();
-        if (!request || !result) {
-          this.#db.finishSelfImprovementJob(thread.id, "No completed user/assistant exchange.");
-          continue;
-        }
-        this.#db.upsertSelfImprovementMemory({
-          scope: thread.projectId ? "project" : "global",
-          projectId: thread.projectId,
-          kind: "experience",
-          title: `任务经验：${thread.title.slice(0, 160)}`,
-          content: `任务：${request.slice(0, 900)}\n结果：${result.slice(0, 2_400)}`,
-          sourceThreadId: thread.id
-        });
-        this.#db.finishSelfImprovementJob(thread.id);
-        processed += 1;
-      } catch (error) {
-        this.#db.finishSelfImprovementJob(thread.id, error instanceof Error ? error.message : String(error));
-      }
+    if (!settings.generateMemories) {
+      return { processed: 0, pruned: this.#db.pruneSelfImprovementMemories(settings.retentionDays, settings.maxMemories) };
     }
-    return { processed, pruned };
+    // User-triggered runs ignore the idle gate so "立即提炼" works right after a task.
+    const result = await this.#memoryDistiller.sweep({ threads: this.#db.listThreads(), force: true });
+    return { processed: result.processed, pruned: result.pruned };
   }
 
   private async extractKnowledgeSourceDocuments(
@@ -4546,6 +4612,18 @@ export class DesktopBackend {
     const hasQueuedMessage = this.#db.listQueuedMessages(thread.id)
       .some((message) => message.status === "queued" || message.status === "dispatching");
     const watchdog = this.#subagentProgress.get(thread.id);
+    // "idle" is not a synonym for "queued". It covers a child that was created
+    // while the parent was at capacity and has not been dispatched yet, a thread
+    // whose turn ended through an interrupt/abort path, and — before the runtime
+    // stopped writing it that way — a turn that completed after a truncated
+    // response. Mapping bare idle to "queued" made finished subagents look like
+    // they were still waiting in line.
+    //
+    // A child is queued only while it has never run a turn: either the dispatch
+    // flag is still set or no turn was recorded at all. The flag alone is not
+    // enough — it can outlive dispatch — so it must never outrank a turn outcome.
+    const pendingDispatch = this.#db.isSubagentPendingDispatch(thread.id);
+    const waitingForDispatch = !latestTurn && (pendingDispatch || thread.status !== "failed");
     const status = watchdog?.interruptionReason
       ? "interrupted"
       : thread.status === "running" || thread.status === "waiting"
@@ -4553,10 +4631,12 @@ export class DesktopBackend {
       : hasQueuedMessage
         ? "queued"
         : latestTurn?.status === "interrupted"
-        ? "interrupted"
-        : thread.status === "idle"
-          ? "queued"
-          : thread.status;
+          ? "interrupted"
+          : latestTurn?.status === "failed" || thread.status === "failed"
+            ? "failed"
+            : waitingForDispatch
+              ? "queued"
+              : "completed";
     const errors = [
       ...(watchdog?.interruptionReason ? [watchdog.interruptionReason] : []),
       ...(latestTurn?.errorMessage ? [latestTurn.errorMessage] : []),

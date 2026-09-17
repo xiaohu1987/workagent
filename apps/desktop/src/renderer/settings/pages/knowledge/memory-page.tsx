@@ -1,7 +1,8 @@
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import type { AppConfig, ErrorSolutionRecord, SelfImprovementMemoryRecord } from "@shared-types";
+import type { AppConfig, ErrorSolutionRecord, SelfImprovementMemoryRecord, SelfImprovementMemoryStats } from "@shared-types";
 import { ComposerSelect, type ComposerSelectOption } from "../../../workspace/composer-select";
 import { MemoryPagination } from "../../../workspace/memory-pagination";
+import type { MemoryScopeFilter } from "../../../hooks/use-self-improvement-memories";
 import { IconChevronDown, IconKnowledge, IconRefresh, IconTrash } from "../../../icons";
 
 type Props = {
@@ -9,6 +10,9 @@ type Props = {
   setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>;
   selfImprovementMemories: SelfImprovementMemoryRecord[];
   visibleSelfImprovementMemories: SelfImprovementMemoryRecord[];
+  selfImprovementMemoryStats: SelfImprovementMemoryStats;
+  memoryScopeFilter: MemoryScopeFilter;
+  setMemoryScopeFilter: Dispatch<SetStateAction<MemoryScopeFilter>>;
   selfImprovementMemoryListRef: MutableRefObject<HTMLDivElement | null>;
   safeSelfImprovementMemoryPage: number;
   selfImprovementMemoryPageCount: number;
@@ -40,26 +44,56 @@ type Props = {
   onOpenClearErrorSolutions: () => void;
 };
 
-export function MemoryPage({ configDraft, setConfigDraft, selfImprovementMemories, visibleSelfImprovementMemories, selfImprovementMemoryListRef, safeSelfImprovementMemoryPage, selfImprovementMemoryPageCount, setSelfImprovementMemoryPage, isRefreshingSelfImprovementMemories, isClearingSelfImprovement, onRefreshMemories: refreshSelfImprovementNow, onOpenClearMemories, onSaveConfig: saveConfigDraft, onDeleteMemory: deleteSelfImprovementMemory, errorSolutionModelFilter, setErrorSolutionModelFilter, setErrorSolutionPage, onRefreshErrorSolutions: refreshErrorSolutions, errorSolutionModelOptions, errorSolutions, visibleErrorSolutions, errorSolutionListRef, safeErrorSolutionPage, errorSolutionPageCount, isClearingErrorSolutions, errorSolutionBusyId, expandedErrorSolutionIds, resolveModelLabel: resolveErrorSolutionModelLabel, getRecallStatus: getErrorSolutionRecallStatus, formatRelativeTime, onToggleExpanded: toggleErrorSolutionExpanded, onDeleteErrorSolution: deleteErrorSolution, onOpenClearErrorSolutions }: Props) {
+export function MemoryPage({ configDraft, setConfigDraft, selfImprovementMemories, visibleSelfImprovementMemories, selfImprovementMemoryStats, memoryScopeFilter, setMemoryScopeFilter, selfImprovementMemoryListRef, safeSelfImprovementMemoryPage, selfImprovementMemoryPageCount, setSelfImprovementMemoryPage, isRefreshingSelfImprovementMemories, isClearingSelfImprovement, onRefreshMemories: refreshSelfImprovementNow, onOpenClearMemories, onSaveConfig: saveConfigDraft, onDeleteMemory: deleteSelfImprovementMemory, errorSolutionModelFilter, setErrorSolutionModelFilter, setErrorSolutionPage, onRefreshErrorSolutions: refreshErrorSolutions, errorSolutionModelOptions, errorSolutions, visibleErrorSolutions, errorSolutionListRef, safeErrorSolutionPage, errorSolutionPageCount, isClearingErrorSolutions, errorSolutionBusyId, expandedErrorSolutionIds, resolveModelLabel: resolveErrorSolutionModelLabel, getRecallStatus: getErrorSolutionRecallStatus, formatRelativeTime, onToggleExpanded: toggleErrorSolutionExpanded, onDeleteErrorSolution: deleteErrorSolution, onOpenClearErrorSolutions }: Props) {
+  const memoryScopeTabs: Array<{ id: MemoryScopeFilter; label: string; count: number; hint: string }> = [
+    { id: "all", label: "全部", count: selfImprovementMemoryStats.total, hint: "项目记忆与全局记忆合并显示" },
+    { id: "project", label: "项目记忆", count: selfImprovementMemoryStats.project, hint: "只在所属项目中使用" },
+    { id: "global", label: "全局记忆", count: selfImprovementMemoryStats.global, hint: "所有项目共享的通用事实" }
+  ];
   return (
   <div className="settings-section memory-settings-section">
     <div className="config-block memory-management-panel">
       <div className="section-copy">
         <strong>记忆</strong>
-        <span>从已完成主任务中提炼脱敏经验；通用经验全局可用，项目经验只在对应项目中使用。</span>
+        <span>任务完成后自动提炼脱敏经验，并按作用域分开管理：项目记忆只在对应项目中使用，全局记忆在所有项目共享。</span>
       </div>
       {configDraft ? (
         <div className="memory-toolbar">
           <div className="memory-toolbar-main">
-            <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.generateMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, generateMemories: event.target.checked } } : current)} /> <span>生成经验</span></label>
-            <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.useMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, useMemories: event.target.checked } } : current)} /> <span>任务中使用</span></label>
-            <label className="memory-filter-field"><input type="checkbox" checked={configDraft.selfImprovement.dedicatedTools} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, dedicatedTools: event.target.checked } } : current)} /> <span>开放专用工具</span></label>
-            <label className="memory-filter-field"><span>保留天数</span><input className="form-input" type="number" min="7" max="3650" value={configDraft.selfImprovement.retentionDays} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, retentionDays: Number(event.target.value) || 180 } } : current)} /></label>
-            <label className="memory-filter-field"><span>最大记录</span><input className="form-input" type="number" min="20" max="5000" value={configDraft.selfImprovement.maxMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, maxMemories: Number(event.target.value) || 500 } } : current)} /></label>
+            <div className="memory-option-row" role="group" aria-label="记忆开关">
+              <label className="memory-option"><input type="checkbox" checked={configDraft.selfImprovement.generateMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, generateMemories: event.target.checked } } : current)} /><span>生成经验</span></label>
+              <label className="memory-option" title="主任务完成后自动调用模型提炼记忆"><input type="checkbox" checked={configDraft.selfImprovement.autoDistillOnComplete} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, autoDistillOnComplete: event.target.checked } } : current)} /><span>完成自动提炼</span></label>
+              <label className="memory-option"><input type="checkbox" checked={configDraft.selfImprovement.useMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, useMemories: event.target.checked } } : current)} /><span>任务中使用</span></label>
+              <label className="memory-option" title="允许模型通过专用工具检索与写入记忆"><input type="checkbox" checked={configDraft.selfImprovement.dedicatedTools} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, dedicatedTools: event.target.checked } } : current)} /><span>专用工具</span></label>
+            </div>
+            <span className="memory-toolbar-sep" aria-hidden="true" />
+            <div className="memory-param-row">
+              <label className="memory-param" title="超过该天数的记忆会被自动清理"><span>保留天数</span><input className="memory-param-input" type="number" min="7" max="3650" value={configDraft.selfImprovement.retentionDays} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, retentionDays: Number(event.target.value) || 180 } } : current)} /></label>
+              <label className="memory-param" title="记忆总量上限，超出后优先清理低频记录"><span>最大记录</span><input className="memory-param-input" type="number" min="20" max="5000" value={configDraft.selfImprovement.maxMemories} onChange={(event) => setConfigDraft((current) => current ? { ...current, selfImprovement: { ...current.selfImprovement, maxMemories: Number(event.target.value) || 500 } } : current)} /></label>
+            </div>
           </div>
           <div className="memory-toolbar-actions">
-            <span className="memory-count-pill">{selfImprovementMemories.length} 条记录</span>
-            <button className="button ghost" type="button" onClick={() => void refreshSelfImprovementNow()} disabled={isRefreshingSelfImprovementMemories}><IconRefresh /><span>{isRefreshingSelfImprovementMemories ? "处理中" : "立即提炼"}</span></button>
+            <div className="memory-scope-tabs" role="tablist" aria-label="记忆作用域">
+              {memoryScopeTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  className={`memory-scope-tab${memoryScopeFilter === tab.id ? " is-active" : ""}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={memoryScopeFilter === tab.id}
+                  title={tab.hint}
+                  onClick={() => {
+                    setMemoryScopeFilter(tab.id);
+                    setSelfImprovementMemoryPage(0);
+                  }}
+                >
+                  {tab.label}
+                  <span className="memory-scope-tab-count">{tab.count}</span>
+                </button>
+              ))}
+            </div>
+            <span className="memory-toolbar-sep" aria-hidden="true" />
+            <button className="button ghost" type="button" onClick={() => void refreshSelfImprovementNow()} disabled={isRefreshingSelfImprovementMemories}><IconRefresh /><span>{isRefreshingSelfImprovementMemories ? "提炼中" : "立即提炼"}</span></button>
             <button className="button ghost" type="button" onClick={onOpenClearMemories} disabled={selfImprovementMemories.length === 0 || isClearingSelfImprovement}><IconTrash /><span>清空记忆</span></button>
             <button className="button ghost" type="button" onClick={() => void saveConfigDraft()}><span>保存设置</span></button>
           </div>
@@ -68,16 +102,16 @@ export function MemoryPage({ configDraft, setConfigDraft, selfImprovementMemorie
       <div ref={selfImprovementMemoryListRef} className="memory-solution-list memory-paged-list" aria-label="自我完善经验列表">
         {visibleSelfImprovementMemories.map((memory) => (
           <article key={memory.id} className="memory-solution-card">
-            <div className="memory-solution-card-head"><div className="memory-solution-card-copy"><div className="memory-solution-card-title"><strong>{memory.title}</strong><span className="memory-meta-chip soft">{memory.scope === "project" ? "项目" : "全局"}</span></div><p className="memory-solution-summary">{memory.content}</p></div><button className="button ghost danger-icon-button" type="button" title="删除经验" onClick={() => void deleteSelfImprovementMemory(memory.id)}><IconTrash /></button></div>
+            <div className="memory-solution-card-head"><div className="memory-solution-card-copy"><div className="memory-solution-card-title"><strong>{memory.title}</strong><span className="memory-meta-chip soft">{memory.scope === "project" ? "项目" : "全局"}</span><span className="memory-meta-chip soft">{memory.source === "manual" ? "手动" : "自动提炼"}</span>{memory.usageCount > 0 ? <span className="memory-meta-chip soft">引用 {memory.usageCount} 次</span> : null}</div><p className="memory-solution-summary">{memory.content}</p></div><button className="button ghost danger-icon-button" type="button" title="删除经验" onClick={() => void deleteSelfImprovementMemory(memory.id)}><IconTrash /></button></div>
           </article>
         ))}
-        {!selfImprovementMemories.length ? <div className="memory-empty-state"><div className="memory-empty-icon" aria-hidden><IconKnowledge /></div><strong>暂无记忆记录</strong><p>完成的主任务会在空闲后自动提炼为记忆。</p></div> : null}
+        {!visibleSelfImprovementMemories.length ? <div className="memory-empty-state"><div className="memory-empty-icon" aria-hidden><IconKnowledge /></div><strong>{selfImprovementMemories.length ? "当前范围暂无记忆" : "暂无记忆记录"}</strong><p>{selfImprovementMemories.length ? "切换到其他作用域，或调整上方筛选。" : "主任务完成约 20 秒后会自动提炼为记忆。"}</p></div> : null}
       </div>
       <MemoryPagination
         label="记忆列表"
         page={safeSelfImprovementMemoryPage}
         pageCount={selfImprovementMemoryPageCount}
-        totalCount={selfImprovementMemories.length}
+        totalCount={visibleSelfImprovementMemories.length}
         onPageChange={(page) => {
           setSelfImprovementMemoryPage(page);
           window.requestAnimationFrame(() => selfImprovementMemoryListRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
@@ -107,9 +141,10 @@ export function MemoryPage({ configDraft, setConfigDraft, selfImprovementMemorie
               placeholder="选择模型"
             />
           </label>
-          <span className="memory-count-pill">{errorSolutions.length} 条记录</span>
         </div>
         <div className="memory-toolbar-actions">
+          <span className="memory-count-pill">{errorSolutions.length} 条记录</span>
+          <span className="memory-toolbar-sep" aria-hidden="true" />
           <button
             className="button ghost"
             type="button"

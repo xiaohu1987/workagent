@@ -18000,89 +18000,288 @@ body.panel-resizing {
   -webkit-line-clamp: 1;
 }
 
+/* Memory panel toolbar — two aligned rows: options + numeric limits first,
+   list scope + actions second (right-aligned). Every control shares one 26px
+   height so the strip reads as a single grid instead of a mixed-height pile. */
 .memory-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 11px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.memory-toolbar-main,
-.memory-toolbar-actions {
-  display: flex;
-  align-items: center;
   gap: 8px;
-  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(145, 170, 205, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.018);
 }
 
 .memory-toolbar-main {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  align-content: center;
+  gap: 8px 10px;
+  min-width: 0;
 }
 
 .memory-toolbar-actions {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.memory-filter-field {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 32px;
+  flex-wrap: wrap;
+  gap: 6px;
   min-width: 0;
+}
+
+.memory-toolbar-sep {
+  flex: 0 0 1px;
+  align-self: stretch;
+  min-height: 16px;
+  margin: 0 2px;
+  background: rgba(145, 170, 205, 0.18);
+}
+
+.memory-option-row,
+.memory-param-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.memory-option-row { gap: 6px; }
+.memory-param-row { gap: 12px; }
+
+.memory-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px 0 8px;
+  border: 1px solid rgba(145, 170, 205, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.022);
+  color: var(--text-muted, #8f939d);
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.memory-option > input[type="checkbox"] {
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #75a9e6;
+}
+
+.memory-option:hover {
+  border-color: rgba(145, 170, 205, 0.3);
+  color: var(--text-soft, #d0d2d8);
+}
+
+.memory-option:has(input:checked) {
+  border-color: rgba(117, 169, 230, 0.42);
+  background: rgba(117, 169, 230, 0.11);
+  color: #cfe2fb;
+}
+
+.memory-option:has(input:focus-visible) {
+  outline: 2px solid rgba(117, 169, 230, 0.5);
+  outline-offset: 1px;
+}
+
+.memory-param {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted, #8f939d);
+  font-size: 11.5px;
+  line-height: 1;
   white-space: nowrap;
 }
 
-.memory-filter-field > input[type="checkbox"] {
-  flex: 0 0 16px;
-  width: 16px;
-  height: 16px;
-  margin: 0;
-}
-
-.memory-filter-field > .form-input {
+.memory-param-input {
   box-sizing: border-box;
-  width: 144px;
-  min-width: 144px;
+  width: 62px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid rgba(145, 170, 205, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text, #f1f3f6);
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
-.memory-filter-field > span {
-  flex: 0 0 auto;
-  color: rgba(255, 255, 255, 0.52);
-  font-size: 12px;
+.memory-param-input:hover { border-color: rgba(145, 170, 205, 0.28); }
+
+.memory-param-input:focus {
+  border-color: rgba(117, 169, 230, 0.5);
+  background: rgba(117, 169, 230, 0.07);
+  outline: none;
+}
+
+/* Still used by the error-solution filter row; aligned to the same 26px strip. */
+.memory-filter-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  min-width: 0;
+  color: var(--text-muted, #8f939d);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.memory-filter-field > span { flex: 0 0 auto; }
+
+.memory-filter-field .composer-select-trigger {
+  min-height: 26px;
+  height: 26px;
+  padding: 0 8px 0 10px;
+  border-color: rgba(145, 170, 205, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 11.5px;
+}
+
+.memory-scope-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  height: 26px;
+  padding: 2px;
+  border: 1px solid rgba(145, 170, 205, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.memory-scope-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted, #8f939d);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.memory-scope-tab:hover {
+  color: var(--text-soft, #d0d2d8);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.memory-scope-tab.is-active {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.memory-scope-tab:focus-visible {
+  outline: 2px solid rgba(117, 169, 230, 0.5);
+  outline-offset: 1px;
+}
+
+.memory-scope-tab-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  color: inherit;
+  font-size: 10.5px;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 
 .memory-model-filter {
-  width: 200px;
+  width: 208px;
   min-width: 160px;
-  max-width: 240px;
+  max-width: 260px;
 }
 
 .memory-count-pill {
+  display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
-  padding: 3px 8px;
-  border-radius: 999px;
-  color: rgba(255, 255, 255, 0.68);
-  background: rgba(255, 255, 255, 0.06);
-  font-size: 11px;
-  line-height: 1.3;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 6px;
+  color: var(--text-muted, #8f939d);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .memory-toolbar-actions .button {
-  min-height: 32px;
-  gap: 6px;
-  padding: 0 10px;
-  font-size: 12px;
+  min-height: 26px;
+  height: 26px;
+  gap: 5px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
 }
 
 .memory-toolbar-actions .button svg {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
+}
+
+:root[data-theme="light"] .memory-toolbar {
+  border-color: #dbe7f3;
+  background: #f7fbff;
+}
+
+:root[data-theme="light"] .memory-toolbar-sep { background: #d3e2ef; }
+
+:root[data-theme="light"] .memory-option {
+  border-color: #dbe7f3;
+  background: #ffffff;
+  color: #6f879d;
+}
+
+:root[data-theme="light"] .memory-option:hover {
+  border-color: #9dcaf0;
+  color: #35526b;
+}
+
+:root[data-theme="light"] .memory-option:has(input:checked) {
+  border-color: #5aa9e8;
+  background: #e7f3ff;
+  color: #1f5c8f;
+}
+
+:root[data-theme="light"] .memory-param,
+:root[data-theme="light"] .memory-filter-field { color: #6f879d; }
+
+:root[data-theme="light"] .memory-param-input,
+:root[data-theme="light"] .memory-filter-field .composer-select-trigger {
+  border-color: #dbe7f3;
+  background: #ffffff;
+  color: #23384c;
+}
+
+:root[data-theme="light"] .memory-scope-tabs {
+  border-color: #dbe7f3;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .memory-scope-tab { color: #6f879d; }
+:root[data-theme="light"] .memory-scope-tab:hover { color: #35526b; background: #eef6ff; }
+:root[data-theme="light"] .memory-scope-tab.is-active { color: #1f5c8f; background: #e7f3ff; }
+:root[data-theme="light"] .memory-scope-tab-count { background: rgba(90, 169, 232, 0.16); }
+
+:root[data-theme="light"] .memory-count-pill {
+  color: #6f879d;
+  background: #eef4fa;
 }
 
 .app-shell.has-app-background .memory-management-panel {
@@ -18510,15 +18709,13 @@ body.panel-resizing {
   .memory-control-group:nth-child(2) { width: auto; }
   .memory-number-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .memory-control-actions { grid-column: 1 / -1; justify-content: flex-end; }
-  .memory-toolbar {
-    align-items: stretch;
-    grid-template-columns: 1fr;
-  }
-
   .memory-toolbar-main,
   .memory-toolbar-actions {
     width: 100%;
-    justify-content: space-between;
+  }
+
+  .memory-toolbar-sep {
+    display: none;
   }
 
   .memory-model-filter {
@@ -19151,16 +19348,6 @@ body.panel-resizing .app-shell { transition: none; }
   overflow: hidden;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   background: #0b0c0e;
-}
-
-@media (max-width: 1260px) {
-  .memory-toolbar {
-    grid-template-columns: 1fr;
-  }
-
-  .memory-toolbar-actions {
-    justify-content: flex-start;
-  }
 }
 
 .workspace-terminal-drawer[data-motion="entering"] {

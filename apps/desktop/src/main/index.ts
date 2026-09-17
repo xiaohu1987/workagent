@@ -784,11 +784,12 @@ function registerIpc(): void {
   ipcMain.handle("error-solutions:delete", (_event, id: string) => backend.deleteErrorSolution(id));
   ipcMain.handle("error-solutions:clear", (_event, modelId?: string | null) => backend.clearErrorSolutions(modelId));
   ipcMain.handle("self-improvement:clear", () => backend.clearSelfImprovementMemories());
-  ipcMain.handle("self-improvement:list", (_event, input?: { projectId?: string | null; limit?: number; all?: boolean }) =>
+  ipcMain.handle("self-improvement:list", (_event, input?: { projectId?: string | null; limit?: number; all?: boolean; scope?: "global" | "project" }) =>
     backend.listSelfImprovementMemories(input ?? {})
   );
+  ipcMain.handle("self-improvement:stats", () => backend.countSelfImprovementMemories());
   ipcMain.handle("self-improvement:delete", (_event, id: string) => backend.deleteSelfImprovementMemory(id));
-  ipcMain.handle("self-improvement:refresh", () => backend.refreshSelfImprovementMemories());
+  ipcMain.handle("self-improvement:refresh", (_event, threadId?: string) => backend.refreshSelfImprovementMemories(threadId));
   ipcMain.handle("quick-notes:list", () => backend.listQuickNotes());
   ipcMain.handle("quick-notes:save", (_event, payload: { id?: string; title?: string; content: string }) => backend.saveQuickNote(payload));
   ipcMain.handle("quick-notes:delete", (_event, id: string) => backend.deleteQuickNote(id));

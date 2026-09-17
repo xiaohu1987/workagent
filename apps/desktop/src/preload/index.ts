@@ -254,10 +254,11 @@ const api = {
   deleteErrorSolution: (id: string) => ipcRenderer.invoke("error-solutions:delete", id),
   clearErrorSolutions: (modelId?: string | null) => ipcRenderer.invoke("error-solutions:clear", modelId),
   clearSelfImprovementMemories: () => ipcRenderer.invoke("self-improvement:clear"),
-  listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean }) =>
+  listSelfImprovementMemories: (input?: { projectId?: string | null; limit?: number; all?: boolean; scope?: "global" | "project" }) =>
     ipcRenderer.invoke("self-improvement:list", input),
+  countSelfImprovementMemories: () => ipcRenderer.invoke("self-improvement:stats"),
   deleteSelfImprovementMemory: (id: string) => ipcRenderer.invoke("self-improvement:delete", id),
-  refreshSelfImprovementMemories: () => ipcRenderer.invoke("self-improvement:refresh"),
+  refreshSelfImprovementMemories: (threadId?: string) => ipcRenderer.invoke("self-improvement:refresh", threadId),
   openBrowserTab: (payload: { threadId: string; url: string; openMode?: "in_app" | "external_default" }) =>
     ipcRenderer.invoke("browser:open", payload),
   navigateBrowserTab: (payload: { threadId: string; tabId: string; url: string }) =>

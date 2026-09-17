@@ -1164,7 +1164,12 @@ interface RuntimeServices {
   markErrorSolutionUsed?(id: string): Promise<void>;
   recordErrorSolutionRecall?(id: string): Promise<void>;
   setErrorSolutionRecallOutcome?(id: string, outcome: "blocked" | "prerequisite"): Promise<void>;
-  searchSelfImprovementMemories?(input: { query: string; projectId?: string | null; limit?: number }): Promise<Array<{ id: string; title: string; content: string; scope: string }>>;
+  searchSelfImprovementMemories?(input: {
+    query: string;
+    projectId?: string | null;
+    limit?: number;
+    scope?: "global" | "project";
+  }): Promise<Array<{ id: string; title: string; content: string; scope: string }>>;
   addSelfImprovementMemory?(input: { scope: "global" | "project"; projectId: string | null; kind: "note"; title: string; content: string; sourceThreadId: string | null }): Promise<{ id: string }>;
   markSelfImprovementMemoryUsed?(id: string): Promise<void>;
   listFiles(dir: string): Promise<string[]>;
@@ -2020,17 +2025,21 @@ class ThreadSessionRuntime {
       (modePolicy.mode === "project" ? workspaceRoots : []).map((root) => loadProjectInstructionContext(root))
     );
     const projectInstructionContext = projectInstructionContexts.filter(Boolean).join("\n\n");
-    const selfImprovementMemories = this.services.config.selfImprovement.useMemories && !thread.parentThreadId
+    const memoryEnabled = this.services.config.selfImprovement.useMemories && !thread.parentThreadId;
+    const memoryProjectId = modePolicy.mode === "project" ? thread.projectId : null;
+    const globalMemories = memoryEnabled
+      ? await this.services.searchSelfImprovementMemories?.({ query: initialInput, scope: "global", limit: 4 }) ?? []
+      : [];
+    const projectMemories = memoryEnabled && memoryProjectId
       ? await this.services.searchSelfImprovementMemories?.({
           query: initialInput,
-          projectId: modePolicy.mode === "project" ? thread.projectId : null,
-          limit: 6
+          scope: "project",
+          projectId: memoryProjectId,
+          limit: 4
         }) ?? []
       : [];
-    for (const memory of selfImprovementMemories) void this.services.markSelfImprovementMemoryUsed?.(memory.id);
-    const selfImprovementContext = selfImprovementMemories.length
-      ? ["[Internal self-improvement context. Do not quote it verbatim.]", ...selfImprovementMemories.map((memory) => `- ${memory.title}: ${memory.content}`)].join("\n")
-      : "";
+    for (const memory of [...globalMemories, ...projectMemories]) void this.services.markSelfImprovementMemoryUsed?.(memory.id);
+    const selfImprovementContext = buildSelfImprovementContext({ globalMemories, projectMemories });
     const gitMutationRequested = isExplicitGitMutationRequest(initialInput);
     // Detect after we have history later; provisional from input + plan titles.
     let webFrontendGuard =
@@ -5658,9 +5667,14 @@ class ThreadSessionRuntime {
           terminalThread = await this.services.persistence.updateThread(this.threadId, {
             // GOAL and PLAN end a response, not the user task. The confirmed
             // workflow remains available for the next explicit user action.
-            status: terminalDisposition === "awaiting_user_confirmation" || providerOutputLimitEncountered
-              ? "idle"
-              : "completed",
+            //
+            // A truncated response (providerOutputLimitEncountered) is a quality
+            // signal, not a task boundary: once the runtime accepted the terminal
+            // disposition the turn is over, so the thread is completed. Writing
+            // "idle" here leaked into the child-agent state machine, where idle
+            // means "created but never dispatched" and therefore renders as
+            // "queued" — a finished subagent showed up as still waiting in line.
+            status: terminalDisposition === "awaiting_user_confirmation" ? "idle" : "completed",
             updatedAt: new Date().toISOString()
           });
           await settleDraft({ discarded: true });
@@ -6359,11 +6373,14 @@ class ThreadSessionRuntime {
               },
               installPlugin: (source) => this.services.installPluginForThread(this.threadId, source),
               installMcpServer: (input) => this.services.installMcpServerFromChat(input),
-              listSelfImprovementMemories: async (query) => {
+              listSelfImprovementMemories: async (query, scope) => {
                 if (!this.services.config.selfImprovement.useMemories) return [];
+                const activeProjectId = modePolicy.mode === "project" ? thread.projectId : null;
+                if (scope === "project" && !activeProjectId) return [];
                 const memories = await this.services.searchSelfImprovementMemories?.({
                   query: query ?? initialInput,
-                  projectId: modePolicy.mode === "project" ? thread.projectId : null,
+                  scope,
+                  projectId: activeProjectId,
                   limit: 12
                 }) ?? [];
                 for (const memory of memories) void this.services.markSelfImprovementMemoryUsed?.(memory.id);
@@ -6371,10 +6388,14 @@ class ThreadSessionRuntime {
               },
               addSelfImprovementMemory: async (input) => {
                 if (!this.services.config.selfImprovement.generateMemories || !this.services.addSelfImprovementMemory) throw new Error("Self-improvement memory generation is disabled.");
+                // Without an explicit scope, notes follow the active mode so
+                // project-specific facts never land in the shared global store.
+                const wantsProject = input.scope === "project" || (input.scope === undefined && modePolicy.mode === "project");
+                const projectId = wantsProject ? (modePolicy.mode === "project" ? thread.projectId : null) : null;
                 return this.services.addSelfImprovementMemory({
                   ...input,
-                  scope: input.scope === "project" && modePolicy.mode === "project" ? "project" : "global",
-                  projectId: input.scope === "project" && modePolicy.mode === "project" ? thread.projectId : null,
+                  scope: projectId ? "project" : "global",
+                  projectId,
                   kind: "note",
                   sourceThreadId: this.threadId
                 });
@@ -10316,6 +10337,35 @@ export function buildStrategySwitchInstruction(input: {
     alternative,
     "Return a JSON decision containing a different tool call or materially different arguments."
   ].filter(Boolean).join(" ");
+}
+
+/**
+ * Renders recalled memories as two explicitly separated blocks. Keeping the
+ * scopes apart lets the model weigh project facts above generic global habits
+ * and stops project-specific experience from leaking into unrelated chats.
+ */
+export function buildSelfImprovementContext(input: {
+  globalMemories: Array<{ title: string; content: string }>;
+  projectMemories: Array<{ title: string; content: string }>;
+}): string {
+  const blocks: string[] = [];
+  if (input.globalMemories.length) {
+    blocks.push([
+      "【全局记忆】跨项目通用，仅作背景参考：",
+      ...input.globalMemories.map((memory) => `- ${memory.title}: ${memory.content}`)
+    ].join("\n"));
+  }
+  if (input.projectMemories.length) {
+    blocks.push([
+      "【项目记忆】仅适用于当前项目，与本次任务冲突时以项目记忆为准：",
+      ...input.projectMemories.map((memory) => `- ${memory.title}: ${memory.content}`)
+    ].join("\n"));
+  }
+  if (!blocks.length) return "";
+  return [
+    "[Internal memory context. Do not quote it verbatim, and do not treat it as verified truth for this task.]",
+    ...blocks
+  ].join("\n");
 }
 
 export function buildErrorSolutionMemoryInstruction(input: {

@@ -284,11 +284,16 @@ export function resolveSubagentDisplayState(
   result: SubagentResultEnvelope | undefined,
   waitingForInput: boolean
 ): SubagentDisplayState {
+  // Terminal states outrank "queued": the queue flag is a scheduling hint that
+  // can lag behind — or be injected by a stale/merged snapshot — after the agent
+  // is already done. Letting it win made finished subagents render as
+  // "等待可用执行槽位" indefinitely, and a full refresh could not clear it because
+  // the queue flag was rebuilt from the same stale status.
   if (result?.status === "interrupted") return "cancelled";
-  if (queued || result?.status === "queued") return "queued";
-  if (waitingForInput) return "waiting_input";
   if (result?.status === "failed" || agent.status === "failed") return "failed";
   if (result?.status === "completed" || agent.status === "completed") return "completed";
+  if (queued || result?.status === "queued") return "queued";
+  if (waitingForInput) return "waiting_input";
   return "running";
 }
 

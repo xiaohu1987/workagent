@@ -146,7 +146,10 @@ export interface ToolRuntimeContext {
     url?: string;
     transport?: string;
   }) => Promise<{ server: { id: string; name: string; transport?: string; command?: string; url?: string }; connectionError?: string }>;
-  listSelfImprovementMemories?: (query?: string) => Promise<Array<{ id: string; title: string; content: string; scope: string }>>;
+  listSelfImprovementMemories?: (
+    query?: string,
+    scope?: "global" | "project"
+  ) => Promise<Array<{ id: string; title: string; content: string; scope: string }>>;
   addSelfImprovementMemory?: (input: { title: string; content: string; scope?: "global" | "project" }) => Promise<{ id: string }>;
   webSearch: (query: string) => Promise<Array<{ title: string; url: string; snippet: string }>>;
   openPage: (url: string) => Promise<{ title: string; url: string; text: string }>;
@@ -2511,21 +2514,21 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
   );
 
   runtime.register(
-    spec("memories.list", "List available self-improvement memories for this task.", [], "low"),
-    async (_args, ctx) => {
-      const memories = await ctx.listSelfImprovementMemories?.() ?? [];
-      return { ok: true, content: JSON.stringify({ memories }), json: { memories } };
-    }
-  );
-  runtime.register(
-    spec("memories.search", "Search self-improvement memories relevant to a question.", ["query"], "low"),
+    spec("memories.list", "List available self-improvement memories for this task. Optionally pass scope=global (cross-project) or scope=project (current project only).", [], "low"),
     async (args, ctx) => {
-      const memories = await ctx.listSelfImprovementMemories?.(String(args.query ?? "")) ?? [];
+      const memories = await ctx.listSelfImprovementMemories?.(undefined, readMemoryScope(args.scope)) ?? [];
       return { ok: true, content: JSON.stringify({ memories }), json: { memories } };
     }
   );
   runtime.register(
-    spec("memories.add_ad_hoc_note", "Store an explicit, redacted long-term self-improvement note.", ["content"], "low"),
+    spec("memories.search", "Search self-improvement memories relevant to a question. Optionally pass scope=global or scope=project.", ["query"], "low"),
+    async (args, ctx) => {
+      const memories = await ctx.listSelfImprovementMemories?.(String(args.query ?? ""), readMemoryScope(args.scope)) ?? [];
+      return { ok: true, content: JSON.stringify({ memories }), json: { memories } };
+    }
+  );
+  runtime.register(
+    spec("memories.add_ad_hoc_note", "Store an explicit, redacted long-term note. Use scope=global only for project-independent facts; use scope=project (default) for anything specific to the current project.", ["content"], "low"),
     async (args, ctx) => {
       if (!ctx.addSelfImprovementMemory) return { ok: false, content: "Self-improvement memory is unavailable." };
       const memory = await ctx.addSelfImprovementMemory({
@@ -3167,6 +3170,13 @@ function compactDatabaseResult(result: { rows: Array<Record<string, unknown>>; r
   const rows = result.rows.slice(0, 200); const json = { ...extra, rows, rowCount: result.rowCount, returnedRows: rows.length, durationMs: result.durationMs, truncated: result.rows.length > rows.length };
   const content = JSON.stringify(json, null, 2);
   return { ok: true, content: content.length > 50_000 ? `${content.slice(0, 50_000)}\n[Database result truncated]` : content, json };
+}
+
+/** Reads the optional memory scope argument; undefined keeps the caller default. */
+function readMemoryScope(value: unknown): "global" | "project" | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized === "global" || normalized === "project") return normalized;
+  return undefined;
 }
 
 function spec(

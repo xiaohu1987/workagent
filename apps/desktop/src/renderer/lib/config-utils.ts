@@ -105,6 +105,7 @@ export function cloneConfig(config: AppConfig): AppConfig {
       generateMemories: config.selfImprovement?.generateMemories !== false,
       useMemories: config.selfImprovement?.useMemories !== false,
       dedicatedTools: config.selfImprovement?.dedicatedTools === true,
+      autoDistillOnComplete: config.selfImprovement?.autoDistillOnComplete !== false,
       processingModelId: config.selfImprovement?.processingModelId,
       idleMinutes: config.selfImprovement?.idleMinutes ?? 5,
       retentionDays: config.selfImprovement?.retentionDays ?? 180,

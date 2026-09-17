@@ -151,6 +151,32 @@ describe("subagent task UI", () => {
     expect(resolveSubagentDisplayState(agent, false, createResult(agent, "interrupted", "stopped"), false)).toBe("cancelled");
   });
 
+  it("lets a terminal state outrank a stale queue flag", () => {
+    const finished = createAgent("agent", "completed", "review");
+    const completed = createResult(finished, "completed", "done");
+    // The queue flag is a scheduling hint and can lag behind, or be rebuilt from
+    // a stale snapshot. It used to outrank completion, so a finished subagent
+    // rendered as 「排队中 · 等待可用执行槽位」 and never recovered.
+    expect(resolveSubagentDisplayState(finished, true, completed, false)).toBe("completed");
+    expect(resolveSubagentDisplayState(finished, true, createResult(finished, "queued", "done"), false)).toBe("completed");
+    expect(resolveSubagentDisplayState(finished, true, createResult(finished, "failed", "boom"), false)).toBe("failed");
+    // A child that really is waiting for a slot still reports queued.
+    const pending = createAgent("pending", "idle", "docs");
+    expect(resolveSubagentDisplayState(pending, true, createResult(pending, "queued", "pending"), false)).toBe("queued");
+    expect(getSubagentPhases("completed", undefined).map((phase) => phase.label)).toEqual(["分析任务", "整理结果"]);
+  });
+
+  it("does not read a bare idle child thread as queued when building the envelope", () => {
+    const envelopeImplementation = backendSource.slice(
+      backendSource.indexOf("private buildSubagentEnvelope"),
+      backendSource.indexOf("public getToolCallDetails")
+    );
+
+    expect(envelopeImplementation).toContain("this.#db.isSubagentPendingDispatch(thread.id)");
+    expect(envelopeImplementation).toContain("const waitingForDispatch = !latestTurn && (pendingDispatch || thread.status !== \"failed\")");
+    expect(envelopeImplementation).not.toContain("thread.status === \"idle\"");
+  });
+
   it("reports exact state counts without percentage progress", () => {
     const agents = [
       createAgent("done", "completed", "review"),
