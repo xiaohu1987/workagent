@@ -67,6 +67,31 @@ export function resolveVirtualizedRange(
   return { start, end };
 }
 
+/**
+ * The range that is actually rendered.
+ *
+ * `followLatest` means the user is still tracking the newest content, and then the
+ * newest row must stay mounted no matter what the measurement bookkeeping says. A
+ * freshly appended answer is the tallest row in the transcript and its height only
+ * settles after async markdown highlighting and image decode; during that window the
+ * computed range can sit one row short of the end. A row that never mounts cannot be
+ * found by scrolling, so the answer looks like it was never rendered until a thread
+ * switch remounts the list. Keeping the trailing window pinned costs one row of
+ * rendering and removes that failure mode entirely.
+ */
+export function resolveVirtualizedRenderRange(
+  range: VisibleRange,
+  itemCount: number,
+  followLatest: boolean
+): VisibleRange {
+  const clamped = clampVirtualizedRange(range, itemCount);
+  if (!followLatest || itemCount <= 0 || clamped.end >= itemCount) {
+    return clamped;
+  }
+  const windowSize = Math.max(1, clamped.end - clamped.start);
+  return { start: Math.max(0, itemCount - windowSize), end: itemCount };
+}
+
 export function resolveMeasurementScrollAdjustment(
   previousHeight: number,
   nextHeight: number,
@@ -288,7 +313,7 @@ export function VirtualizedTimeline<T>({
     return <>{items.map((item, index) => renderItem(item, index))}</>;
   }
 
-  const visibleRange = clampVirtualizedRange(range, items.length);
+  const visibleRange = resolveVirtualizedRenderRange(range, items.length, followLatest);
   const visibleItems = items.slice(visibleRange.start, visibleRange.end);
   return (
     <div ref={containerRef} className="virtual-timeline" style={{ height: `${layout.totalSize}px` }}>

@@ -45,6 +45,7 @@ assets/tree-sitter-grammars/*.wasm
 /.jt-link/
 /.jt-src/
 /.workbuddy-ai/
+/.workbuddy/
 /.graphify_detect.json
 /$null
 /-

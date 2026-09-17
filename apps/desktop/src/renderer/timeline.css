@@ -151,7 +151,13 @@
 .task-timeline .tool-activity-group,
 .task-timeline .plan-timeline {
   position: relative;
-  animation: timeline-enter 180ms ease-out both;
+  /* No fill-mode on purpose. Transcript entries can be appended below the fold while
+     `content-visibility: auto` (styles.css) still treats them as skipped content. An
+     animation that never advances its clock would then pin the card to its `from`
+     frame (opacity: 0) indefinitely — the "conclusion never renders until I switch
+     thread" report. With the default fill-mode the element falls back to its natural,
+     visible state the moment the animation cannot run. */
+  animation: timeline-enter 180ms ease-out;
 }
 
 .task-timeline .message-card:not(.user)::before,
@@ -1211,7 +1217,7 @@
   padding: 2px 0 2px 12px;
   border-left: 1px solid rgba(96, 165, 250, 0.42);
   color: #e5edf8;
-  animation: timeline-enter 160ms ease-out both;
+  animation: timeline-enter 160ms ease-out;
 }
 
 .streaming-assistant-state {
@@ -1425,7 +1431,7 @@
   color: #aebfd3;
   background: #101720;
   font-size: 12px;
-  animation: timeline-enter 160ms ease-out both;
+  animation: timeline-enter 160ms ease-out;
 }
 
 .task-processing-dots {
@@ -1455,15 +1461,21 @@
 @keyframes task-processing-dot { 0%, 100% { opacity: 0.35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
 
 .task-timeline .message-card.assistant.is-finalizing-from-draft {
-  animation: assistant-finalize-enter 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: assistant-finalize-enter 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .task-timeline .message-card.user.is-sending {
   transform-origin: right center;
-  animation: user-message-send 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: user-message-send 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .task-timeline .message-card,
+  .task-timeline .execution-step,
+  .task-timeline .tool-activity-group,
+  .task-timeline .plan-timeline,
+  .streaming-assistant,
+  .task-processing-indicator,
   .task-timeline .message-card.assistant.is-finalizing-from-draft,
   .task-timeline .message-card.user.is-sending,
   .task-processing-dots i,

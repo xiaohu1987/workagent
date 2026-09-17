@@ -13382,6 +13382,17 @@ input[type="radio"]:focus-visible {
   content-visibility: visible;
 }
 
+/* The tail of the transcript must always be laid out and painted. Freshly appended
+   entries (the final assistant answer, the failed-turn recovery notice) land below the
+   fold and are only scrolled into view a frame later; while `content-visibility: auto`
+   keeps them skipped, their enter animation stays frozen at its `from` frame, so the
+   card exists in the DOM yet never becomes visible. Forcing visibility on the last few
+   entries keeps the paint (and therefore the animation) alive at the point where new
+   content actually arrives. */
+.chat-transcript > *:nth-last-child(-n + 6) {
+  content-visibility: visible;
+}
+
 .virtual-timeline {
   position: relative;
   width: 100%;
@@ -19693,7 +19704,7 @@ select {
 }
 
 .chat-scroll .chat-transcript.motion-thread-content {
-  animation: thread-transcript-enter 160ms var(--motion-ease) both;
+  animation: thread-transcript-enter 160ms var(--motion-ease);
 }
 
 @keyframes thread-transcript-enter {
@@ -28287,7 +28298,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   border: 0;
   background: transparent;
   box-shadow: none;
-  animation: subagent-narrative-enter 180ms ease-out both;
+  animation: subagent-narrative-enter 180ms ease-out;
 }
 
 .task-timeline .subagent-narrative-message.message-card::before { display: none; }

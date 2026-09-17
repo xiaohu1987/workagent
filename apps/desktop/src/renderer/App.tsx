@@ -1105,6 +1105,7 @@ export function App() {
   const errorSolutionListRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
   const manualTranscriptScrollRef = useRef(false);
+  const isTranscriptAtLatestRef = useRef(true);
   const transcriptScrollMetricsRef = useRef({ scrollTop: 0, scrollHeight: 0 });
   const pendingLatestScrollThreadIdRef = useRef<string | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
@@ -4126,6 +4127,12 @@ export function App() {
     visibleMessages.length
   ]);
 
+  // Read the latest "user is following the bottom" flag from imperative callbacks
+  // without re-subscribing the observer on every scroll decision.
+  useEffect(() => {
+    isTranscriptAtLatestRef.current = isTranscriptAtLatest;
+  }, [isTranscriptAtLatest]);
+
   useEffect(() => {
     const transcriptNode = chatTranscriptRef.current;
     if (!transcriptNode || showWelcome) {
@@ -4133,10 +4140,17 @@ export function App() {
     }
 
     const observer = new ResizeObserver(() => {
-      const shouldFollowLatest = shouldAutoScrollRef.current;
-      if (!shouldFollowLatest) {
-        return;
-      }
+      // `shouldAutoScrollRef` is released 320ms after a turn ends, but the transcript
+      // keeps growing for longer than that: markdown is parsed and highlighted
+      // asynchronously, local images decode after the card mounts, and fonts swap.
+      // `.chat-scroll` sets `overflow-anchor: none`, so once that release fired
+      // nothing compensated the scroll position - the final answer drifted below the
+      // fold, and in a virtualized thread the appended row left the rendered window
+      // entirely, so it only showed up after switching threads (which force-scrolls
+      // to the bottom). Falling back to "the user is still at the bottom" keeps the
+      // newest content pinned while still yielding to a deliberate manual scroll.
+      if (manualTranscriptScrollRef.current) return;
+      if (!shouldAutoScrollRef.current && !isTranscriptAtLatestRef.current) return;
 
       scrollTranscriptToLatest();
       settleAutoScroll(activeSnapshotThreadStatus);

@@ -1029,6 +1029,13 @@ export class DesktopBackend {
       cursor.artifactCount <= artifactCount &&
       cursor.observedAt
     );
+    // Sample the watermark *before* the reads below, never after. The next delta selects
+    // rows with `created_at >= observedAt`, so anything written between the query and the
+    // moment we sampled the clock would be excluded from this response and skipped by
+    // every later delta as well. Sampling first can only produce a duplicate (rows written
+    // after the sample are returned twice), which the renderer reconciles by id — losing a
+    // message is far worse than repeating one.
+    const observedAt = new Date().toISOString();
     const messages = canUseDelta && cursor
       ? this.#db.listMessagesCreatedSince(threadId, cursor.observedAt)
       : this.#db.listRecentMessages(threadId, Math.max(1, messageCount));
@@ -1038,7 +1045,6 @@ export class DesktopBackend {
     const artifacts = canUseDelta && cursor
       ? this.#db.listArtifactsCreatedSince(threadId, cursor.observedAt)
       : this.#db.listArtifacts(threadId);
-    const observedAt = new Date().toISOString();
     return {
       snapshotMode: canUseDelta ? "delta" : "full",
       snapshotCursor: { observedAt, messageCount, toolCallCount, artifactCount },

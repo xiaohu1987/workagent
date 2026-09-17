@@ -4,6 +4,7 @@ import {
   resolveMeasurementScrollAdjustment,
   resolveVirtualizedRangeAfterItemCountChange,
   resolveVirtualizedRange,
+  resolveVirtualizedRenderRange,
   shouldDeferVirtualTimelineMeasurement
 } from "../apps/desktop/src/renderer/timeline/virtualized-timeline";
 
@@ -63,5 +64,33 @@ describe("virtualized timeline range", () => {
     expect(shouldDeferVirtualTimelineMeasurement(true, false)).toBe(true);
     expect(shouldDeferVirtualTimelineMeasurement(false, true)).toBe(true);
     expect(shouldDeferVirtualTimelineMeasurement(false, false)).toBe(false);
+  });
+});
+
+describe("virtualized timeline tail pinning", () => {
+  it("mounts the newest row while the user follows the latest content", () => {
+    // A freshly appended answer is the tallest row in the transcript and its height only
+    // settles after async markdown highlighting and image decode, so the measured range
+    // can sit one row short of the end. A row that never mounts cannot be scrolled into
+    // view: the answer looked like it was never rendered until a thread switch remounted
+    // the list. Pinning the trailing window keeps it mounted.
+    expect(resolveVirtualizedRenderRange({ start: 80, end: 100 }, 101, true))
+      .toEqual({ start: 81, end: 101 });
+    expect(resolveVirtualizedRenderRange({ start: 0, end: 20 }, 50, true))
+      .toEqual({ start: 30, end: 50 });
+  });
+
+  it("leaves the range alone once the user has scrolled away", () => {
+    expect(resolveVirtualizedRenderRange({ start: 80, end: 100 }, 101, false))
+      .toEqual({ start: 80, end: 100 });
+    expect(resolveVirtualizedRenderRange({ start: 90, end: 110 }, 40, false))
+      .toEqual({ start: 20, end: 40 });
+  });
+
+  it("keeps a range that already covers the tail untouched", () => {
+    expect(resolveVirtualizedRenderRange({ start: 95, end: 101 }, 101, true))
+      .toEqual({ start: 95, end: 101 });
+    expect(resolveVirtualizedRenderRange({ start: 0, end: 0 }, 0, true))
+      .toEqual({ start: 0, end: 0 });
   });
 });
