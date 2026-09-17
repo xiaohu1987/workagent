@@ -2335,10 +2335,8 @@ export function App() {
             threadId,
             turnRunId,
             content: streamUpdate?.content ?? previous?.content ?? "",
-            chunks: streamUpdate ? streamUpdate.chunks : previous?.chunks,
             deltaSequence,
             reasoning: reasoningUpdate?.reasoning ?? previous?.reasoning,
-            reasoningChunks: reasoningUpdate ? reasoningUpdate.chunks : previous?.reasoningChunks,
             reasoningDeltaSequence,
             phase,
             startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
@@ -2347,7 +2345,13 @@ export function App() {
           assistantDraftThreadIdsRef.current[draftId] = threadId;
           return reconcileAssistantDraftUpdate(current, next);
         });
-        setRuntimeProgress({ threadId, phase: "generating", runtimeObserved: true });
+        // Returning the previous object keeps React from re-rendering on every
+        // streamed frame: the phase is already "generating" for the whole turn.
+        setRuntimeProgress((current) =>
+          current?.threadId === threadId && current.phase === "generating" && current.runtimeObserved
+            ? current
+            : { threadId, phase: "generating", runtimeObserved: true }
+        );
         return;
       }
       if (typed.type === "assistant.execution_output" && typed.threadId && typed.payload?.content) {
@@ -4118,9 +4122,7 @@ export function App() {
     activeSnapshotThreadId,
     activeSnapshotThreadStatus,
     activeAssistantDraft?.content,
-    activeAssistantDraft?.chunks?.length,
     activeAssistantDraft?.reasoning,
-    activeAssistantDraft?.reasoningChunks?.length,
     latestVisibleMessageId,
     showRuntimeActivityPanel,
     showWelcome,
@@ -7066,7 +7068,6 @@ export function App() {
                     key={`draft-${activeAssistantDraft.draftId}`}
                     assistantLabel={activeAssistantLabel}
                     content={activeDraftContent}
-                    chunks={activeAssistantDraft.chunks}
                     draftId={activeAssistantDraft.draftId}
                     phase={activeAssistantDraft.phase}
                     startedAt={activeAssistantDraft.startedAt}
@@ -7143,7 +7144,6 @@ export function App() {
                   <AssistantDraftReasoning
                     draftId={activeAssistantDraft.draftId}
                     reasoning={activeAssistantDraft.reasoning}
-                    reasoningChunks={activeAssistantDraft.reasoningChunks}
                   />
                 ) : null}
                 {showPendingResumeCard && pendingResumeThread ? (

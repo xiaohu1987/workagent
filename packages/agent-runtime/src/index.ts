@@ -348,6 +348,15 @@ export const MAX_MCP_PERSISTED_RESULT_CHARACTERS = 4_096;
 export const MAX_RAW_HISTORY_TOKENS_PER_REQUEST = 48_000;
 /** Limit full-text draft snapshots so long streamed replies do not starve the desktop renderer. */
 export const ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS = 100;
+/**
+ * Streamed deltas are coalesced onto a fixed frame before they leave the agent
+ * runtime. Without this the publish cadence mirrors the provider's network
+ * chunking exactly (one character now, eight characters 40ms later), which the
+ * renderer can only replay verbatim - producing the "one character, then a
+ * burst" stutter users see. A fixed frame also caps IPC and React work per
+ * second regardless of how chatty the provider is.
+ */
+export const ASSISTANT_DRAFT_STREAM_FRAME_MS = 33;
 /** Pace synthetic chunks when a provider returns the complete response without streaming deltas. */
 export const NON_STREAMING_DRAFT_CHUNK_INTERVAL_MS = 24;
 export const NON_STREAMING_DRAFT_MAX_CHUNKS = 120;
@@ -3002,14 +3011,18 @@ class ThreadSessionRuntime {
         let lastPublishedDraftReasoning = "";
         let draftReasoningDeltaSequence = 0;
         let publishedDraftPhase: AssistantDraftPhase | null = null;
+        let streamedDraftFrameTimer: ReturnType<typeof setTimeout> | null = null;
         activeDraftId = suppressStreamingForActiveSubagents ? null : draftId;
-        const updateDraft = async (
+        /**
+         * Emits one `assistant.draft.updated` event. Every code path funnels
+         * through here so the delta/checkpoint/sequence protocol stays intact.
+         */
+        const publishDraftUpdate = async (
           phase: AssistantDraftPhase,
-          content = streamedVisibleContent,
-          options: { force?: boolean; immediate?: boolean; deliveryMode?: "streaming" | "chunked" } = {}
+          content: string,
+          options: { force?: boolean; immediate?: boolean; deliveryMode?: "streaming" | "chunked" }
         ) => {
           if (draftSettled || suppressStreamingForActiveSubagents) return;
-          streamedVisibleContent = content;
           const nowMs = Date.now();
           const force = options.force === true;
           if (!shouldPublishAssistantDraftUpdate(
@@ -3044,9 +3057,59 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
         };
-        const updateDraftReasoning = async (delta: string) => {
-          if (!delta || draftSettled || suppressStreamingForActiveSubagents) return;
-          streamedReasoningContent += delta;
+        /** Publishes everything accumulated since the previous frame. */
+        const publishStreamedDraft = async () => {
+          if (streamedVisibleContent !== lastPublishedDraftContent) {
+            await publishDraftUpdate("generating", streamedVisibleContent, {
+              immediate: true,
+              deliveryMode: "streaming"
+            });
+          }
+          await publishStreamedReasoning();
+        };
+        const cancelStreamedDraftFrame = () => {
+          if (streamedDraftFrameTimer === null) return;
+          clearTimeout(streamedDraftFrameTimer);
+          streamedDraftFrameTimer = null;
+        };
+        const scheduleStreamedDraftPublish = () => {
+          if (streamedDraftFrameTimer !== null || draftSettled || suppressStreamingForActiveSubagents) return;
+          streamedDraftFrameTimer = setTimeout(() => {
+            streamedDraftFrameTimer = null;
+            // An aborted turn must not push a tail frame after the draft settled.
+            if (abortController.signal.aborted) return;
+            void publishStreamedDraft().catch(() => undefined);
+          }, ASSISTANT_DRAFT_STREAM_FRAME_MS);
+        };
+        /**
+         * Drains a pending frame synchronously. Phase transitions, retries and
+         * completion all call this first so a deferred frame can never land
+         * after a checkpoint and roll the visible text back.
+         */
+        const flushStreamedDraft = async () => {
+          if (streamedDraftFrameTimer === null) return;
+          cancelStreamedDraftFrame();
+          await publishStreamedDraft();
+        };
+        const updateDraft = async (
+          phase: AssistantDraftPhase,
+          content = streamedVisibleContent,
+          options: { force?: boolean; immediate?: boolean; deliveryMode?: "streaming" | "chunked" } = {}
+        ) => {
+          if (draftSettled || suppressStreamingForActiveSubagents) return;
+          streamedVisibleContent = content;
+          // Only pure incremental appends wait for the next frame. Phase
+          // transitions, retries and synthetic chunk pacing stay synchronous.
+          if (options.force !== true && phase === "generating" && options.deliveryMode === "streaming") {
+            scheduleStreamedDraftPublish();
+            return;
+          }
+          await flushStreamedDraft();
+          await publishDraftUpdate(phase, content, options);
+        };
+        const publishStreamedReasoning = async () => {
+          if (draftSettled || suppressStreamingForActiveSubagents) return;
+          if (!streamedReasoningContent || streamedReasoningContent === lastPublishedDraftReasoning) return;
           const reasoningDelta = streamedReasoningContent.startsWith(lastPublishedDraftReasoning)
             ? streamedReasoningContent.slice(lastPublishedDraftReasoning.length)
             : undefined;
@@ -3069,8 +3132,16 @@ class ThreadSessionRuntime {
             createdAt: new Date().toISOString()
           });
         };
+        const updateDraftReasoning = async (delta: string) => {
+          if (!delta || draftSettled || suppressStreamingForActiveSubagents) return;
+          // Reasoning streams are the longest of all, so they ride the same
+          // frame as the visible text instead of emitting per token.
+          streamedReasoningContent += delta;
+          scheduleStreamedDraftPublish();
+        };
         const checkpointDraftReasoning = async (reasoning: string) => {
           if (!reasoning || draftSettled || suppressStreamingForActiveSubagents) return;
+          cancelStreamedDraftFrame();
           streamedReasoningContent = reasoning;
           lastPublishedDraftReasoning = reasoning;
           draftReasoningDeltaSequence += 1;
@@ -3090,6 +3161,9 @@ class ThreadSessionRuntime {
           });
         };
         const retryDraft = async (mode: AssistantDraftRetryMode = "retain") => {
+          // Drop any pending frame first: it would otherwise publish an empty
+          // buffer after the retry checkpoint and blank the bubble.
+          cancelStreamedDraftFrame();
           const retained = resolveRetainedAssistantDraft({
             mode,
             lastPublishedContent: lastPublishedDraftContent,
@@ -3137,6 +3211,9 @@ class ThreadSessionRuntime {
         };
         const settleDraft = async (input: { messageId?: string; discarded?: boolean }) => {
           if (draftSettled || suppressStreamingForActiveSubagents) return;
+          // Publish the coalesced tail before sealing the draft, otherwise the
+          // last frame would be dropped and the bubble would end truncated.
+          await flushStreamedDraft();
           draftSettled = true;
           activeDraftId = null;
           await this.services.emit({

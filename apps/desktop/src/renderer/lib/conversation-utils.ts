@@ -145,12 +145,9 @@ export type AssistantDraft = {
   threadId: string;
   turnRunId: string;
   content: string;
-  /** Optional chunked representation used by the incremental stream path. */
-  chunks?: string[];
   deltaSequence?: number;
   /** Provider reasoning kept separate from the visible final response. */
   reasoning?: string;
-  reasoningChunks?: string[];
   reasoningDeltaSequence?: number;
   phase: AssistantDraftPhase;
   startedAt: string;
@@ -2072,21 +2069,24 @@ export function isAssistantDraftPhase(value: unknown): value is AssistantDraftPh
 }
 
 export type AssistantDraftStreamBuffer = {
-  chunks: string[];
-  checkpoint: string;
+  /**
+   * Full visible text assembled from the deltas seen so far. Deltas only ever
+   * extend this string, so appending is a rope concat rather than the O(n^2)
+   * `[...previous, delta]` array copy this replaced.
+   */
+  accumulated: string;
   nextDeltaSequence: number;
-  usesMarkup: boolean;
 };
 
 export type AssistantDraftReasoningBuffer = {
-  chunks: string[];
+  accumulated: string;
   nextDeltaSequence: number;
 };
 
 export function reconcileAssistantDraftStreamUpdate(
   previous: AssistantDraftStreamBuffer | undefined,
   input: { content?: string; delta?: string; deltaSequence?: number }
-): { buffer?: AssistantDraftStreamBuffer; content: string; chunks?: string[] } | null {
+): { buffer?: AssistantDraftStreamBuffer; content: string } | null {
   const { content, delta, deltaSequence } = input;
   if (deltaSequence === undefined || delta === undefined) {
     return content === undefined ? null : { content };
@@ -2097,39 +2097,21 @@ export function reconcileAssistantDraftStreamUpdate(
     : content !== undefined || deltaSequence === 1;
   if (!isNext) {
     if (content === undefined) return null;
-    const usesMarkup = /<\/?tool_(?:calls|result)\b/i.test(content);
-    const buffer = {
-      chunks: [content],
-      checkpoint: content,
-      nextDeltaSequence: deltaSequence + 1,
-      usesMarkup
-    };
-    return { buffer, content, chunks: usesMarkup ? undefined : buffer.chunks };
+    const buffer = { accumulated: content, nextDeltaSequence: deltaSequence + 1 };
+    return { buffer, content };
   }
 
-  const chunks = content !== undefined
-    ? [content]
-    : [...(previous?.chunks ?? []), delta];
-  const usesMarkup = previous?.usesMarkup === true || /<\/?tool_(?:calls|result)\b/i.test(`${content ?? ""}${delta}`);
-  const buffer = {
-    chunks,
-    checkpoint: content ?? previous?.checkpoint ?? "",
-    nextDeltaSequence: deltaSequence + 1,
-    usesMarkup
-  };
-  return {
-    buffer,
-    // Checkpoints are sent periodically. Until the next one arrives, render
-    // the accumulated deltas so short streamed responses do not stay blank.
-    content: chunks.join(""),
-    chunks: usesMarkup ? undefined : chunks
-  };
+  // Checkpoints ship the authoritative full text and reset the buffer; plain
+  // deltas extend it until the next checkpoint arrives.
+  const accumulated = content !== undefined ? content : `${previous?.accumulated ?? ""}${delta}`;
+  const buffer = { accumulated, nextDeltaSequence: deltaSequence + 1 };
+  return { buffer, content: accumulated };
 }
 
 export function reconcileAssistantDraftReasoningUpdate(
   previous: AssistantDraftReasoningBuffer | undefined,
   input: { reasoning?: string; delta?: string; deltaSequence?: number }
-): { buffer?: AssistantDraftReasoningBuffer; reasoning: string; chunks?: string[] } | null {
+): { buffer?: AssistantDraftReasoningBuffer; reasoning: string } | null {
   const { reasoning, delta, deltaSequence } = input;
   if (deltaSequence === undefined || delta === undefined) {
     return reasoning === undefined ? null : { reasoning };
@@ -2140,13 +2122,13 @@ export function reconcileAssistantDraftReasoningUpdate(
     : reasoning !== undefined || deltaSequence === 1;
   if (!isNext) {
     if (reasoning === undefined) return null;
-    const buffer = { chunks: [reasoning], nextDeltaSequence: deltaSequence + 1 };
-    return { buffer, reasoning, chunks: buffer.chunks };
+    const buffer = { accumulated: reasoning, nextDeltaSequence: deltaSequence + 1 };
+    return { buffer, reasoning };
   }
 
-  const chunks = reasoning !== undefined ? [reasoning] : [...(previous?.chunks ?? []), delta];
-  const buffer = { chunks, nextDeltaSequence: deltaSequence + 1 };
-  return { buffer, reasoning: chunks.join(""), chunks: buffer.chunks };
+  const accumulated = reasoning !== undefined ? reasoning : `${previous?.accumulated ?? ""}${delta}`;
+  const buffer = { accumulated, nextDeltaSequence: deltaSequence + 1 };
+  return { buffer, reasoning: accumulated };
 }
 
 export function getAssistantDraftPhaseLabel(phase: AssistantDraftPhase): string {

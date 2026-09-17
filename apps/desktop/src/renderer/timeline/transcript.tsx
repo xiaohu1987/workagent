@@ -866,21 +866,81 @@ type TranscriptMessageProps = {
 type AssistantDraftMessageProps = {
   assistantLabel: string;
   content: string;
-  chunks?: string[];
   draftId: string;
   phase: AssistantDraftPhase;
   startedAt: string;
   completed: boolean;
 };
 
+/**
+ * Streamed text never arrives evenly: the provider hands over a single
+ * character now and a whole sentence a few milliseconds later, and a coalesced
+ * frame can hand over a burst at once. Pasting every frame into the DOM makes
+ * the bubble jump - one character, then a clump. This keeps the body to a single
+ * text node and drains whatever is pending at a steady per-frame rate, so the
+ * reveal reads as even typing however the bytes arrive.
+ */
+const STREAM_REVEAL_CATCH_UP_BACKLOG = 180;
+
+function StreamedText({ text, instant }: { text: string; instant: boolean }) {
+  const [revealed, setRevealed] = useState(text);
+  const targetRef = useRef(text);
+  const revealedRef = useRef(text);
+  const frameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    targetRef.current = text;
+    if (instant) {
+      // Completion hands the reply over to the persisted markdown message, so
+      // it must be whole instead of caught mid-animation.
+      if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+      revealedRef.current = text;
+      setRevealed(text);
+      return;
+    }
+    // A frame is already scheduled and will pick up the new target on its own.
+    if (revealedRef.current === text || frameRef.current !== null) return;
+    const step = () => {
+      frameRef.current = null;
+      const target = targetRef.current;
+      const shown = revealedRef.current;
+      if (!target.startsWith(shown)) {
+        // A retry rewrites or clears the text instead of extending it. There is
+        // nothing to animate, so snap instead of replaying the whole reply.
+        revealedRef.current = target;
+        setRevealed(target);
+        return;
+      }
+      const backlog = target.length - shown.length;
+      if (backlog <= 0) return;
+      // Normal case trickles a fraction of the backlog; a large backlog (a
+      // burst, or a frame that was skipped while the window was hidden) drains
+      // fast so the text never falls meaningfully behind the stream.
+      const advance = backlog > STREAM_REVEAL_CATCH_UP_BACKLOG
+        ? Math.ceil(backlog / 3)
+        : Math.max(1, Math.ceil(backlog / 6));
+      const next = target.slice(0, shown.length + advance);
+      revealedRef.current = next;
+      setRevealed(next);
+      if (next !== targetRef.current) frameRef.current = window.requestAnimationFrame(step);
+    };
+    frameRef.current = window.requestAnimationFrame(step);
+  }, [text, instant]);
+
+  useEffect(() => () => {
+    if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
+  }, []);
+
+  return <>{revealed}</>;
+}
+
 export function AssistantDraftReasoning({
   draftId,
-  reasoning,
-  reasoningChunks
+  reasoning
 }: {
   draftId: string;
   reasoning?: string;
-  reasoningChunks?: string[];
 }) {
   const reasoningScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -890,7 +950,7 @@ export function AssistantDraftReasoning({
       if (viewport) viewport.scrollTop = viewport.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [reasoning, reasoningChunks]);
+  }, [reasoning]);
 
   if (!reasoning?.trim()) return null;
 
@@ -898,7 +958,7 @@ export function AssistantDraftReasoning({
     <details className="streaming-reasoning" open>
       <summary>思考过程</summary>
       <div ref={reasoningScrollRef} className="streaming-reasoning-body">
-        {reasoningChunks?.length ? reasoningChunks.map((chunk, index) => <span key={`${draftId}-reasoning-${index}`}>{chunk}</span>) : reasoning}
+        <StreamedText text={reasoning} instant={false} />
       </div>
     </details>
   );
@@ -907,7 +967,6 @@ export function AssistantDraftReasoning({
 export const AssistantDraftMessage = memo(function AssistantDraftMessage({
   assistantLabel,
   content,
-  chunks,
   draftId,
   phase,
   startedAt,
@@ -923,7 +982,7 @@ export const AssistantDraftMessage = memo(function AssistantDraftMessage({
       <div className="message-flat-body streaming-assistant-body">
         <div className="streaming-assistant-content">
           <span className="streaming-assistant-plain-body" data-draft-id={draftId}>
-            {chunks?.length ? chunks.map((chunk, index) => <span key={`${draftId}-${index}`}>{chunk}</span>) : content}
+            <StreamedText text={content} instant={completed || phase !== "generating"} />
           </span>
         </div>
         {phase === "generating" ? <span className="streaming-caret" aria-hidden /> : null}

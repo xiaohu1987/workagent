@@ -69,6 +69,7 @@ import {
   upsertRuntimeUserInputPrompt,
   upsertRuntimeToolCallSummary
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
+import type { AssistantDraftStreamBuffer } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getConciseToolActivityLabel } from "../apps/desktop/src/renderer/timeline/transcript";
 import { didTranscriptScrollUpWithoutContentShrink, getSidebarUpdateReminder, isPointerInTranscriptScrollbar, removeQueuedMessageById, shouldFollowLatestAfterTranscriptContentChange, shouldFollowLatestAfterTranscriptScroll } from "../apps/desktop/src/renderer/App";
 import { hasRecognizedGitRepository, getDefaultRightWorkspaceTab, isProjectWorkspaceThread, resolveRightWorkspaceTabForMode, selectWorkspaceTab, shouldLoadProjectWorkspaceResource } from "../apps/desktop/src/renderer/workspace/right-workspace";
@@ -1891,12 +1892,13 @@ describe("assistant draft lifecycle", () => {
       delta: "Hello",
       deltaSequence: 2
     });
-    expect(first).toMatchObject({ content: "Hello", chunks: ["", "Hello"] });
+    expect(first).toMatchObject({ content: "Hello" });
+    expect(first?.buffer).toEqual({ accumulated: "Hello", nextDeltaSequence: 3 });
     const second = reconcileAssistantDraftStreamUpdate(first?.buffer, {
       delta: " world",
       deltaSequence: 3
     });
-    expect(second).toMatchObject({ content: "Hello world", chunks: ["", "Hello", " world"] });
+    expect(second).toMatchObject({ content: "Hello world" });
     expect(reconcileAssistantDraftStreamUpdate(second?.buffer, {
       delta: " skipped",
       deltaSequence: 5
@@ -1905,7 +1907,21 @@ describe("assistant draft lifecycle", () => {
       content: "Hello world restored",
       delta: " restored",
       deltaSequence: 20
-    })?.chunks).toEqual(["Hello world restored"]);
+    })?.content).toBe("Hello world restored");
+  });
+
+  it("accumulates streamed draft text without copying the whole prefix", () => {
+    let buffer: AssistantDraftStreamBuffer | undefined;
+    for (let index = 0; index < 400; index += 1) {
+      const update = reconcileAssistantDraftStreamUpdate(buffer, {
+        delta: "字",
+        deltaSequence: index + 1
+      });
+      buffer = update?.buffer ?? undefined;
+    }
+
+    expect(buffer?.accumulated).toBe("字".repeat(400));
+    expect(buffer?.nextDeltaSequence).toBe(401);
   });
 
   it("keeps streamed reasoning separate from the visible response", () => {
@@ -1918,15 +1934,12 @@ describe("assistant draft lifecycle", () => {
       deltaSequence: 2
     });
 
-    expect(second).toMatchObject({
-      reasoning: "Inspecting the stream.",
-      chunks: ["Inspecting ", "the stream."]
-    });
+    expect(second).toMatchObject({ reasoning: "Inspecting the stream." });
     expect(reconcileAssistantDraftReasoningUpdate(second?.buffer, {
       reasoning: "Restored reasoning.",
       delta: "Restored reasoning.",
       deltaSequence: 20
-    })?.chunks).toEqual(["Restored reasoning."]);
+    })?.reasoning).toBe("Restored reasoning.");
   });
 
   it("ignores late updates from an older model request in the same turn", () => {
