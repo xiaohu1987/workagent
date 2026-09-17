@@ -32,7 +32,11 @@ import type {
   ThreadRecord,
   ToolCallRecord,
   ToolCallSummary,
-  UserInputPrompt
+  UserInputPrompt,
+  ShareChannel,
+  ShareImagePayload,
+  ShareTarget,
+  ShareTargetStatus
 } from "@shared-types";
 import {
   DEFAULT_RESPONSE_TONE,
@@ -325,6 +329,20 @@ import { RightWorkspacePanel, getDefaultRightWorkspaceTab, isProjectWorkspaceThr
 import { NotificationCenter } from "./workspace/notification-center";
 import { HelpSheet } from "./workspace/help-sheet";
 import { QuickNotesSheet } from "./workspace/quick-notes-sheet";
+import { ShareBar } from "./workspace/share-bar";
+import type { ShareBarFeedback } from "./workspace/share-bar";
+import { mountShareCard } from "./workspace/share-capture-document";
+import { captureShareCard, ShareCaptureError } from "./lib/share-capture";
+import {
+  allShareMessageIds,
+  buildShareFileName,
+  buildShareTurns,
+  composeShareMessageMarkdown,
+  computeShareStats,
+  defaultShareMessageIds,
+  shareMessagesById,
+  shareTurnIdsForMessages
+} from "./lib/share-turns";
 import { HistorySearchDialog } from "./history/history-search-dialog";
 import { HistorySidebar } from "./history/history-sidebar";
 import { ChatWelcome } from "./chat/chat-welcome";
@@ -2902,8 +2920,18 @@ export function App() {
     };
   }, [gitRefreshRevision, gitRoot, isRightWorkspaceOpen, rightWorkspaceTab, selectedThread?.mode, selectedThreadId]);
 
+  // Share mode is a transcript selection state, not a dialog: the composer is
+  // replaced by the share bar and each message grows a tick box.
+  const [isSharing, setIsSharing] = useState(false);
+  const [selectedShareMessageIds, setSelectedShareMessageIds] = useState<string[]>([]);
+  const [shareTargets, setShareTargets] = useState<ShareTargetStatus[]>([]);
+  const [shareTargetsLoading, setShareTargetsLoading] = useState(false);
+  const [shareBusyChannel, setShareBusyChannel] = useState<ShareChannel | null>(null);
+  const [shareGenerating, setShareGenerating] = useState(false);
+  const [shareFeedback, setShareFeedback] = useState<ShareBarFeedback>(null);
+
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu && !isSharing) {
       return;
     }
 
@@ -2931,6 +2959,11 @@ export function App() {
 
         if (isQuickNotesOpen) {
           setIsQuickNotesOpen(false);
+          return;
+        }
+
+        if (isSharing && shareBusyChannel === null && !shareGenerating) {
+          setIsSharing(false);
           return;
         }
 
@@ -3000,7 +3033,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deletingHistoryBatch, deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyBatchDeleteConfirmation, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, updateConfirmDialog]);
+  }, [deletingHistoryBatch, deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyBatchDeleteConfirmation, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, isSharing, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, shareBusyChannel, shareGenerating, updateConfirmDialog]);
 
   useLayoutEffect(() => {
     snapshotThreadIdRef.current = snapshot?.thread.id ?? null;
@@ -5368,6 +5401,113 @@ export function App() {
     }
   }
 
+  async function loadShareTargets() {
+    setShareTargetsLoading(true);
+    try {
+      const detected = await window.codexh.listShareTargets();
+      setShareTargets(Array.isArray(detected) ? detected : []);
+    } catch {
+      setShareTargets([]);
+    } finally {
+      setShareTargetsLoading(false);
+    }
+  }
+
+  /**
+   * Enter selection mode. No dialog opens: the transcript itself becomes the
+   * picker, pre-ticked with the most recent answered turn.
+   */
+  function enterShareMode() {
+    setShareFeedback(null);
+    setSelectedShareMessageIds(defaultShareMessageIds(visibleMessages));
+    setIsSharing(true);
+    void loadShareTargets();
+  }
+
+  function exitShareMode() {
+    if (shareBusyChannel !== null || shareGenerating) return;
+    setIsSharing(false);
+    setShareFeedback(null);
+  }
+
+  const toggleShareMessage = useCallback((messageId: string) => {
+    setShareFeedback(null);
+    setSelectedShareMessageIds((current) =>
+      current.includes(messageId) ? current.filter((id) => id !== messageId) : [...current, messageId]
+    );
+  }, []);
+
+  function toggleAllShareMessages() {
+    setShareFeedback(null);
+    setSelectedShareMessageIds((current) =>
+      shareableMessageIds.length > 0 && shareableMessageIds.every((id) => current.includes(id))
+        ? []
+        : [...shareableMessageIds]
+    );
+  }
+
+  /**
+   * Rasterize the selected messages and hand the image to the requested
+   * channel. The markdown body travels with it so a paste target that refuses
+   * images still receives readable, formatted content.
+   */
+  async function shareToChannel(channel: ShareChannel) {
+    if (selectedShareMessageIds.length === 0) {
+      setShareFeedback({ tone: "warning", message: "请先在对话中勾选要分享的内容。" });
+      return;
+    }
+    if (!shareBody.trim()) {
+      setShareFeedback({ tone: "warning", message: "所选内容没有可分享的文字。" });
+      return;
+    }
+
+    setShareBusyChannel(channel);
+    setShareFeedback(null);
+    try {
+      let image: ShareImagePayload | undefined;
+      if (channel !== "copyMarkdown") {
+        setShareGenerating(true);
+        try {
+          image = await captureShareCard((host) => mountShareCard({
+            host,
+            messages: shareMessagesById(visibleMessages, selectedShareMessageIds),
+            title: selectedThread?.title ?? "",
+            assistantLabel: activeAssistantLabel,
+            stats: shareStats
+          }));
+        } finally {
+          setShareGenerating(false);
+        }
+      }
+
+      const result = await window.codexh.shareTaskImage({
+        channel,
+        image,
+        markdown: shareBody,
+        fileName: buildShareFileName(selectedThread?.title ?? "")
+      });
+
+      setShareFeedback({ tone: result.ok ? "success" : "warning", message: result.message });
+      if (!result.cancelled) {
+        showNotice(result.ok ? "分享已完成。" : "分享失败。", {
+          message: result.message,
+          tone: result.ok ? "success" : "warning"
+        });
+      }
+    } catch (error) {
+      // A range that cannot fit in one image is a user decision, not a bug:
+      // report it in the panel instead of a transient notice.
+      const message = error instanceof ShareCaptureError
+        ? error.message
+        : error instanceof Error ? error.message : "分享失败，请重试。";
+      setShareFeedback({ tone: "warning", message });
+      showNotice("分享失败。", { message });
+    } finally {
+      setShareBusyChannel(null);
+      setShareGenerating(false);
+    }
+  }
+
   function beginUserMessageEdit(message: MessageRecord) {
     if (isActiveThreadExecuting || isPreparingRuntime) {
       showNotice("任务执行中，停止后才能重新编辑消息。");
@@ -6438,6 +6578,34 @@ export function App() {
   const terminalDrawerPresence = useMotionPresence(isTerminalOpen ? true : null, 220);
   const helpPresence = useMotionPresence(isHelpOpen ? true : null, 220);
   const quickNotesPresence = useMotionPresence(isQuickNotesOpen ? true : null, 220);
+  // Sharing reads the same transcript the user sees, so a shared message always
+  // matches the rendered answer (tool event blocks are excluded) and the tick
+  // boxes line up with the conversation on screen.
+  const shareTurns = useMemo(() => buildShareTurns(visibleMessages), [visibleMessages]);
+  const shareableMessageIds = useMemo(() => allShareMessageIds(visibleMessages), [visibleMessages]);
+  // Turn ids are only used to attribute tool calls and file changes; the
+  // selection itself is keyed by message.
+  const selectedShareTurnIds = useMemo(
+    () => shareTurnIdsForMessages(shareTurns, selectedShareMessageIds),
+    [selectedShareMessageIds, shareTurns]
+  );
+  const shareStats = useMemo(
+    () => computeShareStats(
+      shareTurns,
+      selectedShareTurnIds,
+      snapshot?.toolCalls ?? [],
+      collectFileChangesByTurn(snapshot?.toolCalls ?? [], snapshotWorkspaceRoot)
+    ),
+    [selectedShareTurnIds, shareTurns, snapshot?.toolCalls, snapshotWorkspaceRoot]
+  );
+  const shareBody = useMemo(
+    () => composeShareMessageMarkdown(visibleMessages, selectedShareMessageIds),
+    [selectedShareMessageIds, visibleMessages]
+  );
+  const shareableIdSet = useMemo(() => new Set(shareableMessageIds), [shareableMessageIds]);
+  const selectedShareIdSet = useMemo(() => new Set(selectedShareMessageIds), [selectedShareMessageIds]);
+  const canShare = shareableMessageIds.length > 0;
+  const allShareSelected = canShare && shareableMessageIds.every((id) => selectedShareIdSet.has(id));
   const quickNoteListMenuPresence = useMotionPresence(quickNoteListMenu, 140);
   const visibleQuickNoteListMenu = quickNoteListMenu ?? quickNoteListMenuPresence.value;
   const quickNoteDeleteConfirmPresence = useMotionPresence(quickNoteDeleteConfirm, 180);
@@ -6772,6 +6940,9 @@ export function App() {
           onOpenNotification={openNotificationItem}
           onClearFinishedNotifications={() => dispatchNotificationCenter({ type: "clear-finished" })}
           onMarkNotificationsRead={() => dispatchNotificationCenter({ type: "mark-all-read" })}
+          canShare={canShare}
+          shareActive={isSharing}
+          onShare={() => (isSharing ? exitShareMode() : enterShareMode())}
           terminalOpen={isTerminalOpen}
           onToggleTerminal={() => setIsTerminalOpen((current) => !current)}
           rightWorkspaceOpen={isRightWorkspaceOpen}
@@ -6808,7 +6979,7 @@ export function App() {
           </div>
         ) : null}
 
-        <section className="chat-canvas">
+        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""}`}>
           <div
             ref={chatScrollRef}
             className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""}`}
@@ -6867,6 +7038,10 @@ export function App() {
                   followLatest={isTranscriptAtLatest}
                   onOpenFolder={openGeneratedFileLocationEvent}
                   onToggleTurn={toggleConversationTurnCollapsedEvent}
+                  shareMode={isSharing}
+                  shareableMessageIds={shareableIdSet}
+                  selectedShareMessageIds={selectedShareIdSet}
+                  onToggleShareMessage={toggleShareMessage}
                 />
                 {activeAssistantDraft ? (
                   <AssistantDraftMessage
@@ -6966,6 +7141,22 @@ export function App() {
               <ComposerSubmissionStatus submission={composerSubmission} />
             ) : null}
           </div>
+
+          {isSharing ? (
+            <ShareBar
+              stats={shareStats}
+              selectedCount={selectedShareMessageIds.length}
+              allSelected={allShareSelected}
+              targets={shareTargets}
+              targetsLoading={shareTargetsLoading}
+              busyChannel={shareBusyChannel}
+              generating={shareGenerating}
+              feedback={shareFeedback}
+              onToggleAll={toggleAllShareMessages}
+              onChannel={(channel) => void shareToChannel(channel)}
+              onExit={exitShareMode}
+            />
+          ) : null}
 
           <footer
             className={[

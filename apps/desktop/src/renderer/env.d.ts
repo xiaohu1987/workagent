@@ -19,6 +19,8 @@ type RendererNotificationNavigationTarget = import("@shared-types").Notification
 type RendererPendingResumeThread = import("@shared-types").PendingResumeThread;
 type RendererRuntimeLogPage = import("@shared-types").RuntimeLogPage;
 type RendererSubagentResultEnvelope = import("@shared-types").SubagentResultEnvelope;
+type RendererShareTargetStatus = import("@shared-types").ShareTargetStatus;
+type RendererShareSendResult = import("@shared-types").ShareSendResult;
 
 declare global {
   interface Window {
@@ -182,6 +184,14 @@ declare global {
       writeTerminal: (payload: { threadId: string; input: string; sessionId?: string; rootPath?: string }) => Promise<void>;
       closeTerminal: (payload: { threadId: string; sessionId?: string }) => Promise<void>;
       openExternal: (url: string) => Promise<void>;
+      listShareTargets: () => Promise<RendererShareTargetStatus[]>;
+      shareTaskResult: (payload: {
+        target: import("@shared-types").ShareTarget;
+        text: string;
+      }) => Promise<RendererShareSendResult>;
+      shareTaskImage: (
+        payload: import("@shared-types").ShareImageRequest
+      ) => Promise<import("@shared-types").ShareImageResult>;
       openPath: (targetPath: string) => Promise<string>;
       openFolder: (targetPath: string) => Promise<string>;
       openFileLocation: (payload: { threadId: string; path: string }) => Promise<string>;

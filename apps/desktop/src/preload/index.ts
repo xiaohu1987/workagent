@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { NotificationNavigationTarget, QueuedMessageRecord, RuntimeThreadSnapshotCursor } from "@shared-types";
+import type { NotificationNavigationTarget, QueuedMessageRecord, RuntimeThreadSnapshotCursor, ShareTarget } from "@shared-types";
 
 const api = {
   reportRendererError: (payload: { message: string; stack?: string; componentStack?: string; unhandledRejection?: boolean }) =>
@@ -147,6 +147,11 @@ const api = {
     ipcRenderer.invoke("terminal:write", payload),
   closeTerminal: (payload: { threadId: string; sessionId?: string }) => ipcRenderer.invoke("terminal:close", payload),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
+  listShareTargets: () => ipcRenderer.invoke("share:targets"),
+  shareTaskResult: (payload: { target: ShareTarget; text: string }) =>
+    ipcRenderer.invoke("share:send", payload),
+  shareTaskImage: (payload: import("@shared-types").ShareImageRequest) =>
+    ipcRenderer.invoke("share:image", payload),
   openPath: (targetPath: string) => ipcRenderer.invoke("shell:open-path", targetPath),
   openFolder: (targetPath: string) => ipcRenderer.invoke("shell:open-folder", targetPath),
   openFileLocation: (payload: { threadId: string; path: string }) =>

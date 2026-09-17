@@ -99,6 +99,7 @@ import { TerminalRuntime, type TerminalOutputHeartbeat } from "./terminal-runtim
 import { GitService } from "./git-service";
 import { SkillLabService } from "./skill-lab";
 import { parseEditableMessageMetadata } from "./message-metadata";
+import { detectShareTargets, sendShareImage, sendShareToTarget } from "./share-service";
 import { isProjectAttachmentPath } from "./attachment-path";
 import {
   DatabaseService,
@@ -570,6 +571,29 @@ export class DesktopBackend {
     // Child-agent records support the active-task panel; they are not chats a
     // user can return to from the sidebar history.
     return this.#db.listThreads().filter((thread) => !thread.parentThreadId);
+  }
+
+  /** Share targets (WeChat / DingTalk) discovered on this machine. */
+  public listShareTargets(): Promise<import("@shared-types").ShareTargetStatus[]> {
+    return detectShareTargets();
+  }
+
+  /**
+   * Copy the composed task answer to the clipboard and front the target client.
+   * Composition happens in the renderer so the shared text matches the
+   * transcript the user selected from.
+   */
+  public shareTaskResult(request: import("@shared-types").ShareSendRequest): Promise<import("@shared-types").ShareSendResult> {
+    return sendShareToTarget(request);
+  }
+
+  /**
+   * Deliver a rendered conversation image: clipboard for the chat clients, or a
+   * PNG file when the user asked to keep a copy. Rendering happens in the
+   * renderer so the image mirrors the transcript exactly.
+   */
+  public shareTaskImage(request: import("@shared-types").ShareImageRequest): Promise<import("@shared-types").ShareImageResult> {
+    return sendShareImage(request);
   }
 
   public getThreadTokenUsage(threadId: string): {

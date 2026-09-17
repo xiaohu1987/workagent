@@ -37,6 +37,11 @@ type Props = {
   followLatest: boolean;
   onOpenFolder: (filePath: string) => void;
   onToggleTurn: (turnId: string) => void;
+  /** Share selection mode is active: tick boxes are rendered in the gutter. */
+  shareMode: boolean;
+  shareableMessageIds: ReadonlySet<string>;
+  selectedShareMessageIds: ReadonlySet<string>;
+  onToggleShareMessage: (messageId: string) => void;
 };
 
 const getTimelineEntryKey = (entry: TimelineEntry) => entry.id;
@@ -60,7 +65,11 @@ export const TimelineEntries = memo(function TimelineEntries({
   scrollInteractionActive,
   followLatest,
   onOpenFolder,
-  onToggleTurn
+  onToggleTurn,
+  shareMode,
+  shareableMessageIds,
+  selectedShareMessageIds,
+  onToggleShareMessage
 }: Props) {
   const visibleEntries = useMemo(() => entries.filter((entry) => {
     const entryTurn = turnByEntryId.get(entry.id);
@@ -95,6 +104,9 @@ export const TimelineEntries = memo(function TimelineEntries({
                 userMessageActions={userMessageActions}
                 isGpaPlanMessage={entry.message.id === gpaPlanMessageId}
                 isFinalizingFromDraft={finalizingAssistantMessageIds.has(entry.message.id)}
+                shareSelectable={shareMode && shareableMessageIds.has(entry.message.id)}
+                shareSelected={selectedShareMessageIds.has(entry.message.id)}
+                onToggleShare={onToggleShareMessage}
               />
             ) : entry.kind === "file-summary" ? (
               <FileChangeSummary files={entry.files} onOpenFolder={onOpenFolder} />

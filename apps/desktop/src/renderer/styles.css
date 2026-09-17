@@ -28652,3 +28652,397 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .subagent-narrative-link,
   .subagent-narrative-name { transition: none; }
 }
+
+
+/* ---------------------------------------------------------------------------
+   Task result sharing: top-bar entry (right of the notification bell)
+   --------------------------------------------------------------------------- */
+
+.share-control-button > svg {
+  flex: 0 0 auto;
+  color: inherit;
+}
+
+/* Share mode swaps the composer for the share bar, so the entry stays lit for
+   as long as the selection is active. */
+.share-control-button.active {
+  color: var(--action-primary);
+  border-color: rgba(33, 150, 243, 0.42);
+  background: rgba(33, 150, 243, 0.14);
+}
+
+.share-control-button.active:hover {
+  border-color: rgba(33, 150, 243, 0.55);
+  background: rgba(33, 150, 243, 0.2);
+}
+
+.share-control-button:disabled {
+  opacity: 0.34;
+  cursor: not-allowed;
+}
+
+/* ---------------------------------------------------------------------------
+   Share selection: tick boxes in the transcript gutter + the bottom share bar
+   --------------------------------------------------------------------------- */
+
+/* Selecting what to share replaces the composer, exactly like WorkBuddy. */
+.chat-canvas.is-sharing .composer-shell {
+  display: none;
+}
+
+.share-select-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.share-select-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* User bubbles are right-aligned, so their tick box mirrors to the far side and
+   stays next to the bubble it selects. */
+.share-select-row.is-user .share-select-check {
+  order: 2;
+}
+
+.share-select-check,
+.share-bar-check {
+  display: grid;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: #ffffff;
+  background: var(--surface-soft);
+  transition: border-color var(--motion-fast) var(--motion-ease), background var(--motion-fast) var(--motion-ease);
+}
+
+.share-select-check svg,
+.share-bar-check svg {
+  width: 13px;
+  height: 13px;
+}
+
+.share-select-check {
+  margin-top: 2px;
+  cursor: pointer;
+}
+
+.share-select-check:hover {
+  border-color: var(--text-muted);
+}
+
+.share-select-check:focus-visible {
+  outline: 2px solid var(--action-primary);
+  outline-offset: 1px;
+}
+
+.share-select-row.is-selected .share-select-check,
+.share-bar-select-all.is-on .share-bar-check {
+  border-color: var(--action-primary);
+  background: var(--action-primary);
+}
+
+.share-bar {
+  position: relative;
+  z-index: 5;
+  display: grid;
+  gap: 10px;
+  width: min(1120px, calc(100% - 80px));
+  margin: 0 auto 12px;
+  padding: 12px 16px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  background: var(--surface-elevated);
+  box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.32);
+}
+
+.share-bar-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 16px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.share-bar-summary {
+  color: var(--text-muted);
+}
+
+.share-bar-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-bar-status.is-success {
+  color: var(--green);
+}
+
+.share-bar-status.is-warning {
+  color: var(--orange);
+}
+
+.share-bar-status.is-busy {
+  color: var(--text-soft);
+}
+
+.share-bar-status svg {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  animation: share-bar-spin 1s linear infinite;
+}
+
+@keyframes share-bar-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.share-bar-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.share-bar-select-all {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border: 0;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  white-space: nowrap;
+  background: transparent;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--motion-ease);
+}
+
+.share-bar-select-all:hover {
+  color: var(--text);
+}
+
+.share-bar-select-all:focus-visible {
+  outline: 2px solid var(--action-primary);
+  outline-offset: 1px;
+}
+
+.share-bar-channels {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.share-bar-channel {
+  display: grid;
+  flex: 0 0 auto;
+  justify-items: center;
+  gap: 5px;
+  min-width: 90px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  background: transparent;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--motion-ease), background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
+}
+
+.share-bar-channel:hover:not(:disabled) {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--surface-card-hover);
+}
+
+.share-bar-channel:focus-visible {
+  outline: 2px solid var(--action-primary);
+  outline-offset: 1px;
+}
+
+.share-bar-channel:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.share-bar-channel-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.share-bar-channel.is-muted .share-bar-channel-icon {
+  color: var(--text-faint);
+}
+
+.share-bar-channel.is-busy .share-bar-channel-icon {
+  color: var(--action-primary);
+}
+
+.share-bar-channel.is-busy .share-bar-channel-icon svg {
+  animation: share-bar-spin 1s linear infinite;
+}
+
+.share-bar-channel-label {
+  white-space: nowrap;
+}
+
+.share-bar-exit {
+  display: grid;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--motion-ease), background var(--motion-fast) var(--motion-ease);
+}
+
+.share-bar-exit:hover {
+  color: var(--text);
+  background: var(--surface-card-hover);
+}
+
+.share-bar-exit svg {
+  width: 16px;
+  height: 16px;
+}
+
+@media (max-width: 960px) {
+  .share-bar {
+    width: calc(100% - 32px);
+  }
+
+  .share-bar-channel {
+    min-width: 74px;
+  }
+}
+
+@media (max-width: 720px) {
+  .share-bar-main {
+    flex-wrap: wrap;
+  }
+
+  .share-bar-channels {
+    order: 3;
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Shared conversation card (rendered off-screen, rasterized to a PNG)
+   --------------------------------------------------------------------------- */
+
+.share-card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 820px;
+  box-sizing: border-box;
+  padding: 28px 30px 24px;
+  color: var(--text);
+  background: var(--surface);
+}
+
+.share-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.share-card-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--action-primary);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.share-card-brand svg {
+  width: 16px;
+  height: 16px;
+}
+
+.share-card-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.share-card-stats {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.share-card-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* The card reuses the transcript markup, so only the interactive chrome and
+   the scroll constraints are neutralized here. */
+.share-card .message-card {
+  margin: 0;
+  overflow: visible;
+}
+
+.share-card .message-markdown,
+.share-card .message-flat-body {
+  overflow: visible;
+}
+
+.share-card button,
+.share-card .copy-text-button,
+.share-card .message-actions,
+.share-card .message-media-actions {
+  display: none;
+}
+
+.share-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.share-card-foot-note {
+  color: var(--text-muted);
+}

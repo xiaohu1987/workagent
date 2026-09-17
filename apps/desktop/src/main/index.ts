@@ -8,6 +8,11 @@ import type {
   DatabaseConnectionConfig,
   NotificationNavigationTarget,
   RuntimeEvent,
+  ShareSendRequest,
+  ShareImageRequest,
+  ShareImageResult,
+  ShareTargetStatus,
+  ShareSendResult,
   SkillLabEvent,
   ThreadStatus
 } from "@shared-types";
@@ -635,6 +640,13 @@ function registerIpc(): void {
     backend.closeTerminal(payload.threadId, payload.sessionId)
   );
   ipcMain.handle("shell:open-external", (_event, url: string) => shell.openExternal(url));
+  ipcMain.handle("share:targets", (): Promise<ShareTargetStatus[]> => backend.listShareTargets());
+  ipcMain.handle("share:send", (_event, payload: ShareSendRequest): Promise<ShareSendResult> =>
+    backend.shareTaskResult(payload)
+  );
+  ipcMain.handle("share:image", (_event, payload: ShareImageRequest): Promise<ShareImageResult> =>
+    backend.shareTaskImage(payload)
+  );
   ipcMain.handle("shell:open-path", (_event, targetPath: string) => {
     if (typeof targetPath !== "string" || !path.isAbsolute(targetPath)) {
       return "无效的本地路径。";

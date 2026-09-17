@@ -1485,3 +1485,115 @@ export interface ToolSearchResult {
   score: number;
   source: string;
 }
+
+/** Instant-messaging targets a task result can be shared to. */
+export type ShareTarget = "wechat" | "dingtalk";
+
+/**
+ * How the share text is rendered. WeChat has no markdown rendering, so its
+ * payload is plain text; DingTalk renders markdown.
+ */
+export type ShareFormat = "text" | "markdown";
+
+/** Which part of a task is shared: only the final answer, or every answer. */
+export type ShareScope = "final" | "all";
+
+/** How the target client will be brought to the foreground. */
+export type ShareLaunchMethod = "app-path" | "protocol" | "unavailable";
+
+export interface ShareTargetStatus {
+  target: ShareTarget;
+  label: string;
+  available: boolean;
+  launchMethod: ShareLaunchMethod;
+  /** Absolute path of the detected client executable, when one was found. */
+  appPath: string | null;
+}
+
+export interface ShareSendRequest {
+  target: ShareTarget;
+  /** Fully composed share body. The renderer owns composition so the shared
+   *  text matches what the user sees in the transcript. */
+  text: string;
+}
+
+export interface ShareSendResult {
+  ok: boolean;
+  target: ShareTarget;
+  format: ShareFormat;
+  /** Whether the payload reached the system clipboard. */
+  copied: boolean;
+  /** Whether the client was brought to the foreground. */
+  launched: boolean;
+  launchMethod: ShareLaunchMethod;
+  /** Human readable outcome used for the in-app notice. */
+  message: string;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Formatted task sharing (rendered conversation image)                       */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * One conversation turn as offered by the share panel's range picker: the user
+ * prompt plus every assistant answer it produced.
+ */
+export interface ShareTurnSummary {
+  id: string;
+  /** First line of the user prompt, used as the picker row label. */
+  prompt: string;
+  createdAt: string;
+  /** Assistant answers carrying prose in this turn. */
+  answerCount: number;
+  /** Characters of shareable content in this turn. */
+  charCount: number;
+}
+
+/** Delivery channel chosen in the share panel. */
+export type ShareChannel = "wechat" | "dingtalk" | "copyImage" | "saveImage" | "copyMarkdown";
+
+/** A conversation image rendered by the renderer. */
+export interface ShareImagePayload {
+  /** `data:image/png;base64,...` */
+  dataUrl: string;
+  /** Pixel width of the encoded image (already scaled for crispness). */
+  width: number;
+  /** Pixel height of the encoded image (already scaled for crispness). */
+  height: number;
+  /** Decoded PNG size in bytes. */
+  bytes: number;
+}
+
+/** Headline statistics shown above the shared conversation. */
+export interface ShareTaskStats {
+  conversations: number;
+  toolCalls: number;
+  files: number;
+}
+
+export interface ShareImageRequest {
+  channel: ShareChannel;
+  /** Rendered conversation image. Absent for the `copyMarkdown` channel. */
+  image?: ShareImagePayload;
+  /** Markdown fallback written next to the image, so a paste target that
+   *  refuses images still receives readable content. */
+  markdown: string;
+  /** Base file name (without extension) offered by the `saveImage` channel. */
+  fileName?: string;
+}
+
+export interface ShareImageResult {
+  ok: boolean;
+  channel: ShareChannel;
+  /** Whether the payload reached the system clipboard. */
+  copied: boolean;
+  /** Whether the target client was brought to the foreground. */
+  launched: boolean;
+  launchMethod: ShareLaunchMethod;
+  /** Absolute path written by the `saveImage` channel. */
+  savedPath: string | null;
+  /** True when the user dismissed the save dialog. */
+  cancelled: boolean;
+  /** Human readable outcome used for the in-app notice. */
+  message: string;
+}

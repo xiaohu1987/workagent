@@ -164,6 +164,16 @@ export function IconCheck() {
   );
 }
 
+export function IconShare() {
+  return (
+    <SvgIcon>
+      <path d="M12 3.5v11" />
+      <path d="m8 7.5 4-4 4 4" />
+      <path d="M5.5 13.5v4.5A1.5 1.5 0 0 0 7 19.5h10a1.5 1.5 0 0 0 1.5-1.5v-4.5" />
+    </SvgIcon>
+  );
+}
+
 export function IconChecklist() {
   return (
     <SvgIcon>

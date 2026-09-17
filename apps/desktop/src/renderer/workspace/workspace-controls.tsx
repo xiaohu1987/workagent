@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 import type { TokenUsage } from "@shared-types";
 import type { NotificationCenterItem } from "../core/notification-center";
-import { IconSplitPanel, IconTerminal } from "../icons";
+import { IconShare, IconSplitPanel, IconTerminal } from "../icons";
 import { NotificationCenter } from "./notification-center";
 import { TokenUsagePopover } from "./token-usage-popover";
 
@@ -25,6 +25,11 @@ type Props = {
   onOpenNotification: (item: NotificationCenterItem) => Promise<void>;
   onClearFinishedNotifications: () => void;
   onMarkNotificationsRead: () => void;
+  /** Share entry lives in this top bar, right next to the notification bell. */
+  canShare: boolean;
+  /** Share selection mode is on; the button toggles back out of it. */
+  shareActive: boolean;
+  onShare: () => void;
   terminalOpen: boolean;
   onToggleTerminal: () => void;
   rightWorkspaceOpen: boolean;
@@ -32,7 +37,7 @@ type Props = {
   projectWorkspace?: boolean;
 };
 
-export function WorkspaceControls({ tokenUsage, tokenUsageOpen, tokenUsageMotionPhase, selectedThreadId, tokenUsageButtonRef, tokenUsagePanelRef, onToggleTokenUsage, notifications, notificationNow, notificationOpen, notificationVisible, notificationMotionPhase, highlightedNotificationTarget, notificationButtonRef, notificationPanelRef, onToggleNotifications, onOpenNotification, onClearFinishedNotifications, onMarkNotificationsRead, terminalOpen, onToggleTerminal, rightWorkspaceOpen, onOpenRightWorkspace, projectWorkspace = true }: Props) {
+export function WorkspaceControls({ tokenUsage, tokenUsageOpen, tokenUsageMotionPhase, selectedThreadId, tokenUsageButtonRef, tokenUsagePanelRef, onToggleTokenUsage, notifications, notificationNow, notificationOpen, notificationVisible, notificationMotionPhase, highlightedNotificationTarget, notificationButtonRef, notificationPanelRef, onToggleNotifications, onOpenNotification, onClearFinishedNotifications, onMarkNotificationsRead, canShare, shareActive, onShare, terminalOpen, onToggleTerminal, rightWorkspaceOpen, onOpenRightWorkspace, projectWorkspace = true }: Props) {
   const workspaceButtonTitle = projectWorkspace
     ? "显示右侧工作区（文件 / 浏览器 / 子智能体）"
     : "显示右侧工作区（浏览器 / 子智能体）";
@@ -40,6 +45,17 @@ export function WorkspaceControls({ tokenUsage, tokenUsageOpen, tokenUsageMotion
     <div className="workspace-controls">
       <TokenUsagePopover usage={tokenUsage} active={tokenUsageOpen} selectedThreadId={selectedThreadId} motionPhase={tokenUsageMotionPhase} buttonRef={tokenUsageButtonRef} panelRef={tokenUsagePanelRef} onToggle={onToggleTokenUsage} />
       <NotificationCenter items={notifications} now={notificationNow} isOpen={notificationOpen} visible={notificationVisible} motionPhase={notificationMotionPhase} highlightedTarget={highlightedNotificationTarget} buttonRef={notificationButtonRef} panelRef={notificationPanelRef} onToggle={onToggleNotifications} onOpenItem={onOpenNotification} onClearFinished={onClearFinishedNotifications} onMarkAllRead={onMarkNotificationsRead} />
+      <button
+        type="button"
+        className={`workspace-control-button share-control-button ${shareActive ? "active" : ""}`}
+        title={shareActive ? "退出分享" : canShare ? "分享任务结果" : "当前任务还没有可分享的回答"}
+        aria-label={shareActive ? "退出分享" : "分享任务结果"}
+        aria-pressed={shareActive}
+        disabled={!canShare && !shareActive}
+        onClick={onShare}
+      >
+        <IconShare />
+      </button>
       <button type="button" className={`workspace-control-button terminal-toggle ${terminalOpen ? "active" : ""}`} title={terminalOpen ? "收起终端" : "打开终端"} aria-label={terminalOpen ? "收起终端" : "打开终端"} onClick={onToggleTerminal}><IconTerminal /></button>
       {!rightWorkspaceOpen ? (
         <button

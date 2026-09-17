@@ -857,6 +857,10 @@ type TranscriptMessageProps = {
   userMessageActions: UserMessageActions;
   isGpaPlanMessage?: boolean;
   isFinalizingFromDraft?: boolean;
+  /** Share selection mode: render a tick box next to this message. */
+  shareSelectable?: boolean;
+  shareSelected?: boolean;
+  onToggleShare?: (messageId: string) => void;
 };
 
 type AssistantDraftMessageProps = {
@@ -933,7 +937,10 @@ export const TranscriptMessage = memo(function TranscriptMessage({
   assistantLabel,
   userMessageActions,
   isGpaPlanMessage = false,
-  isFinalizingFromDraft = false
+  isFinalizingFromDraft = false,
+  shareSelectable = false,
+  shareSelected = false,
+  onToggleShare
 }: TranscriptMessageProps) {
   const gpaTaskProgress = getGpaTaskProgress(message);
   if (gpaTaskProgress) {
@@ -944,18 +951,23 @@ export const TranscriptMessage = memo(function TranscriptMessage({
     return null;
   }
 
+  const selection: ShareSelectionDescriptor | null =
+    shareSelectable && onToggleShare ? { selected: shareSelected, onToggle: () => onToggleShare(message.id) } : null;
+
   if (message.role === "user") {
-    return (
+    return wrapForShareSelection(
       <article
         id={`transcript-message-${message.id}`}
         className={`message-card user${message.id.startsWith("optimistic-") ? " is-sending" : ""}`}
       >
         {renderMessageContent(message, displayContent, userMessageActions)}
-      </article>
+      </article>,
+      selection,
+      true
     );
   }
 
-  return (
+  return wrapForShareSelection(
     <article
       id={`transcript-message-${message.id}`}
       className={`message-card ${message.role}${getMessageDisplayKind(message) === "commentary" ? " commentary" : ""}${isFinalizingFromDraft ? " is-finalizing-from-draft" : ""}`}
@@ -971,9 +983,47 @@ export const TranscriptMessage = memo(function TranscriptMessage({
           ) : renderMessageContent(message, displayContent)}
         </div>
       </ApiCardThreadContext.Provider>
-    </article>
+    </article>,
+    selection
   );
 }, areTranscriptMessagePropsEqual);
+
+type ShareSelectionDescriptor = {
+  selected: boolean;
+  onToggle: () => void;
+};
+
+/**
+ * Share selection puts a tick box in the transcript gutter instead of opening a
+ * dialog, so the message row becomes a two-column flex row while the selection
+ * is active. Outside share mode the article is returned untouched.
+ *
+ * `isUser` mirrors the tick box to the far side of the row: user bubbles are
+ * right-aligned here, so an always-left tick box would sit far away from the
+ * message it selects. This is the same convention chat apps use in select mode.
+ */
+function wrapForShareSelection(
+  article: ReactNode,
+  selection: ShareSelectionDescriptor | null,
+  isUser = false
+): ReactNode {
+  if (!selection) return article;
+  return (
+    <div className={`share-select-row${isUser ? " is-user" : ""}${selection.selected ? " is-selected" : ""}`}>
+      <button
+        type="button"
+        className="share-select-check"
+        role="checkbox"
+        aria-checked={selection.selected}
+        aria-label={selection.selected ? "取消选择这条消息" : "选择这条消息"}
+        onClick={selection.onToggle}
+      >
+        {selection.selected ? <IconCheck /> : null}
+      </button>
+      <div className="share-select-body">{article}</div>
+    </div>
+  );
+}
 
 function areTranscriptMessagePropsEqual(
   previous: Readonly<TranscriptMessageProps>,
@@ -982,7 +1032,10 @@ function areTranscriptMessagePropsEqual(
   if (
     previous.assistantLabel !== next.assistantLabel ||
     previous.isGpaPlanMessage !== next.isGpaPlanMessage ||
-    previous.isFinalizingFromDraft !== next.isFinalizingFromDraft
+    previous.isFinalizingFromDraft !== next.isFinalizingFromDraft ||
+    previous.shareSelectable !== next.shareSelectable ||
+    previous.shareSelected !== next.shareSelected ||
+    previous.onToggleShare !== next.onToggleShare
   ) {
     return false;
   }
