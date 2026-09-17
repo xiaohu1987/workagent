@@ -673,16 +673,142 @@ class MockProvider implements ProviderAdapter {
 }
 
 /**
+ * Request-shape diagnostics attached to a failed provider call. `undefined`
+ * fields mean "the upstream response did not carry this field".
+ */
+export interface ProviderRequestDiagnostics {
+  providerId?: string;
+  /**
+   * User-facing provider name (`ProviderDefinition.name`). Diagnostics are also
+   * rendered to users, so anything but the raw id is preferred there; falls
+   * back to `providerId` when the provider was never renamed.
+   */
+  providerName?: string;
+  modelId?: string;
+  toolCount?: number;
+  messageCount?: number;
+  /** Compact role histogram, e.g. `system:1,user:5,assistant:30`. */
+  roleSummary?: string;
+  requestBytes?: number;
+  upstreamCode?: string;
+  upstreamParam?: string;
+  upstreamType?: string;
+  dumpPath?: string;
+}
+
+const PROVIDER_REQUEST_DIAGNOSTICS_KEY = "providerRequestDiagnostics";
+const PROVIDER_REQUEST_DIAGNOSTICS_TAG = "[provider-request ";
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Upstream error fields arrive as strings *or* numbers (`code: 11133` from
+ * OpenAI-compatible gateways). `null`/`""` mean "the upstream omitted it" and
+ * must not be printed as an empty `param=`. Not exported: callers outside this
+ * module read the typed diagnostics instead.
+ */
+function toOptionalUpstreamField(value: unknown): string | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : undefined;
+  return isNonEmptyString(value) ? value : undefined;
+}
+
+/**
+ * Provider names are user-authored, so they may contain spaces, quotes or a
+ * bracket that would terminate the compact tail. Whitespace is collapsed and
+ * the two structural characters are dropped; the name is re-read from the
+ * quoted `providerName="…"` field.
+ */
+function sanitizeProviderName(value: unknown): string | undefined {
+  if (!isNonEmptyString(value)) return undefined;
+  const cleaned = value.replace(/\s+/g, " ").replace(/["\]]/g, "").trim();
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function readDiagnosticsFromMessage(message: string): ProviderRequestDiagnostics | null {
+  const start = message.lastIndexOf(PROVIDER_REQUEST_DIAGNOSTICS_TAG);
+  if (start < 0) return null;
+  const end = message.indexOf("]", start);
+  const body = message.slice(start + PROVIDER_REQUEST_DIAGNOSTICS_TAG.length, end < 0 ? undefined : end);
+  const readField = (name: string): string | undefined => {
+    const match = new RegExp(`(?:^|\\s)${name}=([^\\s\\]]*)`).exec(body);
+    return isNonEmptyString(match?.[1]) ? match[1] : undefined;
+  };
+  // Free-text values (the provider name) are quoted because they may contain
+  // spaces, which the whitespace-delimited fields above could not survive.
+  const readQuotedField = (name: string): string | undefined => {
+    const match = new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(body);
+    return isNonEmptyString(match?.[1]) ? match[1] : undefined;
+  };
+  const readNumber = (name: string): number | undefined => {
+    const raw = readField(name);
+    const parsed = Number(raw);
+    return raw !== undefined && Number.isFinite(parsed) ? parsed : undefined;
+  };
+  const upstream = /(?:^|\s)upstream\(([^)]*)\)/.exec(body)?.[1] ?? "";
+  const upstreamField = (name: string): string | undefined => {
+    const match = new RegExp(`(?:^|\\s)${name}=([^\\s)]*)`).exec(upstream);
+    return isNonEmptyString(match?.[1]) ? match[1] : undefined;
+  };
+  const dumpIndex = body.indexOf("dump=");
+  return {
+    providerId: readField("provider"),
+    providerName: readQuotedField("providerName"),
+    modelId: readField("model"),
+    toolCount: readNumber("tools"),
+    messageCount: readNumber("messages"),
+    roleSummary: readField("roles"),
+    requestBytes: readNumber("bytes"),
+    upstreamCode: upstreamField("code"),
+    upstreamParam: upstreamField("param"),
+    upstreamType: upstreamField("type"),
+    dumpPath: dumpIndex < 0 ? undefined : body.slice(dumpIndex + "dump=".length).trim() || undefined
+  };
+}
+
+/**
+ * Reads the structured request diagnostics off a failed provider call. Prefers
+ * the object attached at enrichment time and falls back to parsing the compact
+ * `[provider-request ...]` tail, so callers that only have the error message
+ * (or a re-hydrated message string) still get the fields.
+ */
+export function readProviderRequestDiagnostics(error: unknown): ProviderRequestDiagnostics | null {
+  if (error && typeof error === "object") {
+    const attached = (error as Record<string, unknown>)[PROVIDER_REQUEST_DIAGNOSTICS_KEY];
+    if (attached && typeof attached === "object") {
+      return attached as ProviderRequestDiagnostics;
+    }
+  }
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return message ? readDiagnosticsFromMessage(message) : null;
+}
+
+/**
+ * Removes the `[provider-request ...]` diagnostics tail, leaving the upstream
+ * message that downstream classifiers and user-facing text are built from.
+ */
+export function stripProviderRequestDiagnostics(message: string): string {
+  const index = message.lastIndexOf(PROVIDER_REQUEST_DIAGNOSTICS_TAG);
+  return (index < 0 ? message : message.slice(0, index)).trim();
+}
+
+/**
  * Appends request-shape diagnostics to a failed chat-completions call so the
  * exact trigger (tool count, message shape, upstream error code) survives in
  * logs, and dumps the full payload to ~/.codexh/logs for offline analysis.
  * The upstream message is kept intact at the front, so downstream matchers
  * (context-overflow detection, retry classification) keep working.
+ *
+ * The tail is deliberately compact — a role histogram instead of the full
+ * role sequence — because this string is also surfaced to users by the
+ * runtime's failure-message builder. The structured copy is attached to the
+ * error object so user-facing rendering never has to re-parse the tail.
  */
 function enrichProviderRequestError(
   error: unknown,
   request: Record<string, unknown>,
-  modelId: string
+  identity: { providerId?: string; providerName?: string; modelId: string }
 ): unknown {
   if (!(error instanceof Error)) {
     return error;
@@ -691,7 +817,12 @@ function enrichProviderRequestError(
   const messages = Array.isArray(request.messages)
     ? (request.messages as Array<{ role?: unknown }>)
     : [];
-  const roleSummary = messages.map((message) => String(message.role ?? "?")).join(",");
+  const roleCounts = new Map<string, number>();
+  for (const message of messages) {
+    const role = String(message.role ?? "?");
+    roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
+  }
+  const roleSummary = [...roleCounts.entries()].map(([role, count]) => `${role}:${count}`).join(",");
   let bytes = -1;
   try {
     bytes = Buffer.byteLength(JSON.stringify(request), "utf8");
@@ -706,28 +837,65 @@ function enrichProviderRequestError(
     type?: unknown;
     error?: { code?: unknown; param?: unknown; type?: unknown };
   };
-  const upstreamParts: string[] = [];
-  const upstreamCode = candidate.error?.code ?? candidate.code;
-  const upstreamParam = candidate.error?.param ?? candidate.param;
-  const upstreamType = candidate.error?.type ?? candidate.type;
-  if (upstreamCode != null) upstreamParts.push(`code=${String(upstreamCode)}`);
-  if (upstreamParam != null) upstreamParts.push(`param=${String(upstreamParam)}`);
-  if (upstreamType != null) upstreamParts.push(`type=${String(upstreamType)}`);
+  const upstreamCode = toOptionalUpstreamField(candidate.error?.code ?? candidate.code);
+  const upstreamParam = toOptionalUpstreamField(candidate.error?.param ?? candidate.param);
+  const upstreamType = toOptionalUpstreamField(candidate.error?.type ?? candidate.type);
+  const upstreamParts = [
+    upstreamCode ? `code=${upstreamCode}` : "",
+    // Empty `param=`/`type=` values are pure noise for readers; omit them.
+    upstreamParam ? `param=${upstreamParam}` : "",
+    upstreamType ? `type=${upstreamType}` : ""
+  ].filter(Boolean);
   const upstreamNote = upstreamParts.length > 0 ? ` upstream(${upstreamParts.join(" ")})` : "";
 
-  let dumpNote = "";
+  let dumpPath: string | undefined;
   try {
     const dir = join(homedir(), ".codexh", "logs");
     const file = join(dir, `provider-request-error-${Date.now()}.json`);
     void mkdir(dir, { recursive: true })
       .then(() => writeFile(file, JSON.stringify(request, null, 2), "utf8"))
       .catch(() => undefined);
-    dumpNote = ` dump=${file}`;
+    dumpPath = file;
   } catch {
     // Dumping is best-effort; never mask the original error.
   }
+  const dumpNote = dumpPath ? ` dump=${dumpPath}` : "";
 
-  error.message = `${error.message} [provider-request model=${modelId} tools=${tools} messages=${messages.length}(${roleSummary}) bytes=${bytes}${upstreamNote}${dumpNote}]`;
+  const providerName = sanitizeProviderName(identity.providerName);
+  const diagnostics: ProviderRequestDiagnostics = {
+    providerId: identity.providerId,
+    providerName,
+    modelId: identity.modelId,
+    toolCount: tools,
+    messageCount: messages.length,
+    roleSummary,
+    requestBytes: bytes,
+    upstreamCode,
+    upstreamParam,
+    upstreamType,
+    dumpPath
+  };
+  const headFields = [
+    identity.providerId ? `provider=${identity.providerId}` : "",
+    providerName ? `providerName="${providerName}"` : "",
+    `model=${identity.modelId}`,
+    `tools=${tools}`,
+    `messages=${messages.length}`,
+    `roles=${roleSummary}`,
+    `bytes=${bytes}`
+  ].filter(Boolean);
+
+  error.message = `${error.message} ${PROVIDER_REQUEST_DIAGNOSTICS_TAG}${headFields.join(" ")}${upstreamNote}${dumpNote}]`;
+  try {
+    Object.defineProperty(error, PROVIDER_REQUEST_DIAGNOSTICS_KEY, {
+      value: diagnostics,
+      enumerable: false,
+      configurable: true,
+      writable: true
+    });
+  } catch {
+    // Non-extensible errors still carry the tail; parsing covers them.
+  }
   return error;
 }
 
@@ -798,7 +966,11 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
           stream: true,
           error: error instanceof Error ? error.message : String(error)
         });
-        throw enrichProviderRequestError(error, streamRequest, input.model.id);
+        throw enrichProviderRequestError(error, streamRequest, {
+          providerId: input.provider.id,
+          providerName: input.provider.name,
+          modelId: input.model.id
+        });
       }
       if (!isAsyncIterable(streamResponse)) {
         const fallbackDecision = compat.parseResponse(streamResponse, ctx, Boolean(nativeTools));
@@ -939,7 +1111,11 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
         stream: false,
         error: error instanceof Error ? error.message : String(error)
       });
-      throw enrichProviderRequestError(error, request, input.model.id);
+      throw enrichProviderRequestError(error, request, {
+        providerId: input.provider.id,
+        providerName: input.provider.name,
+        modelId: input.model.id
+      });
     }
     await reportProviderTrace(input, "response", {
       transport: "chat.completions",

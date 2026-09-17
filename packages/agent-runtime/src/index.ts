@@ -39,7 +39,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
-import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, isGrokModel, isProgressOnlyAssistantMessage, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, isGrokModel, isProgressOnlyAssistantMessage, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripProviderRequestDiagnostics, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
 import { ToolRuntime, canonicalizeToolName, isChildReadOnlyForbiddenTool, isWebFrontendTaskText, prepareShellCommandForWebFrontend, sanitizeBrowserToolJson } from "@tool-runtime";
@@ -87,6 +87,7 @@ import {
   updateRecoveryEpisodeFailure
 } from "./error-recovery";
 import type { RecoveryEpisode } from "./error-recovery";
+import { buildProviderFailureDetailLines, buildProviderFailureMessage, summarizeFailureDetail } from "./provider-failure-message";
 import {
   applyMultimodalInputRecognitionToTranscript,
   buildMultimodalInputRecognizeSystemPrompt,
@@ -183,6 +184,13 @@ export {
 /** @deprecated Use MAX_TARGET_FAILURE_ATTEMPTS for tool failures. */
 export const MAX_REPEATED_TASK_FAILURES = MAX_TARGET_FAILURE_ATTEMPTS;
 export { MAX_PREMATURE_COMPLETION_ATTEMPTS, MAX_TARGET_FAILURE_ATTEMPTS } from "./error-recovery";
+export {
+  buildProviderFailureDetailLines,
+  buildProviderFailureMessage,
+  classifyProviderFailure,
+  summarizeFailureDetail,
+  type ProviderFailureKind
+} from "./provider-failure-message";
 export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
 // A model can ignore a strategy-switch instruction after a failed call and
 // resend the same rejected invocation indefinitely. End the turn after a
@@ -581,8 +589,18 @@ export const MAX_SUBAGENT_REQUEST_LIMIT_RETRIES = 3;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_BASE_TOKENS = 8_192;
 export const PROVIDER_OUTPUT_LIMIT_RECOVERY_MAX_TOKENS = 32_768;
 
+/**
+ * Provider errors carry a `[provider-request ...]` diagnostics tail containing
+ * bare integers (`bytes=500`, `messages=429`). Status-code detectors scan the
+ * message for 4xx/5xx numbers, so the tail must be removed first — otherwise a
+ * 500-byte request is read as an HTTP 500 and retried as an outage.
+ */
+function providerErrorMessage(error: unknown): string {
+  return stripProviderRequestDiagnostics(error instanceof Error ? error.message : String(error));
+}
+
 export function isUpstreamContextOverflowError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = providerErrorMessage(error);
   if (!/\b(?:HTTP\s*)?400\b/i.test(message)) {
     return false;
   }
@@ -597,12 +615,11 @@ export function isUpstreamServiceUnavailableError(error: unknown): boolean {
       return true;
     }
   }
-  const message = error instanceof Error ? error.message : String(error);
-  return /\b(?:HTTP\s*)?(?:500|502|503|504)\b/i.test(message);
+  return /\b(?:HTTP\s*)?(?:500|502|503|504)\b/i.test(providerErrorMessage(error));
 }
 
 export function isFunctionCallProtocolError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = providerErrorMessage(error);
   if (!/\b(?:HTTP\s*)?400\b/i.test(message)) {
     return false;
   }
@@ -629,7 +646,7 @@ export function isModelRateLimitError(error: unknown): boolean {
       return true;
     }
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = providerErrorMessage(error);
   if (/\b(?:HTTP\s*)?429\b/i.test(message)) {
     return true;
   }
@@ -10421,7 +10438,7 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
   if (isFunctionCallProtocolError(error)) {
     return [
       "任务暂时停止：模型服务的工具调用会话未能匹配调用与结果。",
-      `原因：${error instanceof Error ? error.message : String(error)}`,
+      `原因：${summarizeFailureDetail(error)}`,
       "未完成的 GPA 计划已保留，可直接在下方选择是否重试剩余任务。",
       "建议：重试后仍重复出现时，切换到已验证 Agent 工具调用的模型或供应商。"
     ].join("\n");
@@ -10430,7 +10447,7 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
   if (error instanceof Error && error.message.startsWith("Agent progress commentary recovery exhausted:")) {
     return [
       "任务暂时停止：模型连续返回进度说明，但没有继续调用工具或给出最终结果。",
-      `原因：${error.message.replace(/^Agent progress commentary recovery exhausted:\s*/, "")}`,
+      `原因：${summarizeFailureDetail(error.message.replace(/^Agent progress commentary recovery exhausted:\s*/, ""))}`,
       "系统已多次要求模型继续执行，仍未成功。请重试；若重复出现，请检查该模型的 Agent 工具调用能力。已完成的工具结果和项目文件会被保留。"
     ].join("\n");
   }
@@ -10438,7 +10455,7 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
   if (error instanceof Error && error.message.startsWith("Agent decision protocol failed repeatedly:")) {
     return [
       "任务暂时停止：模型连续多次未能返回可执行的 Agent 决策。",
-      `原因：${error.message.replace(/^Agent decision protocol failed repeatedly:\s*/, "")}`,
+      `原因：${summarizeFailureDetail(error.message.replace(/^Agent decision protocol failed repeatedly:\s*/, ""))}`,
       "建议：稍后重试，或检查当前模型服务是否可用。已完成的工具结果和项目文件会被保留。"
     ].join("\n");
   }
@@ -10454,17 +10471,27 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
   }
 
   if (error instanceof Error && error.message.startsWith("Model rate limit persisted after")) {
+    const rateLimitDetailLines = buildProviderFailureDetailLines(error);
     return [
       "任务暂时停止：模型服务持续返回 429（请求过于频繁）。",
-      `原因：${error.message.replace(/^Model rate limit persisted after\s+\d+\s+retries:\s*/, "")}`,
-      "建议：稍后再试，或切换到配额更充足的模型/供应商。已完成的工具结果和项目文件会被保留。"
+      `原因：${summarizeFailureDetail(error.message.replace(/^Model rate limit persisted after\s+\d+\s+retries:\s*/, ""))}`,
+      "建议：稍后再试，或切换到配额更充足的模型/供应商。已完成的工具结果和项目文件会被保留。",
+      ...(rateLimitDetailLines.length > 0 ? ["", ...rateLimitDetailLines] : [])
     ].join("\n");
   }
 
-  const detail = error instanceof Error ? error.message : String(error);
+  // Provider faults get a localized conclusion + action instead of the raw
+  // upstream string, which for a gateway rejection is an unreadable wall of
+  // English, a role-sequence dump and an empty `param=`. Checked last so every
+  // specific recovery branch above keeps priority.
+  const providerFailureMessage = buildProviderFailureMessage(error);
+  if (providerFailureMessage) return providerFailureMessage;
+
+  const detailLines = buildProviderFailureDetailLines(error);
   return [
     "任务暂时停止：运行时遇到了无法自动恢复的异常。",
-    `原因：${detail}`
+    `原因：${summarizeFailureDetail(error)}`,
+    ...(detailLines.length > 0 ? ["", ...detailLines] : [])
   ].join("\n");
 }
 

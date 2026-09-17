@@ -44,7 +44,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, defaultOpenAiApiFormatsForModel, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, prepareGrokAvailableTools, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, defaultOpenAiApiFormatsForModel, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, prepareGrokAvailableTools, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, readProviderRequestDiagnostics, resolveModelCompat, resolveProviderRequestLimits, stripProviderRequestDiagnostics, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -1308,7 +1308,113 @@ describe("OpenAiCompatibleProvider", () => {
         },
         provider
       })
-    ).rejects.toThrow(/400 Invalid request parameters \[provider-request model=kimi-k3 tools=1 messages=2\(system,user\) bytes=\d+ upstream\(code=11133 type=invalid_request_error\) dump=/);
+    ).rejects.toThrow(/400 Invalid request parameters \[provider-request provider=moonshot-gateway model=kimi-k3 tools=1 messages=2 roles=system:1,user:1 bytes=\d+ upstream\(code=11133 type=invalid_request_error\) dump=/);
+  });
+
+  it("exposes provider request diagnostics without the display-hostile role sequence", async () => {
+    const apiError = Object.assign(new Error("400 credit insufficient balance: balance=79 required=4368"), {
+      status: 400,
+      error: { code: "insufficient_user_quota", param: "", type: "api_error" }
+    });
+    mocks.chatCreate.mockRejectedValue(apiError);
+    const provider: ProviderDefinition = {
+      id: "provider-16",
+      name: "云雾 API 网关",
+      type: "openai-compatible",
+      apiKey: "secret"
+    };
+    const models = {
+      id: "qwen3.8-flash-free",
+      providerId: provider.id,
+      displayName: "Qwen Flash",
+      contextWindow: 256_000,
+      supportsStreaming: true,
+      supportsToolCalling: true,
+      supportsParallelToolCalls: false,
+      supportsJsonOutput: true,
+      supportsMultimodalInput: false,
+      supportsReasoningSummary: false,
+      defaultTemperature: 0.2,
+      defaultMaxOutputTokens: 4096
+    } satisfies ModelProfile;
+
+    await expect(
+      new ProviderFactory().create(provider).runTurn({
+        systemPrompt: "You are codexh.",
+        transcript: [
+          { role: "user", content: "你好" },
+          { role: "assistant", content: "你好，有什么可以帮你。" },
+          { role: "assistant", content: "我查一下。" }
+        ],
+        availableTools: [],
+        model: models,
+        provider
+      })
+    ).rejects.toThrow();
+
+    const diagnostics = readProviderRequestDiagnostics(apiError);
+    expect(diagnostics).toMatchObject({
+      providerId: "provider-16",
+      providerName: "云雾 API 网关",
+      modelId: "qwen3.8-flash-free",
+      toolCount: 0,
+      messageCount: 4,
+      upstreamCode: "insufficient_user_quota",
+      upstreamType: "api_error"
+    });
+    // Empty upstream fields are dropped instead of printing `param= type=`.
+    expect(diagnostics?.upstreamParam).toBeUndefined();
+    // The tail carries a compact role histogram, never the full role list.
+    expect(apiError.message).toContain("roles=system:1,user:1,assistant:2");
+    expect(apiError.message).not.toContain("system,user,assistant");
+    // The human-readable provider name is quoted so spaces survive the parsing.
+    expect(apiError.message).toContain('providerName="云雾 API 网关"');
+    expect(apiError.message).toMatch(/upstream\(code=insufficient_user_quota type=api_error\)/);
+    expect(stripProviderRequestDiagnostics(apiError.message)).toBe(
+      "400 credit insufficient balance: balance=79 required=4368"
+    );
+  });
+
+  it("sanitizes provider names that would break the diagnostics tail", async () => {
+    const apiError = Object.assign(new Error("400 bad request"), { status: 400 });
+    mocks.chatCreate.mockRejectedValue(apiError);
+    const provider: ProviderDefinition = {
+      id: "gateway-1",
+      name: '他说 "hi"] 然后\n换行',
+      type: "openai-compatible",
+      apiKey: "secret"
+    };
+
+    await expect(
+      new ProviderFactory().create(provider).runTurn({
+        systemPrompt: "You are codexh.",
+        transcript: [{ role: "user", content: "Hello" }],
+        availableTools: [],
+        model: {
+          id: "kimi-k3",
+          providerId: provider.id,
+          displayName: "Kimi K3",
+          contextWindow: 500_000,
+          supportsStreaming: false,
+          supportsToolCalling: true,
+          supportsParallelToolCalls: false,
+          supportsJsonOutput: true,
+          supportsMultimodalInput: true,
+          supportsReasoningSummary: true,
+          defaultTemperature: 0.2,
+          defaultMaxOutputTokens: 8192
+        },
+        provider
+      })
+    ).rejects.toThrow();
+
+    const diagnostics = readProviderRequestDiagnostics(apiError);
+    // Quotes (parse-breaking) and brackets (tail-terminating) are dropped, and
+    // the line break is collapsed…
+    expect(diagnostics?.providerName).toBe("他说 hi 然后 换行");
+    // …so the tail still terminates where it should and stays parseable.
+    expect(apiError.message).toContain('providerName="他说 hi 然后 换行"');
+    expect(apiError.message).toContain("dump=");
   });
 
   it("reports provider request size as UTF-8 bytes", async () => {

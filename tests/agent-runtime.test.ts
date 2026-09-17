@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import * as XLSX from "xlsx";
 import type { AppConfig, MessageRecord, ModelProfile, SkillMetadata, ToolSpecDefinition } from "@shared-types";
+import { ProviderRequestLimitError } from "@provider-adapters";
 import {
   createToolCallFingerprint,
   prioritizeToolsForProvider,
@@ -87,6 +88,7 @@ import {
   buildRepeatedInspectionFailureStoppedMessage,
   buildRepeatedTaskRecoveryMessage,
   buildRuntimeFailureRecoveryMessage,
+  classifyProviderFailure,
   AgentModelCompatibilityError,
   compactTranscriptForContext,
   CONTEXT_COMPACTION_THRESHOLD,
@@ -2529,6 +2531,120 @@ describe("Agent model compatibility failures", () => {
     expect(message).toContain("继续完成");
     expect(message).not.toContain("Standard completion validation");
     expect(message).not.toContain("项目路径、权限");
+  });
+});
+
+describe("Provider failure explanations", () => {
+  const enrichedQuotaError = () =>
+    Object.assign(
+      new Error(
+        "400 credit insufficient balance: balance=79 required=4368 (request id: 20260916091033691398034c955d568eL56e0WQ) " +
+          "[provider-request provider=provider-16 model=qwen3.8-flash-free tools=57 messages=36 roles=system:1,user:5,assistant:30 bytes=160910 upstream(code=insufficient_user_quota type=api_error) dump=C:\\Users\\xhwange\\.codexh\\logs\\provider-request-error-1789549833864.json]"
+      ),
+      { status: 400, error: { code: "insufficient_user_quota", param: "", type: "api_error" } }
+    );
+
+  it("classifies the provider faults users actually hit", () => {
+    expect(classifyProviderFailure(enrichedQuotaError())).toBe("quota");
+    expect(classifyProviderFailure(Object.assign(new Error("401 invalid api key"), { status: 401 }))).toBe("auth");
+    expect(classifyProviderFailure(Object.assign(new Error("404 model not found"), { status: 404 }))).toBe("model_unavailable");
+    expect(
+      classifyProviderFailure(new Error("400 This model's maximum context length is 128000 tokens"))
+    ).toBe("context_length");
+    expect(classifyProviderFailure(Object.assign(new Error("413 payload too large"), { status: 413 }))).toBe("request_too_large");
+    expect(classifyProviderFailure(new Error("400 request rejected by content filter"))).toBe("content_filter");
+    expect(classifyProviderFailure(Object.assign(new Error("429 too many requests"), { status: 429 }))).toBe("rate_limit");
+    expect(classifyProviderFailure(new Error("500 status code (no body)"))).toBe("service_unavailable");
+    expect(classifyProviderFailure(new Error("fetch failed"))).toBe("network");
+    expect(classifyProviderFailure(new Error("Invalid workspace path"))).toBeNull();
+  });
+
+  it("turns a quota rejection into a conclusion, an action and one detail line", () => {
+    const message = buildRuntimeFailureRecoveryMessage(enrichedQuotaError());
+
+    expect(message).toContain("模型供应商账户额度不足");
+    expect(message).toContain("剩余额度 79");
+    expect(message).toContain("本次请求需要 4368");
+    expect(message).toContain("供应商 provider-16");
+    expect(message).toContain("建议：");
+    expect(message).toContain("设置 → 模型");
+    // The wall of raw provider text must not survive.
+    expect(message).not.toContain("无法自动恢复");
+    expect(message).not.toContain("[provider-request");
+    expect(message).not.toContain("roles=system:1");
+    expect(message).not.toContain("param=");
+    expect(message).not.toContain("credit insufficient balance");
+    // …but the machine-readable context is still reachable.
+    expect(message).toContain("技术细节：HTTP 400 · insufficient_user_quota · 模型 qwen3.8-flash-free · 供应商 provider-16 · 157 KB / 36 条消息 / 57 个工具");
+    expect(message).toContain("完整请求已保存：C:\\Users\\xhwange\\.codexh\\logs\\provider-request-error-1789549833864.json");
+  });
+
+  it("names the configured provider instead of leaking its internal id", () => {
+    const message = buildRuntimeFailureRecoveryMessage(
+      Object.assign(
+        new Error(
+          "400 credit insufficient balance: balance=0 required=2574 " +
+            '[provider-request provider=provider-16 providerName="云雾 API 网关" model=qwen3.8-flash-free tools=57 messages=2 roles=system:1,user:1 bytes=92160 upstream(code=insufficient_user_quota type=api_error) dump=C:\\Users\\xhwange\\.codexh\\logs\\provider-request-error-1789552126343.json]'
+        ),
+        { status: 400, error: { code: "insufficient_user_quota", type: "api_error" } }
+      )
+    );
+
+    expect(message).toContain("供应商「云雾 API 网关」的账户剩余额度 0，本次请求需要 2574");
+    expect(message).toContain("先给「云雾 API 网关」的账户充值");
+    // The reason line must never show the internal id…
+    const reasonLine = message.split("\n").find((line) => line.startsWith("原因：")) ?? "";
+    expect(reasonLine).not.toContain("provider-16");
+    // …while the technical line keeps it for support correlation.
+    expect(message).toContain("供应商 云雾 API 网关（provider-16）");
+  });
+
+  it("keeps an unclassified provider fault readable instead of dumping the diagnostics tail", () => {
+    const error = Object.assign(
+      new Error(
+        "400 unexpected gateway response: response body could not be parsed [provider-request provider=provider-9 model=glm-5.3-flash tools=2 messages=3 roles=system:1,user:1,assistant:1 bytes=2048 dump=C:\\tmp\\d.json]"
+      ),
+      { status: 400 }
+    );
+
+    const message = buildRuntimeFailureRecoveryMessage(error);
+
+    expect(message).toContain("无法自动恢复");
+    expect(message).toContain("unexpected gateway response");
+    expect(message).not.toContain("[provider-request");
+    expect(message).toContain("技术细节：HTTP 400 · 模型 glm-5.3-flash · 供应商 provider-9 · 2 KB / 3 条消息 / 2 个工具");
+    expect(message).toContain("完整请求已保存：C:\\tmp\\d.json");
+  });
+
+  it("keeps the raw cause focused for non-provider runtime errors", () => {
+    const message = buildRuntimeFailureRecoveryMessage(new Error("Invalid workspace path"));
+
+    expect(message).toContain("Invalid workspace path");
+    expect(message).not.toContain("技术细节：");
+  });
+
+  it("explains an exhausted provider request-size limit in bytes", () => {
+    const message = buildRuntimeFailureRecoveryMessage(new ProviderRequestLimitError(2_000_000, 1_000_000));
+
+    expect(message).toContain("请求体积超过了供应商允许的上限");
+    expect(message).toContain("1.9 MB");
+    expect(message).toContain("配置上限 977 KB");
+    expect(message).not.toContain("UTF-8 bytes");
+  });
+
+  it("never reads the diagnostics tail as an HTTP status", () => {
+    const withTail = (bytes: string) =>
+      new Error(
+        `400 invalid request [provider-request provider=p model=m tools=1 messages=1 roles=system:1 bytes=${bytes} dump=C:\\tmp\\d.json]`
+      );
+
+    // `bytes=500` must not look like an HTTP 500 outage…
+    expect(isUpstreamServiceUnavailableError(withTail("500"))).toBe(false);
+    expect(isUpstreamServiceUnavailableError(withTail("503"))).toBe(false);
+    // …and `bytes=429` must not look like rate limiting.
+    expect(isModelRateLimitError(withTail("429"))).toBe(false);
+    // The real status still wins.
+    expect(isUpstreamServiceUnavailableError(Object.assign(withTail("500"), { status: 503 }))).toBe(true);
   });
 });
 
