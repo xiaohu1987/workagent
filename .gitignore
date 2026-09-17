@@ -36,3 +36,15 @@ assets/tree-sitter-grammars/*.wasm
 # Local bundled-plugin sources are not distributed with the application.
 /assets/bundled-plugins/
 /scripts/stage-bundled-plugins.mjs
+
+# Generated task output, analysis scratch, and shell-accident leftovers.
+/.codexh/
+/.codebuddy/
+/graphify-out/
+/artifacts/
+/.jt-link/
+/.jt-src/
+/.workbuddy-ai/
+/.graphify_detect.json
+/$null
+/-
