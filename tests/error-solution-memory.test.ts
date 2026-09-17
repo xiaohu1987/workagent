@@ -234,8 +234,16 @@ describe("error solution memory persistence", () => {
     vi.setSystemTime("2026-07-25T03:00:00.000Z");
     db.markSelfImprovementMemoryUsed(first.id);
 
-    expect(db.listSelfImprovementMemories({ all: true }).map((entry) => entry.id))
-      .toEqual([first.id, second.id]);
+    // A recall is not a content update. `updated_at` is content freshness: it drives list
+    // ordering, recall tie-breaking and stale-pruning. Bumping it on every recall made the
+    // most-recalled memory look permanently newest and immune to retention. Order now
+    // follows content freshness; the recall is recorded on `usage_count` / `last_used_at`.
+    const listed = db.listSelfImprovementMemories({ all: true });
+    expect(listed.map((entry) => entry.id)).toEqual([second.id, first.id]);
+    const recalled = listed.find((entry) => entry.id === first.id);
+    expect(recalled?.usageCount).toBe(1);
+    expect(recalled?.lastUsedAt).toBe("2026-07-25T03:00:00.000Z");
+    expect(recalled?.updatedAt).toBe("2026-07-25T01:00:00.000Z");
   });
 
   it("shares project recovery facts across models while keeping model strategies separate", async () => {

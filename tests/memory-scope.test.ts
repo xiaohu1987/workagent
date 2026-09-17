@@ -129,9 +129,52 @@ describe("memory scope separation", () => {
     expect(db.searchSelfImprovementMemories({ query: "deploy", scope: "project", projectId: "project-a" }).map((row) => row.title))
       .toEqual(["project deploy"]);
     expect(db.searchSelfImprovementMemories({ query: "deploy", scope: "project", projectId: "project-z" })).toEqual([]);
-    // Legacy combined recall still returns both, project first by usage.
+    // Legacy combined recall still returns both, across both scopes.
     expect(db.searchSelfImprovementMemories({ query: "deploy", projectId: "project-a" }).map((row) => row.title))
       .toEqual(expect.arrayContaining(["project deploy", "global deploy"]));
+  });
+
+  it("falls back to the freshest memory instead of the most-recalled one", async () => {
+    const db = await makeDatabase();
+    const stale = db.upsertSelfImprovementMemory({
+      scope: "global", projectId: null, kind: "experience",
+      title: "stale deploy note", content: "deploy with make release", sourceThreadId: "t-stale"
+    });
+    // A memory recalled hundreds of times must not be able to buy itself a permanent
+    // recall slot: `usage_count` is no longer a sort key, and a recall no longer
+    // refreshes `updated_at`.
+    for (let index = 0; index < 300; index += 1) db.markSelfImprovementMemoryUsed(stale.id);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const fresh = db.upsertSelfImprovementMemory({
+      scope: "global", projectId: null, kind: "experience",
+      title: "fresh deploy note", content: "deploy with pnpm release", sourceThreadId: "t-fresh"
+    });
+
+    const recalled = db.listSelfImprovementMemories({ all: true }).find((entry) => entry.id === stale.id);
+    expect(recalled?.usageCount).toBe(300);
+    expect(recalled?.lastUsedAt).not.toBeNull();
+    expect(recalled?.updatedAt).toBe(stale.updatedAt);
+
+    // Unmatched query -> recency fallback. The most-recalled memory must not win.
+    const fallback = db.searchSelfImprovementMemories({ query: "zzzunmatchedtoken", scope: "global", limit: 2 });
+    expect(fallback.map((entry) => entry.id)).toEqual([fresh.id, stale.id]);
+  });
+
+  it("keeps recall ranking free of usage_count (regression guard)", async () => {
+    const source = await fs.readFile(
+      new URL("../apps/desktop/src/main/storage.ts", import.meta.url),
+      "utf8"
+    );
+    const start = source.indexOf("public searchSelfImprovementMemories");
+    const end = source.indexOf("public markSelfImprovementMemoryUsed", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+    // Sorting by usage_count made recall self-reinforcing: a memory injected once ranked
+    // higher next time, so freshly distilled memories (usage 0) never surfaced.
+    expect(body).not.toContain("usage_count DESC");
+    expect(body).toContain("ORDER BY score ASC, m.updated_at DESC");
+    expect(body).toContain("ORDER BY updated_at DESC");
   });
 
   it("merges by fingerprint so re-distilling updates instead of duplicating", async () => {

@@ -2959,22 +2959,35 @@ export class DatabaseService {
     let rows: any[] = [];
     if (query) {
       try {
+        // Rank by relevance only. `usage_count` used to be a sort key here and in the
+        // fallback below, which made recall self-reinforcing: a memory injected once
+        // ranked higher next time, so freshly distilled memories (usage 0) could never
+        // displace stale ones. Recency now breaks ties instead.
         rows = this.#db.prepare(`SELECT m.*, bm25(self_improvement_memory_fts) AS score FROM self_improvement_memory_fts f
           JOIN self_improvement_memories m ON m.id = f.memory_id WHERE self_improvement_memory_fts MATCH ? AND ${filter}
-          ORDER BY score ASC, m.usage_count DESC, m.updated_at DESC LIMIT ?`).all(query, ...scopeParams, limit) as any[];
+          ORDER BY score ASC, m.updated_at DESC LIMIT ?`).all(query, ...scopeParams, limit) as any[];
       } catch { /* Search falls back to useful recent memories. */ }
     }
     if (!rows.length) {
+      // Nothing matched: fall back to the most recently updated memories. Sorting by
+      // `usage_count` here was what let a single unhelpful memory accumulate 304
+      // injections and permanently occupy a recall slot.
       rows = this.#db.prepare(`SELECT *, 0 AS score FROM self_improvement_memories m WHERE ${filter}
-        ORDER BY usage_count DESC, updated_at DESC LIMIT ?`).all(...scopeParams, limit) as any[];
+        ORDER BY updated_at DESC LIMIT ?`).all(...scopeParams, limit) as any[];
     }
     return rows.map((row) => ({ ...mapSelfImprovementMemoryRow(row), score: Number(row.score ?? 0) }));
   }
 
+  /**
+   * Records a recall. Deliberately leaves `updated_at` alone: that column is content
+   * freshness, used both for recall tie-breaking and retention. Refreshing it on every
+   * recall would resurrect the very self-reinforcing behaviour the ranking fix removes —
+   * a recalled memory would look "newest" and keep winning the same slot.
+   */
   public markSelfImprovementMemoryUsed(id: string): void {
     const now = nowIso();
-    this.#db.prepare("UPDATE self_improvement_memories SET usage_count = usage_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?")
-      .run(now, now, id);
+    this.#db.prepare("UPDATE self_improvement_memories SET usage_count = usage_count + 1, last_used_at = ? WHERE id = ?")
+      .run(now, id);
   }
 
   public deleteSelfImprovementMemory(id: string): void {
