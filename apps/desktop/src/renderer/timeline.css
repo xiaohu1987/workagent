@@ -804,26 +804,14 @@
 .tool-activity-running { display: none; }
 
 .tool-activity-chevron {
-  width: 7px;
-  height: 7px;
-  margin-left: 0;
-  border-right: 1px solid #9da5b0;
-  border-bottom: 1px solid #9da5b0;
-  transform: rotate(-45deg);
-  /* 不画展开箭头：它贴在整行最右端，一屏里连成一条竖线非常抢眼。
-     折叠态与展开态都默认隐藏，只有悬停 / 键盘聚焦这一行时才淡入。
-     用 opacity 而不是 display:none，保住 grid 第三列，悬停时不会有横向跳动。 */
-  opacity: 0;
-  transition: transform 150ms ease, opacity 140ms ease;
+  /* 展开指示箭头整体停用：折叠态、展开态、悬停、键盘聚焦全都不显示。
+     别再退回 "只在 hover / [open] 时显示" 的方案——点击 <summary> 展开时鼠标就停在那一行，
+     且 <summary> 会拿到焦点，:hover 与 :focus-within 同时成立，箭头必然可见（被反馈过两次）。
+     "这一行可以点开"由 .tool-activity-summary:hover 的文字提亮 + 展开后的明细行承担。
+     原画法（需要恢复时从 git 取）：7×7 只留 border-right/bottom + rotate(-45deg) = 细 ">"，
+     [open] 时 rotate(45deg) = "v"。 */
+  display: none;
 }
-
-.tool-activity-group:hover .tool-activity-chevron,
-.tool-activity-group:focus-within .tool-activity-chevron {
-  opacity: 1;
-}
-
-/* 展开态同样不画箭头：只保留旋转，悬停时才淡入——不悬停就永远看不到这个箭头。 */
-.tool-activity-group[open] .tool-activity-chevron { transform: rotate(45deg); }
 
 .tool-activity-details-shell {
   display: grid;
