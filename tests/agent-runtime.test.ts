@@ -86,6 +86,10 @@ import {
   isRecoverableInspectionToolFailure,
   buildRepeatedInspectionFailurePrompt,
   buildRepeatedInspectionFailureStoppedMessage,
+  buildInspectionFailurePromptLimitMessage,
+  registerInspectionRecoveryPrompt,
+  resolveInspectionFailureRecoveryAnswer,
+  isMissingTargetReadError,
   buildRepeatedTaskRecoveryMessage,
   buildRuntimeFailureRecoveryMessage,
   classifyProviderFailure,
@@ -222,6 +226,7 @@ import {
   prioritizeUserInputToolCall,
   MAX_REPEATED_TASK_FAILURES,
   MAX_BLOCKED_IDENTICAL_TOOL_RETRIES,
+  MAX_INSPECTION_RECOVERY_PROMPTS,
   shouldStopAfterBlockedIdenticalToolRetry,
   MAX_MODEL_TIMEOUT_RETRIES,
   MODEL_DECISION_TIMEOUT_MS,
@@ -4066,6 +4071,133 @@ describe("managed-write recovery", () => {
       workspaceCwd
     });
     expect(state.phase).toBe("none");
+  });
+
+  it("drops a target proven absent instead of forcing the identical read forever", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: { patch: "*** Begin Patch\n*** Update File: README.md\n*** End Patch" },
+      ok: false,
+      workspaceCwd
+    });
+    expect(createManagedWriteRecoveryReadToolCall(state, "recovery-read")).toEqual({
+      id: "recovery-read",
+      name: "fs.read_file",
+      arguments: { path: "C:\\project\\README.md" }
+    });
+
+    // Forcing the read of a missing file is what dead-locked the turn: the
+    // read could never succeed, so the runtime re-issued it on every turn.
+    const instruction = advanceManagedWriteRecovery(state, {
+      toolName: "fs.read_file",
+      argumentsJson: { path: "C:\\project\\README.md" },
+      ok: false,
+      workspaceCwd,
+      error: "Tool execution failed: ENOENT: no such file or directory, open 'C:\\project\\README.md'"
+    });
+
+    expect(instruction).toContain("*** Add File:");
+    expect(state.missingTargetPaths).toEqual(["C:\\project\\README.md"]);
+    expect(state.targetPaths).toEqual([]);
+    expect(state.phase).toBe("write");
+    expect(createManagedWriteRecoveryReadToolCall(state, "second-read")).toBeNull();
+  });
+
+  it("does not re-queue a target already proven absent when the patch fails again", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: { patch: "*** Begin Patch\n*** Update File: README.md\n*** End Patch" },
+      ok: false,
+      workspaceCwd
+    });
+    advanceManagedWriteRecovery(state, {
+      toolName: "fs.read_file",
+      argumentsJson: { path: "C:\\project\\README.md" },
+      ok: false,
+      workspaceCwd,
+      error: "ENOENT: no such file or directory, open 'C:\\project\\README.md'"
+    });
+
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: { patch: "*** Begin Patch\n*** Update File: README.md\n*** End Patch" },
+      ok: false,
+      workspaceCwd
+    });
+
+    expect(state.phase).toBe("write");
+    expect(state.targetPaths).toEqual([]);
+    expect(createManagedWriteRecoveryReadToolCall(state, "read-again")).toBeNull();
+  });
+
+  it("keeps requiring the read when the inspection failed for another reason", () => {
+    const state = createManagedWriteRecoveryState();
+    advanceManagedWriteRecovery(state, {
+      toolName: "apply_patch",
+      argumentsJson: { patch: "*** Begin Patch\n*** Update File: src/app.ts\n*** End Patch" },
+      ok: false,
+      workspaceCwd
+    });
+
+    expect(state.phase).toBe("read");
+    expect(state.targetPaths).toEqual(["C:\\project\\src\\app.ts"]);
+
+    // A permission failure is not proof of absence; the read stays mandatory.
+    advanceManagedWriteRecovery(state, {
+      toolName: "fs.read_file",
+      argumentsJson: { path: "src/app.ts" },
+      ok: false,
+      workspaceCwd,
+      error: "EACCES: permission denied, open 'C:\\project\\src\\app.ts'"
+    });
+
+    expect(state.phase).toBe("read");
+    expect(state.targetPaths).toEqual(["C:\\project\\src\\app.ts"]);
+    expect(state.missingTargetPaths).toEqual([]);
+  });
+});
+
+describe("repeated inspection failure prompts", () => {
+  it("caps how often the same read failure may interrupt the user", () => {
+    const counts = new Map<string, number>();
+    const fingerprint = "read:README.md";
+    for (let attempt = 0; attempt < MAX_INSPECTION_RECOVERY_PROMPTS; attempt += 1) {
+      expect(registerInspectionRecoveryPrompt(counts, fingerprint)).toBe(true);
+    }
+
+    expect(registerInspectionRecoveryPrompt(counts, fingerprint)).toBe(false);
+    // A different read keeps its own budget.
+    expect(registerInspectionRecoveryPrompt(counts, "read:index.html")).toBe(true);
+
+    const limitMessage = buildInspectionFailurePromptLimitMessage({
+      toolName: "fs.read_file",
+      argumentsJson: { path: "C:\\Users\\me\\Desktop\\地球\\README.md" }
+    });
+    expect(limitMessage).toContain("README.md");
+    expect(limitMessage).toContain("不会再重复询问");
+  });
+
+  it("treats a path-less 'provide_path' answer as unresolved instead of solved", () => {
+    const answer = resolveInspectionFailureRecoveryAnswer({ read_failure_recovery: "provide_path" });
+    expect(answer.shouldStop).toBe(false);
+    expect(answer.guidance).not.toBe("provide_path");
+    expect(answer.guidance).toContain("没有填写具体路径");
+
+    const withPath = resolveInspectionFailureRecoveryAnswer({
+      read_failure_recovery: "provide_path",
+      read_failure_recovery__note: "__note__:C:\\Users\\me\\Desktop\\地球"
+    });
+    expect(withPath.guidance).toContain("C:\\Users\\me\\Desktop\\地球");
+
+    expect(resolveInspectionFailureRecoveryAnswer({ read_failure_recovery: "stop" }).shouldStop).toBe(true);
+  });
+
+  it("only classifies missing-path read errors as a missing target", () => {
+    expect(isMissingTargetReadError("ENOENT: no such file or directory, open 'C:\\x'")).toBe(true);
+    expect(isMissingTargetReadError("EACCES: permission denied, open 'C:\\x'")).toBe(false);
+    expect(isMissingTargetReadError(undefined)).toBe(false);
   });
 });
 

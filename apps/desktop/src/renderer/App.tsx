@@ -542,6 +542,181 @@ function clampPanelWidth(value: number, minimum: number, maximum: number): numbe
   return Math.round(Math.min(Math.max(value, minimum), maximum));
 }
 
+// ---------------------------------------------------------------------------
+// TEMPORARY DIAGNOSTIC - remove once "the final answer only appears after the
+// thread is reloaded" is closed. Renderer `console.error` is forwarded by the
+// main process and persisted to `~/.codexh/logs/runtime.jsonl`, which is the
+// only channel that lets renderer state be inspected from outside the app.
+// ---------------------------------------------------------------------------
+type SnapshotRefreshOutcome = "applied" | "superseded" | "error";
+
+/**
+ * A "superseded" snapshot read means newer runtime data exists but has not been
+ * fetched yet. Re-issue a bounded number of times: without it a completion that
+ * invalidates a read in flight leaves the transcript stale forever, while an
+ * unbounded retry could turn a continuously streaming turn into a fetch loop.
+ */
+const SNAPSHOT_SUPERSEDED_RETRY_LIMIT = 3;
+
+type TranscriptDiagnosticInputs = {
+  threadId: string | null;
+  threadStatus: string | null;
+  isTaskProcessing: boolean;
+  messages: ReadonlyArray<MessageRecord>;
+  entries: ReadonlyArray<{ kind: string; id: string; createdAt: string }>;
+  sections: ReadonlyArray<{
+    id: string;
+    userEntryId: string;
+    summaryEntryId: string | null;
+    entryIds: readonly string[];
+  }>;
+  collapsedTurnIds: ReadonlySet<string>;
+  latestTurnId: string | null;
+};
+
+const transcriptDiagnosticKeys = new Set<string>();
+
+function shortDiagId(value: string | null | undefined): string {
+  return typeof value === "string" ? value.slice(0, 8) : "";
+}
+
+function describeTranscriptMessage(message: MessageRecord) {
+  let displayKind: string | null = null;
+  if (message.metadataJson) {
+    try {
+      displayKind = (JSON.parse(message.metadataJson) as { displayKind?: string }).displayKind ?? null;
+    } catch {
+      displayKind = "PARSE_ERR";
+    }
+  }
+  return {
+    i: shortDiagId(message.id),
+    r: message.role,
+    n: message.content.length,
+    dk: displayKind,
+    tr: shortDiagId(message.turnRunId)
+  };
+}
+
+function inspectTranscriptDom(signature: string): Record<string, unknown> {
+  const result: Record<string, unknown> = { found: false };
+  try {
+    const scroll = document.querySelector(".chat-scroll") as HTMLElement | null;
+    result.cards = document.querySelectorAll(".message-card").length;
+    if (scroll) {
+      result.scrollTop = Math.round(scroll.scrollTop);
+      result.clientHeight = Math.round(scroll.clientHeight);
+      result.scrollHeight = Math.round(scroll.scrollHeight);
+    }
+    const needle = signature.replace(/\s+/g, " ").trim().slice(0, 24);
+    if (!needle) return result;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    let hit: Text | null = null;
+    while (node) {
+      const text = node.nodeValue;
+      if (text && text.includes(needle)) {
+        hit = node as Text;
+        break;
+      }
+      node = walker.nextNode();
+    }
+    if (!hit) return result;
+    result.found = true;
+    const element = hit.parentElement;
+    const card = (element?.closest(".message-card") as HTMLElement | null) ?? element;
+    if (!card) return result;
+    const style = window.getComputedStyle(card);
+    result.opacity = style.opacity;
+    result.visibility = style.visibility;
+    result.display = style.display;
+    result.className = typeof card.className === "string" ? card.className.slice(0, 160) : "";
+    const rect = card.getBoundingClientRect();
+    result.rectTop = Math.round(rect.top);
+    result.rectHeight = Math.round(rect.height);
+    if (scroll) {
+      const scrollRect = scroll.getBoundingClientRect();
+      result.inViewport = rect.bottom > scrollRect.top && rect.top < scrollRect.bottom;
+    }
+  } catch {
+    // Diagnostic only: never affect the app.
+  }
+  return result;
+}
+
+function emitTranscriptDiagnostic(reason: string, delayMs: number, payload: Record<string, unknown>): void {
+  try {
+    console.error(`[transcript-diag] ${JSON.stringify({ reason, delayMs, ...payload })}`);
+  } catch {
+    // Diagnostic only.
+  }
+}
+
+export function scheduleTranscriptDiagnostic(
+  reason: string,
+  threadId: string,
+  messageId: string | null,
+  inputsRef: { current: TranscriptDiagnosticInputs | null }
+): void {
+  const key = `${reason}:${threadId}:${messageId ?? "-"}`;
+  if (transcriptDiagnosticKeys.has(key)) return;
+  if (transcriptDiagnosticKeys.size > 60) transcriptDiagnosticKeys.clear();
+  transcriptDiagnosticKeys.add(key);
+  for (const delayMs of [1400, 5200]) {
+    window.setTimeout(() => {
+      try {
+        const inputs = inputsRef.current;
+        if (!inputs) return;
+        const target = (messageId ? inputs.messages.find((message) => message.id === messageId) : undefined)
+          ?? [...inputs.messages].reverse().find(
+            (message) => message.role === "assistant" && message.content.trim().length > 150
+          );
+        const section = target
+          ? inputs.sections.find((candidate) => candidate.entryIds.some((entryId) => entryId.includes(target.id)))
+          : undefined;
+        const entry = target
+          ? inputs.entries.find((candidate) => candidate.id.includes(target.id))
+          : undefined;
+        emitTranscriptDiagnostic(reason, delayMs, {
+          thread: shortDiagId(threadId),
+          activeThread: shortDiagId(inputs.threadId),
+          status: inputs.threadStatus,
+          processing: inputs.isTaskProcessing,
+          msgCount: inputs.messages.length,
+          entryCount: inputs.entries.length,
+          target: target ? shortDiagId(target.id) : null,
+          targetMessage: target ? describeTranscriptMessage(target) : null,
+          inMessages: Boolean(target),
+          inEntries: Boolean(entry),
+          entryId: entry ? entry.id.slice(0, 24) : null,
+          sectionId: section ? section.id.slice(0, 24) : null,
+          summaryId: section?.summaryEntryId ? section.summaryEntryId.slice(0, 24) : null,
+          summaryIsTarget: Boolean(section?.summaryEntryId && target && section.summaryEntryId.includes(target.id)),
+          sectionEntryCount: section ? section.entryIds.length : null,
+          turnCollapsed: Boolean(section && inputs.collapsedTurnIds.has(section.id)),
+          collapsedCount: inputs.collapsedTurnIds.size,
+          latestTurn: inputs.latestTurnId ? inputs.latestTurnId.slice(0, 16) : null,
+          tailMessages: inputs.messages.slice(-5).map(describeTranscriptMessage),
+          tailEntries: inputs.entries.slice(-6).map((item) => ({
+            k: item.kind,
+            i: item.id.slice(0, 20),
+            c: item.createdAt
+          })),
+          tailSections: inputs.sections.slice(-2).map((item) => ({
+            id: item.id.slice(0, 20),
+            u: item.userEntryId.slice(0, 20),
+            s: item.summaryEntryId ? item.summaryEntryId.slice(0, 20) : null,
+            n: item.entryIds.length
+          })),
+          dom: inspectTranscriptDom(target?.content ?? "")
+        });
+      } catch {
+        // Diagnostic only.
+      }
+    }, delayMs);
+  }
+}
+
 export function App() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const threadsRef = useRef<ThreadRecord[]>([]);
@@ -608,6 +783,9 @@ export function App() {
   const interruptingThreadIdsRef = useRef<Set<string>>(new Set());
   const pendingOneShotSkillRemovalsRef = useRef<Record<string, string[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
+  // TEMPORARY diagnostic: latest render's transcript inputs, read by the runtime
+  // event handler (which runs outside React's render pass).
+  const transcriptDiagnosticInputsRef = useRef<TranscriptDiagnosticInputs | null>(null);
   const latestRuntimeThreadsRef = useRef<Record<string, ThreadRecord>>({});
   const persistedRuntimeMessagesRef = useRef<Record<string, Map<string, MessageRecord>>>({});
   const snapshotRefreshInFlightRef = useRef<Record<string, Promise<void>>>({});
@@ -2726,6 +2904,7 @@ export function App() {
         // so it is queued without an optimistic message bubble until restart.
         pendingRuntimeStartsRef.current.delete(runtimeThreadId);
         if (status !== "running" && status !== "waiting") {
+          scheduleTranscriptDiagnostic("thread.terminal", runtimeThreadId, null, transcriptDiagnosticInputsRef);
           discardQueuedAssistantDraftsForThread(runtimeThreadId);
           setAssistantDrafts((current) => {
             const remaining = Object.entries(current).filter(([, entry]) =>
@@ -2766,6 +2945,14 @@ export function App() {
           discarded: discarded === true,
           suppressed
         }));
+        if (discarded !== true && typeof messageId === "string" && typed.threadId) {
+          scheduleTranscriptDiagnostic(
+            "assistant.completed",
+            typed.threadId,
+            messageId,
+            transcriptDiagnosticInputsRef
+          );
+        }
       }
       if (typed.type === "turn.usage" && typed.threadId) {
         if (currentSelectedThreadId && notificationThreadId === currentSelectedThreadId) {
@@ -3514,6 +3701,18 @@ export function App() {
       };
     });
   }, [activeSnapshotThreadId, isTaskProcessing, latestConversationTurn?.id]);
+  // TEMPORARY diagnostic: expose this render's transcript inputs to the runtime
+  // event handler through a ref.
+  transcriptDiagnosticInputsRef.current = {
+    threadId: activeSnapshotThreadId,
+    threadStatus: activeSnapshotThreadStatus,
+    isTaskProcessing,
+    messages: visibleMessages,
+    entries: timelineEntries,
+    sections: conversationTurnSections,
+    collapsedTurnIds,
+    latestTurnId: latestConversationTurn?.id ?? null
+  };
   const latestRootRuntimeTool = useMemo(
     () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
       (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
@@ -4253,9 +4452,24 @@ export function App() {
     let refreshPromise!: Promise<void>;
     refreshPromise = (async () => {
       try {
+        let supersededRetries = 0;
         do {
           snapshotRefreshPendingRef.current[threadId] = false;
-          await refreshSnapshotOnce(threadId);
+          const outcome = await refreshSnapshotOnce(threadId);
+          if (outcome === "superseded") {
+            // The read we already paid for was discarded because a newer runtime
+            // event (usually the final assistant message or the completion update)
+            // landed mid-flight. Nothing else is guaranteed to come along and ask
+            // again - the coalescing timer has already fired - so re-issue here.
+            // This is what previously left a finished task's conclusion invisible
+            // until the thread was reloaded.
+            if (supersededRetries < SNAPSHOT_SUPERSEDED_RETRY_LIMIT) {
+              supersededRetries += 1;
+              snapshotRefreshPendingRef.current[threadId] = true;
+            }
+          } else {
+            supersededRetries = 0;
+          }
         } while (snapshotRefreshPendingRef.current[threadId]);
       } finally {
         if (snapshotRefreshInFlightRef.current[threadId] === refreshPromise) {
@@ -4268,7 +4482,7 @@ export function App() {
     await refreshPromise;
   }
 
-  async function refreshSnapshotOnce(threadId: string) {
+  async function refreshSnapshotOnce(threadId: string): Promise<SnapshotRefreshOutcome> {
     const requestId = (snapshotRequestIdsRef.current[threadId] ?? 0) + 1;
     snapshotRequestIdsRef.current[threadId] = requestId;
     try {
@@ -4277,7 +4491,10 @@ export function App() {
         : undefined;
       const next = (await window.codexh.getThreadSnapshot(threadId, cursor)) as RuntimeThreadSnapshot;
       if (snapshotRequestIdsRef.current[threadId] !== requestId) {
-        return;
+        // Obsolete payload: a newer runtime event invalidated this read while it
+        // was in flight. Report it as superseded so the caller re-reads, rather
+        // than letting the newer data silently never arrive.
+        return "superseded";
       }
       if (next.snapshotCursor) {
         snapshotCursorByThreadRef.current[threadId] = next.snapshotCursor;
@@ -4426,12 +4643,14 @@ export function App() {
           setActiveToolCall((current) => current?.threadId === threadId ? null : current);
         }
       }
+      return "applied";
     } catch (error) {
       if (selectedThreadIdRef.current === threadId) {
         setIsThreadSwitching(false);
       }
       const message = error instanceof Error ? error.message : String(error);
       showNotice("加载聊天记录失败。", { message });
+      return "error";
     }
   }
 

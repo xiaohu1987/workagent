@@ -577,6 +577,15 @@ export function shouldKeepTimelineEntryWhenTurnCollapsed(
   if (!turn || !collapsedTurnIds.has(turn.id)) {
     return true;
   }
+  // A collapsed turn renders only its user message, its file summary and its
+  // summary entry (the turn's final assistant answer). Until that summary entry
+  // exists the turn has no answer to show, so collapsing it would hide the
+  // conclusion entirely - which is what left a finished long-running task looking
+  // truncated until the thread was reopened. Keep the whole turn visible instead;
+  // the real answer is still on its way and this self-corrects on the next render.
+  if (!turn.summaryEntryId) {
+    return true;
+  }
   return entry.id === turn.userEntryId
     || entry.id === turn.summaryEntryId
     || entry.kind === "file-summary"

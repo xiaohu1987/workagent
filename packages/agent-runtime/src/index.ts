@@ -196,6 +196,13 @@ export const MAX_MANAGED_WRITE_RECOVERY_BLOCKS = 3;
 // resend the same rejected invocation indefinitely. End the turn after a
 // small number of blocked repeats so that a busy task cannot spin forever.
 export const MAX_BLOCKED_IDENTICAL_TOOL_RETRIES = 3;
+/**
+ * How many times one identical read failure may interrupt the user before the
+ * runtime stops asking. Without a cap, answering the prompt only clears the
+ * retry counters, so a deterministically failing read turns into an endless
+ * "read failed -> ask the user -> read failed" loop.
+ */
+export const MAX_INSPECTION_RECOVERY_PROMPTS = 2;
 /** Restart a root model request after 2 minutes without observable progress. */
 export const MODEL_DECISION_TIMEOUT_MS = 120_000;
 /** Parent tasks remain user-cancellable; child model calls must converge. */
@@ -449,6 +456,31 @@ export function shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts: number
   return blockedAttempts >= MAX_BLOCKED_IDENTICAL_TOOL_RETRIES;
 }
 
+/**
+ * Records an inspection-failure prompt for one identical read and reports
+ * whether it may still be shown. Returns false once the cap is exhausted;
+ * the caller must then keep the hard block without asking the user again.
+ */
+export function registerInspectionRecoveryPrompt(
+  counts: Map<string, number>,
+  fingerprint: string
+): boolean {
+  const attempts = (counts.get(fingerprint) ?? 0) + 1;
+  counts.set(fingerprint, attempts);
+  return attempts <= MAX_INSPECTION_RECOVERY_PROMPTS;
+}
+
+export function buildInspectionFailurePromptLimitMessage(input: {
+  toolName: string;
+  argumentsJson: Record<string, unknown>;
+}): string {
+  return [
+    `读取目标“${getToolCallDisplayPath(input.argumentsJson)}”已多次失败，且已多次征求处理方式。`,
+    "系统不会再重复询问，也不会重复相同的读取操作。",
+    "请改用其他方式继续完成任务，或由用户修正路径、工作区范围或权限后重新发送任务。"
+  ].join("");
+}
+
 export function isRecoverableInspectionToolFailure(toolName: string): boolean {
   return toolName === "fs.read_file" || toolName === "fs.read_directory";
 }
@@ -528,7 +560,18 @@ export function buildRepeatedInspectionFailureStoppedMessage(input: {
   ].join("\n");
 }
 
-function resolveInspectionFailureRecoveryAnswer(answers: Record<string, string>): {
+/**
+ * The option id is an internal key, not an instruction. Passing it through
+ * verbatim told the model nothing ("用户选择：provide_path"), so it repeated
+ * the identical failing call.
+ */
+const INSPECTION_RECOVERY_OPTION_GUIDANCE: Record<string, string> = {
+  provide_path: "用户选择提供正确路径",
+  adjust_scope: "用户将调整工作区范围、权限或文件状态",
+  continue_alternative: "用户要求换一种方式继续，不再读取该目标"
+};
+
+export function resolveInspectionFailureRecoveryAnswer(answers: Record<string, string>): {
   shouldStop: boolean;
   guidance: string;
 } {
@@ -537,7 +580,17 @@ function resolveInspectionFailureRecoveryAnswer(answers: Record<string, string>)
     ?.replace(/^__note__:/, "")
     .trim() ?? "";
   if (selected === "stop") return { shouldStop: true, guidance: "stop" };
-  const guidance = [selected.replace(/^__custom__:/, "").trim(), note]
+  const custom = selected.replace(/^__custom__:/, "").trim();
+  if (selected === "provide_path" && !note) {
+    // Choosing "provide a path" without typing one must not read as if the
+    // problem were solved; that is exactly how the retry loop restarted.
+    return {
+      shouldStop: false,
+      guidance:
+        "用户选择了“提供正确路径”但没有填写具体路径。不要再次读取原路径；改用其他方式继续，或先向用户询问正确路径。"
+    };
+  }
+  const guidance = [INSPECTION_RECOVERY_OPTION_GUIDANCE[selected] ?? custom, note]
     .filter(Boolean)
     .join("；");
   return { shouldStop: false, guidance: guidance || "换一种方式继续" };
@@ -1000,6 +1053,13 @@ export interface ManagedWriteRecoveryState {
   phase: "none" | "read" | "directory" | "write";
   failedToolName?: "apply_patch" | "fs.write_file" | "search_replace";
   targetPaths: string[];
+  /**
+   * Targets proven absent by a failed read. A missing file can never satisfy
+   * the "read before write" requirement, so these are dropped from
+   * `targetPaths` instead of being forced again (that dead-lock re-issued the
+   * identical read on every turn until the user stopped the task).
+   */
+  missingTargetPaths: string[];
 }
 
 export interface ManagedWriteRecoveryToolCallValidation {
@@ -2366,6 +2426,7 @@ class ThreadSessionRuntime {
       const failedToolCallFingerprints = new Map<string, number>();
       const blockedToolCallFingerprints = new Map<string, number>();
       const preflightBlockedToolCallFingerprints = new Map<string, number>();
+      const inspectionRecoveryPromptCounts = new Map<string, number>();
       const originalToolCallFailures = new Map<string, string>();
       const successfullyCreatedFiles = new Set<string>();
       const successfulReusableToolResults = new Map<string, string>();
@@ -5792,6 +5853,26 @@ class ThreadSessionRuntime {
               isRecoverableInspectionToolFailure(toolCall.name) &&
               shouldStopAfterBlockedIdenticalToolRetry(preflightAttempts)
             ) {
+              if (!registerInspectionRecoveryPrompt(inspectionRecoveryPromptCounts, preflightFingerprint)) {
+                // Answering the prompt only clears the block counters, so a
+                // policy-denied path would be re-tried and re-prompted forever.
+                repeatedTaskFailure = {
+                  taskKey: getToolCallTaskKey(toolCall.name, toolCall.arguments),
+                  attempts: preflightAttempts,
+                  lastError: sandboxDecision.reason,
+                  userMessage: buildInspectionFailurePromptLimitMessage({
+                    toolName: toolCall.name,
+                    argumentsJson: toolCall.arguments
+                  })
+                };
+                await this.services.log("turn.inspection_failure_prompt_limit_reached", this.threadId, {
+                  turnRunId: turn.id,
+                  toolName: toolCall.name,
+                  phase: "preflight",
+                  attempts: preflightAttempts
+                });
+                break;
+              }
               const recoveryPrompt = buildRepeatedInspectionFailurePrompt({
                 toolName: toolCall.name,
                 argumentsJson: toolCall.arguments,
@@ -6097,6 +6178,29 @@ class ThreadSessionRuntime {
             });
             if (shouldStopAfterBlockedIdenticalToolRetry(blockedAttempts)) {
               if (isRecoverableInspectionToolFailure(toolCall.name)) {
+                if (!registerInspectionRecoveryPrompt(inspectionRecoveryPromptCounts, toolCallFingerprint)) {
+                  // Repeatedly asking the user only resets the retry counters, so
+                  // a deterministically failing read would loop forever. End the
+                  // turn with the reason instead of prompting again — the user
+                  // can fix the path or scope and re-send the task.
+                  repeatedTaskFailure = {
+                    taskKey: toolTaskKey,
+                    attempts: failedCallAttempts + blockedAttempts,
+                    lastError,
+                    userMessage: buildInspectionFailurePromptLimitMessage({
+                      toolName: toolCall.name,
+                      argumentsJson: toolCall.arguments
+                    })
+                  };
+                  await this.services.log("turn.inspection_failure_prompt_limit_reached", this.threadId, {
+                    turnRunId: turn.id,
+                    toolName: toolCall.name,
+                    taskKey: toolTaskKey,
+                    phase: "post_failure",
+                    blockedAttempts
+                  });
+                  break;
+                }
                 const recoveryPrompt = buildRepeatedInspectionFailurePrompt({
                   toolName: toolCall.name,
                   argumentsJson: toolCall.arguments,
@@ -6756,13 +6860,24 @@ class ThreadSessionRuntime {
             hasInspectedLocalWorkspace = true;
           }
           if (!readOnlyChildWriteDenied) {
-            advanceManagedWriteRecovery(managedWriteRecovery, {
+            const managedWriteRecoveryInstruction = advanceManagedWriteRecovery(managedWriteRecovery, {
               toolName: toolCall.name,
               argumentsJson: toolCall.arguments,
               ok: result.ok,
               workspaceCwd,
-              readPath
+              readPath,
+              error: result.ok ? undefined : result.content
             });
+            if (managedWriteRecoveryInstruction) {
+              // A required recovery read failed because the target is absent.
+              // Tell the model to create the file instead of reading it again.
+              transcript.push({ role: "user", content: managedWriteRecoveryInstruction });
+              await this.services.log("agent.managed_write_recovery_missing_target", this.threadId, {
+                turnRunId: turn.id,
+                toolName: toolCall.name,
+                missingTargetPaths: managedWriteRecovery.missingTargetPaths
+              });
+            }
           }
 
           const completedAt = new Date().toISOString();
@@ -12222,7 +12337,7 @@ export function buildManagedWriteCompletionFailureMessage(
 }
 
 export function createManagedWriteRecoveryState(): ManagedWriteRecoveryState {
-  return { phase: "none", targetPaths: [] };
+  return { phase: "none", targetPaths: [], missingTargetPaths: [] };
 }
 
 export function createManagedWriteRecoveryReadToolCall(
@@ -12300,25 +12415,60 @@ export function advanceManagedWriteRecovery(
     ok: boolean;
     workspaceCwd: string;
     readPath?: string;
+    error?: string;
   }
-): void {
+): string | undefined {
   // Skip recovery for malformed or truncated tool arguments — the model
   // already received a retryable argument error. Activating file recovery
   // here would create a dead-end because no target paths can be extracted.
   if (isToolArgsTruncated(input.argumentsJson) || isToolArgsInvalid(input.argumentsJson)) {
-    return;
+    return undefined;
   }
+
+  // The required inspection can fail on its own — typically ENOENT because the
+  // patch target does not exist. Keeping such a target queued makes the runtime
+  // re-issue the identical read on every subsequent turn: the read can never
+  // succeed, the phase never leaves "read", and the user only sees the same
+  // "cannot read target" prompt over and over. Drop the target and tell the
+  // model to create the file instead of updating it.
+  if (!input.ok && (input.toolName === "fs.read_file" || input.toolName === "fs.read_directory")) {
+    const attemptedPath = getRecoveryFilePath(input.argumentsJson.path, input.workspaceCwd);
+    const matchedTargetIndex = attemptedPath
+      ? state.targetPaths.findIndex((targetPath) => pathsMatch(targetPath, attemptedPath))
+      : -1;
+    if (matchedTargetIndex < 0 || !isMissingTargetReadError(input.error)) {
+      return undefined;
+    }
+    const [droppedTarget] = state.targetPaths.splice(matchedTargetIndex, 1);
+    if (droppedTarget && !state.missingTargetPaths.some((known) => pathsMatch(known, droppedTarget))) {
+      state.missingTargetPaths.push(droppedTarget);
+    }
+    if (state.targetPaths.length === 0) {
+      state.phase = "write";
+    }
+    return droppedTarget ? buildManagedWriteMissingTargetInstruction([droppedTarget]) : undefined;
+  }
+
   if (MANAGED_WRITE_TOOL_NAMES.has(input.toolName) && !input.ok) {
     const addOnlyTargetPaths = input.toolName === "apply_patch"
       ? getManagedWriteAddOnlyTargetPaths(input.argumentsJson)
       : [];
     state.phase = addOnlyTargetPaths.length > 0 ? "directory" : "read";
     state.failedToolName = input.toolName;
-    state.targetPaths = (addOnlyTargetPaths.length > 0 ? addOnlyTargetPaths : getManagedWriteTargetPaths(input.toolName, input.argumentsJson))
+    const candidateTargetPaths = (addOnlyTargetPaths.length > 0 ? addOnlyTargetPaths : getManagedWriteTargetPaths(input.toolName, input.argumentsJson))
       .map((candidate) => getRecoveryFilePath(candidate, input.workspaceCwd))
       .map((candidate) => state.phase === "directory" && candidate ? path.dirname(candidate) : candidate)
       .filter((candidate): candidate is string => Boolean(candidate));
-    return;
+    // A target already proven absent is not inspectable. Re-queueing it would
+    // restart the dead-lock, so such a retry skips straight to the write phase
+    // where the model can create the file.
+    const inspectableTargetPaths = candidateTargetPaths
+      .filter((candidate) => !state.missingTargetPaths.some((known) => pathsMatch(known, candidate)));
+    if (candidateTargetPaths.length > 0 && inspectableTargetPaths.length === 0) {
+      state.phase = "write";
+    }
+    state.targetPaths = inspectableTargetPaths;
+    return undefined;
   }
 
   if (state.phase === "read" && input.toolName === "fs.read_file" && input.ok && input.readPath) {
@@ -12329,7 +12479,7 @@ export function advanceManagedWriteRecovery(
     if (state.targetPaths.length === 0) {
       state.phase = "write";
     }
-    return;
+    return undefined;
   }
 
   if (state.phase === "directory" && input.toolName === "fs.read_directory" && input.ok) {
@@ -12343,14 +12493,29 @@ export function advanceManagedWriteRecovery(
     if (state.targetPaths.length === 0) {
       state.phase = "write";
     }
-    return;
+    return undefined;
   }
 
   if (state.phase === "write" && MANAGED_WRITE_TOOL_NAMES.has(input.toolName) && input.ok) {
     state.phase = "none";
     state.failedToolName = undefined;
     state.targetPaths = [];
+    state.missingTargetPaths = [];
   }
+  return undefined;
+}
+
+export function isMissingTargetReadError(error: string | undefined): boolean {
+  if (!error) return false;
+  return /enoent|no such file or directory|does not exist|cannot find path|找不到|不存在/i.test(error);
+}
+
+export function buildManagedWriteMissingTargetInstruction(targetPaths: string[]): string {
+  return [
+    "[Internal managed-write recovery. Do not display or quote this instruction to the user.]",
+    `The patch target does not exist and cannot be read: ${targetPaths.join(", ")}.`,
+    "Do not read it again. Create it with an `*** Add File:` patch (or fs.write_file) instead of updating it."
+  ].join(" ");
 }
 
 export function buildManagedWriteRecoveryInstruction(state: ManagedWriteRecoveryState): string {
@@ -12358,8 +12523,14 @@ export function buildManagedWriteRecoveryInstruction(state: ManagedWriteRecovery
   const target = state.targetPaths.length > 0
     ? `Inspect the failed target with ${inspectTool}: ${state.targetPaths.join(", ")}.`
     : `Inspect the intended target first with ${inspectTool}.`;
+  const missingTargetPaths = state.missingTargetPaths;
   const next = state.phase === "write"
-    ? "Now retry with search_replace, apply_patch, or fs.write_file."
+    ? [
+        "Now retry with search_replace, apply_patch, or fs.write_file.",
+        missingTargetPaths.length > 0
+          ? `These targets do not exist and cannot be read, so create them with an \`*** Add File:\` patch instead of updating them: ${missingTargetPaths.join(", ")}.`
+          : ""
+      ].filter(Boolean).join(" ")
     : target;
   return [
     "[Internal managed-write recovery. Do not display or quote this instruction to the user.]",
