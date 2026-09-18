@@ -12348,13 +12348,16 @@ input[type="radio"]:focus-visible {
   100% { opacity: 1; }
 }
 
+/* Both of these are declared with `... ease-out both` below, so a stalled animation
+   clock (content-visibility: auto on offscreen transcript content) would pin them at
+   the from-frame permanently. Keep the offset, drop the transparent start. */
 @keyframes agent-runtime-update-in {
-  from { opacity: 0; transform: translateY(2px); }
+  from { opacity: 1; transform: translateY(2px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes agent-activity-detail-in {
-  from { opacity: 0; transform: translateY(-3px); }
+  from { opacity: 1; transform: translateY(-3px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -19708,7 +19711,11 @@ select {
 }
 
 @keyframes thread-transcript-enter {
-  from { opacity: 0; transform: translateY(8px); }
+  /* Opacity must not start at 0: this animates the whole transcript container, so a
+     stalled clock (offscreen-skipped content, an interrupted commit) would hide the
+     entire conversation instead of just one card. Offset-only keeps the feel while
+     making "invisible transcript" impossible. */
+  from { opacity: 1; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -19895,7 +19902,10 @@ select {
 }
 
 @keyframes thread-switch-placeholder-in {
-  from { opacity: 0; transform: translateY(4px); }
+  /* Paired with `animation-fill-mode: both` below. `both` pins the element to the
+     from-frame whenever the clock does not advance, so a transparent start frame
+     would blank the whole switch placeholder. Keep the offset, drop the fade. */
+  from { opacity: 1; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
 

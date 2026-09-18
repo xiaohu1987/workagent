@@ -249,6 +249,7 @@ import {
   applyCompletedPlanTasks,
   resolveGpaPlanProgress,
   shouldApplyToolExecutionTimeout,
+  resolveToolExecutionTimeoutMs,
   buildGpaPlanSequenceRecoveryInstruction,
   parseMultimodalIntentClassification,
   detectMultimodalIntent,
@@ -2881,6 +2882,52 @@ describe("tool execution timeout", () => {
   it("lets terminal commands use output-based stall detection", () => {
     expect(shouldApplyToolExecutionTimeout("shell.exec")).toBe(false);
     expect(shouldApplyToolExecutionTimeout("fs.read_file")).toBe(true);
+  });
+
+  it("never wall-clock-times a wait on a human or a child agent", () => {
+    // A user may take minutes to answer, and a child agent may run for its own
+    // full runtime budget; a tool wall clock here would fail healthy work.
+    expect(shouldApplyToolExecutionTimeout("request_user_input")).toBe(false);
+    expect(shouldApplyToolExecutionTimeout("wait_agent")).toBe(false);
+    expect(shouldApplyToolExecutionTimeout("browser.capture_screenshot")).toBe(true);
+  });
+
+  it("never resolves a tool budget to zero, which would disable the timer", () => {
+    const names = [
+      "fs.read_file",
+      "apply_patch",
+      "shell.exec",
+      "browser.wait_for",
+      "browser.assert_page",
+      "browser.capture_screenshot",
+      "browser.navigate",
+      "desktop.capture_screenshot",
+      "image.generate",
+      "video.generate",
+      "mcp.call",
+      "code.search"
+    ];
+    for (const name of names) {
+      expect(resolveToolExecutionTimeoutMs(name)).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps browser automation well below the generic budget", () => {
+    const browserBudget = resolveToolExecutionTimeoutMs("browser.capture_screenshot");
+    expect(browserBudget).toBeLessThan(resolveToolExecutionTimeoutMs("fs.read_file"));
+    // Unlisted browser tools inherit the tighter budget too.
+    expect(resolveToolExecutionTimeoutMs("browser.click")).toBe(
+      resolveToolExecutionTimeoutMs("browser.set_viewport")
+    );
+  });
+
+  it("leaves slow media generation enough room", () => {
+    expect(resolveToolExecutionTimeoutMs("video.generate")).toBeGreaterThanOrEqual(
+      resolveToolExecutionTimeoutMs("image.generate")
+    );
+    expect(resolveToolExecutionTimeoutMs("image.generate")).toBeGreaterThan(
+      resolveToolExecutionTimeoutMs("fs.read_file")
+    );
   });
 });
 

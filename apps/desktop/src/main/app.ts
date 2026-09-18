@@ -2920,7 +2920,7 @@ export class DesktopBackend {
     const contents = await this.requireBrowserContents(threadId, tabId);
     const key = this.browserContentsKey(threadId, tabId);
     const safeChecks = normalizeBrowserAssertionChecks(checks);
-    const pageResults = await contents.executeJavaScript(`
+    const pageResults = await this.runBrowserPageScript(contents, `
       (() => {
         const checks = ${JSON.stringify(safeChecks)};
         const matchValue = (actual, expected, mode = 'includes') => {
@@ -2963,31 +2963,25 @@ export class DesktopBackend {
               return { check, passed, message: passed ? 'no horizontal overflow' : 'page has horizontal overflow', actual };
             }
             if (check.type === 'canvas_nonblank') {
+              // Never call getContext() from the assertion script: requesting a 2d
+              // context on a canvas the page means to use for WebGL locks the
+              // canvas and can break the very page being verified. WebGL drawing
+              // buffers are also cleared after compositing, so readPixels reports
+              // all zeros for three.js content unless the app opted into
+              // preserveDrawingBuffer — which produced false "canvas is blank"
+              // failures. Report the canvas geometry and let the main process
+              // measure real composited pixels from a screenshot instead.
               const canvases = check.selector ? [...document.querySelectorAll(check.selector)] : [...document.querySelectorAll('canvas')];
-              let opaquePixels = 0;
-              const colors = new Set();
+              const canvasRegions = [];
               for (const canvas of canvases) {
-                const context = canvas.getContext('2d', { willReadFrequently: true });
-                if (canvas.width <= 0 || canvas.height <= 0) continue;
-                const sampleWidth = Math.min(canvas.width, 256);
-                const sampleHeight = Math.min(canvas.height, 256);
-                let data;
-                if (context) {
-                  data = context.getImageData(0, 0, sampleWidth, sampleHeight).data;
-                } else {
-                  const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-                  if (!gl) continue;
-                  data = new Uint8Array(sampleWidth * sampleHeight * 4);
-                  gl.readPixels(0, 0, sampleWidth, sampleHeight, gl.RGBA, gl.UNSIGNED_BYTE, data);
-                }
-                const step = Math.max(4, Math.floor(data.length / (16000 * 4)) * 4);
-                for (let index = 0; index < data.length; index += step) {
-                  if (data[index + 3] > 8) opaquePixels += 1;
-                  colors.add(data[index] + ',' + data[index + 1] + ',' + data[index + 2] + ',' + data[index + 3]);
-                }
+                const rect = canvas.getBoundingClientRect();
+                if (rect.width < 1 || rect.height < 1) continue;
+                canvasRegions.push({ x: rect.left, y: rect.top, width: rect.width, height: rect.height, widthAttribute: canvas.width, heightAttribute: canvas.height });
               }
-              const passed = canvases.length > 0 && opaquePixels >= (check.minOpaquePixels || 24) && colors.size >= (check.minColors || 2);
-              return { check, passed, message: passed ? 'canvas contains rendered pixels' : 'canvas is blank, transparent, or unavailable', actual: { canvases: canvases.length, opaquePixels, colors: colors.size } };
+              if (canvasRegions.length === 0) {
+                return { check, passed: false, message: 'canvas is blank, transparent, or unavailable', actual: { canvases: canvases.length, opaquePixels: 0, colors: 0 } };
+              }
+              return { check, passed: false, message: 'canvas is pending a compositor screenshot', canvasRegions };
             }
             return { check, passed: false, message: 'unsupported assertion check' };
           } catch (error) {
@@ -2995,8 +2989,16 @@ export class DesktopBackend {
           }
         });
       })()
-    `, true) as BrowserAssertionResult[];
-    const results = [...pageResults];
+    `) as Array<BrowserAssertionResult & { canvasRegions?: CanvasCaptureRegion[] }>;
+    const results: BrowserAssertionResult[] = [];
+    for (const pageResult of pageResults) {
+      const { canvasRegions, ...pageCheck } = pageResult;
+      if (pageCheck.check?.type === "canvas_nonblank" && canvasRegions && canvasRegions.length > 0) {
+        results.push(await this.measureCanvasFromScreenshot(contents, pageCheck.check, canvasRegions));
+        continue;
+      }
+      results.push(pageCheck);
+    }
     for (const check of safeChecks.filter((item) => item.type === "no_severe_console_errors")) {
       const errors = this.#browserConsoleErrors.get(key) ?? [];
       results.push({
@@ -3015,6 +3017,108 @@ export class DesktopBackend {
       passed: results.length > 0 && results.every((result) => result.passed),
       results
     };
+  }
+
+  /**
+   * Bounded wrapper for `executeJavaScript`. A page that reloads mid-call
+   * orphans the pending promise forever, which used to stall the whole turn.
+   */
+  private async runBrowserPageScript(
+    contents: WebContents,
+    script: string,
+    label = "Browser page script",
+    timeoutMs = BROWSER_PAGE_SCRIPT_TIMEOUT_MS
+  ): Promise<unknown> {
+    try {
+      return await withOperationTimeout(
+        contents.executeJavaScript(script, true) as Promise<unknown>,
+        timeoutMs,
+        label
+      );
+    } catch (error) {
+      if (error instanceof OperationTimeoutError) {
+        await this.#logs.append("browser.page_script_timeout", {
+          label,
+          timeoutMs,
+          url: contents.isDestroyed() ? "" : contents.getURL()
+        });
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Completes a `canvas_nonblank` assertion from composited pixels. WebGL
+   * canvases cannot be sampled from inside the page (see assertBrowserPage),
+   * so the verdict comes from a screenshot of the canvas region. A flat,
+   * single-colour region means nothing was drawn (blank canvas showing the
+   * page background); visible variation means the canvas rendered.
+   */
+  private async measureCanvasFromScreenshot(
+    contents: WebContents,
+    check: Extract<BrowserAssertionCheck, { type: "canvas_nonblank" }>,
+    regions: CanvasCaptureRegion[]
+  ): Promise<BrowserAssertionResult> {
+    const minOpaquePixels = check.minOpaquePixels ?? 24;
+    const minColors = check.minColors ?? 2;
+    const left = Math.max(0, Math.floor(Math.min(...regions.map((region) => region.x))));
+    const top = Math.max(0, Math.floor(Math.min(...regions.map((region) => region.y))));
+    const right = Math.max(...regions.map((region) => Math.ceil(region.x + region.width)));
+    const bottom = Math.max(...regions.map((region) => Math.ceil(region.y + region.height)));
+    const width = Math.min(Math.max(1, right - left), CANVAS_CAPTURE_MAX_SIDE);
+    const height = Math.min(Math.max(1, bottom - top), CANVAS_CAPTURE_MAX_SIDE);
+    try {
+      const image = await withOperationTimeout(
+        contents.capturePage({ x: left, y: top, width, height }),
+        CANVAS_CAPTURE_TIMEOUT_MS,
+        "Canvas screenshot"
+      );
+      const size = image.getSize();
+      if (size.width < 1 || size.height < 1) {
+        throw new Error("Compositor screenshot was empty.");
+      }
+      // toBitmap() is BGRA on every platform and avoids decoding the PNG.
+      const bitmap = image.toBitmap();
+      const pixelCount = size.width * size.height;
+      const stride = Math.max(1, Math.floor(pixelCount / 16000));
+      const colors = new Set<string>();
+      let opaquePixels = 0;
+      for (let index = 0; index < pixelCount; index += stride) {
+        const offset = index * 4;
+        if (offset + 3 >= bitmap.length) break;
+        const alpha = bitmap[offset + 3];
+        if (alpha > 8) opaquePixels += 1;
+        // Quantise to 5 bits per channel so compositor noise does not read as
+        // colour variety while real gradients still do.
+        colors.add(`${bitmap[offset + 2] >> 3},${bitmap[offset + 1] >> 3},${bitmap[offset] >> 3},${alpha >> 3}`);
+      }
+      const passed = opaquePixels >= minOpaquePixels && colors.size >= minColors;
+      return {
+        check,
+        passed,
+        message: passed ? "canvas contains rendered pixels" : "canvas is blank, transparent, or unavailable",
+        actual: {
+          source: "compositor_screenshot",
+          canvases: regions.length,
+          opaquePixels,
+          colors: colors.size,
+          width: size.width,
+          height: size.height,
+          canvasPixels: regions[0]?.widthAttribute
+            ? `${regions[0].widthAttribute}x${regions[0].heightAttribute ?? 0}`
+            : null
+        }
+      };
+    } catch (error) {
+      // A capture failure is not proof of a blank canvas — say so explicitly so
+      // the verdict cannot be mistaken for a rendering defect.
+      return {
+        check,
+        passed: false,
+        message: `canvas check unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        actual: { source: "compositor_screenshot", canvases: regions.length, captureFailed: true }
+      };
+    }
   }
 
   public async syncBrowserWebContents(input: { threadId: string; tabId: string }): Promise<BrowserTabRecord> {
@@ -3171,19 +3275,31 @@ export class DesktopBackend {
     const contents = await this.requireBrowserContents(threadId, tabId);
     const timeoutMs = Math.max(250, Math.min(input.timeoutMs ?? 5_000, 15_000));
     const startedAt = Date.now();
+    let lastProbeError: Error | null = null;
     while (Date.now() - startedAt < timeoutMs) {
-      const matched = await contents.executeJavaScript(`
-        (() => {
-          const elementId = ${JSON.stringify(input.elementId ?? "")};
-          const text = ${JSON.stringify(input.text ?? "")};
-          return (elementId && !!document.querySelector('[data-codexh-agent-id="' + CSS.escape(elementId) + '"]')) ||
-            (text && (document.body?.innerText || '').includes(text));
-        })()
-      `, true) as boolean;
-      if (matched) return { matched: true, waitedMs: Date.now() - startedAt };
+      try {
+        const matched = await this.runBrowserPageScript(contents, `
+          (() => {
+            const elementId = ${JSON.stringify(input.elementId ?? "")};
+            const text = ${JSON.stringify(input.text ?? "")};
+            return (elementId && !!document.querySelector('[data-codexh-agent-id="' + CSS.escape(elementId) + '"]')) ||
+              (text && (document.body?.innerText || '').includes(text));
+          })()
+        `, "browser.wait_for probe", BROWSER_PAGE_PROBE_TIMEOUT_MS) as boolean;
+        if (matched) return { matched: true, waitedMs: Date.now() - startedAt };
+        lastProbeError = null;
+      } catch (error) {
+        // One unresponsive probe (page mid-reload) must not abort the wait;
+        // keep polling until the overall budget runs out.
+        lastProbeError = error instanceof Error ? error : new Error(String(error));
+      }
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    throw new Error("Timed out waiting for the requested page state.");
+    throw new Error(
+      lastProbeError
+        ? `Timed out waiting for the requested page state: ${lastProbeError.message}`
+        : "Timed out waiting for the requested page state."
+    );
   }
 
   private browserContentsKey(threadId: string, tabId: string) {
@@ -3349,32 +3465,26 @@ export class DesktopBackend {
     const filePath = path.join(browserDir, fileName);
     let png: Buffer;
     if (fullPage) {
-      let attachedHere = false;
-      if (!contents.debugger.isAttached()) {
-        contents.debugger.attach("1.3");
-        attachedHere = true;
-      }
-      try {
-        const metrics = await contents.debugger.sendCommand("Page.getLayoutMetrics") as { cssContentSize?: { width: number; height: number } };
-        const contentSize = metrics.cssContentSize ?? { width: 1440, height: 900 };
-        const captured = await contents.debugger.sendCommand("Page.captureScreenshot", {
-          format: "png",
-          captureBeyondViewport: true,
-          fromSurface: true,
-          clip: {
-            x: 0,
-            y: 0,
-            width: Math.min(16384, Math.max(1, contentSize.width)),
-            height: Math.min(16384, Math.max(1, contentSize.height)),
-            scale: 1
-          }
-        }) as { data: string };
-        png = Buffer.from(captured.data, "base64");
-      } finally {
-        if (attachedHere && contents.debugger.isAttached()) contents.debugger.detach();
-      }
+      png = await this.captureBrowserPngViaCompositor(contents, true);
     } else {
-      png = (await contents.capturePage()).toPNG();
+      try {
+        png = (await withOperationTimeout(
+          contents.capturePage(),
+          BROWSER_SCREENSHOT_TIMEOUT_MS,
+          "Browser screenshot"
+        )).toPNG();
+      } catch (error) {
+        // capturePage() never settles while the page is not being composited
+        // (hidden window, wedged renderer). Fall back to the CDP compositor
+        // path so the turn gets an image instead of hanging.
+        await this.#logs.append("browser.screenshot_fallback", {
+          threadId,
+          tabId,
+          fullPage,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+        png = await this.captureBrowserPngViaCompositor(contents, false);
+      }
     }
     await fs.writeFile(filePath, png);
     const stats = await fs.stat(filePath);
@@ -3419,6 +3529,53 @@ export class DesktopBackend {
       attachment,
       artifact
     };
+  }
+
+  /** Compositor-level screenshot via CDP; the only path that always settles. */
+  private async captureBrowserPngViaCompositor(contents: WebContents, fullPage: boolean): Promise<Buffer> {
+    if (contents.isDestroyed()) {
+      throw new Error("Browser tab was closed before the screenshot could be captured.");
+    }
+    let attachedHere = false;
+    if (!contents.debugger.isAttached()) {
+      contents.debugger.attach("1.3");
+      attachedHere = true;
+    }
+    try {
+      const params: Record<string, unknown> = {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: fullPage
+      };
+      if (fullPage) {
+        const metrics = await withOperationTimeout(
+          contents.debugger.sendCommand("Page.getLayoutMetrics") as Promise<{ cssContentSize?: { width: number; height: number } }>,
+          BROWSER_SCREENSHOT_TIMEOUT_MS,
+          "Browser layout metrics"
+        );
+        const contentSize = metrics.cssContentSize ?? { width: 1440, height: 900 };
+        params.clip = {
+          x: 0,
+          y: 0,
+          width: Math.min(16384, Math.max(1, contentSize.width)),
+          height: Math.min(16384, Math.max(1, contentSize.height)),
+          scale: 1
+        };
+      }
+      const captured = await withOperationTimeout(
+        contents.debugger.sendCommand("Page.captureScreenshot", params) as Promise<{ data?: string }>,
+        BROWSER_SCREENSHOT_TIMEOUT_MS,
+        "Browser screenshot"
+      );
+      if (!captured?.data) {
+        throw new Error("Compositor screenshot returned no image data.");
+      }
+      return Buffer.from(captured.data, "base64");
+    } finally {
+      if (attachedHere && !contents.isDestroyed() && contents.debugger.isAttached()) {
+        contents.debugger.detach();
+      }
+    }
   }
 
   public async captureDesktopScreenshot(
@@ -5969,6 +6126,59 @@ function normalizeBrowserAssertionChecks(checks: BrowserAssertionCheck[]): Brows
     ) normalized.push(check);
   }
   return normalized;
+}
+
+/**
+ * A wedged or reloading renderer makes `executeJavaScript` / `capturePage`
+ * promises that never settle. Every page-level call is bounded so the turn
+ * always gets an answer instead of hanging until the user stops it.
+ */
+const BROWSER_PAGE_SCRIPT_TIMEOUT_MS = 10_000;
+const BROWSER_PAGE_PROBE_TIMEOUT_MS = 2_000;
+const BROWSER_SCREENSHOT_TIMEOUT_MS = 20_000;
+const CANVAS_CAPTURE_TIMEOUT_MS = 10_000;
+const CANVAS_CAPTURE_MAX_SIDE = 4_096;
+
+class OperationTimeoutError extends Error {
+  public constructor(label: string, timeoutMs: number) {
+    super(`${label} did not respond within ${Math.round(timeoutMs / 1000)}s.`);
+    this.name = "OperationTimeoutError";
+  }
+}
+
+function withOperationTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new OperationTimeoutError(label, timeoutMs));
+    }, timeoutMs);
+    operation.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  });
+}
+
+interface CanvasCaptureRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Backing-store size, reported for diagnostics only. */
+  widthAttribute?: number;
+  heightAttribute?: number;
 }
 
 function readPngDimensions(buffer: Buffer): { width: number; height: number } {

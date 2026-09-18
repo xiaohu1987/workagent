@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as cheerio from "cheerio";
 import type { BrowserOpenMode, BrowserTabRecord } from "@shared-types";
 
@@ -468,16 +469,25 @@ export async function loadPage(
   });
 }
 
+function resolveFileUrlPath(target: string): string {
+  try {
+    return fileURLToPath(target);
+  } catch {
+    // Network shares (file://host/share/...) are rejected by fileURLToPath on
+    // Windows; fall back to the decoded pathname so they keep working.
+    return decodeURIComponent(new URL(target).pathname);
+  }
+}
+
 async function resolveTarget(target: string, timeoutMs: number): Promise<{ url: string; html: string }> {
   if (target.startsWith("file://")) {
-    const filePath = decodeURIComponent(new URL(target).pathname);
-    const html = await fs.readFile(filePath, "utf8");
+    const html = await fs.readFile(resolveFileUrlPath(target), "utf8");
     return { url: target, html };
   }
 
   if (path.isAbsolute(target)) {
     const html = await fs.readFile(target, "utf8");
-    return { url: new URL(`file://${target.replace(/\\/g, "/")}`).toString(), html };
+    return { url: pathToFileURL(target).toString(), html };
   }
 
   if (target.startsWith("data:")) {

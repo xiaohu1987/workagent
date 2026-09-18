@@ -579,7 +579,12 @@
 
 @keyframes api-card-fade-in {
   from {
-    opacity: 0;
+    /* Never start fully transparent: this runs with fill-mode `both` inside message
+       cards, and `.chat-transcript > *` uses `content-visibility: auto`. A skipped
+       card freezes the animation at its from-frame, and `both` pins it there — an
+       invisible body inside a card that looks empty. Offset-only keeps the entrance
+       without the "my content disappeared" failure mode. */
+    opacity: 1;
     transform: translateY(var(--motion-distance, 8px));
   }
   to {

@@ -7,6 +7,8 @@ import {
   buildTimelineEntriesIncremental,
   filterTranscriptMessages,
   getDisplayMessageContent,
+  getMessageDisplayKind,
+  mergeServerMessagesWithNewerLocal,
   shouldKeepTimelineEntryWhenTurnCollapsed
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import type { MessageRecord } from "@shared-types";
@@ -165,7 +167,7 @@ describeWithFixture("final answer survives the transcript pipeline", () => {
     expect(targetEntry).toBeUndefined();
   });
 
-  it("never hides a collapsed turn that has no summary entry yet", () => {
+  it("never hides a collapsed turn's prose when it has no summary entry yet", () => {
     // Regression for the reload-only symptom. A turn that finishes before its
     // final answer reaches the transcript has summaryEntryId === null. Collapsing
     // such a turn used to drop every assistant entry in it, leaving exactly the
@@ -191,10 +193,10 @@ describeWithFixture("final answer survives the transcript pipeline", () => {
     expect(staleSection.entryIds.length).toBeGreaterThan(1);
 
     const collapsed = new Set([staleSection.id]);
-    const hidden = staleSection.entryIds.filter((entryId) => {
-      const entry = staleEntries.find((candidate) => candidate.id === entryId);
-      return entry ? !shouldKeepTimelineEntryWhenTurnCollapsed(entry, staleSection, collapsed) : false;
-    });
+    const hiddenEntries = staleSection.entryIds
+      .map((entryId) => staleEntries.find((candidate) => candidate.id === entryId))
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+      .filter((entry) => !shouldKeepTimelineEntryWhenTurnCollapsed(entry, staleSection, collapsed));
     // Counterfactual: the rule before this fix kept only the user message, the
     // file summary and the (here absent) summary entry, so the whole turn body
     // disappeared while "主要改动文件" and the duration footer stayed. That is the
@@ -211,11 +213,58 @@ describeWithFixture("final answer survives the transcript pipeline", () => {
       "[repro] collapsedWithoutSummary",
       JSON.stringify({
         entries: staleSection.entryIds.length,
-        hidden,
+        hidden: hiddenEntries.map((entry) => entry.kind),
         legacyHidden: legacyHidden.length
       })
     );
     expect(legacyHidden.length).toBeGreaterThan(0);
-    expect(hidden).toEqual([]);
+    // Nothing the user is waiting to read may vanish: every formal assistant entry
+    // survives the collapse. Interim commentary may fold away - keeping *all*
+    // assistant text visible here is what left finished turns fully expanded
+    // (the "过程不收起了" half of the symptom reported against this fix).
+    expect(
+      hiddenEntries.filter((entry) =>
+        entry.kind === "message"
+        && entry.message.role === "assistant"
+        && getMessageDisplayKind(entry.message) !== "commentary")
+    ).toEqual([]);
+    // The noisy tool activity is still folded away - that is the whole point of
+    // collapsing a finished turn.
+    expect(hiddenEntries.some((entry) => entry.kind === "tool-group")).toBe(true);
+  });
+});
+
+describe("a snapshot read must not erase a message the ui already painted", () => {
+  const message = (id: string, createdAt: string) => ({ id, createdAt });
+
+  it("re-attaches the final answer when the server list is behind", () => {
+    // `message.created` is broadcast before the row is visible to a snapshot
+    // read, so the read returns a list without it. Replacing the painted list
+    // with that read is what left the conclusion missing until a reload.
+    const server = [message("a", "2026-09-18T05:55:00.000Z"), message("b", "2026-09-18T05:55:12.000Z")];
+    const local = [...server, message("final", "2026-09-18T05:55:28.052Z")];
+    expect(mergeServerMessagesWithNewerLocal(server, local).map((item) => item.id))
+      .toEqual(["a", "b", "final"]);
+  });
+
+  it("lets a current server list win", () => {
+    const local = [message("a", "2026-09-18T05:55:00.000Z")];
+    const server = [...local, message("b", "2026-09-18T05:55:12.000Z")];
+    expect(mergeServerMessagesWithNewerLocal(server, local).map((item) => item.id))
+      .toEqual(["a", "b"]);
+  });
+
+  it("still honours server-side deletion when the server is not behind", () => {
+    // `a` was removed server-side; the newest row matches what we hold, so the
+    // server list is authoritative and `a` must not be resurrected.
+    const server = [message("b", "2026-09-18T05:55:12.000Z")];
+    const local = [message("a", "2026-09-18T05:55:00.000Z"), message("b", "2026-09-18T05:55:12.000Z")];
+    expect(mergeServerMessagesWithNewerLocal(server, local).map((item) => item.id))
+      .toEqual(["b"]);
+  });
+
+  it("does nothing when there is no local state", () => {
+    const server = [message("a", "2026-09-18T05:55:00.000Z")];
+    expect(mergeServerMessagesWithNewerLocal(server, [])).toBe(server);
   });
 });

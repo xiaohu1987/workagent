@@ -579,12 +579,23 @@ export function shouldKeepTimelineEntryWhenTurnCollapsed(
   }
   // A collapsed turn renders only its user message, its file summary and its
   // summary entry (the turn's final assistant answer). Until that summary entry
-  // exists the turn has no answer to show, so collapsing it would hide the
-  // conclusion entirely - which is what left a finished long-running task looking
-  // truncated until the thread was reopened. Keep the whole turn visible instead;
-  // the real answer is still on its way and this self-corrects on the next render.
+  // exists the turn has no answer to show, so collapsing down to it would hide
+  // the conclusion entirely - which is what left a finished long-running task
+  // looking truncated until the thread was reopened. In that window keep the
+  // turn's prose visible (so nothing already on screen disappears) while still
+  // collapsing the tool activity, which is what the user expects to be folded
+  // away. This self-corrects on the next render once a summary entry exists.
   if (!turn.summaryEntryId) {
-    return true;
+    // Keep the user message, the file summary and any formal assistant prose so a
+    // conclusion that is already on screen never blinks out, but still fold the
+    // commentary and tool activity away: keeping *every* assistant message here
+    // (commentary included) is what left finished turns fully expanded.
+    return entry.id === turn.userEntryId
+      || entry.kind === "file-summary"
+      || (entry.kind === "message"
+        && entry.message.role === "assistant"
+        && getMessageDisplayKind(entry.message) !== "commentary")
+      || timelineEntryHasGeneratedMedia(entry);
   }
   return entry.id === turn.userEntryId
     || entry.id === turn.summaryEntryId
@@ -1509,6 +1520,48 @@ export function mergeSnapshotRecords<T extends { id: string }>(
   return merged.sort((left, right) => multiplier * getCreatedAt(left).localeCompare(getCreatedAt(right)));
 }
 
+/**
+ * Reconcile a server transcript snapshot with the messages the renderer already
+ * knows about.
+ *
+ * The runtime broadcasts `message.created` (and the renderer paints it
+ * immediately, including `flushSync` for a formal final answer) *before* that
+ * row is necessarily visible to a subsequent snapshot read. A read that lands in
+ * that window returns a list without the message, and because the renderer
+ * replaces its list with the server's on a full read, the conclusion that was
+ * just painted disappeared again - and nothing re-issued the read, so the
+ * transcript stayed truncated until the thread was reopened.
+ *
+ * Normally the server list is authoritative and must win. Only when the server's
+ * newest row is *older* than the newest row the renderer already has do we treat
+ * it as behind, and then re-attach the locally known rows it does not contain.
+ */
+export function mergeServerMessagesWithNewerLocal<T extends { id: string; createdAt: string }>(
+  serverMessages: T[],
+  localMessages: T[]
+): T[] {
+  if (localMessages.length === 0) {
+    return serverMessages;
+  }
+  const newestLocal = localMessages.reduce<T | null>(
+    (latest, message) => (!latest || message.createdAt > latest.createdAt ? message : latest),
+    null
+  );
+  const newestServer = serverMessages.reduce<T | null>(
+    (latest, message) => (!latest || message.createdAt > latest.createdAt ? message : latest),
+    null
+  );
+  if (!newestLocal || (newestServer && newestServer.createdAt >= newestLocal.createdAt)) {
+    return serverMessages;
+  }
+  const serverIds = new Set(serverMessages.map((message) => message.id));
+  const missing = localMessages.filter((message) => !serverIds.has(message.id));
+  if (missing.length === 0) {
+    return serverMessages;
+  }
+  return mergeSnapshotRecords(serverMessages, missing, (message) => message.createdAt);
+}
+
 export function upsertRuntimeUserInputPrompt(
   prompts: UserInputPrompt[],
   prompt: UserInputPrompt
@@ -1920,6 +1973,41 @@ export function reconcilePendingUserMessages(
   persisted: MessageRecord[]
 ): MessageRecord[] {
   return reconcilePendingUserMessagesDetailed(pending, persisted).remaining;
+}
+
+/**
+ * A delta snapshot read has to be able to account for every row the server reports.
+ * When it cannot, the rows it is missing can never arrive through a later delta -
+ * the cursor has already been advanced past them - so the transcript would stay
+ * permanently short (typically by the message the user had just sent) until a full
+ * read, which in practice means until the thread was reloaded. Callers use this to
+ * escalate to a cursor-less read instead of committing a truncated transcript.
+ */
+export function isSnapshotReadShort(
+  mode: string | undefined,
+  messageCount: number,
+  localCount: number,
+  receivedCount: number
+): boolean {
+  if (mode !== "delta") return false;
+  return localCount + receivedCount < messageCount;
+}
+
+/**
+ * An optimistic user row may only be dropped from the local baseline once the server
+ * list actually carries its persisted twin. It leaves `pending` the moment that twin
+ * is broadcast, and removing it from the baseline at the same instant left a window
+ * in which no copy of the user's message existed anywhere: if the following read did
+ * not carry the twin either, the just-sent bubble vanished from the transcript until
+ * the thread was reloaded.
+ */
+export function shouldKeepOptimisticBaselineMessage(
+  message: MessageRecord,
+  pending: ReadonlyArray<MessageRecord>,
+  serverMessages: ReadonlyArray<MessageRecord>
+): boolean {
+  if (pending.some((item) => item.id === message.id)) return true;
+  return reconcilePendingUserMessages([message], [...serverMessages]).length > 0;
 }
 
 export function reconcilePendingUserMessagesDetailed(

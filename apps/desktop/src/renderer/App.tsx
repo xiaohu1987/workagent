@@ -138,14 +138,16 @@ import {
   isPersistentComposerContextKind,
   isSubagentWaitTool,
   mergeMessagesAfterOptimisticUserEdit,
+  mergeServerMessagesWithNewerLocal,
   mergeSnapshotRecords,
   parseMessageEventBlocks,
   reconcileAssistantDraftCompletion,
   reconcileAssistantDraftReasoningUpdate,
   reconcileAssistantDraftStreamUpdate,
   reconcileAssistantDraftUpdate,
-  reconcilePendingUserMessages,
+  isSnapshotReadShort,
   reconcilePendingUserMessagesDetailed,
+  shouldKeepOptimisticBaselineMessage,
   resolveLatestThreadRecord,
   rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
@@ -557,6 +559,13 @@ type SnapshotRefreshOutcome = "applied" | "superseded" | "error";
  * unbounded retry could turn a continuously streaming turn into a fetch loop.
  */
 const SNAPSHOT_SUPERSEDED_RETRY_LIMIT = 3;
+/**
+ * A delta read is only allowed to escalate to a full read a couple of times in a
+ * row per thread. Escalation is triggered by "the server reports more rows than
+ * this read can account for", which cannot happen in a healthy stream; the cap
+ * keeps a pathological server count from turning every refresh into a full read.
+ */
+const SNAPSHOT_DELTA_HEAL_LIMIT = 2;
 
 type TranscriptDiagnosticInputs = {
   threadId: string | null;
@@ -598,17 +607,41 @@ function describeTranscriptMessage(message: MessageRecord) {
   };
 }
 
+/**
+ * A needle taken from the raw markdown never appears in a text node, because the
+ * renderer strips markers like `##` or `**`. Taking the raw prefix therefore
+ * reported "not in the DOM" even when the answer was on screen. Take the longest
+ * plain-text line instead.
+ */
+function extractPlainTextNeedle(signature: string): string {
+  const lines = signature
+    .split(/\r?\n/)
+    .map((line) => line
+      .replace(/^\s*(?:[>#*+\-|]+\s*|\d+[.)]\s*)+/, "")
+      .replace(/[*`_|[\]]/g, "")
+      .trim())
+    .filter((line) => line.length >= 12);
+  const longest = lines.reduce((best, line) => (line.length > best.length ? line : best), "");
+  return longest.slice(0, 16);
+}
+
 function inspectTranscriptDom(signature: string): Record<string, unknown> {
   const result: Record<string, unknown> = { found: false };
   try {
     const scroll = document.querySelector(".chat-scroll") as HTMLElement | null;
-    result.cards = document.querySelectorAll(".message-card").length;
+    const cards = Array.from(document.querySelectorAll(".message-card"));
+    result.cards = cards.length;
+    result.cardTexts = cards.map((card) => ({
+      cls: String(card.className ?? "").slice(0, 48),
+      text: (card.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 56)
+    }));
     if (scroll) {
       result.scrollTop = Math.round(scroll.scrollTop);
       result.clientHeight = Math.round(scroll.clientHeight);
       result.scrollHeight = Math.round(scroll.scrollHeight);
     }
-    const needle = signature.replace(/\s+/g, " ").trim().slice(0, 24);
+    const needle = extractPlainTextNeedle(signature);
+    result.needle = needle;
     if (!needle) return result;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let node = walker.nextNode();
@@ -717,6 +750,68 @@ export function scheduleTranscriptDiagnostic(
   }
 }
 
+/**
+ * A swallowed user message and a send that did nothing look identical on screen,
+ * so sample the user's own bubble explicitly: is the optimistic row still pending,
+ * did it ever reach the painted set, has a persisted twin arrived, and is the text
+ * in the DOM. This is the only signal that separates "never painted" from
+ * "painted and then removed".
+ */
+export function scheduleUserMessageSendDiagnostic(
+  threadId: string,
+  optimisticId: string,
+  content: string,
+  refs: {
+    inputs: { current: TranscriptDiagnosticInputs | null };
+    live: { current: RuntimeThreadSnapshot | null };
+    pending: { current: Record<string, MessageRecord[]> };
+    rendered: { current: Set<string> };
+  }
+): void {
+  const needle = content.replace(/\s+/g, " ").trim().slice(0, 20);
+  const key = `user.sent:${threadId}:${optimisticId}`;
+  if (transcriptDiagnosticKeys.has(key)) return;
+  if (transcriptDiagnosticKeys.size > 60) transcriptDiagnosticKeys.clear();
+  transcriptDiagnosticKeys.add(key);
+  for (const delayMs of [700, 1400, 5200]) {
+    window.setTimeout(() => {
+      try {
+        const inputs = refs.inputs.current;
+        const live = refs.live.current?.thread.id === threadId ? refs.live.current : null;
+        const twins = (list: ReadonlyArray<MessageRecord>) => list.filter((message) =>
+          message.role === "user"
+          && !message.id.startsWith("optimistic-")
+          && (message.id === optimisticId
+            || (needle.length > 0 && message.content.replace(/\s+/g, " ").trim().slice(0, 20) === needle))
+        );
+        const liveTwins = live ? twins(live.messages) : [];
+        const visibleTwins = inputs ? twins(inputs.messages) : [];
+        emitTranscriptDiagnostic("user.sent", delayMs, {
+          thread: shortDiagId(threadId),
+          activeThread: shortDiagId(inputs?.threadId ?? null),
+          optimisticId: shortDiagId(optimisticId),
+          status: inputs?.threadStatus ?? null,
+          liveCount: live ? live.messages.length : null,
+          msgCount: inputs?.messages.length ?? null,
+          entryCount: inputs?.entries.length ?? null,
+          pendingCount: (refs.pending.current[threadId] ?? []).length,
+          optimisticPending: (refs.pending.current[threadId] ?? []).some((item) => item.id === optimisticId),
+          renderedOptimistic: refs.rendered.current.has(optimisticId),
+          renderedTwin: liveTwins.some((message) => refs.rendered.current.has(message.id)),
+          liveHit: liveTwins.map((message) => shortDiagId(message.id)),
+          visibleHit: visibleTwins.map((message) => shortDiagId(message.id)),
+          entryHit: visibleTwins.map((message) =>
+            inputs?.entries.find((entry) => entry.id.includes(message.id))?.id.slice(0, 24) ?? null
+          ),
+          dom: inspectTranscriptDom(needle)
+        });
+      } catch {
+        // Diagnostic only.
+      }
+    }, delayMs);
+  }
+}
+
 export function App() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const threadsRef = useRef<ThreadRecord[]>([]);
@@ -783,6 +878,10 @@ export function App() {
   const interruptingThreadIdsRef = useRef<Set<string>>(new Set());
   const pendingOneShotSkillRemovalsRef = useRef<Record<string, string[]>>({});
   const snapshotRequestIdsRef = useRef<Record<string, number>>({});
+  // Consecutive delta reads that could not account for the row count the server
+  // reported, used to bound the escalation to a full read (see
+  // SNAPSHOT_DELTA_HEAL_LIMIT).
+  const snapshotDeltaHealCountRef = useRef<Record<string, number>>({});
   // TEMPORARY diagnostic: latest render's transcript inputs, read by the runtime
   // event handler (which runs outside React's render pass).
   const transcriptDiagnosticInputsRef = useRef<TranscriptDiagnosticInputs | null>(null);
@@ -814,6 +913,13 @@ export function App() {
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
   const snapshotRef = useRef<RuntimeThreadSnapshot | null>(null);
+  // Ids of the messages the transcript actually painted. `snapshotRef` tracks the
+  // committed state, but a low-priority (transition) commit can be starved by the
+  // burst of runtime events that ends a task, leaving the screen one answer behind
+  // the state. Snapshot commits compare against this set so a newer answer
+  // re-commits at normal priority instead of being folded into a transition that
+  // never lands. Written only from a layout effect, i.e. after a real commit.
+  const renderedTranscriptMessageIdsRef = useRef<Set<string>>(new Set());
   const snapshotCursorByThreadRef = useRef<Record<string, RuntimeThreadSnapshotCursor>>({});
   const snapshotCacheByThreadRef = useRef<Map<string, RuntimeThreadSnapshot>>(new Map());
   const threadTokenUsageRefreshTimerRef = useRef<number | null>(null);
@@ -2805,11 +2911,25 @@ export function App() {
         messages.set(message.id, message);
         persistedRuntimeMessagesRef.current[runtimeThreadId] = messages;
         invalidateSnapshotRequest(runtimeThreadId);
+        const commitImmediately = shouldCommitRuntimeMessageImmediately(message);
         reconcileCachedAndSelectedSnapshot(
           runtimeThreadId,
           consumedOptimisticIds,
-          shouldCommitRuntimeMessageImmediately(message)
+          commitImmediately
         );
+        emitTranscriptDiagnostic("message.created", 0, {
+          thr: shortDiagId(runtimeThreadId),
+          id: shortDiagId(message.id),
+          role: message.role,
+          n: message.content.length,
+          dk: getMessageDisplayKind(message),
+          commitImmediately,
+          refSize: persistedRuntimeMessagesRef.current[runtimeThreadId]?.size ?? 0,
+          snapLen:
+            snapshotRef.current?.thread.id === runtimeThreadId
+              ? snapshotRef.current.messages.length
+              : null
+        });
       }
       if (
         typed.type === "message.created" &&
@@ -3467,6 +3587,15 @@ export function App() {
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
   );
+  // Record what actually reached the screen. Snapshot commits compare against this
+  // set rather than against the live state: the final answer can be present in
+  // `snapshot` while the transcript is still one render behind (the commit that
+  // carried it was starved), and comparing against state made the follow-up commit
+  // look like a no-op, so it was scheduled as an interruptible transition and then
+  // never landed. This only advances from a real commit.
+  useLayoutEffect(() => {
+    renderedTranscriptMessageIdsRef.current = new Set(visibleMessages.map((message) => message.id));
+  }, [visibleMessages]);
   const gpaPlanMessageId = useMemo(
     () => getGpaPlanMessageId(visibleMessages, gpaState),
     [gpaState, visibleMessages]
@@ -4489,7 +4618,7 @@ export function App() {
       const cursor = snapshotCacheByThreadRef.current.has(threadId)
         ? snapshotCursorByThreadRef.current[threadId]
         : undefined;
-      const next = (await window.codexh.getThreadSnapshot(threadId, cursor)) as RuntimeThreadSnapshot;
+      let next = (await window.codexh.getThreadSnapshot(threadId, cursor)) as RuntimeThreadSnapshot;
       if (snapshotRequestIdsRef.current[threadId] !== requestId) {
         // Obsolete payload: a newer runtime event invalidated this read while it
         // was in flight. Report it as superseded so the caller re-reads, rather
@@ -4500,19 +4629,55 @@ export function App() {
         snapshotCursorByThreadRef.current[threadId] = next.snapshotCursor;
       }
       const pending = pendingUserMessagesRef.current[threadId] ?? [];
-      const nextMessages = pending.length > 0 ? [...next.messages, ...pending] : next.messages;
       const cached = snapshotCacheByThreadRef.current.get(threadId);
       const liveSnapshot = snapshotRef.current?.thread.id === threadId ? snapshotRef.current : null;
       const base = cached ?? (snapshotThreadIdRef.current === threadId ? liveSnapshot : null);
+      // `shouldKeepOptimisticBaselineMessage` holds an optimistic row in the baseline
+      // until the server list actually carries its persisted twin. Dropping it as soon
+      // as it left `pending` left a window in which no copy of the user's message
+      // existed anywhere, which is how a just-sent bubble went missing.
+      const localMessages = (liveSnapshot?.messages ?? base?.messages ?? []).filter((message) =>
+        !message.id.startsWith("optimistic-")
+        || shouldKeepOptimisticBaselineMessage(message, pending, next.messages)
+      );
+      // A delta read only returns rows newer than the cursor the server handed out
+      // last time. Whenever the renderer still cannot account for the row count the
+      // server just reported, the missing rows can never arrive through a later delta
+      // - that cursor has already passed them - so the transcript stayed short
+      // (typically by the message the user had just sent) until a full read, which in
+      // practice meant until the thread was reloaded. Re-read once without a cursor:
+      // the full list is authoritative, and the escalation is bounded per thread.
+      const shortDelta = isSnapshotReadShort(
+        next.snapshotMode,
+        next.messageCount,
+        localMessages.length,
+        next.messages.length
+      );
+      if (shortDelta) {
+        snapshotDeltaHealCountRef.current[threadId] = (snapshotDeltaHealCountRef.current[threadId] ?? 0) + 1;
+      } else {
+        delete snapshotDeltaHealCountRef.current[threadId];
+      }
+      if (shortDelta && snapshotDeltaHealCountRef.current[threadId] <= SNAPSHOT_DELTA_HEAL_LIMIT) {
+        next = (await window.codexh.getThreadSnapshot(threadId, undefined)) as RuntimeThreadSnapshot;
+        if (snapshotRequestIdsRef.current[threadId] !== requestId) {
+          return "superseded";
+        }
+        if (next.snapshotCursor) {
+          snapshotCursorByThreadRef.current[threadId] = next.snapshotCursor;
+        }
+      }
+      const nextMessages = pending.length > 0 ? [...next.messages, ...pending] : next.messages;
+      // A full read replaces the list with the server's copy. That is what we want
+      // for deletions, but it also erased a final answer the renderer had already
+      // painted from `message.created` whenever the row had not reached the
+      // database yet: the following read saw a shorter list, replaced the painted
+      // one, and nothing re-issued it, so the transcript stayed truncated until the
+      // thread was reopened. Re-attach rows the server list is missing whenever the
+      // server's newest row is older than what we already hold.
       const mergedMessages = next.snapshotMode === "delta" && base
-        ? mergeSnapshotRecords(
-            base.messages.filter((message) =>
-              !message.id.startsWith("optimistic-") || pending.some((item) => item.id === message.id)
-            ),
-            nextMessages,
-            (message) => message.createdAt
-          )
-        : nextMessages;
+        ? mergeSnapshotRecords(localMessages, nextMessages, (message) => message.createdAt)
+        : mergeServerMessagesWithNewerLocal(nextMessages, localMessages);
       const messages = mergeMessagesAfterOptimisticUserEdit(
         liveSnapshot?.messages ?? base?.messages ?? [],
         mergedMessages,
@@ -4550,7 +4715,14 @@ export function App() {
         approvals: base ? reuseEquivalentRecordArray(base.approvals, next.approvals) : next.approvals,
         prompts: base ? reuseEquivalentRecordArray(base.prompts, next.prompts) : next.prompts
       });
-      const renderedMessageIds = new Set((liveSnapshot?.messages ?? []).map((message) => message.id));
+      // Compare against what the transcript actually painted rather than against
+      // the live state. The final answer can already sit in `snapshot` while the
+      // commit that carried it never reached the screen (it was a low-priority
+      // transition that got starved by the end-of-task event burst). Measuring
+      // against state made that follow-up commit look like a no-op, so it was
+      // scheduled as another interruptible transition and the answer stayed
+      // invisible until the thread was reloaded.
+      const renderedMessageIds = renderedTranscriptMessageIdsRef.current;
       const hasNewMessages = mergedSnapshot.messages.some((message) => !renderedMessageIds.has(message.id));
       const reachedTerminalState = Boolean(
         liveSnapshot &&
@@ -4605,10 +4777,34 @@ export function App() {
           commitSelectedSnapshot();
         } else {
           // Background refreshes of an already visible transcript may remain
-          // interruptible so clicks and live task activity stay responsive.
+          // interruptible so clicks and live task activity stay responsive, but a
+          // transition can be starved by the runtime event burst that ends a turn.
+          // Escalate to a synchronous re-render if those messages still are not
+          // painted, which is exactly the state that used to require a thread
+          // reload to recover.
           startTransition(commitSelectedSnapshot);
+          window.setTimeout(() => {
+            if (selectedThreadIdRef.current !== threadId) return;
+            const painted = renderedTranscriptMessageIdsRef.current;
+            if (!mergedSnapshot.messages.some((message) => !painted.has(message.id))) return;
+            flushSync(() => {
+              setSnapshot((current) => current && current.thread.id === threadId
+                ? { ...current, messages: [...current.messages] }
+                : current);
+            });
+          }, 1_200);
         }
       }
+      emitTranscriptDiagnostic("snapshot.applied", 0, {
+        thr: shortDiagId(threadId),
+        mode: next.snapshotMode,
+        serverCount: next.messageCount,
+        got: next.messages.length,
+        localCount: localMessages.length,
+        finalCount: mergedSnapshot.messages.length,
+        hasNewMessages,
+        reachedTerminalState
+      });
       setThreads((current) => current.map((thread) =>
         thread.id === mergedSnapshot.thread.id
           ? resolveLatestThreadRecord(thread, mergedSnapshot.thread)
@@ -4690,10 +4886,20 @@ export function App() {
       });
     };
     // Empty/welcome transcripts must leave the default screen in this click.
-    // Long conversations stay in a transition so the send click is not blocked
-    // by rebuilding a large timeline.
+    // Long conversations used to stay in a transition so the send click would not
+    // be blocked by rebuilding a large timeline - but a submission is immediately
+    // followed by a burst of runtime events (queue.updated, thread.updated,
+    // agent.context_measured, message.created) that can interrupt that transition
+    // indefinitely. The optimistic bubble is the only acknowledgement that the send
+    // was accepted, and the moment its persisted twin is broadcast the optimistic id
+    // is consumed, so the abandoned transition has nothing left to paint: the sent
+    // message never appeared at all until the thread was reloaded. The user's own
+    // message is committed at normal priority instead; everything else about the
+    // submission is already off the click path.
     if (!snapshot || snapshot.thread.id !== threadId || snapshot.messages.length === 0) {
       applyOptimistic();
+    } else if (selectedThreadIdRef.current === threadId) {
+      flushSync(applyOptimistic);
     } else {
       startTransition(applyOptimistic);
     }
@@ -5479,6 +5685,14 @@ export function App() {
     const optimisticMessage = !options?.internal && !queueingBehindActiveTask
       ? appendOptimisticUserMessage(threadId, displayContent)
       : null;
+    if (optimisticMessage) {
+      scheduleUserMessageSendDiagnostic(threadId, optimisticMessage.id, displayContent, {
+        inputs: transcriptDiagnosticInputsRef,
+        live: snapshotRef,
+        pending: pendingUserMessagesRef,
+        rendered: renderedTranscriptMessageIdsRef
+      });
+    }
     // Start the under-message heartbeat immediately so send never looks like a
     // silent no-op while attachments/skills/runtime wake are still in flight.
     if (!options?.internal && !queueingBehindActiveTask) {

@@ -218,6 +218,39 @@ export const SUBAGENT_MAX_RUNTIME_MS = 1_800_000;
 export const MAX_CHILD_INSPECTION_TOOLS_BEFORE_REPORT = 8;
 /** Hard-stop further file/code inspection and require a parent-facing result. */
 export const MAX_CHILD_INSPECTION_TOOLS_HARD_STOP = 12;
+/**
+ * Wall-clock budget for a single tool call. Without this, a tool whose promise
+ * never settles (a wedged renderer, an await that was orphaned by a page
+ * reload) stalls the whole turn until the user hits Stop — the runtime has no
+ * other exit. shell.exec and waits on a human or a child agent are exempt; see
+ * NON_TIMED_TOOL_NAMES.
+ */
+export const DEFAULT_TOOL_EXECUTION_TIMEOUT_MS = 300_000;
+/** Browser/desktop automation blocks on live UI state: keep it well below the default. */
+export const BROWSER_TOOL_EXECUTION_TIMEOUT_MS = 60_000;
+const TOOL_EXECUTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
+  "browser.open_tab": 60_000,
+  "browser.capture_screenshot": 60_000,
+  "browser.assert_page": 45_000,
+  "browser.wait_for": 30_000,
+  "desktop.capture_screenshot": 60_000,
+  // Media generation and package installs are legitimately slow.
+  "image.generate": 600_000,
+  "video.generate": 900_000,
+  "skills.install": 600_000,
+  "plugins.install": 600_000,
+  "mcp.install": 600_000,
+  // Large knowledge imports and remote MCP calls outrun the generic budget.
+  "knowledge.create": 600_000,
+  "knowledge.add": 600_000,
+  "mcp.call": 600_000
+};
+/**
+ * Tools whose latency is not the tool's own: terminal commands report progress
+ * through stdout/stderr, while these waits block on a human or on a child
+ * agent whose runtime budget is much larger than any single tool call.
+ */
+const NON_TIMED_TOOL_NAMES = new Set(["shell.exec", "request_user_input", "wait_agent"]);
 
 export const SUBAGENT_WATCHDOG_PROGRESS_EVENT_TYPES = [
   "tool.started",
@@ -1401,7 +1434,24 @@ function waitForAbort<T>(
 export function shouldApplyToolExecutionTimeout(toolName: string): boolean {
   // TerminalRuntime tracks command activity from stdout/stderr. Applying the
   // generic wall-clock timeout here would discard that progress information.
-  return toolName !== "shell.exec";
+  // Waits that block on a human or on a child agent are bounded by their own
+  // watchdogs (subagent idle/runtime limits, approval prompts) — a wall clock
+  // here would just fail tasks whose latency is not the tool's fault.
+  return !NON_TIMED_TOOL_NAMES.has(toolName);
+}
+
+export function resolveToolExecutionTimeoutMs(toolName: string): number {
+  const override = TOOL_EXECUTION_TIMEOUT_OVERRIDES_MS[toolName];
+  if (override !== undefined) {
+    return override;
+  }
+  // Any unlisted browser/desktop automation tool is also waiting on a live
+  // renderer, so it inherits the tighter browser budget rather than the
+  // generic one.
+  if (toolName.startsWith("browser.") || toolName.startsWith("desktop.")) {
+    return BROWSER_TOOL_EXECUTION_TIMEOUT_MS;
+  }
+  return DEFAULT_TOOL_EXECUTION_TIMEOUT_MS;
 }
 
 class ModelDecisionTimeoutError extends Error {
@@ -6444,7 +6494,7 @@ class ThreadSessionRuntime {
           let toolArgsTruncated = false;
           let toolArgsInvalid = false;
           let toolContext: Parameters<ToolRuntime["execute"]>[1] | null = null;
-          const toolTimeoutMs = 0;
+          const toolTimeoutMs = resolveToolExecutionTimeoutMs(toolCall.name);
           try {
             // Projectless chats must never inherit the desktop application's launch folder.
             toolContext = {
@@ -7263,12 +7313,13 @@ class ThreadSessionRuntime {
                 },
                 createdAt: new Date().toISOString()
               });
+              const verificationTimeoutMs = resolveToolExecutionTimeoutMs(verificationCall.name);
               let verificationResult: ToolResult;
               try {
                 verificationResult = await waitForAbortOrTimeout(
                   this.services.toolRuntime.execute(verificationCall, toolContext),
                   abortController.signal,
-                  toolTimeoutMs
+                  verificationTimeoutMs
                 );
               } catch (error) {
                 if (abortController.signal.aborted) {
@@ -7277,7 +7328,7 @@ class ThreadSessionRuntime {
                 verificationResult = {
                   ok: false,
                   content: error instanceof ModelDecisionTimeoutError
-                    ? `Automatic project verification timed out after ${toolTimeoutMs / 1000}s.`
+                    ? `Automatic project verification timed out after ${verificationTimeoutMs / 1000}s.`
                     : `Automatic project verification failed: ${error instanceof Error ? error.message : String(error)}`
                 };
               }
