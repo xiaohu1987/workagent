@@ -1994,6 +1994,47 @@ export function isSnapshotReadShort(
 }
 
 /**
+ * A snapshot read is authoritative for the transcript, but the commit that
+ * carries it may never land: it is scheduled as an interruptible transition
+ * whenever the read looks like it brings nothing new, and a transition can be
+ * starved by the event burst that ends a turn. When that happens the renderer
+ * keeps a snapshot that is missing rows the read already returned, and nothing
+ * asks for them again - the thread stays short until it is reopened.
+ *
+ * Comparing the live messages against the expected ones is what makes those
+ * rows observable, so the commit can be retried from data already in hand
+ * instead of waiting for a reload.
+ */
+export function collectMissingSnapshotMessages<T extends { id: string }>(
+  currentMessages: ReadonlyArray<T>,
+  expectedMessages: ReadonlyArray<T>
+): T[] {
+  if (expectedMessages.length === 0) {
+    return [];
+  }
+  const present = new Set(currentMessages.map((message) => message.id));
+  return expectedMessages.filter((message) => !present.has(message.id));
+}
+
+/**
+ * The ids the transcript is expected to paint for a snapshot.
+ *
+ * A commit has something new to paint when one of these is not among the ids
+ * the screen has already painted. Comparing against the raw snapshot rows
+ * instead would report "new" for every message the transcript deliberately
+ * hides (`[internal:`, executed-tool digests, folded commentary), which is why
+ * the comparison is made on the filtered, actually renderable set.
+ */
+export function expectedVisibleMessageIds(
+  messages: ReadonlyArray<MessageRecord>,
+  threadStatus?: ThreadRecord["status"] | null
+): Set<string> {
+  return new Set(
+    filterTranscriptMessages(messages as MessageRecord[], threadStatus).map((message) => message.id)
+  );
+}
+
+/**
  * An optimistic user row may only be dropped from the local baseline once the server
  * list actually carries its persisted twin. It leaves `pending` the moment that twin
  * is broadcast, and removing it from the baseline at the same instant left a window

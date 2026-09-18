@@ -810,9 +810,19 @@
   border-right: 1px solid #9da5b0;
   border-bottom: 1px solid #9da5b0;
   transform: rotate(-45deg);
-  transition: transform 150ms ease;
+  /* 不画展开箭头：它贴在整行最右端，一屏里连成一条竖线非常抢眼。
+     折叠态与展开态都默认隐藏，只有悬停 / 键盘聚焦这一行时才淡入。
+     用 opacity 而不是 display:none，保住 grid 第三列，悬停时不会有横向跳动。 */
+  opacity: 0;
+  transition: transform 150ms ease, opacity 140ms ease;
 }
 
+.tool-activity-group:hover .tool-activity-chevron,
+.tool-activity-group:focus-within .tool-activity-chevron {
+  opacity: 1;
+}
+
+/* 展开态同样不画箭头：只保留旋转，悬停时才淡入——不悬停就永远看不到这个箭头。 */
 .tool-activity-group[open] .tool-activity-chevron { transform: rotate(45deg); }
 
 .tool-activity-details-shell {

@@ -146,6 +146,8 @@ import {
   reconcileAssistantDraftStreamUpdate,
   reconcileAssistantDraftUpdate,
   isSnapshotReadShort,
+  collectMissingSnapshotMessages,
+  expectedVisibleMessageIds,
   reconcilePendingUserMessagesDetailed,
   shouldKeepOptimisticBaselineMessage,
   resolveLatestThreadRecord,
@@ -3596,6 +3598,48 @@ export function App() {
   useLayoutEffect(() => {
     renderedTranscriptMessageIdsRef.current = new Set(visibleMessages.map((message) => message.id));
   }, [visibleMessages]);
+  const snapshotThreadKey = snapshot?.thread.id ?? null;
+  // The transcript has to converge on the snapshot the renderer already owns.
+  // A refresh can commit and still leave the list short if a later update dropped
+  // rows it returned, and when no further read is scheduled nothing ever asks for
+  // them again - which is exactly the shape of "the answer is gone, reload the
+  // thread and it comes back". Diff the live messages against the cached snapshot
+  // after paint and merge back whatever is missing. The cached list stays
+  // authoritative: a server-side deletion already replaced both copies, so this
+  // cannot resurrect a message the server removed.
+  useLayoutEffect(() => {
+    if (!snapshotThreadKey) return;
+    const cachedMessages = snapshotCacheByThreadRef.current.get(snapshotThreadKey)?.messages;
+    if (!cachedMessages || cachedMessages.length === 0) return;
+    const expected = mergeServerMessagesWithNewerLocal(cachedMessages, selectedMessages);
+    if (collectMissingSnapshotMessages(selectedMessages, expected).length === 0) return;
+    setSnapshot((current) => {
+      if (!current || current.thread.id !== snapshotThreadKey) return current;
+      const missing = collectMissingSnapshotMessages(current.messages, expected);
+      if (missing.length === 0) return current;
+      return {
+        ...current,
+        messages: mergeSnapshotRecords(current.messages, missing, (message) => message.createdAt),
+        messageCount: Math.max(current.messageCount, current.messages.length + missing.length)
+      };
+    });
+  }, [snapshotThreadKey, selectedMessages]);
+  // TEMPORARY diagnostic: log every change in the transcript's shape so a commit
+  // that drops rows is visible in the runtime log.
+  const transcriptShapeDiagRef = useRef<string>("");
+  useLayoutEffect(() => {
+    const shape = `${snapshotThreadKey ?? "-"}:${selectedMessages.length}:${visibleMessages.length}`;
+    if (transcriptShapeDiagRef.current === shape) return;
+    transcriptShapeDiagRef.current = shape;
+    emitTranscriptDiagnostic("transcript.shape", 0, {
+      thread: shortDiagId(snapshotThreadKey),
+      stateCount: selectedMessages.length,
+      cacheCount: snapshotCacheByThreadRef.current.get(snapshotThreadKey ?? "")?.messages.length ?? -1,
+      visibleCount: visibleMessages.length,
+      optimisticCount: selectedMessages.filter((message) => message.id.startsWith("optimistic-")).length,
+      tail: selectedMessages.slice(-4).map((message) => `${shortDiagId(message.id)}:${message.role}`)
+    });
+  }, [selectedMessages, snapshotThreadKey, visibleMessages]);
   const gpaPlanMessageId = useMemo(
     () => getGpaPlanMessageId(visibleMessages, gpaState),
     [gpaState, visibleMessages]
@@ -4722,8 +4766,22 @@ export function App() {
       // against state made that follow-up commit look like a no-op, so it was
       // scheduled as another interruptible transition and the answer stayed
       // invisible until the thread was reloaded.
+      //
+      // The comparison runs on the ids the transcript is expected to *paint*
+      // (the filtered, renderable set), not on the raw snapshot rows. Rows the
+      // transcript hides on purpose would otherwise count as "new" on every
+      // single read, and - far worse - a row that the screen has painted once
+      // and then lost counted as "already there", so the read that could have
+      // restored it was downgraded to a transition and the transcript never
+      // converged again until the thread was reopened.
       const renderedMessageIds = renderedTranscriptMessageIdsRef.current;
-      const hasNewMessages = mergedSnapshot.messages.some((message) => !renderedMessageIds.has(message.id));
+      const expectedMessageIds = expectedVisibleMessageIds(
+        mergedSnapshot.messages,
+        mergedSnapshot.thread.status
+      );
+      const hasNewMessages = [...expectedMessageIds].some(
+        (messageId) => !renderedMessageIds.has(messageId)
+      );
       const reachedTerminalState = Boolean(
         liveSnapshot &&
         isThreadExecutionInProgress(liveSnapshot.thread.status) &&
@@ -4779,18 +4837,36 @@ export function App() {
           // Background refreshes of an already visible transcript may remain
           // interruptible so clicks and live task activity stay responsive, but a
           // transition can be starved by the runtime event burst that ends a turn.
-          // Escalate to a synchronous re-render if those messages still are not
-          // painted, which is exactly the state that used to require a thread
-          // reload to recover.
+          //
+          // The escalation has to be able to *repair* the transcript, not just
+          // re-render it. The previous version only checked whether an id the
+          // screen had painted before was still missing, then re-created the
+          // message array from `current` - so when the live snapshot had lost a
+          // row the read returned (the exact shape of "the answer is gone until
+          // I reload"), the check passed and the re-render re-painted the same
+          // incomplete list. Now the live messages are diffed against the
+          // snapshot we already own and anything missing is merged back, so a
+          // starved or dropped commit converges on its own.
           startTransition(commitSelectedSnapshot);
           window.setTimeout(() => {
             if (selectedThreadIdRef.current !== threadId) return;
-            const painted = renderedTranscriptMessageIdsRef.current;
-            if (!mergedSnapshot.messages.some((message) => !painted.has(message.id))) return;
+            const expected = snapshotCacheByThreadRef.current.get(threadId)?.messages
+              ?? mergedSnapshot.messages;
             flushSync(() => {
-              setSnapshot((current) => current && current.thread.id === threadId
-                ? { ...current, messages: [...current.messages] }
-                : current);
+              setSnapshot((current) => {
+                if (!current || current.thread.id !== threadId) return current;
+                const missing = collectMissingSnapshotMessages(current.messages, expected);
+                if (missing.length === 0) return current;
+                return {
+                  ...current,
+                  messages: mergeSnapshotRecords(
+                    current.messages,
+                    missing,
+                    (message) => message.createdAt
+                  ),
+                  messageCount: Math.max(current.messageCount, current.messages.length + missing.length)
+                };
+              });
             });
           }, 1_200);
         }
