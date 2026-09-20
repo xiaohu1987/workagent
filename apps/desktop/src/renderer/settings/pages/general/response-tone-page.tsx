@@ -41,5 +41,25 @@ export function ResponseTonePage({ configDraft, options, defaultTone, setConfigD
                       <span className="subtle-inline">修改后自动保存，后续回复立即使用。</span>
                     </div>
                   </div>
+
+                  <div className="config-block general-tone-settings">
+                    <div className="section-copy">
+                      <strong>任务标题</strong>
+                      <span>新任务的第一条消息发出后立即生成规则标题，随后由模型提炼一句更准确的话标题覆盖它；手动重命名过的标题不会被覆盖。</span>
+                    </div>
+                    <div className="memory-option-row">
+                      <label className="memory-option" title="关闭后只保留规则提炼的标题，不再调用模型">
+                        <input
+                          type="checkbox"
+                          checked={configDraft.desktop.autoTitleGeneration !== false}
+                          onChange={(event) => updateAndSave((current) => ({ ...current, desktop: { ...current.desktop, autoTitleGeneration: event.target.checked } }))}
+                        />
+                        <span>自动提炼标题</span>
+                      </label>
+                    </div>
+                    <div className="settings-save-row">
+                      <span className="subtle-inline">由当前对话所选模型生成，超时或失败时保留规则标题。</span>
+                    </div>
+                  </div>
                 </div>
                 ); }

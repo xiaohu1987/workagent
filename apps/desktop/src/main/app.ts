@@ -103,6 +103,7 @@ import {
   MEMORY_DISTILL_DEBOUNCE_MS,
   type MemoryDistillStore
 } from "./memory-distiller";
+import { buildThreadTitleFromFirstMessage, ThreadTitleService } from "./thread-title";
 import { parseEditableMessageMetadata } from "./message-metadata";
 import { detectShareTargets, sendShareImage, sendShareToTarget } from "./share-service";
 import { isProjectAttachmentPath } from "./attachment-path";
@@ -320,6 +321,7 @@ export class DesktopBackend {
   #runtime!: AgentRuntimeService;
   #skillLab!: SkillLabService;
   #memoryDistiller!: MemoryDistillerService;
+  #threadTitles!: ThreadTitleService;
   #memorySweepTimer: ReturnType<typeof setInterval> | null = null;
   readonly #gpaStateCache = new Map<string, GpaState>();
   #mcp!: McpManager;
@@ -389,6 +391,29 @@ export class DesktopBackend {
       store: this.#createMemoryDistillStore(),
       log: (kind, payload) => this.#logs.append(kind, payload),
       onMemoriesChanged: () => this.emitMemoryUpdated()
+    });
+    this.#threadTitles = new ThreadTitleService({
+      config: () => this.#config,
+      providerFactory: this.#providerFactory,
+      store: {
+        getThread: (threadId) => {
+          try {
+            return this.#db.getThread(threadId);
+          } catch {
+            return null;
+          }
+        },
+        updateThread: (threadId, patch) => this.#db.updateThread(threadId, patch)
+      },
+      applyTitle: (thread) => {
+        void this.emit({
+          type: "thread.updated",
+          threadId: thread.id,
+          payload: { thread },
+          createdAt: new Date().toISOString()
+        }).catch(() => undefined);
+      },
+      log: (kind, payload) => this.#logs.append(kind, payload)
     });
     this.startMemorySweepLoop();
 
@@ -1230,8 +1255,9 @@ export class DesktopBackend {
     // synchronously on the main process for long conversations.
     const isFirstThreadMessage = this.#db.countMessages(threadId) === 0 && this.#db.listQueuedMessages(threadId).length === 0;
     if (isFirstThreadMessage) {
+      const firstMessage = displayContent || normalizedContent;
       const updated = this.#db.updateThread(threadId, {
-        title: buildThreadTitleFromFirstMessage(displayContent || normalizedContent)
+        title: buildThreadTitleFromFirstMessage(firstMessage)
       });
       void this.emit({
         type: "thread.updated",
@@ -1239,6 +1265,9 @@ export class DesktopBackend {
         payload: { thread: updated },
         createdAt: new Date().toISOString()
       }).catch(() => undefined);
+      // Upgrade the rule-based title to a model-written summary once the provider
+      // answers. Queued behind the real turn: submission never waits on it.
+      this.#threadTitles.schedule(threadId, firstMessage, updated.title);
     }
 
     const queued = this.#db.enqueueQueuedMessage({
@@ -1443,6 +1472,7 @@ export class DesktopBackend {
         payload: { thread: updated },
         createdAt: new Date().toISOString()
       });
+      this.#threadTitles.schedule(threadId, content, updated.title);
     }
 
     const userMessage = this.#db.createMessage({
@@ -5868,6 +5898,7 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       silentBrowserOpen: config.desktop?.silentBrowserOpen !== false,
       liveEditPreview: config.desktop?.liveEditPreview === true,
       llmLogViewer: config.desktop?.llmLogViewer === true,
+      autoTitleGeneration: config.desktop?.autoTitleGeneration !== false,
       completionAudit: normalizeCompletionAuditSettings(config.desktop),
       sandboxMode: normalizeSandboxMode(config.desktop?.sandboxMode ?? fallback.desktop.sandboxMode),
       sandboxNetworkAccess: normalizeSandboxNetworkAccess(config.desktop?.sandboxNetworkAccess ?? fallback.desktop.sandboxNetworkAccess)
@@ -6207,31 +6238,6 @@ function resolveProjectKnowledgeBundleRoot(
     "bundles",
     `${slugify(displayName)}-${randomUUID()}`
   );
-}
-
-function buildThreadTitleFromFirstMessage(content: string): string {
-  const normalized = content
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!normalized) {
-    return "新建任务";
-  }
-
-  const sentenceBoundary = normalized.search(/[。！？!?；;]/u);
-  const firstSentence =
-    sentenceBoundary === -1 ? normalized : normalized.slice(0, sentenceBoundary + 1).trim();
-  const codePoints = Array.from(firstSentence);
-  if (codePoints.length <= 24) {
-    return firstSentence;
-  }
-
-  return `${codePoints.slice(0, 24).join("").trimEnd()}...`;
 }
 
 function buildPromptDefaultAnswers(questions: UserInputQuestion[]): Record<string, string> | null {

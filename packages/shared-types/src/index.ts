@@ -1123,6 +1123,11 @@ export interface AppConfig {
     silentBrowserOpen: boolean;
     liveEditPreview: boolean;
     llmLogViewer: boolean;
+    /**
+     * Ask the model for a distilled thread title after the first message. The
+     * rule-based fallback title is written immediately either way.
+     */
+    autoTitleGeneration: boolean;
     completionAudit: CompletionAuditSettings;
     /**
      * Default sandbox for ordinary chats. Opening a project always promotes

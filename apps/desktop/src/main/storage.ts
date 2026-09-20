@@ -327,6 +327,7 @@ export function defaultConfig(): AppConfig {
       silentBrowserOpen: true,
       liveEditPreview: false,
       llmLogViewer: false,
+      autoTitleGeneration: true,
       completionAudit: normalizeCompletionAuditSettings(),
       sandboxMode: "read-only",
       sandboxNetworkAccess: false
@@ -539,6 +540,7 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       silentBrowserOpen,
       liveEditPreview: parsed.desktop?.liveEditPreview ?? false,
       llmLogViewer: parsed.desktop?.llmLogViewer ?? false,
+      autoTitleGeneration: parsed.desktop?.autoTitleGeneration ?? true,
       completionAudit: normalizeCompletionAuditSettings(parsed.desktop),
       sandboxMode: normalizeSandboxMode(parsed.desktop?.sandboxMode),
       sandboxNetworkAccess: normalizeSandboxNetworkAccess(parsed.desktop?.sandboxNetworkAccess)
