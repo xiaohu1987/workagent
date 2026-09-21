@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
 import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, normalizeSandboxMode, normalizeSandboxNetworkAccess, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
 import { isRootUserRequestMessage } from "./subagent-assignment";
+import type { CloudNoteRecord, CloudNotesAccount } from "./cloud-notes";
 import type {
   AppConfig,
   ApprovalResolutionMode,
@@ -884,6 +885,23 @@ export class DatabaseService {
       CREATE TABLE IF NOT EXISTS quick_notes (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL,
         knowledge_base_id TEXT NOT NULL, knowledge_source_path TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS cloud_notes (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 1,
+        server_updated_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS cloud_notes_account (
+        id TEXT PRIMARY KEY, server_url TEXT NOT NULL, email TEXT NOT NULL,
+        display_name TEXT NOT NULL DEFAULT '', user_id TEXT NOT NULL DEFAULT '',
+        access_token TEXT NOT NULL, refresh_token TEXT NOT NULL,
+        token_expires_at TEXT NOT NULL DEFAULT '', cursor INTEGER NOT NULL DEFAULT 0,
+        last_synced_at TEXT, device_id TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS cloud_note_links (
+        cloud_note_id TEXT PRIMARY KEY, quick_note_id TEXT NOT NULL UNIQUE,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS browser_tabs (
@@ -3282,6 +3300,250 @@ export class DatabaseService {
 
   public deleteQuickNote(id: string): void {
     this.#db.prepare("DELETE FROM quick_notes WHERE id = ?").run(id);
+  }
+
+  /** 云笔记 ↔ 本地随手记的双向关联：一条云笔记最多绑定一条随手记。 */
+  public listCloudNoteLinks(): Array<{
+    cloudNoteId: string;
+    quickNoteId: string;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    return this.#db
+      .prepare("SELECT * FROM cloud_note_links ORDER BY created_at ASC")
+      .all()
+      .map((row) => this.mapCloudNoteLinkRow(row as Record<string, unknown>));
+  }
+
+  public getCloudNoteLinkByCloudNote(cloudNoteId: string): {
+    cloudNoteId: string;
+    quickNoteId: string;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.#db
+      .prepare("SELECT * FROM cloud_note_links WHERE cloud_note_id = ?")
+      .get(cloudNoteId) as Record<string, unknown> | undefined;
+    return row ? this.mapCloudNoteLinkRow(row) : null;
+  }
+
+  public getCloudNoteLinkByQuickNote(quickNoteId: string): {
+    cloudNoteId: string;
+    quickNoteId: string;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.#db
+      .prepare("SELECT * FROM cloud_note_links WHERE quick_note_id = ?")
+      .get(quickNoteId) as Record<string, unknown> | undefined;
+    return row ? this.mapCloudNoteLinkRow(row) : null;
+  }
+
+  public upsertCloudNoteLink(cloudNoteId: string, quickNoteId: string): {
+    cloudNoteId: string;
+    quickNoteId: string;
+    createdAt: string;
+    updatedAt: string;
+  } {
+    const now = new Date().toISOString();
+    // 一条随手记只能绑定一条云笔记：先摘掉它原有的旧绑定，避免 UNIQUE 冲突。
+    this.#db.prepare("DELETE FROM cloud_note_links WHERE quick_note_id = ? AND cloud_note_id <> ?").run(
+      quickNoteId,
+      cloudNoteId
+    );
+    const existing = this.getCloudNoteLinkByCloudNote(cloudNoteId);
+    this.#db
+      .prepare(
+        "INSERT INTO cloud_note_links (cloud_note_id, quick_note_id, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(cloud_note_id) DO UPDATE SET quick_note_id = excluded.quick_note_id, updated_at = excluded.updated_at"
+      )
+      .run(cloudNoteId, quickNoteId, existing?.createdAt ?? now, now);
+    return {
+      cloudNoteId,
+      quickNoteId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    };
+  }
+
+  public deleteCloudNoteLinkByCloudNote(cloudNoteId: string): void {
+    this.#db.prepare("DELETE FROM cloud_note_links WHERE cloud_note_id = ?").run(cloudNoteId);
+  }
+
+  public deleteCloudNoteLinkByQuickNote(quickNoteId: string): void {
+    this.#db.prepare("DELETE FROM cloud_note_links WHERE quick_note_id = ?").run(quickNoteId);
+  }
+
+  private mapCloudNoteLinkRow(row: Record<string, unknown>): {
+    cloudNoteId: string;
+    quickNoteId: string;
+    createdAt: string;
+    updatedAt: string;
+  } {
+    return {
+      cloudNoteId: String(row.cloud_note_id ?? ""),
+      quickNoteId: String(row.quick_note_id ?? ""),
+      createdAt: String(row.created_at ?? ""),
+      updatedAt: String(row.updated_at ?? "")
+    };
+  }
+
+  private mapCloudNoteRow(row: Record<string, unknown>): CloudNoteRecord {
+    return {
+      id: String(row.id ?? ""),
+      title: String(row.title ?? ""),
+      content: String(row.content ?? ""),
+      version: Number(row.version ?? 0) || 0,
+      seq: Number(row.seq ?? 0) || 0,
+      deleted: Number(row.deleted ?? 0) === 1,
+      dirty: Number(row.dirty ?? 0) === 1,
+      serverUpdatedAt: typeof row.server_updated_at === "string" ? row.server_updated_at : null,
+      createdAt: String(row.created_at ?? ""),
+      updatedAt: String(row.updated_at ?? "")
+    };
+  }
+
+  public listCloudNotes(): CloudNoteRecord[] {
+    return this.#db
+      .prepare("SELECT * FROM cloud_notes WHERE deleted = 0 ORDER BY updated_at DESC")
+      .all()
+      .map((row) => this.mapCloudNoteRow(row as Record<string, unknown>));
+  }
+
+  public getCloudNote(id: string): CloudNoteRecord | null {
+    const row = this.#db.prepare("SELECT * FROM cloud_notes WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.mapCloudNoteRow(row) : null;
+  }
+
+  public listDirtyCloudNotes(): CloudNoteRecord[] {
+    return this.#db
+      .prepare("SELECT * FROM cloud_notes WHERE dirty = 1 ORDER BY updated_at ASC")
+      .all()
+      .map((row) => this.mapCloudNoteRow(row as Record<string, unknown>));
+  }
+
+  public countDirtyCloudNotes(): number {
+    const row = this.#db.prepare("SELECT COUNT(*) AS total FROM cloud_notes WHERE dirty = 1").get() as
+      | { total?: number }
+      | undefined;
+    return Number(row?.total ?? 0) || 0;
+  }
+
+  public countCloudNotes(): number {
+    const row = this.#db.prepare("SELECT COUNT(*) AS total FROM cloud_notes WHERE deleted = 0").get() as
+      | { total?: number }
+      | undefined;
+    return Number(row?.total ?? 0) || 0;
+  }
+
+  public upsertCloudNote(input: {
+    id: string;
+    title: string;
+    content: string;
+    version?: number;
+    seq?: number;
+    deleted?: boolean;
+    dirty?: boolean;
+    serverUpdatedAt?: string | null;
+  }): CloudNoteRecord {
+    const current = this.getCloudNote(input.id);
+    const record: CloudNoteRecord = {
+      id: input.id,
+      title: input.title,
+      content: input.content,
+      version: input.version ?? current?.version ?? 0,
+      seq: input.seq ?? current?.seq ?? 0,
+      deleted: input.deleted ?? current?.deleted ?? false,
+      dirty: input.dirty ?? true,
+      serverUpdatedAt: input.serverUpdatedAt === undefined ? current?.serverUpdatedAt ?? null : input.serverUpdatedAt,
+      createdAt: current?.createdAt ?? nowIso(),
+      updatedAt: nowIso()
+    };
+    this.#db
+      .prepare(
+        "INSERT INTO cloud_notes (id, title, content, version, seq, deleted, dirty, server_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, version = excluded.version, seq = excluded.seq, deleted = excluded.deleted, dirty = excluded.dirty, server_updated_at = excluded.server_updated_at, updated_at = excluded.updated_at"
+      )
+      .run(
+        record.id,
+        record.title,
+        record.content,
+        record.version,
+        record.seq,
+        record.deleted ? 1 : 0,
+        record.dirty ? 1 : 0,
+        record.serverUpdatedAt,
+        record.createdAt,
+        record.updatedAt
+      );
+    return record;
+  }
+
+  public deleteCloudNote(id: string): void {
+    this.#db.prepare("DELETE FROM cloud_notes WHERE id = ?").run(id);
+  }
+
+  public getCloudNotesAccount(): CloudNotesAccount | null {
+    const row = this.#db.prepare("SELECT * FROM cloud_notes_account WHERE id = 'default'").get() as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    return {
+      serverUrl: String(row.server_url ?? ""),
+      userId: String(row.user_id ?? ""),
+      email: String(row.email ?? ""),
+      displayName: String(row.display_name ?? ""),
+      accessToken: String(row.access_token ?? ""),
+      refreshToken: String(row.refresh_token ?? ""),
+      tokenExpiresAt: String(row.token_expires_at ?? ""),
+      cursor: Number(row.cursor ?? 0) || 0,
+      lastSyncedAt: typeof row.last_synced_at === "string" ? row.last_synced_at : null,
+      deviceId: String(row.device_id ?? "")
+    };
+  }
+
+  public saveCloudNotesAccount(account: CloudNotesAccount): CloudNotesAccount {
+    this.#db
+      .prepare(
+        "INSERT INTO cloud_notes_account (id, server_url, email, display_name, user_id, access_token, refresh_token, token_expires_at, cursor, last_synced_at, device_id, updated_at) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET server_url = excluded.server_url, email = excluded.email, display_name = excluded.display_name, user_id = excluded.user_id, access_token = excluded.access_token, refresh_token = excluded.refresh_token, token_expires_at = excluded.token_expires_at, cursor = excluded.cursor, last_synced_at = excluded.last_synced_at, device_id = excluded.device_id, updated_at = excluded.updated_at"
+      )
+      .run(
+        account.serverUrl,
+        account.email,
+        account.displayName,
+        account.userId,
+        account.accessToken,
+        account.refreshToken,
+        account.tokenExpiresAt,
+        account.cursor,
+        account.lastSyncedAt,
+        account.deviceId,
+        nowIso()
+      );
+    return account;
+  }
+
+  public updateCloudNotesAccountState(input: {
+    accessToken?: string;
+    refreshToken?: string;
+    tokenExpiresAt?: string;
+    cursor?: number;
+    lastSyncedAt?: string | null;
+  }): void {
+    const current = this.getCloudNotesAccount();
+    if (!current) return;
+    this.saveCloudNotesAccount({
+      ...current,
+      accessToken: input.accessToken ?? current.accessToken,
+      refreshToken: input.refreshToken ?? current.refreshToken,
+      tokenExpiresAt: input.tokenExpiresAt ?? current.tokenExpiresAt,
+      cursor: input.cursor ?? current.cursor,
+      lastSyncedAt: input.lastSyncedAt === undefined ? current.lastSyncedAt : input.lastSyncedAt
+    });
+  }
+
+  public clearCloudNotesAccount(): void {
+    this.#db.prepare("DELETE FROM cloud_notes_account WHERE id = 'default'").run();
   }
 
   public deleteKnowledgeDocumentBySourcePath(knowledgeBaseId: string, sourcePath: string): void {

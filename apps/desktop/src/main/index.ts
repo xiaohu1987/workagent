@@ -794,6 +794,17 @@ function registerIpc(): void {
   ipcMain.handle("quick-notes:save", (_event, payload: { id?: string; title?: string; content: string }) => backend.saveQuickNote(payload));
   ipcMain.handle("quick-notes:delete", (_event, id: string) => backend.deleteQuickNote(id));
   ipcMain.handle("quick-notes:ai-create", (_event, payload: { prompt: string; context: string }) => backend.createQuickNoteWithAi(payload.prompt, payload.context));
+  ipcMain.handle("cloud-notes:status", () => backend.getCloudNotesStatus());
+  ipcMain.handle("cloud-notes:configure", (_event, payload: { serverUrl?: string; email?: string; displayName?: string; deviceId?: string }) => backend.configureCloudNotes(payload));
+  ipcMain.handle("cloud-notes:login", (_event, payload: { password: string; register?: boolean }) => backend.loginCloudNotes(payload.password, payload.register === true));
+  ipcMain.handle("cloud-notes:logout", () => backend.logoutCloudNotes());
+  ipcMain.handle("cloud-notes:sync", () => backend.syncCloudNotes());
+  ipcMain.handle("cloud-notes:list", () => backend.listCloudNotes());
+  ipcMain.handle("cloud-notes:save", (_event, payload: { id?: string; title?: string; content: string; dirty?: boolean }) => backend.saveCloudNote(payload));
+  ipcMain.handle("cloud-notes:delete", (_event, id: string) => backend.deleteCloudNote(id));
+  ipcMain.handle("cloud-notes:links", () => backend.listCloudNoteLinks());
+  ipcMain.handle("cloud-notes:pull-to-quick-note", (_event, cloudNoteId: string) => backend.pullCloudNoteToQuickNote(cloudNoteId));
+  ipcMain.handle("cloud-notes:sync-quick-note", (_event, quickNoteId: string) => backend.syncQuickNoteToCloud(quickNoteId));
   ipcMain.handle("browser:open", (_event, payload) => backend.openBrowserTab(payload.threadId, payload.url, payload.openMode));
   ipcMain.handle("browser:navigate", (_event, payload) =>
     backend.navigateBrowserTab(payload.threadId, payload.tabId, payload.url)

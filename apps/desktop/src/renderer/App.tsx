@@ -287,6 +287,7 @@ import { MultimodalSettingsPage } from "./settings/pages/models/multimodal-page"
 import { ProviderSettingsPage } from "./settings/pages/models/provider-page";
 import { ApiFavoritesPage } from "./settings/pages/knowledge/api-favorites-page";
 import { KnowledgePage } from "./settings/pages/knowledge/knowledge-page";
+import { CloudNotesPage } from "./settings/pages/connections/cloud-notes-page";
 import { MemoryPage } from "./settings/pages/knowledge/memory-page";
 import { ResponseTonePage } from "./settings/pages/general/response-tone-page";
 import { RuntimeOverviewPage } from "./settings/pages/general/runtime-overview-page";
@@ -979,7 +980,10 @@ export function App() {
     changeContent: changeQuickNoteContent,
     save: saveQuickNote,
     rename: renameQuickNote,
-    remove: deleteQuickNote
+    remove: deleteQuickNote,
+    syncingCloud: quickNoteSyncingCloud,
+    syncToCloud: syncQuickNoteToCloud,
+    selectedCloudNoteId: selectedQuickNoteCloudId
   } = quickNotesState;
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const historySearch = useHistorySearch(showNotice);
@@ -8148,6 +8152,9 @@ export function App() {
                   void sendApiCardFavoriteToChat(favorite);
                 }} threadId={selectedThreadId} />
               ) : null}
+              {settingsTab === "cloudNotes" ? (
+                <CloudNotesPage showNotice={showNotice} />
+              ) : null}
               {settingsTab === "memory" ? (
                 <MemoryPage configDraft={configDraft} setConfigDraft={setConfigDraft} selfImprovementMemories={selfImprovementMemories} visibleSelfImprovementMemories={visibleSelfImprovementMemories} selfImprovementMemoryStats={selfImprovementMemoryStats} memoryScopeFilter={memoryScopeFilter} setMemoryScopeFilter={setMemoryScopeFilter} selfImprovementMemoryListRef={selfImprovementMemoryListRef} safeSelfImprovementMemoryPage={safeSelfImprovementMemoryPage} selfImprovementMemoryPageCount={selfImprovementMemoryPageCount} setSelfImprovementMemoryPage={setSelfImprovementMemoryPage} isRefreshingSelfImprovementMemories={isRefreshingSelfImprovementMemories} isClearingSelfImprovement={isClearingSelfImprovement} onRefreshMemories={refreshSelfImprovementNow} onOpenClearMemories={() => setIsClearSelfImprovementConfirmOpen(true)} onSaveConfig={saveConfigDraft} onDeleteMemory={deleteSelfImprovementMemory} errorSolutionModelFilter={errorSolutionModelFilter} setErrorSolutionModelFilter={setErrorSolutionModelFilter} setErrorSolutionPage={setErrorSolutionPage} onRefreshErrorSolutions={refreshErrorSolutions} errorSolutionModelOptions={errorSolutionModelOptions} errorSolutions={errorSolutions} visibleErrorSolutions={visibleErrorSolutions} errorSolutionListRef={errorSolutionListRef} safeErrorSolutionPage={safeErrorSolutionPage} errorSolutionPageCount={errorSolutionPageCount} isClearingErrorSolutions={isClearingErrorSolutions} errorSolutionBusyId={errorSolutionBusyId} expandedErrorSolutionIds={expandedErrorSolutionIds} resolveModelLabel={resolveErrorSolutionModelLabel} getRecallStatus={getErrorSolutionRecallStatus} formatRelativeTime={formatRelativeTime} onToggleExpanded={toggleErrorSolutionExpanded} onDeleteErrorSolution={deleteErrorSolution} onOpenClearErrorSolutions={() => setIsClearErrorSolutionsConfirmOpen(true)} />
               ) : null}
@@ -8207,6 +8214,9 @@ export function App() {
           onCloseDeleteConfirm={() => setQuickNoteDeleteConfirm(null)}
           onRename={renameQuickNote}
           onContentChange={changeQuickNoteContent}
+          cloudNoteId={selectedQuickNoteCloudId}
+          syncingCloud={quickNoteSyncingCloud}
+          onSyncToCloud={syncQuickNoteToCloud}
           onSave={saveQuickNote}
           onDelete={deleteQuickNote}
         />

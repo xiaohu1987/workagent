@@ -3082,11 +3082,18 @@ class ThreadSessionRuntime {
           selectedMcpToolsOnly.length,
           providerRequestLimitRecoveryAttempts
         );
-        const requestTools = prioritizeToolsForProvider({
-          tools: selectedMcpToolsOnly.filter((tool) => !suppressSkillLoaderForTurn || tool.name !== "skills.load"),
-          promotedToolNames: promotedProviderToolNames,
-          maxTools: requestToolBudget
-        });
+        // Tool schemas never enter the transcript, so context compaction can
+        // never shrink them. Give them an explicit slice of the input budget and
+        // shorten descriptions (then drop trailing tools) when a large MCP
+        // toolbox would otherwise make every request exceed the model window.
+        const requestTools = fitToolSchemasForContextBudget(
+          prioritizeToolsForProvider({
+            tools: selectedMcpToolsOnly.filter((tool) => !suppressSkillLoaderForTurn || tool.name !== "skills.load"),
+            promotedToolNames: promotedProviderToolNames,
+            maxTools: requestToolBudget
+          }),
+          Math.max(1_024, Math.floor(contextBudgetPlan.maxInputTokens * 0.4))
+        );
         const requestAvailableToolsPrompt = formatAvailableTools(requestTools, {
           includeSchemas: !agentToolsEnabled
         });
@@ -10720,6 +10727,18 @@ export function buildRuntimeFailureRecoveryMessage(error: unknown): string {
     ].join("\n");
   }
 
+  if (error instanceof ContextInputLimitError) {
+    const segmentLabel = error.segment === "current_user_message"
+      ? "当前消息本身"
+      : "当前请求所需的上下文";
+    return [
+      "任务暂时停止：本次请求需要的上下文超出模型的输入预算，运行时已无法在保留关键信息的前提下继续压缩。",
+      `原因：${segmentLabel}估算约 ${error.estimatedTokens} tokens，超过该模型 ${error.maxInputTokens} tokens 的输入预算上限。`,
+      "已完成的工具结果和项目文件都已保留。直接重新发送“继续”即可，系统会带着压缩后的上下文接着执行。",
+      "若反复出现，可改用上下文窗口更大的模型，或把任务拆成更小的步骤。"
+    ].join("\n");
+  }
+
   if (error instanceof ModelDecisionTimeoutError) {
     return [
       "任务暂时停止：模型在限定时间内没有返回可执行决策，已自动重试多次仍未成功。",
@@ -11827,7 +11846,61 @@ export function fitSystemPromptForContextBudget(systemPrompt: string, tokenBudge
   if (estimateRuntimeTokens(next) <= safeBudget) return next;
 
   next = rewritePromptHeadingSection(next, "## Workflow Packs", () => "");
-  return next;
+  if (estimateRuntimeTokens(next) <= safeBudget) return next;
+
+  // Last resort: dropping the removable sections above was not enough, so trim
+  // the remainder rather than letting the turn die in ContextInputLimitError.
+  // Head and tail are preserved, which keeps the opening rules and the trailing
+  // tool/protocol instructions readable.
+  return truncateToRuntimeTokenBudget(next, safeBudget);
+}
+
+/**
+ * Keeps the native tool-schema block inside its share of the input budget.
+ *
+ * Tool schemas are the one context segment compaction cannot reach: they are
+ * rebuilt from the registry on every request and never enter the transcript, so
+ * a provider exposing dozens of MCP tools can push the estimate far past the
+ * window while every compaction round keeps reporting a healthy transcript.
+ * Descriptions are shortened first so every tool stays callable; only when that
+ * is not enough are trailing tools dropped, and `prioritizeToolsForProvider`
+ * has already ordered the important ones first.
+ */
+export function fitToolSchemasForContextBudget<T extends { name: string; description?: string }>(
+  tools: T[],
+  tokenBudget: number
+): T[] {
+  if (tools.length === 0) return tools;
+  const serializedTokens = (list: T[]): number => estimateRuntimeTokens(JSON.stringify(list.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: (tool as { inputSchema?: unknown }).inputSchema
+  }))));
+  if (serializedTokens(tools) <= tokenBudget) return tools;
+
+  let trimmed = tools;
+  for (const descriptionBudget of [
+    Math.max(96, Math.floor(tokenBudget / tools.length)),
+    48,
+    16
+  ]) {
+    trimmed = tools.map((tool) => Object.assign({}, tool, {
+      description: tool.description
+        ? truncateToRuntimeTokenBudget(tool.description, descriptionBudget)
+        : tool.description
+    }));
+    if (serializedTokens(trimmed) <= tokenBudget) return trimmed;
+  }
+
+  const kept: T[] = [];
+  let usedTokens = 0;
+  for (const tool of trimmed) {
+    const toolTokens = serializedTokens([tool]);
+    if (kept.length > 0 && usedTokens + toolTokens > tokenBudget) break;
+    kept.push(tool);
+    usedTokens += toolTokens;
+  }
+  return kept;
 }
 
 export function selectBudgetedHistory(
@@ -12016,7 +12089,10 @@ export function compactTranscriptForContext(
   const recentBudget = options.force
     ? Math.min(Math.floor(targetTranscriptTokens * 0.7), Math.max(256, Math.floor(transcriptTokens * 0.6)))
     : Math.floor(targetTranscriptTokens * 0.7);
-  const recentMessages = selectProtocolSafeRecentMessagesByBudget(transcript, recentBudget);
+  const recentMessages = truncateTranscriptUnitsToTokenBudget(
+    selectProtocolSafeRecentMessagesByBudget(transcript, recentBudget),
+    recentBudget
+  );
   const earlierMessages = transcript.slice(0, Math.max(0, transcript.length - recentMessages.length));
   const summaryBudget = Math.max(120, Math.floor(targetTranscriptTokens * 0.3));
   const summary = buildCompactedTranscriptSummary(earlierMessages, summaryBudget);
@@ -12083,7 +12159,7 @@ function buildCompactedTranscriptSummary(
   return truncateToRuntimeTokenBudget(source, tokenBudget);
 }
 
-function estimateRuntimeTranscriptTokens(transcript: ProviderTurnInput["transcript"]): number {
+export function estimateRuntimeTranscriptTokens(transcript: ProviderTurnInput["transcript"]): number {
   return transcript.reduce((total, message) => {
     let tokens = estimateRuntimeTokens(message.content);
     if (message.reasoningContent) {
@@ -12126,6 +12202,92 @@ function selectProtocolSafeRecentMessagesByBudget(
     endIndex = unitStartIndex;
   }
   return transcript.slice(startIndex);
+}
+
+/**
+ * Final safety net for the "the latest evidence is never truncated" rule.
+ *
+ * `selectProtocolSafeRecentMessagesByBudget` keeps the newest protocol unit no
+ * matter how large it is, which makes a single oversized tool result or
+ * tool-call argument (e.g. an apply_patch body) impossible to compact: every
+ * round keeps it, the estimate stays above budget and the turn dies with
+ * ContextInputLimitError. When that happens the trimming has to happen *inside*
+ * the unit. Message boundaries, tool-call ids and call/result pairing are all
+ * preserved so the provider still receives a valid transcript; only bulk text
+ * (tool result body, reasoning echo, oversized string arguments) is shortened.
+ */
+export function truncateTranscriptUnitsToTokenBudget(
+  messages: ProviderTurnInput["transcript"],
+  tokenBudget: number
+): ProviderTurnInput["transcript"] {
+  if (messages.length === 0) return messages;
+  const safeBudget = Math.max(256, Math.floor(tokenBudget));
+  if (estimateRuntimeTranscriptTokens(messages) <= safeBudget) return messages;
+
+  let remaining = safeBudget;
+  return messages.map((message, index) => {
+    const messagesLeft = messages.length - index;
+    const share = Math.max(32, Math.floor(remaining / messagesLeft));
+    const truncatedMessage = truncateTranscriptMessageToTokenBudget(message, share);
+    remaining = Math.max(0, remaining - estimateRuntimeTranscriptTokens([truncatedMessage]));
+    return truncatedMessage;
+  });
+}
+
+function truncateTranscriptMessageToTokenBudget(
+  message: ProviderTurnInput["transcript"][number],
+  tokenBudget: number
+): ProviderTurnInput["transcript"][number] {
+  if (estimateRuntimeTranscriptTokens([message]) <= tokenBudget) return message;
+
+  const budget = Math.max(0, Math.floor(tokenBudget));
+  const content = truncateToRuntimeTokenBudget(message.content, budget);
+  let remaining = Math.max(0, budget - estimateRuntimeTokens(content));
+
+  let reasoningContent = message.reasoningContent;
+  if (reasoningContent) {
+    reasoningContent = truncateToRuntimeTokenBudget(reasoningContent, Math.floor(remaining * 0.5));
+    remaining = Math.max(0, remaining - estimateRuntimeTokens(reasoningContent));
+  }
+
+  const calls = message.toolCalls;
+  const perCallBudget = calls && calls.length > 0 ? Math.max(32, Math.floor(remaining / calls.length)) : 0;
+  const toolCalls = calls
+    ? calls.map((call) => ({
+      ...call,
+      arguments: truncateToolCallArgumentsToBudget(call.arguments, perCallBudget)
+    }))
+    : calls;
+
+  return { ...message, content, reasoningContent, toolCalls };
+}
+
+function truncateToolCallArgumentsToBudget(
+  args: Record<string, unknown>,
+  tokenBudget: number
+): Record<string, unknown> {
+  if (Object.keys(args).length === 0) return args;
+  if (estimateRuntimeTokens(JSON.stringify(args)) <= tokenBudget) return args;
+
+  // Shorten the longest string fields first (patch bodies, file contents,
+  // shell commands); every key stays present so the call keeps its shape.
+  const next: Record<string, unknown> = { ...args };
+  // Fields below this size are structural, not bulk: a path, a flag, a search
+  // pattern. Truncating them saves nothing and destroys meaning, and with a
+  // squeeze to one or two tokens they collapse to a single punctuation
+  // character. Only genuinely oversized payloads are trimmed.
+  const minimumFieldTokens = 32;
+  const stringEntries = Object.entries(next)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)
+    .sort((left, right) => right[1].length - left[1].length);
+  for (const [key, value] of stringEntries) {
+    if (estimateRuntimeTokens(value) <= minimumFieldTokens) break;
+    const availableTokens = tokenBudget - estimateRuntimeTokens(JSON.stringify({ ...next, [key]: "" }));
+    if (availableTokens <= minimumFieldTokens) break;
+    next[key] = truncateToRuntimeTokenBudget(value, availableTokens);
+    if (estimateRuntimeTokens(JSON.stringify(next)) <= tokenBudget) break;
+  }
+  return next;
 }
 
 function findProtocolSafeUnitStart(
@@ -12189,7 +12351,11 @@ function truncateToRuntimeTokenBudget(content: string, tokenBudget: number): str
       high = retainedCharacters - 1;
     }
   }
-  return best || marker.trim().slice(0, Math.max(1, safeBudget));
+  if (best) return best;
+  // The budget cannot even hold the marker. Keep a plain prefix of the original
+  // content rather than a punctuation fragment of the marker itself, which used
+  // to turn a short value like "a.ts" into ".".
+  return content.slice(0, Math.max(1, Math.floor(safeBudget * 2)));
 }
 
 const BROWSER_OBSERVATION_FINGERPRINT_PREFIXES = [

@@ -249,13 +249,26 @@ function redactSecrets(value: unknown): unknown {
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [
       key,
-      /token|authorization|secret|password|code_verifier|access_token|refresh_token/i.test(key) ? "[redacted]" : redactSecrets(child)
+      isSensitiveLogKey(key) && !isNumericDiagnostic(child) ? "[redacted]" : redactSecrets(child)
     ]));
   }
   if (typeof value === "string") {
     return value.replace(/Bearer\s+[^\s,;]+/gi, "Bearer [redacted]");
   }
   return value;
+}
+
+function isSensitiveLogKey(key: string): boolean {
+  return /token|authorization|secret|password|code_verifier|access_token|refresh_token/i.test(key);
+}
+
+// Token *counts* are diagnostics, not credentials. Keys such as
+// `estimatedInputTokens`, `beforeTokens` or `segments[].tokens` hold numbers,
+// and redacting them made context-budget failures impossible to explain after
+// the fact. Numbers and booleans always pass through; only string-ish payloads
+// under a sensitive key are masked.
+function isNumericDiagnostic(value: unknown): boolean {
+  return typeof value === "number" || typeof value === "boolean";
 }
 
 function safeFileName(value: string): string {

@@ -199,6 +199,10 @@ import {
   validateFollowUpSourceToolCall,
   createContextBudgetPlan,
   fitSystemPromptForContextBudget,
+  fitToolSchemasForContextBudget,
+  truncateTranscriptUnitsToTokenBudget,
+  estimateRuntimeTranscriptTokens,
+  ContextInputLimitError,
   selectBudgetedHistory,
   resolveModel,
   resolveTurnContextCapsuleTokenBudget,
@@ -3167,6 +3171,94 @@ describe("context compaction", () => {
     expect(result.compacted).toBe(true);
     expect(retainedEnvelope?.toolCalls).toHaveLength(10);
     expect(retainedResultIds).toEqual(calls.map((call) => call.id));
+  });
+
+  it("truncates inside a single oversized protocol unit instead of failing the request", () => {
+    const transcript = [
+      { role: "user" as const, content: "please inspect" },
+      {
+        role: "assistant" as const,
+        content: "",
+        toolCalls: [{
+          id: "native-call",
+          name: "fs.write_file",
+          arguments: { path: "a.ts", content: "x".repeat(400_000) }
+        }]
+      },
+      { role: "tool" as const, toolCallId: "native-call", content: `fs.write_file\n${"y".repeat(400_000)}` }
+    ];
+
+    const bounded = truncateTranscriptUnitsToTokenBudget(transcript, 2_000);
+
+    expect(estimateRuntimeTranscriptTokens(bounded)).toBeLessThanOrEqual(2_000);
+    expect(bounded).toHaveLength(3);
+    expect(bounded[1]?.toolCalls?.[0]?.id).toBe("native-call");
+    expect(bounded[1]?.toolCalls?.[0]?.name).toBe("fs.write_file");
+    expect(bounded[1]?.toolCalls?.[0]?.arguments.path).toBe("a.ts");
+    expect(bounded[2]?.toolCallId).toBe("native-call");
+  });
+
+  it("converges when the newest transcript unit alone exceeds the input budget", () => {
+    const transcript = [
+      ...Array.from({ length: 10 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" as const : "assistant" as const,
+        content: `older message ${index} ${"x".repeat(800)}`
+      })),
+      { role: "tool" as const, content: `fs.read_file\n${"z".repeat(500_000)}` }
+    ];
+
+    const result = compactTranscriptForContext(transcript, 8_000, "system instructions", { force: true });
+
+    expect(result.compacted).toBe(true);
+    expect(result.afterTokens).toBeLessThanOrEqual(8_000 * CONTEXT_COMPACTION_THRESHOLD);
+  });
+
+  it("caps the system prompt when no removable section is left", () => {
+    const prompt = `SAFETY_RULES\n\n## Project Instructions\n${"rule ".repeat(60_000)}`;
+    const fitted = fitSystemPromptForContextBudget(prompt, 1_000);
+
+    expect(estimateRuntimeTokens(fitted)).toBeLessThanOrEqual(1_000);
+    expect(fitted).toContain("SAFETY_RULES");
+  });
+
+  it("keeps tool schemas inside their share of the input budget", () => {
+    const padded = Array.from({ length: 20 }, (_, index) => ({
+      name: `tool-${index}`,
+      description: `description ${index} ${"d".repeat(2_000)}`,
+      inputSchema: { type: "object", properties: {} }
+    }));
+
+    const trimmed = fitToolSchemasForContextBudget(padded, 1_500);
+
+    expect(estimateRuntimeTokens(JSON.stringify(trimmed))).toBeLessThanOrEqual(1_500);
+    expect(trimmed[0]?.name).toBe("tool-0");
+    expect(trimmed[0]?.description?.length ?? 0).toBeLessThan(2_000);
+  });
+
+  it("drops trailing tools when their schemas cannot be shortened further", () => {
+    const bulky = Array.from({ length: 30 }, (_, index) => ({
+      name: `bulk-tool-${index}`,
+      description: "short",
+      inputSchema: { type: "object", properties: { blob: { type: "string", description: "b".repeat(4_000) } } }
+    }));
+
+    const trimmed = fitToolSchemasForContextBudget(bulky, 2_000);
+
+    expect(trimmed[0]?.name).toBe("bulk-tool-0");
+    expect(trimmed.length).toBeLessThan(bulky.length);
+  });
+});
+
+describe("context input limit failure message", () => {
+  it("explains the budget overrun in Chinese with a next step", () => {
+    const message = buildRuntimeFailureRecoveryMessage(
+      new ContextInputLimitError(2_214_548, 192_000, "required_context")
+    );
+
+    expect(message).toContain("超出模型的输入预算");
+    expect(message).toContain("2214548");
+    expect(message).toContain("192000");
+    expect(message).not.toContain("无法自动恢复");
   });
 });
 

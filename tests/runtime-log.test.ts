@@ -66,6 +66,23 @@ describe("RuntimeLogWriter", () => {
     expect(entries[1]?.payload.content).toBe("done");
   });
 
+  it("keeps numeric token diagnostics while still masking token values", async () => {
+    const logsDir = await makeTempDir();
+    const writer = new RuntimeLogWriter(logsDir);
+    await writer.append("agent.context_measured", {
+      estimatedInputTokens: 2_214_548,
+      maxInputTokens: 192_000,
+      segments: [{ id: "system", tokens: 10 }],
+      access_token: "sk-live-secret"
+    }, "thread-1");
+
+    const entries = await writer.readSession("thread-1");
+    expect(entries[0]?.payload.estimatedInputTokens).toBe(2_214_548);
+    expect(entries[0]?.payload.maxInputTokens).toBe(192_000);
+    expect(entries[0]?.payload.segments).toEqual([{ id: "system", tokens: 10 }]);
+    expect(entries[0]?.payload.access_token).toBe("[redacted]");
+  });
+
   it("preserves event order when many records are queued in one batch", async () => {
     const logsDir = await makeTempDir();
     const writer = new RuntimeLogWriter(logsDir);

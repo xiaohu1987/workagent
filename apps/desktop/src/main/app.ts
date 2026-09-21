@@ -6,6 +6,8 @@ import { EventEmitter } from "node:events";
 import * as cheerio from "cheerio";
 import iconv from "iconv-lite";
 import { app, BrowserWindow, desktopCapturer, net, screen, shell, webContents } from "electron";
+import { CloudNotesService, type CloudNotesStatusView } from "./cloud-notes-service";
+import type { CloudNoteRecord } from "./cloud-notes";
 import type { WebContents } from "electron";
 import type {
   AttachmentImportInput,
@@ -331,6 +333,10 @@ export class DesktopBackend {
   #logs!: RuntimeLogWriter;
   #deferredServices: Promise<void> | null = null;
   #backgroundSkillRefresh: Promise<void> | null = null;
+  #cloudNotes: CloudNotesService | null = null;
+
+  /** 后台静默同步队列：保证同一时刻只有一次同步在飞，避免版本号互相踩踏。 */
+  #cloudSyncQueue: Promise<void> = Promise.resolve();
   readonly #subagentDispatches = new Map<string, Promise<void>>();
   readonly #subagentProgress = new Map<string, SubagentProgress>();
   readonly #publishedSubagentSummaryIds = new Set<string>();
@@ -3797,11 +3803,20 @@ export class DesktopBackend {
     });
   }
 
-  public listQuickNotes(): QuickNoteRecord[] {
-    return this.#db.listQuickNotes();
+  public listQuickNotes(): Array<QuickNoteRecord & { cloudNoteId: string | null }> {
+    const links = new Map(this.#db.listCloudNoteLinks().map((link) => [link.quickNoteId, link.cloudNoteId]));
+    return this.#db.listQuickNotes().map((note) => ({ ...note, cloudNoteId: links.get(note.id) ?? null }));
   }
 
   public saveQuickNote(input: { id?: string; title?: string; content: string }): QuickNoteRecord {
+    const note = this.persistQuickNote(input);
+    // 已关联云笔记的随手记：改完立刻推一次，实现双向即时同步。
+    this.pushQuickNoteToCloud(note.id);
+    return note;
+  }
+
+  /** 只写本地存储与知识库；云笔记回流、关联拉取也复用它，避免再次触发推送。 */
+  private persistQuickNote(input: { id?: string; title?: string; content: string }): QuickNoteRecord {
     const content = input.content.trim();
     if (!content) throw new Error("笔记内容不能为空。");
     const existing = input.id ? this.#db.getQuickNote(input.id) : null;
@@ -3835,7 +3850,147 @@ export class DesktopBackend {
     if (!note) return;
     this.#db.deleteKnowledgeDocumentBySourcePath(note.knowledgeBaseId, note.knowledgeSourcePath);
     this.#db.deleteQuickNote(id);
+    // 删除本地随手记不删云笔记，只解开关联，避免误删服务端数据。
+    this.#db.deleteCloudNoteLinkByQuickNote(id);
     this.#db.updateKnowledgeBase(note.knowledgeBaseId, { status: "ready" });
+  }
+
+  private cloudNotesService(): CloudNotesService {
+    this.#cloudNotes ??= new CloudNotesService(this.#db);
+    return this.#cloudNotes;
+  }
+
+  public getCloudNotesStatus(): CloudNotesStatusView {
+    return this.cloudNotesService().getStatus();
+  }
+
+  public configureCloudNotes(input: { serverUrl?: string; email?: string; displayName?: string; deviceId?: string }): CloudNotesStatusView {
+    return this.cloudNotesService().configure(input);
+  }
+
+  public loginCloudNotes(password: string, register = false): Promise<CloudNotesStatusView> {
+    return this.cloudNotesService().login(password, register);
+  }
+
+  public logoutCloudNotes(): Promise<void> {
+    return this.cloudNotesService().logout();
+  }
+
+  public listCloudNotes(): CloudNoteRecord[] {
+    return this.cloudNotesService().list();
+  }
+
+  public saveCloudNote(input: { id?: string; title?: string; content: string; dirty?: boolean }): CloudNoteRecord {
+    const note = this.cloudNotesService().save(input);
+    // 已关联随手记时，云笔记的编辑立刻回写到本地随手记。
+    this.applyCloudNoteToLinkedQuickNote(note.id);
+    return note;
+  }
+
+  public deleteCloudNote(id: string): void {
+    this.cloudNotesService().remove(id);
+    this.#db.deleteCloudNoteLinkByCloudNote(id);
+  }
+
+  public syncCloudNotes() {
+    return this.cloudNotesService().sync().then((view) => {
+      this.applyCloudNotesToLinkedQuickNotes(view.changedIds);
+      return view;
+    });
+  }
+
+  public listCloudNoteLinks(): Array<{ cloudNoteId: string; quickNoteId: string; createdAt: string; updatedAt: string }> {
+    return this.#db.listCloudNoteLinks();
+  }
+
+  /** 把云笔记拉成（或刷新成）一条本地随手记，并建立双向关联。 */
+  public pullCloudNoteToQuickNote(cloudNoteId: string): { cloudNoteId: string; quickNoteId: string } {
+    const cloudNote = this.#db.getCloudNote(cloudNoteId);
+    if (!cloudNote || cloudNote.deleted) throw new Error("这条云笔记已不存在，无法拉取到随手记。");
+    const link = this.#db.getCloudNoteLinkByCloudNote(cloudNoteId);
+    const quickNote = this.persistQuickNote({
+      id: link?.quickNoteId,
+      title: cloudNote.title,
+      content: cloudNote.content
+    });
+    this.#db.upsertCloudNoteLink(cloudNoteId, quickNote.id);
+    return { cloudNoteId, quickNoteId: quickNote.id };
+  }
+
+  /** 随手记同步到云笔记：已关联就更新，未关联就新建，然后立刻做一次往返同步。 */
+  public async syncQuickNoteToCloud(
+    quickNoteId: string
+  ): Promise<{ cloudNoteId: string; synced: boolean; message: string }> {
+    const quickNote = this.#db.getQuickNote(quickNoteId);
+    if (!quickNote) throw new Error("随手记不存在，可能已被删除。");
+    const link = this.#db.getCloudNoteLinkByQuickNote(quickNoteId);
+    const cloudNote = this.cloudNotesService().save({
+      id: link?.cloudNoteId,
+      title: quickNote.title,
+      content: quickNote.content
+    });
+    this.#db.upsertCloudNoteLink(cloudNote.id, quickNoteId);
+    try {
+      const outcome = await this.syncCloudNotes();
+      return { cloudNoteId: cloudNote.id, synced: outcome.pushed > 0, message: "" };
+    } catch (error) {
+      // 内容已经进本地待推送队列，网络恢复后再同步即可，这里只回报原因。
+      return {
+        cloudNoteId: cloudNote.id,
+        synced: false,
+        message: error instanceof Error ? error.message : "同步失败。"
+      };
+    }
+  }
+
+  /** 后台静默同步：把本地改动推上去，失败不打断编辑。 */
+  public syncCloudNotesQuietly(): Promise<void> {
+    const account = this.#db.getCloudNotesAccount();
+    if (!account?.accessToken) return Promise.resolve();
+    this.#cloudSyncQueue = this.#cloudSyncQueue
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await this.syncCloudNotes();
+        } catch {
+          // 失败原因通过 getCloudNotesStatus / syncCloudNotes 暴露，这里保持编辑流畅。
+        }
+      });
+    return this.#cloudSyncQueue;
+  }
+
+  private pushQuickNoteToCloud(quickNoteId: string): void {
+    const link = this.#db.getCloudNoteLinkByQuickNote(quickNoteId);
+    if (!link) return;
+    const cloudNote = this.#db.getCloudNote(link.cloudNoteId);
+    if (!cloudNote || cloudNote.deleted) {
+      this.#db.deleteCloudNoteLinkByQuickNote(quickNoteId);
+      return;
+    }
+    const quickNote = this.#db.getQuickNote(quickNoteId);
+    if (!quickNote) return;
+    if (cloudNote.title === quickNote.title && cloudNote.content === quickNote.content) return;
+    this.cloudNotesService().save({ id: cloudNote.id, title: quickNote.title, content: quickNote.content });
+    void this.syncCloudNotesQuietly();
+  }
+
+  private applyCloudNoteToLinkedQuickNote(cloudNoteId: string): void {
+    const link = this.#db.getCloudNoteLinkByCloudNote(cloudNoteId);
+    if (!link) return;
+    const cloudNote = this.#db.getCloudNote(cloudNoteId);
+    const quickNote = this.#db.getQuickNote(link.quickNoteId);
+    if (!quickNote || !cloudNote || cloudNote.deleted) {
+      this.#db.deleteCloudNoteLinkByCloudNote(cloudNoteId);
+      return;
+    }
+    if (quickNote.title === cloudNote.title && quickNote.content === cloudNote.content) return;
+    this.persistQuickNote({ id: quickNote.id, title: cloudNote.title, content: cloudNote.content });
+  }
+
+  private applyCloudNotesToLinkedQuickNotes(changedIds: string[]): void {
+    for (const cloudNoteId of changedIds) {
+      this.applyCloudNoteToLinkedQuickNote(cloudNoteId);
+    }
   }
 
   public async createQuickNoteWithAi(prompt: string, context: string): Promise<string> {

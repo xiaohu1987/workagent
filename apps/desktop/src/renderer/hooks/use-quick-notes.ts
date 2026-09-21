@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 
-export type QuickNote = { id: string; title: string; content: string; updatedAt: string };
+export type QuickNote = { id: string; title: string; content: string; updatedAt: string; cloudNoteId: string | null };
 export type QuickNoteListMenu = { x: number; y: number; note: Pick<QuickNote, "id" | "title" | "content"> } | null;
 export type QuickNoteDeleteConfirm = { id: string; title: string } | null;
 
@@ -18,6 +18,7 @@ export function useQuickNotes(showNotice: Notice) {
   const [renameDraft, setRenameDraft] = useState("");
   const [listMenu, setListMenu] = useState<QuickNoteListMenu>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<QuickNoteDeleteConfirm>(null);
+  const [syncingCloud, setSyncingCloud] = useState(false);
   const contentRef = useRef("");
 
   async function open() {
@@ -113,10 +114,50 @@ export function useQuickNotes(showNotice: Notice) {
     showNotice("随手记已删除", { tone: "success" });
   }
 
+  /** 已建立关联的随手记：更新同一条云笔记；未关联则新建一条并建立双向关联。 */
+  async function syncToCloud() {
+    if (!selectedId) {
+      setStatus("请先保存这条随手记，再同步到云笔记。");
+      return;
+    }
+    const pending = contentRef.current;
+    if (!pending.trim()) {
+      setStatus("请先填写笔记内容");
+      return;
+    }
+    setSyncingCloud(true);
+    setStatus("正在同步到云笔记...");
+    try {
+      if (pending !== content) {
+        // 先把编辑器里的最新内容落库，保证推给云端的是当前版本。
+        await window.codexh.saveQuickNote({ id: selectedId, title, content: pending });
+      }
+      const result = await window.codexh.syncQuickNoteToCloud(selectedId);
+      setNotes(await window.codexh.listQuickNotes());
+      if (result.synced) {
+        setStatus("已同步到云笔记");
+        showNotice("已同步到云笔记", { tone: "success", message: "之后两边修改会立即相互同步。" });
+      } else {
+        const reason = result.message || "服务器暂时不可达。";
+        setStatus(`已保存，云笔记待重试：${reason}`);
+        showNotice("已保存，云笔记同步待重试", { tone: "warning", message: reason });
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "请稍后重试。";
+      setStatus(reason);
+      showNotice("同步到云笔记失败", { message: reason });
+    } finally {
+      setSyncingCloud(false);
+    }
+  }
+
+  const selectedCloudNoteId = notes.find((note) => note.id === selectedId)?.cloudNoteId ?? null;
+
   return {
     isOpen, setIsOpen, notes, selectedId, title, content, saving, status,
     renamingId, setRenamingId, renameDraft, setRenameDraft,
     listMenu, setListMenu, deleteConfirm, setDeleteConfirm,
-    open, select, create, changeContent, save, rename, remove
+    open, select, create, changeContent, save, rename, remove,
+    syncingCloud, syncToCloud, selectedCloudNoteId
   };
 }

@@ -22,6 +22,7 @@ export type SettingsTab =
   | "capabilities"
   | "mcp"
   | "database"
+  | "cloudNotes"
   | "update";
 
 export type CapabilityTab = "skills" | "userSkills" | "plugins" | "lab";
