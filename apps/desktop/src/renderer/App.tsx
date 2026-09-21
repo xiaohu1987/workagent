@@ -139,6 +139,7 @@ import {
   isPersistentComposerContextKind,
   isSubagentWaitTool,
   mergeMessagesAfterOptimisticUserEdit,
+  mergeRecoveredSnapshotMessages,
   mergeServerMessagesWithNewerLocal,
   mergeSnapshotRecords,
   parseMessageEventBlocks,
@@ -3629,10 +3630,17 @@ export function App() {
       if (!current || current.thread.id !== snapshotThreadKey) return current;
       const missing = collectMissingSnapshotMessages(current.messages, expected);
       if (missing.length === 0) return current;
+      // Re-attaching rows is only safe while the row is genuinely missing. The cached
+      // list also holds the in-flight send placeholder, and putting that back next to
+      // its persisted twin repainted the same message twice - this time from the repair
+      // path, which is the only thing still writing here, so nothing reconciled the
+      // duplicate afterwards and it survived until the thread was reloaded.
+      const messages = mergeRecoveredSnapshotMessages(current.messages, missing);
+      if (messages === current.messages) return current;
       return {
         ...current,
-        messages: mergeSnapshotRecords(current.messages, missing, (message) => message.createdAt),
-        messageCount: Math.max(current.messageCount, current.messages.length + missing.length)
+        messages,
+        messageCount: Math.max(current.messageCount, messages.length)
       };
     });
   }, [snapshotThreadKey, selectedMessages]);
@@ -4869,14 +4877,12 @@ export function App() {
                 if (!current || current.thread.id !== threadId) return current;
                 const missing = collectMissingSnapshotMessages(current.messages, expected);
                 if (missing.length === 0) return current;
+                const messages = mergeRecoveredSnapshotMessages(current.messages, missing);
+                if (messages === current.messages) return current;
                 return {
                   ...current,
-                  messages: mergeSnapshotRecords(
-                    current.messages,
-                    missing,
-                    (message) => message.createdAt
-                  ),
-                  messageCount: Math.max(current.messageCount, current.messages.length + missing.length)
+                  messages,
+                  messageCount: Math.max(current.messageCount, messages.length)
                 };
               });
             });

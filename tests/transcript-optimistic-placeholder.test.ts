@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildTimelineEntries,
   dropSupersededOptimisticMessages,
+  filterTranscriptMessages,
   isOptimisticUserMessage,
-  mergeMessagesAfterOptimisticUserEdit
+  mergeMessagesAfterOptimisticUserEdit,
+  mergeRecoveredSnapshotMessages
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import type { MessageRecord } from "@shared-types";
 
@@ -146,5 +148,48 @@ describe("buildTimelineEntries", () => {
       [], [], undefined, "completed", [], null
     );
     expect(entries.filter((entry) => entry.kind === "message")).toHaveLength(1);
+  });
+});
+
+// The duplicate did not have to be introduced by a merge. The transcript is rebuilt
+// from whatever the live snapshot holds, so a pair that any single commit left behind -
+// including the recovery passes, which re-attach rows the cached baseline still carries
+// and the cache holds the placeholder while a send is in flight - stayed on screen
+// until the thread was reloaded. Reconciling the renderable set is what makes the
+// transcript independent of which commit produced the list.
+describe("filterTranscriptMessages", () => {
+  it("never paints the placeholder next to its persisted twin", () => {
+    expect(
+      filterTranscriptMessages([earlierAssistant, placeholder, persistedTwin]).map((item) => item.id)
+    ).toEqual([earlierAssistant.id, persistedTwin.id]);
+  });
+
+  it("still paints a placeholder the server has not delivered", () => {
+    expect(
+      filterTranscriptMessages([earlierAssistant, placeholder]).map((item) => item.id)
+    ).toEqual([earlierAssistant.id, placeholder.id]);
+  });
+});
+
+describe("mergeRecoveredSnapshotMessages", () => {
+  it("does not resurrect a superseded placeholder carried by the cached baseline", () => {
+    const repaired = mergeRecoveredSnapshotMessages(
+      [earlierAssistant, persistedTwin],
+      [placeholder, persistedTwin]
+    );
+    expect(repaired.map((item) => item.id)).toEqual([earlierAssistant.id, persistedTwin.id]);
+  });
+
+  it("re-attaches a row that is genuinely missing", () => {
+    const repaired = mergeRecoveredSnapshotMessages([earlierAssistant], [persistedTwin]);
+    expect(repaired.map((item) => item.id)).toEqual([earlierAssistant.id, persistedTwin.id]);
+  });
+
+  it("returns the current list by reference when the recovery adds nothing", () => {
+    // The retry compares the merged list against the state it came from, so an unchanged
+    // result must not look like progress: a fresh array would re-enter setSnapshot on
+    // every pass.
+    const current = [earlierAssistant, persistedTwin];
+    expect(mergeRecoveredSnapshotMessages(current, [persistedTwin])).toBe(current);
   });
 });

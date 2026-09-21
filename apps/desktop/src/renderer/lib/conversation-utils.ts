@@ -1909,7 +1909,15 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
   });
 
   const visibleAssistantMessages = new Set<string>();
-  return filteredMessages.filter((message) => {
+  // The painting pass is the last line of defence for the send placeholder. Several
+  // independent paths can put `optimistic-<uuid>` and its persisted twin into the same
+  // list (runtime event merge, snapshot read, cached baseline), but each of them
+  // reconciles the duplicate only while it runs: once the last of them has passed, a
+  // pair introduced by any other route - most often a recovery commit that re-attaches
+  // the rows it believes are missing - stays on screen as two copies of the same
+  // message until the thread is reloaded. Reconciling the renderable set itself means
+  // the transcript can never paint a placeholder whose persisted twin is already there.
+  return dropSupersededOptimisticMessages(filteredMessages.filter((message) => {
     if (message.role !== "assistant" || !message.turnRunId) {
       return true;
     }
@@ -1925,7 +1933,7 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
 
     visibleAssistantMessages.add(messageKey);
     return true;
-  });
+  }));
 }
 
 export function getMessageDisplayKind(message: MessageRecord): string | null {
@@ -2147,6 +2155,34 @@ export function dropSupersededOptimisticMessages(messages: MessageRecord[]): Mes
   return superseded.size === 0
     ? messages
     : messages.filter((message) => !superseded.has(message.id));
+}
+
+/**
+ * Merge rows a recovery commit believes are missing back into the live transcript.
+ *
+ * The recovery passes diff the painted list against a cached snapshot and re-attach
+ * whatever the cache carries, which is the right repair for a starved commit - but the
+ * cache also carries the client placeholder while a send is in flight. When the state
+ * had already dropped that placeholder and the cache had not, the row that got
+ * re-attached was the placeholder itself: the same text painted twice, this time by the
+ * repair path, which no later reconciliation looked at again. Only a placeholder whose
+ * persisted twin is already in hand can be dropped here, so a row the server has not
+ * delivered yet is still re-attached, and an unchanged list returns by reference so the
+ * retry cannot loop.
+ */
+export function mergeRecoveredSnapshotMessages(
+  currentMessages: MessageRecord[],
+  recoveredMessages: MessageRecord[]
+): MessageRecord[] {
+  if (recoveredMessages.length === 0) {
+    return currentMessages;
+  }
+  const merged = dropSupersededOptimisticMessages(
+    mergeSnapshotRecords(currentMessages, recoveredMessages, (message) => message.createdAt)
+  );
+  const unchanged = merged.length === currentMessages.length
+    && merged.every((message, index) => message === currentMessages[index]);
+  return unchanged ? currentMessages : merged;
 }
 
 export function mergeMessagesAfterOptimisticUserEdit(
