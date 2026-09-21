@@ -15,6 +15,7 @@ type ConversationTurnSection = {
   id: string;
   userEntryId: string;
   summaryEntryId: string | null;
+  entryIds: string[];
   startedAt: string;
   completedAt: string | null;
 };
@@ -119,7 +120,13 @@ export const TimelineEntries = memo(function TimelineEntries({
             ) : (
               <ToolActivityGroup toolCalls={entry.toolCalls} skillNames={skillNames} />
             )}
-            {entryTurn && entry.id === entryTurn.userEntryId ? (
+            {/* A turn that never got past its own user message has no elapsed work to
+                report: `completedAt` is still that message's own timestamp, so the footer
+                read "已处理 0s" and ruled off a bubble with nothing folded away. An empty
+                turn is also exactly what a duplicated user row looked like, so render the
+                footer only when the turn holds more than that one entry, or while the send
+                is still being processed (where it is the live heartbeat). */}
+            {entryTurn && entry.id === entryTurn.userEntryId && (isActiveTurn || entryTurn.entryIds.length > 1) ? (
               <TurnElapsedBanner
                 startedAt={entryTurn.startedAt}
                 completedAt={isActiveTurn ? null : isLatestTurn && completedLatestTurnAt ? completedLatestTurnAt : entryTurn.completedAt}

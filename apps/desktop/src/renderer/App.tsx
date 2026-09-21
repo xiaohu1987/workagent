@@ -112,6 +112,7 @@ import {
   composerAttachmentKey,
   completeRuntimeToolCallSummary,
   createOptimisticThreadSnapshot,
+  dropSupersededOptimisticMessages,
   filterTranscriptMessages,
   formatComposerAttachments,
   getActivePlanTimelineItem,
@@ -1717,9 +1718,16 @@ export function App() {
       ? nextSnapshot.messages.filter((message) => !consumedOptimisticIds.has(message.id))
       : nextSnapshot.messages;
     const runtimeMessages = Array.from(persistedRuntimeMessagesRef.current[threadId]?.values() ?? []);
-    const messages = runtimeMessages.length > 0
-      ? mergeSnapshotRecords(snapshotMessages, runtimeMessages, (message) => message.createdAt)
-      : snapshotMessages;
+    // The snapshot can still carry the client-side placeholder while the runtime event
+    // brings its persisted twin. They have different ids for the same text, so the merge
+    // kept both and the user's own message was painted twice, with an empty turn between
+    // the copies. The event path's consumed-id set only covers the event that produced it,
+    // so the list is reconciled again here, where both rows are in hand.
+    const messages = dropSupersededOptimisticMessages(
+      runtimeMessages.length > 0
+        ? mergeSnapshotRecords(snapshotMessages, runtimeMessages, (message) => message.createdAt)
+        : snapshotMessages
+    );
     const messageCount = Math.max(nextSnapshot.messageCount, messages.length);
     if (thread === nextSnapshot.thread && messages === nextSnapshot.messages && messageCount === nextSnapshot.messageCount) {
       return nextSnapshot;

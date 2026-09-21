@@ -409,7 +409,18 @@ export function buildTimelineEntries(
   const sortedEntries = [...messageEntries, ...toolEntries, ...fileSummaryEntries, ...promptEntries, ...contextCompactionEntries].sort(
     (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
   );
-  return collapseDirectoryReadMessages(sortedEntries);
+  // `message-<id>` is the entry identity, so two entries sharing an id are the same
+  // row: painting both drew the message twice and opened a second turn for it, and the
+  // turn footer then reported "已处理 0s" because that empty turn had no elapsed work.
+  // The message list is supposed to hand over unique rows; this is a last-resort guard
+  // so an upstream duplication can never reach the transcript as a visible repeat.
+  const seenEntryIds = new Set<string>();
+  const uniqueEntries = sortedEntries.filter((entry) => {
+    if (seenEntryIds.has(entry.id)) return false;
+    seenEntryIds.add(entry.id);
+    return true;
+  });
+  return collapseDirectoryReadMessages(uniqueEntries);
 }
 
 export type TimelineIncrementalInput = {
@@ -2078,6 +2089,66 @@ export function reconcilePendingUserMessagesDetailed(
   return { remaining, consumedIds };
 }
 
+export function isOptimisticUserMessage(message: Pick<MessageRecord, "id" | "role">): boolean {
+  return message.role === "user" && message.id.startsWith("optimistic-");
+}
+
+/**
+ * How far apart a placeholder and its persisted twin are still considered the same
+ * message. The renderer and the runtime share one clock, but the placeholder is
+ * stamped when the user hits send while the row is stamped when the runtime accepts
+ * it, so compare symmetrically and with room to spare instead of assuming the row is
+ * always newer.
+ */
+const OPTIMISTIC_TWIN_WINDOW_MS = 60_000;
+
+/**
+ * The renderer paints the user's own bubble before the server row exists
+ * (`optimistic-<uuid>`), and several independent paths can then put that placeholder
+ * and its persisted twin into the same list: the runtime event, the snapshot read and
+ * the local baseline. They carry different ids for the same text, so nothing compared
+ * them and both survived - the sent message was painted twice, and because the
+ * timeline entry id is `message-<id>` the second copy opened another turn whose only
+ * content was that message, which rendered as a "已处理 0s" footer between the two
+ * bubbles. The consumed-id set of the event path only covers the event that produced
+ * it, so a placeholder that had already left `pending` was never removed again until
+ * the thread was reloaded and every in-memory structure was rebuilt from the server
+ * list.
+ *
+ * Dropping is deliberately one-sided: only a placeholder can be superseded, and only
+ * while a row carrying the same text is already on screen, so this can never hide a
+ * message the server has not delivered yet.
+ */
+export function dropSupersededOptimisticMessages(messages: MessageRecord[]): MessageRecord[] {
+  const placeholders = messages.filter(isOptimisticUserMessage);
+  if (placeholders.length === 0) {
+    return messages;
+  }
+  const persisted = messages.filter(
+    (message) => message.role === "user" && !isOptimisticUserMessage(message)
+  );
+  if (persisted.length === 0) {
+    return messages;
+  }
+  const superseded = new Set<string>();
+  for (const placeholder of placeholders) {
+    const text = normalizeUserMessageForReconciliation(placeholder.content);
+    const placeholderAt = Date.parse(placeholder.createdAt);
+    if (!text || !Number.isFinite(placeholderAt)) continue;
+    const hasTwin = persisted.some((message) => {
+      const sameText = normalizeUserMessageForReconciliation(message.content) === text
+        || normalizeUserMessageForReconciliation(getDisplayMessageContent(message)) === text;
+      if (!sameText) return false;
+      const messageAt = Date.parse(message.createdAt);
+      return Number.isFinite(messageAt) && Math.abs(messageAt - placeholderAt) <= OPTIMISTIC_TWIN_WINDOW_MS;
+    });
+    if (hasTwin) superseded.add(placeholder.id);
+  }
+  return superseded.size === 0
+    ? messages
+    : messages.filter((message) => !superseded.has(message.id));
+}
+
 export function mergeMessagesAfterOptimisticUserEdit(
   currentMessages: MessageRecord[],
   incomingMessages: MessageRecord[],
@@ -2090,13 +2161,13 @@ export function mergeMessagesAfterOptimisticUserEdit(
     }
   }
   for (const message of currentMessages) {
-    if (message.role === "user" && message.id.startsWith("optimistic-")) {
+    if (isOptimisticUserMessage(message)) {
       optimisticById.set(message.id, message);
     }
   }
   const optimistic = [...optimisticById.values()];
   if (optimistic.length === 0) {
-    return incomingMessages;
+    return dropSupersededOptimisticMessages(incomingMessages);
   }
 
   const optimisticIds = new Set(optimistic.map((message) => message.id));
@@ -2120,10 +2191,12 @@ export function mergeMessagesAfterOptimisticUserEdit(
       && createdAt >= oldestOptimisticAt - 1_000;
   });
   const remaining = reconcilePendingUserMessages(optimistic, incomingSuffix);
-  return mergeSnapshotRecords(
-    [...prefix, ...remaining],
-    incomingSuffix,
-    (message) => message.createdAt
+  return dropSupersededOptimisticMessages(
+    mergeSnapshotRecords(
+      [...prefix, ...remaining],
+      incomingSuffix,
+      (message) => message.createdAt
+    )
   );
 }
 
