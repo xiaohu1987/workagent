@@ -28722,22 +28722,6 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 .subagent-workspace-meta > time { font-family: var(--font-mono); }
 .subagent-workspace-meta code { color: #77828f; font-family: var(--font-mono); overflow-wrap: anywhere; }
 
-.subagent-workspace-empty {
-  display: grid;
-  width: 100%;
-  height: 100%;
-  align-content: center;
-  justify-items: center;
-  gap: 7px;
-  padding: 24px;
-  color: #818d9a;
-  text-align: center;
-}
-.subagent-workspace-empty > span { color: var(--subagent-purple, #9d7bea); }
-.subagent-workspace-empty svg { width: 24px; height: 24px; }
-.subagent-workspace-empty strong { color: #c7d0da; font-size: 12px; }
-.subagent-workspace-empty p { margin: 0; font-size: 10px; }
-
 :root[data-theme="light"] .subagent-narrative-feed,
 :root[data-theme="light"] .subagent-switch-row,
 :root[data-theme="light"] .subagent-workspace-shell,
@@ -28834,8 +28818,6 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 :root[data-theme="light"] .subagent-workspace-section p { color: var(--text-soft) !important; }
 :root[data-theme="light"] .subagent-workspace-output.failed { color: #a40e26 !important; }
 :root[data-theme="light"] .subagent-workspace-history span { color: var(--text-soft) !important; }
-:root[data-theme="light"] .subagent-workspace-empty { color: var(--text-muted) !important; background: transparent !important; }
-:root[data-theme="light"] .subagent-workspace-empty strong { color: var(--text) !important; }
 
 .app-shell:is(.has-app-background, .has-realtime-character) :is(
   .subagent-narrative-feed,
@@ -28846,8 +28828,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   .subagent-workspace-heading,
   .subagent-workspace-phases,
   .subagent-workspace-scroll,
-  .subagent-workspace-section,
-  .subagent-workspace-empty
+  .subagent-workspace-section
 ) {
   background: transparent !important;
   background-image: none !important;

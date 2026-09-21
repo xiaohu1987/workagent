@@ -5,6 +5,7 @@ import { IconBolt, IconCheck, IconChevronRight, IconClose, IconCompose, IconGuid
 import { getToolProcessingLabel, type SkillNameMap } from "../lib/conversation-utils";
 import { ToolActivityIcon } from "../timeline/transcript";
 import type { ComposerSubmission, RuntimeActivity, RuntimeActivityEntry, RuntimeProgress } from "../core/app-types";
+import { WorkspaceEmptyState } from "../workspace/panels";
 
 function useElapsedClock(startedAt: string | null | undefined, active: boolean, completedAt?: string | null) {
   const [now, setNow] = useState(() => Date.now());
@@ -597,11 +598,11 @@ export function SubagentSwitchRow({
 export function SubagentDetailWorkspace({ item }: { item: SubagentPresentation | null }) {
   if (!item) {
     return (
-      <div className="subagent-workspace-empty">
-        <span aria-hidden><IconGuide /></span>
-        <strong>无正在执行的子智能体</strong>
-        <p>新子智能体启动后会显示在这里。</p>
-      </div>
+      <WorkspaceEmptyState
+        icon={<IconGuide />}
+        title="无正在执行的子智能体"
+        message="新子智能体启动后会显示在这里。"
+      />
     );
   }
 
