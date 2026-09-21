@@ -28422,6 +28422,14 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+/* With no child agents the switch row is not rendered, so the empty state would
+   land in the auto-sized first track and its height:100% could not resolve to
+   the panel height. Pin it to the flexible track so it fills and centers like
+   the empty states of the other right-workspace tabs. */
+.subagent-workspace-shell > .right-workspace-empty-state {
+  grid-row: -2 / -1;
+}
+
 .subagent-switch-row {
   display: flex;
   flex-wrap: nowrap;

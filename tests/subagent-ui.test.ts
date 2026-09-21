@@ -347,7 +347,9 @@ describe("subagent task UI", () => {
     expect(workspaceControlsSource).toContain("显示右侧工作区（浏览器 / 子智能体）");
     expect(workspaceControlsSource).not.toContain("!rightWorkspaceOpen && projectWorkspace");
     expect(rendererAppSource).not.toContain("&& (rightWorkspaceTab === \"files\" || rightWorkspaceTab === \"changes\")");
-    expect(renderToStaticMarkup(createElement(SubagentDetailWorkspace, { item: null }))).toContain("无正在执行的子智能体");
+    const emptyStateHtml = renderToStaticMarkup(createElement(SubagentDetailWorkspace, { item: null }));
+    expect(emptyStateHtml).toContain("无正在执行的子智能体");
+    expect(emptyStateHtml).toContain("right-workspace-empty-state");
   });
 
   it("publishes child-agent results into the parent process conversation", () => {
@@ -372,6 +374,8 @@ describe("subagent task UI", () => {
     expect(rendererStylesCss).toContain(".app-shell:is(.has-app-background, .has-realtime-character) :is(");
     expect(rendererStylesCss).toContain(".subagent-workspace-phases");
     expect(rendererStylesCss).toContain(".subagent-workspace-scroll");
+    expect(rendererStylesCss).toContain(".subagent-workspace-shell > .right-workspace-empty-state");
+    expect(rendererStylesCss).toContain("grid-row: -2 / -1");
     expect(rendererStylesCss).toContain("@media (prefers-reduced-motion: reduce)");
   });
 
