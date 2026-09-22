@@ -20394,6 +20394,121 @@ select option:checked {
   opacity: 1;
 }
 
+/* 深度思考 lives in the right workspace so the streaming reasoning never changes
+   the height of the chat transcript. */
+.thinking-workspace {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: transparent;
+}
+
+.thinking-workspace-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.thinking-workspace-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #c3ccd8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.thinking-workspace-title svg {
+  width: 15px;
+  height: 15px;
+  color: #8fa6c4;
+}
+
+.thinking-workspace-status {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: #8b95a3;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.thinking-workspace-status.is-active {
+  color: #b8d5ff;
+  background: rgba(108, 174, 255, 0.14);
+}
+
+.thinking-workspace-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  color: #9aa5b4;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.thinking-workspace-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.thinking-workspace-body::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.right-workspace-tab > .right-workspace-tab-live-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #6caeff;
+  animation: thinking-tab-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes thinking-tab-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .right-workspace-tab > .right-workspace-tab-live-dot {
+    animation: none;
+  }
+}
+
+:root[data-theme="light"] .thinking-workspace-header {
+  border-bottom-color: rgba(15, 23, 42, 0.08);
+}
+
+:root[data-theme="light"] :is(.thinking-workspace-title, .thinking-workspace-body) {
+  color: #4a5462;
+}
+
+:root[data-theme="light"] .thinking-workspace-status {
+  color: #5c6675;
+  background: rgba(15, 23, 42, 0.06);
+}
+
+:root[data-theme="light"] .thinking-workspace-status.is-active {
+  color: #0b5cad;
+  background: rgba(9, 105, 218, 0.12);
+}
 .conversation-log-window-panel {
   width: 100%;
   height: 100%;

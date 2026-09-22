@@ -336,6 +336,7 @@ import { DATABASE_PERMISSION_OPTIONS, getSkillSortLabel, RESPONSE_TONE_OPTIONS, 
 import { reregisterBrowserWebviews } from "./workspace/browser-workspace";
 import { shouldRevealBrowserWorkspace, selectMountedBrowserThreadIds } from "./workspace/browser-preferences";
 import { RightWorkspacePanel, getDefaultRightWorkspaceTab, isProjectWorkspaceThread, resolveRightWorkspaceTabForMode, shouldLoadProjectWorkspaceResource, type RightWorkspaceTab } from "./workspace/right-workspace";
+import { rememberThinkingText, selectThinkingText, type ThinkingMemory } from "./workspace/thinking-state";
 import { NotificationCenter } from "./workspace/notification-center";
 import { HelpSheet } from "./workspace/help-sheet";
 import { QuickNotesSheet } from "./workspace/quick-notes-sheet";
@@ -368,7 +369,7 @@ import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfir
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
 import { TimelineEntries } from "./timeline/timeline-entries";
-import { ApprovalCard, AssistantDraftMessage, AssistantDraftReasoning, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
+import { ApprovalCard, AssistantDraftMessage, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
 import {
   HISTORY_EXPANDED_GROUPS_STORAGE_KEY,
@@ -966,6 +967,10 @@ export function App() {
   const threadTokenUsageRefreshTimerRef = useRef<number | null>(null);
   const pluginToggleQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pluginEnabledStateRef = useRef<Map<string, boolean>>(new Map());
+  // Last reasoning text per thread. Reasoning streams frame by frame and then
+  // disappears the moment the draft is committed; remembering the latest text lets
+  // the 深度思考 workspace tab keep showing what was thought about.
+  const thinkingMemoryRef = useRef<ThinkingMemory | null>(null);
   const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
   const [assistantDrafts, setAssistantDrafts] = useState<Record<string, AssistantDraft>>({});
   const [finalizingAssistantMessageIds, setFinalizingAssistantMessageIds] = useState<Set<string>>(() => new Set());
@@ -3838,6 +3843,21 @@ export function App() {
   }, [currentTaskTurnRunId, snapshotWorkspaceRoot, snapshot?.toolCalls]);
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
   const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
+
+  // Reasoning used to stream at the tail of the chat transcript, where every frame
+  // changed the conversation height and made the whole chat jump up and down. It now
+  // renders in its own right-workspace tab, so the transcript keeps a stable height
+  // while the model thinks.
+  const thinkingThreadId = activeAssistantDraft?.threadId ?? activeSnapshotThreadId ?? selectedThreadId;
+  thinkingMemoryRef.current = rememberThinkingText(
+    thinkingMemoryRef.current,
+    thinkingThreadId,
+    activeAssistantDraft?.reasoning
+  );
+  const thinkingText = selectThinkingText(thinkingMemoryRef.current, activeSnapshotThreadId ?? selectedThreadId);
+  const thinkingStreaming = Boolean(
+    isTaskProcessing && !activeAssistantDraft?.completed && activeAssistantDraft?.reasoning?.trim()
+  );
   const workspaceSubagentPresentations = useMemo(
     () => isTaskProcessing ? subagentPresentations : [],
     [isTaskProcessing, subagentPresentations]
@@ -7734,12 +7754,6 @@ export function App() {
                     ) : null}
                   </div>
                 ) : null}
-                {activeAssistantDraft?.reasoning?.trim() ? (
-                  <AssistantDraftReasoning
-                    draftId={activeAssistantDraft.draftId}
-                    reasoning={activeAssistantDraft.reasoning}
-                  />
-                ) : null}
                 {showPendingResumeCard && pendingResumeThread ? (
                   <PendingResumeCard
                     pending={pendingResumeThread}
@@ -8094,6 +8108,9 @@ export function App() {
           subagentItems={workspaceSubagentPresentations}
           selectedSubagentId={selectedSubagentId}
           onSelectSubagent={selectSubagentEvent}
+          thinkingText={thinkingText}
+          thinkingRunning={isTaskProcessing}
+          thinkingStreaming={thinkingStreaming}
           threadId={selectedThreadId}
         />
 

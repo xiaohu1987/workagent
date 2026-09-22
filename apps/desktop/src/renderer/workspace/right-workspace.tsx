@@ -3,14 +3,15 @@ import type { ReactNode } from "react";
 import type { GitActionResult, GitSnapshot, RuntimeThreadSnapshot, ToolCallRecord } from "@shared-types";
 import type { ComposerAttachmentInput } from "../lib/conversation-utils";
 import { getProjectRelativeGitFiles, type ProjectFileEntry } from "../lib/project-files";
-import { IconChevronRight, IconFileChanges, IconFolder, IconGlobe, IconGuide } from "../icons";
+import { IconBrain, IconChevronRight, IconFileChanges, IconFolder, IconGlobe, IconGuide } from "../icons";
 import { SubagentDetailWorkspace, SubagentSwitchRow, type SubagentPresentation } from "../cards/runtime-cards";
 import { BrowserWorkspace } from "./browser-workspace";
 import { GitChangesWorkspace } from "./git-changes";
 import { WorkspaceEmptyState } from "./panels";
 import { ProjectFilesWorkspace } from "./project-files";
+import { ThinkingWorkspace } from "./thinking-workspace";
 
-export type RightWorkspaceTab = "terminal" | "browser" | "files" | "changes" | "subagents";
+export type RightWorkspaceTab = "thinking" | "terminal" | "browser" | "files" | "changes" | "subagents";
 
 export function hasRecognizedGitRepository(snapshot: GitSnapshot | null, projectRoot: string): boolean {
   if (snapshot?.available !== true || !snapshot.root?.trim() || !projectRoot.trim()) return false;
@@ -52,6 +53,9 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   subagentItems,
   selectedSubagentId,
   onSelectSubagent,
+  thinkingText,
+  thinkingRunning,
+  thinkingStreaming,
   threadId
 }: {
   hidden: boolean;
@@ -89,6 +93,9 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   subagentItems: SubagentPresentation[];
   selectedSubagentId: string | null;
   onSelectSubagent: (agentId: string) => void;
+  thinkingText: string;
+  thinkingRunning: boolean;
+  thinkingStreaming: boolean;
   threadId: string | null;
 }) {
   const showGitWorkspace = showProjectWorkspace;
@@ -103,6 +110,14 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   return (
     <aside className={`right-workspace-panel ${hidden ? "is-background" : ""}`} aria-label="Right workspace" aria-hidden={hidden}>
       <div className="right-workspace-tabs" role="tablist" aria-label="工作区切换">
+        <WorkspaceTabButton
+          id="thinking"
+          label="深度思考"
+          icon={<IconBrain />}
+          active={activeTab === "thinking"}
+          live={thinkingStreaming}
+          onClick={() => selectWorkspaceTab("thinking", onTabChange, onExpandedTabChange)}
+        />
         <WorkspaceTabButton
           id="browser"
           label="浏览器"
@@ -139,6 +154,9 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
         ) : null}
       </div>
       <div className="right-workspace-content">
+        <div id="right-workspace-content-thinking" className={`right-workspace-view ${activeTab === "thinking" ? "active" : ""}`} role={activeTab === "thinking" ? "tabpanel" : undefined} aria-labelledby={activeTab === "thinking" ? "right-workspace-tab-thinking" : undefined} aria-hidden={activeTab !== "thinking"} inert={activeTab !== "thinking"}>
+          <ThinkingWorkspace text={thinkingText} taskRunning={thinkingRunning} streaming={thinkingStreaming} />
+        </div>
         {showGitWorkspace ? (
           <div id="right-workspace-content-changes" className={`right-workspace-view ${activeTab === "changes" ? "active" : ""}`} role={activeTab === "changes" ? "tabpanel" : undefined} aria-labelledby={activeTab === "changes" ? "right-workspace-tab-changes" : undefined} aria-hidden={activeTab !== "changes"} inert={activeTab !== "changes"}>
             <GitChangesWorkspace
@@ -259,12 +277,14 @@ function WorkspaceTabButton({
   label,
   icon,
   active,
+  live = false,
   onClick
 }: {
   id: string;
   label: string;
   icon: ReactNode;
   active: boolean;
+  live?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -280,6 +300,7 @@ function WorkspaceTabButton({
       onClick={onClick}
     >
       {icon}
+      {live ? <span className="right-workspace-tab-live-dot" aria-hidden="true" /> : null}
     </button>
   );
 }

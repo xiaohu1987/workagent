@@ -28,6 +28,17 @@ export function SvgIcon({
   );
 }
 
+export function IconBrain() {
+  return (
+    <SvgIcon>
+      <path d="M12 6a3.2 3.2 0 0 0-6.1-1.1A3 3 0 0 0 4 7.7a3.1 3.1 0 0 0 .4 4.4A3 3 0 0 0 6.7 17 3.2 3.2 0 0 0 12 18.6" />
+      <path d="M12 6a3.2 3.2 0 0 1 6.1-1.1A3 3 0 0 1 20 7.7a3.1 3.1 0 0 1-.4 4.4A3 3 0 0 1 17.3 17 3.2 3.2 0 0 1 12 18.6" />
+      <path d="M12 6v12.6" />
+      <path d="M9.3 9.4h.01M14.7 9.4h.01M9.3 13.6h.01M14.7 13.6h.01" />
+    </SvgIcon>
+  );
+}
+
 export function IconSidebar() {
   return (
     <SvgIcon>

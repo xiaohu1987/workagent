@@ -882,7 +882,7 @@ type AssistantDraftMessageProps = {
  */
 const STREAM_REVEAL_CATCH_UP_BACKLOG = 180;
 
-function StreamedText({ text, instant }: { text: string; instant: boolean }) {
+export function StreamedText({ text, instant }: { text: string; instant: boolean }) {
   const [revealed, setRevealed] = useState(text);
   const targetRef = useRef(text);
   const revealedRef = useRef(text);
