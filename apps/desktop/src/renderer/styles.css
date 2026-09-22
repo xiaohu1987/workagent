@@ -20404,6 +20404,17 @@ select option:checked {
   min-width: 0;
   min-height: 0;
   background: transparent;
+  /* One accent per state: the badge is this tab's only status readout, so the
+     phases have to be told apart by colour and not only by their label. */
+  --thinking-live: #a8cfff;
+  --thinking-live-bg: rgba(108, 174, 255, 0.16);
+  --thinking-live-border: rgba(108, 174, 255, 0.4);
+  --thinking-busy: #f0c28a;
+  --thinking-busy-bg: rgba(226, 154, 74, 0.16);
+  --thinking-busy-border: rgba(226, 154, 74, 0.4);
+  --thinking-done: #93e0b0;
+  --thinking-done-bg: rgba(70, 190, 120, 0.15);
+  --thinking-done-border: rgba(70, 190, 120, 0.38);
 }
 
 .thinking-workspace-header {
@@ -20420,7 +20431,7 @@ select option:checked {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #c3ccd8;
+  color: var(--text);
   font-size: 12px;
   font-weight: 600;
 }
@@ -20428,22 +20439,55 @@ select option:checked {
 .thinking-workspace-title svg {
   width: 15px;
   height: 15px;
-  color: #8fa6c4;
+  color: var(--text-muted);
 }
 
 .thinking-workspace-status {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
   padding: 1px 8px;
+  border: 1px solid transparent;
   border-radius: 999px;
-  color: #8b95a3;
+  color: var(--text-muted);
   background: rgba(255, 255, 255, 0.06);
   font-size: 11px;
   line-height: 18px;
 }
 
+/* 思考中 - reasoning is arriving right now. */
 .thinking-workspace-status.is-active {
-  color: #b8d5ff;
-  background: rgba(108, 174, 255, 0.14);
+  color: var(--thinking-live);
+  border-color: var(--thinking-live-border);
+  background: var(--thinking-live-bg);
+}
+
+.thinking-workspace-status-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: thinking-status-dot-pulse 1.4s ease-in-out infinite;
+}
+
+/* 执行中 - the task is still running, the model has just stopped narrating. */
+.thinking-workspace-status.is-executing {
+  color: var(--thinking-busy);
+  border-color: var(--thinking-busy-border);
+  background: var(--thinking-busy-bg);
+}
+
+/* 已完成 - the turn has settled. */
+.thinking-workspace-status.is-done {
+  color: var(--thinking-done);
+  border-color: var(--thinking-done-border);
+  background: var(--thinking-done-bg);
+}
+
+@keyframes thinking-status-dot-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
 }
 
 .thinking-workspace-body {
@@ -20454,9 +20498,9 @@ select option:checked {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  color: #9aa5b4;
+  color: var(--text-soft);
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.72;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -20487,7 +20531,7 @@ select option:checked {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .right-workspace-tab > .right-workspace-tab-live-dot {
+  :is(.right-workspace-tab > .right-workspace-tab-live-dot, .thinking-workspace-status-dot) {
     animation: none;
   }
 }
@@ -20496,18 +20540,26 @@ select option:checked {
   border-bottom-color: rgba(15, 23, 42, 0.08);
 }
 
-:root[data-theme="light"] :is(.thinking-workspace-title, .thinking-workspace-body) {
-  color: #4a5462;
-}
-
 :root[data-theme="light"] .thinking-workspace-status {
-  color: #5c6675;
   background: rgba(15, 23, 42, 0.06);
 }
 
 :root[data-theme="light"] .thinking-workspace-status.is-active {
   color: #0b5cad;
+  border-color: rgba(9, 105, 218, 0.3);
   background: rgba(9, 105, 218, 0.12);
+}
+
+:root[data-theme="light"] .thinking-workspace-status.is-executing {
+  color: #8a5300;
+  border-color: rgba(190, 110, 15, 0.3);
+  background: rgba(217, 119, 6, 0.13);
+}
+
+:root[data-theme="light"] .thinking-workspace-status.is-done {
+  color: #106b30;
+  border-color: rgba(22, 163, 74, 0.28);
+  background: rgba(22, 163, 74, 0.13);
 }
 .conversation-log-window-panel {
   width: 100%;

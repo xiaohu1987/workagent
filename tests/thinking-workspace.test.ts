@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { rememberThinkingText, selectThinkingText } from "../apps/desktop/src/renderer/workspace/thinking-state";
-import { ThinkingWorkspace } from "../apps/desktop/src/renderer/workspace/thinking-workspace";
+import { ThinkingWorkspace, resolveThinkingStatus } from "../apps/desktop/src/renderer/workspace/thinking-workspace";
 
 const readSource = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 
@@ -65,6 +65,66 @@ describe("deep thinking workspace tab", () => {
     }));
     expect(settled).toContain("已完成");
     expect(settled).not.toContain("思考中");
+  });
+
+  it("maps each phase to its own status label and class", () => {
+    expect(resolveThinkingStatus({ taskRunning: true, streaming: true })).toBe("thinking");
+    expect(resolveThinkingStatus({ taskRunning: true, streaming: false })).toBe("executing");
+    expect(resolveThinkingStatus({ taskRunning: false, streaming: false })).toBe("done");
+
+    const render = (taskRunning: boolean, streaming: boolean) => renderToStaticMarkup(createElement(ThinkingWorkspace, {
+      text: "先定位滚动淡出的实现",
+      taskRunning,
+      streaming
+    }));
+
+    const live = render(true, true);
+    expect(live).toContain("thinking-workspace-status is-active");
+    expect(live).toContain("thinking-workspace-status-dot");
+    expect(live).toContain("思考中");
+
+    // The task is still running after the model stopped narrating, so the badge must
+    // not claim the turn finished.
+    const busy = render(true, false);
+    expect(busy).toContain("thinking-workspace-status is-executing");
+    expect(busy).toContain("执行中");
+    expect(busy).not.toContain("thinking-workspace-status-dot");
+    expect(busy).not.toContain("已完成");
+
+    const settled = render(false, false);
+    expect(settled).toContain("thinking-workspace-status is-done");
+    expect(settled).toContain("已完成");
+  });
+
+  it("gives the statuses different colours and keeps the reasoning text bright", () => {
+    for (const selector of [
+      ".thinking-workspace-status.is-active",
+      ".thinking-workspace-status.is-executing",
+      ".thinking-workspace-status.is-done"
+    ]) {
+      expect(styles).toContain(selector);
+    }
+    expect(styles).toContain("--thinking-live:");
+    expect(styles).toContain("--thinking-busy:");
+    expect(styles).toContain("--thinking-done:");
+    expect(styles).toContain("@keyframes thinking-status-dot-pulse {");
+
+    // Regression: the body used the faint #9aa5b4 grey, which read as disabled text
+    // next to the rest of the app.
+    const bodyRule = styles.slice(styles.indexOf(".thinking-workspace-body {"));
+    expect(bodyRule.slice(0, bodyRule.indexOf("}"))).toContain("color: var(--text-soft)");
+  });
+
+  it("always keeps the newest reasoning in view", () => {
+    const source = readSource("../apps/desktop/src/renderer/workspace/thinking-workspace.tsx");
+    // The body is a live tail: every growth pins it back to the bottom.
+    expect(source).toContain("ResizeObserver");
+    expect(source).toContain("body.scrollTop = body.scrollHeight");
+    // Regression: the panel used to stop following the moment the reader scrolled
+    // up, which left the live tail parked mid-stream until the turn ended.
+    expect(source).not.toContain("FOLLOW_THRESHOLD_PX");
+    expect(source).not.toContain("followRef");
+    expect(source).not.toContain("onScroll");
   });
 
   it("puts the thinking tab ahead of the browser tab", () => {
