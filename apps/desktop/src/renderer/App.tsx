@@ -44,6 +44,7 @@ import {
   createEmptyTokenUsage,
   isConfigurableReasoningEffortModel,
   isGptReasoningEffort,
+  isRuntimeItemEventType,
   resolveModelReasoningEffort
 } from "@shared-types";
 import { IMAGE_GENERATION_PROTOCOL_LABELS, imageGenerationProtocolForModel, providerSupportsMediaGeneration } from "../../../../packages/provider-adapters/src/models/media-protocol";
@@ -126,6 +127,7 @@ import {
   getGpaPlanMessageId,
   getLatestTurnRunId,
   getMessageDisplayKind,
+  getAssistantDraftPhaseLabel,
   getPostToolDecisionLabel,
   getSubagentWaitLabel,
   getThreadDeleteFailureMessage,
@@ -389,6 +391,7 @@ import {
   type RuntimeProgress,
   type SettingsTab,
 } from "./core/app-types";
+import { RuntimeItemStream, withRuntimeItemDetails, type RuntimeItemStreamEntry } from "./lib/runtime-item-stream";
 
 const MAX_RUNTIME_ACTIVITY_ENTRIES = 120;
 
@@ -893,6 +896,38 @@ export function App() {
   const transcriptDiagnosticInputsRef = useRef<TranscriptDiagnosticInputs | null>(null);
   const latestRuntimeThreadsRef = useRef<Record<string, ThreadRecord>>({});
   const persistedRuntimeMessagesRef = useRef<Record<string, Map<string, MessageRecord>>>({});
+  /**
+   * Additive consumer of the item channel. Legacy events still drive every UI
+   * branch; this stream only upgrades the tool rows with the facts carried by
+   * the item frames alone (command exit code, changed-file count, MCP target and
+   * progress). It stays empty for sessions that emit no item frames.
+   */
+  const runtimeItemStreamRef = useRef<RuntimeItemStream | null>(null);
+
+  function getRuntimeItemStream(): RuntimeItemStream {
+    let stream = runtimeItemStreamRef.current;
+    if (!stream) {
+      stream = new RuntimeItemStream();
+      runtimeItemStreamRef.current = stream;
+    }
+    return stream;
+  }
+
+  /**
+   * Applies the folded item frames to the activity panel rows of one thread.
+   * Rows are matched by tool call id, which is also the item id, so a frame that
+   * arrives before its thread has a panel simply does nothing.
+   */
+  function applyRuntimeItemDetails(threadId: string, touched: readonly RuntimeItemStreamEntry[]): void {
+    if (touched.length === 0) return;
+    setRuntimeActivities((current) => {
+      const activity = current[threadId];
+      if (!activity) return current;
+      const entries = withRuntimeItemDetails(activity.entries, touched);
+      if (!entries) return current;
+      return { ...current, [threadId]: { ...activity, entries } };
+    });
+  }
   const snapshotRefreshInFlightRef = useRef<Record<string, Promise<void>>>({});
   const snapshotRefreshPendingRef = useRef<Record<string, boolean>>({});
   const cachedSnapshotFallbackTimerRef = useRef<number | null>(null);
@@ -2593,6 +2628,15 @@ export function App() {
         setRuntimeProgress({ threadId: typed.threadId, phase: "thinking", runtimeObserved: true });
         return;
       }
+      if (isRuntimeItemEventType(runtimeEvent.type)) {
+        // Item frames are the aligned channel. Fold them into the stream and
+        // upgrade the tool rows the legacy branches already created; no other
+        // branch reads them, so an item frame cannot change existing rendering.
+        const touched = getRuntimeItemStream().apply([runtimeEvent]);
+        const itemThreadId = runtimeEvent.threadId ?? null;
+        if (itemThreadId) applyRuntimeItemDetails(itemThreadId, touched);
+        return;
+      }
       if (typed.type === "assistant.draft.updated" && typed.threadId && typed.payload?.turnRunId && typed.payload?.draftId) {
         const threadId = typed.threadId;
         const payload = typed.payload;
@@ -2646,11 +2690,16 @@ export function App() {
           return reconcileAssistantDraftUpdate(current, next);
         });
         // Returning the previous object keeps React from re-rendering on every
-        // streamed frame: the phase is already "generating" for the whole turn.
+        // streamed frame, but the comparison now includes `draftPhase`: otherwise
+        // a turn that moves from generating to validating/auditing/retrying keeps
+        // showing the first state until it finishes.
         setRuntimeProgress((current) =>
-          current?.threadId === threadId && current.phase === "generating" && current.runtimeObserved
+          current?.threadId === threadId
+          && current.phase === "generating"
+          && current.draftPhase === phase
+          && current.runtimeObserved
             ? current
-            : { threadId, phase: "generating", runtimeObserved: true }
+            : { threadId, phase: "generating", draftPhase: phase, runtimeObserved: true }
         );
         return;
       }
@@ -3965,7 +4014,7 @@ export function App() {
         : activeToolCall?.threadId === activeSnapshotThreadId
         ? getToolProcessingLabel(activeToolCall.toolName, activeToolCall.argumentsJson, skillNames)
         : activeAssistantDraft
-          ? "正在生成回复"
+          ? getAssistantDraftPhaseLabel(activeAssistantDraft.phase)
         : isPreparingRuntime
             ? "正在理解任务"
             : localRuntimeProgress?.phase === "thinking"

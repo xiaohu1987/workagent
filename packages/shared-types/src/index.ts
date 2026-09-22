@@ -1,4 +1,5 @@
 export { modelJsonCandidates, tryParseModelJson } from "./model-json";
+export * from "./runtime-item";
 
 export type ThreadMode = "project" | "chat";
 export type WorkspaceKind = "project" | "projectless";
@@ -1318,7 +1319,16 @@ export interface RuntimeEvent {
     | "gpa.updated"
     | "model.capability.updated"
     | "terminal.output"
-    | "runtime.log";
+    | "runtime.log"
+    /**
+     * Item-level dual-write frames (see `./runtime-item`). A writer emits these
+     * next to the legacy event that carries the same information, so the
+     * renderer can branch on `itemType` instead of guessing from `payload` and
+     * still fall back when an item frame is missing.
+     */
+    | "item.started"
+    | "item.delta"
+    | "item.completed";
   threadId?: string;
   /** Root task used by global notifications while preserving the event's subject thread. */
   notificationThreadId?: string;

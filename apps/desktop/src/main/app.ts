@@ -93,6 +93,7 @@ import {
 } from "@skills-runtime";
 import { listProjectDirectoryEntries, type ProjectFileEntry } from "./project-files";
 import { ToolRuntime } from "@tool-runtime";
+import { RuntimeItemWriter } from "./runtime-item-writer";
 import { DatabaseRuntime } from "@database-runtime";
 import { redactRuntimeLogPayload, RuntimeLogWriter } from "./runtime-log";
 import { buildSubagentCompletionSummary } from "./subagent-summary";
@@ -5617,6 +5618,12 @@ export class DesktopBackend {
     }, root.id);
   }
 
+  /**
+   * Dual-writes item-level frames next to every legacy runtime event. See
+   * `runtime-item-writer.ts` for the scope and the accepted volume trade-off.
+   */
+  readonly #itemWriter = new RuntimeItemWriter();
+
   private async emit(event: RuntimeEvent): Promise<void> {
     let subject: ThreadRecord | null = null;
     if (event.threadId) {
@@ -5638,6 +5645,13 @@ export class DesktopBackend {
     const boundedEvent = compactRuntimeToolResult(routedEvent);
     this.#db.addRuntimeEvent(boundedEvent);
     this.#events.emit("runtime-event", boundedEvent);
+    // Item frames are derived from the frame above, so they are written after
+    // it and never projected again (the writer ignores item event types).
+    for (const itemFrame of this.#itemWriter.project(boundedEvent, {
+      cwd: subject?.mode === "project" ? subject.cwd : null
+    })) {
+      await this.emit(itemFrame);
+    }
     if (boundedEvent.type === "thread.updated") {
       if (subject?.parentThreadId) {
         void this.publishSubagentCompletionSummary(subject).catch((error) => {
@@ -5662,7 +5676,9 @@ export class DesktopBackend {
       threadId: boundedEvent.threadId,
       payload: { event: sanitizedEvent }
     };
-    if (boundedEvent.type !== "assistant.draft.updated" || this.#config.desktop.llmLogViewer) {
+    // Derived `item.delta` frames mirror a legacy channel that is already logged,
+    // so persisting them would only duplicate high-volume output.
+    if (boundedEvent.type !== "item.delta" && (boundedEvent.type !== "assistant.draft.updated" || this.#config.desktop.llmLogViewer)) {
       // Runtime delivery must not wait for disk I/O. RuntimeLogWriter keeps
       // ordering and flushes the batch before readers or shutdown continue.
       void this.#logs.append("runtime.event", runtimeLogEntry.payload, boundedEvent.threadId);

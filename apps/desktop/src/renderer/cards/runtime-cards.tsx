@@ -99,10 +99,14 @@ function getRuntimeHistoryLabel(entry: RuntimeActivityEntry, skillNames?: SkillN
     entry.toolCall.argumentsJson,
     skillNames
   ).replace(/^正在/, "");
-  if (entry.toolCall.status === "failed" || entry.toolCall.status === "denied") return `失败 · ${action}`;
-  if (entry.toolCall.status === "blocked") return `已拦截 · ${action}`;
-  if (entry.toolCall.status === "running" || entry.toolCall.status === "pending") return `正在${action}`;
-  return `已完成 · ${action}`;
+  // Facts only the item frames carry (command exit code, duration, changed-file
+  // count). Empty for a session that never produced an item frame, so the label
+  // falls back to exactly the legacy text.
+  const itemDetail = entry.itemDetail ? ` · ${entry.itemDetail}` : "";
+  if (entry.toolCall.status === "failed" || entry.toolCall.status === "denied") return `失败 · ${action}${itemDetail}`;
+  if (entry.toolCall.status === "blocked") return `已拦截 · ${action}${itemDetail}`;
+  if (entry.toolCall.status === "running" || entry.toolCall.status === "pending") return `正在${action}${itemDetail}`;
+  return `已完成 · ${action}${itemDetail}`;
 }
 
 function formatRuntimeEventOffset(createdAt: string, startedAt?: string | null): string {
@@ -686,7 +690,7 @@ function getSubagentRuntimeHistory(activity: RuntimeActivity | undefined, skillN
     label: entry.kind === "tool"
       ? entry.toolCall.status === "running"
         ? getToolProcessingLabel(entry.toolCall.toolName, entry.toolCall.argumentsJson, skillNames)
-        : `${entry.toolCall.status === "failed" ? "工具失败" : "已完成"} · ${entry.toolCall.toolName}`
+        : `${entry.toolCall.status === "failed" ? "工具失败" : "已完成"} · ${entry.toolCall.toolName}${entry.itemDetail ? ` · ${entry.itemDetail}` : ""}`
       : entry.kind === "status"
         ? entry.label
         : entry.label

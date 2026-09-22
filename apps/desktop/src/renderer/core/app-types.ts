@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type {
+  AssistantDraftPhase,
   GpaState,
   KnowledgeImportSource,
   McpServerConfig,
@@ -91,6 +92,13 @@ export type ModelTestResult = {
 export type RuntimeProgress = {
   threadId: string;
   phase: "preparing" | "thinking" | "generating" | "tool";
+  /**
+   * Finer-grained state of the streaming draft. `phase` above only selects the
+   * coarse indicator, so the runtime's four real work states
+   * (generating / validating / auditing / retrying) had no slot and were
+   * flattened to `generating` for the whole turn.
+   */
+  draftPhase?: AssistantDraftPhase;
   runtimeObserved: boolean;
 };
 
@@ -102,7 +110,17 @@ export type ComposerSubmission = {
 export type RuntimeActivityEntry =
   | { id: string; kind: "status"; label: string; createdAt: string }
   | { id: string; kind: "output"; label: string; content: string; createdAt: string }
-  | { id: string; kind: "tool"; toolCall: ToolCallRecord };
+  | {
+      id: string;
+      kind: "tool";
+      toolCall: ToolCallRecord;
+      /**
+       * Variant-specific fact derived from the item frames, such as a command's
+       * exit code and duration or a patch's changed-file count. Absent for any
+       * tool whose events produced no item frame, which is the legacy path.
+       */
+      itemDetail?: string | null;
+    };
 
 export type RuntimeActivity = {
   threadId: string;
