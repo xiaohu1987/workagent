@@ -22,6 +22,8 @@ type ParsedDiffFile = {
   additions: number;
   deletions: number;
   hunks: ParsedHunk[];
+  /** true = 这个文件的逐行差异被主动省略（hunk 行数超过 MAX_HUNK_LINES）。 */
+  diffOmitted?: boolean;
 };
 
 type ParsedStatus = {
@@ -36,6 +38,29 @@ type BranchRefs = {
   local: Set<string>;
   remote: Set<string>;
 };
+
+type LineCount = {
+  additions: number;
+  deletions: number;
+};
+
+/**
+ * 快照的逐行差异闸门。文件数由 `git status` 白送，所以在付 diff 的代价之前就能判断规模。
+ *
+ * 参照实测（2026-09-22，`D:\学习\Tools\tools`，11052 个已暂存文件、含整个 node_modules）：
+ * - 全量 `git diff --cached`：156 MB / 167 万行 / 11.4 秒，逐行解析后整份交给渲染层 → 界面卡死；
+ * - `git diff --cached --numstat -z`：617 KB / 6.2 秒，只给增删行数，不产生 hunks。
+ */
+type DiffMode = "full" | "numstat" | "status-only";
+
+/** 变更文件数 ≤ 该值时正常解析逐行差异。 */
+const MAX_FULL_DIFF_FILES = 400;
+/** 变更文件数 ≤ 该值时只取增删行数（numstat）；再往上连 numstat 也跳过。 */
+const MAX_NUMSTAT_FILES = 4000;
+/** 单次 diff 输出体积上限，兜住"文件数不多但单个文件极大"的情况。 */
+const MAX_DIFF_BYTES = 4 * 1024 * 1024;
+/** 单个文件的 hunk 总行数上限，超过就只省略这个文件的逐行差异。 */
+const MAX_HUNK_LINES = 20_000;
 
 const EMPTY_SNAPSHOT: GitSnapshot = {
   available: false,
@@ -74,8 +99,12 @@ export class GitService {
 
     const status = parseStatus(statusResult.stdout);
     const changedFiles = [...status.files.values()];
-    const hasStagedChanges = changedFiles.some((file) => file.staged);
-    const hasTrackedUnstagedChanges = changedFiles.some((file) => file.unstaged && !file.untracked);
+    // 先判断，再花钱：文件数决定要不要解析逐行差异。
+    const diffMode: DiffMode = changedFiles.length > MAX_NUMSTAT_FILES
+      ? "status-only"
+      : changedFiles.length > MAX_FULL_DIFF_FILES ? "numstat" : "full";
+    const hasStagedChanges = diffMode === "full" && changedFiles.some((file) => file.staged);
+    const hasTrackedUnstagedChanges = diffMode === "full" && changedFiles.some((file) => file.unstaged && !file.untracked);
     const emptyDiff: GitCommandResult = { code: 0, stdout: "", stderr: "" };
     const [headResult, stagedResult, unstagedResult, remoteResult, branchesResult] = await Promise.all([
       runGit(root, ["rev-parse", "--short", "HEAD"]),
@@ -88,22 +117,39 @@ export class GitService {
       status.branch ? runGit(root, ["remote", "get-url", "origin"]) : Promise.resolve(emptyDiff),
       runGit(root, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"])
     ]);
-    const stagedDiffs = parseDiff(stagedResult.stdout, "staged");
-    const unstagedDiffs = parseDiff(unstagedResult.stdout, "unstaged");
-    const paths = new Set([...status.files.keys(), ...stagedDiffs.keys(), ...unstagedDiffs.keys()]);
+    // 文件数没超闸门时仍可能被单个巨型文件撑爆输出，用体积再兜一道底。
+    const diffOmitted = diffMode !== "full"
+      || stagedResult.stdout.length > MAX_DIFF_BYTES
+      || unstagedResult.stdout.length > MAX_DIFF_BYTES;
+    const stagedDiffs = diffOmitted ? null : parseDiff(stagedResult.stdout, "staged");
+    const unstagedDiffs = diffOmitted ? null : parseDiff(unstagedResult.stdout, "unstaged");
+    // 逐行差异被省略时改用 --numstat 补回增删行数：输出量与文件数成正比，与单个文件体量无关。
+    // 两个 numstat 一起喂给解析器，同一路径在两处的计数会自然累加。
+    const lineCounts = diffOmitted && diffMode !== "status-only"
+      ? parseNumstat((await Promise.all([
+        runGit(root, ["diff", "--cached", "--numstat", "-z"]),
+        runGit(root, ["diff", "--numstat", "-z"])
+      ])).map((result) => result.stdout).join(""))
+      : new Map<string, LineCount>();
+    const paths = new Set([...status.files.keys(), ...(stagedDiffs?.keys() ?? []), ...(unstagedDiffs?.keys() ?? [])]);
     const files = [...paths].map((path) => {
       const statusFile = status.files.get(path) ?? emptyFile(path);
-      const staged = stagedDiffs.get(path);
-      const unstaged = unstagedDiffs.get(path);
-      return {
+      const staged = stagedDiffs?.get(path);
+      const unstaged = unstagedDiffs?.get(path);
+      const counts = lineCounts.get(path);
+      const change: GitFileChange = {
         ...statusFile,
         binary: Boolean(staged?.binary || unstaged?.binary),
-        additions: (staged?.additions ?? 0) + (unstaged?.additions ?? 0),
-        deletions: (staged?.deletions ?? 0) + (unstaged?.deletions ?? 0),
+        additions: staged || unstaged ? (staged?.additions ?? 0) + (unstaged?.additions ?? 0) : counts?.additions ?? 0,
+        deletions: staged || unstaged ? (staged?.deletions ?? 0) + (unstaged?.deletions ?? 0) : counts?.deletions ?? 0,
         stagedHunks: staged?.hunks.map((hunk) => hunk.publicHunk) ?? [],
         unstagedHunks: unstaged?.hunks.map((hunk) => hunk.publicHunk) ?? []
-      } satisfies GitFileChange;
+      };
+      // 只在省略时打标记，避免给上万个文件各加一段无用字段。
+      if (diffOmitted || staged?.diffOmitted || unstaged?.diffOmitted) change.diffOmitted = true;
+      return change;
     }).sort((left, right) => left.path.localeCompare(right.path));
+    const diffOmittedFiles = files.filter((file) => file.diffOmitted).length;
     const remoteUrl = remoteResult.code === 0 ? remoteResult.stdout.trim() : "";
     const comparison = buildPullRequestUrl(remoteUrl, status.branch, status.upstream);
 
@@ -123,7 +169,8 @@ export class GitService {
       localBranches: [...branchRefs.local].sort((left, right) => left.localeCompare(right)),
       remoteBranches: [...branchRefs.remote].sort((left, right) => left.localeCompare(right)),
       canCreatePullRequest: Boolean(comparison),
-      files
+      files,
+      ...(diffOmitted ? { diffOmitted: true, diffOmittedFiles } : {})
     };
   }
 
@@ -184,13 +231,20 @@ export class GitService {
   }
 
   public async push(cwd: string): Promise<GitActionResult> {
-    const snapshot = await this.snapshot(cwd);
-    if (!snapshot.available || !snapshot.root) return { ok: false, message: snapshot.message ?? "当前项目不是 Git 仓库。", snapshot };
-    if (!snapshot.branch) return { ok: false, message: "detached HEAD 状态下无法推送，请先创建分支。", snapshot };
-    const args = snapshot.upstream ? ["push"] : ["push", "-u", "origin", snapshot.branch];
-    const result = await runGit(snapshot.root, args);
-    if (result.code !== 0) return this.failure(snapshot.root, result.stderr.trim() || "推送失败。");
-    return { ok: true, message: "已推送分支", snapshot: await this.snapshot(snapshot.root) };
+    const root = await this.getRoot(cwd);
+    if (!root) return this.failure(cwd, "当前项目不是 Git 仓库。");
+    // 预检只需要分支名与上游，用两条轻量 rev-parse 代替一整份快照：
+    // 「一键提交」会连着走 stageAll → commit → push，每一步都重建全量快照代价太高。
+    const [branchResult, upstreamResult] = await Promise.all([
+      runGit(root, ["rev-parse", "--abbrev-ref", "HEAD"]),
+      runGit(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    ]);
+    const branch = branchResult.code === 0 ? branchResult.stdout.trim() : "";
+    if (!branch || branch === "HEAD") return this.failure(root, "detached HEAD 状态下无法推送，请先创建分支。");
+    const hasUpstream = upstreamResult.code === 0 && Boolean(upstreamResult.stdout.trim());
+    const result = await runGit(root, hasUpstream ? ["push"] : ["push", "-u", "origin", branch]);
+    if (result.code !== 0) return this.failure(root, result.stderr.trim() || "推送失败。");
+    return { ok: true, message: "已推送分支", snapshot: await this.snapshot(root) };
   }
 
   public async pull(cwd: string): Promise<GitActionResult> {
@@ -428,8 +482,22 @@ function parseDiffFile(lines: string[], source: "staged" | "unstaged"): ParsedDi
   const newPath = lines.find((line) => line.startsWith("+++ "));
   const path = normalizeDiffPath(newPath?.slice(4)) ?? normalizeDiffPath(oldPath?.slice(4));
   if (!path) return null;
+  const binary = lines.some((line) => line.startsWith("Binary files ") || line === "GIT binary patch");
   const hunkIndexes = lines.map((line, index) => line.startsWith("@@ ") ? index : -1).filter((index) => index >= 0);
-  const header = lines.slice(0, hunkIndexes[0] ?? lines.length).join("\n");
+  const hunkStart = hunkIndexes[0] ?? lines.length;
+  // 单个文件的 hunk 行数过大时提前放弃逐行差异（例如被误暂存的打包产物）。
+  // 这里只做一次线性计数，不构造任何对象，因此比解析完再丢弃便宜得多。
+  if (lines.length - hunkStart > MAX_HUNK_LINES) {
+    let additions = 0;
+    let deletions = 0;
+    for (let index = hunkStart; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line.startsWith("+")) additions += 1;
+      else if (line.startsWith("-")) deletions += 1;
+    }
+    return { path, binary, additions, deletions, hunks: [], diffOmitted: true };
+  }
+  const header = lines.slice(0, hunkStart).join("\n");
   const hunks: ParsedHunk[] = [];
   let additions = 0;
   let deletions = 0;
@@ -441,18 +509,56 @@ function parseDiffFile(lines: string[], source: "staged" | "unstaged"): ParsedDi
     additions += parsedLines.filter((line) => line.kind === "added").length;
     deletions += parsedLines.filter((line) => line.kind === "removed").length;
     const patch = `${header}\n${hunkLines.join("\n")}\n`;
+    // id 由 (来源, 路径, patch) 决定，两处完全相同 —— 只算一次 sha256。
+    const id = createHash("sha256").update(`${source}\0${path}\0${patch}`).digest("hex").slice(0, 20);
     hunks.push({
-      id: createHash("sha256").update(`${source}\0${path}\0${patch}`).digest("hex").slice(0, 20),
+      id,
       header: hunkLines[0],
       patch,
-      publicHunk: {
-        id: createHash("sha256").update(`${source}\0${path}\0${patch}`).digest("hex").slice(0, 20),
-        header: hunkLines[0],
-        lines: parsedLines
-      }
+      publicHunk: { id, header: hunkLines[0], lines: parsedLines }
     });
   }
-  return { path, binary: lines.some((line) => line.startsWith("Binary files ") || line === "GIT binary patch"), additions, deletions, hunks };
+  return { path, binary, additions, deletions, hunks };
+}
+
+/**
+ * 解析 `git diff --numstat -z` 的输出，用于「省略逐行差异」时仍然给出增删行数。
+ * 格式：`<added>\t<deleted>\t<path>\0`；二进制文件的行数是 `-`；
+ * 重命名时路径字段为空，改由后面两个字段带上旧路径与新路径。
+ */
+function parseNumstat(output: string): Map<string, LineCount> {
+  const counts = new Map<string, LineCount>();
+  const fields = output.split("\0");
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index];
+    if (!field) continue;
+    const addedTab = field.indexOf("\t");
+    if (addedTab < 0) continue;
+    const deletedTab = field.indexOf("\t", addedTab + 1);
+    if (deletedTab < 0) continue;
+    let filePath = field.slice(deletedTab + 1);
+    if (!filePath) {
+      index += 2;
+      filePath = fields[index] ?? "";
+    }
+    if (!filePath) continue;
+    const additions = toLineCount(field.slice(0, addedTab));
+    const deletions = toLineCount(field.slice(addedTab + 1, deletedTab));
+    const current = counts.get(filePath);
+    if (current) {
+      current.additions += additions;
+      current.deletions += deletions;
+    } else {
+      counts.set(filePath, { additions, deletions });
+    }
+  }
+  return counts;
+}
+
+/** numstat 对二进制文件输出 `-`，按 0 计。 */
+function toLineCount(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function parseHunkLines(lines: string[]): GitDiffLine[] {

@@ -149,6 +149,7 @@ import {
   reconcileAssistantDraftUpdate,
   isSnapshotReadShort,
   collectMissingSnapshotMessages,
+  resolveSnapshotRecoveryMessages,
   expectedVisibleMessageIds,
   reconcilePendingUserMessagesDetailed,
   shouldKeepOptimisticBaselineMessage,
@@ -3612,6 +3613,12 @@ export function App() {
     renderedTranscriptMessageIdsRef.current = new Set(visibleMessages.map((message) => message.id));
   }, [visibleMessages]);
   const snapshotThreadKey = snapshot?.thread.id ?? null;
+  // The rows the recovery effect last tried to re-attach. A repair that the write
+  // refuses has to stay refused: the interleaved `current` an event handed the
+  // updater can make the very same repair look worth scheduling again on the next
+  // commit, and the layout effect re-entering itself there is what blew the update
+  // depth limit.
+  const snapshotRecoveryKeyRef = useRef<string | null>(null);
   // The transcript has to converge on the snapshot the renderer already owns.
   // A refresh can commit and still leave the list short if a later update dropped
   // rows it returned, and when no further read is scheduled nothing ever asks for
@@ -3625,18 +3632,29 @@ export function App() {
     const cachedMessages = snapshotCacheByThreadRef.current.get(snapshotThreadKey)?.messages;
     if (!cachedMessages || cachedMessages.length === 0) return;
     const expected = mergeServerMessagesWithNewerLocal(cachedMessages, selectedMessages);
-    if (collectMissingSnapshotMessages(selectedMessages, expected).length === 0) return;
+    // Decide through the same merge the write performs, not by diffing alone. `expected`
+    // can carry rows this commit is unable to keep - typically the cached in-flight send
+    // placeholder, which the merge drops again because its persisted twin is already on
+    // screen. Counting those as "missing" kept the gate true while every write handed back
+    // a fresh array, and this layout effect re-entered itself until React aborted with #185
+    // (the "界面遇到异常" flash followed by the automatic reload).
+    const recovery = resolveSnapshotRecoveryMessages(selectedMessages, expected);
+    if (!recovery) return;
+    // The write below re-reads `current`, which an interleaved runtime event may already
+    // have moved on from, so the check above is only advisory. Never run the identical
+    // repair twice in a row.
+    const recoveryKey = `${snapshotThreadKey}:${recovery.map((message) => message.id).join(",")}`;
+    if (snapshotRecoveryKeyRef.current === recoveryKey) return;
+    snapshotRecoveryKeyRef.current = recoveryKey;
     setSnapshot((current) => {
       if (!current || current.thread.id !== snapshotThreadKey) return current;
-      const missing = collectMissingSnapshotMessages(current.messages, expected);
-      if (missing.length === 0) return current;
       // Re-attaching rows is only safe while the row is genuinely missing. The cached
       // list also holds the in-flight send placeholder, and putting that back next to
       // its persisted twin repainted the same message twice - this time from the repair
       // path, which is the only thing still writing here, so nothing reconciled the
       // duplicate afterwards and it survived until the thread was reloaded.
-      const messages = mergeRecoveredSnapshotMessages(current.messages, missing);
-      if (messages === current.messages) return current;
+      const messages = resolveSnapshotRecoveryMessages(current.messages, expected);
+      if (!messages) return current;
       return {
         ...current,
         messages,

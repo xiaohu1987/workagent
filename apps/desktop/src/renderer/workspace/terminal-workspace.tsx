@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { IconTerminal } from "../icons";
+import { IconChevronDown, IconTerminal } from "../icons";
 import { WorkspaceEmptyState, WorkspaceSubtabStrip } from "./panels";
 
 export type TerminalWorkspaceTab = { id: string; title: string; rootPath: string };
@@ -73,9 +73,12 @@ export function TerminalWorkspace({
           <span title={cwd}>{cwd || "正在连接终端"}</span>
         </div>
         {workspaceRoots.length > 1 ? (
-          <select className="workspace-root-select" aria-label="终端目录" value={activeRootPath} onChange={(event) => onRootChange(event.target.value)}>
-            {workspaceRoots.map((root) => <option key={root} value={root}>{root}</option>)}
-          </select>
+          <span className="workspace-root-select-shell">
+            <select className="workspace-root-select" aria-label="终端目录" value={activeRootPath} onChange={(event) => onRootChange(event.target.value)}>
+              {workspaceRoots.map((root) => <option key={root} value={root}>{root}</option>)}
+            </select>
+            <IconChevronDown />
+          </span>
         ) : null}
       </div>
       <pre ref={scrollRef} className="terminal-output" aria-live="polite">

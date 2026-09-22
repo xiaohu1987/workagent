@@ -471,7 +471,9 @@ function ProjectFileDiffPopover({
         <footer className="generated-file-diff-note">二进制文件不支持文本差异预览。</footer>
       ) : null}
       {!snapshot && gitFile && !gitFile.binary && lines.length === 0 ? (
-        <footer className="generated-file-diff-note">当前 Git 快照没有可显示的文本差异。</footer>
+        <footer className="generated-file-diff-note">
+          {gitFile.diffOmitted ? "此仓库变更过多，逐行差异已被省略。" : "当前 Git 快照没有可显示的文本差异。"}
+        </footer>
       ) : null}
       {snapshot && (snapshot.beforeTruncated || snapshot.afterTruncated) ? (
         <footer className="generated-file-diff-note">快照内容过长，仅显示已保存的部分。</footer>

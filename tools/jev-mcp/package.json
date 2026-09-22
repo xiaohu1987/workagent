@@ -1,0 +1,14 @@
+{
+  "name": "jev-mcp",
+  "private": true,
+  "version": "1.0.0",
+  "description": "把 TypeSafe System One（Jev）决策接口包成一个 stdio MCP 工具。",
+  "type": "module",
+  "main": "./server.mjs",
+  "bin": {
+    "jev-mcp": "./server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

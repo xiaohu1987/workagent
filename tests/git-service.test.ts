@@ -23,6 +23,46 @@ describe("GitService", () => {
     });
   });
 
+  it("omits per-line diffs once the repository has too many changed files", async () => {
+    await withGitRepository(async (root) => {
+      const batch = 450;
+      await Promise.all(Array.from({ length: batch }, (_, index) =>
+        fs.writeFile(path.join(root, `bulk-${index}.txt`), `${index}\n`, "utf8")));
+      await git(root, "add", "-A");
+
+      const snapshot = await new GitService().snapshot(root);
+
+      expect(snapshot.diffOmitted).toBe(true);
+      expect(snapshot.diffOmittedFiles).toBe(batch);
+      expect(snapshot.files).toHaveLength(batch);
+      // 文件列表与增删行数仍然完整（来自 --numstat），只是不再携带逐行差异。
+      const sample = snapshot.files.find((file) => file.path === "bulk-7.txt");
+      expect(sample?.diffOmitted).toBe(true);
+      expect(sample?.additions).toBe(1);
+      expect(snapshot.files.every((file) => file.stagedHunks.length === 0 && file.unstagedHunks.length === 0)).toBe(true);
+    });
+  }, 60_000);
+
+  it("omits only the oversized file while keeping hunks for the rest", async () => {
+    await withGitRepository(async (root) => {
+      await fs.writeFile(path.join(root, "huge.txt"), "big line\n".repeat(20_100), "utf8");
+      await fs.writeFile(path.join(root, "small.txt"), "one\ntwo\n", "utf8");
+      await git(root, "add", "-A");
+
+      const snapshot = await new GitService().snapshot(root);
+
+      expect(snapshot.diffOmitted).toBeUndefined();
+      const huge = snapshot.files.find((file) => file.path === "huge.txt");
+      expect(huge?.diffOmitted).toBe(true);
+      expect(huge?.stagedHunks).toEqual([]);
+      expect(huge?.additions).toBe(20_100);
+      const small = snapshot.files.find((file) => file.path === "small.txt");
+      expect(small?.diffOmitted).toBeUndefined();
+      expect(small?.stagedHunks.length).toBeGreaterThan(0);
+      expect(small?.additions).toBe(2);
+    });
+  }, 60_000);
+
   it("lists local branches and switches to an existing branch", async () => {
     await withGitRepository(async (root) => {
       await git(root, "branch", "feature/test");

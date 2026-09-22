@@ -1,5 +1,5 @@
 import type { GitActionResult, GitDiffLine, GitFileChange, GitHunk, GitSnapshot } from "@shared-types";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowDown,
   IconArrowUp,
@@ -26,6 +26,21 @@ type SideBySideDiffRow = {
   newLine: number | null;
   newContent: string;
   newKind: GitDiffLine["kind"] | "empty";
+};
+
+/** 每个分组最多渲染多少个文件行：正常仓库远低于这个数，异常仓库（误暂存 node_modules）不会把 DOM 撑爆。 */
+const MAX_FILES_PER_GROUP = 200;
+
+export type GitChangeGroup = {
+  id: string;
+  label: string;
+  files: GitFileChange[];
+};
+
+export type GitCommitRequest = {
+  message: string;
+  onProgress: (progress: GitCommitProgress) => void;
+  onCommitted: () => void;
 };
 
 export type GitCommitProgress = {
@@ -302,15 +317,13 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
 }) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [openedPath, setOpenedPath] = useState<string | null>(null);
-  const [commitMessage, setCommitMessage] = useState("");
-  const [commitProgress, setCommitProgress] = useState<GitCommitProgress | null>(null);
   const files = snapshot?.files ?? [];
   const selected = files.find((file) => file.path === selectedPath) ?? null;
   const opened = files.find((file) => file.path === openedPath) ?? null;
   const hasStagedFiles = files.some((file) => file.staged);
   const hasUnstagedFiles = files.some((file) => file.unstaged || file.untracked);
   const canPush = Boolean(snapshot?.branch && (!snapshot.upstream || (snapshot.ahead ?? 0) > 0));
-  const groups = useMemo(() => [
+  const groups = useMemo<GitChangeGroup[]>(() => [
     { id: "conflicted", label: "冲突", files: files.filter((file) => file.conflicted) },
     { id: "staged", label: "暂存的更改", files: files.filter((file) => file.staged && !file.conflicted) },
     { id: "changes", label: "更改", files: files.filter((file) => file.unstaged && !file.untracked && !file.conflicted) },
@@ -322,15 +335,45 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
     if (selectedPath && !files.some((file) => file.path === selectedPath)) setSelectedPath(null);
   }, [files, openedPath, selectedPath]);
 
-  useEffect(() => {
-    setCommitMessage("");
-    setCommitProgress(null);
-  }, [rootPath, threadId]);
+  // 全部回调都做成引用稳定的：下面的文件列表与文件行都靠 memo 跳过多余重渲染。
+  const run = useCallback((action: () => Promise<GitActionResult>) => {
+    if (!threadId || busy) return Promise.resolve(undefined);
+    return onAction(action);
+  }, [busy, onAction, threadId]);
+
+  const fileAction = useCallback((action: "stage" | "unstage" | "revert", file: GitFileChange) => {
+    if (!threadId) return;
+    if (action === "stage") void run(() => window.codexh.stageGitFile({ threadId, rootPath, path: file.path }) as Promise<GitActionResult>);
+    if (action === "unstage") void run(() => window.codexh.unstageGitFile({ threadId, rootPath, path: file.path }) as Promise<GitActionResult>);
+    if (action === "revert") void run(() => window.codexh.revertGitFile({ threadId, rootPath, path: file.path, untracked: file.untracked }) as Promise<GitActionResult>);
+  }, [rootPath, run, threadId]);
+
+  const selectFile = useCallback((path: string) => setSelectedPath(path), []);
+  const openFile = useCallback((path: string) => {
+    setSelectedPath(path);
+    setOpenedPath(path);
+  }, []);
+  const stageFile = useCallback((file: GitFileChange) => fileAction("stage", file), [fileAction]);
+  const unstageFile = useCallback((file: GitFileChange) => fileAction("unstage", file), [fileAction]);
+  const oneClickCommit = useCallback((request: GitCommitRequest) => {
+    if (!threadId) return Promise.resolve(undefined);
+    return run(() => runOneClickGitCommit({
+      hasUnstagedFiles,
+      stageAll: () => window.codexh.stageAllGitChanges({ threadId, rootPath }) as Promise<GitActionResult>,
+      commit: () => window.codexh.commitGitChanges({ threadId, rootPath, message: request.message }) as Promise<GitActionResult>,
+      push: () => window.codexh.pushGitChanges({ threadId, rootPath }) as Promise<GitActionResult>,
+      onProgress: request.onProgress,
+      onCommitted: request.onCommitted
+    }));
+  }, [hasUnstagedFiles, rootPath, run, threadId]);
 
   const rootSelector = workspaceRoots.length > 1 ? (
-    <select className="workspace-root-select" aria-label="Git 目录" title="切换 Git 目录" value={rootPath} disabled={busy} onChange={(event) => onRootChange(event.target.value)}>
-      {workspaceRoots.map((root) => <option key={root} value={root}>{root}</option>)}
-    </select>
+    <span className="workspace-root-select-shell">
+      <select className="workspace-root-select" aria-label="Git 目录" title="切换 Git 目录" value={rootPath} disabled={busy} onChange={(event) => onRootChange(event.target.value)}>
+        {workspaceRoots.map((root) => <option key={root} value={root}>{root}</option>)}
+      </select>
+      <IconChevronDown />
+    </span>
   ) : null;
 
   if (loading && !snapshot) {
@@ -339,29 +382,6 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   if (!snapshot?.available) {
     return <section className="git-changes-workspace"><header className="git-changes-header">{rootSelector}</header><WorkspaceEmptyState icon={<IconFileChanges />} title="Git 源代码管理" message={snapshot?.message ?? "当前项目不是 Git 仓库。"} /></section>;
   }
-
-  const run = (action: () => Promise<GitActionResult>) => {
-    if (!threadId || busy) return Promise.resolve(undefined);
-    return onAction(action);
-  };
-  const fileAction = (action: "stage" | "unstage" | "revert", file: GitFileChange) => {
-    if (!threadId) return;
-    if (action === "stage") run(() => window.codexh.stageGitFile({ threadId, rootPath, path: file.path }) as Promise<GitActionResult>);
-    if (action === "unstage") run(() => window.codexh.unstageGitFile({ threadId, rootPath, path: file.path }) as Promise<GitActionResult>);
-    if (action === "revert") run(() => window.codexh.revertGitFile({ threadId, rootPath, path: file.path, untracked: file.untracked }) as Promise<GitActionResult>);
-  };
-  const oneClickCommit = () => {
-    if (!threadId) return;
-    const message = commitMessage.trim();
-    run(() => runOneClickGitCommit({
-      hasUnstagedFiles,
-      stageAll: () => window.codexh.stageAllGitChanges({ threadId, rootPath }) as Promise<GitActionResult>,
-      commit: () => window.codexh.commitGitChanges({ threadId, rootPath, message }) as Promise<GitActionResult>,
-      push: () => window.codexh.pushGitChanges({ threadId, rootPath }) as Promise<GitActionResult>,
-      onProgress: setCommitProgress,
-      onCommitted: () => setCommitMessage("")
-    }));
-  };
 
   return (
     <section className={`git-changes-workspace ${opened ? "is-diff-open" : ""}`} aria-label="Git 源代码管理">
@@ -384,6 +404,11 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
         <span title={snapshot.upstream ?? "没有上游分支"}>{snapshot.upstream ?? "未设置上游"}</span>
       </div>
       {message ? <p className="git-action-message" role="status">{message}</p> : null}
+      {snapshot.diffOmitted ? (
+        <p className="git-diff-omitted-notice" role="status">
+          已省略逐行差异：此仓库有 {files.length} 个变更文件。建议为它补一个 .gitignore 并执行 git reset 清理索引，再回来刷新。
+        </p>
+      ) : null}
 
       {opened ? (
         <GitDiffView
@@ -398,76 +423,24 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
         />
       ) : (
         <>
-          <section className="git-commit-panel" aria-label="提交更改">
-            <textarea
-              value={commitMessage}
-              onChange={(event) => {
-                setCommitMessage(event.target.value);
-                if (commitProgress?.state !== "running") setCommitProgress(null);
-              }}
-              placeholder="输入提交消息（必需）"
-              disabled={busy}
-              rows={3}
-            />
-            <div className="git-commit-actions">
-              <button
-                type="button"
-                className="git-one-click-commit-button"
-                title="暂存全部变更、创建提交并推送"
-                disabled={busy || !threadId || (!hasStagedFiles && !hasUnstagedFiles) || !commitMessage.trim()}
-                onClick={oneClickCommit}
-              >
-                {busy && commitProgress?.state === "running" ? <IconSpinner /> : <IconCheck />}
-                <span>{busy && commitProgress?.state === "running" ? "正在提交" : "一键提交"}</span>
-              </button>
-            </div>
-            {commitProgress ? (
-              <div className={`git-commit-progress is-${commitProgress.state}`} aria-live="polite">
-                <div
-                  className="git-commit-progress-track"
-                  role="progressbar"
-                  aria-label="Git 提交进度"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={commitProgress.percent}
-                >
-                  <span style={{ width: `${commitProgress.percent}%` }} />
-                </div>
-                <span>{commitProgress.label}</span>
-                <b>{commitProgress.percent}%</b>
-              </div>
-            ) : null}
-          </section>
+          <GitCommitPanel
+            key={`${threadId ?? ""}:${rootPath}`}
+            busy={busy}
+            disabled={!threadId}
+            hasStagedFiles={hasStagedFiles}
+            hasUnstagedFiles={hasUnstagedFiles}
+            onSubmit={oneClickCommit}
+          />
 
-          <div className="git-change-list" aria-label="变更文件">
-            <p className="git-change-list-hint">双击文件查看变更前后对比</p>
-            {groups.map((group) => group.files.length ? (
-              <section key={group.id} className={`git-file-group ${group.id}`}>
-                <h3>{group.label}<span>{group.files.length}</span></h3>
-                {group.files.map((file) => (
-                  <div key={`${group.id}:${file.path}`} className={`git-file-row-wrap ${selected?.path === file.path ? "active" : ""}`}>
-                    <button
-                      type="button"
-                      className="git-file-row"
-                      onClick={() => setSelectedPath(file.path)}
-                      onDoubleClick={() => { setSelectedPath(file.path); setOpenedPath(file.path); }}
-                      title={`${file.path}\n双击查看差异`}
-                    >
-                      <IconFile />
-                      <span>{file.path}</span>
-                      <small>{file.additions ? `+${file.additions}` : ""}{file.deletions ? ` −${file.deletions}` : ""}</small>
-                      <b>{getFileStatusLabel(file)}</b>
-                    </button>
-                    <div className="git-file-row-actions">
-                      {file.unstaged || file.untracked ? <button type="button" title="暂存文件" aria-label={`暂存 ${file.path}`} disabled={busy} onClick={() => fileAction("stage", file)}><IconPlus /></button> : null}
-                      {file.staged ? <button type="button" title="取消暂存" aria-label={`取消暂存 ${file.path}`} disabled={busy} onClick={() => fileAction("unstage", file)}><IconUndo /></button> : null}
-                    </div>
-                  </div>
-                ))}
-              </section>
-            ) : null)}
-            {files.length === 0 ? <WorkspaceEmptyState icon={<IconFileChanges />} title="没有变更" message="工作区没有未提交的修改。" /> : null}
-          </div>
+          <GitChangeList
+            groups={groups}
+            selectedPath={selectedPath}
+            busy={busy}
+            onSelect={selectFile}
+            onOpen={openFile}
+            onStage={stageFile}
+            onUnstage={unstageFile}
+          />
         </>
       )}
     </section>
@@ -479,6 +452,161 @@ export const GitChangesWorkspace = memo(function GitChangesWorkspace({
   previous.busy === next.busy &&
   previous.message === next.message
 );
+
+/**
+ * 提交面板独立成组件：提交说明每敲一个字都只重渲染这里。
+ * 之前它是 GitChangesWorkspace 的 state，于是输入一个字符就会重建整个变更文件列表。
+ */
+const GitCommitPanel = memo(function GitCommitPanel({
+  busy,
+  disabled,
+  hasStagedFiles,
+  hasUnstagedFiles,
+  onSubmit
+}: {
+  busy: boolean;
+  disabled: boolean;
+  hasStagedFiles: boolean;
+  hasUnstagedFiles: boolean;
+  onSubmit: (request: GitCommitRequest) => Promise<GitActionResult | undefined>;
+}) {
+  const [message, setMessage] = useState("");
+  const [progress, setProgress] = useState<GitCommitProgress | null>(null);
+  const running = busy && progress?.state === "running";
+  return (
+    <section className="git-commit-panel" aria-label="提交更改">
+      <textarea
+        value={message}
+        onChange={(event) => {
+          setMessage(event.target.value);
+          if (progress?.state !== "running") setProgress(null);
+        }}
+        placeholder="输入提交消息（必需）"
+        disabled={busy}
+        rows={3}
+      />
+      <div className="git-commit-actions">
+        <button
+          type="button"
+          className="git-one-click-commit-button"
+          title="暂存全部变更、创建提交并推送"
+          disabled={busy || disabled || (!hasStagedFiles && !hasUnstagedFiles) || !message.trim()}
+          onClick={() => {
+            const trimmed = message.trim();
+            if (!trimmed) return;
+            void onSubmit({ message: trimmed, onProgress: setProgress, onCommitted: () => setMessage("") });
+          }}
+        >
+          {running ? <IconSpinner /> : <IconCheck />}
+          <span>{running ? "正在提交" : "一键提交"}</span>
+        </button>
+      </div>
+      {progress ? (
+        <div className={`git-commit-progress is-${progress.state}`} aria-live="polite">
+          <div
+            className="git-commit-progress-track"
+            role="progressbar"
+            aria-label="Git 提交进度"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress.percent}
+          >
+            <span style={{ width: `${progress.percent}%` }} />
+          </div>
+          <span>{progress.label}</span>
+          <b>{progress.percent}%</b>
+        </div>
+      ) : null}
+    </section>
+  );
+});
+
+/** 单个文件行：memo 化，父级因选中态或其它状态重渲染时不会被逐个重建。 */
+const GitFileRow = memo(function GitFileRow({
+  file,
+  active,
+  busy,
+  onSelect,
+  onOpen,
+  onStage,
+  onUnstage
+}: {
+  file: GitFileChange;
+  active: boolean;
+  busy: boolean;
+  onSelect: (path: string) => void;
+  onOpen: (path: string) => void;
+  onStage: (file: GitFileChange) => void;
+  onUnstage: (file: GitFileChange) => void;
+}) {
+  return (
+    <div className={`git-file-row-wrap ${active ? "active" : ""}`}>
+      <button
+        type="button"
+        className="git-file-row"
+        onClick={() => onSelect(file.path)}
+        onDoubleClick={() => onOpen(file.path)}
+        title={`${file.path}\n双击查看差异`}
+      >
+        <IconFile />
+        <span>{file.path}</span>
+        <small>{file.additions ? `+${file.additions}` : ""}{file.deletions ? ` −${file.deletions}` : ""}</small>
+        <b>{getFileStatusLabel(file)}</b>
+      </button>
+      <div className="git-file-row-actions">
+        {file.unstaged || file.untracked ? <button type="button" title="暂存文件" aria-label={`暂存 ${file.path}`} disabled={busy} onClick={() => onStage(file)}><IconPlus /></button> : null}
+        {file.staged ? <button type="button" title="取消暂存" aria-label={`取消暂存 ${file.path}`} disabled={busy} onClick={() => onUnstage(file)}><IconUndo /></button> : null}
+      </div>
+    </div>
+  );
+});
+
+/** 变更文件列表：每个分组最多渲染 MAX_FILES_PER_GROUP 行，异常仓库不会把 DOM 撑爆。 */
+const GitChangeList = memo(function GitChangeList({
+  groups,
+  selectedPath,
+  busy,
+  onSelect,
+  onOpen,
+  onStage,
+  onUnstage
+}: {
+  groups: GitChangeGroup[];
+  selectedPath: string | null;
+  busy: boolean;
+  onSelect: (path: string) => void;
+  onOpen: (path: string) => void;
+  onStage: (file: GitFileChange) => void;
+  onUnstage: (file: GitFileChange) => void;
+}) {
+  const total = groups.reduce((sum, group) => sum + group.files.length, 0);
+  return (
+    <div className="git-change-list" aria-label="变更文件">
+      <p className="git-change-list-hint">双击文件查看变更前后对比</p>
+      {groups.map((group) => group.files.length ? (
+        <section key={group.id} className={`git-file-group ${group.id}`}>
+          <h3>{group.label}<span>{group.files.length}</span></h3>
+          {group.files.slice(0, MAX_FILES_PER_GROUP).map((file) => (
+            <GitFileRow
+              key={`${group.id}:${file.path}`}
+              file={file}
+              active={selectedPath === file.path}
+              busy={busy}
+              onSelect={onSelect}
+              onOpen={onOpen}
+              onStage={onStage}
+              onUnstage={onUnstage}
+            />
+          ))}
+          {group.files.length > MAX_FILES_PER_GROUP ? (
+            <p className="git-file-group-more">另有 {group.files.length - MAX_FILES_PER_GROUP} 个文件未显示，建议先用命令行处理或为该仓库补 .gitignore。</p>
+          ) : null}
+        </section>
+      ) : null)}
+      {total === 0 ? <WorkspaceEmptyState icon={<IconFileChanges />} title="没有变更" message="工作区没有未提交的修改。" /> : null}
+    </div>
+  );
+});
 
 function GitDiffView({
   file,
@@ -512,10 +640,13 @@ function GitDiffView({
       </header>
       {file.conflicted ? <p className="git-conflict-notice">此文件存在冲突，请先解决冲突。</p> : null}
       {file.binary ? <p className="git-binary-notice">二进制文件不支持文本差异对比。</p> : null}
+      {file.diffOmitted && file.stagedHunks.length + file.unstagedHunks.length === 0 ? (
+        <p className="git-diff-omitted-notice">为保持界面响应，此文件的逐行差异已被省略（仓库变更过多或该文件差异过大）。</p>
+      ) : null}
       <div className="git-diff-scroll">
         <GitSideBySideHunks file={file} source="staged" busy={busy} threadId={threadId} rootPath={rootPath} onAction={onAction} onComment={onComment} />
         <GitSideBySideHunks file={file} source="unstaged" busy={busy} threadId={threadId} rootPath={rootPath} onAction={onAction} onComment={onComment} />
-        {!file.binary && file.stagedHunks.length + file.unstagedHunks.length === 0 ? <WorkspaceEmptyState icon={<IconEye />} title="没有文本差异" message="此文件没有可显示的文本差异。" /> : null}
+        {!file.binary && !file.diffOmitted && file.stagedHunks.length + file.unstagedHunks.length === 0 ? <WorkspaceEmptyState icon={<IconEye />} title="没有文本差异" message="此文件没有可显示的文本差异。" /> : null}
       </div>
     </div>
   );

@@ -1489,6 +1489,11 @@ export interface GitFileChange {
   deletions: number;
   stagedHunks: GitHunk[];
   unstagedHunks: GitHunk[];
+  /**
+   * 该文件的逐行差异被主动省略（仓库变更过多，或这个文件差异本身过大）。
+   * 此时 stagedHunks / unstagedHunks 为空数组，但 additions / deletions 仍然可用。
+   */
+  diffOmitted?: boolean;
 }
 
 export interface GitSnapshot {
@@ -1505,6 +1510,13 @@ export interface GitSnapshot {
   remoteBranches?: string[];
   canCreatePullRequest: boolean;
   files: GitFileChange[];
+  /**
+   * true = 本次快照没有解析逐行差异（变更文件数超过闸门，或 diff 输出体积过大）。
+   * 文件列表、状态、增删行数仍然完整，只是不含 hunks。
+   */
+  diffOmitted?: boolean;
+  /** 逐行差异被省略的文件数量（= files.length，放在这里方便界面直接展示）。 */
+  diffOmittedFiles?: number;
 }
 
 export interface GitActionResult {

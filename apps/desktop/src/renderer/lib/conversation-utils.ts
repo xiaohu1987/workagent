@@ -2185,6 +2185,33 @@ export function mergeRecoveredSnapshotMessages(
   return unchanged ? currentMessages : merged;
 }
 
+/**
+ * What the transcript recovery commit should write back, or `null` when there is
+ * nothing it can actually change.
+ *
+ * The gate that *schedules* the commit has to ask the same question the commit
+ * itself asks. Diffing the live rows against `expected` alone counts rows the
+ * merge would immediately discard again: the cached list still carries the
+ * in-flight send placeholder, and `dropSupersededOptimisticMessages` removes it
+ * the moment its persisted twin is already on screen. The diff therefore never
+ * emptied, every commit handed back a brand-new array, and the layout effect that
+ * schedules it re-ran itself until React aborted with "Maximum update depth
+ * exceeded" (React #185) - which the error boundary surfaced as a flash of
+ * "界面遇到异常" followed by an automatic reload. Deciding through the same merge
+ * turns that state into a no-op instead of a loop.
+ */
+export function resolveSnapshotRecoveryMessages(
+  liveMessages: MessageRecord[],
+  expectedMessages: MessageRecord[]
+): MessageRecord[] | null {
+  const missing = collectMissingSnapshotMessages(liveMessages, expectedMessages);
+  if (missing.length === 0) {
+    return null;
+  }
+  const merged = mergeRecoveredSnapshotMessages(liveMessages, missing);
+  return merged === liveMessages ? null : merged;
+}
+
 export function mergeMessagesAfterOptimisticUserEdit(
   currentMessages: MessageRecord[],
   incomingMessages: MessageRecord[],

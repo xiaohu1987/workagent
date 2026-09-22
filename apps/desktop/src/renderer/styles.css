@@ -12776,6 +12776,7 @@ input[type="radio"]:focus-visible {
   gap: 6px;
 }
 
+.git-header-root-row .workspace-root-select-shell,
 .git-header-root-row .workspace-root-select {
   width: 100%;
   max-width: none;
@@ -13059,6 +13060,24 @@ input[type="radio"]:focus-visible {
   padding: 4px 7px 7px;
   color: rgba(220, 224, 230, 0.36);
   font-size: 10px;
+}
+
+.git-file-group-more {
+  margin: 0;
+  padding: 6px 7px 4px;
+  color: rgba(220, 224, 230, 0.42);
+  font-size: 10px;
+}
+
+/* 变更过多时逐行差异会被省略，这里明确告诉用户"不是坏了"。 */
+.git-diff-omitted-notice {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(238, 214, 166, 0.85);
+  font-size: 11px;
+  background: rgba(214, 165, 76, 0.08);
 }
 
 .git-file-group + .git-file-group {
@@ -16651,16 +16670,63 @@ input[type="radio"]:focus-visible {
 .project-root-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .project-root-row > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(210, 214, 220, 0.42); font-size: 10px; }
 
-.workspace-root-select {
+/* Root folder picker: one control language with the Git branch picker so the
+   header reads as a matching pair of dropdowns instead of a native select. */
+.workspace-root-select-shell {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
   min-width: 0;
   max-width: 180px;
+  overflow: visible;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.workspace-root-select-shell > svg {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 14px;
+  height: 14px;
+  color: #83b7ff;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.workspace-root-select {
+  appearance: none;
+  -webkit-appearance: none;
+  min-width: 0;
+  width: 100%;
+  max-width: 180px;
   height: 28px;
-  padding: 0 24px 0 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 5px;
-  color: #e4e6e9;
-  background: #171717;
+  padding: 0 22px 0 7px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 4px;
+  outline: none;
+  color: #e5e7eb;
+  background-color: #17191c;
+  font-family: var(--font-mono);
   font-size: 11px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.workspace-root-select:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.workspace-root-select:focus-visible {
+  border-color: rgba(108, 174, 255, 0.58);
+  box-shadow: 0 0 0 2px rgba(74, 146, 231, 0.16);
+}
+
+.workspace-root-select:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .project-file-tree-item { min-width: 0; }
@@ -21908,9 +21974,13 @@ body.is-history-trashing {
   transition: opacity 600ms ease, filter 120ms ease, transform 120ms ease;
 }
 
+/* 只保留缓慢位移，刻意不做缩放：动效层里叠着最多三层全屏 filter: blur() 的位图，动画里一旦出现
+   scale()，Chromium 每一帧都得重新栅格化并重做模糊。实测（窗口可见、空闲会话）原始版本 GPU 常驻
+   79~85% 一个核、渲染主线程 17%；改成纯 translate3d 之后两者都回到 0~8%。
+   代价是失去原来的缓慢放大观感（放大 1.012→1.065），换来的是不再把合成链路吃满。 */
 @keyframes app-background-ken-burns {
-  from { transform: translate3d(-0.8%, 0.6%, 0) scale(1.012); }
-  to { transform: translate3d(0.8%, -0.6%, 0) scale(1.065); }
+  from { transform: translate3d(-0.8%, 0.6%, 0); }
+  to { transform: translate3d(0.8%, -0.6%, 0); }
 }
 
 @keyframes app-background-light-sweep {
@@ -24346,6 +24416,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 :root[data-theme="light"] .git-file-row,
 :root[data-theme="light"] .git-file-row b,
 :root[data-theme="light"] .git-change-list-hint,
+:root[data-theme="light"] .git-file-group-more,
 :root[data-theme="light"] .git-file-group h3,
 :root[data-theme="light"] .git-hunk-list > h3,
 :root[data-theme="light"] .git-sync-summary,
@@ -24374,6 +24445,11 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   background: var(--action-primary-hover) !important;
 }
 :root[data-theme="light"] .git-commit-progress-track { background: #dbe7f3 !important; }
+:root[data-theme="light"] .git-diff-omitted-notice {
+  border-bottom-color: #e6dcc4 !important;
+  color: #8a6320 !important;
+  background: #fdf6e6 !important;
+}
 
 /* Terminal drawer and terminal workspace. */
 :root[data-theme="light"] :is(

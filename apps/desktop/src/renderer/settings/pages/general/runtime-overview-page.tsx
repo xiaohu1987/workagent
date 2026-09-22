@@ -194,7 +194,6 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
           <div className="config-block general-subagent-settings">
             <div className="section-copy">
               <strong><IconChecklist />沙箱策略</strong>
-              <span>对齐 Codex 的策略档位。第一版只做路径与审批控制，不做操作系统隔离。任务里的「完全访问」会在当前聊天中启用全路径、shell 出站并跳过普通审批；密钥和明确授权操作仍受保护。</span>
             </div>
             <div className="general-subagent-settings-grid">
               <label className="settings-field">
