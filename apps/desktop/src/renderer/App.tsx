@@ -405,6 +405,53 @@ export function removeQueuedMessageById(
   return [...messages.slice(0, index), ...messages.slice(index + 1)];
 }
 
+/**
+ * Auto-follow scroll tuning.
+ *
+ * Streaming content arrives in many small bursts per second. Writing
+ * `scrollTop = scrollHeight` on each burst - in the same frame the virtualized list
+ * corrects its own measurements - is what read as a jerk right after every chunk.
+ * The follow loop below instead advances a bounded distance per frame: a growing
+ * answer glides at a steady pace, and only a large block (a tool card landing)
+ * travels quickly, never in a single jump.
+ */
+export const TRANSCRIPT_FOLLOW_MIN_SPEED_PX_PER_MS = 0.35;
+export const TRANSCRIPT_FOLLOW_MAX_SPEED_PX_PER_MS = 2.8;
+export const TRANSCRIPT_FOLLOW_SPEED_GAIN = 0.012;
+/** Long frames (window restored from a suspended state) must not scroll a screenful. */
+export const TRANSCRIPT_FOLLOW_MAX_FRAME_MS = 48;
+/** Below this the transcript is treated as arrived; stops sub-pixel churn. */
+export const TRANSCRIPT_FOLLOW_SETTLE_EPSILON_PX = 0.5;
+/** Quiet window kept after arrival so the next chunk does not restart the loop. */
+export const TRANSCRIPT_FOLLOW_IDLE_STOP_MS = 320;
+
+export function resolveTranscriptFollowSpeed(distanceFromLatest: number): number {
+  const distance = Math.max(0, distanceFromLatest);
+  if (distance <= 0) return 0;
+  const speed = TRANSCRIPT_FOLLOW_MIN_SPEED_PX_PER_MS + distance * TRANSCRIPT_FOLLOW_SPEED_GAIN;
+  return Math.min(
+    TRANSCRIPT_FOLLOW_MAX_SPEED_PX_PER_MS,
+    Math.max(TRANSCRIPT_FOLLOW_MIN_SPEED_PX_PER_MS, speed)
+  );
+}
+
+export function resolveTranscriptFollowStep(distanceFromLatest: number, elapsedMs: number): number {
+  const distance = Math.max(0, distanceFromLatest);
+  if (distance <= 0) return 0;
+  const frameMs = Math.min(Math.max(0, elapsedMs), TRANSCRIPT_FOLLOW_MAX_FRAME_MS);
+  return Math.min(distance, resolveTranscriptFollowSpeed(distance) * frameMs);
+}
+
+/**
+ * Keep the loop alive while it still lags the bottom, and for a short quiet window
+ * after it arrives. Tearing the loop down on every arrival is what reintroduces the
+ * hitch the loop exists to remove.
+ */
+export function shouldContinueTranscriptFollow(distanceFromLatest: number, idleMs: number): boolean {
+  if (distanceFromLatest > TRANSCRIPT_FOLLOW_SETTLE_EPSILON_PX) return true;
+  return idleMs < TRANSCRIPT_FOLLOW_IDLE_STOP_MS;
+}
+
 export function shouldFollowLatestAfterTranscriptScroll(
   distanceFromLatest: number,
   manualScrollActive: boolean
@@ -4377,13 +4424,18 @@ export function App() {
     });
   }, [activeContextCompaction, composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.contextMeasurement, snapshot?.toolCalls]);
 
-  function cancelPendingAutoScrollFrame() {
-    if (autoScrollFrameRef.current === null) {
-      return;
-    }
+  // Timestamp of the previous follow frame and of the last follow request. The pair lets
+  // the loop derive a per-frame delta (so speed is time-based, not frame-based) and decide
+  // when a quiet transcript may stop animating.
+  const autoScrollLastFrameAtRef = useRef<number | null>(null);
+  const autoScrollLastRequestAtRef = useRef(0);
 
-    window.cancelAnimationFrame(autoScrollFrameRef.current);
-    autoScrollFrameRef.current = null;
+  function cancelPendingAutoScrollFrame() {
+    if (autoScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(autoScrollFrameRef.current);
+      autoScrollFrameRef.current = null;
+    }
+    autoScrollLastFrameAtRef.current = null;
   }
 
   function clearAutoScrollReleaseTimer() {
@@ -4432,6 +4484,81 @@ export function App() {
     });
   }
 
+  function prefersReducedTranscriptMotion(): boolean {
+    return typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  /**
+   * One frame of the follow loop: advance a time-based slice of the remaining distance,
+   * then reschedule while the transcript still lags the bottom. Rescheduling before the
+   * work is done is what makes the motion continuous instead of one jump per chunk.
+   */
+  function runAutoFollowFrame() {
+    autoScrollFrameRef.current = null;
+    const node = chatScrollRef.current;
+    if (!node) {
+      autoScrollLastFrameAtRef.current = null;
+      return;
+    }
+
+    const now = performance.now();
+    const previousFrameAt = autoScrollLastFrameAtRef.current;
+    autoScrollLastFrameAtRef.current = now;
+    const elapsedMs = previousFrameAt === null ? TRANSCRIPT_FOLLOW_MAX_FRAME_MS : now - previousFrameAt;
+    const maxScrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+    const distanceFromLatest = Math.max(0, maxScrollTop - node.scrollTop);
+    const step = resolveTranscriptFollowStep(distanceFromLatest, elapsedMs);
+    if (step > 0) {
+      // Assigning `scrollTop` scrolls immediately and bypasses `scroll-behavior: smooth`,
+      // so the loop stays the only writer and the pace stays the one computed above.
+      node.scrollTop = Math.min(maxScrollTop, node.scrollTop + step);
+    }
+
+    const remaining = Math.max(0, maxScrollTop - node.scrollTop);
+    if (!shouldContinueTranscriptFollow(remaining, now - autoScrollLastRequestAtRef.current)) {
+      autoScrollLastFrameAtRef.current = null;
+      return;
+    }
+
+    autoScrollFrameRef.current = window.requestAnimationFrame(runAutoFollowFrame);
+  }
+
+  function requestAutoFollowFrame() {
+    if (autoScrollFrameRef.current !== null) {
+      return;
+    }
+
+    autoScrollLastFrameAtRef.current = null;
+    autoScrollFrameRef.current = window.requestAnimationFrame(runAutoFollowFrame);
+  }
+
+  /**
+   * Follow new content with a continuous frame loop instead of snapping to the bottom on
+   * every snapshot. The previous instant jump wrote `scrollTop = scrollHeight` in the same
+   * frame the virtualized list corrected its measurements, and the two writes landed as a
+   * visible jerk right after each streamed chunk.
+   *
+   * The state flags keep the meaning they had for the instant jump, so user scrolling,
+   * the jump-to-latest button and thread switching behave exactly as before.
+   */
+  function startSmoothTranscriptFollow() {
+    if (prefersReducedTranscriptMotion()) {
+      scrollTranscriptToLatest();
+      return;
+    }
+
+    if (!chatScrollRef.current) {
+      return;
+    }
+
+    manualTranscriptScrollRef.current = false;
+    shouldAutoScrollRef.current = true;
+    setIsTranscriptAtLatest(true);
+    autoScrollLastRequestAtRef.current = performance.now();
+    requestAutoFollowFrame();
+  }
+
   function handleTranscriptScroll() {
     const node = chatScrollRef.current;
     if (!node) {
@@ -4446,6 +4573,14 @@ export function App() {
       beginManualTranscriptScroll();
     }
     transcriptScrollMetricsRef.current = currentMetrics;
+    // The follow loop writes `scrollTop` on every frame, so its intermediate positions sit
+    // above the "at latest" threshold. Reading those as "the user scrolled away" would stop
+    // the loop mid-flight and restart it on the next chunk - the hitch this loop removes.
+    // Manual input cancels the pending frame first, so wheel, scrollbar and touch still
+    // reach the checks below.
+    if (autoScrollFrameRef.current !== null) {
+      return;
+    }
     const distanceFromLatest = Math.max(0, node.scrollHeight - node.scrollTop - node.clientHeight);
     const atLatest = distanceFromLatest <= 48;
     const shouldFollowLatest = shouldFollowLatestAfterTranscriptScroll(
@@ -4556,7 +4691,9 @@ export function App() {
       isTranscriptAtLatest,
       manualTranscriptScrollRef.current
     )) {
-      scrollTranscriptToLatest();
+      // New content arrived while the transcript was following: glide the remaining
+      // distance over the next frames instead of pinning to the bottom in this one.
+      startSmoothTranscriptFollow();
       settleAutoScroll(activeSnapshotThreadStatus);
       return;
     }
@@ -4593,9 +4730,10 @@ export function App() {
       return;
     }
 
-    // Runtime updates can arrive several times per second. Following them
-    // smoothly restarts the scroll animation and makes the transcript jitter.
-    scrollTranscriptToLatest();
+    // Runtime updates can arrive several times per second. The follow loop stays alive for
+    // a whole burst, so the transcript glides instead of restarting a scroll animation -
+    // and visibly jittering - on every update.
+    startSmoothTranscriptFollow();
     settleAutoScroll(activeSnapshotThreadStatus);
   }, [
     activeSnapshotThreadId,
@@ -4633,7 +4771,9 @@ export function App() {
       if (manualTranscriptScrollRef.current) return;
       if (!shouldAutoScrollRef.current && !isTranscriptAtLatestRef.current) return;
 
-      scrollTranscriptToLatest();
+      // Late growth (async markdown, decoded images, font swaps) also follows smoothly so
+      // it cannot land as a jump on top of content the reader is already watching.
+      startSmoothTranscriptFollow();
       settleAutoScroll(activeSnapshotThreadStatus);
     });
 
@@ -7355,6 +7495,12 @@ export function App() {
     void openGeneratedFileLocation(filePath);
   });
   const toggleConversationTurnCollapsedEvent = useStableEvent(toggleConversationTurnCollapsed);
+  // Stable identity on purpose: `TimelineEntries` is memoized and the virtualized list
+  // re-measures rows when its callback identity changes, so an inline arrow here would
+  // add exactly the measurement churn the follow loop is smoothing out.
+  const requestSmoothFollowLatestEvent = useStableEvent(() => {
+    startSmoothTranscriptFollow();
+  });
   const createThreadEvent = useStableEvent(createThread);
   const openThreadEvent = useStableEvent(openThread);
   const openQuickNotesEvent = useStableEvent(openQuickNotes);
@@ -7670,6 +7816,7 @@ export function App() {
                   scrollElementRef={chatScrollRef}
                   scrollInteractionActive={isTranscriptScrollbarDragging}
                   followLatest={isTranscriptAtLatest}
+                  onRequestFollowLatest={requestSmoothFollowLatestEvent}
                   onOpenFolder={openGeneratedFileLocationEvent}
                   onToggleTurn={toggleConversationTurnCollapsedEvent}
                   shareMode={isSharing}

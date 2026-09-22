@@ -37,6 +37,12 @@ type Props = {
   scrollInteractionActive: boolean;
   followLatest: boolean;
   onOpenFolder: (filePath: string) => void;
+  /**
+   * Asks the chat to glide to the newest content instead of pinning to the bottom in one
+   * frame. Must keep a stable identity: a new callback on every render would make the
+   * virtualized list re-measure its rows, which is the churn the glide exists to hide.
+   */
+  onRequestFollowLatest: () => void;
   onToggleTurn: (turnId: string) => void;
   /** Share selection mode is active: tick boxes are rendered in the gutter. */
   shareMode: boolean;
@@ -66,6 +72,7 @@ export const TimelineEntries = memo(function TimelineEntries({
   scrollInteractionActive,
   followLatest,
   onOpenFolder,
+  onRequestFollowLatest,
   onToggleTurn,
   shareMode,
   shareableMessageIds,
@@ -92,6 +99,7 @@ export const TimelineEntries = memo(function TimelineEntries({
       scrollElementRef={scrollElementRef}
       scrollInteractionActive={scrollInteractionActive}
       followLatest={followLatest}
+      requestFollowLatest={onRequestFollowLatest}
       renderItem={(entry) => {
         const entryTurn = turnByEntryId.get(entry.id);
         const isLatestTurn = entryTurn?.id === latestTurnId;
