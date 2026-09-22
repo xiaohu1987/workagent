@@ -20449,7 +20449,7 @@ select option:checked {
 .thinking-workspace-body {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 12px;
+  padding: 12px 12px 14px;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -20459,6 +20459,15 @@ select option:checked {
   line-height: 1.7;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Keep a quiet strip of space under the last thought. Chromium drops a scroll
+   container's own bottom padding once the content overflows, so the trailing
+   gap is real content instead of relying on padding alone. */
+.thinking-workspace-body::after {
+  display: block;
+  height: 16px;
+  content: "";
 }
 
 .thinking-workspace-body::-webkit-scrollbar {
