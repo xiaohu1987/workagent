@@ -3136,17 +3136,29 @@ export class DatabaseService {
     if (turnRunId) {
       const result = this.#db
         .prepare(
-          "UPDATE user_input_prompts SET status = 'cancelled', answered_at = ? WHERE thread_id = ? AND turn_run_id = ? AND status = 'pending'"
+          "UPDATE user_input_prompts SET status = 'cancelled', resolution_source = 'interrupted', answered_at = ? WHERE thread_id = ? AND turn_run_id = ? AND status = 'pending'"
         )
         .run(nowIso(), threadId, turnRunId);
       return Number(result.changes ?? 0);
     }
     const result = this.#db
       .prepare(
-        "UPDATE user_input_prompts SET status = 'cancelled', answered_at = ? WHERE thread_id = ? AND status = 'pending'"
+        "UPDATE user_input_prompts SET status = 'cancelled', resolution_source = 'interrupted', answered_at = ? WHERE thread_id = ? AND status = 'pending'"
       )
       .run(nowIso(), threadId);
     return Number(result.changes ?? 0);
+  }
+
+  /**
+   * Threads that still hold an unanswered question. Startup recovery uses this to
+   * settle prompts whose owning task died with the previous process, because no
+   * waiting resolver survives a restart.
+   */
+  public listPendingUserPromptThreadIds(): string[] {
+    return this.#db
+      .prepare("SELECT DISTINCT thread_id FROM user_input_prompts WHERE status = 'pending'")
+      .all()
+      .map((row) => (row as { thread_id: string }).thread_id);
   }
 
   public listUserPrompts(threadId: string): UserInputPrompt[] {

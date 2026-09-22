@@ -673,6 +673,15 @@ export function UserInputPromptCard({
   });
 
   if (!pending) {
+    if (prompt.resolutionSource === "interrupted") {
+      return (
+        <section className="user-input-prompt-card resolved interrupted" aria-label={`${prompt.title} 已中断`}>
+          <span className="user-input-prompt-resolved-mark" aria-hidden><IconClose /></span>
+          <span>该问题所属任务已中断</span>
+          <strong>请重新开始后再决定</strong>
+        </section>
+      );
+    }
     if (prompt.kind === "gpa_plan_clarification") {
       const answers = prompt.questions.map((question) => {
         const rawAnswer = prompt.answers?.[question.id] ?? "";
@@ -723,7 +732,9 @@ export function UserInputPromptCard({
     return (
       <section className="user-input-prompt-card resolved" aria-label={`${prompt.title} 已处理`}>
         <span className="user-input-prompt-resolved-mark" aria-hidden><IconCheck /></span>
-        <span>已提供输入</span>
+        <span>
+          {prompt.resolutionSource === "timeout" ? "未及时选择，已自动采用默认项" : "已提供输入"}
+        </span>
         <strong>{skipped ? "保持原计划" : summary || "已提交"}</strong>
       </section>
     );
@@ -745,6 +756,7 @@ export function UserInputPromptCard({
         <span className="user-input-prompt-icon" aria-hidden><IconHelpCircle /></span>
         <strong>{prompt.title}</strong>
         <InteractionCountdown expiresAt={prompt.expiresAt} timeoutLabel="后将自动执行默认操作" />
+        {prompt.expiresAt ? null : <span className="user-input-prompt-hold">需你显式确认</span>}
       </header>
       <div className="user-input-prompt-questions">
         {prompt.questions.map((question, index) => (
