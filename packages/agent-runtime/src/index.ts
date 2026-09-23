@@ -53,6 +53,7 @@ import {
   canStartGpaStage,
   DEFAULT_GPA_STATE,
   detectGpaConfirmation,
+  gpaClarificationFingerprint,
   gpaStageAllowsTools,
   gpaStageLabel,
   parseGpaCompletedTaskDeclarations,
@@ -61,6 +62,7 @@ import {
   parseCanonicalGpaPlanTasks,
   parseGpaPlanTasks,
   reconcileGpaPlanTasks,
+  selectUnaskedGpaClarificationQuestions,
   parseGpaState
 } from "./gpa";
 import {
@@ -96,6 +98,7 @@ import {
   formatNonImageAttachmentPaths,
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
+import { resolveVerbatimMediaPrompt } from "./media-prompt";
 import type { GpaStage, GpaState } from "@shared-types";
 import { normalizeSandboxMode, normalizeSandboxNetworkAccess } from "@shared-types";
 import { createChatRuntimePolicy } from "./chat-runtime";
@@ -103,6 +106,15 @@ import {
   createProjectRuntimePolicy,
   PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE
 } from "./project-runtime";
+import {
+  appendProjectRuleInjection,
+  buildProjectRuleInjection,
+  resolveProjectRuleState
+} from "./project-rule-inject";
+import {
+  evaluateProjectRuleWriteCheck,
+  recordProjectRuleWriteConflicts
+} from "./project-rule-guard";
 import {
   buildSandboxSystemPrompt,
   defaultAppHome,
@@ -154,6 +166,8 @@ export {
   parseGpaCompletedTaskDeclarations,
   parseGpaPlanTasks,
   reconcileGpaPlanTasks,
+  selectUnaskedGpaClarificationQuestions,
+  gpaClarificationFingerprint,
   normalizeSequentialPlanTasks,
   parseGpaState
 } from "./gpa";
@@ -169,6 +183,113 @@ export {
   type GpaPlanFileDocument
 } from "./gpa-plan-file";
 export {
+  PROJECT_SCAN_CONFIG_FILES,
+  PROJECT_SCAN_DEFAULT_MAX_DEPTH,
+  PROJECT_SCAN_GENERATED_DIRECTORIES,
+  PROJECT_SCAN_IGNORED_DIRECTORIES,
+  PROJECT_SCAN_PROTECTED_FILES,
+  MAX_PROJECT_SCAN_KEY_DEPENDENCIES,
+  MAX_PROJECT_SCAN_PACKAGES,
+  classifyProjectScriptKind,
+  describeProjectFacts,
+  scanProjectFacts,
+  type ProjectScanCommand,
+  type ProjectScanCommandKind,
+  type ProjectScanFacts,
+  type ProjectScanKeyDependency,
+  type ProjectScanPackage
+} from "./project-rule-scan";
+export {
+  PROJECT_RULE_CATEGORIES,
+  PROJECT_RULE_FILE_VERSION,
+  PROJECT_RULE_RELATIVE_PATH,
+  MAX_PROJECT_RULE_ENTRIES,
+  MAX_PROJECT_RULE_ENTRY_CHARACTERS,
+  MAX_PROJECT_RULE_FILE_CHARACTERS,
+  MAX_PROJECT_RULE_INDEX_CHARACTERS,
+  MAX_PROJECT_RULE_INDEX_ENTRIES,
+  buildProjectRuleIndexLine,
+  formatProjectRuleMarkdown,
+  getProjectRuleCategory,
+  nextProjectRuleId,
+  parseProjectRuleMarkdown,
+  readProjectRuleFile,
+  resolveProjectRuleCategoryFromId,
+  resolveProjectRuleFilePath,
+  sortProjectRuleEntries,
+  truncateProjectRuleText,
+  writeProjectRuleFile,
+  type ProjectRuleCategory,
+  type ProjectRuleCategoryId,
+  type ProjectRuleDocument,
+  type ProjectRuleEntry,
+  type ProjectRuleSource
+} from "./project-rule-file";
+export {
+  PROJECT_RULE_TEMPLATE_HEADER,
+  PROJECT_RULE_TEMPLATE_NOTES,
+  buildEmptyProjectRuleDocument,
+  buildProjectRuleCategoryGuide,
+  buildProjectRuleEntrySkeleton
+} from "./project-rule-template";
+export {
+  MAX_PROJECT_RULE_AUTO_UPDATE_ENTRIES,
+  PROJECT_RULE_FRESHNESS_PROBE_FILES,
+  buildProjectRuleUpdateMessage,
+  collectProjectRuleProbeModifiedAt,
+  mergeProjectRuleDocument,
+  projectRuleEntryKey,
+  projectRuleNeedsRefresh,
+  refreshProjectRuleFile,
+  type ProjectRuleMergeOptions,
+  type ProjectRuleMergeResult,
+  type ProjectRuleRefreshResult
+} from "./project-rule-update";
+export {
+  buildProjectRuleEntriesFromFacts,
+  ensureProjectRuleFile,
+  type ProjectRuleBootstrapResult
+} from "./project-rule-bootstrap";
+export {
+  PROJECT_RULE_EDIT_ACTION_KINDS,
+  applyProjectRuleEdit,
+  editProjectRuleFile,
+  type ProjectRuleEditAction,
+  type ProjectRuleEditActionKind,
+  type ProjectRuleEditResult
+} from "./project-rule-edit";
+export {
+  PROJECT_RULE_INJECTION_HEADING,
+  PROJECT_RULE_INJECTION_PATH_LABEL,
+  appendProjectRuleInjection,
+  buildProjectRuleInjection,
+  resolveProjectRuleInjection,
+  resolveProjectRuleState
+} from "./project-rule-inject";
+export {
+  MAX_PROJECT_RULE_EXPANSION_CHARACTERS,
+  MAX_PROJECT_RULE_EXPANSION_ENTRIES,
+  PROJECT_RULE_EXPANSION_HEADING,
+  PROJECT_RULE_PENDING_ENTRY_TITLE,
+  PROJECT_RULE_WRITE_TOOL_NAMES,
+  buildProjectRuleTargetExpansion,
+  buildProjectRuleWriteConflictMessage,
+  evaluateProjectRuleWriteCheck,
+  isHardProjectRuleBoundary,
+  isProjectRuleScopeMatch,
+  isProjectRuleWriteTool,
+  normalizeProjectRulePath,
+  recordProjectRuleWriteConflicts,
+  registerProjectRuleWriteConflicts,
+  resolveProjectRuleWriteTargets,
+  selectProjectRuleEntriesForTargets,
+  toProjectRelativePath,
+  type ProjectRuleTargetSelection,
+  type ProjectRuleWriteCheckInput,
+  type ProjectRuleWriteCheckResult,
+  type ProjectRuleWriteConflict
+} from "./project-rule-guard";
+export {
   detectMultimodalIntent,
   detectRequestedImageCount,
   stripThinkTags,
@@ -180,6 +301,7 @@ export {
   applyMultimodalInputRecognitionToTranscript,
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
+export { isUserOriginatedMediaPrompt, resolveVerbatimMediaPrompt } from "./media-prompt";
 
 /** @deprecated Use MAX_TARGET_FAILURE_ATTEMPTS for tool failures. */
 export const MAX_REPEATED_TASK_FAILURES = MAX_TARGET_FAILURE_ATTEMPTS;
@@ -1556,6 +1678,9 @@ class ThreadSessionRuntime {
   #busy = false;
   readonly #idleWaiters: Array<() => void> = [];
   #gpa: GpaState = { ...DEFAULT_GPA_STATE };
+  // PLAN clarifications are re-derived from the assistant text on every model
+  // decision, so remember what was already asked and ask each one only once.
+  readonly #askedGpaClarifications = new Set<string>();
   #gpaLoaded = false;
   #useFunctionCallCompatibilityTranscript = false;
 
@@ -1678,6 +1803,10 @@ class ThreadSessionRuntime {
 
   async #commitGpa(next: GpaState): Promise<void> {
     const committed = { ...next, confirmationExpiresAt: null };
+    if (committed.stage !== this.#gpa.stage) {
+      // A new stage means a new analysis round, so its clarifications may be asked again.
+      this.#askedGpaClarifications.clear();
+    }
     this.#gpa = committed;
     await this.services.persistence.updateThread(this.threadId, {
       gpaStateJson: JSON.stringify(committed)
@@ -2058,13 +2187,23 @@ class ThreadSessionRuntime {
     const activeMcpServerIds = selectedMcpServerIds.length > 0
       ? selectedMcpServerIds
       : accessibleMcpServerIds;
+    // Project rules are injected on every project turn: the bounded index is
+    // resident prompt text while the full entries stay on disk for on-demand reads.
+    const projectRuleState =
+      thread.mode === "project" && thread.cwd
+        ? await resolveProjectRuleState(thread.cwd)
+        : null;
+    const projectRuleInjection = buildProjectRuleInjection(projectRuleState?.document ?? null);
     const modePolicy = thread.mode === "project"
-      ? createProjectRuntimePolicy({
-          cwd: thread.cwd,
-          workspaceRoots: thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : []),
-          explicitlySelectedMcp: selectedMcpServerIds.length > 0,
-          explicitlyRequestedMcp
-        })
+      ? appendProjectRuleInjection(
+          createProjectRuntimePolicy({
+            cwd: thread.cwd,
+            workspaceRoots: thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : []),
+            explicitlySelectedMcp: selectedMcpServerIds.length > 0,
+            explicitlyRequestedMcp
+          }),
+          projectRuleInjection
+        )
       : createChatRuntimePolicy({
           outputDir: turnOutputDir,
           request: effectiveRequest,
@@ -2362,7 +2501,7 @@ class ThreadSessionRuntime {
         await this.runMultimodalIntentTurn({
           intent: mediaIntent,
           turnId: turn.id,
-          prompt: initialInput.trim(),
+          prompt: resolveVerbatimMediaPrompt({ userInput: initialInput, requestedPrompt: initialInput.trim() }).prompt,
           count: mediaIntent === "image" ? detectRequestedImageCount(initialInput) : 1,
           abortController
         });
@@ -2899,7 +3038,7 @@ class ThreadSessionRuntime {
       const persistBlockedToolCall = async (
         toolCall: RuntimeToolCall,
         reason: string,
-        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope" | "explicit_authorization_denied" | "sandbox_policy"
+        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope" | "explicit_authorization_denied" | "sandbox_policy" | "project_rule_conflict"
       ) => {
         const toolRecord = await this.services.persistence.recordToolCall({
           threadId: this.threadId,
@@ -4358,32 +4497,52 @@ class ThreadSessionRuntime {
               ? textClarificationQuestions
               : riskClarificationQuestions);
           if (promotedQuestions.length > 0) {
-            await this.services.log("gpa.text_clarification_promoted", this.threadId, {
-              turnRunId: turn.id,
-              stage: this.#gpa.stage,
-              questionCount: promotedQuestions.length,
-              source: embeddedInput
-                ? "embedded_xml"
-                : textClarificationQuestions.length > 0
-                  ? "numbered_questions"
-                  : "risk_defaults"
-            });
-            decision.toolCalls = [{
-              id: randomUUID(),
-              name: "request_user_input",
-              arguments: {
-                title:
-                  embeddedInput?.title ??
-                  (this.#gpa.stage === "plan" ? "计划细节待确认" : "目标细节待确认"),
-                questions: promotedQuestions
-              }
-            }];
-            // Keep the visible analysis; only strip the unparsed XML markup.
-            decision.assistantMessage = embeddedInput
-              ? embeddedInput.cleanedContent || undefined
-              : decision.assistantMessage;
-            decision.endTurn = false;
-            decision.goalCompleted = false;
+            // The answers to a clarification arrive inside the same turn, and the
+            // model restates its plan afterwards. Without this filter the identical
+            // question was promoted again on every following decision, so the user
+            // had to answer the same thing over and over.
+            const freshQuestions = selectUnaskedGpaClarificationQuestions(
+              promotedQuestions,
+              this.#askedGpaClarifications
+            );
+            if (freshQuestions.length === 0) {
+              await this.services.log("gpa.clarification_duplicate_suppressed", this.threadId, {
+                turnRunId: turn.id,
+                stage: this.#gpa.stage,
+                questionIds: promotedQuestions.map((question) => question.id)
+              });
+            }
+            for (const question of freshQuestions) {
+              this.#askedGpaClarifications.add(gpaClarificationFingerprint(question));
+            }
+            if (freshQuestions.length > 0) {
+              await this.services.log("gpa.text_clarification_promoted", this.threadId, {
+                turnRunId: turn.id,
+                stage: this.#gpa.stage,
+                questionCount: freshQuestions.length,
+                source: embeddedInput
+                  ? "embedded_xml"
+                  : textClarificationQuestions.length > 0
+                    ? "numbered_questions"
+                    : "risk_defaults"
+              });
+              decision.toolCalls = [{
+                id: randomUUID(),
+                name: "request_user_input",
+                arguments: {
+                  title:
+                    embeddedInput?.title ??
+                    (this.#gpa.stage === "plan" ? "计划细节待确认" : "目标细节待确认"),
+                  questions: freshQuestions
+                }
+              }];
+              // Keep the visible analysis; only strip the unparsed XML markup.
+              decision.assistantMessage = embeddedInput
+                ? embeddedInput.cleanedContent || undefined
+                : decision.assistantMessage;
+              decision.endTurn = false;
+              decision.goalCompleted = false;
+            }
           }
         }
 
@@ -6142,6 +6301,43 @@ class ThreadSessionRuntime {
           rawToolCall.name = toolCall.name;
           let toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
           let toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+          // Project rules are re-checked immediately before a write executes: the
+          // entries covering the target paths are expanded into the turn, and a
+          // boundary conflict blocks the call and is registered as a pending rule
+          // update instead of being written silently.
+          const projectRuleWriteCheck = projectRuleState
+            ? evaluateProjectRuleWriteCheck({
+                document: projectRuleState.document,
+                toolName: toolCall.name,
+                arguments: toolCall.arguments,
+                cwd: workspaceCwd
+              })
+            : null;
+          if (projectRuleWriteCheck?.injection) {
+            transcript.push({ role: "user", content: projectRuleWriteCheck.injection });
+          }
+          if (projectRuleWriteCheck?.requiresConfirmation && projectRuleWriteCheck.message) {
+            const projectRuleReason = projectRuleWriteCheck.message;
+            appendBlockedToolCallResult(toolCall, projectRuleReason);
+            await persistBlockedToolCall(toolCall, projectRuleReason, "project_rule_conflict");
+            const pendingRuleEntryId = thread.cwd
+              ? await recordProjectRuleWriteConflicts(thread.cwd, projectRuleWriteCheck.conflicts)
+              : null;
+            transcript.push({
+              role: "user",
+              content: pendingRuleEntryId
+                ? `${projectRuleReason}\n（冲突已登记为规则待更新条目 \`${pendingRuleEntryId}\`）`
+                : projectRuleReason
+            });
+            await this.services.log("agent.project_rule_write_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              conflicts: projectRuleWriteCheck.conflicts.map(
+                (conflict) => `${conflict.entryId}@${conflict.target}:${conflict.severity}`
+              )
+            });
+            continue;
+          }
           let recoveryTargetKey = getToolCallRecoveryTargetKey(toolCall.name, toolCall.arguments, workspaceCwd);
           let recoveryStrategyFingerprint = createRecoveryStrategyFingerprint(toolCall.name, toolCall.arguments);
           const isRepeatableCoordinationTool = toolCall.name === "multi_agents.wait" || toolCall.name === "multi_agents.list";
@@ -6683,18 +6879,42 @@ class ThreadSessionRuntime {
               getThreadOutputDir: () => this.services.getThreadOutputDir(this.threadId),
               abortSignal: abortController.signal,
               generateImageWithDefaultModel: async ({ prompt, toolCallId }) => {
+                // The image model must receive the user's own words; a model-authored
+                // rewrite of the request would silently change what was asked for.
+                const resolvedPrompt = resolveVerbatimMediaPrompt({
+                  userInput: initialInput,
+                  requestedPrompt: prompt
+                });
+                if (resolvedPrompt.source === "user" && resolvedPrompt.prompt !== prompt) {
+                  await this.services.log("media.prompt_verbatim", this.threadId, {
+                    turnRunId: turn.id,
+                    toolName: "image.generate",
+                    promptPreview: resolvedPrompt.prompt.slice(0, 200)
+                  });
+                }
                 const generated = await this.createGeneratedImageArtifact({
                   turnId: turn.id,
-                  prompt,
+                  prompt: resolvedPrompt.prompt,
                   toolCallId: toolCallId ?? toolRecord.id,
                   abortSignal: abortController.signal
                 });
                 return generated;
               },
               generateVideoWithDefaultModel: async ({ prompt, toolCallId }) => {
+                const resolvedPrompt = resolveVerbatimMediaPrompt({
+                  userInput: initialInput,
+                  requestedPrompt: prompt
+                });
+                if (resolvedPrompt.source === "user" && resolvedPrompt.prompt !== prompt) {
+                  await this.services.log("media.prompt_verbatim", this.threadId, {
+                    turnRunId: turn.id,
+                    toolName: "video.generate",
+                    promptPreview: resolvedPrompt.prompt.slice(0, 200)
+                  });
+                }
                 const generated = await this.createGeneratedVideoArtifact({
                   turnId: turn.id,
-                  prompt,
+                  prompt: resolvedPrompt.prompt,
                   toolCallId: toolCallId ?? toolRecord.id,
                   abortSignal: abortController.signal
                 });
@@ -11792,6 +12012,11 @@ function buildRuntimePrompt(
   const attachedFilePrompt = buildAttachedLocalFilePrompt(attachedLocalPaths);
   if (attachedFilePrompt) {
     blocks.push(attachedFilePrompt);
+  }
+  if (imageGenerateAvailable || videoGenerateAvailable) {
+    blocks.push(
+      "Image and video generation send the user's own words to the media model: the runtime replaces any prompt you compose with the current user message verbatim. Call image.generate or video.generate as soon as the request arrives, without a reasoning, planning, or prompt-engineering step, and pass the user's request through unchanged - never translate, expand, shorten, restyle, or add style, composition, lighting, motion, or camera hints. Describe what you are generating in the user's own wording."
+    );
   }
   if (imageGenerateAvailable) {
     blocks.push(

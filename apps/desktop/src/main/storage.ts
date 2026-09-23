@@ -4185,17 +4185,21 @@ When the user wants an image, do **not** invent a picture or claim you generated
 
 ## Required workflow
 1. Call \`skills.load\` with \`skill_id: generate_image\` if you have not loaded it yet.
-2. Call the built-in function \`image.generate\` with a concrete \`prompt\` and \`count\`.
+2. Call the built-in function \`image.generate\` with \`prompt\` and \`count\`.
+   - Pass the user's own message as \`prompt\`, word for word. The runtime forwards the user's turn
+     text to the image model unchanged, so rewriting it has no effect: never translate, expand,
+     shorten, restyle, or append style / composition / lighting hints.
    - Default \`count\` to 1.
    - Use the requested count when the user asks for multiple separate images (maximum 4).
    - If the user clearly asks for multiple images without an exact number, use \`count: 2\`.
 3. The runtime will use the **default image model** from **设置 → 多模态** (not the chat reasoning model).
 4. After the tool succeeds, briefly confirm the image was generated. The UI will show the image attachment.
 
-## Prompt tips
-- Include subject, composition, style, lighting, and constraints.
-- Prefer a clear English or Chinese prompt; keep it specific.
-- For edits, describe the change relative to the previous image in the prompt text.
+## Prompt rules
+- Pass the user's own words exactly as written: no translation, no restyling, no added style, composition, or lighting hints.
+- Call image.generate immediately when the user asks for an image; no reasoning, planning, or prompt-engineering step is needed.
+- The runtime replaces the tool prompt with the user's current message verbatim, so a polished rewrite never reaches the image model. Never claim you rewrote, enriched, or optimized the prompt.
+- Only when the turn carries no user speech (internal turns) may you author the prompt yourself.
 
 ## If the tool is unavailable
 Tell the user to open **设置 → 多模态**, enable image generation, add an image model, and set a default. Do not fabricate image files.
@@ -4203,7 +4207,7 @@ Tell the user to open **设置 → 多模态**, enable image generation, add an 
       meta: `interface:
   display_name: Generate Image
   short_description: Generate images via image.generate and the default multimodal image model
-  default_prompt: Load generate_image, then call image.generate with a detailed prompt and the requested image count.
+  default_prompt: Load generate_image, then call image.generate with the user's own words as the prompt and the requested image count.
 policy:
   allow_implicit_invocation: true
 dependencies:
@@ -4228,13 +4232,18 @@ When the user wants a video, do **not** invent a video file or claim you generat
 
 ## Required workflow
 1. Call \`skills.load\` with \`skill_id: generate_video\` if you have not loaded it yet.
-2. Call the built-in function \`video.generate\` with a concrete \`prompt\`.
+2. Call the built-in function \`video.generate\` with \`prompt\`.
+   - Pass the user's own message as \`prompt\`, word for word. The runtime forwards the user's turn
+     text to the video model unchanged, so rewriting it has no effect: never translate, expand,
+     shorten, restyle, or append style / camera / duration hints.
 3. The runtime will use the **default video model** from **设置 → 多模态** (not the chat reasoning model).
 4. After the tool succeeds, briefly confirm the video was generated. The UI will show the file entry.
 
-## Prompt tips
-- Include subject, motion, camera, scene, style, and duration constraints.
-- Prefer a clear English or Chinese prompt; keep it specific.
+## Prompt rules
+- Pass the user's own words exactly as written: no translation, no restyling, no added motion, camera, or duration hints.
+- Call video.generate immediately when the user asks for a video; no reasoning, planning, or prompt-engineering step is needed.
+- The runtime replaces the tool prompt with the user's current message verbatim, so a polished rewrite never reaches the video model. Never claim you rewrote, enriched, or optimized the prompt.
+- Only when the turn carries no user speech (internal turns) may you author the prompt yourself.
 
 ## If the tool is unavailable
 Tell the user to open **设置 → 多模态**, enable video generation, add a video model, and set a default. Do not fabricate video files.
@@ -4242,7 +4251,7 @@ Tell the user to open **设置 → 多模态**, enable video generation, add a v
       meta: `interface:
   display_name: Generate Video
   short_description: Generate videos via video.generate and the default multimodal video model
-  default_prompt: Load generate_video, then call video.generate with a detailed prompt.
+  default_prompt: Load generate_video, then call video.generate with the user's own words as the prompt.
 policy:
   allow_implicit_invocation: true
 dependencies:

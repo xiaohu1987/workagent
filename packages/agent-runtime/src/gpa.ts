@@ -687,6 +687,24 @@ export function buildGpaRiskClarificationQuestions(
   return questions.slice(0, 4);
 }
 
+/**
+ * Clarification questions are re-derived from the assistant's own PLAN text, so
+ * restating that plan (for example right after the user answers) rebuilds the
+ * exact same question. Fingerprints let the runtime ask each question once per
+ * plan revision instead of nagging the user with duplicates.
+ */
+export function gpaClarificationFingerprint(question: UserInputQuestion): string {
+  const prompt = question.prompt.replace(/\s+/g, " ").trim().toLowerCase();
+  return `${question.id}::${prompt}`;
+}
+
+export function selectUnaskedGpaClarificationQuestions(
+  questions: UserInputQuestion[],
+  asked: ReadonlySet<string>
+): UserInputQuestion[] {
+  return questions.filter((question) => !asked.has(gpaClarificationFingerprint(question)));
+}
+
 export function canEnterGpaAct(state: GpaState): boolean {
   return state.stage === "plan" && state.planTasks.length > 0;
 }

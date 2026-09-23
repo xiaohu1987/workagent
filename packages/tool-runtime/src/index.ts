@@ -2806,7 +2806,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           prompt: {
             type: "string",
             description:
-              "Detailed English or Chinese image prompt: subject, composition, style, lighting, and constraints."
+              "The user's own words, copied exactly as the user wrote them. The runtime sends the user's current message to the image model verbatim, so a rewritten prompt is ignored: never translate, expand, shorten, restyle, or add subject, composition, style, or lighting hints."
           },
           count: {
             type: "integer",
@@ -2890,7 +2890,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           prompt: {
             type: "string",
             description:
-              "Detailed English or Chinese video prompt: subject, motion, scene, camera, style, and duration constraints."
+              "The user's own words, copied exactly as the user wrote them. The runtime sends the user's current message to the video model verbatim, so a rewritten prompt is ignored: never translate, expand, shorten, restyle, or add motion, camera, scene, style, or duration hints."
           }
         },
         required: ["prompt"]

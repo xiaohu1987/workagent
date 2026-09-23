@@ -189,6 +189,51 @@ import {
   reconcileGpaPlanTasks,
   buildGpaRiskClarificationQuestions,
   buildGpaTextClarificationQuestions,
+  gpaClarificationFingerprint,
+  selectUnaskedGpaClarificationQuestions,
+  PROJECT_RULE_CATEGORIES,
+  PROJECT_RULE_FILE_VERSION,
+  PROJECT_RULE_RELATIVE_PATH,
+  buildEmptyProjectRuleDocument,
+  buildProjectRuleCategoryGuide,
+  buildProjectRuleEntrySkeleton,
+  buildProjectRuleIndexLine,
+  formatProjectRuleMarkdown,
+  nextProjectRuleId,
+  parseProjectRuleMarkdown,
+  readProjectRuleFile,
+  resolveProjectRuleFilePath,
+  sortProjectRuleEntries,
+  writeProjectRuleFile,
+  classifyProjectScriptKind,
+  describeProjectFacts,
+  scanProjectFacts,
+  ensureProjectRuleFile,
+  buildProjectRuleInjection,
+  appendProjectRuleInjection,
+  resolveProjectRuleInjection,
+  PROJECT_RULE_INJECTION_HEADING,
+  PROJECT_RULE_INJECTION_PATH_LABEL,
+  MAX_PROJECT_RULE_INDEX_ENTRIES,
+  MAX_PROJECT_RULE_INDEX_CHARACTERS,
+  isProjectRuleWriteTool,
+  resolveProjectRuleWriteTargets,
+  selectProjectRuleEntriesForTargets,
+  buildProjectRuleTargetExpansion,
+  evaluateProjectRuleWriteCheck,
+  registerProjectRuleWriteConflicts,
+  recordProjectRuleWriteConflicts,
+  PROJECT_RULE_EXPANSION_HEADING,
+  PROJECT_RULE_PENDING_ENTRY_TITLE,
+  MAX_PROJECT_RULE_AUTO_UPDATE_ENTRIES,
+  mergeProjectRuleDocument,
+  projectRuleEntryKey,
+  refreshProjectRuleFile,
+  type ProjectRuleMergeResult,
+  type ProjectRuleRefreshResult,
+  type ProjectScanFacts,
+  type ProjectRuleEntry,
+  type ProjectRuleDocument,
   parseEmbeddedRequestUserInput,
   getAddedPatchFiles,
   getToolCallTaskKey,
@@ -4910,6 +4955,39 @@ describe("GPA plan validation", () => {
     expect(questions.some((question) => question.id === "gpa_risk_mitigation")).toBe(true);
   });
 
+  it("asks a promoted PLAN clarification only once per plan revision", () => {
+    const content = [
+      "### 风险点 & 预案",
+      "",
+      "| 风险 | 影响 | 预案 |",
+      "|------|------|------|",
+      "| 战斗动画/日志不同步 | 用户体验差 | 用 setTimeout 按序打印日志 |"
+    ].join("\n");
+
+    const asked = new Set<string>();
+    const firstQuestions = buildGpaRiskClarificationQuestions("plan", content);
+    const firstPromotion = selectUnaskedGpaClarificationQuestions(firstQuestions, asked);
+    expect(firstPromotion).toEqual(firstQuestions);
+    for (const question of firstPromotion) {
+      asked.add(gpaClarificationFingerprint(question));
+    }
+
+    // The model restates the identical plan after the user answered, which used to
+    // re-promote the same question and make the user confirm it again and again.
+    const repeatedPlan = buildGpaRiskClarificationQuestions("plan", content);
+    expect(selectUnaskedGpaClarificationQuestions(repeatedPlan, asked)).toEqual([]);
+
+    // A materially revised plan is still a new question.
+    const revisedPlan = buildGpaRiskClarificationQuestions(
+      "plan",
+      content.replace("用 setTimeout 按序打印日志", "改用单队列串行渲染日志")
+    );
+    expect(
+      selectUnaskedGpaClarificationQuestions(revisedPlan, asked).some(
+        (question) => question.id === "gpa_risk_mitigation"
+      )
+    ).toBe(true);
+  });
   it("rejects prose that does not contain an executable task list", () => {
     expect(parseGpaPlanTasks("I will create a complete game and test it.")).toEqual([]);
   });
@@ -5896,5 +5974,807 @@ describe("GPA turn-level verification evidence", () => {
     applyTurnVerificationEvidence(evidence);
 
     expect(evidence[0].kinds.filter((kind) => kind === "verification")).toHaveLength(1);
+  });
+});
+
+describe("project rule file", () => {
+  const buildEntry = (input: {
+    category: "boundary" | "tech-stack" | "verify" | "layout" | "style" | "pitfall";
+    id: string;
+    title: string;
+    rules?: string[];
+    scope?: string;
+    source?: "auto" | "user";
+    updatedAt?: string;
+    stale?: boolean;
+  }) => buildProjectRuleEntrySkeleton(input);
+
+  it("keeps the resident index derived from entries and ordered by category priority", () => {
+    const verifyEntry = buildEntry({
+      category: "verify",
+      id: "R-VERIFY-001",
+      title: "提交前跑单测",
+      rules: ["pnpm vitest run"],
+      scope: "packages/**"
+    });
+    const guardEntry = buildEntry({
+      category: "boundary",
+      id: "R-GUARD-001",
+      title: "写入 .codexh 前先确认",
+      rules: ["不要自动改写计划文件"]
+    });
+    const doc: ProjectRuleDocument = {
+      version: PROJECT_RULE_FILE_VERSION,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      entries: [verifyEntry, guardEntry]
+    };
+
+    const markdown = formatProjectRuleMarkdown(doc);
+    const indexSection = markdown.split(/^##\s*Entries\b/m)[0];
+
+    expect(indexSection).toContain(buildProjectRuleIndexLine(verifyEntry));
+    expect(indexSection).toContain(buildProjectRuleIndexLine(guardEntry));
+    // boundary carries the lower priority number, so it must lead the index.
+    expect(indexSection.indexOf("R-GUARD-001")).toBeLessThan(indexSection.indexOf("R-VERIFY-001"));
+    expect(sortProjectRuleEntries(doc.entries).map((entry) => entry.id)).toEqual([
+      "R-GUARD-001",
+      "R-VERIFY-001"
+    ]);
+  });
+
+  it("serializes an unchanged document byte-identically so the file is not rewritten needlessly", () => {
+    const doc: ProjectRuleDocument = {
+      version: PROJECT_RULE_FILE_VERSION,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      entries: [buildEntry({ category: "style", id: "R-STYLE-001", title: "命名", rules: ["用 camelCase"] })]
+    };
+
+    expect(formatProjectRuleMarkdown(doc)).toBe(
+      formatProjectRuleMarkdown({ ...doc, entries: [...doc.entries] })
+    );
+  });
+
+  it("round-trips meta fields and preserves user-authored entries", () => {
+    const doc: ProjectRuleDocument = {
+      version: PROJECT_RULE_FILE_VERSION,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      entries: [
+        buildEntry({
+          category: "pitfall",
+          id: "R-PITFALL-001",
+          title: "PowerShell 5.1 中文乱码",
+          scope: "scripts/**",
+          rules: ["脚本正文只写 ASCII", "中文标签放独立 UTF-8 文件"],
+          source: "user",
+          updatedAt: "2026-02-02T00:00:00.000Z",
+          stale: true
+        })
+      ]
+    };
+
+    const parsed = parseProjectRuleMarkdown(formatProjectRuleMarkdown(doc));
+    const parsedEntry = parsed?.entries?.[0];
+
+    expect(parsed?.version).toBe(PROJECT_RULE_FILE_VERSION);
+    expect(parsed?.entries).toHaveLength(1);
+    expect(parsedEntry).toMatchObject({
+      id: "R-PITFALL-001",
+      category: "pitfall",
+      source: "user",
+      scope: "scripts/**",
+      updatedAt: "2026-02-02T00:00:00.000Z",
+      stale: true
+    });
+    expect(parsedEntry?.rules).toEqual(["脚本正文只写 ASCII", "中文标签放独立 UTF-8 文件"]);
+  });
+
+  it("ignores empty documents and entries without executable rules", () => {
+    expect(parseProjectRuleMarkdown("")).toBeNull();
+    expect(parseProjectRuleMarkdown("### `R-STYLE-001` 空条目\n\n- category: `style`\n")).toBeNull();
+  });
+
+  it("allocates the next free id inside a category", () => {
+    const entries = [
+      buildEntry({ category: "verify", id: "R-VERIFY-002", title: "a", rules: ["x"] }),
+      buildEntry({ category: "verify", id: "R-VERIFY-007", title: "b", rules: ["y"] }),
+      buildEntry({ category: "style", id: "R-STYLE-004", title: "c", rules: ["z"] })
+    ];
+
+    expect(nextProjectRuleId("verify", entries)).toBe("R-VERIFY-008");
+    expect(nextProjectRuleId("layout", entries)).toBe("R-LAYOUT-001");
+  });
+
+  it("writes and reads .codexh/rule.md without leaving temporary files", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-rule-"));
+    const doc: ProjectRuleDocument = {
+      version: PROJECT_RULE_FILE_VERSION,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      entries: [buildEntry({ category: "tech-stack", id: "R-TECH-001", title: "包管理器", rules: ["统一用 pnpm"] })]
+    };
+
+    try {
+      expect(resolveProjectRuleFilePath(cwd)).toBe(path.join(cwd, ".codexh", "rule.md"));
+
+      const written = await writeProjectRuleFile(cwd, doc);
+      expect(path.relative(cwd, written).split(path.sep).join("/")).toBe(".codexh/rule.md");
+      expect(await readProjectRuleFile(cwd)).toMatchObject({
+        version: PROJECT_RULE_FILE_VERSION,
+        entries: [{ id: "R-TECH-001", category: "tech-stack", rules: ["统一用 pnpm"] }]
+      });
+      expect((await fs.readdir(path.join(cwd, ".codexh"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a missing rule file as null instead of throwing", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-rule-missing-"));
+
+    try {
+      expect(await readProjectRuleFile(cwd)).toBeNull();
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes the bootstrap skeleton and the category guide", () => {
+    const empty = buildEmptyProjectRuleDocument({ updatedAt: "2026-01-01T00:00:00.000Z" });
+
+    expect(empty.entries).toEqual([]);
+    expect(formatProjectRuleMarkdown(empty)).toContain("（暂无条目）");
+    expect(buildProjectRuleCategoryGuide()).toContain("R-GUARD");
+    expect(PROJECT_RULE_CATEGORIES.map((category) => category.id)).toContain("boundary");
+    expect(PROJECT_RULE_RELATIVE_PATH.split(path.sep).join("/")).toBe(".codexh/rule.md");
+  });
+});
+
+describe("project fact scanner", () => {
+  const writeProjectFixture = async (root: string) => {
+    await fs.mkdir(path.join(root, "src"), { recursive: true });
+    await fs.mkdir(path.join(root, "packages", "core", "src"), { recursive: true });
+    await fs.mkdir(path.join(root, "dist"), { recursive: true });
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    await fs.mkdir(path.join(root, ".git"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "demo-app",
+        packageManager: "pnpm@9.12.0",
+        scripts: {
+          typecheck: "tsc --noEmit",
+          test: "vitest run",
+          lint: "eslint .",
+          build: "electron-vite build",
+          start: "electron ."
+        },
+        dependencies: { electron: "^30.0.0" },
+        devDependencies: { typescript: "^5.5.0", vitest: "^2.0.0", eslint: "^9.0.0" }
+      }),
+      "utf8"
+    );
+    await fs.writeFile(path.join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+    await fs.writeFile(path.join(root, "pnpm-workspace.yaml"), 'packages:\n  - "packages/*"\n', "utf8");
+    await fs.writeFile(path.join(root, "tsconfig.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(root, "src", "main.ts"), "export const main = 1;\n", "utf8");
+    await fs.writeFile(
+      path.join(root, "packages", "core", "package.json"),
+      JSON.stringify({ name: "@demo/core", scripts: { test: "vitest run" } }),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(root, "packages", "core", "src", "index.ts"),
+      "export const core = 1;\n",
+      "utf8"
+    );
+  };
+
+  it("classifies common npm scripts and ignores unrelated ones", () => {
+    expect(classifyProjectScriptKind("typecheck")).toBe("typecheck");
+    expect(classifyProjectScriptKind("check-types")).toBe("typecheck");
+    expect(classifyProjectScriptKind("test:unit")).toBe("test");
+    expect(classifyProjectScriptKind("lint:fix")).toBe("lint");
+    expect(classifyProjectScriptKind("build")).toBe("build");
+    expect(classifyProjectScriptKind("start")).toBeNull();
+    expect(classifyProjectScriptKind("dev")).toBeNull();
+  });
+
+  it("scans stack, commands, packages and read-only paths", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-scan-"));
+    try {
+      await writeProjectFixture(root);
+      const facts: ProjectScanFacts = await scanProjectFacts(root);
+
+      expect(facts.packageName).toBe("demo-app");
+      expect(facts.packageManager).toBe("pnpm");
+      expect(facts.packageManagerEvidence).toContain("pnpm-lock.yaml");
+      expect(facts.languages).toContain("TypeScript");
+      expect(facts.testFramework).toBe("vitest");
+      expect(facts.frameworks).toContain("electron");
+      expect(facts.workspaces).toEqual(["packages/*"]);
+      expect(facts.packages).toEqual([
+        { name: "@demo/core", relativePath: "packages/core", scripts: ["test"] }
+      ]);
+      expect(facts.commands.map((command) => `${command.kind}:${command.name}`)).toEqual([
+        "build:build",
+        "lint:lint",
+        "test:test",
+        "typecheck:typecheck"
+      ]);
+      expect(facts.sourceDirectories).toEqual(["packages", "src"]);
+      expect(facts.generatedDirectories).toContain("dist");
+      expect(facts.protectedPaths).toEqual([".git", "node_modules", "dist"]);
+      expect(facts.configFiles).toContain("tsconfig.json");
+      expect(facts.notes.join("\n")).toContain("检测到 workspace");
+      expect(describeProjectFacts(facts).join("\n")).toContain("vitest run");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("degrades to unknown facts for a folder without package.json", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-scan-empty-"));
+    try {
+      await fs.writeFile(path.join(root, "main.py"), "print('hi')\n", "utf8");
+      const facts = await scanProjectFacts(root);
+
+      expect(facts.packageName).toBeNull();
+      expect(facts.packageManager).toBeNull();
+      expect(facts.commands).toEqual([]);
+      expect(facts.languages).toEqual(["Python"]);
+      expect(facts.workspaces).toEqual([]);
+      expect(facts.notes.join("\n")).toContain("未发现 package.json");
+      expect(describeProjectFacts(facts).join("\n")).toContain("未检测到锁文件");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("project rule injection", () => {
+  const ruleEntry = (
+    overrides: Partial<ProjectRuleEntry> & Pick<ProjectRuleEntry, "id" | "category" | "title">
+  ): ProjectRuleEntry => ({
+    scope: "**/*",
+    rules: ["示例规则"],
+    source: "auto",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    stale: false,
+    ...overrides
+  });
+
+  const buildDocument = (entries: ProjectRuleEntry[]): ProjectRuleDocument => ({
+    version: PROJECT_RULE_FILE_VERSION,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    entries
+  });
+
+  const indexLines = (block: string) => block.split("\n").filter((line) => /^- `R-/.test(line));
+  const indexIds = (block: string) =>
+    indexLines(block).map((line) => /`(R-[A-Z]+-\d{3})`/.exec(line)?.[1]);
+
+  it("orders the injected index by category priority and marks stale entries", () => {
+    const block = buildProjectRuleInjection(
+      buildDocument([
+        ruleEntry({ id: "R-STYLE-001", category: "style", title: "缩进统一" }),
+        ruleEntry({ id: "R-GUARD-001", category: "boundary", title: "不要改 dist", stale: true }),
+        ruleEntry({ id: "R-VERIFY-001", category: "verify", title: "改完跑 typecheck" })
+      ])
+    );
+
+    expect(block).not.toBeNull();
+    expect(indexIds(block!)).toEqual(["R-GUARD-001", "R-VERIFY-001", "R-STYLE-001"]);
+    expect(indexLines(block!)[0]).toContain("· stale");
+    expect(block!).toContain(PROJECT_RULE_INJECTION_HEADING);
+    expect(block!).toContain(PROJECT_RULE_INJECTION_PATH_LABEL);
+  });
+
+  it("injects nothing when there are no rules to inject", () => {
+    expect(buildProjectRuleInjection(null)).toBeNull();
+    expect(buildProjectRuleInjection(buildDocument([]))).toBeNull();
+  });
+
+  it("caps the resident index and discloses the omitted entries", () => {
+    const entries = Array.from({ length: MAX_PROJECT_RULE_INDEX_ENTRIES + 5 }, (_, index) =>
+      ruleEntry({
+        id: `R-PITFALL-${String(index + 1).padStart(3, "0")}`,
+        category: "pitfall",
+        title: `已踩过的坑 ${index + 1}`
+      })
+    );
+    const block = buildProjectRuleInjection(buildDocument(entries))!;
+
+    expect(indexLines(block)).toHaveLength(MAX_PROJECT_RULE_INDEX_ENTRIES);
+    expect(block).toContain("另有 5 条条目未展开");
+  });
+
+  it("keeps the resident block bounded and states the user-instruction priority", () => {
+    const entries = Array.from({ length: MAX_PROJECT_RULE_INDEX_ENTRIES }, (_, index) =>
+      ruleEntry({
+        id: `R-STYLE-${String(index + 1).padStart(3, "0")}`,
+        category: "style",
+        title: `${"很长的规则标题".repeat(20)}${index}`
+      })
+    );
+    const block = buildProjectRuleInjection(buildDocument(entries))!;
+
+    expect(block).toContain("以用户指令为准");
+    expect(block).toContain("内容过长已截断");
+    expect(block.length).toBeLessThan(MAX_PROJECT_RULE_INDEX_CHARACTERS + 1_000);
+  });
+
+  it("appends the block to a project prompt without mutating the base policy", () => {
+    const policy = { systemPrompt: "基础提示\n", mode: "project" as const };
+    expect(appendProjectRuleInjection(policy, null)).toBe(policy);
+
+    const appended = appendProjectRuleInjection(policy, "## Project Rules\n- 示例规则");
+    expect(appended).not.toBe(policy);
+    expect(appended.mode).toBe("project");
+    expect(appended.systemPrompt.startsWith("基础提示")).toBe(true);
+    expect(appended.systemPrompt).toContain("- 示例规则");
+    expect(policy.systemPrompt).toBe("基础提示\n");
+  });
+
+  it("generates the rule file once for a project and reuses it on later turns", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-rule-inject-"));
+    try {
+      await fs.mkdir(path.join(root, "src"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          name: "inject-demo",
+          packageManager: "pnpm@9.12.0",
+          scripts: { typecheck: "tsc --noEmit", test: "vitest run" }
+        }),
+        "utf8"
+      );
+      await fs.writeFile(path.join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+      await fs.writeFile(path.join(root, "src", "main.ts"), "export const main = 1;\n", "utf8");
+
+      const first = await ensureProjectRuleFile(root);
+      expect(first.created).toBe(true);
+      expect(first.document.entries.length).toBeGreaterThan(0);
+
+      const injection = await resolveProjectRuleInjection(root);
+      expect(injection).toContain(PROJECT_RULE_INJECTION_HEADING);
+      for (const entry of first.document.entries) {
+        expect(injection).toContain(entry.id);
+      }
+
+      const second = await ensureProjectRuleFile(root);
+      expect(second.created).toBe(false);
+      expect(second.document.updatedAt).toBe(first.document.updatedAt);
+      expect(await resolveProjectRuleInjection(root)).toBe(injection);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns no injection instead of failing when the project cannot be read", async () => {
+    expect(await resolveProjectRuleInjection("")).toBeNull();
+
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-rule-inject-file-"));
+    try {
+      const filePath = path.join(root, "not-a-directory.txt");
+      await fs.writeFile(filePath, "x\n", "utf8");
+      expect(await resolveProjectRuleInjection(filePath)).toBeNull();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("project rule write guard", () => {
+  const ruleEntry = (
+    overrides: Partial<ProjectRuleEntry> & Pick<ProjectRuleEntry, "id" | "category" | "title">
+  ): ProjectRuleEntry => ({
+    scope: "**/*",
+    rules: ["示例规则"],
+    source: "auto",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    stale: false,
+    ...overrides
+  });
+
+  const buildDocument = (entries: ProjectRuleEntry[]): ProjectRuleDocument => ({
+    version: PROJECT_RULE_FILE_VERSION,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    entries
+  });
+
+  const updatePatch = (filePath: string) =>
+    [
+      "*** Begin Patch",
+      `*** Update File: ${filePath}`,
+      "@@",
+      "-旧内容",
+      "+新内容",
+      "*** End Patch"
+    ].join("\n");
+
+  const forbiddenBuildArtifact = () =>
+    ruleEntry({
+      id: "R-GUARD-001",
+      category: "boundary",
+      title: "禁止改动构建产物",
+      scope: "**/*",
+      rules: ["禁止直接修改 dist/ 下的构建产物，必须改源码后重新构建。"]
+    });
+
+  it("injects the entries covering the files a write tool is about to change", () => {
+    const document = buildDocument([
+      ruleEntry({
+        id: "R-LAYOUT-001",
+        category: "layout",
+        title: "packages 目录职责",
+        scope: "packages/**",
+        rules: ["packages 下每个包自成一个工作区，跨包改动要同步改引用方。"]
+      }),
+      ruleEntry({ id: "R-STYLE-001", category: "style", title: "缩进统一", scope: "docs/**" })
+    ]);
+
+    const result = evaluateProjectRuleWriteCheck({
+      document,
+      toolName: "apply_patch",
+      arguments: { patch: updatePatch("packages/agent-runtime/src/index.ts") }
+    });
+
+    expect(result.matchedEntryIds).toEqual(["R-LAYOUT-001"]);
+    expect(result.injection).toContain(PROJECT_RULE_EXPANSION_HEADING);
+    expect(result.injection).toContain("R-LAYOUT-001");
+    expect(result.injection).not.toContain("R-STYLE-001");
+    expect(result.conflicts).toEqual([]);
+    expect(result.requiresConfirmation).toBe(false);
+    expect(result.message).toBeNull();
+  });
+
+  it("keeps non-write tools and unmatched targets free of any rule work", () => {
+    const document = buildDocument([
+      ruleEntry({ id: "R-STYLE-001", category: "style", title: "缩进统一", scope: "docs/**" })
+    ]);
+    const unmatchedWrite = evaluateProjectRuleWriteCheck({
+      document,
+      toolName: "fs.write_file",
+      arguments: { path: "src/main.ts" }
+    });
+
+    expect(unmatchedWrite.injection).toBeNull();
+    expect(unmatchedWrite.matchedEntryIds).toEqual([]);
+    expect(unmatchedWrite.requiresConfirmation).toBe(false);
+    expect(unmatchedWrite.message).toBeNull();
+
+    expect(resolveProjectRuleWriteTargets("fs.read_file", { path: "docs/guide.md" })).toBeNull();
+    expect(resolveProjectRuleWriteTargets("code.search", { pattern: "docs" })).toBeNull();
+    expect(evaluateProjectRuleWriteCheck({
+      document,
+      toolName: "fs.read_file",
+      arguments: { path: "docs/guide.md" }
+    })).toEqual({
+      injection: null,
+      matchedEntryIds: [],
+      conflicts: [],
+      requiresConfirmation: false,
+      message: null
+    });
+  });
+
+  it("blocks a forbidden target instead of writing silently and explains the conflict", () => {
+    const document = buildDocument([forbiddenBuildArtifact()]);
+    const result = evaluateProjectRuleWriteCheck({
+      document,
+      toolName: "apply_patch",
+      arguments: { patch: updatePatch("dist/bundle.js") }
+    });
+
+    expect(result.injection).toContain("R-GUARD-001");
+    expect(result.requiresConfirmation).toBe(true);
+    expect(result.conflicts).toEqual([
+      {
+        entryId: "R-GUARD-001",
+        target: "dist/bundle.js",
+        severity: "block",
+        detail: "禁止改动构建产物"
+      }
+    ]);
+    expect(result.message).toContain("不要静默写入");
+    expect(result.message).toContain("R-GUARD-001");
+  });
+
+  it("separates a confirm-only boundary from repository-wide rules that do not name the target", () => {
+    const document = buildDocument([
+      ruleEntry({
+        id: "R-GUARD-002",
+        category: "boundary",
+        title: "dist 改动前先确认",
+        scope: "**/*",
+        rules: ["修改 dist/ 下的文件前需要先向用户确认。"]
+      }),
+      ruleEntry({
+        id: "R-GUARD-003",
+        category: "boundary",
+        title: "禁止提交密钥文件",
+        scope: "**/*",
+        rules: ["禁止把 .env 或密钥文件提交进仓库。"]
+      })
+    ]);
+    const result = evaluateProjectRuleWriteCheck({
+      document,
+      toolName: "fs.write_file",
+      arguments: { path: "dist/app.css" }
+    });
+
+    expect(result.requiresConfirmation).toBe(true);
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]).toMatchObject({ entryId: "R-GUARD-002", severity: "confirm" });
+    expect(result.injection).toContain("R-GUARD-003");
+  });
+
+  it("registers a conflict as a pending rule update without touching existing entries", () => {
+    const boundary = forbiddenBuildArtifact();
+    const document = buildDocument([boundary]);
+    const conflicts = evaluateProjectRuleWriteCheck({
+      document,
+      toolName: "apply_patch",
+      arguments: { patch: updatePatch("dist/bundle.js") }
+    }).conflicts;
+
+    const first = registerProjectRuleWriteConflicts(document, conflicts, "2026-02-02T00:00:00.000Z");
+
+    expect(first.added).toBe(1);
+    expect(first.entryId).toBe("R-PITFALL-001");
+    const pending = first.document.entries.find((entry) => entry.id === "R-PITFALL-001");
+    expect(pending?.category).toBe("pitfall");
+    expect(pending?.title).toBe(PROJECT_RULE_PENDING_ENTRY_TITLE);
+    expect(pending?.rules[0]).toContain("R-GUARD-001");
+    expect(pending?.rules[0]).toContain("登记于 2026-02-02T00:00:00.000Z");
+    expect(first.document.entries[0]).toEqual(boundary);
+
+    const second = registerProjectRuleWriteConflicts(first.document, conflicts, "2026-02-03T00:00:00.000Z");
+    expect(second.added).toBe(0);
+    expect(second.document).toBe(first.document);
+    expect(second.document.updatedAt).toBe("2026-02-02T00:00:00.000Z");
+  });
+
+  it("persists the pending conflict into .codexh/rule.md and records it only once", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-rule-guard-"));
+    try {
+      const document = buildDocument([forbiddenBuildArtifact()]);
+      await writeProjectRuleFile(root, document);
+      const conflicts = evaluateProjectRuleWriteCheck({
+        document,
+        toolName: "apply_patch",
+        arguments: { patch: updatePatch("dist/bundle.js") }
+      }).conflicts;
+
+      await expect(recordProjectRuleWriteConflicts(root, conflicts)).resolves.toBe("R-PITFALL-001");
+
+      const persisted = await readProjectRuleFile(root);
+      expect(persisted?.entries.some((entry) => entry.id === "R-GUARD-001")).toBe(true);
+      expect(persisted?.entries.some((entry) => entry.title === PROJECT_RULE_PENDING_ENTRY_TITLE)).toBe(true);
+
+      await expect(recordProjectRuleWriteConflicts(root, conflicts)).resolves.toBeNull();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("project rule incremental update", () => {
+  const ruleEntry = (
+    overrides: Partial<ProjectRuleEntry> & Pick<ProjectRuleEntry, "id" | "category" | "title">
+  ): ProjectRuleEntry => ({
+    scope: "**/*",
+    rules: ["示例规则"],
+    source: "auto",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    stale: false,
+    ...overrides
+  });
+
+  const buildDocument = (entries: ProjectRuleEntry[]): ProjectRuleDocument => ({
+    version: PROJECT_RULE_FILE_VERSION,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    entries
+  });
+
+  it("refines a matching entry in place and keeps its id", () => {
+    const document = buildDocument([
+      ruleEntry({
+        id: "R-GUARD-001",
+        category: "boundary",
+        title: "只读与禁改路径",
+        rules: ["旧的禁改说明。"]
+      }),
+      ruleEntry({ id: "R-STYLE-005", category: "style", title: "缩进统一", rules: ["两空格缩进。"] })
+    ]);
+    const result = mergeProjectRuleDocument(
+      document,
+      [
+        ruleEntry({
+          id: "R-GUARD-001",
+          category: "boundary",
+          title: "只读与禁改路径",
+          rules: ["以下路径视为只读：dist、build。"]
+        })
+      ],
+      "2026-03-03T00:00:00.000Z"
+    );
+
+    expect(result.updated).toEqual(["R-GUARD-001"]);
+    expect(result.added).toEqual([]);
+    expect(result.staleMarked).toEqual(["R-STYLE-005"]);
+    expect(result.requiresConfirmation).toBe(false);
+    const refined = result.document.entries.find((entry) => entry.id === "R-GUARD-001");
+    expect(refined?.rules).toEqual(["以下路径视为只读：dist、build。"]);
+    expect(refined?.updatedAt).toBe("2026-03-03T00:00:00.000Z");
+    expect(result.document.updatedAt).toBe("2026-03-03T00:00:00.000Z");
+    expect(document.entries[0]?.rules).toEqual(["旧的禁改说明。"]);
+  });
+
+  it("allocates fresh ids for entries the file does not have yet", () => {
+    const document = buildDocument([
+      ruleEntry({ id: "R-TECH-001", category: "tech-stack", title: "技术栈与包管理器" })
+    ]);
+    const result = mergeProjectRuleDocument(
+      document,
+      [
+        ruleEntry({
+          id: "R-VERIFY-002",
+          category: "verify",
+          title: "改动后的验证命令",
+          rules: ["改动后执行 vitest run。"]
+        }),
+        ruleEntry({
+          id: "R-PITFALL-004",
+          category: "pitfall",
+          title: "扫描发现的注意事项",
+          rules: ["生成物目录应视为只读。"]
+        })
+      ],
+      "2026-03-04T00:00:00.000Z"
+    );
+
+    expect(result.added).toEqual(["R-VERIFY-001", "R-PITFALL-001"]);
+    expect(result.updated).toEqual([]);
+    const pitfall = result.document.entries.find((entry) => entry.id === "R-PITFALL-001");
+    expect(pitfall).toMatchObject({ source: "auto", stale: false, category: "pitfall" });
+    expect(pitfall?.rules).toEqual(["生成物目录应视为只读。"]);
+  });
+
+  it("is idempotent and returns the very same document when nothing changed", () => {
+    const stored = [
+      ruleEntry({ id: "R-TECH-001", category: "tech-stack", title: "技术栈与包管理器", rules: ["使用 pnpm。"] }),
+      ruleEntry({ id: "R-VERIFY-001", category: "verify", title: "改动后的验证命令", rules: ["改动后执行 vitest run。"] })
+    ];
+    const document = buildDocument(stored);
+    const result = mergeProjectRuleDocument(document, stored, "2026-03-05T00:00:00.000Z");
+
+    expect(result.changed).toBe(0);
+    expect(result.added).toEqual([]);
+    expect(result.updated).toEqual([]);
+    expect(result.staleMarked).toEqual([]);
+    expect(result.document).toBe(document);
+    expect(result.message).toBeNull();
+  });
+
+  it("marks an entry the facts no longer back as stale instead of deleting it", () => {
+    const document = buildDocument([
+      ruleEntry({ id: "R-LAYOUT-002", category: "layout", title: "已不存在的目录约定", rules: ["只写进 apps/。"] })
+    ]);
+    const result = mergeProjectRuleDocument(
+      document,
+      [ruleEntry({ id: "R-TECH-001", category: "tech-stack", title: "技术栈与包管理器" })],
+      "2026-03-06T00:00:00.000Z"
+    );
+
+    expect(result.staleMarked).toEqual(["R-LAYOUT-002"]);
+    const kept = result.document.entries.find((entry) => entry.id === "R-LAYOUT-002");
+    expect(kept?.stale).toBe(true);
+    expect(kept?.rules).toEqual(["只写进 apps/。"]);
+    expect(result.document.entries).toHaveLength(2);
+  });
+
+  it("never overwrites user-authored entries and does not duplicate them", () => {
+    const document = buildDocument([
+      ruleEntry({
+        id: "R-TECH-001",
+        category: "tech-stack",
+        title: "技术栈与包管理器",
+        rules: ["用户手写：pnpm 9 且禁止升级。", "来源为 user。"],
+        source: "user"
+      })
+    ]);
+    const result = mergeProjectRuleDocument(
+      document,
+      [
+        ruleEntry({
+          id: "R-TECH-001",
+          category: "tech-stack",
+          title: "技术栈与包管理器",
+          rules: ["包管理器使用 pnpm。"]
+        })
+      ],
+      "2026-03-07T00:00:00.000Z"
+    );
+
+    expect(result.preserved).toEqual(["R-TECH-001"]);
+    expect(result.added).toEqual([]);
+    expect(result.updated).toEqual([]);
+    expect(result.changed).toBe(0);
+    expect(result.document).toBe(document);
+    expect(document.entries[0]?.rules).toEqual(["用户手写：pnpm 9 且禁止升级。", "来源为 user。"]);
+  });
+
+  it("downgrades an oversized update to a confirmation prompt", () => {
+    const document = buildDocument([
+      ruleEntry({ id: "R-TECH-001", category: "tech-stack", title: "技术栈与包管理器", rules: ["占位。"] })
+    ]);
+    const result = mergeProjectRuleDocument(
+      document,
+      [
+        ruleEntry({ id: "R-TECH-001", category: "tech-stack", title: "技术栈与包管理器", rules: ["使用 pnpm。"] }),
+        ruleEntry({ id: "R-VERIFY-001", category: "verify", title: "改动后的验证命令" }),
+        ruleEntry({ id: "R-STYLE-001", category: "style", title: "关键配置与风格约束" }),
+        ruleEntry({ id: "R-PITFALL-001", category: "pitfall", title: "扫描发现的注意事项" })
+      ],
+      "2026-03-08T00:00:00.000Z",
+      { maxChangedEntries: 2 }
+    );
+
+    expect(result.changed).toBe(4);
+    expect(result.requiresConfirmation).toBe(true);
+    expect(result.message).toContain("超过自动改写上限 2 条");
+    expect(result.message).toContain("本次不自动改写");
+    expect(result.document).toBe(document);
+    expect(document.entries).toHaveLength(1);
+  });
+
+  it("writes .codexh/rule.md only when the merge actually changed something", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-rule-update-"));
+    try {
+      await fs.mkdir(path.join(root, "src"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          name: "update-demo",
+          packageManager: "pnpm@9.12.0",
+          scripts: { typecheck: "tsc --noEmit", test: "vitest run" }
+        }),
+        "utf8"
+      );
+      await fs.writeFile(path.join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+      await fs.writeFile(path.join(root, "src", "main.ts"), "export const main = 1;\n", "utf8");
+      await writeProjectRuleFile(
+        root,
+        buildDocument([
+          ruleEntry({
+            id: "R-TECH-001",
+            category: "tech-stack",
+            title: "技术栈与包管理器",
+            rules: ["占位规则，等待自动补充。"]
+          })
+        ])
+      );
+
+      const first = await refreshProjectRuleFile(root, { maxChangedEntries: 40 });
+      expect(first.written).toBe(true);
+      expect(first.changed).toBeGreaterThan(0);
+      expect(first.updated).toContain("R-TECH-001");
+
+      const refreshed = await readProjectRuleFile(root);
+      const techEntry = refreshed?.entries.find((entry) => entry.id === "R-TECH-001");
+      expect(techEntry?.rules.join("")).toContain("包管理器");
+      expect(techEntry?.rules).not.toContain("占位规则，等待自动补充。");
+
+      const ruleFilePath = resolveProjectRuleFilePath(root);
+      const before = await fs.readFile(ruleFilePath, "utf8");
+      const second = await refreshProjectRuleFile(root, { maxChangedEntries: 40 });
+
+      expect(second.written).toBe(false);
+      expect(second.changed).toBe(0);
+      expect(second.requiresConfirmation).toBe(false);
+      expect(await fs.readFile(ruleFilePath, "utf8")).toBe(before);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
