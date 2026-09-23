@@ -30,6 +30,7 @@ import {
   isBrowserWorkspaceUnavailableError,
   isBrowserTestToolCall,
   classifySuccessfulToolEvidence,
+  applyTurnVerificationEvidence,
   createManagedWriteCompletionState,
   recordManagedWriteResult,
   validateManagedWriteCompletion,
@@ -634,6 +635,44 @@ describe("createToolCallFingerprint", () => {
 
     expect(fingerprint).not.toBe(createToolCallFingerprint("read", { path: "src" }));
     expect(fingerprint).not.toBe(createToolCallFingerprint("read_file", { path: "." }));
+  });
+
+  it("ignores paging-only arguments that select the same operation", () => {
+    expect(createToolCallFingerprint("fs.read_file", { path: "src/app.ts", charOffset: 1, charLimit: 2_000 })).toBe(
+      createToolCallFingerprint("fs.read_file", { path: "src/app.ts" })
+    );
+    expect(createToolCallFingerprint("mcp.call", {
+      server: "repo",
+      tool: "list",
+      arguments: { path: ".", maxResults: 50 }
+    })).toBe(createToolCallFingerprint("mcp.call", {
+      server: "repo",
+      tool: "list",
+      arguments: { maxResults: 100, path: "." }
+    }));
+  });
+
+  it("unifies equivalent path spellings but keeps other values apart", () => {
+    expect(createToolCallFingerprint("fs.read_file", {
+      path: "D:\\workagent\\packages\\agent-runtime\\src\\index.ts"
+    })).toBe(createToolCallFingerprint("fs.read_file", {
+      path: "d:/workagent/packages/agent-runtime/src//index.ts/"
+    }));
+
+    const fingerprint = createToolCallFingerprint("fs.read_file", { path: "src/index.ts" });
+    expect(fingerprint).not.toBe(createToolCallFingerprint("fs.read_file", { path: "src/other.ts" }));
+    // Only path separators and drive-letter case are unified: the text of an
+    // ordinary value still keeps two calls apart.
+    expect(fingerprint).not.toBe(createToolCallFingerprint("fs.read_file", { path: "src/Index.ts" }));
+    expect(createToolCallFingerprint("web_search.search_query", { query: "Vitest" })).not.toBe(
+      createToolCallFingerprint("web_search.search_query", { query: "vitest" })
+    );
+  });
+
+  it("never collapses a URL into a different resource", () => {
+    expect(createToolCallFingerprint("web_search.open_page", { url: "http://example.test/a" })).not.toBe(
+      createToolCallFingerprint("web_search.open_page", { url: "http:/example.test/a" })
+    );
   });
 
   it("groups patch retries by their target file instead of patch text", () => {
@@ -5776,5 +5815,86 @@ describe("GPA plan resume preview", () => {
     expect(preview.sameSession).toBe(true);
     expect(preview.pendingCount).toBe(1);
     expect(preview.doneCount).toBe(1);
+  });
+});
+
+describe("GPA turn-level verification evidence", () => {
+  it("credits a test that ran before the change it proves", () => {
+    const evidence = [
+      classifySuccessfulToolEvidence({ toolCallId: "test-1", toolName: "shell.exec" }),
+      classifySuccessfulToolEvidence({ toolCallId: "patch-1", toolName: "apply_patch" })
+    ];
+    expect(evidence[0].verificationCandidate).toBe(true);
+    expect(evidence[0].kinds).not.toContain("verification");
+
+    applyTurnVerificationEvidence(evidence);
+
+    expect(evidence[0].kinds).toContain("verification");
+    expect(evidence[1].kinds).toContain("delivery");
+  });
+
+  it("reaches the same verdict whether the test or the change ran first", () => {
+    const testsFirst = [
+      classifySuccessfulToolEvidence({ toolCallId: "test-1", toolName: "shell.exec" }),
+      classifySuccessfulToolEvidence({ toolCallId: "patch-1", toolName: "apply_patch" })
+    ];
+    const patchFirst = [
+      classifySuccessfulToolEvidence({
+        toolCallId: "patch-1",
+        toolName: "apply_patch",
+        hasPriorDelivery: false
+      }),
+      classifySuccessfulToolEvidence({
+        toolCallId: "test-1",
+        toolName: "shell.exec",
+        hasPriorDelivery: true
+      })
+    ];
+    applyTurnVerificationEvidence(testsFirst);
+    applyTurnVerificationEvidence(patchFirst);
+    const summarize = (evidence: Array<{ toolName: string; kinds: string[] }>): string[] =>
+      evidence.map((item) => `${item.toolName}:${[...item.kinds].sort().join("+")}`);
+
+    // Both turns reach the same verdicts; the arrays differ only in the order
+    // the calls actually ran, which must not change the outcome.
+    expect(summarize(testsFirst).sort()).toEqual(summarize(patchFirst).sort());
+  });
+
+  it("withholds verification credit while the turn delivered nothing", () => {
+    const lone = [
+      classifySuccessfulToolEvidence({ toolCallId: "read-1", toolName: "fs.read_file" })
+    ];
+
+    applyTurnVerificationEvidence(lone);
+
+    expect(lone[0].kinds).toEqual(["observation"]);
+  });
+
+  it("never credits a verification call that did not pass", () => {
+    const evidence = [
+      classifySuccessfulToolEvidence({
+        toolCallId: "verify-1",
+        toolName: "project.verify",
+        verificationPassed: false
+      }),
+      classifySuccessfulToolEvidence({ toolCallId: "patch-1", toolName: "apply_patch" })
+    ];
+
+    applyTurnVerificationEvidence(evidence);
+
+    expect(evidence[0].verificationCandidate).toBeUndefined();
+    expect(evidence[0].kinds).not.toContain("verification");
+  });
+
+  it("stays idempotent when the same evidence is re-applied", () => {
+    const evidence = [
+      classifySuccessfulToolEvidence({ toolCallId: "test-1", toolName: "shell.exec" }),
+      classifySuccessfulToolEvidence({ toolCallId: "patch-1", toolName: "apply_patch" })
+    ];
+
+    applyTurnVerificationEvidence(evidence);
+    applyTurnVerificationEvidence(evidence);
+
+    expect(evidence[0].kinds.filter((kind) => kind === "verification")).toHaveLength(1);
   });
 });

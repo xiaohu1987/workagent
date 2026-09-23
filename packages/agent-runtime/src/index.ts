@@ -1026,6 +1026,12 @@ export interface SuccessfulToolEvidence {
   toolRecordId?: string;
   toolName: string;
   kinds: CompletionEvidenceKind[];
+  /**
+   * Internal marker: this successful call can prove a delivered change once
+   * the turn contains delivery evidence. Kept out of `kinds` so the credit can
+   * be granted retroactively, without depending on which call ran first.
+   */
+  verificationCandidate?: boolean;
   unitTestPassed?: boolean;
   unitTestUnavailable?: boolean;
   verifiedPaths?: string[];
@@ -7172,7 +7178,6 @@ class ThreadSessionRuntime {
               toolCallId: toolCall.id,
               toolRecordId: toolRecord.id,
               toolName: toolCall.name,
-              hasPriorDelivery: successfulToolEvidence.some((item) => item.kinds.includes("delivery")),
               verificationPassed: toolCall.name === "project.verify"
                 ? result.json?.passed === true && Array.isArray(result.json?.commands) && result.json.commands.length > 0
                 : undefined,
@@ -7183,6 +7188,7 @@ class ThreadSessionRuntime {
               resultPreview: modelContent
             });
             successfulToolEvidence.push(evidence);
+            applyTurnVerificationEvidence(successfulToolEvidence);
             const prerequisiteTarget = recoveryPrerequisiteTargets.get(toolCall.id);
             if (prerequisiteTarget) {
               observedRecoveryTargets.add(prerequisiteTarget);
@@ -7381,12 +7387,12 @@ class ThreadSessionRuntime {
                   toolCallId: verificationCall.id,
                   toolRecordId: verificationRecord.id,
                   toolName: verificationCall.name,
-                  hasPriorDelivery: true,
                   verificationPassed: verificationResult.json?.passed === true &&
                     Array.isArray(verificationResult.json?.commands) && verificationResult.json.commands.length > 0,
                   unitTestPassed: hasSuccessfulUnitTestResult(verificationCall, verificationResult),
                   unitTestUnavailable: hasUnavailableUnitTestResult(verificationCall, verificationResult)
                 }));
+                applyTurnVerificationEvidence(successfulToolEvidence);
               } else if (!verificationResult.ok) {
                 await registerTargetFailure(
                   getToolCallRecoveryTargetKey(verificationCall.name, verificationCall.arguments, workspaceCwd),
@@ -8332,8 +8338,65 @@ export function buildUserMessageMetadata(
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
+/**
+ * Keys that select a slice of the same underlying operation. A model that adds
+ * `maxResults` or shifts `offset` after a failure is repeating the same call,
+ * but a differing slice used to hash differently, so repeat detection never saw
+ * it and the identical failing invocation could run forever.
+ */
+const FINGERPRINT_IGNORED_KEYS = new Set([
+  "limit",
+  "offset",
+  "charoffset",
+  "charlimit",
+  "maxresults",
+  "maxdepth",
+  "nextcursor",
+  "cursor",
+  "page",
+  "pagesize",
+  "perpage"
+]);
+
+const FINGERPRINT_URL_VALUE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const FINGERPRINT_WINDOWS_PATH = /^[a-z]:\//i;
+
+/**
+ * `D:\workagent\App.tsx` and `d:/workagent/App.tsx` name one file but hashed
+ * differently, so a reworded path escaped repeat detection. Only separator
+ * style, repeated separators, a trailing separator and drive-letter case are
+ * unified; every other character still distinguishes two invocations.
+ */
+function normalizeFingerprintString(value: string): string {
+  const trimmed = value.trim();
+  if (FINGERPRINT_URL_VALUE.test(trimmed) || !/[\\/]/.test(trimmed)) return trimmed;
+  const unified = trimmed.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  const withoutTrailingSeparator = unified.length > 1 ? unified.replace(/\/+$/, "") : unified;
+  return FINGERPRINT_WINDOWS_PATH.test(withoutTrailingSeparator)
+    ? withoutTrailingSeparator.charAt(0).toLowerCase() + withoutTrailingSeparator.slice(1)
+    : withoutTrailingSeparator;
+}
+
+function normalizeFingerprintValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeFingerprintValue(item));
+  }
+  if (value && typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (FINGERPRINT_IGNORED_KEYS.has(key.toLowerCase())) continue;
+      normalized[key] = normalizeFingerprintValue(item);
+    }
+    return normalized;
+  }
+  return typeof value === "string" ? normalizeFingerprintString(value) : value;
+}
+
 export function createToolCallFingerprint(name: string, argumentsJson: Record<string, unknown>): string {
-  return `${name}:${stableSerialize(argumentsJson)}`;
+  // Some callers canonicalize the tool alias before hashing and others do not,
+  // which split the dedupe key for one and the same tool.
+  const normalizedName = name.trim().toLowerCase();
+  return `${normalizedName}:${stableSerialize(normalizeFingerprintValue(argumentsJson))}`;
 }
 
 export function prioritizeToolsForProvider(input: {
@@ -9144,7 +9207,13 @@ export function classifySuccessfulToolEvidence(input: {
   toolCallId: string;
   toolRecordId?: string;
   toolName: string;
-  hasPriorDelivery: boolean;
+  /**
+   * Whether a successful delivery call was already observed in this turn.
+   * A verification-capable call that ran before the change it proves is
+   * granted the `verification` kind retroactively by
+   * applyTurnVerificationEvidence, so the outcome never depends on call order.
+   */
+  hasPriorDelivery?: boolean;
   verificationPassed?: boolean;
   unitTestPassed?: boolean;
   unitTestUnavailable?: boolean;
@@ -9166,18 +9235,23 @@ export function classifySuccessfulToolEvidence(input: {
     kinds.add("delivery");
     kinds.add("verification");
   }
-  if (
-    input.hasPriorDelivery &&
+  const verificationCandidate =
     POST_DELIVERY_VERIFICATION_TOOLS.has(input.toolName) &&
-    (input.toolName !== "project.verify" || input.verificationPassed === true)
-  ) {
+    (input.toolName !== "project.verify" || input.verificationPassed === true);
+  if (verificationCandidate) {
     kinds.add("verification");
+    // A verification capability is not by itself a verification: a lone read
+    // still has to be backed by a delivered change in the same turn.
+    if (!input.hasPriorDelivery) {
+      kinds.delete("verification");
+    }
   }
   return {
     toolCallId: input.toolCallId,
     toolRecordId: input.toolRecordId,
     toolName: input.toolName,
     kinds: [...kinds],
+    verificationCandidate: verificationCandidate || undefined,
     unitTestPassed: input.unitTestPassed === true || undefined,
     unitTestUnavailable: input.unitTestUnavailable === true || undefined,
     verifiedPaths: input.verifiedPaths,
@@ -9185,6 +9259,22 @@ export function classifySuccessfulToolEvidence(input: {
   };
 }
 
+/**
+ * Grants verification credit retroactively for a call that ran before the
+ * change it proves. Requiring the delivery to be observed first made the same
+ * transcript valid or invalid purely from tool ordering: a model that ran its
+ * test and then wrote the patch kept collecting "no post-delivery verification
+ * evidence" no matter how often it retried. Credit is withheld while the turn
+ * holds no delivery at all, so a lone read stays an observation.
+ */
+export function applyTurnVerificationEvidence(evidence: SuccessfulToolEvidence[]): void {
+  if (!evidence.some((item) => item.kinds.includes("delivery"))) return;
+  for (const item of evidence) {
+    if (item.verificationCandidate && !item.kinds.includes("verification")) {
+      item.kinds = [...item.kinds, "verification"];
+    }
+  }
+}
 /**
  * Resolves ACT progress without treating ordinary commentary as task completion.
  * Provider-reported ids always win; text is considered only when the provider
