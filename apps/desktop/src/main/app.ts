@@ -8,6 +8,11 @@ import iconv from "iconv-lite";
 import { app, BrowserWindow, desktopCapturer, net, screen, shell, webContents } from "electron";
 import { CloudNotesService, type CloudNotesStatusView } from "./cloud-notes-service";
 import type { CloudNoteRecord } from "./cloud-notes";
+import {
+  INTERACTION_TIMEOUT_MS,
+  planInteractionTimeout,
+  resolveApprovalExpiresAt
+} from "./interaction-decision";
 import type { WebContents } from "electron";
 import type {
   AttachmentImportInput,
@@ -128,7 +133,7 @@ type SubagentProgress = {
   phase: "starting" | "awaiting_model" | "executing_shell_test" | "retrying";
   interruptionReason?: string;
 };
-const INTERACTION_TIMEOUT_MS = 30_000;
+// Interaction timeouts live in ./interaction-decision so the contract stays testable.
 const RUNTIME_TOOL_RESULT_LIMIT_BYTES = 4_096;
 const GPA_STATE_CACHE_LIMIT = 16;
 const MAX_APPLICATION_BACKGROUND_BYTES = 40 * 1024 * 1024;
@@ -575,6 +580,23 @@ export class DesktopBackend {
     });
     for (const approval of this.#db.listPendingApprovals()) {
       this.#scheduleApprovalTimeout(approval.id);
+    }
+    // A crash can leave a question marked pending even though nothing will ever
+    // answer it: no resolver survives the restart and recovery already moved its
+    // thread out of "waiting". Settle those records so the transcript stops
+    // rendering a live card that the user can no longer respond to.
+    for (const threadId of this.#db.listPendingUserPromptThreadIds()) {
+      if (this.#db.getThread(threadId)?.status === "waiting") continue;
+      if (this.#db.cancelPendingUserPrompts(threadId) === 0) continue;
+      for (const prompt of this.#db.listUserPrompts(threadId)) {
+        if (prompt.status !== "cancelled") continue;
+        await this.emit({
+          type: "user-input.resolved",
+          threadId,
+          payload: { prompt },
+          createdAt: new Date().toISOString()
+        });
+      }
     }
     void this.processSelfImprovementMemories();
     // Recovery turns interrupted work back into queued messages. Reapply the
@@ -1732,6 +1754,22 @@ export class DesktopBackend {
         if (record?.threadId === threadId) {
           this.#clearPromptTimeout(promptId);
           this.#promptResolvers.delete(promptId);
+        }
+      }
+      // A stopped task can never answer its question and no resolver survives the
+      // interrupt. Cancel the record so the transcript renders it as settled
+      // instead of leaving a card that throws when the user tries to respond.
+      const unansweredPrompts = this.#db
+        .listUserPrompts(threadId)
+        .filter((prompt) => prompt.status === "pending");
+      if (this.#db.cancelPendingUserPrompts(threadId) > 0) {
+        for (const prompt of unansweredPrompts) {
+          await this.emit({
+            type: "user-input.resolved",
+            threadId,
+            payload: { prompt: this.#db.getUserPrompt(prompt.id) ?? prompt },
+            createdAt: new Date().toISOString()
+          });
         }
       }
       const updated = this.#db.interruptThreadExecution(threadId);
@@ -4741,7 +4779,7 @@ export class DesktopBackend {
       approvalKey,
       payloadJson: JSON.stringify(input.payload),
       status: "pending",
-      expiresAt: requiresExplicitAuthorization ? null : new Date(Date.now() + INTERACTION_TIMEOUT_MS).toISOString()
+      expiresAt: resolveApprovalExpiresAt(kind)
     });
 
     await this.emit({
@@ -4768,11 +4806,21 @@ export class DesktopBackend {
       questions: UserInputQuestion[];
       timeoutMs?: number;
       defaultAnswers?: Record<string, string>;
+      /** Irreversible decisions must never be answered on the user's behalf. */
+      allowsAutoSelection?: boolean;
     }
   ): Promise<Record<string, string>> {
-    const defaultAnswers = input.defaultAnswers ??
-      (input.kind === "generic" ? buildPromptDefaultAnswers(input.questions) : null);
-    const timeoutMs = input.timeoutMs ?? (defaultAnswers ? INTERACTION_TIMEOUT_MS : undefined);
+    const allowsAutoSelection = input.allowsAutoSelection !== false;
+    const plan = allowsAutoSelection && input.defaultAnswers
+      ? { timeoutMs: input.timeoutMs ?? INTERACTION_TIMEOUT_MS, defaultAnswers: input.defaultAnswers }
+      : planInteractionTimeout({
+        kind: input.kind,
+        questions: input.questions,
+        requestedTimeoutMs: input.timeoutMs,
+        allowsAutoSelection
+      });
+    const defaultAnswers = plan.defaultAnswers;
+    const timeoutMs = plan.timeoutMs ?? undefined;
     const prompt = this.#db.createUserPrompt({
       threadId,
       turnRunId,
@@ -6409,16 +6457,6 @@ function resolveProjectKnowledgeBundleRoot(
     "bundles",
     `${slugify(displayName)}-${randomUUID()}`
   );
-}
-
-function buildPromptDefaultAnswers(questions: UserInputQuestion[]): Record<string, string> | null {
-  const answers: Record<string, string> = {};
-  for (const question of questions) {
-    const option = question.options?.find((entry) => entry.recommended) ?? question.options?.[0];
-    if (!option) return null;
-    answers[question.id] = option.id;
-  }
-  return Object.keys(answers).length > 0 ? answers : null;
 }
 
 function hashApprovalPayload(input: {

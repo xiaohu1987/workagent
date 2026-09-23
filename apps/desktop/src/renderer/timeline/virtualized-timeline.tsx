@@ -13,6 +13,12 @@ type VirtualizedTimelineProps<T> = {
   scrollElementRef: RefObject<HTMLElement | null>;
   scrollInteractionActive?: boolean;
   followLatest?: boolean;
+  /**
+   * Hands "scroll to the newest content" back to the parent while a measurement correction
+   * is applied. Without it the correction writes `scrollTop` itself, in the same frame as
+   * the parent's own follow write, and the two writes land as the jerk this prop removes.
+   */
+  requestFollowLatest?: () => void;
   estimatedRowHeight?: number;
   overscanPx?: number;
   threshold?: number;
@@ -117,6 +123,7 @@ export function VirtualizedTimeline<T>({
   scrollElementRef,
   scrollInteractionActive = false,
   followLatest = false,
+  requestFollowLatest,
   estimatedRowHeight = DEFAULT_ESTIMATED_ROW_HEIGHT,
   overscanPx = DEFAULT_OVERSCAN_PX,
   threshold = DEFAULT_VIRTUALIZATION_THRESHOLD
@@ -250,11 +257,15 @@ export function VirtualizedTimeline<T>({
     const scrollElement = scrollElementRef.current;
     if (!scrollElement) return;
     if (correction.pinnedToBottom) {
-      scrollElement.scrollTop = scrollElement.scrollHeight;
+      if (requestFollowLatest) {
+        requestFollowLatest();
+      } else {
+        scrollElement.scrollTop = scrollElement.scrollHeight;
+      }
     } else if (correction.adjustment !== 0) {
       scrollElement.scrollTop += correction.adjustment;
     }
-  }, [layout.totalSize, measurementVersion, scrollElementRef, scrollInteractionActive]);
+  }, [layout.totalSize, measurementVersion, requestFollowLatest, scrollElementRef, scrollInteractionActive]);
 
   useEffect(() => {
     if (!virtualized) return;
@@ -295,9 +306,15 @@ export function VirtualizedTimeline<T>({
     measurementsRef.current.set(key, height);
     setMeasurementVersion((current) => current + 1);
     if (pinnedToBottom && scrollElement) {
-      window.requestAnimationFrame(() => {
-        scrollElement.scrollTop = scrollElement.scrollHeight;
-      });
+      // Prefer the parent's animated follow. The direct write stays as the fallback so a
+      // caller that renders this list on its own keeps the previous pinned behaviour.
+      if (requestFollowLatest) {
+        requestFollowLatest();
+      } else {
+        window.requestAnimationFrame(() => {
+          scrollElement.scrollTop = scrollElement.scrollHeight;
+        });
+      }
     } else if (scrollElement && rowBottom !== null && viewportTop !== null) {
       scrollElement.scrollTop += resolveMeasurementScrollAdjustment(
         previousHeight,
@@ -307,7 +324,7 @@ export function VirtualizedTimeline<T>({
         pinnedToBottom
       );
     }
-  }, [estimatedRowHeight, scrollElementRef, scrollInteractionActive]);
+  }, [estimatedRowHeight, requestFollowLatest, scrollElementRef, scrollInteractionActive]);
 
   if (!virtualized) {
     return <>{items.map((item, index) => renderItem(item, index))}</>;
