@@ -5,7 +5,9 @@ import {
   resolveVirtualizedRangeAfterItemCountChange,
   resolveVirtualizedRange,
   resolveVirtualizedRenderRange,
-  shouldDeferVirtualTimelineMeasurement
+  resolveVirtualizedRowEstimate,
+  shouldDeferVirtualTimelineMeasurement,
+  shouldVirtualizedTimelineFollowTail
 } from "../apps/desktop/src/renderer/timeline/virtualized-timeline";
 
 describe("virtualized timeline range", () => {
@@ -92,5 +94,48 @@ describe("virtualized timeline tail pinning", () => {
       .toEqual({ start: 95, end: 101 });
     expect(resolveVirtualizedRenderRange({ start: 0, end: 0 }, 0, true))
       .toEqual({ start: 0, end: 0 });
+  });
+});
+
+describe("virtualized timeline row estimate", () => {
+  it("reserves the average of the heights that were measured", () => {
+    expect(resolveVirtualizedRowEstimate([120, 480, 300], 196)).toBe(300);
+  });
+
+  it("keeps a tool heavy transcript from collapsing onto the constant estimate", () => {
+    // Tool groups and long answers are several times taller than a short user turn. Reserving
+    // the constant for every never-measured row under-estimated the content badly, so the
+    // mounted rows jumped as soon as the real heights landed.
+    expect(resolveVirtualizedRowEstimate([600, 900, 750], 196)).toBe(750);
+  });
+
+  it("falls back to the configured estimate before anything was measured", () => {
+    expect(resolveVirtualizedRowEstimate([], 196)).toBe(196);
+    expect(resolveVirtualizedRowEstimate([Number.NaN, 0, -5], 196)).toBe(196);
+  });
+});
+
+describe("virtualized timeline follow detection", () => {
+  it("treats a scroll element resting at the bottom as following the tail", () => {
+    expect(shouldVirtualizedTimelineFollowTail(false, { scrollHeight: 1200, scrollTop: 1030, clientHeight: 180 }))
+      .toBe(true);
+    expect(shouldVirtualizedTimelineFollowTail(false, { scrollHeight: 1200, scrollTop: 700, clientHeight: 180 }))
+      .toBe(false);
+    expect(shouldVirtualizedTimelineFollowTail(true, null)).toBe(true);
+    expect(shouldVirtualizedTimelineFollowTail(false, null)).toBe(false);
+  });
+
+  it("mounts a row appended while the reader sits at the bottom even when the flag lags", () => {
+    // The follow flag is released on wheel/press and gated per turn, so a turn can finish while
+    // it is false although the reader never left the bottom. Appending the answer in that window
+    // left it outside the rendered range, and an unmounted row cannot be reached by scrolling:
+    // the conclusion only appeared after a refresh.
+    const followLatest = shouldVirtualizedTimelineFollowTail(false, {
+      scrollHeight: 1200,
+      scrollTop: 1030,
+      clientHeight: 180
+    });
+    expect(resolveVirtualizedRangeAfterItemCountChange({ start: 80, end: 100 }, 100, 101, followLatest))
+      .toEqual({ start: 81, end: 101 });
   });
 });

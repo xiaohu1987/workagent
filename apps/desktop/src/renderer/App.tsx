@@ -368,6 +368,7 @@ import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEf
 import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, SubagentSwitchRow, buildSubagentPresentations, resolveSelectedSubagentId } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
+import { resolveDeferredToolGroup } from "./timeline/deferred-tool-group";
 import { TimelineEntries } from "./timeline/timeline-entries";
 import { ApprovalCard, AssistantDraftMessage, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
@@ -4056,13 +4057,20 @@ export function App() {
     );
     if (!group) return null;
 
-    const groupCompletedAt = Math.max(...group.toolCalls.map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt)));
-    const hasReplacementReply = visibleMessages.some((message) =>
+    // Timestamps that cannot be parsed used to make this comparison `false` forever, which kept
+    // the whole group hidden for the rest of the turn. Dropping them leaves the decision to the
+    // batch rule below instead of silently suppressing finished records.
+    const groupCompletedAt = Math.max(
+      ...group.toolCalls
+        .map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt))
+        .filter((timestamp) => Number.isFinite(timestamp))
+    );
+    const hasReplacementReply = Number.isFinite(groupCompletedAt) && visibleMessages.some((message) =>
       message.role === "assistant" &&
       !isInternalAgentProtocolMessage(message.content) &&
       Date.parse(message.createdAt) > groupCompletedAt
     );
-    return hasReplacementReply ? null : group.toolCalls;
+    return resolveDeferredToolGroup(group.toolCalls, hasReplacementReply);
   }, [isTaskProcessing, latestRootRuntimeTool, timelineEntries, visibleMessages]);
   const shouldRenderRuntimeTailPanel = Boolean(
     showRuntimeActivityPanel &&

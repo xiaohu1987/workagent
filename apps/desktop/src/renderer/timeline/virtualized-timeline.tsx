@@ -4,6 +4,7 @@ import type { CSSProperties, ReactNode, RefObject } from "react";
 const DEFAULT_ESTIMATED_ROW_HEIGHT = 196;
 const DEFAULT_OVERSCAN_PX = 900;
 const DEFAULT_VIRTUALIZATION_THRESHOLD = 80;
+const PINNED_TO_BOTTOM_SLACK_PX = 24;
 
 type VirtualizedTimelineProps<T> = {
   items: T[];
@@ -115,6 +116,47 @@ export function shouldDeferVirtualTimelineMeasurement(
   return scrollInteractionActive || deferredCommitPending;
 }
 
+/**
+ * Reserved height for rows that have never been mounted.
+ *
+ * One constant cannot describe a transcript whose rows differ by an order of magnitude: tool
+ * groups and long answers are several times taller than a short user turn, so every
+ * never-measured row above the viewport reserves far less space than it really occupies. The
+ * offsets then collapse, and the rows jump as soon as the real heights land. Averaging the
+ * heights that were actually measured keeps the reserved space in the same order of magnitude
+ * as the content, and it converges as more rows get measured.
+ */
+export function resolveVirtualizedRowEstimate(measuredHeights: Iterable<number>, fallback: number): number {
+  let total = 0;
+  let count = 0;
+  for (const height of measuredHeights) {
+    if (!Number.isFinite(height) || height <= 0) continue;
+    total += height;
+    count += 1;
+  }
+  return count > 0 ? total / count : fallback;
+}
+
+/**
+ * Whether the newest content must stay mounted.
+ *
+ * `followLatest` is the parent's own bookkeeping and it can lag the DOM: the follow loop
+ * releases it on wheel/press, the composer gates it per turn, and a turn can finish while it is
+ * still false although the reader never left the bottom. Appending the answer inside that window
+ * left the row outside the rendered range, and an unmounted row cannot be reached by scrolling,
+ * so the answer looked like it was never rendered until the list was rebuilt (the "conclusion
+ * only shows up after a refresh" report). The live scroll geometry therefore has the final word.
+ */
+export function shouldVirtualizedTimelineFollowTail(
+  followLatest: boolean,
+  scrollElement: { scrollHeight: number; scrollTop: number; clientHeight: number } | null
+): boolean {
+  if (followLatest) return true;
+  if (!scrollElement) return false;
+  return scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight <
+    PINNED_TO_BOTTOM_SLACK_PX;
+}
+
 export function VirtualizedTimeline<T>({
   items,
   getKey,
@@ -143,6 +185,7 @@ export function VirtualizedTimeline<T>({
     keyIndexes: new Map()
   });
   const frameRef = useRef(0);
+  const frameRerunRef = useRef(false);
   const previousItemCountRef = useRef(items.length);
   const [measurementVersion, setMeasurementVersion] = useState(0);
   const [range, setRange] = useState<VisibleRange>(() => ({ start: 0, end: Math.min(items.length, 20) }));
@@ -153,10 +196,11 @@ export function VirtualizedTimeline<T>({
     const offsets = new Array<number>(items.length);
     const sizes = new Array<number>(items.length);
     const keyIndexes = new Map<string, number>();
+    const fallbackHeight = resolveVirtualizedRowEstimate(measurementsRef.current.values(), estimatedRowHeight);
     let totalSize = 0;
     for (let index = 0; index < items.length; index += 1) {
       const key = getKey(items[index]);
-      const size = measurementsRef.current.get(key) ?? estimatedRowHeight;
+      const size = measurementsRef.current.get(key) ?? fallbackHeight;
       keyIndexes.set(key, index);
       offsets[index] = totalSize;
       sizes[index] = size;
@@ -179,17 +223,38 @@ export function VirtualizedTimeline<T>({
     setRange((current) => current.start === start && current.end === end ? current : { start, end });
   }, [items.length, layout.offsets, layout.sizes, overscanPx, scrollElementRef, virtualized]);
 
+  const updateRangeRef = useRef(updateRange);
+  updateRangeRef.current = updateRange;
+  const scheduleRangeUpdateRef = useRef<() => void>(() => {});
+  /**
+   * Queues a range recompute on the next frame.
+   *
+   * Dropping a request because a frame was already pending lost the recompute that follows a
+   * fresh measurement or a new item: the queued frame still ran the closure from the older
+   * layout, and when nothing else scheduled afterwards the rendered window stayed stale until a
+   * scroll, a resize or a reload rebuilt it (the "tool records come back only after a refresh"
+   * report). Recording the extra request and rerunning once keeps the window in sync with the
+   * layout this render produced.
+   */
   const scheduleRangeUpdate = useCallback(() => {
-    if (frameRef.current) return;
+    if (frameRef.current) {
+      frameRerunRef.current = true;
+      return;
+    }
     frameRef.current = window.requestAnimationFrame(() => {
       frameRef.current = 0;
-      updateRange();
+      updateRangeRef.current();
+      if (frameRerunRef.current) {
+        frameRerunRef.current = false;
+        scheduleRangeUpdateRef.current();
+      }
     });
-  }, [updateRange]);
+  }, []);
+  scheduleRangeUpdateRef.current = scheduleRangeUpdate;
 
   useLayoutEffect(() => {
     scheduleRangeUpdate();
-  }, [layout.totalSize, scheduleRangeUpdate]);
+  }, [items, layout.offsets, layout.sizes, scheduleRangeUpdate]);
 
   useLayoutEffect(() => {
     const previousItemCount = previousItemCountRef.current;
@@ -200,7 +265,7 @@ export function VirtualizedTimeline<T>({
         current,
         previousItemCount,
         items.length,
-        followLatest
+        shouldVirtualizedTimelineFollowTail(followLatest, scrollElementRef.current)
       );
       return current.start === next.start && current.end === next.end ? current : next;
     });
@@ -215,9 +280,7 @@ export function VirtualizedTimeline<T>({
     const scrollElement = scrollElementRef.current;
     const container = containerRef.current;
     const currentLayout = layoutRef.current;
-    const pinnedToBottom = Boolean(
-      scrollElement && scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 24
-    );
+    const pinnedToBottom = shouldVirtualizedTimelineFollowTail(false, scrollElement);
     const containerTop = container?.getBoundingClientRect().top ?? null;
     const viewportTop = scrollElement?.getBoundingClientRect().top ?? null;
     let adjustment = 0;
@@ -279,6 +342,7 @@ export function VirtualizedTimeline<T>({
       scrollElement.removeEventListener("scroll", scheduleRangeUpdate);
       if (frameRef.current) window.cancelAnimationFrame(frameRef.current);
       frameRef.current = 0;
+      frameRerunRef.current = false;
     };
   }, [scheduleRangeUpdate, scrollElementRef, virtualized]);
 
@@ -290,9 +354,7 @@ export function VirtualizedTimeline<T>({
       return;
     }
     const scrollElement = scrollElementRef.current;
-    const pinnedToBottom = Boolean(
-      scrollElement && scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 24
-    );
+    const pinnedToBottom = shouldVirtualizedTimelineFollowTail(false, scrollElement);
     const container = containerRef.current;
     const currentLayout = layoutRef.current;
     const index = currentLayout.keyIndexes.get(key);
@@ -330,7 +392,8 @@ export function VirtualizedTimeline<T>({
     return <>{items.map((item, index) => renderItem(item, index))}</>;
   }
 
-  const visibleRange = resolveVirtualizedRenderRange(range, items.length, followLatest);
+  const followTail = shouldVirtualizedTimelineFollowTail(followLatest, scrollElementRef.current);
+  const visibleRange = resolveVirtualizedRenderRange(range, items.length, followTail);
   const visibleItems = items.slice(visibleRange.start, visibleRange.end);
   return (
     <div ref={containerRef} className="virtual-timeline" style={{ height: `${layout.totalSize}px` }}>
