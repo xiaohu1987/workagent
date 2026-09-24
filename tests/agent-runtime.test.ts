@@ -8,6 +8,7 @@ import { ProviderRequestLimitError } from "@provider-adapters";
 import {
   createToolCallFingerprint,
   prioritizeToolsForProvider,
+  sortToolsForStableBaseline,
   promoteToolSearchResults,
   recoverMisroutedSkillLoadCalls,
   buildInvalidSkillLoadRecoveryInstruction,
@@ -762,6 +763,27 @@ describe("provider tool routing recovery", () => {
     });
     expect(requestTools).toHaveLength(50);
     expect(requestTools[0]?.name).toBe("database.list_sources");
+  });
+
+  it("keeps the tool baseline order deterministic across discovery orders", () => {
+    const discovered = [tool("zeta.read"), tool("alpha.write"), tool("skills.load"), tool("mcp.beta")];
+    const baseline = sortToolsForStableBaseline(discovered);
+
+    expect(baseline.map((entry) => entry.name)).toEqual(["alpha.write", "mcp.beta", "skills.load", "zeta.read"]);
+    expect(sortToolsForStableBaseline([...discovered].reverse())).toEqual(baseline);
+    expect(sortToolsForStableBaseline(discovered.slice(2).concat(discovered.slice(0, 2)))).toEqual(baseline);
+    expect(discovered.map((entry) => entry.name)).toEqual(["zeta.read", "alpha.write", "skills.load", "mcp.beta"]);
+  });
+
+  it("keeps promoted tools first in a name-stable bounded provider list", () => {
+    const sortedBaseline = sortToolsForStableBaseline([tool("zeta.read"), tool("mcp.beta"), tool("alpha.write")]);
+    const requestTools = prioritizeToolsForProvider({
+      tools: sortedBaseline,
+      promotedToolNames: ["zeta.read"],
+      maxTools: 2
+    });
+
+    expect(requestTools.map((entry) => entry.name)).toEqual(["zeta.read", "alpha.write"]);
   });
 
   it("rewrites a low-risk tool name misrouted through skills.load", () => {

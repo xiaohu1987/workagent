@@ -44,7 +44,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: Anthropic };
 });
 
-import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, defaultOpenAiApiFormatsForModel, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, prepareGrokAvailableTools, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, readProviderRequestDiagnostics, resolveModelCompat, resolveProviderRequestLimits, stripProviderRequestDiagnostics, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
+import { applyProviderRequestLimits, buildDecisionSystemPrompt, classifyResponsesFallback, defaultOpenAiApiFormatsForModel, describeProviderUsageReport, extractVisibleStreamText, imageGenerationProtocolForModel, isBareToolInvocationText, nativeToolName, parseDecisionFromText, parseNativeToolArguments, parseProviderTokenUsage, planResponsesIncrementalRequest, prepareGrokAvailableTools, providerSupportsMediaGeneration, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, readProviderRequestDiagnostics, resolveModelCompat, resolveProviderRequestLimits, stripProviderRequestDiagnostics, stripTaggedToolCalls, stripThinkBlocks, stripThinkBlocksFromStream, surfaceThinkBlocksInStream, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 
 describe("native tool names", () => {
   it("uses a stable provider-safe name without punctuation collisions", () => {
@@ -4346,6 +4346,171 @@ describe("native provider tool protocols", () => {
     expect(responsesRequest).not.toHaveProperty("reasoning_effort");
   });
 
+  it("sends the thread cache affinity key as Responses prompt_cache_key only", async () => {
+    mocks.responsesCreate.mockResolvedValue({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }] });
+    const responsesProvider: ProviderDefinition = {
+      id: "openai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "[REDACTED]"
+    };
+    await new ProviderFactory().create(responsesProvider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
+      model: { ...model, providerId: responsesProvider.id },
+      provider: responsesProvider, cacheAffinityKey: "thread-abc", stream: false
+    });
+    expect(mocks.responsesCreate.mock.calls.at(-1)?.[0]).toMatchObject({ prompt_cache_key: "thread-abc" });
+
+    // Chat and Anthropic payloads must not grow provider-specific cache routing fields.
+    // The key stays in the contract so Responses can use it, but each adapter opts in.
+    const chatProvider: ProviderDefinition = { id: "openai", type: "openai-compatible", apiKey: "[REDACTED]" };
+    mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "Done." } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    await new ProviderFactory().create(chatProvider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
+      model: { ...model, providerId: chatProvider.id },
+      provider: chatProvider, cacheAffinityKey: "thread-abc", stream: false
+    });
+    expect(mocks.chatCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("prompt_cache_key");
+
+    const anthropicProvider: ProviderDefinition = { id: "anthropic", type: "anthropic", apiKey: "[REDACTED]" };
+    mocks.anthropicCreate.mockResolvedValue({ content: [{ type: "text", text: "Done." }] });
+    await new ProviderFactory().create(anthropicProvider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "Hello" }], availableTools: [],
+      model: { ...model, providerId: anthropicProvider.id },
+      provider: anthropicProvider, cacheAffinityKey: "thread-abc", stream: false
+    });
+    expect(mocks.anthropicCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("prompt_cache_key");
+  });
+
+  describe("Responses incremental continuation", () => {
+    it("records a reason for every branch that blocks response reuse", () => {
+      const request = {
+        model: "gpt-5.6",
+        instructions: "Answer.",
+        input: [{ role: "user", content: "one" }, { role: "user", content: "two" }]
+      };
+      const first = planResponsesIncrementalRequest({ enabled: true, previous: null, request });
+      expect(first.plan).toMatchObject({ mode: "full", reason: "no_previous_request", requestItemCount: 2 });
+      expect(first.state?.itemFingerprints).toHaveLength(2);
+      const previous = { responseId: "resp_1", ...(first.state as NonNullable<typeof first.state>) };
+      const blocked: Array<[Parameters<typeof planResponsesIncrementalRequest>[0], string]> = [
+        [{ enabled: false, previous, request }, "disabled"],
+        [{ enabled: true, previous: null, request }, "no_previous_request"],
+        [{ enabled: true, previous: { ...previous, restoredHistory: true }, request }, "restored_history"],
+        [{ enabled: true, previous: { ...previous, propertiesFingerprint: "stale" }, request }, "properties_mismatch"],
+        [{ enabled: true, previous, request: { ...request, input: "not-a-list" } }, "items_mismatch"],
+        [{ enabled: true, previous, request: { ...request, input: [{ role: "user", content: "one" }, { role: "user", content: "changed" }] } }, "items_mismatch"],
+        [{ enabled: true, previous, request: { ...request, input: [{ role: "user", content: "one" }] } }, "incompatible_length"]
+      ];
+      for (const [params, reason] of blocked) {
+        const result = planResponsesIncrementalRequest(params);
+        expect(result.plan).toMatchObject({ mode: "full", reason });
+        expect(result.request).not.toHaveProperty("previous_response_id");
+      }
+      expect(planResponsesIncrementalRequest({ enabled: true, previous, request: { ...request, input: "not-a-list" } }).state).toBeNull();
+    });
+
+    it("sends the delta with the previous response id when the input strictly extends", () => {
+      const request = {
+        model: "gpt-5.6",
+        instructions: "Answer.",
+        input: [{ role: "user", content: "one" }]
+      };
+      const first = planResponsesIncrementalRequest({ enabled: true, previous: null, request });
+      const previous = { responseId: "resp_1", ...(first.state as NonNullable<typeof first.state>) };
+      const second = planResponsesIncrementalRequest({
+        enabled: true,
+        previous,
+        request: { ...request, input: [...request.input, { role: "user", content: "two" }] }
+      });
+      expect(second.plan).toMatchObject({
+        mode: "incremental",
+        reason: "prefix_extension",
+        previousResponseId: "resp_1",
+        deltaItemCount: 1,
+        requestItemCount: 2
+      });
+      expect(second.request).toMatchObject({
+        previous_response_id: "resp_1",
+        instructions: "Answer.",
+        input: [{ role: "user", content: "two" }]
+      });
+      expect(second.state?.propertiesFingerprint).toBe(first.state?.propertiesFingerprint);
+      expect(second.state?.itemFingerprints).toHaveLength(2);
+    });
+
+    it("reuses the upstream response id across extended turns and reports each plan", async () => {
+      const responsesProvider: ProviderDefinition = {
+        id: "openai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "[REDACTED]"
+      };
+      const adapter = new ProviderFactory().create(responsesProvider);
+      const plans: unknown[] = [];
+      let continuation: Exclude<Parameters<NonNullable<ProviderTurnInput["onResponsesContinuationPlan"]>>[1], null> | undefined;
+      const record: NonNullable<ProviderTurnInput["onResponsesContinuationPlan"]> = (plan, state) => {
+        plans.push(plan);
+        continuation = state ?? undefined;
+      };
+      const turnInput = {
+        systemPrompt: "Answer.",
+        availableTools: [] as ProviderTurnInput["availableTools"],
+        model: { ...model, providerId: responsesProvider.id },
+        provider: responsesProvider,
+        stream: false
+      };
+      mocks.responsesCreate.mockResolvedValue({
+        id: "resp_1",
+        status: "completed",
+        output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
+      });
+      await adapter.runTurn({
+        ...turnInput,
+        transcript: [{ role: "user", content: "First" }],
+        incrementalResponses: true,
+        onResponsesContinuationPlan: record
+      });
+      expect(mocks.responsesCreate.mock.calls.at(-1)?.[0]).not.toHaveProperty("previous_response_id");
+      expect(plans.at(-1)).toMatchObject({ mode: "full", reason: "no_previous_request" });
+      expect(continuation?.responseId).toBe("resp_1");
+
+      mocks.responsesCreate.mockResolvedValue({
+        id: "resp_2",
+        status: "completed",
+        output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }]
+      });
+      await adapter.runTurn({
+        ...turnInput,
+        transcript: [
+          { role: "user", content: "First" },
+          { role: "assistant", content: "Answer." },
+          { role: "user", content: "Second" }
+        ],
+        incrementalResponses: true,
+        responsesContinuation: continuation,
+        onResponsesContinuationPlan: record
+      });
+      const secondRequest = mocks.responsesCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+      const delta = secondRequest.input as Array<Record<string, unknown>>;
+      expect(secondRequest.previous_response_id).toBe("resp_1");
+      expect(secondRequest.instructions).toBe("Answer.");
+      expect(delta).toHaveLength(2);
+      expect(delta.at(-1)).toMatchObject({ role: "user" });
+      expect(plans.at(-1)).toMatchObject({
+        mode: "incremental",
+        reason: "prefix_extension",
+        deltaItemCount: delta.length
+      });
+      expect(continuation?.responseId).toBe("resp_2");
+
+      await adapter.runTurn({
+        ...turnInput,
+        transcript: [{ role: "user", content: "First" }],
+        incrementalResponses: false,
+        responsesContinuation: continuation
+      });
+      const switchedOffRequest = mocks.responsesCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+      expect(switchedOffRequest).not.toHaveProperty("previous_response_id");
+      expect(switchedOffRequest.input).toHaveLength(1);
+      expect(plans).toHaveLength(2);
+    });
+  });
+
   it("sends only images as Responses visual blocks and keeps other attachment paths as text", async () => {
     mocks.responsesCreate.mockResolvedValue({
       status: "completed",
@@ -5184,6 +5349,45 @@ describe("parseProviderTokenUsage", () => {
     });
   });
 
+  it("parses OpenAI Responses cache and reasoning details", () => {
+    expect(parseProviderTokenUsage({
+      input_tokens: 1200,
+      output_tokens: 300,
+      total_tokens: 1500,
+      input_tokens_details: { cached_tokens: 800 },
+      output_tokens_details: { reasoning_tokens: 100 }
+    })).toEqual({
+      totalTokens: 1500,
+      inputTokens: 1200,
+      inputCacheHitTokens: 800,
+      inputCacheMissTokens: 400,
+      inputCacheWriteTokens: 0,
+      outputTokens: 300,
+      outputReasoningTokens: 100,
+      outputContentTokens: 200,
+      cacheHitRate: 800 / 1200
+    });
+  });
+
+  it("keeps Anthropic payloads on the Anthropic branch", () => {
+    expect(parseProviderTokenUsage({
+      input_tokens: 200,
+      output_tokens: 50,
+      cache_read_input_tokens: 700,
+      cache_creation_input_tokens: 100,
+      output_tokens_details: { thinking_tokens: 40 }
+    })).toMatchObject({
+      inputTokens: 1000,
+      inputCacheHitTokens: 700,
+      inputCacheMissTokens: 200,
+      inputCacheWriteTokens: 100,
+      outputTokens: 50,
+      outputReasoningTokens: 40,
+      outputContentTokens: 10,
+      cacheHitRate: 0.7
+    });
+  });
+
   it("parses Anthropic cache read/write tokens", () => {
     expect(parseProviderTokenUsage({
       input_tokens: 200,
@@ -5497,5 +5701,61 @@ describe("parseNativeToolArguments JSON repair", () => {
     const raw = '{"patch": "line1\\nline2\nline3"}';
     const parsed = parseNativeToolArguments(raw);
     expect(parsed).toEqual({ patch: "line1\nline2\nline3" });
+  });
+});
+
+describe("provider usage report", () => {
+  it("flags OpenAI Responses cache and reasoning fields as reported", () => {
+    expect(
+      describeProviderUsageReport({
+        input_tokens: 1_000,
+        output_tokens: 200,
+        input_tokens_details: { cached_tokens: 800 },
+        output_tokens_details: { reasoning_tokens: 50 }
+      })
+    ).toEqual({
+      protocol: "openai_responses",
+      inputTokensReported: true,
+      cacheHitReported: true,
+      cacheWriteReported: false,
+      reasoningReported: true
+    });
+  });
+
+  it("keeps a reported zero distinct from a missing cache field", () => {
+    const reportedZero = describeProviderUsageReport({
+      input_tokens: 100,
+      input_tokens_details: { cached_tokens: 0 }
+    });
+    const missingField = describeProviderUsageReport({
+      input_tokens: 100,
+      input_tokens_details: {}
+    });
+    expect(reportedZero.cacheHitReported).toBe(true);
+    expect(missingField.cacheHitReported).toBe(false);
+  });
+
+  it("detects chat and Anthropic payloads without cross-routing", () => {
+    expect(
+      describeProviderUsageReport({
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        prompt_tokens_details: { cached_tokens: 4 }
+      }).protocol
+    ).toBe("openai_chat");
+    expect(
+      describeProviderUsageReport({ input_tokens: 10, cache_read_input_tokens: 4 }).protocol
+    ).toBe("anthropic");
+  });
+
+  it("reports unknown payloads as unknown instead of a zero hit rate", () => {
+    expect(describeProviderUsageReport(null)).toEqual({
+      protocol: "unknown",
+      inputTokensReported: false,
+      cacheHitReported: false,
+      cacheWriteReported: false,
+      reasoningReported: false
+    });
+    expect(describeProviderUsageReport({ prompt_tokens: 10, completion_tokens: 2 }).cacheHitReported).toBe(false);
   });
 });

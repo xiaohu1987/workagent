@@ -39,6 +39,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
+import type { ResponsesContinuationPlan, ResponsesContinuationState } from "@shared-types";
 import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, isGrokModel, isProgressOnlyAssistantMessage, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripProviderRequestDiagnostics, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
@@ -99,6 +100,14 @@ import {
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
 import { resolveVerbatimMediaPrompt } from "./media-prompt";
+import {
+  hashCachePrefixText,
+  measureCachePrefix,
+  summarizeCachePrefixChange,
+  type CachePrefixLayerInput
+} from "./cache-prefix";
+import { summarizeCompactionPrefixOutcome } from "./compaction-prefix";
+import type { CachePrefixMeasurement } from "./cache-prefix";
 import type { GpaStage, GpaState } from "@shared-types";
 import { normalizeSandboxMode, normalizeSandboxNetworkAccess } from "@shared-types";
 import { createChatRuntimePolicy } from "./chat-runtime";
@@ -302,6 +311,18 @@ export {
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
 export { isUserOriginatedMediaPrompt, resolveVerbatimMediaPrompt } from "./media-prompt";
+export {
+  hashCachePrefixText,
+  measureCachePrefix,
+  summarizeCachePrefixChange,
+  type CachePrefixChangeSummary,
+  type CachePrefixFragmentInput,
+  type CachePrefixFragmentMeasurement,
+  type CachePrefixLayerId,
+  type CachePrefixLayerInput,
+  type CachePrefixLayerMeasurement,
+  type CachePrefixMeasurement
+} from "./cache-prefix";
 
 /** @deprecated Use MAX_TARGET_FAILURE_ATTEMPTS for tool failures. */
 export const MAX_REPEATED_TASK_FAILURES = MAX_TARGET_FAILURE_ATTEMPTS;
@@ -1682,7 +1703,11 @@ class ThreadSessionRuntime {
   // decision, so remember what was already asked and ask each one only once.
   readonly #askedGpaClarifications = new Set<string>();
   #gpaLoaded = false;
+  // Reusable prefix measured for the previous provider request in this thread;
+  // used to attribute which layer changed when the prefix stops being stable.
+  #cachePrefixMeasurement: CachePrefixMeasurement | null = null;
   #useFunctionCallCompatibilityTranscript = false;
+  #responsesContinuation = new Map<string, ResponsesContinuationState>();
 
   public constructor(
     private readonly threadId: string,
@@ -3231,9 +3256,14 @@ class ThreadSessionRuntime {
         // never shrink them. Give them an explicit slice of the input budget and
         // shorten descriptions (then drop trailing tools) when a large MCP
         // toolbox would otherwise make every request exceed the model window.
+        // Keep the ordinary tool baseline byte-stable across turns. Dynamic
+        // provider promotions still stay first so bounded tool lists retain
+        // newly discovered tools, while the remainder no longer depends on
+        // MCP/skill discovery order.
+        const stableToolBaseline = sortToolsForStableBaseline(selectedMcpToolsOnly);
         const requestTools = fitToolSchemasForContextBudget(
           prioritizeToolsForProvider({
-            tools: selectedMcpToolsOnly.filter((tool) => !suppressSkillLoaderForTurn || tool.name !== "skills.load"),
+            tools: stableToolBaseline.filter((tool) => !suppressSkillLoaderForTurn || tool.name !== "skills.load"),
             promotedToolNames: promotedProviderToolNames,
             maxTools: requestToolBudget
           }),
@@ -3524,17 +3554,20 @@ class ThreadSessionRuntime {
             ? Math.max(1_000, Math.floor(6_000 / providerRequestSlimmingAttempts))
             : 16_000
         });
-        let systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
-          buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}${buildDesktopScreenshotDirective(model.supportsMultimodalInput && agentToolsEnabled)}\n\n${buildGitMutationPolicyPrompt(gitMutationRequested)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}${
-          useTextToolProtocol
-            ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
-            : ""
-        }${
-          providerOutputLimitAttempts > 0
-            ? "\n\n[Output-limit recovery] The previous response was truncated. Do not repeat analysis, logs, source text, or completed work. Return only one compact next tool call, or a concise final answer under 500 words using the verified results already present."
-            : ""
-        }`;
+        const decisionSystemPromptText = buildDecisionSystemPrompt(model);
+        const responseTonePromptText = buildResponseTonePrompt(this.services.config.responseTone);
+        const gpaDirectiveText = `${buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""}${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}${buildDesktopScreenshotDirective(model.supportsMultimodalInput && agentToolsEnabled)}`;
+        const gitMutationPolicyText = buildGitMutationPolicyPrompt(gitMutationRequested);
+        const baseInstructionBlock = `${decisionSystemPromptText}\n\n${responseTonePromptText}\n\n${prompt.systemPrompt}${gpaDirectiveText}\n\n${gitMutationPolicyText}`;
+        const textToolProtocolNotice = useTextToolProtocol
+          ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
+          : "";
+        const outputLimitRecoveryNotice = providerOutputLimitAttempts > 0
+          ? "\n\n[Output-limit recovery] The previous response was truncated. Do not repeat analysis, logs, source text, or completed work. Return only one compact next tool call, or a concise final answer under 500 words using the verified results already present."
+          : "";
+        const dynamicContextBlock = `${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}`;
+        const assembledSystemPrompt = `${baseInstructionBlock}\n\n${dynamicContextBlock}${textToolProtocolNotice}${outputLimitRecoveryNotice}`;
+        let systemPrompt = assembledSystemPrompt;
         const toolSchemaText = useTextToolProtocol
           ? ""
           : JSON.stringify(requestTools.map((tool) => ({
@@ -3551,9 +3584,59 @@ class ThreadSessionRuntime {
           systemPrompt,
           Math.max(256, contextBudgetPlan.maxInputTokens - toolSchemaTokens - latestEvidenceTokens)
         );
-        const budgetedSystemPrompt = toolSchemaText
-          ? `${systemPrompt}\n\n[Native tool schemas]\n${toolSchemaText}`
-          : systemPrompt;
+        // Native protocols receive the same schemas through `availableTools`;
+        // do not duplicate them in the system prompt and invalidate the
+        // reusable prefix. Text-tool compatibility keeps schemas in its
+        // explicit available-tools prompt above.
+        const budgetedSystemPrompt = systemPrompt;
+        // Prefix accounting for cache-hit troubleshooting: hash the reusable
+        // layers and the dynamic layers separately so a later diff can say
+        // which layer changed instead of guessing.
+        const buildPrefixLayers = (): CachePrefixLayerInput[] => [
+          {
+            id: "base_instructions",
+            fragments: [
+              { id: "decision_system_prompt", text: decisionSystemPromptText },
+              { id: "response_tone", text: responseTonePromptText },
+              { id: "runtime_prompt", text: prompt.systemPrompt },
+              { id: "gpa_and_policy_directives", text: gpaDirectiveText },
+              { id: "git_mutation_policy", text: gitMutationPolicyText }
+            ]
+          },
+          {
+            id: "tool_schemas",
+            fragments: [{ id: "request_tools", text: toolSchemaText }]
+          },
+          {
+            id: "dynamic_context",
+            fragments: [
+              { id: "stored_turn_context", text: storedContextPrompt },
+              { id: "follow_up_source", text: followUpSourcePrompt },
+              { id: "self_improvement", text: selfImprovementContext },
+              { id: "multi_agent_directive", text: multiAgentDirective },
+              { id: "available_tools_prompt", text: requestAvailableToolsPrompt },
+              { id: "text_tool_protocol_notice", text: textToolProtocolNotice },
+              { id: "output_limit_recovery_notice", text: outputLimitRecoveryNotice }
+            ]
+          }
+        ];
+        const prefixMeasurement = measureCachePrefix(buildPrefixLayers());
+        const prefixChange = summarizeCachePrefixChange(this.#cachePrefixMeasurement, prefixMeasurement);
+        this.#cachePrefixMeasurement = prefixMeasurement;
+        await this.services.log("agent.cache_prefix_measured", this.threadId, {
+          turnRunId: turn.id,
+          modelId: model.id,
+          providerId: provider.id,
+          toolProtocol: useTextToolProtocol ? "text_tool_protocol" : "native_tool_calls",
+          prefixHash: prefixMeasurement.hash,
+          layers: prefixMeasurement.layers,
+          systemPromptHash: hashCachePrefixText(budgetedSystemPrompt),
+          systemPromptTrimmed: budgetedSystemPrompt !== assembledSystemPrompt,
+          baseline: prefixChange.baseline,
+          stable: prefixChange.stable,
+          changedLayers: prefixChange.changedLayers,
+          changedFragments: prefixChange.changedFragments
+        });
         const compactContext = async (
           trigger: "pre_model_request" | "post_tool_batch" | "provider_request_limit" | "upstream_context_overflow" | "model_timeout_recovery" | "provider_stream_recovery" | "task_completed",
           force = false
@@ -3578,6 +3661,26 @@ class ThreadSessionRuntime {
             return false;
           }
           transcript = compaction.transcript;
+          // Compaction rewrites the transcript only. Re-measure the reusable
+          // layers so a miss that follows is attributable: 0 when the prefix
+          // survived, 1 when a stable layer moved.
+          const postCompactionPrefix = measureCachePrefix(buildPrefixLayers());
+          const compactionImpact = summarizeCompactionPrefixOutcome(
+            summarizeCachePrefixChange(prefixMeasurement, postCompactionPrefix),
+            trigger
+          );
+          await this.services.log("agent.cache_prefix_measured", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            providerId: provider.id,
+            phase: "post_compaction",
+            compactionTrigger: trigger,
+            prefixHash: postCompactionPrefix.hash,
+            layers: postCompactionPrefix.layers,
+            stableLayersPreserved: compactionImpact.stableLayersPreserved,
+            changedLayers: compactionImpact.changedLayers,
+            explainableMisses: compactionImpact.explainableMisses
+          });
           const compactionPayload = {
             turnRunId: turn.id,
             trigger,
@@ -3686,6 +3789,16 @@ class ThreadSessionRuntime {
           decision = await waitForAbortOrIdleTimeout(
             adapter.runTurn({
               systemPrompt,
+              // Keep provider-side prompt caches pinned to the same node across retries,
+              // tool turns, and resumed sessions within this thread.
+              cacheAffinityKey: this.threadId,
+              // Responses incremental continuation: reuse the previous upstream
+              // response id for this thread and persist the refreshed state.
+              responsesContinuation: this.#responsesContinuation.get(this.threadId) ?? undefined,
+              onResponsesContinuationPlan: (_plan, state) => {
+                if (state) this.#responsesContinuation.set(this.threadId, state);
+                else this.#responsesContinuation.delete(this.threadId);
+              },
               transcript: (
                 this.#useFunctionCallCompatibilityTranscript || useTextToolProtocol
               )
@@ -3696,6 +3809,7 @@ class ThreadSessionRuntime {
               provider: requestProvider,
               reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
               forceTextToolProtocol: useTextToolProtocol,
+              incrementalResponses: this.services.config.incrementalResponses === true,
               stream: requestUsesStreaming,
               onTextDelta: async (delta) => {
                 if (abortController.signal.aborted) {
@@ -4297,6 +4411,13 @@ class ThreadSessionRuntime {
               usage: turnTokenUsage
             },
             createdAt: new Date().toISOString()
+          });
+        }
+
+        if (decision.usageReport) {
+          await this.services.log("agent.provider_usage_report", this.threadId, {
+            turnRunId: turn.id,
+            ...decision.usageReport
           });
         }
 
@@ -8617,6 +8738,14 @@ export function createToolCallFingerprint(name: string, argumentsJson: Record<st
   // which split the dedupe key for one and the same tool.
   const normalizedName = name.trim().toLowerCase();
   return `${normalizedName}:${stableSerialize(normalizeFingerprintValue(argumentsJson))}`;
+}
+
+/**
+ * Orders the provider tool baseline by tool name so the serialized tool block
+ * stays byte-stable across turns regardless of MCP/skill discovery order.
+ */
+export function sortToolsForStableBaseline(tools: readonly ToolSpecDefinition[]): ToolSpecDefinition[] {
+  return [...tools].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export function prioritizeToolsForProvider(input: {

@@ -1100,6 +1100,13 @@ export interface AppConfig {
   defaultProvider: string;
   responseTone: ResponseTone;
   reasoningEffort: GptReasoningEffort;
+  /**
+   * Reuse the previous Responses API response through `previous_response_id`
+   * when the next input strictly extends the last request. Off by default:
+   * compatible gateways differ in support, so the runtime opts in only when
+   * this flag is explicitly enabled.
+   */
+  incrementalResponses?: boolean;
   providers: ProviderDefinition[];
   models: ModelProfile[];
   routing: {
@@ -1146,6 +1153,20 @@ export interface AppConfig {
   databaseConnections: DatabaseConnectionConfig[];
 }
 
+/**
+ * Presence metadata for the usage fields a provider reported on one step.
+ *
+ * A real zero and a field the gateway never sends must stay distinguishable:
+ * a missing field means "unknown cache state", not "cache miss".
+ */
+export interface ProviderUsageReport {
+  protocol: "openai_chat" | "openai_responses" | "anthropic" | "gemini" | "unknown";
+  inputTokensReported: boolean;
+  cacheHitReported: boolean;
+  cacheWriteReported: boolean;
+  reasoningReported: boolean;
+}
+
 export interface ProviderTurnDecision {
   assistantMessage?: string;
   clarification?: {
@@ -1158,6 +1179,8 @@ export interface ProviderTurnDecision {
   outputTokens?: number;
   /** Detailed provider usage when available. Prefer this over outputTokens alone. */
   usage?: TokenUsage;
+  /** Which usage fields the provider actually reported for this decision. */
+  usageReport?: ProviderUsageReport;
   toolCalls: RuntimeToolCall[];
   endTurn: boolean;
   /** Explicit provider declaration that every deliverable in the user goal is complete. */
@@ -1240,6 +1263,39 @@ export interface KnowledgeBaseSummary extends KnowledgeBaseRecord {
   bundleExists?: boolean;
 }
 
+/** Continuation state captured after one successful Responses API turn. */
+export interface ResponsesContinuationState {
+  /** `id` of the response that owns the input list described below. */
+  responseId: string;
+  /** Fingerprint over every non-input field of the request that produced it. */
+  propertiesFingerprint: string;
+  /** One fingerprint per input item, in order. */
+  itemFingerprints: string[];
+  /** Set when the conversation was restored and the server response cannot be reused. */
+  restoredHistory?: boolean;
+}
+
+/** Why a turn did not reuse the previous response. */
+export type ResponsesContinuationReason =
+  | "disabled"
+  | "no_previous_request"
+  | "restored_history"
+  | "properties_mismatch"
+  | "items_mismatch"
+  | "incompatible_length";
+
+/** Outcome of planning one Responses request for incremental continuation. */
+export interface ResponsesContinuationPlan {
+  mode: "incremental" | "full";
+  reason: ResponsesContinuationReason | "prefix_extension";
+  /** Set when `mode` is `incremental`. */
+  previousResponseId?: string;
+  /** Number of input items sent as the delta when `mode` is `incremental`. */
+  deltaItemCount?: number;
+  /** Number of input items the full request would carry. */
+  requestItemCount: number;
+}
+
 export interface ProviderTurnInput {
   systemPrompt: string;
   transcript: Array<{
@@ -1261,7 +1317,18 @@ export interface ProviderTurnInput {
   reasoningEffort?: ReasoningEffort;
   /** Use the JSON decision envelope instead of provider-native function calls. */
   forceTextToolProtocol?: boolean;
+  /**
+   * Stable per-session routing key used for provider-side prompt cache affinity.
+   * Responses requests send it as `prompt_cache_key`; other protocols ignore it.
+   */
+  cacheAffinityKey?: string;
   stream?: boolean;
+  /** Reuse the previous Responses response by sending only the new input items. */
+  incrementalResponses?: boolean;
+  /** Persisted continuation state restored with the thread. */
+  responsesContinuation?: ResponsesContinuationState;
+  /** Reports the continuation decision and next state of each Responses request. */
+  onResponsesContinuationPlan?: (plan: ResponsesContinuationPlan, state: ResponsesContinuationState | null) => void;
   onTextDelta?: (delta: string) => void | Promise<void>;
   /** Reports provider reasoning text as it is received from a streaming response. */
   onReasoningDelta?: (delta: string) => void | Promise<void>;
