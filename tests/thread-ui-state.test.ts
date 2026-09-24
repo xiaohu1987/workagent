@@ -1206,9 +1206,10 @@ describe("tool timeline grouping", () => {
   });
 
   it("closes only the process that just transitioned from running to finished", () => {
-    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, false)).toBe("turn-2");
-    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", false, false)).toBeNull();
-    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, true)).toBeNull();
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, false, true)).toBe("turn-2");
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, false, false)).toBeNull();
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", false, false, true)).toBeNull();
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, true, true)).toBeNull();
   });
 
   it("keeps the file summary visible when a completed turn is collapsed", () => {

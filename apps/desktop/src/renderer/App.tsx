@@ -4017,7 +4017,8 @@ export function App() {
     const turnIdToCollapse = getConversationTurnIdToCollapseAfterExecution(
       previous?.turnId ?? null,
       previous?.isProcessing === true,
-      isTaskProcessing
+      isTaskProcessing,
+      Boolean(latestConversationTurn?.summaryEntryId)
     );
     if (!turnIdToCollapse) return;
     setCollapsedConversationTurns((current) => {

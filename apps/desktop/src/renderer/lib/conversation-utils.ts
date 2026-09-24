@@ -653,9 +653,10 @@ export function getConversationTurnIdsToCollapseForNewSubmission(
 export function getConversationTurnIdToCollapseAfterExecution(
   previousTurnId: string | null,
   wasProcessing: boolean,
-  isProcessing: boolean
+  isProcessing: boolean,
+  hasSummary: boolean
 ): string | null {
-  return wasProcessing && !isProcessing ? previousTurnId : null;
+  return wasProcessing && !isProcessing && hasSummary ? previousTurnId : null;
 }
 
 export function buildToolGroupTimelineEntries(toolCalls: ToolCallRecord[], messages: MessageRecord[]): TimelineEntry[] {
