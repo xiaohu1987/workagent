@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { resolveDeferredToolGroup } from "../apps/desktop/src/renderer/timeline/deferred-tool-group";
+import {
+  isLastToolGroupInTimeline,
+  resolveDeferredToolGroup
+} from "../apps/desktop/src/renderer/timeline/deferred-tool-group";
 
 type Call = {
   id: string;
@@ -45,5 +48,21 @@ describe("deferred runtime tool group", () => {
 
   it("renders an empty batch instead of hiding it", () => {
     expect(resolveDeferredToolGroup([] as Call[], false)).toBeNull();
+  });
+
+  it("hands over only the newest batch of the timeline", () => {
+    // The runtime activity stream can lag the transcript, so the "latest root tool" may still
+    // belong to a batch that already has successors on screen. Hiding that batch dropped tool
+    // records out of the middle of the chat until the thread was reopened.
+    const entries = [
+      { kind: "message" },
+      { kind: "tool-group", toolCalls: [{ id: "batch-1" }] },
+      { kind: "message" },
+      { kind: "tool-group", toolCalls: [{ id: "batch-2" }] }
+    ];
+    expect(isLastToolGroupInTimeline(entries, ["batch-2"])).toBe(true);
+    expect(isLastToolGroupInTimeline(entries, ["batch-1"])).toBe(false);
+    expect(isLastToolGroupInTimeline(entries, ["missing"])).toBe(false);
+    expect(isLastToolGroupInTimeline([{ kind: "tool-group", toolCalls: [] }], ["batch-1"])).toBe(false);
   });
 });

@@ -368,7 +368,7 @@ import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEf
 import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, SubagentSwitchRow, buildSubagentPresentations, resolveSelectedSubagentId } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
-import { resolveDeferredToolGroup } from "./timeline/deferred-tool-group";
+import { isLastToolGroupInTimeline, resolveDeferredToolGroup } from "./timeline/deferred-tool-group";
 import { TimelineEntries } from "./timeline/timeline-entries";
 import { ApprovalCard, AssistantDraftMessage, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
@@ -4057,6 +4057,16 @@ export function App() {
         entry.kind === "tool-group" && entry.toolCalls.some((toolCall) => toolCall.id === latestRootRuntimeTool.id)
     );
     if (!group) return null;
+
+    // The live panel is fed by the runtime activity stream, which can lag the transcript: the
+    // "latest root tool" may still belong to an earlier batch after a newer one has rendered.
+    // Handing that earlier batch over hid records in the middle of the chat, so only the tail
+    // batch is eligible for the hand-over.
+    const groupIsTail = isLastToolGroupInTimeline(
+      timelineEntries as ReadonlyArray<{ kind: string; toolCalls?: readonly { id: string }[] | null }>,
+      group.toolCalls.map((toolCall) => toolCall.id)
+    );
+    if (!groupIsTail) return null;
 
     // Timestamps that cannot be parsed used to make this comparison `false` forever, which kept
     // the whole group hidden for the rest of the turn. Dropping them leaves the decision to the

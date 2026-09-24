@@ -539,14 +539,19 @@ export function buildConversationTurnSections(entries: TimelineEntry[]): Convers
   const sections: ConversationTurnSection[] = [];
   let current: (ConversationTurnSection & {
     lastFormalAssistantEntryId: string | null;
+    lastAssistantEntryId: string | null;
   }) | null = null;
 
   const finishCurrent = () => {
     if (!current) return;
-    const { lastFormalAssistantEntryId, ...section } = current;
+    const { lastFormalAssistantEntryId, lastAssistantEntryId, ...section } = current;
     sections.push({
       ...section,
-      summaryEntryId: lastFormalAssistantEntryId
+      // The collapsed turn renders exactly this entry, so it must be an entry that
+      // actually carries the turn's answer. A turn whose final answer is classified as
+      // commentary used to have no formal entry at all, which left `summaryEntryId`
+      // null and the whole conclusion folded away until the thread was reopened.
+      summaryEntryId: lastFormalAssistantEntryId ?? lastAssistantEntryId
     });
   };
 
@@ -561,7 +566,8 @@ export function buildConversationTurnSections(entries: TimelineEntry[]): Convers
         entryIds: [entry.id],
         startedAt: entry.createdAt,
         completedAt: entry.createdAt,
-        lastFormalAssistantEntryId: null
+        lastFormalAssistantEntryId: null,
+        lastAssistantEntryId: null
       };
       continue;
     }
@@ -571,6 +577,7 @@ export function buildConversationTurnSections(entries: TimelineEntry[]): Convers
       current.completedAt = entry.createdAt;
     }
     if (entry.kind === "message" && entry.message.role === "assistant") {
+      current.lastAssistantEntryId = entry.id;
       if (getMessageDisplayKind(entry.message) !== "commentary") {
         current.lastFormalAssistantEntryId = entry.id;
       }
@@ -588,30 +595,23 @@ export function shouldKeepTimelineEntryWhenTurnCollapsed(
   if (!turn || !collapsedTurnIds.has(turn.id)) {
     return true;
   }
-  // A collapsed turn renders only its user message, its file summary and its
-  // summary entry (the turn's final assistant answer). Until that summary entry
-  // exists the turn has no answer to show, so collapsing down to it would hide
-  // the conclusion entirely - which is what left a finished long-running task
-  // looking truncated until the thread was reopened. In that window keep the
-  // turn's prose visible (so nothing already on screen disappears) while still
-  // collapsing the tool activity, which is what the user expects to be folded
-  // away. This self-corrects on the next render once a summary entry exists.
-  if (!turn.summaryEntryId) {
-    // Keep the user message, the file summary and any formal assistant prose so a
-    // conclusion that is already on screen never blinks out, but still fold the
-    // commentary and tool activity away: keeping *every* assistant message here
-    // (commentary included) is what left finished turns fully expanded.
-    return entry.id === turn.userEntryId
-      || entry.kind === "file-summary"
-      || (entry.kind === "message"
-        && entry.message.role === "assistant"
-        && getMessageDisplayKind(entry.message) !== "commentary")
-      || timelineEntryHasGeneratedMedia(entry);
-  }
+  // A collapsed turn keeps its user message, its file summary, generated media and the
+  // prose the user is reading: the turn's answer (its summary entry) plus every formal
+  // assistant message. Commentary progress notes and tool activity are what collapsing
+  // folds away, and keeping *all* assistant text is what left finished turns expanded.
+  //
+  // The formal-prose clause is what makes a conclusion stop disappearing: collapsing used
+  // to render only the summary entry, so a turn that collapsed before its final answer had
+  // reached the transcript showed no answer at all until the thread was reopened. Keeping
+  // formal prose means nothing already on screen can blink out, whichever entry the summary
+  // fallback picked.
   return entry.id === turn.userEntryId
     || entry.id === turn.summaryEntryId
     || entry.kind === "file-summary"
-    || timelineEntryHasGeneratedMedia(entry);
+    || timelineEntryHasGeneratedMedia(entry)
+    || (entry.kind === "message"
+      && entry.message.role === "assistant"
+      && getMessageDisplayKind(entry.message) !== "commentary");
 }
 
 export function timelineEntryHasGeneratedMedia(entry: TimelineEntry): boolean {
