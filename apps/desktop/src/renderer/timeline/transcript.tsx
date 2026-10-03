@@ -8,10 +8,13 @@ import { IconChart, IconCheck, IconChecklist, IconChevronDown, IconClose, IconCo
 import { CopyTextButton, MessageMediaLightbox, getFileLeafName, normalizeMarkdownImageSource, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
 import { ApiCardThreadContext } from "../cards/api-card-message";
+import { reportToolTimelineDiagnostic } from "../lib/tool-timeline-diagnostics";
 
 type ToolActivityGroupProps = {
   toolCalls: ToolCallRecord[];
   skillNames?: SkillNameMap;
+  /** The group belongs to the currently running conversation turn. */
+  activeTurn?: boolean;
 };
 
 type ToolActivityDisplayStatus = "completed" | "failed" | "in_progress" | "blocked";
@@ -44,16 +47,19 @@ function formatRelativeTime(isoTime: string) {
 
 export const ToolActivityGroup = memo(function ToolActivityGroup({
   toolCalls,
-  skillNames
+  skillNames,
+  activeTurn = false
 }: ToolActivityGroupProps) {
   const toolPresentation = getToolActivityPresentation(toolCalls);
   const { runningCall } = toolPresentation;
   const isRunning = Boolean(runningCall);
+  // Tool groups are intentionally collapsed by default, including the active
+  // group. This keeps long parallel tool batches readable; users can expand the
+  // exact group they want to inspect.
   const [isOpen, setIsOpen] = useState(false);
   const [loadedResults, setLoadedResults] = useState<Map<string, string | null>>(() => new Map());
   const [detailLoadState, setDetailLoadState] = useState<"idle" | "loading" | "error">("idle");
   const [detailLoadAttempt, setDetailLoadAttempt] = useState(0);
-  const wasRunningRef = useRef(isRunning);
   const resolvedToolCalls = toolCalls.map((toolCall) => {
     if (!loadedResults.has(toolCall.id)) return toolCall;
     const resultJson = loadedResults.get(toolCall.id) ?? null;
@@ -61,16 +67,27 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
   });
   const conciseLabel = getConciseToolActivityLabel(resolvedToolCalls, runningCall, skillNames);
 
+  const lastDiagnosticSignatureRef = useRef("");
   useEffect(() => {
-    if (isRunning) {
-      wasRunningRef.current = true;
-      return;
-    }
-    if (wasRunningRef.current) {
-      wasRunningRef.current = false;
-      setIsOpen(false);
-    }
-  }, [isRunning, runningCall?.id]);
+    if (toolCalls.length === 0) return;
+    const signature = [
+      toolCalls.map((toolCall) => `${toolCall.id}:${toolCall.status}`).join(","),
+      activeTurn ? "active" : "history",
+      isOpen ? "open" : "closed"
+    ].join("|");
+    if (signature === lastDiagnosticSignatureRef.current) return;
+    lastDiagnosticSignatureRef.current = signature;
+    reportToolTimelineDiagnostic({
+      stage: "tool-group-render",
+      threadId: toolCalls[0]?.threadId ?? null,
+      toolCallIds: toolCalls.map((toolCall) => toolCall.id),
+      toolNames: toolCalls.map((toolCall) => toolCall.toolName),
+      toolCallCount: toolCalls.length,
+      activeTurn,
+      isRunning,
+      isOpen
+    });
+  }, [activeTurn, isOpen, isRunning, toolCalls]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -112,7 +129,17 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
     <details
       className="tool-activity-group"
       open={isOpen}
-      onToggle={(event) => setIsOpen(event.currentTarget.open)}
+      onToggle={(event) => {
+        const nextOpen = event.currentTarget.open;
+        setIsOpen(nextOpen);
+        reportToolTimelineDiagnostic({
+          stage: "tool-group-toggle",
+          threadId: toolCalls[0]?.threadId ?? null,
+          toolCallIds: toolCalls.map((toolCall) => toolCall.id),
+          open: nextOpen,
+          activeTurn
+        });
+      }}
     >
       <summary
         className="tool-activity-summary"
@@ -140,7 +167,9 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
       ) : null}
     </details>
   );
-}, (previous, next) => previous.skillNames === next.skillNames && areToolActivityGroupsEqual(previous.toolCalls, next.toolCalls));
+}, (previous, next) => previous.skillNames === next.skillNames
+  && previous.activeTurn === next.activeTurn
+  && areToolActivityGroupsEqual(previous.toolCalls, next.toolCalls));
 
 function isToolCallSummary(toolCall: ToolCallRecord): toolCall is ToolCallSummary {
   return "hasFullResult" in toolCall;

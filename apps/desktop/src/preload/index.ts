@@ -4,6 +4,8 @@ import type { NotificationNavigationTarget, QueuedMessageRecord, RuntimeThreadSn
 const api = {
   reportRendererError: (payload: { message: string; stack?: string; componentStack?: string; unhandledRejection?: boolean }) =>
     ipcRenderer.send("renderer:error", payload),
+  reportToolTimelineDiagnostic: (payload: Record<string, unknown>) =>
+    ipcRenderer.send("logs:tool-timeline-diagnostic", payload),
   getApplicationBackgrounds: () => ipcRenderer.invoke("appearance:background:get"),
   saveApplicationBackgrounds: (payload: {
     items: Array<{

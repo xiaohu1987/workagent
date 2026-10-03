@@ -26,6 +26,7 @@ declare global {
   interface Window {
     codexh: {
       reportRendererError: (payload: { message: string; stack?: string; componentStack?: string; unhandledRejection?: boolean }) => void;
+      reportToolTimelineDiagnostic: (payload: Record<string, unknown>) => void;
       getApplicationBackgrounds: () => Promise<{
         items: Array<{
           id: string;

@@ -38,6 +38,55 @@ describe("ToolActivityGroup", () => {
     expect(html).not.toContain("tool-activity-row compact");
   });
 
+  it("keeps the active turn collapsed until the user opens it", () => {
+    const toolCall: ToolCallSummary = {
+      id: "active-tool-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "shell.exec",
+      argumentsJson: JSON.stringify({ command: "pnpm test" }),
+      resultJson: JSON.stringify({ ok: true, stdout: "ok" }),
+      resultSize: 0,
+      hasFullResult: true,
+      status: "completed",
+      riskLevel: "low",
+      approvalMode: "auto",
+      startedAt: "2026-08-14T00:00:00.000Z",
+      completedAt: "2026-08-14T00:00:01.000Z"
+    };
+
+    const html = renderToStaticMarkup(createElement(ToolActivityGroup, {
+      toolCalls: [toolCall],
+      activeTurn: true
+    }));
+
+    expect(html).not.toContain('open=""');
+    expect(html).not.toContain("tool-activity-details-shell");
+  });
+
+  it("keeps a non-latest running group collapsed", () => {
+    const toolCall: ToolCallSummary = {
+      id: "parallel-tool-1",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "web_search.search_query",
+      argumentsJson: JSON.stringify({ query: "T. rex" }),
+      resultJson: null,
+      resultSize: 0,
+      hasFullResult: false,
+      status: "running",
+      riskLevel: "low",
+      approvalMode: "auto",
+      startedAt: "2026-08-14T00:00:00.000Z",
+      completedAt: null
+    };
+
+    const html = renderToStaticMarkup(createElement(ToolActivityGroup, { toolCalls: [toolCall] }));
+
+    expect(html).not.toContain('open=""');
+    expect(html).not.toContain("tool-activity-details-shell");
+  });
+
   it("keeps long expanded tool histories inside a bounded scroll area", () => {
     const detailsRule = timelineCss.match(/\.tool-activity-details\s*\{([^}]*)\}/)?.[1] ?? "";
 

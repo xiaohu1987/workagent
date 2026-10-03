@@ -639,6 +639,43 @@ function registerIpc(): void {
       ...(record.unhandledRejection === true ? { unhandledRejection: true } : {})
     });
   });
+  ipcMain.on("logs:tool-timeline-diagnostic", (_event, payload: unknown) => {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+    const input = payload as Record<string, unknown>;
+    const stage = typeof input.stage === "string" ? input.stage : "unknown";
+    if (!new Set(["runtime-event", "snapshot-to-timeline-mismatch", "render-window"]).has(stage)) return;
+
+    const diagnostic: Record<string, unknown> = { stage };
+    for (const key of ["threadId", "type", "toolCallId", "toolName", "turnRunId", "createdAt"] as const) {
+      const value = input[key];
+      if (typeof value === "string") diagnostic[key] = value.slice(0, 160);
+    }
+    for (const key of ["snapshotToolCallCount", "timelineToolCallCount", "messageCount", "timelineEntryCount", "totalEntries", "totalToolCalls", "renderedEntries"] as const) {
+      const value = input[key];
+      if (typeof value === "number" && Number.isFinite(value)) diagnostic[key] = value;
+    }
+    for (const key of ["status"] as const) {
+      const value = input[key];
+      if (typeof value === "string") diagnostic[key] = value.slice(0, 64);
+    }
+    for (const key of ["missingToolCallIds", "renderedToolCallIds", "collapsedToolCallIds", "outsideWindowToolCallIds"] as const) {
+      const value = input[key];
+      if (Array.isArray(value)) {
+        diagnostic[key] = value
+          .filter((item): item is string => typeof item === "string")
+          .slice(0, 100)
+          .map((item) => item.slice(0, 160));
+      }
+    }
+    const range = input.range;
+    if (range && typeof range === "object" && !Array.isArray(range)) {
+      const value = range as Record<string, unknown>;
+      diagnostic.range = Object.fromEntries(["start", "end", "total"].flatMap((key) =>
+        typeof value[key] === "number" && Number.isFinite(value[key]) ? [[key, value[key]]] : []
+      ));
+    }
+    void backend.appendRuntimeLog("tool_timeline.diagnostic", diagnostic);
+  });
   ipcMain.handle("appearance:background:get", () => backend.getApplicationBackgrounds());
   ipcMain.handle("appearance:background:save", (_event, payload) => backend.saveApplicationBackgrounds(payload));
   ipcMain.handle("appearance:background:save-settings", (_event, settings) =>

@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   collectMissingSnapshotMessages,
+  collectMissingSnapshotRecords,
   expectedVisibleMessageIds,
   filterTranscriptMessages,
   mergeServerMessagesWithNewerLocal,
@@ -42,6 +43,43 @@ describe("a transcript commit must converge on the snapshot it read", () => {
     const cached = [row("b", "2026-09-18T09:01:00.000Z")];
     const expected = mergeServerMessagesWithNewerLocal(cached, live);
     expect(collectMissingSnapshotMessages(live, expected)).toEqual([]);
+  });
+});
+
+describe("snapshot recovery for tool records", () => {
+  const tool = (id: string, startedAt: string) => ({ id, startedAt });
+
+  it("finds durable tool calls omitted by a later snapshot", () => {
+    const current = [tool("call-a", "2026-10-03T09:00:00.000Z")];
+    const expected = [
+      ...current,
+      tool("call-b", "2026-10-03T09:01:00.000Z")
+    ];
+
+    expect(collectMissingSnapshotRecords(current, expected).map((call) => call.id)).toEqual(["call-b"]);
+  });
+
+  it("does not report tool calls already present", () => {
+    const calls = [tool("call-a", "2026-10-03T09:00:00.000Z")];
+    expect(collectMissingSnapshotRecords(calls, calls)).toEqual([]);
+  });
+
+  it("keeps known calls when an incoming full snapshot is temporarily short", () => {
+    const known = [
+      tool("call-a", "2026-10-03T09:00:00.000Z"),
+      tool("call-b", "2026-10-03T09:01:00.000Z"),
+      tool("call-c", "2026-10-03T09:02:00.000Z")
+    ];
+    const temporarilyShortFullSnapshot = [
+      { ...known[2]!, status: "completed" }
+    ];
+
+    expect(mergeSnapshotRecords(known, temporarilyShortFullSnapshot, (call) => call.startedAt))
+      .toEqual([
+        known[0],
+        known[1],
+        { ...known[2], status: "completed" }
+      ]);
   });
 });
 

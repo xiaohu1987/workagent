@@ -74,6 +74,7 @@ import {
   waitForPendingThreadSettingWrites
 } from "./core/thread-ui-state";
 import { useMotionPresence } from "./core/motion-presence";
+import { reportToolTimelineDiagnostic } from "./lib/tool-timeline-diagnostics";
 import {
   PROVIDER_TYPE_OPTIONS,
   buildConfigToSave,
@@ -141,6 +142,7 @@ import {
   isPersistentComposerContextKind,
   isSubagentWaitTool,
   mergeMessagesAfterOptimisticUserEdit,
+  collectMissingSnapshotRecords,
   mergeRecoveredSnapshotMessages,
   mergeServerMessagesWithNewerLocal,
   mergeSnapshotRecords,
@@ -368,7 +370,6 @@ import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEf
 import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, SubagentSwitchRow, buildSubagentPresentations, resolveSelectedSubagentId } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
-import { isLastToolGroupInTimeline, resolveDeferredToolGroup } from "./timeline/deferred-tool-group";
 import { TimelineEntries } from "./timeline/timeline-entries";
 import { ApprovalCard, AssistantDraftMessage, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
@@ -945,6 +946,7 @@ export function App() {
   const transcriptDiagnosticInputsRef = useRef<TranscriptDiagnosticInputs | null>(null);
   const latestRuntimeThreadsRef = useRef<Record<string, ThreadRecord>>({});
   const persistedRuntimeMessagesRef = useRef<Record<string, Map<string, MessageRecord>>>({});
+  const lastToolTimelineMismatchRef = useRef("");
   /**
    * Additive consumer of the item channel. Legacy events still drive every UI
    * branch; this stream only upgrades the tool rows with the facts carried by
@@ -2533,6 +2535,15 @@ export function App() {
         if (suppressRuntimeProgressRef.current[typed.threadId]) {
           return;
         }
+        reportToolTimelineDiagnostic({
+          stage: "runtime-event",
+          type: typed.type,
+          threadId: typed.threadId,
+          toolCallId: typed.payload.toolCallId,
+          toolName: typed.payload.toolName,
+          turnRunId: typed.payload.turnRunId ?? null,
+          createdAt: typed.createdAt ?? null
+        });
         const startedToolForActivity: ToolCallSummary = {
           id: typed.payload.toolCallId,
           threadId: typed.threadId,
@@ -2595,6 +2606,14 @@ export function App() {
       }
       if (typed.type === "tool.completed" && typed.payload?.toolCallId) {
         const runtimeThreadId = typed.threadId;
+        reportToolTimelineDiagnostic({
+          stage: "runtime-event",
+          type: typed.type,
+          threadId: runtimeThreadId ?? null,
+          toolCallId: typed.payload.toolCallId,
+          status: typed.payload.status ?? null,
+          createdAt: typed.createdAt ?? null
+        });
         const completedAt = typeof typed.payload.completedAt === "string"
           ? typed.payload.completedAt
           : typed.createdAt ?? new Date().toISOString();
@@ -3824,6 +3843,30 @@ export function App() {
       visibleMessages
     ]
   );
+  useEffect(() => {
+    if (snapshot?.thread.id !== selectedThreadId) return;
+    const toolCalls = snapshot.toolCalls ?? [];
+    const timelineToolCallIds = new Set(timelineEntries.flatMap((entry) => entry.kind === "tool-group"
+      ? entry.toolCalls.map((toolCall) => toolCall.id)
+      : []));
+    const missingIds = toolCalls.filter((toolCall) => !timelineToolCallIds.has(toolCall.id)).map((toolCall) => toolCall.id);
+    if (missingIds.length === 0) {
+      lastToolTimelineMismatchRef.current = "";
+      return;
+    }
+    const signature = `${selectedThreadId}:${missingIds.join(",")}`;
+    if (lastToolTimelineMismatchRef.current === signature) return;
+    lastToolTimelineMismatchRef.current = signature;
+    reportToolTimelineDiagnostic({
+      stage: "snapshot-to-timeline-mismatch",
+      threadId: selectedThreadId,
+      snapshotToolCallCount: toolCalls.length,
+      timelineToolCallCount: timelineToolCallIds.size,
+      missingToolCallIds: missingIds,
+      messageCount: snapshot.messages.length,
+      timelineEntryCount: timelineEntries.length
+    });
+  }, [selectedThreadId, snapshot, timelineEntries]);
   const conversationTurnSections = useMemo(
     () => buildConversationTurnSections(timelineEntries),
     [timelineEntries]
@@ -4064,41 +4107,6 @@ export function App() {
     )?.toolCall ?? null,
     [activeRuntimeActivity?.entries]
   );
-  const deferredRuntimeToolGroup = useMemo(() => {
-    if (!isTaskProcessing || !latestRootRuntimeTool) {
-      return null;
-    }
-    const group = timelineEntries.find(
-      (entry): entry is Extract<TimelineEntry, { kind: "tool-group" }> =>
-        entry.kind === "tool-group" && entry.toolCalls.some((toolCall) => toolCall.id === latestRootRuntimeTool.id)
-    );
-    if (!group) return null;
-
-    // The live panel is fed by the runtime activity stream, which can lag the transcript: the
-    // "latest root tool" may still belong to an earlier batch after a newer one has rendered.
-    // Handing that earlier batch over hid records in the middle of the chat, so only the tail
-    // batch is eligible for the hand-over.
-    const groupIsTail = isLastToolGroupInTimeline(
-      timelineEntries as ReadonlyArray<{ kind: string; toolCalls?: readonly { id: string }[] | null }>,
-      group.toolCalls.map((toolCall) => toolCall.id)
-    );
-    if (!groupIsTail) return null;
-
-    // Timestamps that cannot be parsed used to make this comparison `false` forever, which kept
-    // the whole group hidden for the rest of the turn. Dropping them leaves the decision to the
-    // batch rule below instead of silently suppressing finished records.
-    const groupCompletedAt = Math.max(
-      ...group.toolCalls
-        .map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt))
-        .filter((timestamp) => Number.isFinite(timestamp))
-    );
-    const hasReplacementReply = Number.isFinite(groupCompletedAt) && visibleMessages.some((message) =>
-      message.role === "assistant" &&
-      !isInternalAgentProtocolMessage(message.content) &&
-      Date.parse(message.createdAt) > groupCompletedAt
-    );
-    return resolveDeferredToolGroup(group.toolCalls, hasReplacementReply);
-  }, [isTaskProcessing, latestRootRuntimeTool, timelineEntries, visibleMessages]);
   const shouldRenderRuntimeTailPanel = Boolean(
     showRuntimeActivityPanel &&
     !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id))
@@ -5015,7 +5023,10 @@ export function App() {
       } else {
         delete pendingUserMessagesRef.current[threadId];
       };
-      const toolCalls = next.snapshotMode === "delta" && base
+      // Tool calls are durable append-only transcript records. Keep locally known
+      // calls across both delta and full reads: a partial/stale full response must
+      // not make completed tools disappear until the next reload.
+      const toolCalls = base
         ? mergeSnapshotRecords(base.toolCalls, next.toolCalls, (toolCall) => toolCall.startedAt)
         : next.toolCalls;
       const artifacts = next.snapshotMode === "delta" && base
@@ -5041,6 +5052,11 @@ export function App() {
         approvals: base ? reuseEquivalentRecordArray(base.approvals, next.approvals) : next.approvals,
         prompts: base ? reuseEquivalentRecordArray(base.prompts, next.prompts) : next.prompts
       });
+      const baseToolCallIds = new Set((base?.toolCalls ?? []).map((toolCall) => toolCall.id));
+      const hasNewToolCalls = mergedSnapshot.toolCalls.some((toolCall) => !baseToolCallIds.has(toolCall.id));
+      const fullSnapshotMissingToolCallIds = next.snapshotMode === "full" && base
+        ? collectMissingSnapshotRecords(next.toolCalls, base.toolCalls).map((toolCall) => toolCall.id)
+        : [];
       // Compare against what the transcript actually painted rather than against
       // the live state. The final answer can already sit in `snapshot` while the
       // commit that carried it never reached the screen (it was a low-priority
@@ -5109,6 +5125,7 @@ export function App() {
           {
             hasPendingOptimisticMessages: (pendingUserMessagesRef.current[threadId] ?? remaining).length > 0,
             hasNewMessages,
+            hasNewToolCalls,
             reachedTerminalState
           }
         )) {
@@ -5132,18 +5149,21 @@ export function App() {
           startTransition(commitSelectedSnapshot);
           window.setTimeout(() => {
             if (selectedThreadIdRef.current !== threadId) return;
-            const expected = snapshotCacheByThreadRef.current.get(threadId)?.messages
-              ?? mergedSnapshot.messages;
+            const expected = snapshotCacheByThreadRef.current.get(threadId) ?? mergedSnapshot;
             flushSync(() => {
               setSnapshot((current) => {
                 if (!current || current.thread.id !== threadId) return current;
-                const missing = collectMissingSnapshotMessages(current.messages, expected);
-                if (missing.length === 0) return current;
-                const messages = mergeRecoveredSnapshotMessages(current.messages, missing);
-                if (messages === current.messages) return current;
+                const missingMessages = collectMissingSnapshotMessages(current.messages, expected.messages);
+                const messages = mergeRecoveredSnapshotMessages(current.messages, missingMessages);
+                const missingToolCalls = collectMissingSnapshotRecords(current.toolCalls, expected.toolCalls);
+                const toolCalls = missingToolCalls.length > 0
+                  ? mergeSnapshotRecords(current.toolCalls, missingToolCalls, (toolCall) => toolCall.startedAt)
+                  : current.toolCalls;
+                if (messages === current.messages && toolCalls === current.toolCalls) return current;
                 return {
                   ...current,
                   messages,
+                  toolCalls,
                   messageCount: Math.max(current.messageCount, messages.length)
                 };
               });
@@ -5159,6 +5179,12 @@ export function App() {
         localCount: localMessages.length,
         finalCount: mergedSnapshot.messages.length,
         hasNewMessages,
+        baseToolCallCount: base?.toolCalls.length ?? 0,
+        serverToolCallCount: next.toolCalls.length,
+        finalToolCallCount: mergedSnapshot.toolCalls.length,
+        hasNewToolCalls,
+        fullSnapshotMissingToolCallCount: fullSnapshotMissingToolCallIds.length,
+        fullSnapshotMissingToolCallIds: fullSnapshotMissingToolCallIds.slice(0, 20),
         reachedTerminalState
       });
       setThreads((current) => current.map((thread) =>
@@ -7836,12 +7862,12 @@ export function App() {
             ) : (
               <div key={activeSnapshotThreadId ?? selectedThreadId ?? "empty-thread"} ref={chatTranscriptRef} className="chat-transcript task-timeline motion-thread-content">
                 <TimelineEntries
+                  threadId={activeSnapshotThreadId ?? selectedThreadId}
                   entries={timelineEntries}
                   turnByEntryId={timelineTurnByEntryId}
                   latestTurnId={latestConversationTurn?.id ?? null}
                   taskProcessing={isTaskProcessing}
                   collapsedTurnIds={collapsedTurnIds}
-                  deferredRuntimeToolGroup={deferredRuntimeToolGroup}
                   skillNames={skillNames}
                   assistantLabel={activeAssistantLabel}
                   userMessageActions={transcriptUserMessageActions}

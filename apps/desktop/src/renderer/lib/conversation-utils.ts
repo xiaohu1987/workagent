@@ -2029,11 +2029,19 @@ export function collectMissingSnapshotMessages<T extends { id: string }>(
   currentMessages: ReadonlyArray<T>,
   expectedMessages: ReadonlyArray<T>
 ): T[] {
-  if (expectedMessages.length === 0) {
+  return collectMissingSnapshotRecords(currentMessages, expectedMessages);
+}
+
+/** Returns expected durable records that disappeared from the live snapshot. */
+export function collectMissingSnapshotRecords<T extends { id: string }>(
+  currentRecords: ReadonlyArray<T>,
+  expectedRecords: ReadonlyArray<T>
+): T[] {
+  if (expectedRecords.length === 0) {
     return [];
   }
-  const present = new Set(currentMessages.map((message) => message.id));
-  return expectedMessages.filter((message) => !present.has(message.id));
+  const present = new Set(currentRecords.map((record) => record.id));
+  return expectedRecords.filter((record) => !present.has(record.id));
 }
 
 /**

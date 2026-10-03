@@ -216,6 +216,15 @@ describe("thread UI state helpers", () => {
     })).toBe(false);
   });
 
+  it("commits newly discovered tool calls without an interruptible transition", () => {
+    expect(shouldCommitThreadSnapshotImmediately("thread-2", "thread-2", "thread-2", {
+      hasNewToolCalls: true
+    })).toBe(true);
+    expect(shouldCommitThreadSnapshotImmediately("thread-3", "thread-3", "thread-2", {
+      hasNewToolCalls: true
+    })).toBe(false);
+  });
+
   it("commits formal runtime replies immediately but leaves progress updates batched", () => {
     const message: MessageRecord = {
       id: "final-message",

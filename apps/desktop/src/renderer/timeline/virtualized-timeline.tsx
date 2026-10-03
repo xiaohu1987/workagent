@@ -20,6 +20,7 @@ type VirtualizedTimelineProps<T> = {
    * the parent's own follow write, and the two writes land as the jerk this prop removes.
    */
   requestFollowLatest?: () => void;
+  onRenderedItemsChange?: (range: { start: number; end: number; total: number }, items: readonly T[]) => void;
   estimatedRowHeight?: number;
   overscanPx?: number;
   threshold?: number;
@@ -166,6 +167,7 @@ export function VirtualizedTimeline<T>({
   scrollInteractionActive = false,
   followLatest = false,
   requestFollowLatest,
+  onRenderedItemsChange,
   estimatedRowHeight = DEFAULT_ESTIMATED_ROW_HEIGHT,
   overscanPx = DEFAULT_OVERSCAN_PX,
   threshold = DEFAULT_VIRTUALIZATION_THRESHOLD
@@ -388,13 +390,20 @@ export function VirtualizedTimeline<T>({
     }
   }, [estimatedRowHeight, requestFollowLatest, scrollElementRef, scrollInteractionActive]);
 
+  const followTail = shouldVirtualizedTimelineFollowTail(followLatest, scrollElementRef.current);
+  const visibleRange = virtualized
+    ? resolveVirtualizedRenderRange(range, items.length, followTail)
+    : { start: 0, end: items.length };
+  const visibleItems = items.slice(visibleRange.start, visibleRange.end);
+
+  useEffect(() => {
+    onRenderedItemsChange?.({ ...visibleRange, total: items.length }, visibleItems);
+  }, [items.length, onRenderedItemsChange, visibleItems, visibleRange.end, visibleRange.start]);
+
   if (!virtualized) {
     return <>{items.map((item, index) => renderItem(item, index))}</>;
   }
 
-  const followTail = shouldVirtualizedTimelineFollowTail(followLatest, scrollElementRef.current);
-  const visibleRange = resolveVirtualizedRenderRange(range, items.length, followTail);
-  const visibleItems = items.slice(visibleRange.start, visibleRange.end);
   return (
     <div ref={containerRef} className="virtual-timeline" style={{ height: `${layout.totalSize}px` }}>
       {getAnchorId ? items.map((item, index) => {
