@@ -3668,7 +3668,9 @@ export class DesktopBackend {
     const scaleFactor = Number.isFinite(targetDisplay.scaleFactor) ? Math.max(1, targetDisplay.scaleFactor) : 1;
     const requestedWidth = Math.max(1, Math.round(targetDisplay.size.width * scaleFactor));
     const requestedHeight = Math.max(1, Math.round(targetDisplay.size.height * scaleFactor));
-    const captureScale = Math.min(1, 8192 / Math.max(requestedWidth, requestedHeight));
+    // Keep the native desktop pixels for high-DPI displays. The previous 8192px
+    // ceiling downscaled 5K/8K captures before they reached the PNG encoder.
+    const captureScale = Math.min(1, 16_384 / Math.max(requestedWidth, requestedHeight));
     const sources = await desktopCapturer.getSources({
       types: ["screen"],
       thumbnailSize: {

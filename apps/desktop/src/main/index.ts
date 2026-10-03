@@ -62,7 +62,14 @@ const deliveredSystemNotificationKeys = new Set<string>();
 let registeredScreenshotShortcut: string | null = null;
 let screenshotShortcutRecording = false;
 let screenshotSelectionWindow: BrowserWindow | null = null;
-let pendingScreenshotSelection: { png: Buffer; displayId: string; displayBounds: { width: number; height: number } } | null = null;
+let pendingScreenshotSelection: {
+  png: Buffer;
+  displayId: string;
+  displayBounds: { width: number; height: number };
+  sourceSize: { width: number; height: number };
+  requestedSize: { width: number; height: number };
+  scaleFactor: number;
+} | null = null;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const sessionDataDir = path.join(app.getPath("userData"), "session-data");
@@ -155,26 +162,15 @@ async function captureShortcutScreenshot(): Promise<void> {
   const displays = screen.getAllDisplays();
   if (displays.length === 0) throw new Error("没有可用的显示器，无法截图。");
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-  const scaleFactor = Number.isFinite(display.scaleFactor) ? Math.max(1, display.scaleFactor) : 1;
-  const width = Math.max(1, Math.round(display.size.width * scaleFactor));
-  const height = Math.max(1, Math.round(display.size.height * scaleFactor));
-  const downscale = Math.min(1, 8192 / Math.max(width, height));
-  const sources = await desktopCapturer.getSources({
-    types: ["screen"],
-    thumbnailSize: { width: Math.max(1, Math.round(width * downscale)), height: Math.max(1, Math.round(height * downscale)) },
-    fetchWindowIcons: false
-  });
-  const source = sources.find((candidate) => candidate.display_id === String(display.id))
-    ?? sources[Math.max(0, displays.findIndex((item) => item.id === display.id))]
-    ?? sources[0];
-  if (!source || source.thumbnail.isEmpty()) {
-    throw new Error("截图没有获得图像，请检查系统的屏幕录制权限。");
-  }
-  const png = source.thumbnail.toPNG();
+  const capture = await captureDisplayThumbnail(display, displays);
+  const png = capture.png;
   pendingScreenshotSelection = {
     png,
     displayId: String(display.id),
-    displayBounds: { width: display.bounds.width, height: display.bounds.height }
+    displayBounds: { width: display.bounds.width, height: display.bounds.height },
+    sourceSize: capture.sourceSize,
+    requestedSize: capture.requestedSize,
+    scaleFactor: capture.scaleFactor
   };
   const overlay = new BrowserWindow({
     x: display.bounds.x,
@@ -228,7 +224,59 @@ async function captureShortcutScreenshot(): Promise<void> {
     if (!overlay.isDestroyed()) overlay.destroy();
     throw error;
   }
-  void backend.appendRuntimeLog("screenshot_shortcut.selection_started", { displayId: String(display.id) });
+  void backend.appendRuntimeLog("screenshot_shortcut.selection_started", {
+    displayId: String(display.id),
+    scaleFactor: capture.scaleFactor,
+    requestedWidth: capture.requestedSize.width,
+    requestedHeight: capture.requestedSize.height,
+    sourceWidth: capture.sourceSize.width,
+    sourceHeight: capture.sourceSize.height,
+    captureAttempt: capture.attempt
+  });
+}
+
+const SCREENSHOT_MAX_CAPTURE_SIDE = 16_384;
+
+async function captureDisplayThumbnail(display: Electron.Display, displays: Electron.Display[]): Promise<{
+  png: Buffer;
+  sourceSize: { width: number; height: number };
+  requestedSize: { width: number; height: number };
+  scaleFactor: number;
+  attempt: number;
+}> {
+  const scaleFactor = Number.isFinite(display.scaleFactor) ? Math.max(1, display.scaleFactor) : 1;
+  const requestedSize = {
+    width: Math.max(1, Math.round(display.bounds.width * scaleFactor)),
+    height: Math.max(1, Math.round(display.bounds.height * scaleFactor))
+  };
+  const displayIndex = Math.max(0, displays.findIndex((item) => item.id === display.id));
+  let best: { png: Buffer; sourceSize: { width: number; height: number }; attempt: number } | null = null;
+  // Electron may return a lower-resolution thumbnail than requested on Windows.
+  // Retry once with a larger request instead of permanently upscaling a soft
+  // thumbnail when the first compositor request is undersized.
+  for (const [index, multiplier] of [1, 2].entries()) {
+    const limitScale = Math.min(1, SCREENSHOT_MAX_CAPTURE_SIDE / Math.max(requestedSize.width * multiplier, requestedSize.height * multiplier));
+    const thumbnailSize = {
+      width: Math.max(1, Math.round(requestedSize.width * multiplier * limitScale)),
+      height: Math.max(1, Math.round(requestedSize.height * multiplier * limitScale))
+    };
+    const sources = await desktopCapturer.getSources({
+      types: ["screen"],
+      thumbnailSize,
+      fetchWindowIcons: false
+    });
+    const source = sources.find((candidate) => candidate.display_id === String(display.id))
+      ?? sources[displayIndex]
+      ?? sources[0];
+    if (!source || source.thumbnail.isEmpty()) continue;
+    const sourceSize = source.thumbnail.getSize();
+    const candidate = { png: source.thumbnail.toPNG(), sourceSize, attempt: index + 1 };
+    if (!best || sourceSize.width * sourceSize.height > best.sourceSize.width * best.sourceSize.height) best = candidate;
+    const meetsRequestedResolution = sourceSize.width >= requestedSize.width * 0.95 && sourceSize.height >= requestedSize.height * 0.95;
+    if (meetsRequestedResolution) return { ...candidate, requestedSize, scaleFactor };
+  }
+  if (!best) throw new Error("截图没有获得图像，请检查系统的屏幕录制权限。");
+  return { ...best, requestedSize, scaleFactor };
 }
 
 async function finishScreenshotSelection(input: {
@@ -253,7 +301,16 @@ async function finishScreenshotSelection(input: {
 
   if (input.action === "copy") {
     clipboard.writeImage(nativeImage.createFromBuffer(png));
-    void backend.appendRuntimeLog("screenshot_shortcut.copied", { displayId: pending.displayId, width, height });
+    void backend.appendRuntimeLog("screenshot_shortcut.copied", {
+      displayId: pending.displayId,
+      width,
+      height,
+      sourceWidth: pending.sourceSize.width,
+      sourceHeight: pending.sourceSize.height,
+      requestedWidth: pending.requestedSize.width,
+      requestedHeight: pending.requestedSize.height,
+      scaleFactor: pending.scaleFactor
+    });
     return;
   }
   if (input.action === "save") {
@@ -263,7 +320,17 @@ async function finishScreenshotSelection(input: {
     });
     if (result.canceled || !result.filePath) return;
     await fsp.writeFile(result.filePath, png);
-    void backend.appendRuntimeLog("screenshot_shortcut.saved", { displayId: pending.displayId, filePath: result.filePath, width, height });
+    void backend.appendRuntimeLog("screenshot_shortcut.saved", {
+      displayId: pending.displayId,
+      filePath: result.filePath,
+      width,
+      height,
+      sourceWidth: pending.sourceSize.width,
+      sourceHeight: pending.sourceSize.height,
+      requestedWidth: pending.requestedSize.width,
+      requestedHeight: pending.requestedSize.height,
+      scaleFactor: pending.scaleFactor
+    });
     return;
   }
 
@@ -271,7 +338,17 @@ async function finishScreenshotSelection(input: {
   await fsp.mkdir(screenshotDir, { recursive: true });
   const filePath = path.join(screenshotDir, `screenshot-${Date.now()}.png`);
   await fsp.writeFile(filePath, png);
-  void backend.appendRuntimeLog("screenshot_shortcut.captured", { displayId: pending.displayId, filePath, width, height });
+  void backend.appendRuntimeLog("screenshot_shortcut.captured", {
+    displayId: pending.displayId,
+    filePath,
+    width,
+    height,
+    sourceWidth: pending.sourceSize.width,
+    sourceHeight: pending.sourceSize.height,
+    requestedWidth: pending.requestedSize.width,
+    requestedHeight: pending.requestedSize.height,
+    scaleFactor: pending.scaleFactor
+  });
   showMainWindow();
   mainWindow?.webContents.send("screenshot-shortcut:captured", { filePath, fileName: path.basename(filePath) });
 }
