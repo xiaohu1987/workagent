@@ -2358,7 +2358,7 @@ class ThreadSessionRuntime {
     const modeHiddenToolNames = visibleToolSet.tools
       .filter((tool) => !visibleModeToolNames.has(tool.name))
       .map((tool) => tool.name);
-    const selectedMcpToolsOnly = selectedMcpServerIds.length > 0
+    let selectedMcpToolsOnly = selectedMcpServerIds.length > 0
       ? tools.filter((tool) =>
           tool.name === "mcp.list_tools" ||
           tool.name === "mcp.call" ||
@@ -2572,6 +2572,27 @@ class ThreadSessionRuntime {
         (webFrontendGuard ||
           isWebFrontendTaskText(history.map((message) => message.content).join("\n")) ||
           isWebFrontendTaskText(this.#gpa.planTasks.map((task) => task.title).join("\n")));
+
+      // Keep visible browser automation opt-in. Web search/page extraction remains
+      // available for research, while browser controls are only exposed for an
+      // explicit browser request or a genuine frontend implementation task.
+      const activePlanContext = this.#gpa.stage === "act"
+        ? this.#gpa.planTasks.filter((task) => !task.done).map((task) => task.title).join("\n")
+        : "";
+      const conversationBrowserToolsAllowed = shouldExposeVisibleBrowserTools(initialInput, activePlanContext);
+      const activeTurnTools = conversationBrowserToolsAllowed
+        ? tools
+        : tools.filter((tool) => !tool.name.startsWith("browser."));
+      selectedMcpToolsOnly = selectedMcpServerIds.length > 0
+        ? activeTurnTools.filter((tool) =>
+            tool.name === "mcp.list_tools" ||
+            tool.name === "mcp.call" ||
+            tool.name === AGENT_PROTOCOL_RECOVERY_TOOL_NAME ||
+            (allowedReadPaths.length > 0 && isAttachedLocalReadTool(tool.name))
+          )
+        : this.services.config.selfImprovement.dedicatedTools
+          ? activeTurnTools
+          : activeTurnTools.filter((tool) => !tool.name.startsWith("memories."));
 
       let turnTokenUsage = createEmptyTokenUsage();
       let activeDraftId: string | null = null;
@@ -12130,15 +12151,33 @@ export function formatAvailableTools(
         ? "The following tools are available in this turn. They are real executable tools, not examples. Command execution is available through the listed shell tool."
         : "The following tools are available in this turn. They are real executable tools, not examples. Use only the tools listed below."
       : "No executable tools are available in this turn.",
+    ...(hasVisibleBrowserOpener
+      ? ["Visible browser tools are opt-in: use browser.* only when the user explicitly asks to open, show, or operate a website in the visible browser, or when implementing/testing a web frontend and visual browser verification is genuinely needed. Never use them for unrelated questions, local code analysis, or ordinary web research/page reading. For research, use web_search tools that read pages in the background."]
+      : []),
     ...(shellAvailable ? ["For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete."] : []),
     ...(shellAvailable && process.platform === "win32"
       ? ["This desktop executes shell.exec in Windows PowerShell. Use PowerShell syntax; recognizable CMD commands are adapted automatically. Do not use Bash syntax such as `||`, and never edit files through shell.exec: use apply_patch."]
       : []),
     ...(hasBackgroundPageReader && hasVisibleBrowserOpener
-      ? ["web_search.open_page only reads page text in the background and never appears in the right-side Browser workspace. When the user asks to open, show, watch, or interact with a website, use browser.open_tab instead."]
+      ? ["web_search.open_page only reads page text in the background and never appears in the right-side Browser workspace. Use it for web research and reading; use browser.open_tab only for the explicit visible-browser cases described above."]
       : []),
     ...definitions
   ].join("\n");
+}
+
+export function shouldExposeVisibleBrowserTools(userContext: string, planContext = ""): boolean {
+  const context = `${userContext}\n${planContext}`;
+  if (/(?:不要|别|无需|不需要|禁止).{0,16}(?:浏览器|网页|网站)|\b(?:don't|do not|never|without)\b.{0,24}\b(?:browser|website|web page)\b/i.test(userContext)) {
+    return false;
+  }
+
+  const explicitVisibleBrowserRequest =
+    /(?:用|通过|打开|访问|进入|登录|操作|控制|点击|填写|浏览|导航到|跳转到|截图|截屏|展示|显示).{0,20}(?:浏览器|网页|网站|页面|网址|链接)|(?:浏览器|网页|网站|页面|网址|链接).{0,20}(?:打开|访问|进入|登录|操作|点击|填写|截图|截屏|展示|测试|预览)|\b(?:open|visit|navigate to|interact with|use|launch|show|display|log into|click|fill|screenshot|preview|render|test)\b.{0,35}\b(?:browser|web page|website|page|url|link)\b/i.test(userContext);
+  const frontendImplementationOrVerification =
+    (isWebFrontendTaskText(userContext) || isWebFrontendTaskText(planContext) || /\b(?:react|vue|svelte|angular)\b|前端|网页应用|网站开发/i.test(context)) &&
+    /(?:创建|开发|制作|实现|修改|修复|调试|预览|测试|验证|重构|美化|优化|build|create|implement|modify|fix|debug|preview|test|verify|refactor|develop|design)/i.test(context);
+
+  return explicitVisibleBrowserRequest || frontendImplementationOrVerification;
 }
 
 function buildGpaPlanRevisionInstruction(): string {

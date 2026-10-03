@@ -885,8 +885,8 @@ export function App() {
     getStoredPanelWidth("codexh.right-workspace-width", 410, MIN_RIGHT_WORKSPACE_WIDTH, MAX_RIGHT_WORKSPACE_WIDTH)
   );
   const [resizingPane, setResizingPane] = useState<ResizePane | null>(null);
-  const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("files");
-  const [rightWorkspaceExpandedTab, setRightWorkspaceExpandedTab] = useState<RightWorkspaceTab | null>("files");
+  const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("thinking");
+  const [rightWorkspaceExpandedTab, setRightWorkspaceExpandedTab] = useState<RightWorkspaceTab | null>("thinking");
   const [activeFilesRoot, setActiveFilesRoot] = useState("");
   const [activeGitRoot, setActiveGitRoot] = useState("");
   const [activeTerminalRoot, setActiveTerminalRoot] = useState("");

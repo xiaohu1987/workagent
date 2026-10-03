@@ -247,7 +247,7 @@ export function isProjectWorkspaceThread(mode: string | null | undefined): boole
 }
 
 export function getDefaultRightWorkspaceTab(mode: string | null | undefined): RightWorkspaceTab {
-  return isProjectWorkspaceThread(mode) ? "files" : "browser";
+  return isProjectWorkspaceThread(mode) ? "files" : "thinking";
 }
 
 export function resolveRightWorkspaceTabForMode(
@@ -257,7 +257,7 @@ export function resolveRightWorkspaceTabForMode(
   if (isProjectWorkspaceThread(mode)) {
     return tab;
   }
-  return tab === "files" || tab === "changes" ? "browser" : tab;
+  return tab === "files" || tab === "changes" ? "thinking" : tab;
 }
 
 export function shouldLoadProjectWorkspaceResource(

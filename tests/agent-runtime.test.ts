@@ -240,6 +240,7 @@ import {
   getToolCallTaskKey,
   retargetStaleBrowserObservationToolCall,
   formatAvailableTools,
+  shouldExposeVisibleBrowserTools,
   extractSelectedMcpServerIds,
   resolveFollowUpSourceContext,
   buildFollowUpSourcePrompt,
@@ -3400,6 +3401,16 @@ describe("native tool prompt budget", () => {
 
     expect(formatAvailableTools(browserTools, { includeSchemas: false }))
       .toContain("never appears in the right-side Browser workspace");
+    expect(formatAvailableTools(browserTools, { includeSchemas: false }))
+      .toContain("Visible browser tools are opt-in");
+  });
+
+  it("exposes visible browser automation only for explicit browser or frontend work", () => {
+    expect(shouldExposeVisibleBrowserTools("帮我打开这个网页并登录")).toBe(true);
+    expect(shouldExposeVisibleBrowserTools("Build and test this React frontend")).toBe(true);
+    expect(shouldExposeVisibleBrowserTools("解释一下这个算法的时间复杂度")).toBe(false);
+    expect(shouldExposeVisibleBrowserTools("搜索网页了解一下缓存命中率")).toBe(false);
+    expect(shouldExposeVisibleBrowserTools("不要用浏览器，直接解释代码")).toBe(false);
   });
 });
 

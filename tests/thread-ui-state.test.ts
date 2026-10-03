@@ -396,10 +396,10 @@ describe("thread UI state helpers", () => {
   it("keeps folder and git workspace resources off for ordinary chats", () => {
     expect(isProjectWorkspaceThread("chat")).toBe(false);
     expect(isProjectWorkspaceThread("project")).toBe(true);
-    expect(getDefaultRightWorkspaceTab("chat")).toBe("browser");
+    expect(getDefaultRightWorkspaceTab("chat")).toBe("thinking");
     expect(getDefaultRightWorkspaceTab("project")).toBe("files");
-    expect(resolveRightWorkspaceTabForMode("chat", "files")).toBe("browser");
-    expect(resolveRightWorkspaceTabForMode("chat", "changes")).toBe("browser");
+    expect(resolveRightWorkspaceTabForMode("chat", "files")).toBe("thinking");
+    expect(resolveRightWorkspaceTabForMode("chat", "changes")).toBe("thinking");
     expect(resolveRightWorkspaceTabForMode("chat", "browser")).toBe("browser");
     expect(resolveRightWorkspaceTabForMode("project", "files")).toBe("files");
     expect(shouldLoadProjectWorkspaceResource("chat", true, "files", "files")).toBe(false);
