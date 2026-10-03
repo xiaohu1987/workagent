@@ -213,7 +213,11 @@ export class TerminalRuntime {
       };
 
       const reportLocalUrl = (candidate?: string) => {
-        if (!candidate || localUrl) {
+        // Terminal output is untrusted evidence: unrelated commands can print
+        // stale localhost URLs (for example, a test or a copied log line).
+        // Only commands explicitly recognized as local server launches may
+        // advertise a URL to the app, which can then open it in the browser.
+        if (!isLocalServerCommand(effectiveCommand) || !candidate || localUrl) {
           return;
         }
         localUrl = candidate;

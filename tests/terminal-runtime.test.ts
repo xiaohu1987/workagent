@@ -61,6 +61,29 @@ describe("TerminalRuntime idle command observation", () => {
   });
 });
 
+describe("TerminalRuntime local URL reporting", () => {
+  it("does not report localhost URLs printed by unrelated commands", async () => {
+    const runtime = new TerminalRuntime();
+    const onLocalUrl = vi.fn();
+
+    try {
+      const result = await runtime.execute(
+        "unrelated-local-url-thread",
+        process.cwd(),
+        `node -e "console.log('http://127.0.0.1:8000/')"`,
+        () => undefined,
+        onLocalUrl
+      );
+
+      expect(result.output).toContain("http://127.0.0.1:8000/");
+      expect(result.localUrl).toBeUndefined();
+      expect(onLocalUrl).not.toHaveBeenCalled();
+    } finally {
+      await runtime.close("unrelated-local-url-thread");
+    }
+  });
+});
+
 describe("web frontend shell policy", () => {
   it("rewrites python http.server and blocks python scaffolding", async () => {
     const {
