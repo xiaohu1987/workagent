@@ -1144,6 +1144,8 @@ export interface AppConfig {
     sandboxMode: SandboxMode;
     /** When false, shell commands with outbound traits cannot auto-run. */
     sandboxNetworkAccess: boolean;
+    /** Electron global accelerator for capturing the desktop into the composer. Empty disables it. */
+    screenshotShortcut?: string;
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;

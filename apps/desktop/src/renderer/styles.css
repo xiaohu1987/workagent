@@ -17973,6 +17973,12 @@ body.panel-resizing {
   width: 76px;
   padding: 0 8px;
 }
+.screenshot-shortcut-controls { display: flex; flex: 1 1 260px; min-width: 0; gap: 8px; }
+.screenshot-shortcut-controls input { flex: 1 1 auto; min-width: 0; cursor: pointer; text-align: center; }
+.screenshot-shortcut-controls input.is-recording { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.screenshot-shortcut-controls button { flex: 0 0 auto; min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-secondary); background: var(--surface-soft); cursor: pointer; }
+.screenshot-shortcut-controls button:hover { color: var(--text); border-color: var(--border-strong); }
+.screenshot-shortcut-hint { color: var(--warning, #d97706); }
 .general-subagent-settings-grid .settings-field .composer-select { flex: 1 1 140px; min-width: 0; }
 .settings-field-hint {
   color: var(--text-faint);

@@ -362,6 +362,9 @@ MCP 工具按动态发现方式工作：模型先调用 `mcp.list_tools` 获取�
 | `agent.model_protocol_failure` | 模型未返回有效工具协议。 |
 | `model.agent_capability_downgraded` | 模型被自动降级为仅聊天。 |
 | `tool.execution_error` | 工具执行异常。 |
+| `agent.operation_slow` | 某个模型请求或工具阶段持续超过 10 秒；`phase` 标出等待首个模型响应，或工具执行、结果处理、持久化、事件发送阶段。 |
+| `agent.model_first_progress` / `agent.model_decision_completed` / `agent.model_decision_failed` | 模型首个可见进度耗时、完整决策耗时，以及请求成功/失败情况。 |
+| `agent.tool_timing` | 较慢（至少 2 秒）或结果较大（至少 64 KiB）的工具阶段耗时、结果大小和持久化耗时。 |
 | `turn.repeated_task_failure` | 同一工具任务连续失败达到阈值。 |
 | `agent.context_compacted` | 上下文接近上限，已执行压缩。 |
 

@@ -48,10 +48,13 @@ export default defineConfig({
       outDir: "dist/preload",
       rollupOptions: {
         external: ["electron"],
-        input: path.resolve(root, "apps/desktop/src/preload/index.ts"),
+        input: {
+          index: path.resolve(root, "apps/desktop/src/preload/index.ts"),
+          "screenshot-selection": path.resolve(root, "apps/desktop/src/preload/screenshot-selection.ts")
+        },
         output: {
           format: "cjs",
-          entryFileNames: "index.cjs"
+          entryFileNames: "[name].cjs"
         }
       }
     }

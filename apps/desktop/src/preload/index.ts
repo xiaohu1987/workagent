@@ -121,6 +121,18 @@ const api = {
     ipcRenderer.invoke("attachments:media-url", payload),
   previewLocalImage: (payload: { absolutePath: string }) =>
     ipcRenderer.invoke("attachments:preview-local", payload),
+  onShortcutScreenshot: (listener: (payload: { filePath: string; fileName: string }) => void) => {
+    const wrapped = (_event: unknown, payload: { filePath: string; fileName: string }) => listener(payload);
+    ipcRenderer.on("screenshot-shortcut:captured", wrapped);
+    return () => ipcRenderer.removeListener("screenshot-shortcut:captured", wrapped);
+  },
+  onShortcutScreenshotError: (listener: (message: string) => void) => {
+    const wrapped = (_event: unknown, message: string) => listener(message);
+    ipcRenderer.on("screenshot-shortcut:error", wrapped);
+    return () => ipcRenderer.removeListener("screenshot-shortcut:error", wrapped);
+  },
+  setScreenshotShortcutRecording: (recording: boolean) =>
+    ipcRenderer.invoke("screenshot-shortcut:recording", recording),
   rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) =>
     ipcRenderer.invoke("threads:reject-multimodal", payload),
   loadApiCardFavorites: () => ipcRenderer.invoke("api-card-favorites:load"),

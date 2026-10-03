@@ -331,7 +331,8 @@ export function defaultConfig(): AppConfig {
       autoTitleGeneration: true,
       completionAudit: normalizeCompletionAuditSettings(),
       sandboxMode: "read-only",
-      sandboxNetworkAccess: false
+      sandboxNetworkAccess: false,
+      screenshotShortcut: "CommandOrControl+Alt+S"
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -544,7 +545,10 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       autoTitleGeneration: parsed.desktop?.autoTitleGeneration ?? true,
       completionAudit: normalizeCompletionAuditSettings(parsed.desktop),
       sandboxMode: normalizeSandboxMode(parsed.desktop?.sandboxMode),
-      sandboxNetworkAccess: normalizeSandboxNetworkAccess(parsed.desktop?.sandboxNetworkAccess)
+      sandboxNetworkAccess: normalizeSandboxNetworkAccess(parsed.desktop?.sandboxNetworkAccess),
+      screenshotShortcut: typeof parsed.desktop?.screenshotShortcut === "string"
+        ? parsed.desktop.screenshotShortcut.trim().slice(0, 80)
+        : "CommandOrControl+Alt+S"
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),

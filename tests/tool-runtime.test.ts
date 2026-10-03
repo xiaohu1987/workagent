@@ -3,7 +3,10 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import os from "node:os";
 import {
+  boundCodeSearchOutput,
   buildCodeSearchCommand,
+  MAX_CODE_SEARCH_RESULT_BYTES,
+  MAX_CODE_SEARCH_LINE_CHARACTERS,
   MAX_CODE_SEARCH_RESULT_LINES,
   FS_READ_FILE_CHAR_PAGE,
   ToolRuntime,
@@ -439,6 +442,37 @@ describe("ToolRuntime", () => {
     expect(result.content.split("\n")).toHaveLength(MAX_CODE_SEARCH_RESULT_LINES + 1);
     expect(result.content).toContain("[search output truncated]");
     expect(result.content).not.toContain("result-699");
+  });
+
+  it("bounds long search lines and the total UTF-8 output size", () => {
+    const longLineOutput = boundCodeSearchOutput(`prefix${"界".repeat(2_000_000)}suffix`);
+    expect(Buffer.byteLength(longLineOutput, "utf8")).toBeLessThanOrEqual(MAX_CODE_SEARCH_RESULT_BYTES);
+    expect(longLineOutput).toContain("[line truncated]");
+    expect(longLineOutput).toContain("[search output truncated]");
+
+    const manyLargeLines = Array.from({ length: MAX_CODE_SEARCH_RESULT_LINES }, (_, index) =>
+      `${index}:${"界".repeat(MAX_CODE_SEARCH_LINE_CHARACTERS)}`
+    ).join("\n");
+    const bounded = boundCodeSearchOutput(manyLargeLines);
+    expect(Buffer.byteLength(bounded, "utf8")).toBeLessThanOrEqual(MAX_CODE_SEARCH_RESULT_BYTES);
+    expect(bounded).toContain("[search output truncated]");
+    expect(bounded.split("\n").some((line) => line.length > MAX_CODE_SEARCH_LINE_CHARACTERS)).toBe(false);
+  });
+
+  it("bounds large stdout included in a failed search before it is persisted", async () => {
+    const runtime = new ToolRuntime();
+    const result = await runtime.execute(
+      { id: "search-failed-large", name: "code.search", arguments: { pattern: "needle" } },
+      {
+        cwd: process.cwd(),
+        runTerminalCommand: vi.fn().mockRejectedValue(new Error("command returned non-zero\n" + "x".repeat(5_000_000)))
+      } as unknown as ToolRuntimeContext
+    );
+
+    expect(result.ok).toBe(false);
+    expect(Buffer.byteLength(result.content, "utf8")).toBeLessThanOrEqual(MAX_CODE_SEARCH_RESULT_BYTES + 64);
+    expect(result.content).toContain("[search output truncated]");
+    expect(Buffer.byteLength(String(result.json?.output), "utf8")).toBeLessThanOrEqual(MAX_CODE_SEARCH_RESULT_BYTES);
   });
 
   it("maps legacy read_file to the file reader", async () => {

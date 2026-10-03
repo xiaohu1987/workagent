@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import type { AppConfig, CompletionAuditMode } from "@shared-types";
 import { DEFAULT_COMPLETION_AUDIT_MAX_ATTEMPTS, MAX_COMPLETION_AUDIT_MAX_ATTEMPTS, MIN_COMPLETION_AUDIT_MAX_ATTEMPTS, defaultCompletionAuditSettings } from "@shared-types";
 import { ComposerSelect } from "../../../workspace/composer-select";
@@ -79,7 +79,33 @@ function CompletionAuditModeFields({
 }
 
 type Props = { config: AppConfig | null; configDraft: AppConfig | null; threadCount: number; skillCount: number; subagentDefaultModelValue: string; subagentDefaultModelOptions: Array<{ value: string; label: string }>; setConfigDraft: Dispatch<SetStateAction<AppConfig | null>>; onSave: (options?: { draft?: AppConfig; showSuccessNotice?: boolean }) => Promise<void> };
+
+function screenshotShortcutFromKeyEvent(event: KeyboardEvent<HTMLInputElement>): string | null {
+  const key = event.nativeEvent.key;
+  if (["Control", "Alt", "Shift", "Meta", "AltGraph"].includes(key)) return null;
+  const keyNames: Record<string, string> = {
+    " ": "Space", Escape: "Escape", Tab: "Tab", Backspace: "Backspace", Delete: "Delete", Insert: "Insert",
+    Enter: "Return", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+    PageUp: "PageUp", PageDown: "PageDown", Home: "Home", End: "End", "+": "Plus"
+  };
+  const normalizedKey = keyNames[key] ?? (key.length === 1 ? key.toUpperCase() : key);
+  if (!/^(?:[A-Z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Space|Escape|Tab|Backspace|Delete|Insert|Return|Up|Down|Left|Right|PageUp|PageDown|Home|End|Plus)$/.test(normalizedKey)) {
+    return null;
+  }
+  const modifiers = [
+    event.ctrlKey ? "CommandOrControl" : "",
+    event.altKey ? "Alt" : "",
+    event.shiftKey ? "Shift" : "",
+    event.metaKey ? "Super" : ""
+  ].filter(Boolean);
+  if (modifiers.length === 0) return null;
+  return [...modifiers, normalizedKey].join("+");
+}
+
 export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCount, subagentDefaultModelValue, subagentDefaultModelOptions, setConfigDraft, onSave }: Props) {
+  const [isRecordingScreenshotShortcut, setIsRecordingScreenshotShortcut] = useState(false);
+  const [screenshotShortcutHint, setScreenshotShortcutHint] = useState("");
+  useEffect(() => () => { void window.codexh.setScreenshotShortcutRecording(false); }, []);
   const updateAndSave = (update: (current: AppConfig) => AppConfig) => {
     if (!configDraft) return;
     const nextDraft = update(configDraft);
@@ -87,6 +113,40 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
     void onSave({ draft: nextDraft, showSuccessNotice: false }).catch((error) => {
       console.error("[renderer] Failed to auto-save runtime settings", error);
     });
+  };
+
+  const stopRecordingScreenshotShortcut = () => {
+    setIsRecordingScreenshotShortcut(false);
+    void window.codexh.setScreenshotShortcutRecording(false);
+  };
+
+  const captureScreenshotShortcut = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (!isRecordingScreenshotShortcut) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      setScreenshotShortcutHint("已取消录入");
+      stopRecordingScreenshotShortcut();
+      return;
+    }
+    const shortcut = screenshotShortcutFromKeyEvent(event);
+    if (!shortcut) {
+      if (!["Control", "Alt", "Shift", "Meta", "AltGraph"].includes(event.key)) {
+        setScreenshotShortcutHint("请使用 Ctrl、Alt、Shift 或 Win/Command 加一个按键");
+      }
+      return;
+    }
+    if (shortcut === "Escape") return;
+    const nextDraft = configDraft
+      ? { ...configDraft, desktop: { ...configDraft.desktop, screenshotShortcut: shortcut } }
+      : null;
+    if (!nextDraft) return;
+    setScreenshotShortcutHint("");
+    setConfigDraft(nextDraft);
+    setIsRecordingScreenshotShortcut(false);
+    void onSave({ draft: nextDraft, showSuccessNotice: false })
+      .catch((error) => console.error("[renderer] Failed to save screenshot shortcut", error))
+      .finally(() => { void window.codexh.setScreenshotShortcutRecording(false); });
   };
 
   return (
@@ -156,6 +216,40 @@ export function RuntimeOverviewPage({ config, configDraft, threadCount, skillCou
 
         {configDraft ? (
           <>
+          <div className="config-block general-subagent-settings">
+            <div className="section-copy">
+              <strong><IconChecklist />快捷键截图</strong>
+              <span>按下全局快捷键后截取鼠标所在显示器，并将图片放入当前输入框。</span>
+            </div>
+            <div className="general-subagent-settings-grid">
+              <div className="settings-field">
+                <span>截图快捷键</span>
+                <div className="screenshot-shortcut-controls">
+                  <input
+                    type="text"
+                    readOnly
+                    value={isRecordingScreenshotShortcut ? "请按下快捷键组合…（Esc 取消）" : configDraft.desktop.screenshotShortcut || "未设置"}
+                    aria-label="截图快捷键，点击后按键录入"
+                    onClick={() => {
+                      setScreenshotShortcutHint("");
+                      setIsRecordingScreenshotShortcut(true);
+                      void window.codexh.setScreenshotShortcutRecording(true);
+                    }}
+                    onKeyDown={captureScreenshotShortcut}
+                    onBlur={() => { if (isRecordingScreenshotShortcut) stopRecordingScreenshotShortcut(); }}
+                    className={isRecordingScreenshotShortcut ? "is-recording" : ""}
+                  />
+                  <button type="button" onClick={() => updateAndSave((current) => ({
+                    ...current,
+                    desktop: { ...current.desktop, screenshotShortcut: "" }
+                  }))}>清除</button>
+                </div>
+                <small className="settings-field-hint">点击录入框后按下快捷键组合；若组合已被其他程序占用，运行日志会记录注册失败。按 Esc 可取消。</small>
+                {screenshotShortcutHint ? <small className="settings-field-hint screenshot-shortcut-hint">{screenshotShortcutHint}</small> : null}
+              </div>
+            </div>
+            <div className="settings-save-row"><span className="subtle-inline">离开输入框后自动保存并立即生效。</span></div>
+          </div>
           <div className="config-block general-subagent-settings">
             <div className="section-copy">
               <strong><IconGlobe />浏览器</strong>

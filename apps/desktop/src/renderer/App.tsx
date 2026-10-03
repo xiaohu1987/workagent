@@ -1039,6 +1039,22 @@ export function App() {
   // 收藏/取消收藏时弹出全局提醒
   const { notice, isNoticeHovered, setIsNoticeHovered, exitingNoticeId, showNotice, dismissNotice } = useAppNotice();
   useEffect(() => {
+    const disposeCapture = window.codexh.onShortcutScreenshot(({ filePath, fileName }) => {
+      void window.codexh.previewLocalImage({ absolutePath: filePath })
+        .then((previewUrl) => addComposerAttachment({ kind: "image", path: filePath, label: fileName, previewUrl }))
+        .catch(() => addComposerAttachment({ kind: "image", path: filePath, label: fileName }));
+    });
+    const disposeError = window.codexh.onShortcutScreenshotError((message) => {
+      console.warn("[renderer] Screenshot shortcut failed", message);
+      showNotice("截图快捷键不可用", { tone: "warning", message });
+    });
+    return () => {
+      disposeCapture();
+      disposeError();
+    };
+  }, [showNotice]);
+
+  useEffect(() => {
     return subscribeApiCardFavoriteNotices((notice) => {
       if (notice.action === "added") {
         showNotice("已收藏接口卡片", { tone: "success", message: `「${notice.name}」已加入收藏,在输入框输入 / 可快速唤出。` });

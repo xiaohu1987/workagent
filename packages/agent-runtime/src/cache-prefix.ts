@@ -52,6 +52,24 @@ export function hashCachePrefixText(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
 
+/**
+ * Share cache affinity across conversations only when the provider/model match.
+ * GPT Responses requests with the same long-lived baseline prefix can then be
+ * routed to a warm cache even when a user starts a new thread. Other models
+ * retain thread affinity because compatible gateways vary in cache semantics.
+ */
+export function resolvePromptCacheAffinityKey(input: {
+  threadId: string;
+  providerId: string;
+  providerBaseUrl?: string;
+  modelId: string;
+  shareAcrossThreads: boolean;
+}): string {
+  if (!input.shareAcrossThreads) return input.threadId;
+  const scope = [input.providerId, input.providerBaseUrl ?? "", input.modelId].join("\n");
+  return `codexh-gpt-${hashCachePrefixText(scope)}`;
+}
+
 export function measureCachePrefix(layers: CachePrefixLayerInput[]): CachePrefixMeasurement {
   const measuredLayers = layers.map((layer) => {
     const fragments = layer.fragments.map((fragment) => ({

@@ -6120,7 +6120,10 @@ function normalizeAppConfig(config: AppConfig): AppConfig {
       autoTitleGeneration: config.desktop?.autoTitleGeneration !== false,
       completionAudit: normalizeCompletionAuditSettings(config.desktop),
       sandboxMode: normalizeSandboxMode(config.desktop?.sandboxMode ?? fallback.desktop.sandboxMode),
-      sandboxNetworkAccess: normalizeSandboxNetworkAccess(config.desktop?.sandboxNetworkAccess ?? fallback.desktop.sandboxNetworkAccess)
+      sandboxNetworkAccess: normalizeSandboxNetworkAccess(config.desktop?.sandboxNetworkAccess ?? fallback.desktop.sandboxNetworkAccess),
+      screenshotShortcut: typeof config.desktop?.screenshotShortcut === "string"
+        ? config.desktop.screenshotShortcut.trim().slice(0, 80)
+        : fallback.desktop.screenshotShortcut ?? "CommandOrControl+Alt+S"
     },
     projectExecutionPolicies: config.projectExecutionPolicies ?? {},
     multiAgent: {

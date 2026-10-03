@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   hashCachePrefixText,
   measureCachePrefix,
+  resolvePromptCacheAffinityKey,
   summarizeCachePrefixChange,
   type CachePrefixLayerInput
 } from "@agent-runtime";
@@ -27,6 +28,26 @@ describe("cache prefix measurement", () => {
   it("hashes identical text to the same value", () => {
     expect(hashCachePrefixText("same prefix")).toBe(hashCachePrefixText("same prefix"));
     expect(hashCachePrefixText("same prefix")).not.toBe(hashCachePrefixText("same prefiX"));
+  });
+
+  it("shares GPT cache affinity across threads for the same endpoint and model", () => {
+    const first = resolvePromptCacheAffinityKey({
+      threadId: "thread-a", providerId: "openai", providerBaseUrl: "https://api.openai.com/v1", modelId: "gpt-6", shareAcrossThreads: true
+    });
+    const second = resolvePromptCacheAffinityKey({
+      threadId: "thread-b", providerId: "openai", providerBaseUrl: "https://api.openai.com/v1", modelId: "gpt-6", shareAcrossThreads: true
+    });
+    expect(first).toBe(second);
+    expect(first).toMatch(/^codexh-gpt-[a-f0-9]{16}$/);
+    expect(resolvePromptCacheAffinityKey({
+      threadId: "thread-b", providerId: "openai", providerBaseUrl: "https://api.openai.com/v1", modelId: "gpt-6-mini", shareAcrossThreads: true
+    })).not.toBe(first);
+  });
+
+  it("retains thread-scoped affinity for providers without shared GPT caching", () => {
+    expect(resolvePromptCacheAffinityKey({
+      threadId: "thread-a", providerId: "gateway", modelId: "custom-model", shareAcrossThreads: false
+    })).toBe("thread-a");
   });
 
   it("reports byte counts without exposing prompt text", () => {

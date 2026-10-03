@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, normalizeCompletionAuditEnabled, resolveCompletionAuditModeSettings, resolveModelReasoningEffort } from "@shared-types";
+import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, isGptFamilyModel, normalizeCompletionAuditEnabled, resolveCompletionAuditModeSettings, resolveModelReasoningEffort } from "@shared-types";
 import type {
   AppConfig,
   AssistantDraftPhase,
@@ -103,6 +103,7 @@ import { resolveVerbatimMediaPrompt } from "./media-prompt";
 import {
   hashCachePrefixText,
   measureCachePrefix,
+  resolvePromptCacheAffinityKey,
   summarizeCachePrefixChange,
   type CachePrefixLayerInput
 } from "./cache-prefix";
@@ -314,6 +315,7 @@ export { isUserOriginatedMediaPrompt, resolveVerbatimMediaPrompt } from "./media
 export {
   hashCachePrefixText,
   measureCachePrefix,
+  resolvePromptCacheAffinityKey,
   summarizeCachePrefixChange,
   type CachePrefixChangeSummary,
   type CachePrefixFragmentInput,
@@ -531,6 +533,7 @@ export const MAX_MCP_PERSISTED_RESULT_CHARACTERS = 4_096;
 export const MAX_RAW_HISTORY_TOKENS_PER_REQUEST = 48_000;
 /** Limit full-text draft snapshots so long streamed replies do not starve the desktop renderer. */
 export const ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS = 100;
+const SLOW_OPERATION_DIAGNOSTIC_MS = 10_000;
 /**
  * Streamed deltas are coalesced onto a fixed frame before they leave the agent
  * runtime. Without this the publish cadence mirrors the provider's network
@@ -3558,14 +3561,20 @@ class ThreadSessionRuntime {
         const responseTonePromptText = buildResponseTonePrompt(this.services.config.responseTone);
         const gpaDirectiveText = `${buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""}${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}${buildDesktopScreenshotDirective(model.supportsMultimodalInput && agentToolsEnabled)}`;
         const gitMutationPolicyText = buildGitMutationPolicyPrompt(gitMutationRequested);
-        const baseInstructionBlock = `${decisionSystemPromptText}\n\n${responseTonePromptText}\n\n${prompt.systemPrompt}${gpaDirectiveText}\n\n${gitMutationPolicyText}`;
+        // Keep the longest model-independent prefix at the very beginning of
+        // every request. Project instructions, selected skills, knowledge,
+        // GPA state, and mutation policy can change between tool turns, so
+        // placing them after the stable baseline preserves more cacheable
+        // prompt tokens for GPT Responses prompt caching.
+        const baseInstructionBlock = `${decisionSystemPromptText}\n\n${responseTonePromptText}`;
+        const variableInstructionBlock = `${prompt.systemPrompt}${gpaDirectiveText}\n\n${gitMutationPolicyText}`;
         const textToolProtocolNotice = useTextToolProtocol
           ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
           : "";
         const outputLimitRecoveryNotice = providerOutputLimitAttempts > 0
           ? "\n\n[Output-limit recovery] The previous response was truncated. Do not repeat analysis, logs, source text, or completed work. Return only one compact next tool call, or a concise final answer under 500 words using the verified results already present."
           : "";
-        const dynamicContextBlock = `${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}`;
+        const dynamicContextBlock = `${variableInstructionBlock}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}`;
         const assembledSystemPrompt = `${baseInstructionBlock}\n\n${dynamicContextBlock}${textToolProtocolNotice}${outputLimitRecoveryNotice}`;
         let systemPrompt = assembledSystemPrompt;
         const toolSchemaText = useTextToolProtocol
@@ -3597,10 +3606,7 @@ class ThreadSessionRuntime {
             id: "base_instructions",
             fragments: [
               { id: "decision_system_prompt", text: decisionSystemPromptText },
-              { id: "response_tone", text: responseTonePromptText },
-              { id: "runtime_prompt", text: prompt.systemPrompt },
-              { id: "gpa_and_policy_directives", text: gpaDirectiveText },
-              { id: "git_mutation_policy", text: gitMutationPolicyText }
+              { id: "response_tone", text: responseTonePromptText }
             ]
           },
           {
@@ -3610,6 +3616,9 @@ class ThreadSessionRuntime {
           {
             id: "dynamic_context",
             fragments: [
+              { id: "runtime_prompt", text: prompt.systemPrompt },
+              { id: "gpa_and_policy_directives", text: gpaDirectiveText },
+              { id: "git_mutation_policy", text: gitMutationPolicyText },
               { id: "stored_turn_context", text: storedContextPrompt },
               { id: "follow_up_source", text: followUpSourcePrompt },
               { id: "self_improvement", text: selfImprovementContext },
@@ -3769,6 +3778,35 @@ class ThreadSessionRuntime {
         modelAwaitReason = "recovery";
         let decision: ProviderTurnDecision;
         let markModelProgress: () => void = () => undefined;
+        const modelRequestStartedAt = Date.now();
+        let firstModelProgressLogged = false;
+        let modelSlowTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+          void this.services.log("agent.operation_slow", this.threadId, {
+            turnRunId: turn.id,
+            operation: "model_request",
+            phase: "waiting_for_first_progress",
+            modelId: model.id,
+            providerId: provider.id,
+            durationMs: Date.now() - modelRequestStartedAt
+          }).catch(() => undefined);
+          modelSlowTimer = null;
+        }, SLOW_OPERATION_DIAGNOSTIC_MS);
+        const clearModelSlowTimer = () => {
+          if (modelSlowTimer) clearTimeout(modelSlowTimer);
+          modelSlowTimer = null;
+        };
+        const markObservableModelProgress = () => {
+          markModelProgress();
+          if (firstModelProgressLogged) return;
+          firstModelProgressLogged = true;
+          clearModelSlowTimer();
+          void this.services.log("agent.model_first_progress", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            providerId: provider.id,
+            elapsedMs: Date.now() - modelRequestStartedAt
+          }).catch(() => undefined);
+        };
         const requestUsesStreaming = model.supportsStreaming && !forceNonStreamingAfterIncompleteStream;
         let receivedStreamingDelta = false;
         try {
@@ -3791,7 +3829,13 @@ class ThreadSessionRuntime {
               systemPrompt,
               // Keep provider-side prompt caches pinned to the same node across retries,
               // tool turns, and resumed sessions within this thread.
-              cacheAffinityKey: this.threadId,
+              cacheAffinityKey: resolvePromptCacheAffinityKey({
+                threadId: this.threadId,
+                providerId: provider.id,
+                providerBaseUrl: provider.baseUrl,
+                modelId: model.id,
+                shareAcrossThreads: isGptFamilyModel(model)
+              }),
               // Responses incremental continuation: reuse the previous upstream
               // response id for this thread and persist the refreshed state.
               responsesContinuation: this.#responsesContinuation.get(this.threadId) ?? undefined,
@@ -3816,7 +3860,7 @@ class ThreadSessionRuntime {
                   return;
                 }
                 receivedStreamingDelta = true;
-                markModelProgress();
+                markObservableModelProgress();
                 await updateDraft("generating", `${streamedVisibleContent}${delta}`, {
                   immediate: true,
                   deliveryMode: "streaming"
@@ -3824,14 +3868,14 @@ class ThreadSessionRuntime {
               },
               onReasoningDelta: async (delta) => {
                 if (abortController.signal.aborted) return;
-                markModelProgress();
+                markObservableModelProgress();
                 await updateDraftReasoning(delta);
               },
               onToolCallPreparing: async ({ name, argumentsJson }) => {
                 if (abortController.signal.aborted || canonicalizeToolName(name) === AGENT_PROTOCOL_RECOVERY_TOOL_NAME) {
                   return;
                 }
-                markModelProgress();
+                markObservableModelProgress();
                 await this.services.emit({
                   type: "agent.tool_call_preparing",
                   threadId: this.threadId,
@@ -3887,7 +3931,25 @@ class ThreadSessionRuntime {
               markModelProgress = markProgress;
             }
           );
+          clearModelSlowTimer();
+          void this.services.log("agent.model_decision_completed", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            providerId: provider.id,
+            durationMs: Date.now() - modelRequestStartedAt,
+            firstProgressReceived: firstModelProgressLogged,
+            streamed: receivedStreamingDelta,
+            toolCallCount: decision.toolCalls?.length ?? 0
+          }).catch(() => undefined);
         } catch (error) {
+          clearModelSlowTimer();
+          void this.services.log("agent.model_decision_failed", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            providerId: provider.id,
+            durationMs: Date.now() - modelRequestStartedAt,
+            errorName: error instanceof Error ? error.name : "UnknownError"
+          }).catch(() => undefined);
           const errorMessage = error instanceof Error ? error.message : String(error);
           const requestLimit = readProviderRequestLimitDetails(error);
           if (
@@ -6825,6 +6887,34 @@ class ThreadSessionRuntime {
           let toolArgsInvalid = false;
           let toolContext: Parameters<ToolRuntime["execute"]>[1] | null = null;
           const toolTimeoutMs = resolveToolExecutionTimeoutMs(toolCall.name);
+          const toolOperationStartedAt = Date.now();
+          let toolPhase = "tool_execution";
+          let toolPhaseStartedAt = toolOperationStartedAt;
+          let slowOperationTimer: ReturnType<typeof setTimeout> | null = null;
+          const armSlowOperationTimer = () => {
+            if (slowOperationTimer) clearTimeout(slowOperationTimer);
+            slowOperationTimer = setTimeout(() => {
+              void this.services.log("agent.operation_slow", this.threadId, {
+                turnRunId: turn.id,
+                operation: "tool",
+                toolCallId: toolRecord.id,
+                toolName: toolCall.name,
+                phase: toolPhase,
+                phaseDurationMs: Date.now() - toolPhaseStartedAt,
+                totalDurationMs: Date.now() - toolOperationStartedAt
+              }).catch(() => undefined);
+            }, SLOW_OPERATION_DIAGNOSTIC_MS);
+          };
+          const setToolPhase = (phase: string) => {
+            toolPhase = phase;
+            toolPhaseStartedAt = Date.now();
+            armSlowOperationTimer();
+          };
+          const clearSlowOperationTimer = () => {
+            if (slowOperationTimer) clearTimeout(slowOperationTimer);
+            slowOperationTimer = null;
+          };
+          armSlowOperationTimer();
           try {
             // Projectless chats must never inherit the desktop application's launch folder.
             toolContext = {
@@ -7202,6 +7292,7 @@ class ThreadSessionRuntime {
             }
           } catch (error) {
             if (abortController.signal.aborted) {
+              clearSlowOperationTimer();
               throw error;
             }
             const isToolTimeout = error instanceof ModelDecisionTimeoutError;
@@ -7232,9 +7323,12 @@ class ThreadSessionRuntime {
           }
 
           if (abortController.signal.aborted) {
+            clearSlowOperationTimer();
             throw new Error("Turn interrupted.");
           }
 
+          const toolExecutionDurationMs = Date.now() - toolOperationStartedAt;
+          setToolPhase("tool_result_processing");
           const pathVerification = result.ok
             ? await verifySuccessfulToolDeliveryPaths(toolCall.name, toolCall.arguments, result, workspaceCwd)
             : undefined;
@@ -7285,7 +7379,9 @@ class ThreadSessionRuntime {
           }
 
           const completedAt = new Date().toISOString();
+          const resultProcessingStartedAt = Date.now();
           const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result, model.contextWindow);
+          const resultProcessingDurationMs = Date.now() - resultProcessingStartedAt;
           const repositoryResult = getMcpRepositoryToolResult(sanitizedResult);
           if (repositoryResult) {
             applyStructuredRepositoryResult(repositoryExploration, repositoryResult);
@@ -7332,15 +7428,28 @@ class ThreadSessionRuntime {
             ? summarizeDatabaseToolResultForPersistence(sanitizedResult)
             : toolCall.name === "mcp.call"
               ? summarizeMcpToolResultForPersistence(sanitizedResult)
-              : { ...result, json: sanitizedResult.json };
+              : toolCall.name === "code.search"
+                ? {
+                    ...sanitizedResult,
+                    json: {
+                      pattern: result.json?.pattern,
+                      outputBytes: Buffer.byteLength(result.content ?? "", "utf8"),
+                      truncated: (result.content ?? "").includes("[search output truncated]")
+                    }
+                  }
+                : { ...sanitizedResult, json: sanitizedResult.json };
           const eventResultJson = redactSensitiveText(JSON.stringify(persistedResult));
           const resultJson = eventResultJson;
           const status = result.ok ? "completed" : "failed";
+          setToolPhase("tool_persistence");
+          const persistenceStartedAt = Date.now();
           await this.services.persistence.finishToolCall(toolRecord.id, {
             status,
             resultJson,
             completedAt
           });
+          const persistenceDurationMs = Date.now() - persistenceStartedAt;
+          setToolPhase("tool_event_delivery");
           await this.services.emit({
             type: "tool.completed",
             threadId: this.threadId,
@@ -7355,6 +7464,25 @@ class ThreadSessionRuntime {
             },
             createdAt: new Date().toISOString()
           });
+          clearSlowOperationTimer();
+          const totalToolDurationMs = Date.now() - toolOperationStartedAt;
+          const resultContentBytes = Buffer.byteLength(result.content ?? "", "utf8");
+          const persistedResultBytes = Buffer.byteLength(resultJson, "utf8");
+          if (totalToolDurationMs >= 2_000 || resultContentBytes >= 64 * 1024 || persistedResultBytes >= 64 * 1024) {
+            void this.services.log("agent.tool_timing", this.threadId, {
+              turnRunId: turn.id,
+              toolCallId: toolRecord.id,
+              toolName: toolCall.name,
+              success: result.ok,
+              totalDurationMs: totalToolDurationMs,
+              executionDurationMs: toolExecutionDurationMs,
+              resultProcessingDurationMs,
+              persistenceDurationMs,
+              resultContentBytes,
+              persistedResultBytes,
+              truncated: toolCall.name === "code.search" && (result.content ?? "").includes("[search output truncated]")
+            }).catch(() => undefined);
+          }
 
           if (result.ok && MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
             // Count only consecutive failures. A successful write changes the
