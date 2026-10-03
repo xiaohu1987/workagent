@@ -74,8 +74,76 @@ export {
 } from "./browser-page-sanitize";
 
 export const MAX_CODE_SEARCH_RESULT_LINES = 500;
+export const MAX_CODE_SEARCH_RESULT_BYTES = 256 * 1024;
+export const MAX_CODE_SEARCH_LINE_CHARACTERS = 4_000;
 /** Page single-line files that cannot be sliced by line offset/limit. */
 export const FS_READ_FILE_CHAR_PAGE = 80_000;
+
+const SEARCH_OUTPUT_TRUNCATION_MARKER = "\n...[search output truncated]";
+const SEARCH_LINE_TRUNCATION_MARKER = "...[line truncated]";
+
+function truncateToUtf8Bytes(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  let usedBytes = 0;
+  let result = "";
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (usedBytes + characterBytes > maxBytes) break;
+    result += character;
+    usedBytes += characterBytes;
+  }
+  return result;
+}
+
+export function boundCodeSearchOutput(rawOutput: string): string {
+  let truncated = false;
+  const outputLines: string[] = [];
+  let outputBytes = 0;
+
+  let cursor = 0;
+  while (cursor <= rawOutput.length) {
+    if (outputLines.length >= MAX_CODE_SEARCH_RESULT_LINES) {
+      truncated = true;
+      break;
+    }
+    const newline = rawOutput.indexOf("\n", cursor);
+    const lineEnd = newline < 0 ? rawOutput.length : newline;
+    const contentEnd = lineEnd > cursor && rawOutput.charCodeAt(lineEnd - 1) === 13 ? lineEnd - 1 : lineEnd;
+    let line = rawOutput.slice(cursor, contentEnd);
+    if (line.length > MAX_CODE_SEARCH_LINE_CHARACTERS) {
+      let prefixEnd = MAX_CODE_SEARCH_LINE_CHARACTERS - SEARCH_LINE_TRUNCATION_MARKER.length;
+      const lastPrefixCode = line.charCodeAt(prefixEnd - 1);
+      if (lastPrefixCode >= 0xd800 && lastPrefixCode <= 0xdbff) prefixEnd -= 1;
+      line = `${line.slice(0, prefixEnd)}${SEARCH_LINE_TRUNCATION_MARKER}`;
+      truncated = true;
+    }
+
+    const separatorBytes = outputLines.length > 0 ? 1 : 0;
+    const remainingBytes = MAX_CODE_SEARCH_RESULT_BYTES - outputBytes - separatorBytes;
+    const lineBytes = Buffer.byteLength(line, "utf8");
+    if (lineBytes > remainingBytes) {
+      const markerBytes = Buffer.byteLength(SEARCH_OUTPUT_TRUNCATION_MARKER, "utf8");
+      const contentBudget = Math.max(0, remainingBytes - markerBytes);
+      line = truncateToUtf8Bytes(line, contentBudget);
+      if (line.length > 0) outputLines.push(line);
+      truncated = true;
+      break;
+    }
+
+    outputLines.push(line);
+    outputBytes += separatorBytes + lineBytes;
+
+    if (newline < 0) break;
+    cursor = newline + 1;
+  }
+
+  let output = outputLines.join("\n");
+  if (truncated) {
+    const markerBytes = Buffer.byteLength(SEARCH_OUTPUT_TRUNCATION_MARKER, "utf8");
+    output = `${truncateToUtf8Bytes(output, MAX_CODE_SEARCH_RESULT_BYTES - markerBytes)}${SEARCH_OUTPUT_TRUNCATION_MARKER}`;
+  }
+  return output;
+}
 
 export interface ToolRuntimeContext {
   cwd: string;
@@ -1018,12 +1086,21 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
     async (args, ctx) => {
       const searchRoot = resolveReadablePath(ctx, typeof args.path === "string" ? args.path : ".");
       const command = buildCodeSearchCommand(String(args.pattern ?? ""), searchRoot);
-      const terminal = await runShell(command, ctx);
-      const outputLines = terminal.output.replace(/\r\n/g, "\n").split("\n");
-      const output = outputLines.length > MAX_CODE_SEARCH_RESULT_LINES
-        ? `${outputLines.slice(0, MAX_CODE_SEARCH_RESULT_LINES).join("\n")}\n...[search output truncated]`
-        : terminal.output;
-      return { ok: true, content: output, json: { pattern: args.pattern, output } };
+      try {
+        const terminal = await runShell(command, ctx);
+        const output = boundCodeSearchOutput(terminal.output);
+        return { ok: true, content: output, json: { pattern: args.pattern, output } };
+      } catch (error) {
+        // A non-zero search exit (for example, no matches) can still carry
+        // substantial stdout. runShell includes that output in its error, so
+        // bound it here too before the Agent persists or replays the failure.
+        const output = boundCodeSearchOutput(error instanceof Error ? error.message : String(error));
+        return {
+          ok: false,
+          content: `Code search failed.\n${output}`,
+          json: { pattern: args.pattern, output, truncated: output.includes("[search output truncated]") }
+        };
+      }
     }
   );
 
@@ -2806,7 +2883,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           prompt: {
             type: "string",
             description:
-              "Detailed English or Chinese image prompt: subject, composition, style, lighting, and constraints."
+              "The user's own words, copied exactly as the user wrote them. The runtime sends the user's current message to the image model verbatim, so a rewritten prompt is ignored: never translate, expand, shorten, restyle, or add subject, composition, style, or lighting hints."
           },
           count: {
             type: "integer",
@@ -2890,7 +2967,7 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           prompt: {
             type: "string",
             description:
-              "Detailed English or Chinese video prompt: subject, motion, scene, camera, style, and duration constraints."
+              "The user's own words, copied exactly as the user wrote them. The runtime sends the user's current message to the video model verbatim, so a rewritten prompt is ignored: never translate, expand, shorten, restyle, or add motion, camera, scene, style, or duration hints."
           }
         },
         required: ["prompt"]

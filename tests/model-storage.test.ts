@@ -14,6 +14,21 @@ afterEach(async () => {
 });
 
 describe("model configuration storage", () => {
+  it("persists the screenshot shortcut and defaults older configs", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-screenshot-shortcut-"));
+    temporaryDirectories.push(directory);
+    const configFile = path.join(directory, "config.toml");
+    const config = defaultConfig();
+    expect(config.desktop.screenshotShortcut).toBe("CommandOrControl+Alt+S");
+    config.desktop.screenshotShortcut = "Alt+Shift+F12";
+    await saveConfig(configFile, config);
+    expect((await loadConfig(configFile)).desktop.screenshotShortcut).toBe("Alt+Shift+F12");
+
+    const olderConfig = (await fs.readFile(configFile, "utf8")).replace(/^screenshotShortcut\s*=.*\r?\n/m, "");
+    await fs.writeFile(configFile, olderConfig, "utf8");
+    expect((await loadConfig(configFile)).desktop.screenshotShortcut).toBe("CommandOrControl+Alt+S");
+  });
+
   it("clears legacy protocol fields when switching to the DeepSeek template", () => {
     expect(providerTemplatePatch("deepseek")).toMatchObject({
       baseUrl: "https://api.deepseek.com",

@@ -368,6 +368,7 @@ import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEf
 import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, SubagentSwitchRow, buildSubagentPresentations, resolveSelectedSubagentId } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
+import { isLastToolGroupInTimeline, resolveDeferredToolGroup } from "./timeline/deferred-tool-group";
 import { TimelineEntries } from "./timeline/timeline-entries";
 import { ApprovalCard, AssistantDraftMessage, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
@@ -884,8 +885,8 @@ export function App() {
     getStoredPanelWidth("codexh.right-workspace-width", 410, MIN_RIGHT_WORKSPACE_WIDTH, MAX_RIGHT_WORKSPACE_WIDTH)
   );
   const [resizingPane, setResizingPane] = useState<ResizePane | null>(null);
-  const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("files");
-  const [rightWorkspaceExpandedTab, setRightWorkspaceExpandedTab] = useState<RightWorkspaceTab | null>("files");
+  const [rightWorkspaceTab, setRightWorkspaceTab] = useState<RightWorkspaceTab>("thinking");
+  const [rightWorkspaceExpandedTab, setRightWorkspaceExpandedTab] = useState<RightWorkspaceTab | null>("thinking");
   const [activeFilesRoot, setActiveFilesRoot] = useState("");
   const [activeGitRoot, setActiveGitRoot] = useState("");
   const [activeTerminalRoot, setActiveTerminalRoot] = useState("");
@@ -1037,6 +1038,22 @@ export function App() {
   );
   // 收藏/取消收藏时弹出全局提醒
   const { notice, isNoticeHovered, setIsNoticeHovered, exitingNoticeId, showNotice, dismissNotice } = useAppNotice();
+  useEffect(() => {
+    const disposeCapture = window.codexh.onShortcutScreenshot(({ filePath, fileName }) => {
+      void window.codexh.previewLocalImage({ absolutePath: filePath })
+        .then((previewUrl) => addComposerAttachment({ kind: "image", path: filePath, label: fileName, previewUrl }))
+        .catch(() => addComposerAttachment({ kind: "image", path: filePath, label: fileName }));
+    });
+    const disposeError = window.codexh.onShortcutScreenshotError((message) => {
+      console.warn("[renderer] Screenshot shortcut failed", message);
+      showNotice("截图快捷键不可用", { tone: "warning", message });
+    });
+    return () => {
+      disposeCapture();
+      disposeError();
+    };
+  }, [showNotice]);
+
   useEffect(() => {
     return subscribeApiCardFavoriteNotices((notice) => {
       if (notice.action === "added") {
@@ -4016,7 +4033,8 @@ export function App() {
     const turnIdToCollapse = getConversationTurnIdToCollapseAfterExecution(
       previous?.turnId ?? null,
       previous?.isProcessing === true,
-      isTaskProcessing
+      isTaskProcessing,
+      Boolean(latestConversationTurn?.summaryEntryId)
     );
     if (!turnIdToCollapse) return;
     setCollapsedConversationTurns((current) => {
@@ -4056,13 +4074,30 @@ export function App() {
     );
     if (!group) return null;
 
-    const groupCompletedAt = Math.max(...group.toolCalls.map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt)));
-    const hasReplacementReply = visibleMessages.some((message) =>
+    // The live panel is fed by the runtime activity stream, which can lag the transcript: the
+    // "latest root tool" may still belong to an earlier batch after a newer one has rendered.
+    // Handing that earlier batch over hid records in the middle of the chat, so only the tail
+    // batch is eligible for the hand-over.
+    const groupIsTail = isLastToolGroupInTimeline(
+      timelineEntries as ReadonlyArray<{ kind: string; toolCalls?: readonly { id: string }[] | null }>,
+      group.toolCalls.map((toolCall) => toolCall.id)
+    );
+    if (!groupIsTail) return null;
+
+    // Timestamps that cannot be parsed used to make this comparison `false` forever, which kept
+    // the whole group hidden for the rest of the turn. Dropping them leaves the decision to the
+    // batch rule below instead of silently suppressing finished records.
+    const groupCompletedAt = Math.max(
+      ...group.toolCalls
+        .map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt))
+        .filter((timestamp) => Number.isFinite(timestamp))
+    );
+    const hasReplacementReply = Number.isFinite(groupCompletedAt) && visibleMessages.some((message) =>
       message.role === "assistant" &&
       !isInternalAgentProtocolMessage(message.content) &&
       Date.parse(message.createdAt) > groupCompletedAt
     );
-    return hasReplacementReply ? null : group.toolCalls;
+    return resolveDeferredToolGroup(group.toolCalls, hasReplacementReply);
   }, [isTaskProcessing, latestRootRuntimeTool, timelineEntries, visibleMessages]);
   const shouldRenderRuntimeTailPanel = Boolean(
     showRuntimeActivityPanel &&

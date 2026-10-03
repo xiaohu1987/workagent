@@ -218,6 +218,9 @@ declare global {
         kind: "image" | "video" | "file";
       }>;
       previewLocalImage: (payload: { absolutePath: string }) => Promise<string>;
+      onShortcutScreenshot: (listener: (payload: { filePath: string; fileName: string }) => void) => () => void;
+      onShortcutScreenshotError: (listener: (message: string) => void) => () => void;
+      setScreenshotShortcutRecording: (recording: boolean) => Promise<void>;
       rejectUnsupportedMultimodal: (payload: { threadId: string; content: string }) => Promise<void>;
       loadApiCardFavorites: () => Promise<unknown[]>;
       saveApiCardFavorites: (favorites: unknown[]) => Promise<void>;

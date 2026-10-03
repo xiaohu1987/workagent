@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, normalizeCompletionAuditEnabled, resolveCompletionAuditModeSettings, resolveModelReasoningEffort } from "@shared-types";
+import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, isGptFamilyModel, normalizeCompletionAuditEnabled, resolveCompletionAuditModeSettings, resolveModelReasoningEffort } from "@shared-types";
 import type {
   AppConfig,
   AssistantDraftPhase,
@@ -39,6 +39,7 @@ import type {
   TurnRunRecord,
   UserInputQuestion
 } from "@shared-types";
+import type { ResponsesContinuationPlan, ResponsesContinuationState } from "@shared-types";
 import { buildDecisionSystemPrompt, isGeneratedVideoDownloadError, isGrokModel, isProgressOnlyAssistantMessage, ProviderFactory, ProviderRequestLimitError, ProviderStreamIncompleteError, resolveModelCompat, resolveProviderRequestLimits, stripProviderRequestDiagnostics, TOOL_ARGS_INVALID_KEY, TOOL_ARGS_TRUNCATED_KEY } from "@provider-adapters";
 import { SkillsManager } from "@skills-runtime";
 import { McpManager } from "@mcp-runtime";
@@ -53,6 +54,7 @@ import {
   canStartGpaStage,
   DEFAULT_GPA_STATE,
   detectGpaConfirmation,
+  gpaClarificationFingerprint,
   gpaStageAllowsTools,
   gpaStageLabel,
   parseGpaCompletedTaskDeclarations,
@@ -61,6 +63,7 @@ import {
   parseCanonicalGpaPlanTasks,
   parseGpaPlanTasks,
   reconcileGpaPlanTasks,
+  selectUnaskedGpaClarificationQuestions,
   parseGpaState
 } from "./gpa";
 import {
@@ -96,6 +99,16 @@ import {
   formatNonImageAttachmentPaths,
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
+import { resolveVerbatimMediaPrompt } from "./media-prompt";
+import {
+  hashCachePrefixText,
+  measureCachePrefix,
+  resolvePromptCacheAffinityKey,
+  summarizeCachePrefixChange,
+  type CachePrefixLayerInput
+} from "./cache-prefix";
+import { summarizeCompactionPrefixOutcome } from "./compaction-prefix";
+import type { CachePrefixMeasurement } from "./cache-prefix";
 import type { GpaStage, GpaState } from "@shared-types";
 import { normalizeSandboxMode, normalizeSandboxNetworkAccess } from "@shared-types";
 import { createChatRuntimePolicy } from "./chat-runtime";
@@ -103,6 +116,15 @@ import {
   createProjectRuntimePolicy,
   PROJECT_MCP_PRIORITY_RECOVERY_MESSAGE
 } from "./project-runtime";
+import {
+  appendProjectRuleInjection,
+  buildProjectRuleInjection,
+  resolveProjectRuleState
+} from "./project-rule-inject";
+import {
+  evaluateProjectRuleWriteCheck,
+  recordProjectRuleWriteConflicts
+} from "./project-rule-guard";
 import {
   buildSandboxSystemPrompt,
   defaultAppHome,
@@ -154,6 +176,8 @@ export {
   parseGpaCompletedTaskDeclarations,
   parseGpaPlanTasks,
   reconcileGpaPlanTasks,
+  selectUnaskedGpaClarificationQuestions,
+  gpaClarificationFingerprint,
   normalizeSequentialPlanTasks,
   parseGpaState
 } from "./gpa";
@@ -169,6 +193,113 @@ export {
   type GpaPlanFileDocument
 } from "./gpa-plan-file";
 export {
+  PROJECT_SCAN_CONFIG_FILES,
+  PROJECT_SCAN_DEFAULT_MAX_DEPTH,
+  PROJECT_SCAN_GENERATED_DIRECTORIES,
+  PROJECT_SCAN_IGNORED_DIRECTORIES,
+  PROJECT_SCAN_PROTECTED_FILES,
+  MAX_PROJECT_SCAN_KEY_DEPENDENCIES,
+  MAX_PROJECT_SCAN_PACKAGES,
+  classifyProjectScriptKind,
+  describeProjectFacts,
+  scanProjectFacts,
+  type ProjectScanCommand,
+  type ProjectScanCommandKind,
+  type ProjectScanFacts,
+  type ProjectScanKeyDependency,
+  type ProjectScanPackage
+} from "./project-rule-scan";
+export {
+  PROJECT_RULE_CATEGORIES,
+  PROJECT_RULE_FILE_VERSION,
+  PROJECT_RULE_RELATIVE_PATH,
+  MAX_PROJECT_RULE_ENTRIES,
+  MAX_PROJECT_RULE_ENTRY_CHARACTERS,
+  MAX_PROJECT_RULE_FILE_CHARACTERS,
+  MAX_PROJECT_RULE_INDEX_CHARACTERS,
+  MAX_PROJECT_RULE_INDEX_ENTRIES,
+  buildProjectRuleIndexLine,
+  formatProjectRuleMarkdown,
+  getProjectRuleCategory,
+  nextProjectRuleId,
+  parseProjectRuleMarkdown,
+  readProjectRuleFile,
+  resolveProjectRuleCategoryFromId,
+  resolveProjectRuleFilePath,
+  sortProjectRuleEntries,
+  truncateProjectRuleText,
+  writeProjectRuleFile,
+  type ProjectRuleCategory,
+  type ProjectRuleCategoryId,
+  type ProjectRuleDocument,
+  type ProjectRuleEntry,
+  type ProjectRuleSource
+} from "./project-rule-file";
+export {
+  PROJECT_RULE_TEMPLATE_HEADER,
+  PROJECT_RULE_TEMPLATE_NOTES,
+  buildEmptyProjectRuleDocument,
+  buildProjectRuleCategoryGuide,
+  buildProjectRuleEntrySkeleton
+} from "./project-rule-template";
+export {
+  MAX_PROJECT_RULE_AUTO_UPDATE_ENTRIES,
+  PROJECT_RULE_FRESHNESS_PROBE_FILES,
+  buildProjectRuleUpdateMessage,
+  collectProjectRuleProbeModifiedAt,
+  mergeProjectRuleDocument,
+  projectRuleEntryKey,
+  projectRuleNeedsRefresh,
+  refreshProjectRuleFile,
+  type ProjectRuleMergeOptions,
+  type ProjectRuleMergeResult,
+  type ProjectRuleRefreshResult
+} from "./project-rule-update";
+export {
+  buildProjectRuleEntriesFromFacts,
+  ensureProjectRuleFile,
+  type ProjectRuleBootstrapResult
+} from "./project-rule-bootstrap";
+export {
+  PROJECT_RULE_EDIT_ACTION_KINDS,
+  applyProjectRuleEdit,
+  editProjectRuleFile,
+  type ProjectRuleEditAction,
+  type ProjectRuleEditActionKind,
+  type ProjectRuleEditResult
+} from "./project-rule-edit";
+export {
+  PROJECT_RULE_INJECTION_HEADING,
+  PROJECT_RULE_INJECTION_PATH_LABEL,
+  appendProjectRuleInjection,
+  buildProjectRuleInjection,
+  resolveProjectRuleInjection,
+  resolveProjectRuleState
+} from "./project-rule-inject";
+export {
+  MAX_PROJECT_RULE_EXPANSION_CHARACTERS,
+  MAX_PROJECT_RULE_EXPANSION_ENTRIES,
+  PROJECT_RULE_EXPANSION_HEADING,
+  PROJECT_RULE_PENDING_ENTRY_TITLE,
+  PROJECT_RULE_WRITE_TOOL_NAMES,
+  buildProjectRuleTargetExpansion,
+  buildProjectRuleWriteConflictMessage,
+  evaluateProjectRuleWriteCheck,
+  isHardProjectRuleBoundary,
+  isProjectRuleScopeMatch,
+  isProjectRuleWriteTool,
+  normalizeProjectRulePath,
+  recordProjectRuleWriteConflicts,
+  registerProjectRuleWriteConflicts,
+  resolveProjectRuleWriteTargets,
+  selectProjectRuleEntriesForTargets,
+  toProjectRelativePath,
+  type ProjectRuleTargetSelection,
+  type ProjectRuleWriteCheckInput,
+  type ProjectRuleWriteCheckResult,
+  type ProjectRuleWriteConflict
+} from "./project-rule-guard";
+export {
   detectMultimodalIntent,
   detectRequestedImageCount,
   stripThinkTags,
@@ -180,6 +311,20 @@ export {
   applyMultimodalInputRecognitionToTranscript,
   hasRecognizableMultimodalAttachments
 } from "./multimodal-intent";
+export { isUserOriginatedMediaPrompt, resolveVerbatimMediaPrompt } from "./media-prompt";
+export {
+  hashCachePrefixText,
+  measureCachePrefix,
+  resolvePromptCacheAffinityKey,
+  summarizeCachePrefixChange,
+  type CachePrefixChangeSummary,
+  type CachePrefixFragmentInput,
+  type CachePrefixFragmentMeasurement,
+  type CachePrefixLayerId,
+  type CachePrefixLayerInput,
+  type CachePrefixLayerMeasurement,
+  type CachePrefixMeasurement
+} from "./cache-prefix";
 
 /** @deprecated Use MAX_TARGET_FAILURE_ATTEMPTS for tool failures. */
 export const MAX_REPEATED_TASK_FAILURES = MAX_TARGET_FAILURE_ATTEMPTS;
@@ -388,6 +533,7 @@ export const MAX_MCP_PERSISTED_RESULT_CHARACTERS = 4_096;
 export const MAX_RAW_HISTORY_TOKENS_PER_REQUEST = 48_000;
 /** Limit full-text draft snapshots so long streamed replies do not starve the desktop renderer. */
 export const ASSISTANT_DRAFT_UPDATE_MIN_INTERVAL_MS = 100;
+const SLOW_OPERATION_DIAGNOSTIC_MS = 10_000;
 /**
  * Streamed deltas are coalesced onto a fixed frame before they leave the agent
  * runtime. Without this the publish cadence mirrors the provider's network
@@ -1026,6 +1172,12 @@ export interface SuccessfulToolEvidence {
   toolRecordId?: string;
   toolName: string;
   kinds: CompletionEvidenceKind[];
+  /**
+   * Internal marker: this successful call can prove a delivered change once
+   * the turn contains delivery evidence. Kept out of `kinds` so the credit can
+   * be granted retroactively, without depending on which call ran first.
+   */
+  verificationCandidate?: boolean;
   unitTestPassed?: boolean;
   unitTestUnavailable?: boolean;
   verifiedPaths?: string[];
@@ -1550,8 +1702,15 @@ class ThreadSessionRuntime {
   #busy = false;
   readonly #idleWaiters: Array<() => void> = [];
   #gpa: GpaState = { ...DEFAULT_GPA_STATE };
+  // PLAN clarifications are re-derived from the assistant text on every model
+  // decision, so remember what was already asked and ask each one only once.
+  readonly #askedGpaClarifications = new Set<string>();
   #gpaLoaded = false;
+  // Reusable prefix measured for the previous provider request in this thread;
+  // used to attribute which layer changed when the prefix stops being stable.
+  #cachePrefixMeasurement: CachePrefixMeasurement | null = null;
   #useFunctionCallCompatibilityTranscript = false;
+  #responsesContinuation = new Map<string, ResponsesContinuationState>();
 
   public constructor(
     private readonly threadId: string,
@@ -1672,6 +1831,10 @@ class ThreadSessionRuntime {
 
   async #commitGpa(next: GpaState): Promise<void> {
     const committed = { ...next, confirmationExpiresAt: null };
+    if (committed.stage !== this.#gpa.stage) {
+      // A new stage means a new analysis round, so its clarifications may be asked again.
+      this.#askedGpaClarifications.clear();
+    }
     this.#gpa = committed;
     await this.services.persistence.updateThread(this.threadId, {
       gpaStateJson: JSON.stringify(committed)
@@ -2052,13 +2215,23 @@ class ThreadSessionRuntime {
     const activeMcpServerIds = selectedMcpServerIds.length > 0
       ? selectedMcpServerIds
       : accessibleMcpServerIds;
+    // Project rules are injected on every project turn: the bounded index is
+    // resident prompt text while the full entries stay on disk for on-demand reads.
+    const projectRuleState =
+      thread.mode === "project" && thread.cwd
+        ? await resolveProjectRuleState(thread.cwd)
+        : null;
+    const projectRuleInjection = buildProjectRuleInjection(projectRuleState?.document ?? null);
     const modePolicy = thread.mode === "project"
-      ? createProjectRuntimePolicy({
-          cwd: thread.cwd,
-          workspaceRoots: thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : []),
-          explicitlySelectedMcp: selectedMcpServerIds.length > 0,
-          explicitlyRequestedMcp
-        })
+      ? appendProjectRuleInjection(
+          createProjectRuntimePolicy({
+            cwd: thread.cwd,
+            workspaceRoots: thread.workspaceRoots ?? (thread.cwd ? [thread.cwd] : []),
+            explicitlySelectedMcp: selectedMcpServerIds.length > 0,
+            explicitlyRequestedMcp
+          }),
+          projectRuleInjection
+        )
       : createChatRuntimePolicy({
           outputDir: turnOutputDir,
           request: effectiveRequest,
@@ -2185,7 +2358,7 @@ class ThreadSessionRuntime {
     const modeHiddenToolNames = visibleToolSet.tools
       .filter((tool) => !visibleModeToolNames.has(tool.name))
       .map((tool) => tool.name);
-    const selectedMcpToolsOnly = selectedMcpServerIds.length > 0
+    let selectedMcpToolsOnly = selectedMcpServerIds.length > 0
       ? tools.filter((tool) =>
           tool.name === "mcp.list_tools" ||
           tool.name === "mcp.call" ||
@@ -2356,7 +2529,7 @@ class ThreadSessionRuntime {
         await this.runMultimodalIntentTurn({
           intent: mediaIntent,
           turnId: turn.id,
-          prompt: initialInput.trim(),
+          prompt: resolveVerbatimMediaPrompt({ userInput: initialInput, requestedPrompt: initialInput.trim() }).prompt,
           count: mediaIntent === "image" ? detectRequestedImageCount(initialInput) : 1,
           abortController
         });
@@ -2399,6 +2572,27 @@ class ThreadSessionRuntime {
         (webFrontendGuard ||
           isWebFrontendTaskText(history.map((message) => message.content).join("\n")) ||
           isWebFrontendTaskText(this.#gpa.planTasks.map((task) => task.title).join("\n")));
+
+      // Keep visible browser automation opt-in. Web search/page extraction remains
+      // available for research, while browser controls are only exposed for an
+      // explicit browser request or a genuine frontend implementation task.
+      const activePlanContext = this.#gpa.stage === "act"
+        ? this.#gpa.planTasks.filter((task) => !task.done).map((task) => task.title).join("\n")
+        : "";
+      const conversationBrowserToolsAllowed = shouldExposeVisibleBrowserTools(initialInput, activePlanContext);
+      const activeTurnTools = conversationBrowserToolsAllowed
+        ? tools
+        : tools.filter((tool) => !tool.name.startsWith("browser."));
+      selectedMcpToolsOnly = selectedMcpServerIds.length > 0
+        ? activeTurnTools.filter((tool) =>
+            tool.name === "mcp.list_tools" ||
+            tool.name === "mcp.call" ||
+            tool.name === AGENT_PROTOCOL_RECOVERY_TOOL_NAME ||
+            (allowedReadPaths.length > 0 && isAttachedLocalReadTool(tool.name))
+          )
+        : this.services.config.selfImprovement.dedicatedTools
+          ? activeTurnTools
+          : activeTurnTools.filter((tool) => !tool.name.startsWith("memories."));
 
       let turnTokenUsage = createEmptyTokenUsage();
       let activeDraftId: string | null = null;
@@ -2893,7 +3087,7 @@ class ThreadSessionRuntime {
       const persistBlockedToolCall = async (
         toolCall: RuntimeToolCall,
         reason: string,
-        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope" | "explicit_authorization_denied" | "sandbox_policy"
+        blockKind: "identical_retry" | "remembered_strategy" | "recovery_prerequisite" | "project_mcp_priority" | "chat_mode_scope" | "followup_source_scope" | "explicit_authorization_denied" | "sandbox_policy" | "project_rule_conflict"
       ) => {
         const toolRecord = await this.services.persistence.recordToolCall({
           threadId: this.threadId,
@@ -3086,9 +3280,14 @@ class ThreadSessionRuntime {
         // never shrink them. Give them an explicit slice of the input budget and
         // shorten descriptions (then drop trailing tools) when a large MCP
         // toolbox would otherwise make every request exceed the model window.
+        // Keep the ordinary tool baseline byte-stable across turns. Dynamic
+        // provider promotions still stay first so bounded tool lists retain
+        // newly discovered tools, while the remainder no longer depends on
+        // MCP/skill discovery order.
+        const stableToolBaseline = sortToolsForStableBaseline(selectedMcpToolsOnly);
         const requestTools = fitToolSchemasForContextBudget(
           prioritizeToolsForProvider({
-            tools: selectedMcpToolsOnly.filter((tool) => !suppressSkillLoaderForTurn || tool.name !== "skills.load"),
+            tools: stableToolBaseline.filter((tool) => !suppressSkillLoaderForTurn || tool.name !== "skills.load"),
             promotedToolNames: promotedProviderToolNames,
             maxTools: requestToolBudget
           }),
@@ -3379,17 +3578,26 @@ class ThreadSessionRuntime {
             ? Math.max(1_000, Math.floor(6_000 / providerRequestSlimmingAttempts))
             : 16_000
         });
-        let systemPrompt = `${buildDecisionSystemPrompt(model)}\n\n${buildResponseTonePrompt(this.services.config.responseTone)}\n\n${prompt.systemPrompt}${
-          buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""
-        }${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}${buildDesktopScreenshotDirective(model.supportsMultimodalInput && agentToolsEnabled)}\n\n${buildGitMutationPolicyPrompt(gitMutationRequested)}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}${
-          useTextToolProtocol
-            ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
-            : ""
-        }${
-          providerOutputLimitAttempts > 0
-            ? "\n\n[Output-limit recovery] The previous response was truncated. Do not repeat analysis, logs, source text, or completed work. Return only one compact next tool call, or a concise final answer under 500 words using the verified results already present."
-            : ""
-        }`;
+        const decisionSystemPromptText = buildDecisionSystemPrompt(model);
+        const responseTonePromptText = buildResponseTonePrompt(this.services.config.responseTone);
+        const gpaDirectiveText = `${buildGpaSystemDirective(this.#gpa, { webFrontendTask: webFrontendGuard }) || ""}${gpaPlanResumeDirective}${buildBrowserVerificationDirective(this.#gpa.stage)}${buildDesktopScreenshotDirective(model.supportsMultimodalInput && agentToolsEnabled)}`;
+        const gitMutationPolicyText = buildGitMutationPolicyPrompt(gitMutationRequested);
+        // Keep the longest model-independent prefix at the very beginning of
+        // every request. Project instructions, selected skills, knowledge,
+        // GPA state, and mutation policy can change between tool turns, so
+        // placing them after the stable baseline preserves more cacheable
+        // prompt tokens for GPT Responses prompt caching.
+        const baseInstructionBlock = `${decisionSystemPromptText}\n\n${responseTonePromptText}`;
+        const variableInstructionBlock = `${prompt.systemPrompt}${gpaDirectiveText}\n\n${gitMutationPolicyText}`;
+        const textToolProtocolNotice = useTextToolProtocol
+          ? "\n\n[Provider compatibility mode] Native function calls are unavailable. Return the JSON decision envelope and include complete arguments for every tool_calls entry."
+          : "";
+        const outputLimitRecoveryNotice = providerOutputLimitAttempts > 0
+          ? "\n\n[Output-limit recovery] The previous response was truncated. Do not repeat analysis, logs, source text, or completed work. Return only one compact next tool call, or a concise final answer under 500 words using the verified results already present."
+          : "";
+        const dynamicContextBlock = `${variableInstructionBlock}\n\n${storedContextPrompt}\n\n${followUpSourcePrompt}\n\n${selfImprovementContext}\n\n${multiAgentDirective}\n\n${requestAvailableToolsPrompt}`;
+        const assembledSystemPrompt = `${baseInstructionBlock}\n\n${dynamicContextBlock}${textToolProtocolNotice}${outputLimitRecoveryNotice}`;
+        let systemPrompt = assembledSystemPrompt;
         const toolSchemaText = useTextToolProtocol
           ? ""
           : JSON.stringify(requestTools.map((tool) => ({
@@ -3406,9 +3614,59 @@ class ThreadSessionRuntime {
           systemPrompt,
           Math.max(256, contextBudgetPlan.maxInputTokens - toolSchemaTokens - latestEvidenceTokens)
         );
-        const budgetedSystemPrompt = toolSchemaText
-          ? `${systemPrompt}\n\n[Native tool schemas]\n${toolSchemaText}`
-          : systemPrompt;
+        // Native protocols receive the same schemas through `availableTools`;
+        // do not duplicate them in the system prompt and invalidate the
+        // reusable prefix. Text-tool compatibility keeps schemas in its
+        // explicit available-tools prompt above.
+        const budgetedSystemPrompt = systemPrompt;
+        // Prefix accounting for cache-hit troubleshooting: hash the reusable
+        // layers and the dynamic layers separately so a later diff can say
+        // which layer changed instead of guessing.
+        const buildPrefixLayers = (): CachePrefixLayerInput[] => [
+          {
+            id: "base_instructions",
+            fragments: [
+              { id: "decision_system_prompt", text: decisionSystemPromptText },
+              { id: "response_tone", text: responseTonePromptText }
+            ]
+          },
+          {
+            id: "tool_schemas",
+            fragments: [{ id: "request_tools", text: toolSchemaText }]
+          },
+          {
+            id: "dynamic_context",
+            fragments: [
+              { id: "runtime_prompt", text: prompt.systemPrompt },
+              { id: "gpa_and_policy_directives", text: gpaDirectiveText },
+              { id: "git_mutation_policy", text: gitMutationPolicyText },
+              { id: "stored_turn_context", text: storedContextPrompt },
+              { id: "follow_up_source", text: followUpSourcePrompt },
+              { id: "self_improvement", text: selfImprovementContext },
+              { id: "multi_agent_directive", text: multiAgentDirective },
+              { id: "available_tools_prompt", text: requestAvailableToolsPrompt },
+              { id: "text_tool_protocol_notice", text: textToolProtocolNotice },
+              { id: "output_limit_recovery_notice", text: outputLimitRecoveryNotice }
+            ]
+          }
+        ];
+        const prefixMeasurement = measureCachePrefix(buildPrefixLayers());
+        const prefixChange = summarizeCachePrefixChange(this.#cachePrefixMeasurement, prefixMeasurement);
+        this.#cachePrefixMeasurement = prefixMeasurement;
+        await this.services.log("agent.cache_prefix_measured", this.threadId, {
+          turnRunId: turn.id,
+          modelId: model.id,
+          providerId: provider.id,
+          toolProtocol: useTextToolProtocol ? "text_tool_protocol" : "native_tool_calls",
+          prefixHash: prefixMeasurement.hash,
+          layers: prefixMeasurement.layers,
+          systemPromptHash: hashCachePrefixText(budgetedSystemPrompt),
+          systemPromptTrimmed: budgetedSystemPrompt !== assembledSystemPrompt,
+          baseline: prefixChange.baseline,
+          stable: prefixChange.stable,
+          changedLayers: prefixChange.changedLayers,
+          changedFragments: prefixChange.changedFragments
+        });
         const compactContext = async (
           trigger: "pre_model_request" | "post_tool_batch" | "provider_request_limit" | "upstream_context_overflow" | "model_timeout_recovery" | "provider_stream_recovery" | "task_completed",
           force = false
@@ -3433,6 +3691,26 @@ class ThreadSessionRuntime {
             return false;
           }
           transcript = compaction.transcript;
+          // Compaction rewrites the transcript only. Re-measure the reusable
+          // layers so a miss that follows is attributable: 0 when the prefix
+          // survived, 1 when a stable layer moved.
+          const postCompactionPrefix = measureCachePrefix(buildPrefixLayers());
+          const compactionImpact = summarizeCompactionPrefixOutcome(
+            summarizeCachePrefixChange(prefixMeasurement, postCompactionPrefix),
+            trigger
+          );
+          await this.services.log("agent.cache_prefix_measured", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            providerId: provider.id,
+            phase: "post_compaction",
+            compactionTrigger: trigger,
+            prefixHash: postCompactionPrefix.hash,
+            layers: postCompactionPrefix.layers,
+            stableLayersPreserved: compactionImpact.stableLayersPreserved,
+            changedLayers: compactionImpact.changedLayers,
+            explainableMisses: compactionImpact.explainableMisses
+          });
           const compactionPayload = {
             turnRunId: turn.id,
             trigger,
@@ -3521,6 +3799,35 @@ class ThreadSessionRuntime {
         modelAwaitReason = "recovery";
         let decision: ProviderTurnDecision;
         let markModelProgress: () => void = () => undefined;
+        const modelRequestStartedAt = Date.now();
+        let firstModelProgressLogged = false;
+        let modelSlowTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+          void this.services.log("agent.operation_slow", this.threadId, {
+            turnRunId: turn.id,
+            operation: "model_request",
+            phase: "waiting_for_first_progress",
+            modelId: model.id,
+            providerId: provider.id,
+            durationMs: Date.now() - modelRequestStartedAt
+          }).catch(() => undefined);
+          modelSlowTimer = null;
+        }, SLOW_OPERATION_DIAGNOSTIC_MS);
+        const clearModelSlowTimer = () => {
+          if (modelSlowTimer) clearTimeout(modelSlowTimer);
+          modelSlowTimer = null;
+        };
+        const markObservableModelProgress = () => {
+          markModelProgress();
+          if (firstModelProgressLogged) return;
+          firstModelProgressLogged = true;
+          clearModelSlowTimer();
+          void this.services.log("agent.model_first_progress", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            providerId: provider.id,
+            elapsedMs: Date.now() - modelRequestStartedAt
+          }).catch(() => undefined);
+        };
         const requestUsesStreaming = model.supportsStreaming && !forceNonStreamingAfterIncompleteStream;
         let receivedStreamingDelta = false;
         try {
@@ -3541,6 +3848,22 @@ class ThreadSessionRuntime {
           decision = await waitForAbortOrIdleTimeout(
             adapter.runTurn({
               systemPrompt,
+              // Keep provider-side prompt caches pinned to the same node across retries,
+              // tool turns, and resumed sessions within this thread.
+              cacheAffinityKey: resolvePromptCacheAffinityKey({
+                threadId: this.threadId,
+                providerId: provider.id,
+                providerBaseUrl: provider.baseUrl,
+                modelId: model.id,
+                shareAcrossThreads: isGptFamilyModel(model)
+              }),
+              // Responses incremental continuation: reuse the previous upstream
+              // response id for this thread and persist the refreshed state.
+              responsesContinuation: this.#responsesContinuation.get(this.threadId) ?? undefined,
+              onResponsesContinuationPlan: (_plan, state) => {
+                if (state) this.#responsesContinuation.set(this.threadId, state);
+                else this.#responsesContinuation.delete(this.threadId);
+              },
               transcript: (
                 this.#useFunctionCallCompatibilityTranscript || useTextToolProtocol
               )
@@ -3551,13 +3874,14 @@ class ThreadSessionRuntime {
               provider: requestProvider,
               reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
               forceTextToolProtocol: useTextToolProtocol,
+              incrementalResponses: this.services.config.incrementalResponses === true,
               stream: requestUsesStreaming,
               onTextDelta: async (delta) => {
                 if (abortController.signal.aborted) {
                   return;
                 }
                 receivedStreamingDelta = true;
-                markModelProgress();
+                markObservableModelProgress();
                 await updateDraft("generating", `${streamedVisibleContent}${delta}`, {
                   immediate: true,
                   deliveryMode: "streaming"
@@ -3565,14 +3889,14 @@ class ThreadSessionRuntime {
               },
               onReasoningDelta: async (delta) => {
                 if (abortController.signal.aborted) return;
-                markModelProgress();
+                markObservableModelProgress();
                 await updateDraftReasoning(delta);
               },
               onToolCallPreparing: async ({ name, argumentsJson }) => {
                 if (abortController.signal.aborted || canonicalizeToolName(name) === AGENT_PROTOCOL_RECOVERY_TOOL_NAME) {
                   return;
                 }
-                markModelProgress();
+                markObservableModelProgress();
                 await this.services.emit({
                   type: "agent.tool_call_preparing",
                   threadId: this.threadId,
@@ -3628,7 +3952,25 @@ class ThreadSessionRuntime {
               markModelProgress = markProgress;
             }
           );
+          clearModelSlowTimer();
+          void this.services.log("agent.model_decision_completed", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            providerId: provider.id,
+            durationMs: Date.now() - modelRequestStartedAt,
+            firstProgressReceived: firstModelProgressLogged,
+            streamed: receivedStreamingDelta,
+            toolCallCount: decision.toolCalls?.length ?? 0
+          }).catch(() => undefined);
         } catch (error) {
+          clearModelSlowTimer();
+          void this.services.log("agent.model_decision_failed", this.threadId, {
+            turnRunId: turn.id,
+            modelId: model.id,
+            providerId: provider.id,
+            durationMs: Date.now() - modelRequestStartedAt,
+            errorName: error instanceof Error ? error.name : "UnknownError"
+          }).catch(() => undefined);
           const errorMessage = error instanceof Error ? error.message : String(error);
           const requestLimit = readProviderRequestLimitDetails(error);
           if (
@@ -4155,6 +4497,13 @@ class ThreadSessionRuntime {
           });
         }
 
+        if (decision.usageReport) {
+          await this.services.log("agent.provider_usage_report", this.threadId, {
+            turnRunId: turn.id,
+            ...decision.usageReport
+          });
+        }
+
         // A guide received while the provider was deciding invalidates that
         // stale decision before it can start tool work. The next loop reads
         // the guide as the latest user instruction.
@@ -4352,32 +4701,52 @@ class ThreadSessionRuntime {
               ? textClarificationQuestions
               : riskClarificationQuestions);
           if (promotedQuestions.length > 0) {
-            await this.services.log("gpa.text_clarification_promoted", this.threadId, {
-              turnRunId: turn.id,
-              stage: this.#gpa.stage,
-              questionCount: promotedQuestions.length,
-              source: embeddedInput
-                ? "embedded_xml"
-                : textClarificationQuestions.length > 0
-                  ? "numbered_questions"
-                  : "risk_defaults"
-            });
-            decision.toolCalls = [{
-              id: randomUUID(),
-              name: "request_user_input",
-              arguments: {
-                title:
-                  embeddedInput?.title ??
-                  (this.#gpa.stage === "plan" ? "计划细节待确认" : "目标细节待确认"),
-                questions: promotedQuestions
-              }
-            }];
-            // Keep the visible analysis; only strip the unparsed XML markup.
-            decision.assistantMessage = embeddedInput
-              ? embeddedInput.cleanedContent || undefined
-              : decision.assistantMessage;
-            decision.endTurn = false;
-            decision.goalCompleted = false;
+            // The answers to a clarification arrive inside the same turn, and the
+            // model restates its plan afterwards. Without this filter the identical
+            // question was promoted again on every following decision, so the user
+            // had to answer the same thing over and over.
+            const freshQuestions = selectUnaskedGpaClarificationQuestions(
+              promotedQuestions,
+              this.#askedGpaClarifications
+            );
+            if (freshQuestions.length === 0) {
+              await this.services.log("gpa.clarification_duplicate_suppressed", this.threadId, {
+                turnRunId: turn.id,
+                stage: this.#gpa.stage,
+                questionIds: promotedQuestions.map((question) => question.id)
+              });
+            }
+            for (const question of freshQuestions) {
+              this.#askedGpaClarifications.add(gpaClarificationFingerprint(question));
+            }
+            if (freshQuestions.length > 0) {
+              await this.services.log("gpa.text_clarification_promoted", this.threadId, {
+                turnRunId: turn.id,
+                stage: this.#gpa.stage,
+                questionCount: freshQuestions.length,
+                source: embeddedInput
+                  ? "embedded_xml"
+                  : textClarificationQuestions.length > 0
+                    ? "numbered_questions"
+                    : "risk_defaults"
+              });
+              decision.toolCalls = [{
+                id: randomUUID(),
+                name: "request_user_input",
+                arguments: {
+                  title:
+                    embeddedInput?.title ??
+                    (this.#gpa.stage === "plan" ? "计划细节待确认" : "目标细节待确认"),
+                  questions: freshQuestions
+                }
+              }];
+              // Keep the visible analysis; only strip the unparsed XML markup.
+              decision.assistantMessage = embeddedInput
+                ? embeddedInput.cleanedContent || undefined
+                : decision.assistantMessage;
+              decision.endTurn = false;
+              decision.goalCompleted = false;
+            }
           }
         }
 
@@ -6136,6 +6505,43 @@ class ThreadSessionRuntime {
           rawToolCall.name = toolCall.name;
           let toolCallFingerprint = createToolCallFingerprint(toolCall.name, toolCall.arguments);
           let toolTaskKey = getToolCallTaskKey(toolCall.name, toolCall.arguments);
+          // Project rules are re-checked immediately before a write executes: the
+          // entries covering the target paths are expanded into the turn, and a
+          // boundary conflict blocks the call and is registered as a pending rule
+          // update instead of being written silently.
+          const projectRuleWriteCheck = projectRuleState
+            ? evaluateProjectRuleWriteCheck({
+                document: projectRuleState.document,
+                toolName: toolCall.name,
+                arguments: toolCall.arguments,
+                cwd: workspaceCwd
+              })
+            : null;
+          if (projectRuleWriteCheck?.injection) {
+            transcript.push({ role: "user", content: projectRuleWriteCheck.injection });
+          }
+          if (projectRuleWriteCheck?.requiresConfirmation && projectRuleWriteCheck.message) {
+            const projectRuleReason = projectRuleWriteCheck.message;
+            appendBlockedToolCallResult(toolCall, projectRuleReason);
+            await persistBlockedToolCall(toolCall, projectRuleReason, "project_rule_conflict");
+            const pendingRuleEntryId = thread.cwd
+              ? await recordProjectRuleWriteConflicts(thread.cwd, projectRuleWriteCheck.conflicts)
+              : null;
+            transcript.push({
+              role: "user",
+              content: pendingRuleEntryId
+                ? `${projectRuleReason}\n（冲突已登记为规则待更新条目 \`${pendingRuleEntryId}\`）`
+                : projectRuleReason
+            });
+            await this.services.log("agent.project_rule_write_blocked", this.threadId, {
+              turnRunId: turn.id,
+              toolName: toolCall.name,
+              conflicts: projectRuleWriteCheck.conflicts.map(
+                (conflict) => `${conflict.entryId}@${conflict.target}:${conflict.severity}`
+              )
+            });
+            continue;
+          }
           let recoveryTargetKey = getToolCallRecoveryTargetKey(toolCall.name, toolCall.arguments, workspaceCwd);
           let recoveryStrategyFingerprint = createRecoveryStrategyFingerprint(toolCall.name, toolCall.arguments);
           const isRepeatableCoordinationTool = toolCall.name === "multi_agents.wait" || toolCall.name === "multi_agents.list";
@@ -6502,6 +6908,34 @@ class ThreadSessionRuntime {
           let toolArgsInvalid = false;
           let toolContext: Parameters<ToolRuntime["execute"]>[1] | null = null;
           const toolTimeoutMs = resolveToolExecutionTimeoutMs(toolCall.name);
+          const toolOperationStartedAt = Date.now();
+          let toolPhase = "tool_execution";
+          let toolPhaseStartedAt = toolOperationStartedAt;
+          let slowOperationTimer: ReturnType<typeof setTimeout> | null = null;
+          const armSlowOperationTimer = () => {
+            if (slowOperationTimer) clearTimeout(slowOperationTimer);
+            slowOperationTimer = setTimeout(() => {
+              void this.services.log("agent.operation_slow", this.threadId, {
+                turnRunId: turn.id,
+                operation: "tool",
+                toolCallId: toolRecord.id,
+                toolName: toolCall.name,
+                phase: toolPhase,
+                phaseDurationMs: Date.now() - toolPhaseStartedAt,
+                totalDurationMs: Date.now() - toolOperationStartedAt
+              }).catch(() => undefined);
+            }, SLOW_OPERATION_DIAGNOSTIC_MS);
+          };
+          const setToolPhase = (phase: string) => {
+            toolPhase = phase;
+            toolPhaseStartedAt = Date.now();
+            armSlowOperationTimer();
+          };
+          const clearSlowOperationTimer = () => {
+            if (slowOperationTimer) clearTimeout(slowOperationTimer);
+            slowOperationTimer = null;
+          };
+          armSlowOperationTimer();
           try {
             // Projectless chats must never inherit the desktop application's launch folder.
             toolContext = {
@@ -6677,18 +7111,42 @@ class ThreadSessionRuntime {
               getThreadOutputDir: () => this.services.getThreadOutputDir(this.threadId),
               abortSignal: abortController.signal,
               generateImageWithDefaultModel: async ({ prompt, toolCallId }) => {
+                // The image model must receive the user's own words; a model-authored
+                // rewrite of the request would silently change what was asked for.
+                const resolvedPrompt = resolveVerbatimMediaPrompt({
+                  userInput: initialInput,
+                  requestedPrompt: prompt
+                });
+                if (resolvedPrompt.source === "user" && resolvedPrompt.prompt !== prompt) {
+                  await this.services.log("media.prompt_verbatim", this.threadId, {
+                    turnRunId: turn.id,
+                    toolName: "image.generate",
+                    promptPreview: resolvedPrompt.prompt.slice(0, 200)
+                  });
+                }
                 const generated = await this.createGeneratedImageArtifact({
                   turnId: turn.id,
-                  prompt,
+                  prompt: resolvedPrompt.prompt,
                   toolCallId: toolCallId ?? toolRecord.id,
                   abortSignal: abortController.signal
                 });
                 return generated;
               },
               generateVideoWithDefaultModel: async ({ prompt, toolCallId }) => {
+                const resolvedPrompt = resolveVerbatimMediaPrompt({
+                  userInput: initialInput,
+                  requestedPrompt: prompt
+                });
+                if (resolvedPrompt.source === "user" && resolvedPrompt.prompt !== prompt) {
+                  await this.services.log("media.prompt_verbatim", this.threadId, {
+                    turnRunId: turn.id,
+                    toolName: "video.generate",
+                    promptPreview: resolvedPrompt.prompt.slice(0, 200)
+                  });
+                }
                 const generated = await this.createGeneratedVideoArtifact({
                   turnId: turn.id,
-                  prompt,
+                  prompt: resolvedPrompt.prompt,
                   toolCallId: toolCallId ?? toolRecord.id,
                   abortSignal: abortController.signal
                 });
@@ -6855,6 +7313,7 @@ class ThreadSessionRuntime {
             }
           } catch (error) {
             if (abortController.signal.aborted) {
+              clearSlowOperationTimer();
               throw error;
             }
             const isToolTimeout = error instanceof ModelDecisionTimeoutError;
@@ -6885,9 +7344,12 @@ class ThreadSessionRuntime {
           }
 
           if (abortController.signal.aborted) {
+            clearSlowOperationTimer();
             throw new Error("Turn interrupted.");
           }
 
+          const toolExecutionDurationMs = Date.now() - toolOperationStartedAt;
+          setToolPhase("tool_result_processing");
           const pathVerification = result.ok
             ? await verifySuccessfulToolDeliveryPaths(toolCall.name, toolCall.arguments, result, workspaceCwd)
             : undefined;
@@ -6938,7 +7400,9 @@ class ThreadSessionRuntime {
           }
 
           const completedAt = new Date().toISOString();
+          const resultProcessingStartedAt = Date.now();
           const sanitizedResult = sanitizeToolResultForTranscript(toolCall.name, result, model.contextWindow);
+          const resultProcessingDurationMs = Date.now() - resultProcessingStartedAt;
           const repositoryResult = getMcpRepositoryToolResult(sanitizedResult);
           if (repositoryResult) {
             applyStructuredRepositoryResult(repositoryExploration, repositoryResult);
@@ -6985,15 +7449,28 @@ class ThreadSessionRuntime {
             ? summarizeDatabaseToolResultForPersistence(sanitizedResult)
             : toolCall.name === "mcp.call"
               ? summarizeMcpToolResultForPersistence(sanitizedResult)
-              : { ...result, json: sanitizedResult.json };
+              : toolCall.name === "code.search"
+                ? {
+                    ...sanitizedResult,
+                    json: {
+                      pattern: result.json?.pattern,
+                      outputBytes: Buffer.byteLength(result.content ?? "", "utf8"),
+                      truncated: (result.content ?? "").includes("[search output truncated]")
+                    }
+                  }
+                : { ...sanitizedResult, json: sanitizedResult.json };
           const eventResultJson = redactSensitiveText(JSON.stringify(persistedResult));
           const resultJson = eventResultJson;
           const status = result.ok ? "completed" : "failed";
+          setToolPhase("tool_persistence");
+          const persistenceStartedAt = Date.now();
           await this.services.persistence.finishToolCall(toolRecord.id, {
             status,
             resultJson,
             completedAt
           });
+          const persistenceDurationMs = Date.now() - persistenceStartedAt;
+          setToolPhase("tool_event_delivery");
           await this.services.emit({
             type: "tool.completed",
             threadId: this.threadId,
@@ -7008,6 +7485,25 @@ class ThreadSessionRuntime {
             },
             createdAt: new Date().toISOString()
           });
+          clearSlowOperationTimer();
+          const totalToolDurationMs = Date.now() - toolOperationStartedAt;
+          const resultContentBytes = Buffer.byteLength(result.content ?? "", "utf8");
+          const persistedResultBytes = Buffer.byteLength(resultJson, "utf8");
+          if (totalToolDurationMs >= 2_000 || resultContentBytes >= 64 * 1024 || persistedResultBytes >= 64 * 1024) {
+            void this.services.log("agent.tool_timing", this.threadId, {
+              turnRunId: turn.id,
+              toolCallId: toolRecord.id,
+              toolName: toolCall.name,
+              success: result.ok,
+              totalDurationMs: totalToolDurationMs,
+              executionDurationMs: toolExecutionDurationMs,
+              resultProcessingDurationMs,
+              persistenceDurationMs,
+              resultContentBytes,
+              persistedResultBytes,
+              truncated: toolCall.name === "code.search" && (result.content ?? "").includes("[search output truncated]")
+            }).catch(() => undefined);
+          }
 
           if (result.ok && MANAGED_WRITE_TOOL_NAMES.has(toolCall.name)) {
             // Count only consecutive failures. A successful write changes the
@@ -7172,7 +7668,6 @@ class ThreadSessionRuntime {
               toolCallId: toolCall.id,
               toolRecordId: toolRecord.id,
               toolName: toolCall.name,
-              hasPriorDelivery: successfulToolEvidence.some((item) => item.kinds.includes("delivery")),
               verificationPassed: toolCall.name === "project.verify"
                 ? result.json?.passed === true && Array.isArray(result.json?.commands) && result.json.commands.length > 0
                 : undefined,
@@ -7183,6 +7678,7 @@ class ThreadSessionRuntime {
               resultPreview: modelContent
             });
             successfulToolEvidence.push(evidence);
+            applyTurnVerificationEvidence(successfulToolEvidence);
             const prerequisiteTarget = recoveryPrerequisiteTargets.get(toolCall.id);
             if (prerequisiteTarget) {
               observedRecoveryTargets.add(prerequisiteTarget);
@@ -7381,12 +7877,12 @@ class ThreadSessionRuntime {
                   toolCallId: verificationCall.id,
                   toolRecordId: verificationRecord.id,
                   toolName: verificationCall.name,
-                  hasPriorDelivery: true,
                   verificationPassed: verificationResult.json?.passed === true &&
                     Array.isArray(verificationResult.json?.commands) && verificationResult.json.commands.length > 0,
                   unitTestPassed: hasSuccessfulUnitTestResult(verificationCall, verificationResult),
                   unitTestUnavailable: hasUnavailableUnitTestResult(verificationCall, verificationResult)
                 }));
+                applyTurnVerificationEvidence(successfulToolEvidence);
               } else if (!verificationResult.ok) {
                 await registerTargetFailure(
                   getToolCallRecoveryTargetKey(verificationCall.name, verificationCall.arguments, workspaceCwd),
@@ -8332,8 +8828,73 @@ export function buildUserMessageMetadata(
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
+/**
+ * Keys that select a slice of the same underlying operation. A model that adds
+ * `maxResults` or shifts `offset` after a failure is repeating the same call,
+ * but a differing slice used to hash differently, so repeat detection never saw
+ * it and the identical failing invocation could run forever.
+ */
+const FINGERPRINT_IGNORED_KEYS = new Set([
+  "limit",
+  "offset",
+  "charoffset",
+  "charlimit",
+  "maxresults",
+  "maxdepth",
+  "nextcursor",
+  "cursor",
+  "page",
+  "pagesize",
+  "perpage"
+]);
+
+const FINGERPRINT_URL_VALUE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const FINGERPRINT_WINDOWS_PATH = /^[a-z]:\//i;
+
+/**
+ * `D:\workagent\App.tsx` and `d:/workagent/App.tsx` name one file but hashed
+ * differently, so a reworded path escaped repeat detection. Only separator
+ * style, repeated separators, a trailing separator and drive-letter case are
+ * unified; every other character still distinguishes two invocations.
+ */
+function normalizeFingerprintString(value: string): string {
+  const trimmed = value.trim();
+  if (FINGERPRINT_URL_VALUE.test(trimmed) || !/[\\/]/.test(trimmed)) return trimmed;
+  const unified = trimmed.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  const withoutTrailingSeparator = unified.length > 1 ? unified.replace(/\/+$/, "") : unified;
+  return FINGERPRINT_WINDOWS_PATH.test(withoutTrailingSeparator)
+    ? withoutTrailingSeparator.charAt(0).toLowerCase() + withoutTrailingSeparator.slice(1)
+    : withoutTrailingSeparator;
+}
+
+function normalizeFingerprintValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeFingerprintValue(item));
+  }
+  if (value && typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (FINGERPRINT_IGNORED_KEYS.has(key.toLowerCase())) continue;
+      normalized[key] = normalizeFingerprintValue(item);
+    }
+    return normalized;
+  }
+  return typeof value === "string" ? normalizeFingerprintString(value) : value;
+}
+
 export function createToolCallFingerprint(name: string, argumentsJson: Record<string, unknown>): string {
-  return `${name}:${stableSerialize(argumentsJson)}`;
+  // Some callers canonicalize the tool alias before hashing and others do not,
+  // which split the dedupe key for one and the same tool.
+  const normalizedName = name.trim().toLowerCase();
+  return `${normalizedName}:${stableSerialize(normalizeFingerprintValue(argumentsJson))}`;
+}
+
+/**
+ * Orders the provider tool baseline by tool name so the serialized tool block
+ * stays byte-stable across turns regardless of MCP/skill discovery order.
+ */
+export function sortToolsForStableBaseline(tools: readonly ToolSpecDefinition[]): ToolSpecDefinition[] {
+  return [...tools].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export function prioritizeToolsForProvider(input: {
@@ -9144,7 +9705,13 @@ export function classifySuccessfulToolEvidence(input: {
   toolCallId: string;
   toolRecordId?: string;
   toolName: string;
-  hasPriorDelivery: boolean;
+  /**
+   * Whether a successful delivery call was already observed in this turn.
+   * A verification-capable call that ran before the change it proves is
+   * granted the `verification` kind retroactively by
+   * applyTurnVerificationEvidence, so the outcome never depends on call order.
+   */
+  hasPriorDelivery?: boolean;
   verificationPassed?: boolean;
   unitTestPassed?: boolean;
   unitTestUnavailable?: boolean;
@@ -9166,18 +9733,23 @@ export function classifySuccessfulToolEvidence(input: {
     kinds.add("delivery");
     kinds.add("verification");
   }
-  if (
-    input.hasPriorDelivery &&
+  const verificationCandidate =
     POST_DELIVERY_VERIFICATION_TOOLS.has(input.toolName) &&
-    (input.toolName !== "project.verify" || input.verificationPassed === true)
-  ) {
+    (input.toolName !== "project.verify" || input.verificationPassed === true);
+  if (verificationCandidate) {
     kinds.add("verification");
+    // A verification capability is not by itself a verification: a lone read
+    // still has to be backed by a delivered change in the same turn.
+    if (!input.hasPriorDelivery) {
+      kinds.delete("verification");
+    }
   }
   return {
     toolCallId: input.toolCallId,
     toolRecordId: input.toolRecordId,
     toolName: input.toolName,
     kinds: [...kinds],
+    verificationCandidate: verificationCandidate || undefined,
     unitTestPassed: input.unitTestPassed === true || undefined,
     unitTestUnavailable: input.unitTestUnavailable === true || undefined,
     verifiedPaths: input.verifiedPaths,
@@ -9185,6 +9757,22 @@ export function classifySuccessfulToolEvidence(input: {
   };
 }
 
+/**
+ * Grants verification credit retroactively for a call that ran before the
+ * change it proves. Requiring the delivery to be observed first made the same
+ * transcript valid or invalid purely from tool ordering: a model that ran its
+ * test and then wrote the patch kept collecting "no post-delivery verification
+ * evidence" no matter how often it retried. Credit is withheld while the turn
+ * holds no delivery at all, so a lone read stays an observation.
+ */
+export function applyTurnVerificationEvidence(evidence: SuccessfulToolEvidence[]): void {
+  if (!evidence.some((item) => item.kinds.includes("delivery"))) return;
+  for (const item of evidence) {
+    if (item.verificationCandidate && !item.kinds.includes("verification")) {
+      item.kinds = [...item.kinds, "verification"];
+    }
+  }
+}
 /**
  * Resolves ACT progress without treating ordinary commentary as task completion.
  * Provider-reported ids always win; text is considered only when the provider
@@ -11563,15 +12151,33 @@ export function formatAvailableTools(
         ? "The following tools are available in this turn. They are real executable tools, not examples. Command execution is available through the listed shell tool."
         : "The following tools are available in this turn. They are real executable tools, not examples. Use only the tools listed below."
       : "No executable tools are available in this turn.",
+    ...(hasVisibleBrowserOpener
+      ? ["Visible browser tools are opt-in: use browser.* only when the user explicitly asks to open, show, or operate a website in the visible browser, or when implementing/testing a web frontend and visual browser verification is genuinely needed. Never use them for unrelated questions, local code analysis, or ordinary web research/page reading. For research, use web_search tools that read pages in the background."]
+      : []),
     ...(shellAvailable ? ["For shell commands, call shell.exec with {\"command\": \"...\"}. For a local web project, do not open index.html with Start-Process. Start an HTTP server instead, then open its http://127.0.0.1:<port> URL. When starting a long-running local server on Windows, use a background command such as Start-Process so the tool call can complete."] : []),
     ...(shellAvailable && process.platform === "win32"
       ? ["This desktop executes shell.exec in Windows PowerShell. Use PowerShell syntax; recognizable CMD commands are adapted automatically. Do not use Bash syntax such as `||`, and never edit files through shell.exec: use apply_patch."]
       : []),
     ...(hasBackgroundPageReader && hasVisibleBrowserOpener
-      ? ["web_search.open_page only reads page text in the background and never appears in the right-side Browser workspace. When the user asks to open, show, watch, or interact with a website, use browser.open_tab instead."]
+      ? ["web_search.open_page only reads page text in the background and never appears in the right-side Browser workspace. Use it for web research and reading; use browser.open_tab only for the explicit visible-browser cases described above."]
       : []),
     ...definitions
   ].join("\n");
+}
+
+export function shouldExposeVisibleBrowserTools(userContext: string, planContext = ""): boolean {
+  const context = `${userContext}\n${planContext}`;
+  if (/(?:不要|别|无需|不需要|禁止).{0,16}(?:浏览器|网页|网站)|\b(?:don't|do not|never|without)\b.{0,24}\b(?:browser|website|web page)\b/i.test(userContext)) {
+    return false;
+  }
+
+  const explicitVisibleBrowserRequest =
+    /(?:用|通过|打开|访问|进入|登录|操作|控制|点击|填写|浏览|导航到|跳转到|截图|截屏|展示|显示).{0,20}(?:浏览器|网页|网站|页面|网址|链接)|(?:浏览器|网页|网站|页面|网址|链接).{0,20}(?:打开|访问|进入|登录|操作|点击|填写|截图|截屏|展示|测试|预览)|\b(?:open|visit|navigate to|interact with|use|launch|show|display|log into|click|fill|screenshot|preview|render|test)\b.{0,35}\b(?:browser|web page|website|page|url|link)\b/i.test(userContext);
+  const frontendImplementationOrVerification =
+    (isWebFrontendTaskText(userContext) || isWebFrontendTaskText(planContext) || /\b(?:react|vue|svelte|angular)\b|前端|网页应用|网站开发/i.test(context)) &&
+    /(?:创建|开发|制作|实现|修改|修复|调试|预览|测试|验证|重构|美化|优化|build|create|implement|modify|fix|debug|preview|test|verify|refactor|develop|design)/i.test(context);
+
+  return explicitVisibleBrowserRequest || frontendImplementationOrVerification;
 }
 
 function buildGpaPlanRevisionInstruction(): string {
@@ -11702,6 +12308,11 @@ function buildRuntimePrompt(
   const attachedFilePrompt = buildAttachedLocalFilePrompt(attachedLocalPaths);
   if (attachedFilePrompt) {
     blocks.push(attachedFilePrompt);
+  }
+  if (imageGenerateAvailable || videoGenerateAvailable) {
+    blocks.push(
+      "Image and video generation send the user's own words to the media model: the runtime replaces any prompt you compose with the current user message verbatim. Call image.generate or video.generate as soon as the request arrives, without a reasoning, planning, or prompt-engineering step, and pass the user's request through unchanged - never translate, expand, shorten, restyle, or add style, composition, lighting, motion, or camera hints. Describe what you are generating in the user's own wording."
+    );
   }
   if (imageGenerateAvailable) {
     blocks.push(

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray, type Session } from "electron";
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray, type Session } from "electron";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -59,6 +59,10 @@ const backend = new DesktopBackend();
 let updates: UpdateService | null = null;
 const runtimeThreadStatuses = new Map<string, ThreadStatus>();
 const deliveredSystemNotificationKeys = new Set<string>();
+let registeredScreenshotShortcut: string | null = null;
+let screenshotShortcutRecording = false;
+let screenshotSelectionWindow: BrowserWindow | null = null;
+let pendingScreenshotSelection: { png: Buffer; displayId: string; displayBounds: { width: number; height: number } } | null = null;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const sessionDataDir = path.join(app.getPath("userData"), "session-data");
@@ -106,6 +110,207 @@ function showMainWindow(): void {
 
   mainWindow.show();
   mainWindow.focus();
+}
+
+function registerScreenshotShortcut(): void {
+  if (registeredScreenshotShortcut) {
+    globalShortcut.unregister(registeredScreenshotShortcut);
+    registeredScreenshotShortcut = null;
+  }
+  if (screenshotShortcutRecording) return;
+  const accelerator = (backend.getConfig().desktop.screenshotShortcut ?? "CommandOrControl+Alt+S").trim();
+  if (!accelerator) return;
+  let registered = false;
+  try {
+    registered = globalShortcut.register(accelerator, () => {
+      void captureShortcutScreenshot().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[screenshot-shortcut] capture failed", message);
+        void backend.appendRuntimeLog("screenshot_shortcut.failed", { accelerator, message: message.slice(0, 2_000) });
+        mainWindow?.webContents.send("screenshot-shortcut:error", message);
+      });
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn("[screenshot-shortcut] invalid accelerator", accelerator, message);
+    void backend.appendRuntimeLog("screenshot_shortcut.registration_failed", { accelerator, message: message.slice(0, 2_000) });
+  }
+  if (!registered) {
+    const message = `截图快捷键 ${accelerator} 注册失败，可能与其他程序或系统快捷键冲突。`;
+    console.warn("[screenshot-shortcut] registration failed", accelerator);
+    void backend.appendRuntimeLog("screenshot_shortcut.registration_failed", { accelerator });
+    mainWindow?.webContents.send("screenshot-shortcut:error", message);
+    return;
+  }
+  registeredScreenshotShortcut = accelerator;
+  void backend.appendRuntimeLog("screenshot_shortcut.registered", { accelerator });
+}
+
+async function captureShortcutScreenshot(): Promise<void> {
+  if (screenshotSelectionWindow && !screenshotSelectionWindow.isDestroyed()) {
+    screenshotSelectionWindow.show();
+    screenshotSelectionWindow.focus();
+    return;
+  }
+  const displays = screen.getAllDisplays();
+  if (displays.length === 0) throw new Error("没有可用的显示器，无法截图。");
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const scaleFactor = Number.isFinite(display.scaleFactor) ? Math.max(1, display.scaleFactor) : 1;
+  const width = Math.max(1, Math.round(display.size.width * scaleFactor));
+  const height = Math.max(1, Math.round(display.size.height * scaleFactor));
+  const downscale = Math.min(1, 8192 / Math.max(width, height));
+  const sources = await desktopCapturer.getSources({
+    types: ["screen"],
+    thumbnailSize: { width: Math.max(1, Math.round(width * downscale)), height: Math.max(1, Math.round(height * downscale)) },
+    fetchWindowIcons: false
+  });
+  const source = sources.find((candidate) => candidate.display_id === String(display.id))
+    ?? sources[Math.max(0, displays.findIndex((item) => item.id === display.id))]
+    ?? sources[0];
+  if (!source || source.thumbnail.isEmpty()) {
+    throw new Error("截图没有获得图像，请检查系统的屏幕录制权限。");
+  }
+  const png = source.thumbnail.toPNG();
+  pendingScreenshotSelection = {
+    png,
+    displayId: String(display.id),
+    displayBounds: { width: display.bounds.width, height: display.bounds.height }
+  };
+  const overlay = new BrowserWindow({
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.bounds.width,
+    height: display.bounds.height,
+    frame: false,
+    transparent: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    backgroundColor: "#111111",
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/screenshot-selection.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  });
+  screenshotSelectionWindow = overlay;
+  overlay.setMenuBarVisibility(false);
+  overlay.setAlwaysOnTop(true, "screen-saver");
+  overlay.on("closed", () => {
+    if (screenshotSelectionWindow === overlay) {
+      screenshotSelectionWindow = null;
+      pendingScreenshotSelection = null;
+    }
+  });
+  overlay.webContents.on("did-finish-load", () => {
+    if (!overlay.isDestroyed()) {
+      const image = nativeImage.createFromBuffer(png);
+      const size = image.getSize();
+      overlay.webContents.send("screenshot-selection:init", {
+        dataUrl: `data:image/png;base64,${png.toString("base64")}`,
+        width: size.width,
+        height: size.height
+      });
+    }
+  });
+  overlay.show();
+  overlay.focus();
+  try {
+    await overlay.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(screenshotSelectionHtml())}`);
+  } catch (error) {
+    if (screenshotSelectionWindow === overlay) screenshotSelectionWindow = null;
+    pendingScreenshotSelection = null;
+    if (!overlay.isDestroyed()) overlay.destroy();
+    throw error;
+  }
+  void backend.appendRuntimeLog("screenshot_shortcut.selection_started", { displayId: String(display.id) });
+}
+
+async function finishScreenshotSelection(input: {
+  action: "attach" | "copy" | "save";
+  rect: { x: number; y: number; width: number; height: number };
+}): Promise<void> {
+  const pending = pendingScreenshotSelection;
+  if (!pending) return;
+  const source = nativeImage.createFromBuffer(pending.png);
+  const sourceSize = source.getSize();
+  const scaleX = sourceSize.width / pending.displayBounds.width;
+  const scaleY = sourceSize.height / pending.displayBounds.height;
+  const x = Math.max(0, Math.min(sourceSize.width - 1, Math.floor(input.rect.x * scaleX)));
+  const y = Math.max(0, Math.min(sourceSize.height - 1, Math.floor(input.rect.y * scaleY)));
+  const width = Math.max(1, Math.min(sourceSize.width - x, Math.ceil(input.rect.width * scaleX)));
+  const height = Math.max(1, Math.min(sourceSize.height - y, Math.ceil(input.rect.height * scaleY)));
+  const png = source.crop({ x, y, width, height }).toPNG();
+  pendingScreenshotSelection = null;
+  const overlay = screenshotSelectionWindow;
+  screenshotSelectionWindow = null;
+  if (overlay && !overlay.isDestroyed()) overlay.close();
+
+  if (input.action === "copy") {
+    clipboard.writeImage(nativeImage.createFromBuffer(png));
+    void backend.appendRuntimeLog("screenshot_shortcut.copied", { displayId: pending.displayId, width, height });
+    return;
+  }
+  if (input.action === "save") {
+    const result = await dialog.showSaveDialog({
+      defaultPath: path.join(app.getPath("pictures"), `screenshot-${Date.now()}.png`),
+      filters: [{ name: "PNG 图片", extensions: ["png"] }]
+    });
+    if (result.canceled || !result.filePath) return;
+    await fsp.writeFile(result.filePath, png);
+    void backend.appendRuntimeLog("screenshot_shortcut.saved", { displayId: pending.displayId, filePath: result.filePath, width, height });
+    return;
+  }
+
+  const screenshotDir = path.join(app.getPath("userData"), "shortcut-screenshots");
+  await fsp.mkdir(screenshotDir, { recursive: true });
+  const filePath = path.join(screenshotDir, `screenshot-${Date.now()}.png`);
+  await fsp.writeFile(filePath, png);
+  void backend.appendRuntimeLog("screenshot_shortcut.captured", { displayId: pending.displayId, filePath, width, height });
+  showMainWindow();
+  mainWindow?.webContents.send("screenshot-shortcut:captured", { filePath, fileName: path.basename(filePath) });
+}
+
+function cancelScreenshotSelection(): void {
+  const overlay = screenshotSelectionWindow;
+  screenshotSelectionWindow = null;
+  pendingScreenshotSelection = null;
+  if (overlay && !overlay.isDestroyed()) overlay.close();
+  void backend.appendRuntimeLog("screenshot_shortcut.selection_cancelled", {});
+}
+
+function screenshotSelectionHtml(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#151515;font:14px/1.4 "Segoe UI",Arial,sans-serif;color:#fff;user-select:none}
+    #screen,#shade{position:fixed;inset:0;width:100%;height:100%}#screen{object-fit:fill}#shade{background:rgba(0,0,0,.34);cursor:crosshair}
+    #selection{position:fixed;display:none;border:1px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.55);pointer-events:none}
+    #selection-image{position:absolute;inset:0;background-repeat:no-repeat}#size{position:absolute;left:0;top:-27px;padding:3px 7px;border-radius:4px;background:rgba(0,0,0,.78);font-size:12px;white-space:nowrap}
+    #help{position:fixed;left:50%;top:24px;transform:translateX(-50%);padding:8px 14px;border:1px solid rgba(255,255,255,.18);border-radius:8px;background:rgba(20,20,20,.78);box-shadow:0 4px 18px rgba(0,0,0,.2);pointer-events:none}
+    #toolbar{position:fixed;display:none;align-items:center;gap:4px;padding:6px;border:1px solid rgba(255,255,255,.12);border-radius:9px;background:#242424;box-shadow:0 8px 28px rgba(0,0,0,.38);white-space:nowrap}
+    #toolbar button{height:32px;padding:0 12px;border:0;border-radius:6px;background:transparent;color:#eee;font:inherit;cursor:pointer}#toolbar button:hover{background:#3b3b3b}
+    #toolbar button.primary{background:#07c160;color:#fff}#toolbar button.primary:hover{background:#06ad56}#toolbar .divider{width:1px;height:20px;margin:0 3px;background:#505050}
+  </style></head><body>
+    <img id="screen"><div id="shade"></div><div id="help">拖动鼠标选择截图区域 · Esc 取消</div>
+    <div id="selection"><div id="selection-image"></div><span id="size"></span></div>
+    <div id="toolbar"><button data-action="copy">复制</button><button data-action="save">保存</button><span class="divider"></span><button data-action="cancel">取消</button><button class="primary" data-action="attach">完成</button></div>
+    <script>
+      const screenImage=document.getElementById('screen'),selection=document.getElementById('selection'),selectionImage=document.getElementById('selection-image'),sizeLabel=document.getElementById('size'),toolbar=document.getElementById('toolbar'),help=document.getElementById('help');
+      let start=null,rect=null,imageWidth=0,imageHeight=0;
+      window.screenshotSelection.onInit(({dataUrl,width,height})=>{screenImage.src=dataUrl;imageWidth=width;imageHeight=height;});
+      function update(x,y){const left=Math.min(start.x,x),top=Math.min(start.y,y),width=Math.abs(x-start.x),height=Math.abs(y-start.y);rect={x:left,y:top,width,height};selection.style.display='block';selection.style.left=left+'px';selection.style.top=top+'px';selection.style.width=width+'px';selection.style.height=height+'px';selectionImage.style.backgroundImage='url('+screenImage.src+')';selectionImage.style.backgroundSize=innerWidth+'px '+innerHeight+'px';selectionImage.style.backgroundPosition=(-left)+'px '+(-top)+'px';sizeLabel.textContent=Math.round(width*imageWidth/innerWidth)+' × '+Math.round(height*imageHeight/innerHeight);}
+      document.addEventListener('pointerdown',event=>{if(event.target.closest('#toolbar'))return;if(event.button!==0)return;start={x:event.clientX,y:event.clientY};rect=null;toolbar.style.display='none';selection.style.display='none';help.style.display='none';});
+      document.addEventListener('pointermove',event=>{if(start)update(event.clientX,event.clientY);});
+      document.addEventListener('pointerup',event=>{if(!start)return;update(event.clientX,event.clientY);start=null;if(!rect||rect.width<3||rect.height<3){selection.style.display='none';help.style.display='block';return;}const toolbarWidth=toolbar.offsetWidth||300,toolbarHeight=toolbar.offsetHeight||46;let left=Math.max(8,Math.min(innerWidth-toolbarWidth-8,rect.x));let top=rect.y+rect.height+8;if(top+toolbarHeight>innerHeight-8)top=Math.max(8,rect.y-toolbarHeight-8);toolbar.style.left=left+'px';toolbar.style.top=top+'px';toolbar.style.display='flex';});
+      toolbar.addEventListener('pointerdown',event=>event.stopPropagation());
+      toolbar.addEventListener('click',event=>{const button=event.target.closest('button[data-action]');if(!button||!rect)return;const action=button.dataset.action;if(action==='cancel'){window.screenshotSelection.cancel();return;}window.screenshotSelection.complete({action,rect});});
+      document.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();window.screenshotSelection.cancel();}});
+    </script>
+  </body></html>`;
 }
 
 function broadcastTheme(): void {
@@ -364,6 +569,7 @@ async function createWindow(): Promise<void> {
     void backend.appendRuntimeLog("renderer.load_failed", payload);
   });
   mainWindow.webContents.on("did-finish-load", () => {
+    registerScreenshotShortcut();
     void backend.appendRuntimeLog("renderer.loaded", { url: mainWindow?.webContents.getURL() ?? "" });
   });
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
@@ -729,9 +935,35 @@ function registerIpc(): void {
   });
   ipcMain.handle("config:save", async (_event, config) => {
     await backend.saveConfig(config);
+    registerScreenshotShortcut();
     broadcastTheme();
     if (!backend.getConfig().desktop.liveEditPreview) liveEditPreview.clear();
     if (!backend.getConfig().desktop.llmLogViewer) conversationLogWindow.close();
+  });
+  ipcMain.handle("screenshot-shortcut:recording", (event, recording: boolean) => {
+    if (event.sender !== mainWindow?.webContents) return;
+    screenshotShortcutRecording = recording === true;
+    registerScreenshotShortcut();
+  });
+  ipcMain.handle("screenshot-selection:complete", async (event, payload: unknown) => {
+    if (event.sender !== screenshotSelectionWindow?.webContents) throw new Error("截图选区窗口无效。");
+    const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+    const rect = record.rect && typeof record.rect === "object" ? record.rect as Record<string, unknown> : {};
+    const action = record.action;
+    const coordinates = [rect.x, rect.y, rect.width, rect.height];
+    if ((action !== "attach" && action !== "copy" && action !== "save")
+      || !coordinates.every((value) => typeof value === "number" && Number.isFinite(value))
+      || Number(rect.width) <= 0 || Number(rect.height) <= 0) {
+      throw new Error("截图选区参数无效。");
+    }
+    await finishScreenshotSelection({
+      action,
+      rect: { x: Number(rect.x), y: Number(rect.y), width: Number(rect.width), height: Number(rect.height) }
+    });
+  });
+  ipcMain.handle("screenshot-selection:cancel", (event) => {
+    if (event.sender !== screenshotSelectionWindow?.webContents) return;
+    cancelScreenshotSelection();
   });
   ipcMain.handle("config:set-live-edit-preview", async (_event, enabled: boolean) => {
     const next = await backend.setLiveEditPreviewEnabled(enabled === true);
@@ -1023,6 +1255,11 @@ function stopActiveThreadsBeforeQuit(): Promise<void> {
 
 app.on("before-quit", (event) => {
   isQuitting = true;
+  globalShortcut.unregisterAll();
+  registeredScreenshotShortcut = null;
+  pendingScreenshotSelection = null;
+  if (screenshotSelectionWindow && !screenshotSelectionWindow.isDestroyed()) screenshotSelectionWindow.destroy();
+  screenshotSelectionWindow = null;
   if (shutdownTasksPromise) return;
   // Abort in-flight model runs before the process exits. Interrupting persists
   // the turn as interrupted, so the elapsed clock freezes instead of resuming

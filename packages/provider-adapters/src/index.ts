@@ -15,6 +15,8 @@ import type {
   ProviderTurnDecision,
   ProviderTurnInput,
   ProviderType,
+  ResponsesContinuationPlan,
+  ResponsesContinuationState,
   RuntimeToolCall,
   TokenUsage
 } from "@shared-types";
@@ -25,6 +27,11 @@ import type {
 } from "./models";
 import { resolveModelCompat } from "./models";
 import { appendGrokCompletionAuditInstruction, grokFileToolPromptLines, grokNativeToolName, isGrokModel, normalizeGrokCompletionAuditDecision, prepareGrokAvailableTools } from "./models";
+import { describeProviderUsageReport } from "./usage-report";
+import { planResponsesIncrementalRequest } from "./responses-incremental";
+
+export { describeProviderUsageReport } from "./usage-report";
+export { planResponsesIncrementalRequest } from "./responses-incremental";
 
 export {
   resolveModelCompat,
@@ -1280,6 +1287,24 @@ class OpenAiCompatibleProvider implements ProviderAdapter {
 }
 
 /**
+ * Reports the continuation decision of one Responses request. The next state
+ * is only forwarded when the upstream response id is known, because a response
+ * without an id cannot be reused through `previous_response_id`.
+ */
+function reportResponsesContinuation(
+  input: ProviderTurnInput,
+  plan: ResponsesContinuationPlan | null,
+  state: { propertiesFingerprint: string; itemFingerprints: string[] } | null,
+  responseId: string | undefined
+): void {
+  if (!plan || !input.onResponsesContinuationPlan) return;
+  const nextState: ResponsesContinuationState | null = state && responseId
+    ? { ...state, responseId }
+    : null;
+  input.onResponsesContinuationPlan(plan, nextState);
+}
+
+/**
  * OpenAI Responses-compatible transport used by xAI's current agent API.
  * It is deliberately separate from Chat Completions: the request transcript,
  * streaming events, and function-result wire shapes are different.
@@ -1335,12 +1360,21 @@ class OpenAiResponsesProvider implements ProviderAdapter {
       instructions: input.systemPrompt || undefined,
       input: await buildResponsesInput(input),
       max_output_tokens: input.model.defaultMaxOutputTokens,
+      ...(input.cacheAffinityKey ? { prompt_cache_key: input.cacheAffinityKey } : {}),
       ...(nativeTools ? { tools: nativeTools, parallel_tool_calls: input.model.supportsParallelToolCalls } : {}),
       ...(reasoningEffort
         ? { reasoning: { effort: reasoningEffort, summary: "concise" } }
         : {})
     };
-    const request = compat.normalizeRequestParams(compatContext, baseRequest);
+    const normalizedRequest = compat.normalizeRequestParams(compatContext, baseRequest);
+    const continuationResult = input.incrementalResponses === true
+      ? planResponsesIncrementalRequest({
+          enabled: true,
+          previous: input.responsesContinuation ?? null,
+          request: normalizedRequest
+        })
+      : null;
+    const request = continuationResult?.request ?? normalizedRequest;
 
     try {
       if (input.stream && input.model.supportsStreaming) {
@@ -1350,13 +1384,18 @@ class OpenAiResponsesProvider implements ProviderAdapter {
           signal: input.abortSignal
         }) as any;
         if (isAsyncIterable(stream)) {
-          return compat.normalizeDecision(await consumeResponsesStream(stream, input), compatContext);
+          const completion: { responseId?: string } = {};
+          const streamDecision = await consumeResponsesStream(stream, input, completion);
+          reportResponsesContinuation(input, continuationResult?.plan ?? null, continuationResult?.state ?? null, completion.responseId);
+          return compat.normalizeDecision(streamDecision, compatContext);
         }
+        reportResponsesContinuation(input, continuationResult?.plan ?? null, continuationResult?.state ?? null, typeof stream?.id === "string" ? stream.id : undefined);
         return compat.normalizeDecision(parseResponsesResponse(stream, input), compatContext);
       }
       const limitedRequest = applyProviderRequestLimits(request, this.provider, input.model);
       await reportProviderRequestMeasurement(input, limitedRequest);
       const response = await this.#client.responses.create(limitedRequest as any, { signal: input.abortSignal });
+      reportResponsesContinuation(input, continuationResult?.plan ?? null, continuationResult?.state ?? null, typeof response?.id === "string" ? response.id : undefined);
       return compat.normalizeDecision(parseResponsesResponse(response, input), compatContext);
     } catch (error) {
       if (
@@ -2722,7 +2761,7 @@ function parseResponsesResponse(response: any, input: ProviderTurnInput): Provid
   return responseReasoningItem ? { ...withReasoning, responseReasoningItem } : withReasoning;
 }
 
-async function consumeResponsesStream(stream: AsyncIterable<any>, input: ProviderTurnInput): Promise<ProviderTurnDecision> {
+async function consumeResponsesStream(stream: AsyncIterable<any>, input: ProviderTurnInput, completion?: { responseId?: string }): Promise<ProviderTurnDecision> {
   let text = "";
   let visibleText = "";
   let reasoning = "";
@@ -2795,6 +2834,7 @@ async function consumeResponsesStream(stream: AsyncIterable<any>, input: Provide
     }
     if (event?.type === "response.completed") {
       terminalResponse = event.response;
+      if (completion && typeof event.response?.id === "string") completion.responseId = event.response.id;
       continue;
     }
     if (event?.type === "response.incomplete") {
@@ -3495,10 +3535,17 @@ function contentWithFileAttachments(content: string, attachments?: MessageAttach
 
 function withTokenUsage(decision: ProviderTurnDecision, rawUsage: unknown): ProviderTurnDecision {
   const usage = parseProviderTokenUsage(rawUsage);
-  if (!usage) return decision;
+  const usageReport = describeProviderUsageReport(rawUsage);
+  if (!usage) {
+    // Keep the "which fields were reported" signal even when no token numbers
+    // parsed, so telemetry can tell "the gateway reports nothing" apart from a
+    // real zero. Unrecognized payload shapes stay untouched to avoid noise.
+    return usageReport.protocol === "unknown" ? decision : { ...decision, usageReport };
+  }
   return {
     ...decision,
     usage,
+    usageReport,
     outputTokens: usage.outputTokens || decision.outputTokens
   };
 }
@@ -3521,6 +3568,35 @@ export function parseProviderTokenUsage(rawUsage: unknown): TokenUsage | null {
       inputCacheHitTokens,
       inputCacheMissTokens: Math.max(0, inputTokens - inputCacheHitTokens),
       inputCacheWriteTokens: numberOrZero(details.cache_write_tokens ?? usage.cache_write_tokens),
+      outputTokens,
+      outputReasoningTokens,
+      outputContentTokens: Math.max(0, outputTokens - outputReasoningTokens)
+    });
+  }
+
+  // OpenAI Responses: `input_tokens`/`output_tokens` are the top-level totals
+  // and the cache/reasoning breakdown lives in the nested detail objects. This
+  // must run before the Anthropic branch, which matches the same top-level
+  // field names and would otherwise report a 0% cache hit rate for every
+  // GPT-family turn routed through the Responses API.
+  if (
+    (typeof usage.input_tokens === "number" || typeof usage.output_tokens === "number") &&
+    isRecord(usage.input_tokens_details) &&
+    !("cache_read_input_tokens" in usage) &&
+    !("cache_creation_input_tokens" in usage)
+  ) {
+    const inputTokens = numberOrZero(usage.input_tokens);
+    const outputTokens = numberOrZero(usage.output_tokens);
+    const details = usage.input_tokens_details;
+    const completionDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : {};
+    const inputCacheHitTokens = numberOrZero(details.cached_tokens);
+    const outputReasoningTokens = numberOrZero(completionDetails.reasoning_tokens);
+    return finalizeTokenUsage({
+      totalTokens: numberOrZero(usage.total_tokens) || inputTokens + outputTokens,
+      inputTokens,
+      inputCacheHitTokens,
+      inputCacheMissTokens: Math.max(0, inputTokens - inputCacheHitTokens),
+      inputCacheWriteTokens: 0,
       outputTokens,
       outputReasoningTokens,
       outputContentTokens: Math.max(0, outputTokens - outputReasoningTokens)

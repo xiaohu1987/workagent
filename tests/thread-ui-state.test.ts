@@ -239,6 +239,43 @@ describe("thread UI state helpers", () => {
     expect(shouldCommitRuntimeMessageImmediately({ ...message, role: "user" })).toBe(false);
   });
 
+  it("keeps a commentary final answer as the collapsed-turn summary", () => {
+    // A finished turn whose final answer is classified as commentary had no formal assistant
+    // message at all, so the collapsed turn had nothing to render and the conclusion stayed
+    // folded away until the thread was reopened.
+    const user: MessageRecord = {
+      id: "user-summary",
+      threadId: "thread-summary",
+      turnRunId: "turn-summary",
+      role: "user",
+      content: "问题",
+      metadataJson: null,
+      createdAt: "2026-09-24T02:00:00.000Z"
+    };
+    const commentaryAnswer: MessageRecord = {
+      ...user,
+      id: "assistant-commentary-answer",
+      role: "assistant",
+      content: "结论：两个渲染问题都已修复",
+      metadataJson: JSON.stringify({ displayKind: "commentary" }),
+      createdAt: "2026-09-24T02:00:05.000Z"
+    };
+    const formalAnswer: MessageRecord = {
+      ...commentaryAnswer,
+      id: "assistant-formal-answer",
+      metadataJson: null,
+      createdAt: "2026-09-24T02:00:09.000Z"
+    };
+
+    const commentaryEntries = buildTimelineEntries([user, commentaryAnswer], [], [], undefined, undefined, []);
+    expect(buildConversationTurnSections(commentaryEntries)[0]?.summaryEntryId)
+      .toBe(commentaryEntries[commentaryEntries.length - 1]?.id);
+
+    const formalEntries = buildTimelineEntries([user, commentaryAnswer, formalAnswer], [], [], undefined, undefined, []);
+    expect(buildConversationTurnSections(formalEntries)[0]?.summaryEntryId)
+      .toBe(formalEntries[formalEntries.length - 1]?.id);
+  });
+
   it("refreshes a parent task snapshot for runtime events from its subagents", () => {
     expect(shouldRefreshSelectedSnapshotForRuntimeEvent(
       "parent-thread",
@@ -359,10 +396,10 @@ describe("thread UI state helpers", () => {
   it("keeps folder and git workspace resources off for ordinary chats", () => {
     expect(isProjectWorkspaceThread("chat")).toBe(false);
     expect(isProjectWorkspaceThread("project")).toBe(true);
-    expect(getDefaultRightWorkspaceTab("chat")).toBe("browser");
+    expect(getDefaultRightWorkspaceTab("chat")).toBe("thinking");
     expect(getDefaultRightWorkspaceTab("project")).toBe("files");
-    expect(resolveRightWorkspaceTabForMode("chat", "files")).toBe("browser");
-    expect(resolveRightWorkspaceTabForMode("chat", "changes")).toBe("browser");
+    expect(resolveRightWorkspaceTabForMode("chat", "files")).toBe("thinking");
+    expect(resolveRightWorkspaceTabForMode("chat", "changes")).toBe("thinking");
     expect(resolveRightWorkspaceTabForMode("chat", "browser")).toBe("browser");
     expect(resolveRightWorkspaceTabForMode("project", "files")).toBe("files");
     expect(shouldLoadProjectWorkspaceResource("chat", true, "files", "files")).toBe(false);
@@ -1206,9 +1243,10 @@ describe("tool timeline grouping", () => {
   });
 
   it("closes only the process that just transitioned from running to finished", () => {
-    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, false)).toBe("turn-2");
-    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", false, false)).toBeNull();
-    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, true)).toBeNull();
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, false, true)).toBe("turn-2");
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, false, false)).toBeNull();
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", false, false, true)).toBeNull();
+    expect(getConversationTurnIdToCollapseAfterExecution("turn-2", true, true, true)).toBeNull();
   });
 
   it("keeps the file summary visible when a completed turn is collapsed", () => {

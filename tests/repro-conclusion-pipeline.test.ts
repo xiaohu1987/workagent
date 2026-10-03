@@ -169,8 +169,8 @@ describeWithFixture("final answer survives the transcript pipeline", () => {
 
   it("never hides a collapsed turn's prose when it has no summary entry yet", () => {
     // Regression for the reload-only symptom. A turn that finishes before its
-    // final answer reaches the transcript has summaryEntryId === null. Collapsing
-    // such a turn used to drop every assistant entry in it, leaving exactly the
+    // final answer reaches the transcript used to collapse down to a summary that
+    // did not exist, dropping every assistant entry in it and leaving exactly the
     // screenshot shape: file summary + duration footer, no conclusion.
     const staleMessages = filterTranscriptMessages(
       messages.filter((message) => message.id !== TARGET),
@@ -187,7 +187,11 @@ describeWithFixture("final answer survives the transcript pipeline", () => {
     );
     const staleSections = buildConversationTurnSections(staleEntries);
     const staleSection = staleSections.at(-1)!;
-    expect(staleSection.summaryEntryId ?? null).toBeNull();
+    // A summary may resolve before the formal answer lands, so what matters is that it
+    // resolves to real assistant prose: the collapsed turn must always have something
+    // readable to render, and the assertions below still forbid hiding formal text.
+    expect(staleEntries.find((entry) => entry.id === staleSection.summaryEntryId)?.kind)
+      .toBe("message");
     // The turn must actually have assistant entries, otherwise hiding none of
     // them would be trivially true and this test would prove nothing.
     expect(staleSection.entryIds.length).toBeGreaterThan(1);

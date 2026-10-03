@@ -148,8 +148,15 @@ describeWithFixture("4a91894d final answer survives the pipeline", () => {
         keptCommentary: keptCommentary.length
       })
     );
-    expect(last.summaryEntryId ?? null).toBeNull();
+    // The collapsed turn always renders an assistant entry now: the summary falls back to
+    // the last assistant text when no formal answer has landed yet, so a finished turn can
+    // no longer fold away to an empty body while the user waits for the conclusion.
+    const summaryEntry = entries.find((entry) => entry.id === last.summaryEntryId);
+    expect(summaryEntry?.kind).toBe("message");
     expect(last.entryIds.length).toBeGreaterThan(1);
-    expect(keptCommentary).toEqual([]);
+    // Only the summary line survives from the commentary; the remaining progress notes and
+    // the tool activity stay folded away.
+    expect(keptCommentary.length).toBeLessThanOrEqual(1);
+    expect(keptCommentary.every((entry) => entry.id === last.summaryEntryId)).toBe(true);
   });
 });
