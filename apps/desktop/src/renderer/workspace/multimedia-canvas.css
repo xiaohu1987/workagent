@@ -1,0 +1,292 @@
+/* The canvas stays mounted for the whole session so switching back to a task and
+   returning never resets its parameters or creation records; only the active
+   canvas is laid out. */
+.multimedia-canvas {
+  display: none;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 18px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 22px 24px 24px;
+  overflow: hidden;
+}
+
+.multimedia-canvas.is-active {
+  display: flex;
+}
+
+/* While the active canvas is mounted it is the workspace: it keeps the full
+   width instead of sharing the row with the transcript and the side panes. */
+.workspace:has(> .multimedia-canvas.is-active) > *:not(.multimedia-canvas) {
+  display: none;
+}
+
+.multimedia-canvas-header {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.multimedia-canvas-title {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.multimedia-canvas-title-icon {
+  display: flex;
+  color: var(--text-soft);
+}
+
+.multimedia-canvas-subtitle {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* Three columns: creation settings / preview / creation records. Every track is
+   shrinkable (minmax(0, …)) so a narrow window scrolls each column instead of
+   overflowing the canvas horizontally or overlapping neighbours. */
+.multimedia-canvas-columns {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns:
+    minmax(0, 300px)
+    minmax(0, 1fr)
+    minmax(0, 264px);
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.multimedia-canvas-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  padding: 14px 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-card);
+  overflow: hidden;
+}
+
+.multimedia-canvas-column-title {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.multimedia-canvas-preview .multimedia-canvas-column-title,
+.multimedia-canvas-records .multimedia-canvas-column-title {
+  color: var(--text-soft);
+}
+
+.multimedia-canvas-column-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.multimedia-canvas-settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding-bottom: 4px;
+}
+
+.multimedia-canvas-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.multimedia-canvas-field-label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.multimedia-canvas-field-count {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.multimedia-canvas-field-hint {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.multimedia-canvas-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.multimedia-canvas-group-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.multimedia-canvas-group-title {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.multimedia-canvas-key-state {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.multimedia-canvas-key-state.is-ready {
+  color: var(--green);
+  background: rgba(51, 194, 111, 0.14);
+}
+
+.multimedia-canvas-key-state.is-missing {
+  color: var(--orange);
+  background: rgba(242, 139, 53, 0.14);
+}
+
+/* Segmented controls keep the repo's per-surface pattern (a scoped class with
+   an .active button) instead of reaching into another page's styles. */
+.multimedia-canvas-segmented {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.multimedia-canvas-segmented button {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease);
+}
+
+.multimedia-canvas-segmented button:hover {
+  color: var(--text-soft);
+  background: var(--surface-card-hover);
+}
+
+.multimedia-canvas-segmented button.active {
+  color: var(--text);
+  background: var(--surface-elevated);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.multimedia-canvas-prompt {
+  width: 100%;
+  min-height: 96px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface-soft);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.multimedia-canvas-prompt:focus {
+  border-color: var(--action-primary);
+  outline: none;
+}
+
+.multimedia-canvas-output-size {
+  padding: 7px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.multimedia-canvas-count {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  align-self: flex-start;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.multimedia-canvas-count span {
+  min-width: 22px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.multimedia-canvas-count button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-soft);
+  background: transparent;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.multimedia-canvas-count button:hover:not(:disabled) {
+  background: var(--surface-card-hover);
+}
+
+.multimedia-canvas-count button:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}

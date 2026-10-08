@@ -3787,6 +3787,15 @@ pre {
   color: var(--text-faint);
 }
 
+.sidebar-nav-active-dot {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 0 0 3px rgba(120, 180, 255, 0.18);
+}
+
 .sidebar-section-title {
   margin: 30px 0 12px;
   color: var(--text-faint);

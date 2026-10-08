@@ -305,6 +305,7 @@ import { UserSkillsPage } from "./settings/pages/capabilities/user-skills-page";
 import { SkillLabPage } from "./settings/pages/capabilities/skill-lab-page";
 import { TerminalPanel } from "./workspace/terminal-panel";
 import { TerminalWorkspace, type TerminalWorkspaceTab } from "./workspace/terminal-workspace";
+import { MultimediaCanvasWorkspace } from "./workspace/multimedia-canvas-workspace";
 import { useTerminalSessions } from "./hooks/use-terminal-sessions";
 import { useQuickNotes } from "./hooks/use-quick-notes";
 import { useHistorySearch } from "./hooks/use-history-search";
@@ -5352,6 +5353,7 @@ export function App() {
   }
 
   function activateNewThread(thread: ThreadRecord) {
+    setIsCanvasOpen(false);
     selectThreadId(thread.id);
     seedOptimisticThreadSnapshot(thread);
     // The composer is usable from the optimistic state. Fetch everything else
@@ -5361,6 +5363,7 @@ export function App() {
   }
 
   async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
+    setIsCanvasOpen(false);
     const isSwitchingThread = selectedThreadIdRef.current !== threadId;
     if (options?.scrollToLatest) {
       cancelPendingAutoScrollFrame();
@@ -7617,6 +7620,7 @@ export function App() {
   const appTheme = resolveAppTheme(config?.desktop.theme);
   const showImageBackground = backgroundMode === "image" && chatBackgroundImages.length > 0;
   const showRealtimeBackground = appTheme === "dark" && backgroundMode === "dynamic";
+  const [isCanvasOpen, setIsCanvasOpen] = useState(false);
 
   return (
     <div
@@ -7700,6 +7704,8 @@ export function App() {
         onEditProject={openProjectEditorEvent}
         onCreateProjectChat={createProjectChatEvent}
         onRemoveProject={requestRemoveProjectEvent}
+        canvasActive={isCanvasOpen}
+        onOpenCanvas={() => setIsCanvasOpen(true)}
       />
 
       {historySearchPresence.value ? (
@@ -7725,6 +7731,7 @@ export function App() {
       ) : null}
 
       <main className="workspace">
+        <MultimediaCanvasWorkspace active={isCanvasOpen} config={config} />
         {showRealtimeBackground ? (
           <RealtimeCharacterLayer
             scene={realtimeEnhancement.scene}
