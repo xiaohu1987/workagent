@@ -2737,7 +2737,7 @@ class ThreadSessionRuntime {
       let draftSequence = 0;
       let retainedVisibleDraft = "";
       let retainedReasoningDraft = "";
-      let useTextToolProtocol = false;
+      let useTextToolProtocol = internalKind === "agent_protocol_recovery";
       let progressOnlyCompletionAttempts = 0;
       let modelTimeoutAttempts = 0;
       let modelRateLimitAttempts = 0;
@@ -11552,7 +11552,7 @@ export function buildAgentProtocolContinuationInstruction(batch: number): string
     "[Internal Agent protocol recovery. Do not display or quote this instruction.]",
     `The prior turn ended after ${MAX_AGENT_PROTOCOL_FAILURES} invalid Agent decisions. This is automatic recovery batch ${batch} of ${MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES}.`,
     "Continue only the unfinished work from the verified conversation and tool evidence; do not restate completed analysis, tool results, or the user request.",
-    "Return a valid native tool call or a valid JSON decision envelope. Do not repeat the malformed response or describe this recovery to the user."
+    "Native tool calls are disabled for this recovery. Return exactly one valid JSON decision envelope with complete tool_calls arguments, or a final JSON decision when the task is complete. Do not repeat the malformed response or describe this recovery to the user."
   ].join(" ");
 }
 

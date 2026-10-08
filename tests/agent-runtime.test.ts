@@ -2778,13 +2778,15 @@ describe("Agent decision protocol recovery", () => {
     });
   });
 
-  it("keeps automatic continuation instructions internal and bounded", () => {
+  it("keeps automatic continuation instructions internal and switches to strict JSON", () => {
     const instruction = buildAgentProtocolContinuationInstruction(1);
 
     expect(instruction).toContain("Do not display or quote");
     expect(instruction).toContain(String(MAX_AGENT_PROTOCOL_FAILURES));
     expect(instruction).toContain(String(MAX_AGENT_PROTOCOL_AUTO_RECOVERY_BATCHES));
     expect(instruction).toContain("unfinished work");
+    expect(instruction).toContain("Native tool calls are disabled");
+    expect(instruction).toContain("exactly one valid JSON decision envelope");
   });
 
   it("carries an audit repair directive into a fresh turn without duplicating it", () => {

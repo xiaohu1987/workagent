@@ -338,12 +338,14 @@ function quitApplication(): void {
   app.quit();
 }
 
-function resolveTrayIconPath(): string | null {
-  const candidates = [
-    path.join(process.resourcesPath, "icon.ico"),
-    path.resolve(__dirname, "../../assets/icon.ico"),
-    path.resolve(__dirname, "../../../assets/icon.ico")
-  ];
+function resolveAppIconPath(): string | null {
+  const fileName = app.isPackaged ? "icon.ico" : "dev-icon.ico";
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, fileName)]
+    : [
+        path.resolve(__dirname, `../../assets/${fileName}`),
+        path.resolve(__dirname, `../../../assets/${fileName}`)
+      ];
 
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
@@ -359,7 +361,7 @@ function createTray(): void {
     return;
   }
 
-  const iconPath = resolveTrayIconPath();
+  const iconPath = resolveAppIconPath();
   if (iconPath) {
     tray = new Tray(iconPath);
   } else {
@@ -400,7 +402,7 @@ function notifyMinimizedToTray(): void {
 }
 
 function showSystemNotification(title: string, body: string, onClick?: () => void): void {
-  const iconPath = resolveTrayIconPath();
+  const iconPath = resolveAppIconPath();
 
   if (Notification.isSupported()) {
     const notification = new Notification({
@@ -504,6 +506,7 @@ async function createWindow(): Promise<void> {
   const minHeight = Math.min(640, windowHeight);
   const windowX = workArea.x + Math.max(0, Math.floor((workArea.width - windowWidth) / 2));
   const windowY = workArea.y + Math.max(0, Math.floor((workArea.height - windowHeight) / 2));
+  const windowIconPath = process.platform === "win32" ? resolveAppIconPath() : null;
 
   mainWindow = new BrowserWindow({
     x: windowX,
@@ -512,6 +515,7 @@ async function createWindow(): Promise<void> {
     height: windowHeight,
     minWidth,
     minHeight,
+    ...(windowIconPath ? { icon: windowIconPath } : {}),
     autoHideMenuBar: true,
     backgroundColor: backend.getConfig().desktop.theme === "light" ? "#ffffff" : "#09090a",
     title: "codexh",

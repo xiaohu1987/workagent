@@ -6733,9 +6733,9 @@ export function App() {
     try {
       const result = await window.codexh.guideActiveThread({ threadId, content });
       if (result.accepted) {
-        showNotice("已引导当前任务", {
+        showNotice("已按方向调整当前任务", {
           tone: "success",
-          message: "引导指令会在下一次模型决策前生效。"
+          message: "方向调整会在下一次模型决策前生效。"
         });
       } else {
         showNotice("当前任务已结束", {
@@ -6744,7 +6744,7 @@ export function App() {
         await refreshSnapshot(threadId);
       }
     } catch (error) {
-      showNotice("发送引导失败", { message: error instanceof Error ? error.message : String(error) });
+      showNotice("发送方向调整失败", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -6760,9 +6760,9 @@ export function App() {
       removeQueuedMessageFromSnapshots(threadId, message.id);
       const result = await window.codexh.guideActiveThread({ threadId, content: message.content });
       if (result.accepted) {
-        showNotice("已引导当前任务", {
+        showNotice("已按方向调整当前任务", {
           tone: "success",
-          message: "该排队消息已作为引导指令生效。"
+          message: "该排队消息已作为方向调整生效。"
         });
       } else {
         showNotice("当前任务已结束", {
@@ -6784,7 +6784,7 @@ export function App() {
           // Keep the original error: the primary action is what the user needs to retry.
         }
       }
-      showNotice("引导排队消息失败", { message: error instanceof Error ? error.message : String(error) });
+      showNotice("方向调整排队消息失败", { message: error instanceof Error ? error.message : String(error) });
     } finally {
       setDeletingQueuedMessageId((current) => current === message.id ? null : current);
     }
