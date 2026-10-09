@@ -15256,7 +15256,7 @@ input[type="radio"]:focus-visible {
   gap: 8px;
   min-width: 0;
   min-height: 40px;
-  padding: 4px 6px 4px 12px;
+  padding: 4px 6px 4px 8px;
   border: 1px solid transparent;
   border-radius: 12px;
   color: rgba(244, 244, 243, 0.92);
@@ -15270,7 +15270,7 @@ input[type="radio"]:focus-visible {
 }
 
 .history-item.selected {
-  padding: 4px 6px 4px 12px;
+  padding: 4px 6px 4px 8px;
   border-color: rgba(255, 255, 255, 0.1);
   color: #ffffff;
   background: #17171b;
@@ -21119,6 +21119,109 @@ select option:checked {
 }
 
 /* Keep related project tasks together without turning the sidebar into cards. */
+
+/* Sidebar history is one list with two collapsible sections: tasks on top, projects below. */
+.history-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-section-heading:hover {
+  color: var(--text-soft);
+  background: var(--surface-soft);
+}
+
+.history-section-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-section-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--text-faint);
+  background: var(--surface-soft);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.history-section .history-section-heading svg {
+  width: 14px;
+  height: 14px;
+}
+
+.history-section-threads {
+  gap: 2px;
+}
+
+/* Section polish: the heading carries its own count, affordances stay out of the way until hover. */
+.history-section-count {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+}
+
+.history-section-heading .history-project-disclosure {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.history-section-heading:hover .history-project-disclosure,
+.history-section.is-collapsed .history-section-heading .history-project-disclosure {
+  opacity: 1;
+}
+
+.history-section-threads .history-item {
+  padding-left: 8px;
+  font-size: 14px;
+}
+
+/* Rows share the section heading's left edge: no leading bar, no extra gutter. */
+.history-section-threads .history-item::before {
+  display: none;
+}
+
+.history-item-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .sidebar-history-tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -21262,7 +21365,7 @@ select option:checked {
   min-width: 0;
   min-height: 30px;
   margin: 0;
-  padding: 2px 8px 2px 4px;
+  padding: 2px 8px 2px 10px;
   border: 0;
   border-radius: 8px;
   color: rgba(244, 244, 243, 0.86);
@@ -21315,12 +21418,18 @@ select option:checked {
   display: grid;
   gap: 3px;
   min-width: 0;
-  padding-left: 24px;
+  padding-left: 0;
+}
+
+/* Sub tasks step in one level so the folder heading keeps its hierarchy.
+   The tasks section reuses this container, so scope the indent to project groups. */
+.history-project-group > .history-project-threads {
+  padding-left: 16px;
 }
 
 .history-project-threads .history-item {
   min-height: 36px;
-  padding: 3px 6px 3px 10px;
+  padding: 3px 6px 3px 8px;
   border-radius: 10px;
 }
 
