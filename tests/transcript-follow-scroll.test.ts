@@ -85,6 +85,27 @@ describe("transcript follow pacing", () => {
 });
 
 describe("smooth transcript follow wiring", () => {
+  it("defers the end-of-turn collapse to the next frame and yields to a manual scroll", () => {
+    // Collapsing the just-finished turn in the same commit as the terminal snapshot moved
+    // the whole transcript in one frame: the full read replaces every array, the turn folds,
+    // and the follow loop re-pins the bottom - all at once. Rows skipped by
+    // `content-visibility: auto` then re-enter the viewport together and replay their enter
+    // animation, which reads as the entire conversation repainting. The fold must therefore
+    // land on the frame after the terminal commit, and must not run at all while the reader
+    // has scrolled away.
+    const collapseEffectStart = rendererSource.indexOf("getConversationTurnIdToCollapseAfterExecution(");
+    expect(collapseEffectStart).toBeGreaterThan(-1);
+    const collapseEffect = rendererSource.slice(
+      collapseEffectStart,
+      rendererSource.indexOf("// TEMPORARY diagnostic", collapseEffectStart)
+    );
+
+    expect(collapseEffect).toContain("window.requestAnimationFrame(() => {");
+    expect(collapseEffect).toContain("window.cancelAnimationFrame(frame)");
+    expect(collapseEffect).toContain("if (manualTranscriptScrollRef.current) return;");
+    expect(collapseEffect).toContain("if (selectedThreadIdRef.current !== activeSnapshotThreadId) return;");
+  });
+
   it("routes every follow call site through the animated loop", () => {
     // One definition plus the three places that used to jump straight to the bottom:
     // new content, content growth, and the deferred bottom correction.

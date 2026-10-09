@@ -1899,8 +1899,14 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
     }
 
     if (message.turnRunId) {
+      // A running turn's process notes ("过程记录") are not frozen history yet: the
+      // turn can still fold them away the moment its answer lands, and painting them
+      // here only made the transcript grow mid-run and snap back on completion. They
+      // render in the thinking workspace instead (selectActiveTurnProcessNotes).
+      // Frozen turns keep the old rule: an answered turn folds its notes away, an
+      // answerless one keeps them so the turn body is never empty.
       if (activeTurnRunId && message.turnRunId === activeTurnRunId) {
-        return true;
+        return false;
       }
 
       return !turnIdsWithOutcome.has(message.turnRunId);
@@ -1935,6 +1941,54 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
     visibleAssistantMessages.add(messageKey);
     return true;
   }));
+}
+
+/**
+ * The active turn's process notes ("过程记录"), in arrival order, for the thinking
+ * workspace. The transcript deliberately hides these while their turn runs (see
+ * filterTranscriptMessages): they are still provisional, so the panel carries them
+ * live and the frozen history only keeps what the turn settled on. The walk mirrors
+ * the transcript's own rules - only the newest turn, only commentary-only messages,
+ * one entry per distinct text, newest notes last - and `limit` caps the list.
+ */
+export function selectActiveTurnProcessNotes(
+  messages: MessageRecord[],
+  threadStatus?: ThreadRecord["status"] | null,
+  limit = 6
+): string[] {
+  if (messages.length === 0) {
+    return [];
+  }
+
+  const activeTurnRunId = isThreadExecutionInProgress(threadStatus ?? null)
+    ? [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null
+    : null;
+  if (!activeTurnRunId) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const notes: string[] = [];
+  for (const message of messages) {
+    if (message.turnRunId !== activeTurnRunId || !isCommentaryOnlyTranscriptMessage(message)) {
+      continue;
+    }
+
+    const text = (parseMessageEventBlocks(message) ?? [])
+      .filter((block) => block.type === "commentary")
+      .map((block) => block.content.trim())
+      .filter(Boolean)
+      .join("\n\n");
+    const fingerprint = text.replace(/\s+/g, " ").trim();
+    if (!fingerprint || seen.has(fingerprint)) {
+      continue;
+    }
+
+    seen.add(fingerprint);
+    notes.push(text);
+  }
+
+  return limit > 0 ? notes.slice(-limit) : notes;
 }
 
 export function getMessageDisplayKind(message: MessageRecord): string | null {

@@ -159,6 +159,7 @@ import {
   resolveLatestThreadRecord,
   rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
+  selectActiveTurnProcessNotes,
   shouldKeepAssistantDraft,
   shouldCommitRuntimeMessageImmediately,
   shouldShowRuntimeActivityPanel,
@@ -3738,6 +3739,14 @@ export function App() {
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
   );
+  // The running turn's process notes ("过程记录") render in the thinking workspace
+  // instead of the transcript (see filterTranscriptMessages): they are provisional
+  // until the turn freezes, so painting them as history only made the conversation
+  // grow mid-run and snap back the moment the answer landed.
+  const thinkingNotes = useMemo(
+    () => selectActiveTurnProcessNotes(selectedMessages, activeSnapshotThreadStatus),
+    [activeSnapshotThreadStatus, selectedMessages]
+  );
   // Record what actually reached the screen. Snapshot commits compare against this
   // set rather than against the live state: the final answer can be present in
   // `snapshot` while the transcript is still one render behind (the commit that
@@ -4054,14 +4063,26 @@ export function App() {
       Boolean(latestConversationTurn?.summaryEntryId)
     );
     if (!turnIdToCollapse) return;
-    setCollapsedConversationTurns((current) => {
-      const currentIds = current[activeSnapshotThreadId] ?? new Set<string>();
-      if (currentIds.has(turnIdToCollapse)) return current;
-      return {
-        ...current,
-        [activeSnapshotThreadId]: new Set([...currentIds, turnIdToCollapse])
-      };
+    // Collapsing the just-finished turn in the same commit as the terminal snapshot
+    // moved the whole transcript in one frame: the full read replaces every array, the
+    // turn folds, and the follow loop re-pins the bottom - all at once. Rows skipped by
+    // `content-visibility: auto` then re-enter the viewport together and replay their
+    // enter animation, which reads as the entire conversation repainting. Defer the fold
+    // to the next frame so the terminal commit lands first, and skip it entirely when the
+    // reader has scrolled away: folding under their cursor is the same jolt, just later.
+    const frame = window.requestAnimationFrame(() => {
+      if (selectedThreadIdRef.current !== activeSnapshotThreadId) return;
+      if (manualTranscriptScrollRef.current) return;
+      setCollapsedConversationTurns((current) => {
+        const currentIds = current[activeSnapshotThreadId] ?? new Set<string>();
+        if (currentIds.has(turnIdToCollapse)) return current;
+        return {
+          ...current,
+          [activeSnapshotThreadId]: new Set([...currentIds, turnIdToCollapse])
+        };
+      });
     });
+    return () => window.cancelAnimationFrame(frame);
   }, [activeSnapshotThreadId, isTaskProcessing, latestConversationTurn?.id]);
   // TEMPORARY diagnostic: expose this render's transcript inputs to the runtime
   // event handler through a ref.
@@ -8413,6 +8434,7 @@ export function App() {
           thinkingText={thinkingText}
           thinkingRunning={isTaskProcessing}
           thinkingStreaming={thinkingStreaming}
+          thinkingNotes={thinkingNotes}
           threadId={selectedThreadId}
         />
 

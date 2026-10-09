@@ -46,6 +46,7 @@ import {
   getToolActivityTarget,
   shouldShowRuntimeActivityPanel,
   filterTranscriptMessages,
+  selectActiveTurnProcessNotes,
   isFileWriteTool,
   isInternalAgentProtocolMessage,
   isPatchAssistantMessage,
@@ -276,6 +277,40 @@ describe("thread UI state helpers", () => {
       .toBe(formalEntries[formalEntries.length - 1]?.id);
   });
 
+  it("hands the running turn's process notes to the thinking workspace", () => {
+    const note = (id: string, text: string, createdAt: string): MessageRecord => ({
+      id,
+      threadId: "thread-notes",
+      turnRunId: "turn-notes",
+      role: "assistant",
+      content: `<event type="commentary">${text}</event>`,
+      metadataJson: JSON.stringify({ displayKind: "commentary" }),
+      createdAt
+    });
+    const notes = [
+      note("note-1", "我先核对项目规则。", "2026-09-24T03:00:01.000Z"),
+      note("note-2", "接着检查过滤链路。", "2026-09-24T03:00:03.000Z")
+    ];
+
+    // While the turn runs the notes stay out of the transcript; the panel carries
+    // them in arrival order so the reader can still follow the play-by-play.
+    expect(filterTranscriptMessages(notes, "running")).toEqual([]);
+    expect(selectActiveTurnProcessNotes(notes, "running")).toEqual(["我先核对项目规则。", "接着检查过滤链路。"]);
+    expect(selectActiveTurnProcessNotes(notes, "completed")).toEqual([]);
+
+    // Frozen turns keep the old rule: with no answer yet the notes are the turn body...
+    expect(filterTranscriptMessages(notes, "completed").map((message) => message.id)).toEqual(["note-1", "note-2"]);
+
+    // ...and once an answer lands, the notes fold away for good.
+    const answer: MessageRecord = {
+      ...note("answer-1", "结论：两处都处理好了。", "2026-09-24T03:00:05.000Z"),
+      content: "结论：两处都处理好了。",
+      metadataJson: null
+    };
+    const withAnswer = [...notes, answer];
+    expect(filterTranscriptMessages(withAnswer, "completed").map((message) => message.id)).toEqual(["answer-1"]);
+    expect(filterTranscriptMessages(withAnswer, "running").map((message) => message.id)).toEqual(["answer-1"]);
+  });
   it("refreshes a parent task snapshot for runtime events from its subagents", () => {
     expect(shouldRefreshSelectedSnapshotForRuntimeEvent(
       "parent-thread",

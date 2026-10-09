@@ -36,13 +36,18 @@ const THINKING_STATUS_CLASS: Record<ThinkingStatus, string> = {
  * of it changed the height of the conversation and pushed the whole chat up and
  * down. It renders in this dedicated workspace tab instead, so the transcript
  * keeps a stable height while the model thinks.
+ * The running turn's process notes ("过程记录") join the same tab: the transcript
+ * keeps them out until the turn freezes, so the play-by-play is followed here
+ * instead of watching history grow mid-run and collapse on completion.
  */
 export const ThinkingWorkspace = memo(function ThinkingWorkspace({
   text,
+  notes = [],
   taskRunning,
   streaming
 }: {
   text: string;
+  notes?: string[];
   taskRunning: boolean;
   streaming: boolean;
 }) {
@@ -56,6 +61,7 @@ export const ThinkingWorkspace = memo(function ThinkingWorkspace({
   // grow the body without the prop changing. Observing the stream wrapper pins the
   // body on every growth, however the bytes arrive.
   const hasText = text.trim().length > 0;
+  const hasNotes = notes.length > 0;
   useLayoutEffect(() => {
     const body = bodyRef.current;
     const stream = streamRef.current;
@@ -67,9 +73,9 @@ export const ThinkingWorkspace = memo(function ThinkingWorkspace({
     const observer = new ResizeObserver(pinToLatest);
     observer.observe(stream);
     return () => observer.disconnect();
-  }, [hasText]);
+  }, [hasText, hasNotes]);
 
-  if (!text.trim()) {
+  if (!hasText && !hasNotes) {
     return (
       <WorkspaceEmptyState
         icon={<IconBrain />}
@@ -93,7 +99,14 @@ export const ThinkingWorkspace = memo(function ThinkingWorkspace({
       </div>
       <div ref={bodyRef} className="thinking-workspace-body">
         <div ref={streamRef} className="thinking-workspace-stream">
-          <StreamedText text={text} instant={!streaming} />
+          {hasText ? <StreamedText text={text} instant={!streaming} /> : null}
+          {hasNotes ? (
+            <div className="thinking-workspace-notes" aria-label="过程记录">
+              {notes.map((note) => (
+                <p key={note} className="thinking-workspace-note">{note}</p>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
