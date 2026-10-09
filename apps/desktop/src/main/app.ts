@@ -26,6 +26,7 @@ import type {
   BrowserViewport,
   DatabaseConnectionConfig,
   GitActionResult,
+  GitBranchSummary,
   GitSnapshot,
   GpaStage,
   GpaState,
@@ -1211,6 +1212,16 @@ export class DesktopBackend {
 
   public switchGitBranch(threadId: string, branch: string, rootPath?: string): Promise<GitActionResult> {
     return this.#git.switchBranch(this.getProjectDirectory(threadId, rootPath), branch);
+  }
+
+  /** 新建任务页选工作空间时还没有线程，按路径直接取分支信息。 */
+  public getGitBranchSummary(cwd: string): Promise<GitBranchSummary> {
+    return this.#git.branchSummary(cwd);
+  }
+
+  /** 同上：新建任务页选择分支时按路径切换，不要求线程。 */
+  public switchGitBranchByPath(cwd: string, branch: string): Promise<GitActionResult> {
+    return this.#git.switchBranch(cwd, branch);
   }
 
   public createGitBranch(threadId: string, branch: string, rootPath?: string): Promise<GitActionResult> {

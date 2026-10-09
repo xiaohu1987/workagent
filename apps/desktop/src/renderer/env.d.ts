@@ -150,6 +150,8 @@ declare global {
       acknowledgeLiveEditPreviewPath: (payload: { toolCallId: string; path: string }) => Promise<void>;
       markLiveEditPreviewReady: () => Promise<void>;
       getGitSnapshot: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
+      getGitBranchSummary: (payload: { cwd: string }) => Promise<import("@shared-types").GitBranchSummary>;
+      switchGitBranchByPath: (payload: { cwd: string; branch: string }) => Promise<import("@shared-types").GitActionResult>;
       stageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => Promise<any>;
       stageAllGitChanges: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
       unstageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => Promise<any>;

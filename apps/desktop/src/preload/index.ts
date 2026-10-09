@@ -68,6 +68,8 @@ const api = {
     ipcRenderer.invoke("live-edit-preview:acknowledge-path", payload),
   markLiveEditPreviewReady: () => ipcRenderer.invoke("live-edit-preview:ready"),
   getGitSnapshot: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:snapshot", payload),
+  getGitBranchSummary: (payload: { cwd: string }) => ipcRenderer.invoke("git:branch-summary", payload),
+  switchGitBranchByPath: (payload: { cwd: string; branch: string }) => ipcRenderer.invoke("git:switch-branch-path", payload),
   stageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => ipcRenderer.invoke("git:stage-file", payload),
   stageAllGitChanges: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:stage-all", payload),
   unstageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => ipcRenderer.invoke("git:unstage-file", payload),

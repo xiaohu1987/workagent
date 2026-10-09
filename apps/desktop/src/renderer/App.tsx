@@ -12,6 +12,7 @@ import type {
   GpaStage,
   GpaState,
   GitActionResult,
+  GitBranchSummary,
   GitFileChange,
   GitSnapshot,
   GptReasoningEffort,
@@ -356,6 +357,15 @@ import {
 } from "./lib/share-turns";
 import { HistorySearchDialog } from "./history/history-search-dialog";
 import { HistorySidebar } from "./history/history-sidebar";
+import { NewTaskStatusBar } from "./new-task/new-task-status-bar";
+import {
+  NEW_TASK_INPUT_PLACEHOLDER,
+  collectWorkspaceOptions,
+  pickProjectWorkspaceCwd,
+  resolveNewTaskThreadInput,
+  withSelectedWorkspaceOption,
+  type NewTaskWorkspaceSelection
+} from "./core/new-task-composer";
 import { ChatWelcome } from "./chat/chat-welcome";
 import { CHAT_WELCOME_CARDS, PROJECT_WELCOME_CARDS } from "./chat/welcome-cards";
 import { ComposerAttachments } from "./composer/composer-attachments";
@@ -1380,6 +1390,12 @@ export function App() {
   } = useSettingsDialogState();
   const [settingsContentReady, setSettingsContentReady] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
+  const [isNewTaskComposerOpen, setIsNewTaskComposerOpen] = useState(false);
+  const [newTaskWorkspace, setNewTaskWorkspace] = useState<NewTaskWorkspaceSelection>({ kind: "unset" });
+  const [newTaskBranch, setNewTaskBranch] = useState<string | null>(null);
+  const [newTaskBranchSummary, setNewTaskBranchSummary] = useState<GitBranchSummary | null>(null);
+  const [newTaskBranchLoading, setNewTaskBranchLoading] = useState(false);
+  const [isPickingNewTaskFolder, setIsPickingNewTaskFolder] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
   const [projectEditDraft, setProjectEditDraft] = useState<{ cwd: string; workspaceRoots: string[] } | null>(null);
@@ -1700,6 +1716,7 @@ export function App() {
       selectedThreadIdRef.current = nextThreadId;
       setSelectedThreadId(nextThreadId);
       setFilePreviewPath(null);
+      if (nextThreadId) setIsNewTaskComposerOpen(false);
     };
     if (selectedThreadIdRef.current === nextThreadId) {
       select();
@@ -5547,6 +5564,51 @@ export function App() {
     activateNewThread(thread);
   }
 
+  // 合并后的「新建任务」入口：清空上一轮选择，进入空白任务页（右侧居中显示输入框）。
+  // preset.workspaceCwd：删除项目内的任务后回到此页时，默认沿用该项目的工作空间与当前分支。
+  function openNewTaskComposer(preset?: { workspaceCwd?: string | null }) {
+    if (selectedThreadId) selectThreadId(null);
+    setInput("");
+    setIsNewTaskComposerOpen(true);
+    setNewTaskWorkspace({ kind: "unset" });
+    setNewTaskBranch(null);
+    setNewTaskBranchSummary(null);
+    const workspaceCwd = preset?.workspaceCwd?.trim();
+    if (workspaceCwd) void selectNewTaskWorkspace({ kind: "folder", cwd: workspaceCwd });
+  }
+
+  async function selectNewTaskWorkspace(selection: NewTaskWorkspaceSelection) {
+    setNewTaskWorkspace(selection);
+    setNewTaskBranch(null);
+    setNewTaskBranchSummary(null);
+    if (selection.kind !== "folder") return;
+    setNewTaskBranchLoading(true);
+    try {
+      const summary = await window.codexh.getGitBranchSummary({ cwd: selection.cwd });
+      setNewTaskBranchSummary(summary);
+      if (summary.available && summary.branch) setNewTaskBranch(summary.branch);
+    } catch (error) {
+      setNewTaskBranchSummary(null);
+      showNotice("读取分支失败", { message: error instanceof Error ? error.message : "请稍后重试。" });
+    } finally {
+      setNewTaskBranchLoading(false);
+    }
+  }
+
+  async function pickNewTaskWorkspace() {
+    setIsPickingNewTaskFolder(true);
+    try {
+      const defaultPath = newTaskWorkspace.kind === "folder" ? newTaskWorkspace.cwd : undefined;
+      const rootPath = await window.codexh.chooseProjectDirectory(defaultPath);
+      if (!rootPath) return;
+      await selectNewTaskWorkspace({ kind: "folder", cwd: rootPath });
+    } catch (error) {
+      showNotice("选择工作空间失败", { message: error instanceof Error ? error.message : "请稍后重试。" });
+    } finally {
+      setIsPickingNewTaskFolder(false);
+    }
+  }
+
   async function createThreadRecord(
     mode: "project" | "chat",
     cwdInput?: string,
@@ -5582,13 +5644,10 @@ export function App() {
     setProjectEditDraft({ cwd, workspaceRoots: roots.length > 0 ? roots : [cwd] });
   }
 
-  async function createProjectChat(cwd: string) {
-    try {
-      const thread = await createThreadRecord("project", cwd, { title: "新建聊天" });
-      activateNewThread(thread);
-    } catch (error) {
-      showNotice("新建聊天失败", { message: error instanceof Error ? error.message : String(error) });
-    }
+  // 项目右键「新建聊天」：与侧栏「新建任务」同一入口，先进入空白任务页并预设该项目工作空间，
+  // 发送时再按 composer 的选择创建项目线程（旧行为是立即建线程并落到旧欢迎页）。
+  function createProjectChat(cwd: string) {
+    openNewTaskComposer({ workspaceCwd: cwd });
   }
 
   function updateProjectEditRoots(nextRoots: string[]) {
@@ -5666,14 +5725,16 @@ export function App() {
     setIsRemovingProject(true);
     try {
       const deletedIds = new Set(group.map((thread) => thread.id));
+      const removedSelectedThread = Boolean(selectedThreadId && deletedIds.has(selectedThreadId));
       for (const thread of group) await window.codexh.deleteThread(thread.id);
-      if (selectedThreadId && deletedIds.has(selectedThreadId)) {
+      if (removedSelectedThread) {
         selectThreadId(null);
         setSnapshot(null);
       }
       setProjectEditDraft(null);
       setProjectRemovalTarget(null);
       await refreshThreads({ fallbackToFirst: false });
+      if (removedSelectedThread) openNewTaskComposer({ workspaceCwd: cwd });
       showNotice("项目已移除，磁盘文件未删除。", { tone: "success" });
     } catch (error) {
       showNotice("移除项目失败", { message: error instanceof Error ? error.message : String(error) });
@@ -5815,6 +5876,8 @@ export function App() {
         selectThreadId(null);
         setSnapshot(null);
         await refreshThreads({ fallbackToFirst: false });
+        // 项目里的任务：回到新建任务页时默认沿用该项目的工作空间与当前分支。
+        openNewTaskComposer({ workspaceCwd: pickProjectWorkspaceCwd([thread]) });
       } else {
         await refreshThreads();
       }
@@ -5852,9 +5915,14 @@ export function App() {
       }
       setHistoryBatchDeleteConfirmation(null);
       if (selectedId && result.deleted.includes(selectedId)) {
+        const deletedWorkspaceCwd = pickProjectWorkspaceCwd([
+          threadsRef.current.find((entry) => entry.id === selectedId),
+          ...result.deleted.map((threadId) => threadsRef.current.find((entry) => entry.id === threadId))
+        ]);
         selectThreadId(null);
         setSnapshot(null);
         await refreshThreads({ fallbackToFirst: false });
+        openNewTaskComposer({ workspaceCwd: deletedWorkspaceCwd });
       } else {
         await refreshThreads();
       }
@@ -5992,10 +6060,33 @@ export function App() {
 
     let threadId = targetThreadId;
     if (!threadId) {
-      const thread = await createThreadRecord("chat", undefined, { useComposerSelection: true });
+      const newTaskInput = isNewTaskComposerOpen ? resolveNewTaskThreadInput(newTaskWorkspace) : null;
+      const branchToApply =
+        newTaskInput?.mode === "project" && newTaskBranch && newTaskBranchSummary?.branch !== newTaskBranch
+          ? newTaskBranch
+          : null;
+      const thread = await createThreadRecord(newTaskInput?.mode ?? "chat", newTaskInput?.cwd, {
+        useComposerSelection: true,
+        title: "新建任务"
+      });
       threadId = thread.id;
       selectThreadId(thread.id);
       seedOptimisticThreadSnapshot(thread);
+      if (isNewTaskComposerOpen) setIsNewTaskComposerOpen(false);
+      if (branchToApply) {
+        try {
+          const branchResult = (await window.codexh.switchGitBranch({ threadId, branch: branchToApply })) as
+            | GitActionResult
+            | undefined;
+          if (branchResult && !branchResult.ok) {
+            showNotice("切换分支失败", { message: branchResult.message || "请手动切换分支后重试。" });
+          }
+        } catch (branchError) {
+          showNotice("切换分支失败", {
+            message: branchError instanceof Error ? branchError.message : "请手动切换分支后重试。"
+          });
+        }
+      }
       if (gpaState.fullAccess) {
         try {
           await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
@@ -7536,7 +7627,7 @@ export function App() {
   const requestSmoothFollowLatestEvent = useStableEvent(() => {
     startSmoothTranscriptFollow();
   });
-  const createThreadEvent = useStableEvent(createThread);
+  const openNewTaskComposerEvent = useStableEvent(openNewTaskComposer);
   const openThreadEvent = useStableEvent(openThread);
   const openQuickNotesEvent = useStableEvent(openQuickNotes);
   const openHistorySearchEvent = useStableEvent(openHistorySearch);
@@ -7552,7 +7643,7 @@ export function App() {
   const requestDeleteHistoryThreadEvent = useStableEvent(requestDeleteHistoryThread);
   const beginRenameHistoryThreadEvent = useStableEvent(beginRenameHistoryThread);
   const openProjectEditorEvent = useStableEvent(openProjectEditor);
-  const createProjectChatEvent = useStableEvent((cwd: string) => { void createProjectChat(cwd); });
+  const createProjectChatEvent = useStableEvent((cwd: string) => { createProjectChat(cwd); });
   const requestRemoveProjectEvent = useStableEvent(requestRemoveProject);
   const commitRenameHistoryThreadEvent = useStableEvent(commitRenameHistoryThread);
   const cancelRenameHistoryThreadEvent = useStableEvent(cancelRenameHistoryThread);
@@ -7682,7 +7773,7 @@ export function App() {
         setRenamingThread={setRenamingHistoryThread}
         onCommitRename={commitRenameHistoryThreadEvent}
         onCancelRename={cancelRenameHistoryThreadEvent}
-        onCreateThread={createThreadEvent}
+        onCreateTask={openNewTaskComposerEvent}
         onOpenThread={openThreadEvent}
         onOpenQuickNotes={openQuickNotesEvent}
         onOpenSearch={openHistorySearchEvent}
@@ -7794,7 +7885,7 @@ export function App() {
           </div>
         ) : null}
 
-        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""}`}>
+        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""}`}>
           <div
             ref={chatScrollRef}
             className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""}`}
@@ -8007,7 +8098,7 @@ export function App() {
                 <IconChevronDown />
               </button>
             ) : null}
-            {selectedProjectCwd || gpaState.stage !== "off" || taskFileChanges.length > 0 ? (
+            {!isNewTaskComposerOpen && (selectedProjectCwd || gpaState.stage !== "off" || taskFileChanges.length > 0) ? (
               <div className="composer-meta-row">
                 {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} isRunning={isThreadExecutionInProgress(selectedThreadStatus)} /> : null}
                 <div className="composer-meta-actions">
@@ -8032,6 +8123,12 @@ export function App() {
                     </button>
                   ) : null}
                 </div>
+              </div>
+            ) : null}
+            {isNewTaskComposerOpen ? (
+              <div className="new-task-hero">
+                <h1>Code<span className="new-task-hero-red">XH</span>来帮你完成一个<span className="new-task-hero-blue">新任务</span></h1>
+                <p>描述你的目标，直接在下方输入框开始。</p>
               </div>
             ) : null}
             <div className="chat-composer">
@@ -8072,7 +8169,15 @@ export function App() {
                   event.preventDefault();
                   if (event.dataTransfer.files.length > 0) void addDroppedFiles(event.dataTransfer.files);
                 }}
-                placeholder={composerMediaIntent === "image" ? "描述要生成的图片…" : composerMediaIntent === "video" ? "描述要生成的视频…" : "随心输入"}
+                placeholder={
+                  composerMediaIntent === "image"
+                    ? "描述要生成的图片…"
+                    : composerMediaIntent === "video"
+                      ? "描述要生成的视频…"
+                      : isNewTaskComposerOpen
+                        ? NEW_TASK_INPUT_PLACEHOLDER
+                        : "随心输入"
+                }
               />
               <div className="composer-toolbar">
                 <div className="composer-toolbar-left">
@@ -8197,12 +8302,14 @@ export function App() {
                       disabled={isUpdatingReasoningEffort}
                     />
                   ) : null}
-                  <ContextUsageControl
-                    usage={contextUsage}
-                    open={isContextReportOpen}
-                    onToggle={() => setIsContextReportOpen((current) => !current)}
-                    onClose={() => setIsContextReportOpen(false)}
-                  />
+                  {isNewTaskComposerOpen ? null : (
+                    <ContextUsageControl
+                      usage={contextUsage}
+                      open={isContextReportOpen}
+                      onToggle={() => setIsContextReportOpen((current) => !current)}
+                      onClose={() => setIsContextReportOpen(false)}
+                    />
+                  )}
                   <button
                     className={`send-button ${isActiveThreadExecuting ? "running" : ""}`}
                     onClick={() => void handleComposerPrimaryAction()}
@@ -8215,6 +8322,19 @@ export function App() {
                 </div>
               </div>
             </div>
+            {isNewTaskComposerOpen ? (
+              <NewTaskStatusBar
+                workspace={newTaskWorkspace}
+                workspaceOptions={withSelectedWorkspaceOption(collectWorkspaceOptions(projectHistoryGroups.flatMap((group) => group.threads)), newTaskWorkspace)}
+                branch={newTaskBranch}
+                branchSummary={newTaskBranchSummary}
+                branchLoading={newTaskBranchLoading}
+                isPickingFolder={isPickingNewTaskFolder}
+                onSelectWorkspace={(selection) => void selectNewTaskWorkspace(selection)}
+                onPickFolder={() => void pickNewTaskWorkspace()}
+                onSelectBranch={setNewTaskBranch}
+              />
+            ) : null}
           </footer>
         </section>
         {terminalDrawerPresence.value ? (

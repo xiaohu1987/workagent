@@ -567,6 +567,18 @@ export function IconShield() {
   );
 }
 
+export function IconGitBranch() {
+  return (
+    <SvgIcon>
+      <circle cx="7" cy="6" r="2.2" />
+      <circle cx="17" cy="6" r="2.2" />
+      <circle cx="7" cy="18" r="2.2" />
+      <path d="M7 8.2v7.6" />
+      <path d="M17 8.2v2.3a3.5 3.5 0 0 1-3.5 3.5H10" />
+    </SvgIcon>
+  );
+}
+
 export function IconKnowledge() {
   return (
     <SvgIcon>

@@ -77,7 +77,7 @@ type Props = {
   setRenamingThread: Dispatch<SetStateAction<RenameState>>;
   onCommitRename: (title?: string) => Promise<void>;
   onCancelRename: () => void;
-  onCreateThread: (mode: "chat" | "project") => Promise<void>;
+  onCreateTask: () => void;
   onOpenThread: (threadId: string, options?: { scrollToLatest?: boolean }) => Promise<void>;
   onOpenQuickNotes: () => Promise<void>;
   onOpenSearch: () => void;
@@ -97,7 +97,7 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [historyView, setHistoryView] = useState<HistoryView>(() => (
@@ -422,7 +422,7 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
   return <aside className="sidebar">
     <div className="sidebar-scroll">
       <div className="sidebar-brand-row"><div className="sidebar-brand"><strong>Code<span className="sidebar-brand-accent">XH</span></strong><span>AI Workspace</span></div><div className="sidebar-brand-tools"><button className="sidebar-search sidebar-quick-notes" type="button" title="随手记" aria-label="随手记" onClick={() => void onOpenQuickNotes()}><IconNotebook /></button><button className="sidebar-search" type="button" title="搜索历史对话" onClick={onOpenSearch}><IconSearch /></button></div></div>
-      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={() => { setHistoryView("tasks"); void onCreateThread("chat"); }}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span></button><button className="sidebar-nav-button" onClick={() => { setHistoryView("projects"); void onCreateThread("project"); }}><span className="sidebar-nav-icon"><IconFolder /></span><span>新建项目</span><span className="sidebar-nav-plus"><IconPlus /></span></button></div>
+      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={() => { setHistoryView("tasks"); onCreateTask(); }}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span><span className="sidebar-nav-plus"><IconPlus /></span></button></div>
       <div className="sidebar-history-tabs" role="tablist" aria-label="历史列表">
         <button type="button" className={`sidebar-history-tab ${historyView === "projects" ? "active" : ""}`} role="tab" aria-selected={historyView === "projects"} title="项目" aria-label="显示项目" onClick={() => setHistoryView("projects")}><IconFolder /></button>
         <button type="button" className={`sidebar-history-tab ${historyView === "tasks" ? "active" : ""}`} role="tab" aria-selected={historyView === "tasks"} title="普通聊天" aria-label="显示普通聊天" onClick={() => setHistoryView("tasks")}><IconChatBubbles /></button>

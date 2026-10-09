@@ -742,6 +742,8 @@ function registerIpc(): void {
   });
   ipcMain.handle("live-edit-preview:ready", () => liveEditPreview.markReady());
   ipcMain.handle("git:snapshot", (_event, payload: { threadId: string; rootPath?: string }) => backend.getGitSnapshot(payload.threadId, payload.rootPath));
+  ipcMain.handle("git:branch-summary", (_event, payload: { cwd: string }) => backend.getGitBranchSummary(payload.cwd));
+  ipcMain.handle("git:switch-branch-path", (_event, payload: { cwd: string; branch: string }) => backend.switchGitBranchByPath(payload.cwd, payload.branch));
   ipcMain.handle("git:stage-file", (_event, payload: { threadId: string; rootPath?: string; path: string }) =>
     backend.stageGitFile(payload.threadId, payload.path, payload.rootPath)
   );
