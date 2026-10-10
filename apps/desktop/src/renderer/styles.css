@@ -29923,6 +29923,11 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   letter-spacing: -0.02em;
 }
 
+/* 品牌词 CodeXH 在标题里加重，其余文案保持基准字重 */
+.chat-canvas.is-new-task .new-task-hero h1 .new-task-hero-brand {
+  font-weight: 800;
+}
+
 .chat-canvas.is-new-task .new-task-hero h1 .new-task-hero-red {
   color: #ef4444;
 }

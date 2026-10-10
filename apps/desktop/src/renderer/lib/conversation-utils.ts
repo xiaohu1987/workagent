@@ -2001,11 +2001,20 @@ export function getMessageDisplayKind(message: MessageRecord): string | null {
   }
 }
 
+/**
+ * Process notes ("过程记录") and tool-batch anchors.
+ *
+ * They are the runtime's own bookkeeping of what a running turn is doing, so the transcript
+ * hides them while their turn runs and only the process panel shows them.
+ */
+export function isProcessNoteDisplayKind(displayKind: string | null | undefined): boolean {
+  return displayKind === "commentary" || displayKind === "tool_batch";
+}
+
 /** Final/formal replies must paint before a following completion event clears live UI. */
 export function shouldCommitRuntimeMessageImmediately(message: MessageRecord): boolean {
   if (message.role !== "assistant" || !message.content.trim()) return false;
-  const displayKind = getMessageDisplayKind(message);
-  return displayKind !== "commentary" && displayKind !== "tool_batch";
+  return !isProcessNoteDisplayKind(getMessageDisplayKind(message));
 }
 
 export function isCommentaryOnlyTranscriptMessage(message: MessageRecord) {

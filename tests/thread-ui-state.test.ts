@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   canDeleteThread,
@@ -445,6 +446,17 @@ describe("thread UI state helpers", () => {
     expect(shouldLoadProjectWorkspaceResource("project", true, "files", "git")).toBe(false);
   });
 
+  it("refreshes the selected thread git snapshot while the git workspace tab is closed", () => {
+    // 分支徽标读的是同一份 git 快照：快照刷新不能要求右侧 Git 面板处于打开状态，
+    // 否则切换会话后徽标会一直缺失，直到点开面板重新触发刷新。
+    const appSource = readFileSync(new URL("../apps/desktop/src/renderer/App.tsx", import.meta.url), "utf8");
+    const fetchIndex = appSource.indexOf("getGitSnapshot({ threadId: selectedThreadId, rootPath: gitRoot })");
+    expect(fetchIndex).toBeGreaterThan(-1);
+    const effectWindow = appSource.slice(Math.max(0, fetchIndex - 900), fetchIndex + 240);
+    expect(effectWindow).toContain("isProjectWorkspaceThread(selectedThread?.mode)");
+    expect(effectWindow).not.toContain('rightWorkspaceTab, "git"');
+  });
+
   it("isolates GPA stages from non-project chats", () => {
     const state = normalizeGpaStateForThread("chat", {
       stage: "plan",
@@ -596,6 +608,17 @@ describe("thread UI state helpers", () => {
       threadId: "thread-1",
       payload: { discarded: true }
     })).toBe(false);
+    // Settling a process note must not re-read the conversation mid-run.
+    expect(shouldForceFullSnapshotForRuntimeCompletion({
+      type: "assistant.completed",
+      threadId: "thread-1",
+      payload: { messageId: "process-note" }
+    }, { completedMessageIsProcessNote: true })).toBe(false);
+    expect(shouldForceFullSnapshotForRuntimeCompletion({
+      type: "assistant.completed",
+      threadId: "thread-1",
+      payload: { messageId: "final-message" }
+    }, { completedMessageIsProcessNote: false })).toBe(true);
     expect(shouldForceFullSnapshotForRuntimeCompletion({
       type: "thread.updated",
       threadId: "thread-1",
