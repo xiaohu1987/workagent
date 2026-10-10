@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import type { GitActionResult, GitDiffLine, GitFileChange, GitHunk, GitSnapshot } from "@shared-types";
+import type { GitActionResult, GitBranchSummary, GitDiffLine, GitFileChange, GitHunk, GitSnapshot } from "@shared-types";
 
 type GitCommandResult = {
   code: number;
@@ -171,6 +171,61 @@ export class GitService {
       canCreatePullRequest: Boolean(comparison),
       files,
       ...(diffOmitted ? { diffOmitted: true, diffOmittedFiles } : {})
+    };
+  }
+
+  /**
+   * 轻量分支信息：只读当前分支与可切换分支，不解析变更文件，
+   * 供「新建任务」页在没有线程时选择工作空间的分支。
+   */
+  public async branchSummary(cwd: string | null): Promise<GitBranchSummary> {
+    if (!cwd) {
+      return {
+        available: false,
+        message: "当前任务未选择项目文件夹。",
+        branches: [],
+        localBranches: [],
+        remoteBranches: []
+      };
+    }
+
+    const rootResult = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+    if (rootResult.code !== 0) {
+      return {
+        available: false,
+        message: rootResult.error?.includes("ENOENT") ? "未找到 Git，请安装 Git 后重试。" : "当前项目不是 Git 仓库。",
+        branches: [],
+        localBranches: [],
+        remoteBranches: []
+      };
+    }
+
+    const root = rootResult.stdout.trim();
+    const statusResult = await runGit(root, ["status", "--porcelain=v2", "-z", "--branch"]);
+    if (statusResult.code !== 0) {
+      return {
+        available: false,
+        root,
+        message: statusResult.stderr.trim() || "无法读取 Git 状态。",
+        branches: [],
+        localBranches: [],
+        remoteBranches: []
+      };
+    }
+
+    const status = parseStatus(statusResult.stdout);
+    const branchesResult = await runGit(root, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]);
+    const branchRefs = branchesResult.code === 0
+      ? parseBranchRefs(branchesResult.stdout)
+      : { local: new Set(status.branch ? [status.branch] : []), remote: new Set<string>() };
+
+    return {
+      available: true,
+      root,
+      ...(status.branch ? { branch: status.branch } : {}),
+      branches: getSwitchableBranchNames(branchRefs),
+      localBranches: [...branchRefs.local].sort((left, right) => left.localeCompare(right)),
+      remoteBranches: [...branchRefs.remote].sort((left, right) => left.localeCompare(right))
     };
   }
 

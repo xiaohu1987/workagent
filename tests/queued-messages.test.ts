@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DatabaseService } from "../apps/desktop/src/main/storage";
+import type { MessageAttachment } from "../packages/shared-types/src/index";
 
 const tempDirs: string[] = [];
 const databases: DatabaseService[] = [];
@@ -34,6 +35,35 @@ describe("queued messages", () => {
     expect(db.listQueuedMessages("thread-1")[0]?.status).toBe("queued");
     expect(db.deleteQueuedMessage("thread-1", second.id)).toBe(true);
     expect(db.listQueuedMessages("thread-1").map((item) => item.id)).toEqual([first.id]);
+  });
+
+  it("keeps the image attachment and media intent of a queued message", async () => {
+    const db = await createDatabase();
+    const attachment: MessageAttachment = {
+      id: "attachment-1",
+      kind: "image",
+      name: "screenshot.png",
+      mimeType: "image/png",
+      absolutePath: path.join("D:", "workagent", "tmp", "screenshot.png"),
+      sizeBytes: 2048,
+      source: "user"
+    };
+    const queued = db.enqueueQueuedMessage({
+      threadId: "thread-1",
+      content: "看看这张截图",
+      displayContent: "看看这张截图",
+      mediaIntent: "image",
+      attachments: [attachment]
+    });
+
+    const stored = db.listQueuedMessages("thread-1").find((item) => item.id === queued.id);
+    expect(stored?.attachments).toEqual([attachment]);
+    expect(stored?.mediaIntent).toBe("image");
+
+    expect(db.claimNextQueuedMessage("thread-1")?.id).toBe(queued.id);
+    const claimed = db.listQueuedMessages("thread-1").find((item) => item.id === queued.id);
+    expect(claimed?.attachments).toEqual([attachment]);
+    expect(claimed?.status).toBe("dispatching");
   });
 
   it("reuses the persisted user message when an in-flight queue item is recovered", async () => {
@@ -165,6 +195,29 @@ describe("queued messages", () => {
     });
     expect(db.getThread(thread.id).status).toBe("idle");
     expect(db.claimNextQueuedMessage(thread.id)?.id).toBe(next.id);
+  });
+
+  it("keeps the original updatedAt when startup recovery interrupts a stale turn", async () => {
+    // 侧栏的「最后活动」直接读 threads.updated_at。启动恢复只是收尾历史运行态，
+    // 不能把它刷新成当前时间，否则十几天前的会话会一直显示「刚刚 / 1 天前」。
+    const db = await createDatabase();
+    const thread = db.createThread({
+      title: "stale running",
+      mode: "chat",
+      workspaceKind: "projectless",
+      cwd: null,
+      modelId: "mock",
+      providerId: "mock"
+    });
+    const lastActiveAt = "2026-09-20T08:00:00.000Z";
+    db.updateThread(thread.id, { status: "running" });
+    db.updateThread(thread.id, { updatedAt: lastActiveAt });
+
+    db.recoverInterruptedThreads();
+
+    const recovered = db.getThread(thread.id);
+    expect(recovered.status).toBe("idle");
+    expect(recovered.updatedAt).toBe(lastActiveAt);
   });
 
   it("cancels queued messages without touching a dispatch already in progress", async () => {

@@ -1445,6 +1445,10 @@ export class DatabaseService {
 
   public interruptThreadExecution(threadId: string): ThreadRecord {
     const completedAt = nowIso();
+    // 中断与启动恢复只是给遗留的运行态收尾，不算用户活动：
+    // 保留原来的 updated_at，否则每次启动都会把很久以前的会话刷新成「刚刚」，
+    // 侧栏的「最后活动」时间就再也回不到真实的日期。
+    const interrupted = this.getThread(threadId);
     this.#db.exec("BEGIN");
     try {
       this.#db
@@ -1469,7 +1473,7 @@ export class DatabaseService {
            WHERE thread_id = ? AND status = 'pending'`
         )
         .run(completedAt, threadId);
-      const thread = this.updateThread(threadId, { status: "idle", updatedAt: completedAt });
+      const thread = this.updateThread(threadId, { status: "idle", updatedAt: interrupted.updatedAt });
       this.#db.exec("COMMIT");
       return thread;
     } catch (error) {

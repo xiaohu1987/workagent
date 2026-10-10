@@ -12,6 +12,7 @@ import type {
   GpaStage,
   GpaState,
   GitActionResult,
+  GitBranchSummary,
   GitFileChange,
   GitSnapshot,
   GptReasoningEffort,
@@ -140,6 +141,7 @@ import {
   isInternalAgentProtocolMessage,
   isPatchAssistantMessage,
   isPersistentComposerContextKind,
+  isProcessNoteDisplayKind,
   isSubagentWaitTool,
   mergeMessagesAfterOptimisticUserEdit,
   collectMissingSnapshotRecords,
@@ -155,11 +157,13 @@ import {
   collectMissingSnapshotMessages,
   resolveSnapshotRecoveryMessages,
   expectedVisibleMessageIds,
+  canEditUserMessage,
   reconcilePendingUserMessagesDetailed,
   shouldKeepOptimisticBaselineMessage,
   resolveLatestThreadRecord,
   rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
+  selectActiveTurnProcessNotes,
   shouldKeepAssistantDraft,
   shouldCommitRuntimeMessageImmediately,
   shouldShowRuntimeActivityPanel,
@@ -358,6 +362,15 @@ import {
 } from "./lib/share-turns";
 import { HistorySearchDialog } from "./history/history-search-dialog";
 import { HistorySidebar } from "./history/history-sidebar";
+import { NewTaskStatusBar } from "./new-task/new-task-status-bar";
+import {
+  NEW_TASK_INPUT_PLACEHOLDER,
+  collectWorkspaceOptions,
+  pickProjectWorkspaceCwd,
+  resolveNewTaskThreadInput,
+  withSelectedWorkspaceOption,
+  type NewTaskWorkspaceSelection
+} from "./core/new-task-composer";
 import { ChatWelcome } from "./chat/chat-welcome";
 import { CHAT_WELCOME_CARDS, PROJECT_WELCOME_CARDS } from "./chat/welcome-cards";
 import { ComposerAttachments } from "./composer/composer-attachments";
@@ -1382,6 +1395,13 @@ export function App() {
   } = useSettingsDialogState();
   const [settingsContentReady, setSettingsContentReady] = useState(false);
   const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
+  // 启动默认落在新建任务页（默认页面），不自动定位到某个任务。
+  const [isNewTaskComposerOpen, setIsNewTaskComposerOpen] = useState(true);
+  const [newTaskWorkspace, setNewTaskWorkspace] = useState<NewTaskWorkspaceSelection>({ kind: "unset" });
+  const [newTaskBranch, setNewTaskBranch] = useState<string | null>(null);
+  const [newTaskBranchSummary, setNewTaskBranchSummary] = useState<GitBranchSummary | null>(null);
+  const [newTaskBranchLoading, setNewTaskBranchLoading] = useState(false);
+  const [isPickingNewTaskFolder, setIsPickingNewTaskFolder] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
   const [projectEditDraft, setProjectEditDraft] = useState<{ cwd: string; workspaceRoots: string[] } | null>(null);
@@ -1702,6 +1722,7 @@ export function App() {
       selectedThreadIdRef.current = nextThreadId;
       setSelectedThreadId(nextThreadId);
       setFilePreviewPath(null);
+      if (nextThreadId) setIsNewTaskComposerOpen(false);
     };
     if (selectedThreadIdRef.current === nextThreadId) {
       select();
@@ -2317,11 +2338,32 @@ export function App() {
         setRightWorkspaceExpandedTab("browser");
       }
       const isPluginStateUpdate = typed.type === "thread.updated" && !!typed.payload?.pluginChanged;
+      // `assistant.completed` settles the streaming draft for every process note the runtime
+      // records, which happens once per model decision that calls tools. The row already arrived
+      // with the `message.created` right before it and the transcript hides process notes while
+      // their turn runs, so re-reading the whole conversation here re-rendered the history
+      // mid-run for content that never reaches it. Only a completion whose message can reach the
+      // transcript stays authoritative; a message we cannot find locally keeps the old behaviour.
+      const completedMessageId = typed.type === "assistant.completed" && typeof typed.payload?.messageId === "string"
+        ? typed.payload.messageId
+        : null;
+      const completedRuntimeMessage = completedMessageId && typed.threadId
+        ? persistedRuntimeMessagesRef.current[typed.threadId]?.get(completedMessageId)
+          ?? snapshotCacheByThreadRef.current.get(typed.threadId)
+            ?.messages.find((message) => message.id === completedMessageId)
+          ?? (snapshotRef.current?.thread.id === typed.threadId
+            ? snapshotRef.current.messages.find((message) => message.id === completedMessageId)
+            : undefined)
+        : undefined;
       const forcedCompletionSnapshotRefresh = invalidateThreadSnapshotForRuntimeCompletion(typed, {
         cursorByThread: snapshotCursorByThreadRef.current,
         requestIdsByThread: snapshotRequestIdsRef.current,
         cacheByThread: snapshotCacheByThreadRef.current,
         runtimeMessagesByThread: persistedRuntimeMessagesRef.current
+      }, {
+        completedMessageIsProcessNote: Boolean(
+          completedRuntimeMessage && isProcessNoteDisplayKind(getMessageDisplayKind(completedRuntimeMessage))
+        )
       });
       if (
         typed.type === "queue.updated" &&
@@ -3352,19 +3394,23 @@ export function App() {
   }, [filesRoot, selectedThreadId, showNotice]);
 
   useEffect(() => {
-    if (!shouldLoadProjectWorkspaceResource(selectedThread?.mode, isRightWorkspaceOpen, rightWorkspaceTab, "git") || !selectedThreadId || !gitRoot) {
+    // 分支徽标与文件变更标记在右侧面板之外读取同一份 git 快照：
+    // 选中项目会话就刷新，不能要求 Git 面板处于打开状态。
+    if (!isProjectWorkspaceThread(selectedThread?.mode) || !selectedThreadId || !gitRoot) {
       setGitLoading(false);
       return;
     }
     let cancelled = false;
-    setGitSnapshotThreadId(null);
+    const snapshotKey = `${selectedThreadId}:${gitRoot}`;
+    // 同一会话刷新时保留旧快照，避免徽标在例行刷新期间闪现空档。
+    setGitSnapshotThreadId((current) => (current === snapshotKey ? current : null));
     setGitActionMessage(null);
     const timer = window.setTimeout(() => {
       setGitLoading(true);
       void window.codexh.getGitSnapshot({ threadId: selectedThreadId, rootPath: gitRoot }).then((next) => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
           setGitSnapshot(next as GitSnapshot);
-          setGitSnapshotThreadId(`${selectedThreadId}:${gitRoot}`);
+          setGitSnapshotThreadId(snapshotKey);
         }
       }).catch((error: unknown) => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
@@ -3377,7 +3423,7 @@ export function App() {
             canCreatePullRequest: false,
             files: []
           });
-          setGitSnapshotThreadId(`${selectedThreadId}:${gitRoot}`);
+          setGitSnapshotThreadId(snapshotKey);
         }
       }).finally(() => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) setGitLoading(false);
@@ -3740,6 +3786,14 @@ export function App() {
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
   );
+  // The running turn's process notes ("过程记录") render in the thinking workspace
+  // instead of the transcript (see filterTranscriptMessages): they are provisional
+  // until the turn freezes, so painting them as history only made the conversation
+  // grow mid-run and snap back the moment the answer landed.
+  const thinkingNotes = useMemo(
+    () => selectActiveTurnProcessNotes(selectedMessages, activeSnapshotThreadStatus),
+    [activeSnapshotThreadStatus, selectedMessages]
+  );
   // Record what actually reached the screen. Snapshot commits compare against this
   // set rather than against the live state: the final answer can be present in
   // `snapshot` while the transcript is still one render behind (the commit that
@@ -4080,14 +4134,26 @@ export function App() {
       Boolean(latestConversationTurn?.summaryEntryId)
     );
     if (!turnIdToCollapse) return;
-    setCollapsedConversationTurns((current) => {
-      const currentIds = current[activeSnapshotThreadId] ?? new Set<string>();
-      if (currentIds.has(turnIdToCollapse)) return current;
-      return {
-        ...current,
-        [activeSnapshotThreadId]: new Set([...currentIds, turnIdToCollapse])
-      };
+    // Collapsing the just-finished turn in the same commit as the terminal snapshot
+    // moved the whole transcript in one frame: the full read replaces every array, the
+    // turn folds, and the follow loop re-pins the bottom - all at once. Rows skipped by
+    // `content-visibility: auto` then re-enter the viewport together and replay their
+    // enter animation, which reads as the entire conversation repainting. Defer the fold
+    // to the next frame so the terminal commit lands first, and skip it entirely when the
+    // reader has scrolled away: folding under their cursor is the same jolt, just later.
+    const frame = window.requestAnimationFrame(() => {
+      if (selectedThreadIdRef.current !== activeSnapshotThreadId) return;
+      if (manualTranscriptScrollRef.current) return;
+      setCollapsedConversationTurns((current) => {
+        const currentIds = current[activeSnapshotThreadId] ?? new Set<string>();
+        if (currentIds.has(turnIdToCollapse)) return current;
+        return {
+          ...current,
+          [activeSnapshotThreadId]: new Set([...currentIds, turnIdToCollapse])
+        };
+      });
     });
+    return () => window.cancelAnimationFrame(frame);
   }, [activeSnapshotThreadId, isTaskProcessing, latestConversationTurn?.id]);
   // TEMPORARY diagnostic: expose this render's transcript inputs to the runtime
   // event handler through a ref.
@@ -4851,7 +4917,8 @@ export function App() {
   ]);
 
   async function refreshAll() {
-    await Promise.all([refreshThreads(), refreshSkills(), refreshPlugins(), refreshConfig(), refreshMcpServers()]);
+    // 启动时留在默认页面（新建任务页）：列表刷新不自动定位到某个任务。
+    await Promise.all([refreshThreads({ fallbackToFirst: false }), refreshSkills(), refreshPlugins(), refreshConfig(), refreshMcpServers()]);
   }
 
   async function refreshThreads(options?: { refreshSelectedSnapshot?: boolean; fallbackToFirst?: boolean }) {
@@ -5573,6 +5640,51 @@ export function App() {
     activateNewThread(thread);
   }
 
+  // 合并后的「新建任务」入口：清空上一轮选择，进入空白任务页（右侧居中显示输入框）。
+  // preset.workspaceCwd：删除项目内的任务后回到此页时，默认沿用该项目的工作空间与当前分支。
+  function openNewTaskComposer(preset?: { workspaceCwd?: string | null }) {
+    if (selectedThreadId) selectThreadId(null);
+    setInput("");
+    setIsNewTaskComposerOpen(true);
+    setNewTaskWorkspace({ kind: "unset" });
+    setNewTaskBranch(null);
+    setNewTaskBranchSummary(null);
+    const workspaceCwd = preset?.workspaceCwd?.trim();
+    if (workspaceCwd) void selectNewTaskWorkspace({ kind: "folder", cwd: workspaceCwd });
+  }
+
+  async function selectNewTaskWorkspace(selection: NewTaskWorkspaceSelection) {
+    setNewTaskWorkspace(selection);
+    setNewTaskBranch(null);
+    setNewTaskBranchSummary(null);
+    if (selection.kind !== "folder") return;
+    setNewTaskBranchLoading(true);
+    try {
+      const summary = await window.codexh.getGitBranchSummary({ cwd: selection.cwd });
+      setNewTaskBranchSummary(summary);
+      if (summary.available && summary.branch) setNewTaskBranch(summary.branch);
+    } catch (error) {
+      setNewTaskBranchSummary(null);
+      showNotice("读取分支失败", { message: error instanceof Error ? error.message : "请稍后重试。" });
+    } finally {
+      setNewTaskBranchLoading(false);
+    }
+  }
+
+  async function pickNewTaskWorkspace() {
+    setIsPickingNewTaskFolder(true);
+    try {
+      const defaultPath = newTaskWorkspace.kind === "folder" ? newTaskWorkspace.cwd : undefined;
+      const rootPath = await window.codexh.chooseProjectDirectory(defaultPath);
+      if (!rootPath) return;
+      await selectNewTaskWorkspace({ kind: "folder", cwd: rootPath });
+    } catch (error) {
+      showNotice("选择工作空间失败", { message: error instanceof Error ? error.message : "请稍后重试。" });
+    } finally {
+      setIsPickingNewTaskFolder(false);
+    }
+  }
+
   async function createThreadRecord(
     mode: "project" | "chat",
     cwdInput?: string,
@@ -5608,13 +5720,10 @@ export function App() {
     setProjectEditDraft({ cwd, workspaceRoots: roots.length > 0 ? roots : [cwd] });
   }
 
-  async function createProjectChat(cwd: string) {
-    try {
-      const thread = await createThreadRecord("project", cwd, { title: "新建聊天" });
-      activateNewThread(thread);
-    } catch (error) {
-      showNotice("新建聊天失败", { message: error instanceof Error ? error.message : String(error) });
-    }
+  // 项目右键「新建聊天」：与侧栏「新建任务」同一入口，先进入空白任务页并预设该项目工作空间，
+  // 发送时再按 composer 的选择创建项目线程（旧行为是立即建线程并落到旧欢迎页）。
+  function createProjectChat(cwd: string) {
+    openNewTaskComposer({ workspaceCwd: cwd });
   }
 
   function updateProjectEditRoots(nextRoots: string[]) {
@@ -5672,7 +5781,7 @@ export function App() {
       }
       setThreads(nextThreads);
       setProjectEditDraft(null);
-      await refreshThreads();
+      await refreshThreads({ fallbackToFirst: false });
       if (selectedThreadId && group.some((thread) => thread.id === selectedThreadId)) await refreshSnapshot(selectedThreadId);
       showNotice("项目源文件夹已更新。", { tone: "success" });
     } catch (error) {
@@ -5692,14 +5801,16 @@ export function App() {
     setIsRemovingProject(true);
     try {
       const deletedIds = new Set(group.map((thread) => thread.id));
+      const removedSelectedThread = Boolean(selectedThreadId && deletedIds.has(selectedThreadId));
       for (const thread of group) await window.codexh.deleteThread(thread.id);
-      if (selectedThreadId && deletedIds.has(selectedThreadId)) {
+      if (removedSelectedThread) {
         selectThreadId(null);
         setSnapshot(null);
       }
       setProjectEditDraft(null);
       setProjectRemovalTarget(null);
       await refreshThreads({ fallbackToFirst: false });
+      if (removedSelectedThread) openNewTaskComposer({ workspaceCwd: cwd });
       showNotice("项目已移除，磁盘文件未删除。", { tone: "success" });
     } catch (error) {
       showNotice("移除项目失败", { message: error instanceof Error ? error.message : String(error) });
@@ -5841,8 +5952,10 @@ export function App() {
         selectThreadId(null);
         setSnapshot(null);
         await refreshThreads({ fallbackToFirst: false });
+        // 项目里的任务：回到新建任务页时默认沿用该项目的工作空间与当前分支。
+        openNewTaskComposer({ workspaceCwd: pickProjectWorkspaceCwd([thread]) });
       } else {
-        await refreshThreads();
+        await refreshThreads({ fallbackToFirst: false });
       }
       showNotice("任务已删除。", { tone: "success" });
     } catch (error) {
@@ -5878,11 +5991,16 @@ export function App() {
       }
       setHistoryBatchDeleteConfirmation(null);
       if (selectedId && result.deleted.includes(selectedId)) {
+        const deletedWorkspaceCwd = pickProjectWorkspaceCwd([
+          threadsRef.current.find((entry) => entry.id === selectedId),
+          ...result.deleted.map((threadId) => threadsRef.current.find((entry) => entry.id === threadId))
+        ]);
         selectThreadId(null);
         setSnapshot(null);
         await refreshThreads({ fallbackToFirst: false });
+        openNewTaskComposer({ workspaceCwd: deletedWorkspaceCwd });
       } else {
-        await refreshThreads();
+        await refreshThreads({ fallbackToFirst: false });
       }
       if (result.failed.length > 0) {
         showNotice(`已删除 ${result.deleted.length} 个任务，${result.failed.length} 个任务失败。`, { message: result.failed.map((entry) => getThreadDeleteFailureMessage(entry.reason)).join("；") });
@@ -6018,10 +6136,33 @@ export function App() {
 
     let threadId = targetThreadId;
     if (!threadId) {
-      const thread = await createThreadRecord("chat", undefined, { useComposerSelection: true });
+      const newTaskInput = isNewTaskComposerOpen ? resolveNewTaskThreadInput(newTaskWorkspace) : null;
+      const branchToApply =
+        newTaskInput?.mode === "project" && newTaskBranch && newTaskBranchSummary?.branch !== newTaskBranch
+          ? newTaskBranch
+          : null;
+      const thread = await createThreadRecord(newTaskInput?.mode ?? "chat", newTaskInput?.cwd, {
+        useComposerSelection: true,
+        title: "新建任务"
+      });
       threadId = thread.id;
       selectThreadId(thread.id);
       seedOptimisticThreadSnapshot(thread);
+      if (isNewTaskComposerOpen) setIsNewTaskComposerOpen(false);
+      if (branchToApply) {
+        try {
+          const branchResult = (await window.codexh.switchGitBranch({ threadId, branch: branchToApply })) as
+            | GitActionResult
+            | undefined;
+          if (branchResult && !branchResult.ok) {
+            showNotice("切换分支失败", { message: branchResult.message || "请手动切换分支后重试。" });
+          }
+        } catch (branchError) {
+          showNotice("切换分支失败", {
+            message: branchError instanceof Error ? branchError.message : "请手动切换分支后重试。"
+          });
+        }
+      }
       if (gpaState.fullAccess) {
         try {
           await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
@@ -6346,6 +6487,10 @@ export function App() {
   function beginUserMessageEdit(message: MessageRecord) {
     if (isActiveThreadExecuting || isPreparingRuntime) {
       showNotice("任务执行中，停止后才能重新编辑消息。");
+      return;
+    }
+    if (!canEditUserMessage(message)) {
+      showNotice("消息还在发送队列中，等发送完成后再重新编辑。");
       return;
     }
     setEditingUserMessage({ id: message.id, content: message.content });
@@ -6759,9 +6904,9 @@ export function App() {
     try {
       const result = await window.codexh.guideActiveThread({ threadId, content });
       if (result.accepted) {
-        showNotice("已引导当前任务", {
+        showNotice("已按方向调整当前任务", {
           tone: "success",
-          message: "引导指令会在下一次模型决策前生效。"
+          message: "方向调整会在下一次模型决策前生效。"
         });
       } else {
         showNotice("当前任务已结束", {
@@ -6770,7 +6915,7 @@ export function App() {
         await refreshSnapshot(threadId);
       }
     } catch (error) {
-      showNotice("发送引导失败", { message: error instanceof Error ? error.message : String(error) });
+      showNotice("发送方向调整失败", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -6784,11 +6929,22 @@ export function App() {
       await window.codexh.deleteQueuedMessage({ threadId, id: message.id });
       removedFromQueue = true;
       removeQueuedMessageFromSnapshots(threadId, message.id);
-      const result = await window.codexh.guideActiveThread({ threadId, content: message.content });
-      if (result.accepted) {
-        showNotice("已引导当前任务", {
+      const result = await window.codexh.guideActiveThread({
+        threadId,
+        content: message.content,
+        displayContent: message.displayContent,
+        mediaIntent: message.mediaIntent ?? null,
+        attachments: message.attachments
+      });
+      if (result.queuedWithMedia) {
+        showNotice("该排队消息带附件，已按普通消息重新入队", {
           tone: "success",
-          message: "该排队消息已作为引导指令生效。"
+          message: "方向调整只支持文字，附件与图片已保留，将在当前任务结束后发送。"
+        });
+      } else if (result.accepted) {
+        showNotice("已按方向调整当前任务", {
+          tone: "success",
+          message: "该排队消息已作为方向调整生效。"
         });
       } else {
         showNotice("当前任务已结束", {
@@ -6810,7 +6966,7 @@ export function App() {
           // Keep the original error: the primary action is what the user needs to retry.
         }
       }
-      showNotice("引导排队消息失败", { message: error instanceof Error ? error.message : String(error) });
+      showNotice("方向调整排队消息失败", { message: error instanceof Error ? error.message : String(error) });
     } finally {
       setDeletingQueuedMessageId((current) => current === message.id ? null : current);
     }
@@ -6855,7 +7011,7 @@ export function App() {
   async function toggleThreadPinned(thread: ThreadRecord) {
     try {
       await window.codexh.setThreadPinned({ threadId: thread.id, isPinned: !thread.isPinned });
-      await refreshThreads();
+      await refreshThreads({ fallbackToFirst: false });
       showNotice(thread.isPinned ? "已取消置顶。" : "任务已置顶。", { tone: "success" });
     } catch (error) {
       showNotice("修改置顶状态失败。", {
@@ -6889,7 +7045,7 @@ export function App() {
     }
     try {
       await window.codexh.renameThread({ threadId, title: nextTitle });
-      await refreshThreads();
+      await refreshThreads({ fallbackToFirst: false });
       showNotice("任务已重命名。", { tone: "success" });
     } catch (error) {
       showNotice("重命名失败。", {
@@ -6914,7 +7070,7 @@ export function App() {
     try {
       if (target.kind === "plugin") {
         await window.codexh.removePlugin(target.plugin.id);
-        await Promise.all([refreshPlugins(), refreshSkills(), refreshThreads()]);
+        await Promise.all([refreshPlugins(), refreshSkills(), refreshThreads({ fallbackToFirst: false })]);
       } else {
         await window.codexh.removeSkill(target.skill.id);
         await Promise.all([refreshSkills(), refreshUserSkills()]);
@@ -7031,7 +7187,7 @@ export function App() {
     // is the most expensive step for long conversations.
     await Promise.all([
       refreshConfig(preferredProviderId),
-      refreshThreads({ refreshSelectedSnapshot: false }),
+      refreshThreads({ refreshSelectedSnapshot: false, fallbackToFirst: false }),
       refreshMcpServers()
     ]);
   }
@@ -7562,7 +7718,7 @@ export function App() {
   const requestSmoothFollowLatestEvent = useStableEvent(() => {
     startSmoothTranscriptFollow();
   });
-  const createThreadEvent = useStableEvent(createThread);
+  const openNewTaskComposerEvent = useStableEvent(openNewTaskComposer);
   const openThreadEvent = useStableEvent(openThread);
   const openQuickNotesEvent = useStableEvent(openQuickNotes);
   const openHistorySearchEvent = useStableEvent(openHistorySearch);
@@ -7578,7 +7734,7 @@ export function App() {
   const requestDeleteHistoryThreadEvent = useStableEvent(requestDeleteHistoryThread);
   const beginRenameHistoryThreadEvent = useStableEvent(beginRenameHistoryThread);
   const openProjectEditorEvent = useStableEvent(openProjectEditor);
-  const createProjectChatEvent = useStableEvent((cwd: string) => { void createProjectChat(cwd); });
+  const createProjectChatEvent = useStableEvent((cwd: string) => { createProjectChat(cwd); });
   const requestRemoveProjectEvent = useStableEvent(requestRemoveProject);
   const commitRenameHistoryThreadEvent = useStableEvent(commitRenameHistoryThread);
   const cancelRenameHistoryThreadEvent = useStableEvent(cancelRenameHistoryThread);
@@ -7708,7 +7864,7 @@ export function App() {
         setRenamingThread={setRenamingHistoryThread}
         onCommitRename={commitRenameHistoryThreadEvent}
         onCancelRename={cancelRenameHistoryThreadEvent}
-        onCreateThread={createThreadEvent}
+        onCreateTask={openNewTaskComposerEvent}
         onOpenThread={openThreadEvent}
         onOpenQuickNotes={openQuickNotesEvent}
         onOpenSearch={openHistorySearchEvent}
@@ -7820,7 +7976,7 @@ export function App() {
           </div>
         ) : null}
 
-        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""}`}>
+        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""}`}>
           <div
             ref={chatScrollRef}
             className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""}`}
@@ -8033,7 +8189,7 @@ export function App() {
                 <IconChevronDown />
               </button>
             ) : null}
-            {selectedProjectCwd || gpaState.stage !== "off" || taskFileChanges.length > 0 ? (
+            {!isNewTaskComposerOpen && (selectedProjectCwd || gpaState.stage !== "off" || taskFileChanges.length > 0) ? (
               <div className="composer-meta-row">
                 {gpaState.stage !== "off" ? <PlanTimeline state={gpaState} isRunning={isThreadExecutionInProgress(selectedThreadStatus)} /> : null}
                 <div className="composer-meta-actions">
@@ -8058,6 +8214,12 @@ export function App() {
                     </button>
                   ) : null}
                 </div>
+              </div>
+            ) : null}
+            {isNewTaskComposerOpen ? (
+              <div className="new-task-hero">
+                <h1><span className="new-task-hero-brand">Code<span className="new-task-hero-red">XH</span></span>来帮你完成一个<span className="new-task-hero-blue">新任务</span></h1>
+                <p>描述你的目标，直接在下方输入框开始。</p>
               </div>
             ) : null}
             <div className="chat-composer">
@@ -8098,7 +8260,15 @@ export function App() {
                   event.preventDefault();
                   if (event.dataTransfer.files.length > 0) void addDroppedFiles(event.dataTransfer.files);
                 }}
-                placeholder={composerMediaIntent === "image" ? "描述要生成的图片…" : composerMediaIntent === "video" ? "描述要生成的视频…" : "随心输入"}
+                placeholder={
+                  composerMediaIntent === "image"
+                    ? "描述要生成的图片…"
+                    : composerMediaIntent === "video"
+                      ? "描述要生成的视频…"
+                      : isNewTaskComposerOpen
+                        ? NEW_TASK_INPUT_PLACEHOLDER
+                        : "随心输入"
+                }
               />
               <div className="composer-toolbar">
                 <div className="composer-toolbar-left">
@@ -8223,12 +8393,14 @@ export function App() {
                       disabled={isUpdatingReasoningEffort}
                     />
                   ) : null}
-                  <ContextUsageControl
-                    usage={contextUsage}
-                    open={isContextReportOpen}
-                    onToggle={() => setIsContextReportOpen((current) => !current)}
-                    onClose={() => setIsContextReportOpen(false)}
-                  />
+                  {isNewTaskComposerOpen ? null : (
+                    <ContextUsageControl
+                      usage={contextUsage}
+                      open={isContextReportOpen}
+                      onToggle={() => setIsContextReportOpen((current) => !current)}
+                      onClose={() => setIsContextReportOpen(false)}
+                    />
+                  )}
                   <button
                     className={`send-button ${isActiveThreadExecuting ? "running" : ""}`}
                     onClick={() => void handleComposerPrimaryAction()}
@@ -8241,6 +8413,19 @@ export function App() {
                 </div>
               </div>
             </div>
+            {isNewTaskComposerOpen ? (
+              <NewTaskStatusBar
+                workspace={newTaskWorkspace}
+                workspaceOptions={withSelectedWorkspaceOption(collectWorkspaceOptions(projectHistoryGroups.flatMap((group) => group.threads)), newTaskWorkspace)}
+                branch={newTaskBranch}
+                branchSummary={newTaskBranchSummary}
+                branchLoading={newTaskBranchLoading}
+                isPickingFolder={isPickingNewTaskFolder}
+                onSelectWorkspace={(selection) => void selectNewTaskWorkspace(selection)}
+                onPickFolder={() => void pickNewTaskWorkspace()}
+                onSelectBranch={setNewTaskBranch}
+              />
+            ) : null}
           </footer>
         </section>
         {terminalDrawerPresence.value ? (
@@ -8319,6 +8504,7 @@ export function App() {
           thinkingText={thinkingText}
           thinkingRunning={isTaskProcessing}
           thinkingStreaming={thinkingStreaming}
+          thinkingNotes={thinkingNotes}
           threadId={selectedThreadId}
         />
 

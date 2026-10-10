@@ -191,13 +191,25 @@ export type RuntimeCompletionSnapshotEvent = {
   };
 };
 
-/** Completion can race or replace the final message event, so its next read must be authoritative. */
+/**
+ * Completion can race or replace the final message event, so its next read must be authoritative.
+ *
+ * A completion that only settles a *process note* is the exception. The runtime settles the
+ * streaming draft once for every commentary / tool-batch message it records, the row itself
+ * arrives with the `message.created` immediately before it, and the transcript hides those rows
+ * while their turn runs. Re-reading the whole conversation for them made a long thread re-render
+ * several times per turn, so the caller reports that case and only completions whose message can
+ * reach the transcript stay authoritative. Turns that end still get an authoritative read from the
+ * terminal `thread.updated` below.
+ */
 export function shouldForceFullSnapshotForRuntimeCompletion(
-  event: RuntimeCompletionSnapshotEvent
+  event: RuntimeCompletionSnapshotEvent,
+  options?: { completedMessageIsProcessNote?: boolean }
 ): boolean {
   if (!event.threadId || event.payload?.pluginChanged) return false;
   if (event.type === "assistant.completed") {
-    return event.payload?.discarded !== true;
+    if (event.payload?.discarded === true) return false;
+    return options?.completedMessageIsProcessNote !== true;
   }
   if (event.type !== "thread.updated" || event.payload?.childThread) return false;
   const status = event.payload?.thread?.status;
@@ -287,9 +299,10 @@ export function invalidateThreadSnapshotForRuntimeCompletion<TCursor, TSnapshot,
     requestIdsByThread: Record<string, number>;
     cacheByThread: Map<string, TSnapshot>;
     runtimeMessagesByThread: Record<string, TRuntimeMessages>;
-  }
+  },
+  options?: { completedMessageIsProcessNote?: boolean }
 ): boolean {
-  if (!shouldForceFullSnapshotForRuntimeCompletion(event) || !event.threadId) return false;
+  if (!shouldForceFullSnapshotForRuntimeCompletion(event, options) || !event.threadId) return false;
   invalidateThreadSnapshotForFullRefresh(event.threadId, state, { preserveRuntimeMessages: true });
   return true;
 }

@@ -1605,6 +1605,17 @@ export interface GitActionResult {
   pullRequestUrl?: string;
 }
 
+/** 轻量分支快照：只含当前分支与可切换分支，供没有线程时选择分支使用。 */
+export interface GitBranchSummary {
+  available: boolean;
+  message?: string;
+  root?: string;
+  branch?: string;
+  branches: string[];
+  localBranches: string[];
+  remoteBranches: string[];
+}
+
 export interface ToolSearchResult {
   name: string;
   description: string;

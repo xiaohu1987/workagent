@@ -151,6 +151,8 @@ declare global {
       acknowledgeLiveEditPreviewPath: (payload: { toolCallId: string; path: string }) => Promise<void>;
       markLiveEditPreviewReady: () => Promise<void>;
       getGitSnapshot: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
+      getGitBranchSummary: (payload: { cwd: string }) => Promise<import("@shared-types").GitBranchSummary>;
+      switchGitBranchByPath: (payload: { cwd: string; branch: string }) => Promise<import("@shared-types").GitActionResult>;
       stageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => Promise<any>;
       stageAllGitChanges: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
       unstageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => Promise<any>;
@@ -208,7 +210,7 @@ declare global {
           }
         | { ok: false; error: string }
       >;
-      guideActiveThread: (payload: { threadId: string; content: string }) => Promise<{ accepted: boolean }>;
+      guideActiveThread: (payload: { threadId: string; content: string; displayContent?: string; mediaIntent?: "image" | "video" | null; attachments?: any[] }) => Promise<{ accepted: boolean; queuedWithMedia?: boolean }>;
       replaceMessage: (payload: { threadId: string; messageId: string; content: string }) => Promise<void>;
       deleteQueuedMessage: (payload: { threadId: string; id: string }) => Promise<void>;
       importAttachments: (payload: { threadId: string; attachments: any[] }) => Promise<any[]>;

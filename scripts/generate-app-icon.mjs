@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const size = 256;
-const pixels = Buffer.alloc(size * size * 4);
+let pixels = Buffer.alloc(size * size * 4);
 
 function mix(a, b, amount) {
   return a.map((value, index) => Math.round(value + (b[index] - value) * amount));
@@ -91,43 +91,52 @@ function createPng() {
   ]);
 }
 
-const dark = [13, 15, 19, 255];
-const blue = [104, 182, 255, 255];
-const blueSoft = [166, 218, 255, 255];
-const orange = [242, 164, 99, 255];
-const orangeSoft = [255, 207, 160, 255];
-
-roundedRect(0, 0, size, size, 54, dark);
-for (let radius = 105; radius >= 42; radius -= 1) {
-  const shade = Math.max(0, 1 - (105 - radius) / 70);
-  arc(128, 128, radius, -0.73, 0.28, 1, [...mix([13, 15, 19], [22, 34, 49], shade), 55]);
-}
-arc(128, 128, 92, -2.5, -0.32, 6, blue);
-arc(128, 128, 92, 0.64, 2.82, 6, orange);
-arc(128, 128, 92, -0.35, 0.38, 3, blueSoft);
-arc(128, 128, 92, 2.78, 3.52, 3, orangeSoft);
-
-line(80, 86, 112, 128, 12, blue);
-line(112, 128, 80, 170, 12, blueSoft);
-line(142, 85, 142, 171, 11, orange);
-line(181, 85, 181, 171, 11, orangeSoft);
-line(142, 128, 181, 128, 11, orange);
-
 const outputDir = path.resolve("assets");
 await mkdir(outputDir, { recursive: true });
-const png = createPng();
-await writeFile(path.join(outputDir, "icon.png"), png);
 
-const icoHeader = Buffer.alloc(22);
-icoHeader.writeUInt16LE(0, 0);
-icoHeader.writeUInt16LE(1, 2);
-icoHeader.writeUInt16LE(1, 4);
-icoHeader[6] = 0;
-icoHeader[7] = 0;
-icoHeader[8] = 0;
-icoHeader[9] = 0;
-icoHeader.writeUInt16LE(1, 10);
-icoHeader.writeUInt16LE(32, 12);
-icoHeader.writeUInt32LE(png.length, 14);
-icoHeader.writeUInt32LE(22, 18);
-await writeFile(path.join(outputDir, "icon.ico"), Buffer.concat([icoHeader, png]));
+async function writeIcon(name, development = false) {
+  pixels = Buffer.alloc(size * size * 4);
+  const dark = [13, 15, 19, 255];
+  const blue = [104, 182, 255, 255];
+  const blueSoft = [166, 218, 255, 255];
+  const orange = [242, 164, 99, 255];
+  const orangeSoft = [255, 207, 160, 255];
+
+  roundedRect(0, 0, size, size, 54, dark);
+  for (let radius = 105; radius >= 42; radius -= 1) {
+    const shade = Math.max(0, 1 - (105 - radius) / 70);
+    arc(128, 128, radius, -0.73, 0.28, 1, [...mix([13, 15, 19], [22, 34, 49], shade), 55]);
+  }
+  arc(128, 128, 92, -2.5, -0.32, 6, blue);
+  arc(128, 128, 92, 0.64, 2.82, 6, orange);
+  arc(128, 128, 92, -0.35, 0.38, 3, blueSoft);
+  arc(128, 128, 92, 2.78, 3.52, 3, orangeSoft);
+
+  line(80, 86, 112, 128, 12, blue);
+  line(112, 128, 80, 170, 12, blueSoft);
+  line(142, 85, 142, 171, 11, orange);
+  line(181, 85, 181, 171, 11, orangeSoft);
+  line(142, 128, 181, 128, 11, orange);
+
+  if (development) {
+    const badge = [191, 255, 110, 255];
+    roundedRect(176, 16, 68, 68, 20, badge);
+    line(195, 31, 195, 69, 7, dark);
+    arc(195, 50, 14, -Math.PI / 2, Math.PI / 2, 7, dark);
+  }
+
+  const png = createPng();
+  await writeFile(path.join(outputDir, `${name}.png`), png);
+  const icoHeader = Buffer.alloc(22);
+  icoHeader.writeUInt16LE(0, 0);
+  icoHeader.writeUInt16LE(1, 2);
+  icoHeader.writeUInt16LE(1, 4);
+  icoHeader.writeUInt16LE(1, 10);
+  icoHeader.writeUInt16LE(32, 12);
+  icoHeader.writeUInt32LE(png.length, 14);
+  icoHeader.writeUInt32LE(22, 18);
+  await writeFile(path.join(outputDir, `${name}.ico`), Buffer.concat([icoHeader, png]));
+}
+
+await writeIcon("icon");
+await writeIcon("dev-icon", true);

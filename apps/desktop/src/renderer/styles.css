@@ -15256,7 +15256,7 @@ input[type="radio"]:focus-visible {
   gap: 8px;
   min-width: 0;
   min-height: 40px;
-  padding: 4px 6px 4px 12px;
+  padding: 4px 6px 4px 8px;
   border: 1px solid transparent;
   border-radius: 12px;
   color: rgba(244, 244, 243, 0.92);
@@ -15270,7 +15270,7 @@ input[type="radio"]:focus-visible {
 }
 
 .history-item.selected {
-  padding: 4px 6px 4px 12px;
+  padding: 4px 6px 4px 8px;
   border-color: rgba(255, 255, 255, 0.1);
   color: #ffffff;
   background: #17171b;
@@ -20529,6 +20529,29 @@ select option:checked {
   background: rgba(255, 255, 255, 0.14);
 }
 
+/* 过程记录 - process notes from the running turn share the tab with the reasoning
+   stream. The divider keeps a progress update from reading as a thought, and the
+   dimmer, smaller type keeps the stream the visual lead. */
+.thinking-workspace-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.thinking-workspace-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+:root[data-theme="light"] .thinking-workspace-notes {
+  border-top-color: rgba(15, 23, 42, 0.12);
+}
+
 .right-workspace-tab > .right-workspace-tab-live-dot {
   position: absolute;
   top: 5px;
@@ -21119,6 +21142,109 @@ select option:checked {
 }
 
 /* Keep related project tasks together without turning the sidebar into cards. */
+
+/* Sidebar history is one list with two collapsible sections: tasks on top, projects below. */
+.history-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-section-heading:hover {
+  color: var(--text-soft);
+  background: var(--surface-soft);
+}
+
+.history-section-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-section-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--text-faint);
+  background: var(--surface-soft);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.history-section .history-section-heading svg {
+  width: 14px;
+  height: 14px;
+}
+
+.history-section-threads {
+  gap: 2px;
+}
+
+/* Section polish: the heading carries its own count, affordances stay out of the way until hover. */
+.history-section-count {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+}
+
+.history-section-heading .history-project-disclosure {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.history-section-heading:hover .history-project-disclosure,
+.history-section.is-collapsed .history-section-heading .history-project-disclosure {
+  opacity: 1;
+}
+
+.history-section-threads .history-item {
+  padding-left: 8px;
+  font-size: 14px;
+}
+
+/* Rows share the section heading's left edge: no leading bar, no extra gutter. */
+.history-section-threads .history-item::before {
+  display: none;
+}
+
+.history-item-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .sidebar-history-tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -21262,7 +21388,7 @@ select option:checked {
   min-width: 0;
   min-height: 30px;
   margin: 0;
-  padding: 2px 8px 2px 4px;
+  padding: 2px 8px 2px 10px;
   border: 0;
   border-radius: 8px;
   color: rgba(244, 244, 243, 0.86);
@@ -21315,12 +21441,18 @@ select option:checked {
   display: grid;
   gap: 3px;
   min-width: 0;
-  padding-left: 24px;
+  padding-left: 0;
+}
+
+/* Sub tasks step in one level so the folder heading keeps its hierarchy.
+   The tasks section reuses this container, so scope the indent to project groups. */
+.history-project-group > .history-project-threads {
+  padding-left: 16px;
 }
 
 .history-project-threads .history-item {
   min-height: 36px;
-  padding: 3px 6px 3px 10px;
+  padding: 3px 6px 3px 8px;
   border-radius: 10px;
 }
 
@@ -29751,3 +29883,254 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 .cloud-notes-account-meta strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .cloud-notes-account-meta span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: 12px; }
 .cloud-notes-account-tag { flex: 0 0 auto; padding: 1px 8px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-muted); font-size: 11px; }
+
+/* ---------- 新建任务页：空白任务页居中输入 + 底部状态栏 ---------- */
+.chat-canvas.is-new-task {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chat-canvas.is-new-task .chat-scroll {
+  display: none;
+}
+
+.chat-canvas.is-new-task footer {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+}
+
+/* 初始页（新建任务）输入框比常规聊天更高，正常聊天界面不受影响 */
+.chat-canvas.is-new-task .chat-composer textarea {
+  min-height: 96px;
+}
+
+/* 初始页标题区：只在新建任务页显示，常规聊天界面不受影响 */
+.chat-canvas.is-new-task .new-task-hero {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.chat-canvas.is-new-task .new-task-hero h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(24px, 2.6vw, 34px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+/* 品牌词 CodeXH 在标题里加重，其余文案保持基准字重 */
+.chat-canvas.is-new-task .new-task-hero h1 .new-task-hero-brand {
+  font-weight: 800;
+}
+
+.chat-canvas.is-new-task .new-task-hero h1 .new-task-hero-red {
+  color: #ef4444;
+}
+
+.chat-canvas.is-new-task .new-task-hero h1 .new-task-hero-blue {
+  color: #2196f3;
+}
+
+.chat-canvas.is-new-task .new-task-hero p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.composer-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.composer-status-segment {
+  position: relative;
+}
+
+.composer-status-trigger,
+.composer-status-toggle,
+.composer-status-static {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.composer-status-trigger,
+.composer-status-toggle {
+  cursor: pointer;
+}
+
+.composer-status-trigger:hover:not(:disabled),
+.composer-status-toggle:hover:not(:disabled),
+.composer-status-trigger.is-open {
+  border-color: var(--border-strong);
+}
+
+.composer-status-trigger:disabled,
+.composer-status-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-status-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.composer-status-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+}
+
+.composer-status-toggle[aria-checked="true"] .composer-status-check {
+  border-color: var(--border-strong);
+  color: var(--text-soft);
+}
+
+.composer-status-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 40;
+  display: grid;
+  gap: 4px;
+  width: 300px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-card);
+  box-shadow: var(--shadow);
+}
+
+.composer-status-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-soft);
+  color: var(--text-faint);
+}
+
+.composer-status-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  outline: none;
+}
+
+.composer-status-list {
+  display: grid;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.composer-status-option,
+.composer-status-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-status-option:hover,
+.composer-status-action:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--surface-soft);
+}
+
+.composer-status-option.is-selected {
+  border-color: var(--border-strong);
+}
+
+.composer-status-option-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.composer-status-option-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-status-option-path,
+.composer-status-option-note {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.composer-status-option-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-status-option-check {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-soft);
+}
+
+.composer-status-empty {
+  margin: 0;
+  padding: 8px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.composer-status-divider {
+  height: 1px;
+  margin: 2px 4px;
+  background: var(--border);
+}
+
+.composer-status-loading {
+  color: var(--text-faint);
+  font-size: 11px;
+}

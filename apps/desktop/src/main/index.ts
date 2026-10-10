@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   DatabaseConnectionConfig,
+  MessageAttachment,
   NotificationNavigationTarget,
   RuntimeEvent,
   ShareSendRequest,
@@ -415,12 +416,14 @@ function quitApplication(): void {
   app.quit();
 }
 
-function resolveTrayIconPath(): string | null {
-  const candidates = [
-    path.join(process.resourcesPath, "icon.ico"),
-    path.resolve(__dirname, "../../assets/icon.ico"),
-    path.resolve(__dirname, "../../../assets/icon.ico")
-  ];
+function resolveAppIconPath(): string | null {
+  const fileName = app.isPackaged ? "icon.ico" : "dev-icon.ico";
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, fileName)]
+    : [
+        path.resolve(__dirname, `../../assets/${fileName}`),
+        path.resolve(__dirname, `../../../assets/${fileName}`)
+      ];
 
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
@@ -436,7 +439,7 @@ function createTray(): void {
     return;
   }
 
-  const iconPath = resolveTrayIconPath();
+  const iconPath = resolveAppIconPath();
   if (iconPath) {
     tray = new Tray(iconPath);
   } else {
@@ -477,7 +480,7 @@ function notifyMinimizedToTray(): void {
 }
 
 function showSystemNotification(title: string, body: string, onClick?: () => void): void {
-  const iconPath = resolveTrayIconPath();
+  const iconPath = resolveAppIconPath();
 
   if (Notification.isSupported()) {
     const notification = new Notification({
@@ -581,6 +584,7 @@ async function createWindow(): Promise<void> {
   const minHeight = Math.min(640, windowHeight);
   const windowX = workArea.x + Math.max(0, Math.floor((workArea.width - windowWidth) / 2));
   const windowY = workArea.y + Math.max(0, Math.floor((workArea.height - windowHeight) / 2));
+  const windowIconPath = process.platform === "win32" ? resolveAppIconPath() : null;
 
   mainWindow = new BrowserWindow({
     x: windowX,
@@ -589,6 +593,7 @@ async function createWindow(): Promise<void> {
     height: windowHeight,
     minWidth,
     minHeight,
+    ...(windowIconPath ? { icon: windowIconPath } : {}),
     autoHideMenuBar: true,
     backgroundColor: backend.getConfig().desktop.theme === "light" ? "#ffffff" : "#09090a",
     title: "codexh",
@@ -852,6 +857,8 @@ function registerIpc(): void {
   });
   ipcMain.handle("live-edit-preview:ready", () => liveEditPreview.markReady());
   ipcMain.handle("git:snapshot", (_event, payload: { threadId: string; rootPath?: string }) => backend.getGitSnapshot(payload.threadId, payload.rootPath));
+  ipcMain.handle("git:branch-summary", (_event, payload: { cwd: string }) => backend.getGitBranchSummary(payload.cwd));
+  ipcMain.handle("git:switch-branch-path", (_event, payload: { cwd: string; branch: string }) => backend.switchGitBranchByPath(payload.cwd, payload.branch));
   ipcMain.handle("git:stage-file", (_event, payload: { threadId: string; rootPath?: string; path: string }) =>
     backend.stageGitFile(payload.threadId, payload.path, payload.rootPath)
   );
@@ -899,8 +906,12 @@ function registerIpc(): void {
   ipcMain.handle("http:request", (_event, payload: HttpProxyRequestPayload) =>
     executeHttpRequest(payload, (threadId) => backend.getThreadOutputDir(threadId))
   );
-  ipcMain.handle("threads:guide", (_event, payload: { threadId: string; content: string }) =>
-    backend.guideActiveThread(payload.threadId, payload.content)
+  ipcMain.handle("threads:guide", (_event, payload: { threadId: string; content: string; displayContent?: string; mediaIntent?: "image" | "video" | null; attachments?: unknown[] }) =>
+    backend.guideActiveThread(payload.threadId, payload.content, {
+      displayContent: payload.displayContent,
+      mediaIntent: payload.mediaIntent ?? null,
+      attachments: payload.attachments as MessageAttachment[] | undefined
+    })
   );
   ipcMain.handle("threads:replace-message", (_event, payload: { threadId: string; messageId: string; content: string }) =>
     backend.replaceMessage(payload.threadId, payload.messageId, payload.content)

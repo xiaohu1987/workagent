@@ -23,29 +23,35 @@ import {
   IconSkills
 } from "../icons";
 import {
+  HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY,
   HISTORY_DELETE_DRAG_THRESHOLD_PX,
   HISTORY_DELETE_DROP_PADDING_PX,
   HISTORY_DELETE_PRESS_MS,
   HISTORY_DELETE_SWALLOW_MS,
-  HISTORY_STANDALONE_GROUP_KEY,
+  HISTORY_PROJECTS_SECTION_KEY,
+  HISTORY_SECTION_PREVIEW_COUNT,
+  HISTORY_TASKS_SECTION_KEY,
   HISTORY_THREADS_PREVIEW_COUNT,
   expandRect,
   historyDeleteGhostCopy,
   isHistoryProjectGroupCollapsed,
   isPointInRect,
   normalizeHistoryGroupKey,
+  pickVisibleHistorySlice,
   pickVisibleHistoryThreads,
+  readStoredStringSet,
   resolveHistoryDeleteDragTarget,
   shouldIgnoreHistoryDeleteDragFrom,
   shouldStartHistoryDeleteDrag,
+  writeStoredStringSet,
   type HistoryDeleteDragTarget
 } from "./history-utils";
 import { HistoryTrashOverlay } from "./history-trash-overlay";
+import { formatRelativeTime } from "../core/app-formatters";
 import { WorkspaceContextMenu } from "../workspace/panels";
 
 type ProjectGroup = { cwd: string; threads: ThreadRecord[] };
 type RenameState = { id: string; title: string } | null;
-type HistoryView = "projects" | "tasks";
 type HistoryDragState = {
   pointerId: number;
   target: HistoryDeleteDragTarget;
@@ -77,7 +83,7 @@ type Props = {
   setRenamingThread: Dispatch<SetStateAction<RenameState>>;
   onCommitRename: (title?: string) => Promise<void>;
   onCancelRename: () => void;
-  onCreateThread: (mode: "chat" | "project") => Promise<void>;
+  onCreateTask: () => void;
   onOpenThread: (threadId: string, options?: { scrollToLatest?: boolean }) => Promise<void>;
   onOpenQuickNotes: () => Promise<void>;
   onOpenSearch: () => void;
@@ -97,23 +103,22 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateThread, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
-  const [historyView, setHistoryView] = useState<HistoryView>(() => (
-    selectedThreadId && standaloneThreads.some((thread) => thread.id === selectedThreadId) ? "tasks" : "projects"
-  ));
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readStoredStringSet(HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY));
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(new Set());
   const [drag, setDrag] = useState<HistoryDragState | null>(null);
   const contextPresence = useMotionPresence(contextMenu, 140);
   const visibleContextMenu = contextMenu ?? contextPresence.value;
-  const currentViewThreads = historyView === "projects" ? projectGroups.flatMap((group) => group.threads) : standaloneThreads;
   const allHistoryThreads = [...projectGroups.flatMap((group) => group.threads), ...standaloneThreads];
-  const selectableThreads = currentViewThreads.filter((thread) => canDeleteThread(thread.status, deletingThreadId) && !batchDeleting);
-  const deletableThreadIds = allHistoryThreads
-    .filter((thread) => canDeleteThread(thread.status, deletingThreadId) && !batchDeleting)
-    .map((thread) => thread.id);
+  const selectableThreads = allHistoryThreads.filter((thread) => canDeleteThread(thread.status, deletingThreadId) && !batchDeleting);
+  const deletableThreadIds = selectableThreads.map((thread) => thread.id);
+  const tasksSectionExpanded = expandedGroups.has(HISTORY_TASKS_SECTION_KEY);
+  const projectsSectionExpanded = expandedGroups.has(HISTORY_PROJECTS_SECTION_KEY);
+  const tasksFold = pickVisibleHistoryThreads(standaloneThreads, { expanded: tasksSectionExpanded, previewCount: HISTORY_SECTION_PREVIEW_COUNT, selectedThreadId });
+  const projectsFold = pickVisibleHistorySlice(projectGroups, { expanded: projectsSectionExpanded, previewCount: HISTORY_SECTION_PREVIEW_COUNT });
   const selectedCount = allHistoryThreads.filter((thread) => selectedThreadIds.has(thread.id) && canDeleteThread(thread.status, deletingThreadId)).length;
   const trashRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<HistoryDragState | null>(null);
@@ -214,7 +219,6 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
       toggleThreadSelection(thread);
       return;
     }
-    setHistoryView(thread.mode === "project" && thread.cwd ? "projects" : "tasks");
     void onOpenThread(thread.id, { scrollToLatest: true });
   }
 
@@ -335,6 +339,10 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
     window.addEventListener("keydown", onKeyDown);
   }
 
+  useEffect(() => {
+    writeStoredStringSet(HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY, collapsedSections);
+  }, [collapsedSections]);
+
   useEffect(() => () => {
     document.body.classList.remove("is-history-trashing", "is-history-pressing");
     gestureCleanupRef.current?.();
@@ -362,12 +370,38 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
   }
 
   function toggleGroup(setter: Dispatch<SetStateAction<Set<string>>>, groupKey: string) {
+    toggleSetKey(setter, groupKey);
+  }
+
+  function toggleSetKey(setter: Dispatch<SetStateAction<Set<string>>>, key: string) {
     setter((current) => {
       const next = new Set(current);
-      if (next.has(groupKey)) next.delete(groupKey);
-      else next.add(groupKey);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
+  }
+
+  function toggleCollapsedSection(sectionKey: string) {
+    toggleSetKey(setCollapsedSections, sectionKey);
+  }
+
+  function renderSection(options: {
+    sectionKey: string;
+    label: string;
+    className: string;
+    emptyText: string;
+    count: number;
+    expanded: boolean;
+    hiddenCount: number;
+    canExpand: boolean;
+    items: ReactNode[];
+  }) {
+    const collapsed = collapsedSections.has(options.sectionKey);
+    return <section className={`history-section ${options.className} ${collapsed ? "is-collapsed" : ""}`} aria-label={options.label}>
+      <button type="button" className="history-section-heading" aria-expanded={!collapsed} title={collapsed ? `展开${options.label}` : `收起${options.label}`} onClick={() => toggleCollapsedSection(options.sectionKey)}><span className="history-section-label">{options.label}</span><span className="history-section-count">({options.count})</span><span className={`history-project-disclosure ${collapsed ? "" : "is-expanded"}`} aria-hidden><IconChevronRight /></span></button>
+      {collapsed ? null : <div className="history-project-threads history-section-threads">{options.items.length > 0 ? options.items : <div className="history-empty">{options.emptyText}</div>}{options.canExpand ? <button type="button" className={`history-project-more ${options.expanded ? "is-expanded" : ""}`} aria-expanded={options.expanded} onClick={() => toggleGroup(setExpandedGroups, options.sectionKey)}><span>{options.expanded ? "收起" : `展开更多 (${options.hiddenCount})`}</span><IconChevronDown /></button> : null}</div>}
+    </section>;
   }
 
   function renderThread(thread: ThreadRecord) {
@@ -393,14 +427,13 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
         onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, thread }); }}
       >
         {selectionMode && !renaming ? <button type="button" className={`history-item-select ${selectedThreadIds.has(thread.id) ? "is-selected" : ""}`} aria-label={`${selectedThreadIds.has(thread.id) ? "取消选择" : "选择"} ${thread.title}`} aria-pressed={selectedThreadIds.has(thread.id)} disabled={!canDeleteThread(thread.status, deletingThreadId) || batchDeleting} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); if (consumeSuppressedClick(event)) return; toggleThreadSelection(thread); }}><span aria-hidden="true">{selectedThreadIds.has(thread.id) ? <IconCheck /> : null}</span></button> : null}
-        {renaming ? <input className="history-item-rename-input" autoFocus value={renamingThread.title} aria-label="重命名任务" onFocus={(event) => event.currentTarget.select()} onChange={(event) => setRenamingThread({ id: thread.id, title: event.target.value })} onBlur={(event) => void onCommitRename(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); onCancelRename(); } }} onClick={(event) => event.stopPropagation()} /> : <button type="button" className="history-item-main" onClick={(event) => { if (consumeSuppressedClick(event)) return; activateHistoryThread(thread); }}><span className="history-item-label">{thread.title}</span>{thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}</button>}
+        {renaming ? <input className="history-item-rename-input" autoFocus value={renamingThread.title} aria-label="重命名任务" onFocus={(event) => event.currentTarget.select()} onChange={(event) => setRenamingThread({ id: thread.id, title: event.target.value })} onBlur={(event) => void onCommitRename(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); onCancelRename(); } }} onClick={(event) => event.stopPropagation()} /> : <button type="button" className="history-item-main" onClick={(event) => { if (consumeSuppressedClick(event)) return; activateHistoryThread(thread); }}><span className="history-item-label">{thread.title}</span><span className="history-item-time">{formatRelativeTime(thread.updatedAt)}</span>{thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}</button>}
       </div>
     );
   }
 
-  function renderGroup(groupKey: string, groupThreads: ThreadRecord[], options?: { heading?: ReactNode; title?: string; ariaLabel: string; className?: string; collapsible?: boolean; folderCwd?: string }) {
-    const collapsible = options?.collapsible !== false;
-    const collapsed = isHistoryProjectGroupCollapsed(expandedProjectGroups, groupKey, collapsible);
+  function renderGroup(groupKey: string, groupThreads: ThreadRecord[], options: { heading: ReactNode; title?: string; ariaLabel: string; className?: string; folderCwd?: string }) {
+    const collapsed = isHistoryProjectGroupCollapsed(expandedProjectGroups, groupKey, true);
     const expanded = expandedGroups.has(groupKey);
     const { visibleThreads, hiddenCount, canExpand } = pickVisibleHistoryThreads(groupThreads, { expanded, previewCount: HISTORY_THREADS_PREVIEW_COUNT, selectedThreadId });
     const folderTarget = options?.folderCwd
@@ -413,8 +446,8 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
         })
       : null;
     const draggingFolder = Boolean(drag && (drag.active || drag.swallowing) && drag.target.kind === "folder" && options?.folderCwd && drag.target.cwd === options.folderCwd);
-    return <section key={groupKey} className={`history-project-group ${options?.className ?? ""} ${collapsed ? "is-collapsed" : ""} ${draggingFolder ? "is-dragging-trash" : ""}`} aria-label={options?.ariaLabel}>
-      {options?.heading ? (collapsible ? <button type="button" className={`history-project-heading ${folderTarget ? "is-draggable" : ""}`} title={folderTarget ? `${options.title} · 拖到垃圾桶删除` : options.title} aria-expanded={!collapsed} onPointerDown={folderTarget ? (event) => beginHistoryDrag(event, folderTarget, { folderName: getFileLeafName(options.folderCwd ?? "") }, () => toggleGroup(setExpandedProjectGroups, groupKey)) : undefined} onClick={(event) => { if (consumeSuppressedClick(event)) return; toggleGroup(setExpandedProjectGroups, groupKey); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setProjectContextMenu({ x: event.clientX, y: event.clientY, cwd: options.folderCwd ?? options.title ?? "" }); }}><span className={`history-project-disclosure ${collapsed ? "" : "is-expanded"}`} aria-hidden><IconChevronRight /></span>{options.heading}</button> : <div className="history-standalone-heading" title={options.title}>{options.heading}</div>) : null}
+    return <section key={groupKey} className={`history-project-group ${options.className ?? ""} ${collapsed ? "is-collapsed" : ""} ${draggingFolder ? "is-dragging-trash" : ""}`} aria-label={options.ariaLabel}>
+      <button type="button" className={`history-project-heading ${folderTarget ? "is-draggable" : ""}`} title={folderTarget ? `${options.title} · 拖到垃圾桶删除` : options.title} aria-expanded={!collapsed} onPointerDown={folderTarget ? (event) => beginHistoryDrag(event, folderTarget, { folderName: getFileLeafName(options.folderCwd ?? "") }, () => toggleGroup(setExpandedProjectGroups, groupKey)) : undefined} onClick={(event) => { if (consumeSuppressedClick(event)) return; toggleGroup(setExpandedProjectGroups, groupKey); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setProjectContextMenu({ x: event.clientX, y: event.clientY, cwd: options.folderCwd ?? options.title ?? "" }); }}>{options.heading}<span className={`history-project-disclosure ${collapsed ? "" : "is-expanded"}`} aria-hidden><IconChevronRight /></span></button>
       {!collapsed ? <div className="history-project-threads">{visibleThreads.map(renderThread)}{canExpand ? <button type="button" className={`history-project-more ${expanded ? "is-expanded" : ""}`} aria-expanded={expanded} onClick={() => toggleGroup(setExpandedGroups, groupKey)}><span>{expanded ? "收起" : `展开更多 (${hiddenCount})`}</span><IconChevronDown /></button> : null}</div> : null}
     </section>;
   }
@@ -422,12 +455,8 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
   return <aside className="sidebar">
     <div className="sidebar-scroll">
       <div className="sidebar-brand-row"><div className="sidebar-brand"><strong>Code<span className="sidebar-brand-accent">XH</span></strong><span>AI Workspace</span></div><div className="sidebar-brand-tools"><button className="sidebar-search sidebar-quick-notes" type="button" title="随手记" aria-label="随手记" onClick={() => void onOpenQuickNotes()}><IconNotebook /></button><button className="sidebar-search" type="button" title="搜索历史对话" onClick={onOpenSearch}><IconSearch /></button></div></div>
-      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={() => { setHistoryView("tasks"); void onCreateThread("chat"); }}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span></button><button className="sidebar-nav-button" onClick={() => { setHistoryView("projects"); void onCreateThread("project"); }}><span className="sidebar-nav-icon"><IconFolder /></span><span>新建项目</span><span className="sidebar-nav-plus"><IconPlus /></span></button></div>
-      <div className="sidebar-history-tabs" role="tablist" aria-label="历史列表">
-        <button type="button" className={`sidebar-history-tab ${historyView === "projects" ? "active" : ""}`} role="tab" aria-selected={historyView === "projects"} title="项目" aria-label="显示项目" onClick={() => setHistoryView("projects")}><IconFolder /></button>
-        <button type="button" className={`sidebar-history-tab ${historyView === "tasks" ? "active" : ""}`} role="tab" aria-selected={historyView === "tasks"} title="普通聊天" aria-label="显示普通聊天" onClick={() => setHistoryView("tasks")}><IconChatBubbles /></button>
-      </div>
-      <div className={`history-list history-list-${historyView}`} aria-label={historyView === "projects" ? "项目" : "其他任务"}>
+      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={onCreateTask}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span><span className="sidebar-nav-plus"><IconPlus /></span></button></div>
+      <div className="history-list" aria-label="任务与项目">
         {selectionMode ? (
           <div className="history-selection-toolbar" aria-label="批量选择历史对话">
             <span className="history-selection-count">已选择 {selectedCount}</span>
@@ -435,12 +464,31 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
             <button type="button" className="history-selection-close" onClick={exitSelectionMode} disabled={batchDeleting} title="退出批量选择"><IconClose /></button>
           </div>
         ) : null}
-        {historyView === "projects" ? (
-          projectGroups.length > 0 ? projectGroups.map((group) => {
+        {renderSection({
+          sectionKey: HISTORY_TASKS_SECTION_KEY,
+          label: "任务",
+          className: "history-section-tasks",
+          emptyText: "还没有任务",
+          count: standaloneThreads.length,
+          expanded: tasksSectionExpanded,
+          hiddenCount: tasksFold.hiddenCount,
+          canExpand: tasksFold.canExpand,
+          items: tasksFold.visibleThreads.map(renderThread)
+        })}
+        {renderSection({
+          sectionKey: HISTORY_PROJECTS_SECTION_KEY,
+          label: "项目",
+          className: "history-section-projects",
+          emptyText: "还没有项目",
+          count: projectGroups.length,
+          expanded: projectsSectionExpanded,
+          hiddenCount: projectsFold.hiddenCount,
+          canExpand: projectsFold.canExpand,
+          items: projectsFold.visibleItems.map((group) => {
             const collaborationProject = group.threads.some(isCollaborationThread);
             return renderGroup(normalizeHistoryGroupKey(group.cwd), group.threads, { ariaLabel: collaborationProject ? `协作项目 ${getFileLeafName(group.cwd)}` : `项目 ${getFileLeafName(group.cwd)}`, title: group.cwd, folderCwd: group.cwd, heading: <>{collaborationProject ? <IconFolders /> : <IconFolder />}<span>{getFileLeafName(group.cwd)}</span></> });
-          }) : <div className="history-empty">还没有项目</div>
-        ) : standaloneThreads.length > 0 ? renderGroup(HISTORY_STANDALONE_GROUP_KEY, standaloneThreads, { ariaLabel: "其他任务", className: "history-standalone-group", collapsible: false }) : <div className="history-empty">还没有其他任务</div>}
+          })
+        })}
       </div>
       {visibleContextMenu ? <WorkspaceContextMenu x={visibleContextMenu.x} y={visibleContextMenu.y} motionPhase={contextPresence.phase} onClose={() => setContextMenu(null)} actions={[
         ...(!visibleContextMenu.thread.parentThreadId && visibleContextMenu.thread.status !== "running" ? [{ id: "extract-history-thread-skill", label: isGeneratingUserSkill ? "正在提炼技能..." : "提炼技能", icon: <IconSkills />, onSelect: () => onGenerateUserSkill(visibleContextMenu.thread) }] : []),

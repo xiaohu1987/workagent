@@ -947,8 +947,8 @@ export function QueuedMessageList({
           <button
             type="button"
             className="composer-queue-steer"
-            title="引导当前任务"
-            aria-label="引导当前任务"
+            title="方向调整当前任务"
+            aria-label="方向调整当前任务"
             disabled={deletingId === message.id}
             onClick={() => onSteer(message)}
           >

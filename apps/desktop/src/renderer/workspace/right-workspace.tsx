@@ -56,6 +56,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   thinkingText,
   thinkingRunning,
   thinkingStreaming,
+  thinkingNotes,
   threadId
 }: {
   hidden: boolean;
@@ -96,6 +97,7 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   thinkingText: string;
   thinkingRunning: boolean;
   thinkingStreaming: boolean;
+  thinkingNotes: string[];
   threadId: string | null;
 }) {
   const showGitWorkspace = showProjectWorkspace;
@@ -155,7 +157,12 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
       </div>
       <div className="right-workspace-content">
         <div id="right-workspace-content-thinking" className={`right-workspace-view ${activeTab === "thinking" ? "active" : ""}`} role={activeTab === "thinking" ? "tabpanel" : undefined} aria-labelledby={activeTab === "thinking" ? "right-workspace-tab-thinking" : undefined} aria-hidden={activeTab !== "thinking"} inert={activeTab !== "thinking"}>
-          <ThinkingWorkspace text={thinkingText} taskRunning={thinkingRunning} streaming={thinkingStreaming} />
+          <ThinkingWorkspace
+            text={thinkingText}
+            notes={thinkingNotes}
+            taskRunning={thinkingRunning}
+            streaming={thinkingStreaming}
+          />
         </div>
         {showGitWorkspace ? (
           <div id="right-workspace-content-changes" className={`right-workspace-view ${activeTab === "changes" ? "active" : ""}`} role={activeTab === "changes" ? "tabpanel" : undefined} aria-labelledby={activeTab === "changes" ? "right-workspace-tab-changes" : undefined} aria-hidden={activeTab !== "changes"} inert={activeTab !== "changes"}>

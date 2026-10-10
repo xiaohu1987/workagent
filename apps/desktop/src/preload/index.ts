@@ -70,6 +70,8 @@ const api = {
     ipcRenderer.invoke("live-edit-preview:acknowledge-path", payload),
   markLiveEditPreviewReady: () => ipcRenderer.invoke("live-edit-preview:ready"),
   getGitSnapshot: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:snapshot", payload),
+  getGitBranchSummary: (payload: { cwd: string }) => ipcRenderer.invoke("git:branch-summary", payload),
+  switchGitBranchByPath: (payload: { cwd: string; branch: string }) => ipcRenderer.invoke("git:switch-branch-path", payload),
   stageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => ipcRenderer.invoke("git:stage-file", payload),
   stageAllGitChanges: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:stage-all", payload),
   unstageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => ipcRenderer.invoke("git:unstage-file", payload),
@@ -109,8 +111,8 @@ const api = {
     body?: string;
     downloadFileName?: string;
   }) => ipcRenderer.invoke("http:request", payload),
-  guideActiveThread: (payload: { threadId: string; content: string }) =>
-    ipcRenderer.invoke("threads:guide", payload),
+  guideActiveThread: (payload: { threadId: string; content: string; displayContent?: string; mediaIntent?: "image" | "video" | null; attachments?: unknown[] }) =>
+    ipcRenderer.invoke("threads:guide", payload) as Promise<{ accepted: boolean; queuedWithMedia?: boolean }>,
   replaceMessage: (payload: { threadId: string; messageId: string; content: string }) =>
     ipcRenderer.invoke("threads:replace-message", payload),
   deleteQueuedMessage: (payload: { threadId: string; id: string }) =>

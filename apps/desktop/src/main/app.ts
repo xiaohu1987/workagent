@@ -26,6 +26,7 @@ import type {
   BrowserViewport,
   DatabaseConnectionConfig,
   GitActionResult,
+  GitBranchSummary,
   GitSnapshot,
   GpaStage,
   GpaState,
@@ -111,9 +112,11 @@ import {
   MEMORY_DISTILL_DEBOUNCE_MS,
   type MemoryDistillStore
 } from "./memory-distiller";
+import { remapThreadModelSelections } from "./thread-model-remap";
 import { buildThreadTitleFromFirstMessage, ThreadTitleService } from "./thread-title";
 import { parseEditableMessageMetadata } from "./message-metadata";
 import { detectShareTargets, sendShareImage, sendShareToTarget } from "./share-service";
+import { resolveAttachmentMaxBytes } from "./attachment-limits";
 import { isProjectAttachmentPath } from "./attachment-path";
 import {
   DatabaseService,
@@ -1213,6 +1216,16 @@ export class DesktopBackend {
     return this.#git.switchBranch(this.getProjectDirectory(threadId, rootPath), branch);
   }
 
+  /** 新建任务页选工作空间时还没有线程，按路径直接取分支信息。 */
+  public getGitBranchSummary(cwd: string): Promise<GitBranchSummary> {
+    return this.#git.branchSummary(cwd);
+  }
+
+  /** 同上：新建任务页选择分支时按路径切换，不要求线程。 */
+  public switchGitBranchByPath(cwd: string, branch: string): Promise<GitActionResult> {
+    return this.#git.switchBranch(cwd, branch);
+  }
+
   public createGitBranch(threadId: string, branch: string, rootPath?: string): Promise<GitActionResult> {
     return this.#git.createBranch(this.getProjectDirectory(threadId, rootPath), branch);
   }
@@ -1323,10 +1336,28 @@ export class DesktopBackend {
     return { queued, queuedBehindActiveTask };
   }
 
-  public async guideActiveThread(threadId: string, content: string): Promise<{ accepted: boolean }> {
+  public async guideActiveThread(
+    threadId: string,
+    content: string,
+    options: {
+      displayContent?: string;
+      mediaIntent?: "image" | "video" | null;
+      attachments?: MessageAttachment[];
+    } = {}
+  ): Promise<{ accepted: boolean; queuedWithMedia?: boolean }> {
     const guidance = content.trim();
     if (!guidance) {
       throw new Error("Guidance cannot be empty.");
+    }
+    const attachments = options.attachments ?? [];
+    const mediaIntent = options.mediaIntent ?? null;
+    // Live guidance is a text-only channel, so a queued message that carries
+    // attachments or an image/video intent keeps its media by re-entering the
+    // FIFO message path instead of being steered as bare text, which would
+    // silently drop the pictures.
+    if (attachments.length > 0 || mediaIntent) {
+      await this.sendMessage(threadId, guidance, attachments, options.displayContent, true, mediaIntent);
+      return { accepted: false, queuedWithMedia: true };
     }
     const activeTurnRunId = this.#runtime.guideActiveTurn(threadId, guidance);
     if (activeTurnRunId) {
@@ -1347,7 +1378,7 @@ export class DesktopBackend {
     }
     // A completed turn has no remaining model decision to guide. Preserve the
     // request by routing it through the established FIFO message path.
-    await this.sendMessage(threadId, guidance);
+    await this.sendMessage(threadId, guidance, [], options.displayContent, true, mediaIntent);
     return { accepted: false };
   }
 
@@ -1404,7 +1435,8 @@ export class DesktopBackend {
       const mimeType = normalizeAttachmentMimeType(input.mimeType, name);
       const isImage = mimeType.startsWith("image/");
       const isVideo = mimeType.startsWith("video/");
-      const maxBytes = isVideo ? 100 * 1024 * 1024 : isImage ? 10 * 1024 * 1024 : 20 * 1024 * 1024;
+      const kind: MessageAttachment["kind"] = isImage ? "image" : isVideo ? "video" : "file";
+      const maxBytes = resolveAttachmentMaxBytes(kind);
       const sizeBytes = linkedProjectPath
         ? (await fs.stat(linkedProjectPath)).size
         : inputData!.byteLength;
@@ -1414,7 +1446,7 @@ export class DesktopBackend {
       const absolutePath = linkedProjectPath ?? await this.copyAttachment(targetDir, name, mimeType, inputData!);
       attachments.push({
         id: randomUUID(),
-        kind: isImage ? "image" : isVideo ? "video" : "file",
+        kind,
         name,
         mimeType,
         absolutePath,
@@ -2454,26 +2486,19 @@ export class DesktopBackend {
       .map((connection) => this.#databaseCredentials.remove(connection.credentialRef)));
 
     await saveConfig(this.#layout.configFile, this.#config);
-    const selectionCache = new Map<string, Pick<ThreadRecord, "providerId" | "modelId">>();
-    for (const thread of this.#db.listThreads()) {
-      const cacheKey = `${thread.providerId ?? ""}::${thread.modelId ?? ""}`;
-      let selection = selectionCache.get(cacheKey);
-      if (!selection) {
-        selection = resolveThreadModelSelection(this.#config, thread.providerId, thread.modelId);
-        selectionCache.set(cacheKey, selection);
+    await remapThreadModelSelections({
+      database: this.#db,
+      resolveSelection: (thread) =>
+        resolveThreadModelSelection(this.#config, thread.providerId, thread.modelId),
+      onThreadUpdated: async (updated) => {
+        await this.emit({
+          type: "thread.updated",
+          threadId: updated.id,
+          payload: { thread: updated },
+          createdAt: new Date().toISOString()
+        });
       }
-      if (selection.providerId === thread.providerId && selection.modelId === thread.modelId) {
-        continue;
-      }
-
-      const updated = this.#db.updateThread(thread.id, selection);
-      await this.emit({
-        type: "thread.updated",
-        threadId: thread.id,
-        payload: { thread: updated },
-        createdAt: new Date().toISOString()
-      });
-    }
+    });
     // Only rebuild MCP state when server definitions actually changed. Saving
     // Unrelated settings (tone, multi-agent, ...) must not respawn MCP.
     // child processes — that blocked the IPC handler for seconds on Windows.

@@ -1899,8 +1899,14 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
     }
 
     if (message.turnRunId) {
+      // A running turn's process notes ("过程记录") are not frozen history yet: the
+      // turn can still fold them away the moment its answer lands, and painting them
+      // here only made the transcript grow mid-run and snap back on completion. They
+      // render in the thinking workspace instead (selectActiveTurnProcessNotes).
+      // Frozen turns keep the old rule: an answered turn folds its notes away, an
+      // answerless one keeps them so the turn body is never empty.
       if (activeTurnRunId && message.turnRunId === activeTurnRunId) {
-        return true;
+        return false;
       }
 
       return !turnIdsWithOutcome.has(message.turnRunId);
@@ -1937,6 +1943,54 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
   }));
 }
 
+/**
+ * The active turn's process notes ("过程记录"), in arrival order, for the thinking
+ * workspace. The transcript deliberately hides these while their turn runs (see
+ * filterTranscriptMessages): they are still provisional, so the panel carries them
+ * live and the frozen history only keeps what the turn settled on. The walk mirrors
+ * the transcript's own rules - only the newest turn, only commentary-only messages,
+ * one entry per distinct text, newest notes last - and `limit` caps the list.
+ */
+export function selectActiveTurnProcessNotes(
+  messages: MessageRecord[],
+  threadStatus?: ThreadRecord["status"] | null,
+  limit = 6
+): string[] {
+  if (messages.length === 0) {
+    return [];
+  }
+
+  const activeTurnRunId = isThreadExecutionInProgress(threadStatus ?? null)
+    ? [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null
+    : null;
+  if (!activeTurnRunId) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const notes: string[] = [];
+  for (const message of messages) {
+    if (message.turnRunId !== activeTurnRunId || !isCommentaryOnlyTranscriptMessage(message)) {
+      continue;
+    }
+
+    const text = (parseMessageEventBlocks(message) ?? [])
+      .filter((block) => block.type === "commentary")
+      .map((block) => block.content.trim())
+      .filter(Boolean)
+      .join("\n\n");
+    const fingerprint = text.replace(/\s+/g, " ").trim();
+    if (!fingerprint || seen.has(fingerprint)) {
+      continue;
+    }
+
+    seen.add(fingerprint);
+    notes.push(text);
+  }
+
+  return limit > 0 ? notes.slice(-limit) : notes;
+}
+
 export function getMessageDisplayKind(message: MessageRecord): string | null {
   if (!message.metadataJson) return null;
   try {
@@ -1947,11 +2001,20 @@ export function getMessageDisplayKind(message: MessageRecord): string | null {
   }
 }
 
+/**
+ * Process notes ("过程记录") and tool-batch anchors.
+ *
+ * They are the runtime's own bookkeeping of what a running turn is doing, so the transcript
+ * hides them while their turn runs and only the process panel shows them.
+ */
+export function isProcessNoteDisplayKind(displayKind: string | null | undefined): boolean {
+  return displayKind === "commentary" || displayKind === "tool_batch";
+}
+
 /** Final/formal replies must paint before a following completion event clears live UI. */
 export function shouldCommitRuntimeMessageImmediately(message: MessageRecord): boolean {
   if (message.role !== "assistant" || !message.content.trim()) return false;
-  const displayKind = getMessageDisplayKind(message);
-  return displayKind !== "commentary" && displayKind !== "tool_batch";
+  return !isProcessNoteDisplayKind(getMessageDisplayKind(message));
 }
 
 export function isCommentaryOnlyTranscriptMessage(message: MessageRecord) {
@@ -2108,6 +2171,19 @@ export function reconcilePendingUserMessagesDetailed(
 
 export function isOptimisticUserMessage(message: Pick<MessageRecord, "id" | "role">): boolean {
   return message.role === "user" && message.id.startsWith("optimistic-");
+}
+
+/**
+ * Whether the edit flow may open for a transcript row.
+ *
+ * The editor sends the row id to `threads:replace-message`, and the main process can
+ * only edit a row the thread database already holds. A bubble still painted as
+ * `optimistic-<uuid>` has no such row, so submitting the editor for it failed every
+ * time with "The message to edit is no longer available." - the refresh afterwards
+ * kept the still-queued bubble on screen and invited another retry.
+ */
+export function canEditUserMessage(message: Pick<MessageRecord, "id" | "role">): boolean {
+  return message.role === "user" && !isOptimisticUserMessage(message);
 }
 
 /**

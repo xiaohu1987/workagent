@@ -1,8 +1,11 @@
 import type { ThreadRecord } from "@shared-types";
 
 export const HISTORY_THREADS_PREVIEW_COUNT = 10;
-export const HISTORY_STANDALONE_GROUP_KEY = "__standalone__";
+export const HISTORY_SECTION_PREVIEW_COUNT = 6;
+export const HISTORY_TASKS_SECTION_KEY = "__section_tasks__";
+export const HISTORY_PROJECTS_SECTION_KEY = "__section_projects__";
 export const HISTORY_EXPANDED_GROUPS_STORAGE_KEY = "codexh.history-expanded-groups";
+export const HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY = "codexh.history-collapsed-sections";
 
 export function isHistoryProjectGroupCollapsed(
   expandedGroupKeys: ReadonlySet<string>,
@@ -131,25 +134,37 @@ export function pickVisibleHistoryThreads(
   threads: ThreadRecord[],
   options: { expanded: boolean; previewCount: number; selectedThreadId: string | null }
 ): { visibleThreads: ThreadRecord[]; hiddenCount: number; canExpand: boolean } {
-  const canExpand = threads.length > options.previewCount;
-  if (options.expanded || !canExpand) {
-    return { visibleThreads: threads, hiddenCount: 0, canExpand };
-  }
-
-  const preview = threads.slice(0, options.previewCount);
-  const hiddenCount = threads.length - preview.length;
-  if (!options.selectedThreadId || preview.some((thread) => thread.id === options.selectedThreadId)) {
-    return { visibleThreads: preview, hiddenCount, canExpand };
+  const slice = pickVisibleHistorySlice(threads, options);
+  const selectedInPreview = Boolean(
+    options.selectedThreadId && slice.visibleItems.some((thread) => thread.id === options.selectedThreadId)
+  );
+  if (!slice.canExpand || options.expanded || selectedInPreview) {
+    return { visibleThreads: slice.visibleItems, hiddenCount: slice.hiddenCount, canExpand: slice.canExpand };
   }
 
   const selected = threads.find((thread) => thread.id === options.selectedThreadId);
   if (!selected) {
-    return { visibleThreads: preview, hiddenCount, canExpand };
+    return { visibleThreads: slice.visibleItems, hiddenCount: slice.hiddenCount, canExpand: slice.canExpand };
   }
 
   return {
-    visibleThreads: [...preview.slice(0, Math.max(0, options.previewCount - 1)), selected],
-    hiddenCount,
+    visibleThreads: [...slice.visibleItems.slice(0, Math.max(0, slice.visibleItems.length - 1)), selected],
+    hiddenCount: slice.hiddenCount,
+    canExpand: true
+  };
+}
+
+export function pickVisibleHistorySlice<T>(
+  items: readonly T[],
+  options: { expanded: boolean; previewCount: number }
+): { visibleItems: T[]; hiddenCount: number; canExpand: boolean } {
+  const canExpand = items.length > options.previewCount;
+  if (options.expanded || !canExpand) {
+    return { visibleItems: [...items], hiddenCount: 0, canExpand };
+  }
+  return {
+    visibleItems: items.slice(0, options.previewCount),
+    hiddenCount: items.length - options.previewCount,
     canExpand
   };
 }
