@@ -1336,7 +1336,9 @@ describe("tool timeline grouping", () => {
     expect(fileSummary).toBeDefined();
     expect(toolGroup).toBeDefined();
     expect(shouldKeepTimelineEntryWhenTurnCollapsed(fileSummary!, section, new Set([section!.id]))).toBe(true);
-    expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, section, new Set([section!.id]))).toBe(true);
+    // Tool activity is part of the folded process, not of the settled answer: it
+    // disappears with the collapsed turn and returns when the turn is expanded.
+    expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, section, new Set([section!.id]))).toBe(false);
   });
 
   it("keeps generated images visible when a completed turn is collapsed", () => {

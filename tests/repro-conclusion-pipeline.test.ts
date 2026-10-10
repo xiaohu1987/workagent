@@ -231,7 +231,9 @@ describeWithFixture("final answer survives the transcript pipeline", () => {
         && getMessageDisplayKind(entry.message) !== "commentary"
       )
     ).toEqual([]);
-    expect(hiddenEntries.some((entry) => entry.kind === "tool-group")).toBe(false);
+    // The noisy tool activity folds away together with the turn - that is the whole
+    // point of collapsing a finished process. Expanding the turn brings it back.
+    expect(hiddenEntries.some((entry) => entry.kind === "tool-group")).toBe(true);
   });
 });
 

@@ -595,14 +595,14 @@ export function shouldKeepTimelineEntryWhenTurnCollapsed(
     return true;
   }
   // A collapsed turn keeps its user message, its file summary, generated media and the
-  // prose the user is reading. Commentary stays in the thinking workspace, while tool
-  // groups remain as concise summaries of the work that actually happened.
+  // prose the user is reading. The process folds away with the turn: commentary lives in
+  // the thinking workspace, and tool activity collapses together with it, so a settled
+  // turn reads as its conclusion instead of replaying every command it ran.
   //
   // Keeping formal assistant messages means the conclusion does not blink out when a
   // turn is collapsed, whichever entry the summary fallback picked.
   return entry.id === turn.userEntryId
     || entry.id === turn.summaryEntryId
-    || entry.kind === "tool-group"
     || entry.kind === "file-summary"
     || timelineEntryHasGeneratedMedia(entry)
     || (entry.kind === "message"

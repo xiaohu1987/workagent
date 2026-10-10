@@ -3767,7 +3767,8 @@ export function App() {
     [activeSnapshotThreadStatus, selectedMessages]
   );
   // Commentary process notes and the streaming answer draft stay in the thinking
-  // workspace; settled replies and tool activity stay in the transcript.
+  // workspace; settled replies stay in the transcript, and tool activity folds away
+  // together with its turn once the turn collapses.
   const thinkingNotes = useMemo(
     () => selectActiveTurnProcessNotes(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]

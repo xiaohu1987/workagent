@@ -42,6 +42,16 @@ describe("tool activity visibility", () => {
     expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, turn, new Set())).toBe(true);
   });
 
+  it("folds tool groups away with the turn once it is collapsed", () => {
+    const entries = buildTimelineEntries([userMessage], [toolCall], [], undefined, "running");
+    const toolGroup = entries.find((entry) => entry.kind === "tool-group");
+    const turn = buildConversationTurnSections(entries)[0];
+
+    expect(toolGroup?.kind).toBe("tool-group");
+    expect(turn).toBeDefined();
+    expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, turn, new Set([turn!.id]))).toBe(false);
+  });
+
   it("does not cache a running tool's empty result so completion can load it again", () => {
     const loadedResults = new Map<string, string | null>();
     const nextResults = mergeToolCallResults(loadedResults, [
