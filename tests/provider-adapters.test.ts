@@ -2507,6 +2507,44 @@ describe("OpenAiCompatibleProvider", () => {
     expect(grok).toMatchObject({ reasoning_effort: "high" });
   });
 
+  it("asks DeepSeek to keep deep-thinking content in Chinese for Chinese conversations", async () => {
+    mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "Done." }, finish_reason: "stop" }] });
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      compatibilityProfile: "deepseek",
+      apiKey: "[REDACTED]"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "请分析这个项目" }],
+      availableTools: [],
+      model: {
+        id: "deepseek-flash",
+        providerId: provider.id,
+        displayName: "DeepSeek Flash",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true,
+        role: "reasoning"
+      },
+      provider,
+      reasoningEffort: "xhigh",
+      stream: false
+    });
+
+    const systemContent = mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content as string;
+    expect(systemContent).toContain("[Chinese output compatibility]");
+    expect(systemContent).toContain("MUST be written in Simplified Chinese");
+    expect(systemContent).toContain("Think in Simplified Chinese, not in English");
+    expect(systemContent).toContain("reasoning_content");
+    expect(systemContent).toContain("用简体中文思考");
+  });
+
   it("uses Grok's plain-text completion-audit compatibility protocol", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: "APPROVED" } }]
