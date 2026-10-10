@@ -20529,9 +20529,6 @@ select option:checked {
   background: rgba(255, 255, 255, 0.14);
 }
 
-/* 过程记录 - process notes from the running turn share the tab with the reasoning
-   stream. The divider keeps a progress update from reading as a thought, and the
-   dimmer, smaller type keeps the stream the visual lead. */
 .thinking-workspace-notes {
   display: flex;
   flex-direction: column;
@@ -20548,7 +20545,24 @@ select option:checked {
   line-height: 1.6;
 }
 
+.thinking-workspace-draft {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text);
+}
+
+.thinking-workspace-draft-label {
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 :root[data-theme="light"] .thinking-workspace-notes {
+  border-top-color: rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme="light"] .thinking-workspace-draft {
   border-top-color: rgba(15, 23, 42, 0.12);
 }
 

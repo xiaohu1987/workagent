@@ -547,10 +547,9 @@ export function buildConversationTurnSections(entries: TimelineEntry[]): Convers
     const { lastFormalAssistantEntryId, lastAssistantEntryId, ...section } = current;
     sections.push({
       ...section,
-      // The collapsed turn renders exactly this entry, so it must be an entry that
-      // actually carries the turn's answer. A turn whose final answer is classified as
-      // commentary used to have no formal entry at all, which left `summaryEntryId`
-      // null and the whole conclusion folded away until the thread was reopened.
+      // The collapsed turn uses this entry as its canonical answer summary. A turn whose
+      // final answer is classified as commentary has no formal entry, so fall back to the
+      // last assistant message instead of folding the conclusion away.
       summaryEntryId: lastFormalAssistantEntryId ?? lastAssistantEntryId
     });
   };
@@ -596,17 +595,14 @@ export function shouldKeepTimelineEntryWhenTurnCollapsed(
     return true;
   }
   // A collapsed turn keeps its user message, its file summary, generated media and the
-  // prose the user is reading: the turn's answer (its summary entry) plus every formal
-  // assistant message. Commentary progress notes and tool activity are what collapsing
-  // folds away, and keeping *all* assistant text is what left finished turns expanded.
+  // prose the user is reading. Commentary stays in the thinking workspace, while tool
+  // groups remain as concise summaries of the work that actually happened.
   //
-  // The formal-prose clause is what makes a conclusion stop disappearing: collapsing used
-  // to render only the summary entry, so a turn that collapsed before its final answer had
-  // reached the transcript showed no answer at all until the thread was reopened. Keeping
-  // formal prose means nothing already on screen can blink out, whichever entry the summary
-  // fallback picked.
+  // Keeping formal assistant messages means the conclusion does not blink out when a
+  // turn is collapsed, whichever entry the summary fallback picked.
   return entry.id === turn.userEntryId
     || entry.id === turn.summaryEntryId
+    || entry.kind === "tool-group"
     || entry.kind === "file-summary"
     || timelineEntryHasGeneratedMedia(entry)
     || (entry.kind === "message"
@@ -1860,30 +1856,10 @@ export function parseNumericAttribute(value?: string) {
   return Number.isFinite(next) ? next : undefined;
 }
 
-export function filterTranscriptMessages(messages: MessageRecord[], threadStatus?: ThreadRecord["status"] | null) {
+export function filterTranscriptMessages(messages: MessageRecord[], _threadStatus?: ThreadRecord["status"] | null) {
   if (messages.length === 0) {
     return messages;
   }
-
-  const activeTurnRunId = isThreadExecutionInProgress(threadStatus ?? null)
-    ? [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null
-    : null;
-  const turnIdsWithOutcome = new Set<string>();
-  let hasStandaloneOutcome = false;
-
-  for (const message of messages) {
-    if (!isOutcomeTranscriptMessage(message)) {
-      continue;
-    }
-
-    if (message.turnRunId) {
-      turnIdsWithOutcome.add(message.turnRunId);
-    } else {
-      hasStandaloneOutcome = true;
-    }
-  }
-
-  const hasAnyOutcome = hasStandaloneOutcome || turnIdsWithOutcome.size > 0;
 
   const filteredMessages = messages.filter((message) => {
     if (message.content.trimStart().startsWith("[internal:")) {
@@ -1894,25 +1870,9 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
       return false;
     }
 
-    if (!isCommentaryOnlyTranscriptMessage(message)) {
-      return true;
-    }
-
-    if (message.turnRunId) {
-      // A running turn's process notes ("过程记录") are not frozen history yet: the
-      // turn can still fold them away the moment its answer lands, and painting them
-      // here only made the transcript grow mid-run and snap back on completion. They
-      // render in the thinking workspace instead (selectActiveTurnProcessNotes).
-      // Frozen turns keep the old rule: an answered turn folds its notes away, an
-      // answerless one keeps them so the turn body is never empty.
-      if (activeTurnRunId && message.turnRunId === activeTurnRunId) {
-        return false;
-      }
-
-      return !turnIdsWithOutcome.has(message.turnRunId);
-    }
-
-    return !hasAnyOutcome;
+    // Commentary is provisional process output. Keep it in the thinking workspace
+    // so an intermediate snapshot cannot paint it and then remove it on completion.
+    return !isCommentaryOnlyTranscriptMessage(message);
   });
 
   const visibleAssistantMessages = new Set<string>();
@@ -1944,25 +1904,20 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
 }
 
 /**
- * The active turn's process notes ("过程记录"), in arrival order, for the thinking
- * workspace. The transcript deliberately hides these while their turn runs (see
- * filterTranscriptMessages): they are still provisional, so the panel carries them
- * live and the frozen history only keeps what the turn settled on. The walk mirrors
- * the transcript's own rules - only the newest turn, only commentary-only messages,
- * one entry per distinct text, newest notes last - and `limit` caps the list.
+ * The active turn's process notes ("过程记录") are shown in the thinking workspace,
+ * not in the transcript. They are provisional until the turn settles, so the history
+ * never paints a row that a later snapshot can retract.
  */
 export function selectActiveTurnProcessNotes(
   messages: MessageRecord[],
   threadStatus?: ThreadRecord["status"] | null,
   limit = 6
 ): string[] {
-  if (messages.length === 0) {
+  if (messages.length === 0 || !isThreadExecutionInProgress(threadStatus ?? null)) {
     return [];
   }
 
-  const activeTurnRunId = isThreadExecutionInProgress(threadStatus ?? null)
-    ? [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null
-    : null;
+  const activeTurnRunId = [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null;
   if (!activeTurnRunId) {
     return [];
   }

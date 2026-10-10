@@ -116,6 +116,7 @@ import {
   createOptimisticThreadSnapshot,
   dropSupersededOptimisticMessages,
   filterTranscriptMessages,
+  selectActiveTurnProcessNotes,
   formatComposerAttachments,
   getActivePlanTimelineItem,
   getAssistantDraftDisplayContent,
@@ -161,7 +162,6 @@ import {
   resolveLatestThreadRecord,
   rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
-  selectActiveTurnProcessNotes,
   shouldKeepAssistantDraft,
   shouldCommitRuntimeMessageImmediately,
   shouldShowRuntimeActivityPanel,
@@ -381,9 +381,8 @@ import { ComposerModelPicker, ContextUsageControl, FloatingSideMenu, ReasoningEf
 import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfirmationCard, PendingResumeCard, PlanItem, QueuedMessageList, RuntimeActivityOutputRow, RuntimeActivityPanel, SubagentSwitchRow, buildSubagentPresentations, resolveSelectedSubagentId } from "./cards/runtime-cards";
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
-import { isLastToolGroupInTimeline, resolveDeferredToolGroup } from "./timeline/deferred-tool-group";
 import { TimelineEntries } from "./timeline/timeline-entries";
-import { ApprovalCard, AssistantDraftMessage, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
+import { ApprovalCard, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
 import {
   HISTORY_EXPANDED_GROUPS_STORAGE_KEY,
@@ -3767,10 +3766,8 @@ export function App() {
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
   );
-  // The running turn's process notes ("过程记录") render in the thinking workspace
-  // instead of the transcript (see filterTranscriptMessages): they are provisional
-  // until the turn freezes, so painting them as history only made the conversation
-  // grow mid-run and snap back the moment the answer landed.
+  // Commentary process notes and the streaming answer draft stay in the thinking
+  // workspace; settled replies and tool activity stay in the transcript.
   const thinkingNotes = useMemo(
     () => selectActiveTurnProcessNotes(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
@@ -3973,8 +3970,17 @@ export function App() {
     activeAssistantDraft?.reasoning
   );
   const thinkingText = selectThinkingText(thinkingMemoryRef.current, activeSnapshotThreadId ?? selectedThreadId);
+  const draftStreaming = Boolean(
+    isTaskProcessing &&
+    activeAssistantDraft &&
+    !activeAssistantDraft.completed &&
+    activeAssistantDraft.phase === "generating" &&
+    activeDraftContent.trim()
+  );
   const thinkingStreaming = Boolean(
-    isTaskProcessing && !activeAssistantDraft?.completed && activeAssistantDraft?.reasoning?.trim()
+    isTaskProcessing &&
+    !activeAssistantDraft?.completed &&
+    (activeAssistantDraft?.reasoning?.trim() || draftStreaming)
   );
   const workspaceSubagentPresentations = useMemo(
     () => isTaskProcessing ? subagentPresentations : [],
@@ -4130,41 +4136,6 @@ export function App() {
     )?.toolCall ?? null,
     [activeRuntimeActivity?.entries]
   );
-  const deferredRuntimeToolGroup = useMemo(() => {
-    if (!isTaskProcessing || !latestRootRuntimeTool) {
-      return null;
-    }
-    const group = timelineEntries.find(
-      (entry): entry is Extract<TimelineEntry, { kind: "tool-group" }> =>
-        entry.kind === "tool-group" && entry.toolCalls.some((toolCall) => toolCall.id === latestRootRuntimeTool.id)
-    );
-    if (!group) return null;
-
-    // The live panel is fed by the runtime activity stream, which can lag the transcript: the
-    // "latest root tool" may still belong to an earlier batch after a newer one has rendered.
-    // Handing that earlier batch over hid records in the middle of the chat, so only the tail
-    // batch is eligible for the hand-over.
-    const groupIsTail = isLastToolGroupInTimeline(
-      timelineEntries as ReadonlyArray<{ kind: string; toolCalls?: readonly { id: string }[] | null }>,
-      group.toolCalls.map((toolCall) => toolCall.id)
-    );
-    if (!groupIsTail) return null;
-
-    // Timestamps that cannot be parsed used to make this comparison `false` forever, which kept
-    // the whole group hidden for the rest of the turn. Dropping them leaves the decision to the
-    // batch rule below instead of silently suppressing finished records.
-    const groupCompletedAt = Math.max(
-      ...group.toolCalls
-        .map((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt))
-        .filter((timestamp) => Number.isFinite(timestamp))
-    );
-    const hasReplacementReply = Number.isFinite(groupCompletedAt) && visibleMessages.some((message) =>
-      message.role === "assistant" &&
-      !isInternalAgentProtocolMessage(message.content) &&
-      Date.parse(message.createdAt) > groupCompletedAt
-    );
-    return resolveDeferredToolGroup(group.toolCalls, hasReplacementReply);
-  }, [isTaskProcessing, latestRootRuntimeTool, timelineEntries, visibleMessages]);
   const shouldRenderRuntimeTailPanel = Boolean(
     showRuntimeActivityPanel &&
     !(latestConversationTurn && collapsedTurnIds.has(latestConversationTurn.id))
@@ -6137,18 +6108,16 @@ export function App() {
           });
         }
       }
-      if (gpaState.fullAccess) {
-        try {
-          await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
-        } catch (error) {
-          setGpaState((prev) => ({ ...prev, fullAccess: false }));
-          void refreshThreads();
-          void refreshSnapshot(thread.id);
-          showNotice("完全访问设置未保存", {
-            message: error instanceof Error ? error.message : "请重新设置后再发送。"
-          });
-          return;
-        }
+      try {
+        await window.codexh.setGpaFullAccess({ threadId, fullAccess: gpaState.fullAccess });
+      } catch (error) {
+        setGpaState((prev) => ({ ...prev, fullAccess: false }));
+        void refreshThreads();
+        void refreshSnapshot(thread.id);
+        showNotice("完全访问设置未保存", {
+          message: error instanceof Error ? error.message : "请重新设置后再发送。"
+        });
+        return;
       }
       void refreshThreads();
       void refreshSnapshot(thread.id);
@@ -7997,7 +7966,6 @@ export function App() {
                   latestTurnId={latestConversationTurn?.id ?? null}
                   taskProcessing={isTaskProcessing}
                   collapsedTurnIds={collapsedTurnIds}
-                  deferredRuntimeToolGroup={deferredRuntimeToolGroup}
                   skillNames={skillNames}
                   assistantLabel={activeAssistantLabel}
                   userMessageActions={transcriptUserMessageActions}
@@ -8015,17 +7983,6 @@ export function App() {
                   selectedShareMessageIds={selectedShareIdSet}
                   onToggleShareMessage={toggleShareMessage}
                 />
-                {activeAssistantDraft ? (
-                  <AssistantDraftMessage
-                    key={`draft-${activeAssistantDraft.draftId}`}
-                    assistantLabel={activeAssistantLabel}
-                    content={activeDraftContent}
-                    draftId={activeAssistantDraft.draftId}
-                    phase={activeAssistantDraft.phase}
-                    startedAt={activeAssistantDraft.startedAt}
-                    completed={activeAssistantDraft.completed}
-                  />
-                ) : null}
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -8476,9 +8433,11 @@ export function App() {
           selectedSubagentId={selectedSubagentId}
           onSelectSubagent={selectSubagentEvent}
           thinkingText={thinkingText}
+          thinkingDraftText={activeDraftContent}
+          thinkingDraftStreaming={draftStreaming}
+          thinkingNotes={thinkingNotes}
           thinkingRunning={isTaskProcessing}
           thinkingStreaming={thinkingStreaming}
-          thinkingNotes={thinkingNotes}
           threadId={selectedThreadId}
         />
 

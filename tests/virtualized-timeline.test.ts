@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { createElement, type ReactElement } from "react";
 import {
+  buildNonVirtualizedTimelineItems,
   clampVirtualizedRange,
+  isValidVirtualizedRowMeasurement,
   resolveMeasurementScrollAdjustment,
   resolveVirtualizedRangeAfterItemCountChange,
   resolveVirtualizedRange,
@@ -9,6 +12,18 @@ import {
   shouldDeferVirtualTimelineMeasurement,
   shouldVirtualizedTimelineFollowTail
 } from "../apps/desktop/src/renderer/timeline/virtualized-timeline";
+
+describe("non-virtualized timeline identity", () => {
+  it("keys rows by their stable timeline id instead of their array position", () => {
+    const first = buildNonVirtualizedTimelineItems(
+      [{ id: "message-1" }, { id: "tool-1" }],
+      (item) => item.id,
+      (item) => createElement("span", null, item.id)
+    );
+
+    expect(first.map((item) => (item as ReactElement).key)).toEqual(["message-1", "tool-1"]);
+  });
+});
 
 describe("virtualized timeline range", () => {
   it("returns only rows intersecting the overscanned viewport", () => {
@@ -60,6 +75,12 @@ describe("virtualized timeline range", () => {
     expect(resolveMeasurementScrollAdjustment(180, 260, 400, 500, false)).toBe(80);
     expect(resolveMeasurementScrollAdjustment(180, 260, 540, 500, false)).toBe(0);
     expect(resolveMeasurementScrollAdjustment(180, 260, 400, 500, true)).toBe(0);
+  });
+
+  it("rejects transient zero-height measurements", () => {
+    expect(isValidVirtualizedRowMeasurement(0)).toBe(false);
+    expect(isValidVirtualizedRowMeasurement(Number.NaN)).toBe(false);
+    expect(isValidVirtualizedRowMeasurement(180)).toBe(true);
   });
 
   it("defers row measurements throughout a scrollbar drag and its release batch", () => {

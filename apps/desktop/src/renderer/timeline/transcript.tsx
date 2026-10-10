@@ -8,6 +8,7 @@ import { IconChart, IconCheck, IconChecklist, IconChevronDown, IconClose, IconCo
 import { CopyTextButton, MessageMediaLightbox, getFileLeafName, normalizeMarkdownImageSource, renderMarkdownDocument, type MessageMediaPreview } from "../markdown";
 import { useMotionPresence } from "../core/motion-presence";
 import { ApiCardThreadContext } from "../cards/api-card-message";
+import { mergeToolCallResults } from "./tool-activity-state";
 
 type ToolActivityGroupProps = {
   toolCalls: ToolCallRecord[];
@@ -48,29 +49,16 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
 }: ToolActivityGroupProps) {
   const toolPresentation = getToolActivityPresentation(toolCalls);
   const { runningCall } = toolPresentation;
-  const isRunning = Boolean(runningCall);
   const [isOpen, setIsOpen] = useState(false);
   const [loadedResults, setLoadedResults] = useState<Map<string, string | null>>(() => new Map());
   const [detailLoadState, setDetailLoadState] = useState<"idle" | "loading" | "error">("idle");
   const [detailLoadAttempt, setDetailLoadAttempt] = useState(0);
-  const wasRunningRef = useRef(isRunning);
   const resolvedToolCalls = toolCalls.map((toolCall) => {
     if (!loadedResults.has(toolCall.id)) return toolCall;
     const resultJson = loadedResults.get(toolCall.id) ?? null;
     return resultJson === toolCall.resultJson ? toolCall : { ...toolCall, resultJson };
   });
   const conciseLabel = getConciseToolActivityLabel(resolvedToolCalls, runningCall, skillNames);
-
-  useEffect(() => {
-    if (isRunning) {
-      wasRunningRef.current = true;
-      return;
-    }
-    if (wasRunningRef.current) {
-      wasRunningRef.current = false;
-      setIsOpen(false);
-    }
-  }, [isRunning, runningCall?.id]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -89,16 +77,11 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
       toolCallIds: missingCalls.map((toolCall) => toolCall.id)
     }).then((details) => {
       if (cancelled) return;
-      setLoadedResults((current) => {
-        const next = new Map(current);
-        for (const toolCall of missingCalls) {
-          next.set(toolCall.id, null);
-        }
-        for (const detail of details) {
-          next.set(detail.toolCallId, detail.available ? detail.resultJson : null);
-        }
-        return next;
-      });
+      setLoadedResults((current) => mergeToolCallResults(
+        current,
+        details,
+        new Set(missingCalls.filter((toolCall) => toolCall.status === "pending" || toolCall.status === "running").map((toolCall) => toolCall.id))
+      ));
       setDetailLoadState("idle");
     }).catch(() => {
       if (!cancelled) setDetailLoadState("error");

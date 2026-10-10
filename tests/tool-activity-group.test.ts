@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ToolCallSummary } from "@shared-types";
+import type { ToolCallRecord, ToolCallSummary } from "@shared-types";
 import { DatabaseExecutionDetails, getConciseToolActivityLabel, getDatabaseExecutionDetails, getResolvedToolActivityCommand, getToolActivityMetric, ToolActivityGroup, ToolActivityMetricLabel, ToolActivityStatusDot } from "../apps/desktop/src/renderer/timeline/transcript";
 
 const timelineCss = readFileSync(new URL("../apps/desktop/src/renderer/timeline.css", import.meta.url), "utf8");
@@ -36,6 +36,35 @@ describe("ToolActivityGroup", () => {
     expect(html).not.toContain(">已完成<");
     expect(html).not.toContain("tool-activity-details-shell");
     expect(html).not.toContain("tool-activity-row compact");
+  });
+
+  it("keeps a running tool group collapsed until the user expands it", () => {
+    const runningCall: ToolCallRecord = {
+      id: "tool-running",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "shell.exec",
+      argumentsJson: JSON.stringify({ command: "build" }),
+      resultJson: null,
+      status: "running",
+      riskLevel: "low",
+      approvalMode: "auto",
+      startedAt: "2026-08-14T00:00:00.000Z",
+      completedAt: null
+    };
+
+    const html = renderToStaticMarkup(createElement(ToolActivityGroup, { toolCalls: [runningCall] }));
+
+    expect(html).toContain("tool-activity-summary");
+    expect(html).not.toContain("tool-activity-details-shell");
+    expect(html).not.toContain("tool-activity-row compact");
+  });
+
+  it("does not auto-expand tool group details at runtime", () => {
+    const transcriptSource = readFileSync(new URL("../apps/desktop/src/renderer/timeline/transcript.tsx", import.meta.url), "utf8");
+
+    expect(transcriptSource).toContain("const [isOpen, setIsOpen] = useState(false);");
+    expect(transcriptSource).not.toContain("resolveToolActivityGroupOpenState");
   });
 
   it("keeps long expanded tool histories inside a bounded scroll area", () => {

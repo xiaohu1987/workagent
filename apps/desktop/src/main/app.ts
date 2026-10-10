@@ -864,9 +864,9 @@ export class DesktopBackend {
       workspaceRoots,
       modelId: selection.modelId,
       providerId: selection.providerId,
-      // Ordinary conversations start with least privilege. Project tasks keep
-      // their existing explicit default; a user may still change either mode.
-      gpaStateJson: JSON.stringify({ fullAccess: input.mode === "project" }),
+      // Persist the default instead of relying on a renderer-only highlight.
+      // A later manual removal writes false and remains respected.
+      gpaStateJson: JSON.stringify({ fullAccess: true }),
       multiAgentMode: "proactive"
     });
     this.refreshSkillsInBackground(thread.cwd);

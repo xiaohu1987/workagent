@@ -129,7 +129,7 @@ describe("smooth transcript follow wiring", () => {
     const guards = virtualizedTimelineSource.match(/if \(requestFollowLatest\) \{/g) ?? [];
     expect(guards.length).toBe(2);
     expect(virtualizedTimelineSource).toContain("}, [layout.totalSize, measurementVersion, requestFollowLatest, scrollElementRef, scrollInteractionActive]);");
-    expect(virtualizedTimelineSource).toContain("}, [estimatedRowHeight, requestFollowLatest, scrollElementRef, scrollInteractionActive]);");
+    expect(virtualizedTimelineSource).toContain("}, [estimatedRowHeight, requestFollowLatest, scheduleMeasurementCommit, scrollElementRef, scrollInteractionActive]);");
 
     // The direct write stays as a fallback for a list rendered without a parent.
     const directWrites = virtualizedTimelineSource.match(/scrollElement\.scrollTop = scrollElement\.scrollHeight;/g) ?? [];

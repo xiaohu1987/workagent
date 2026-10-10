@@ -54,6 +54,8 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   selectedSubagentId,
   onSelectSubagent,
   thinkingText,
+  thinkingDraftText,
+  thinkingDraftStreaming,
   thinkingRunning,
   thinkingStreaming,
   thinkingNotes,
@@ -95,6 +97,8 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
   selectedSubagentId: string | null;
   onSelectSubagent: (agentId: string) => void;
   thinkingText: string;
+  thinkingDraftText?: string;
+  thinkingDraftStreaming?: boolean;
   thinkingRunning: boolean;
   thinkingStreaming: boolean;
   thinkingNotes: string[];
@@ -159,6 +163,8 @@ export const RightWorkspacePanel = memo(function RightWorkspacePanel({
         <div id="right-workspace-content-thinking" className={`right-workspace-view ${activeTab === "thinking" ? "active" : ""}`} role={activeTab === "thinking" ? "tabpanel" : undefined} aria-labelledby={activeTab === "thinking" ? "right-workspace-tab-thinking" : undefined} aria-hidden={activeTab !== "thinking"} inert={activeTab !== "thinking"}>
           <ThinkingWorkspace
             text={thinkingText}
+            draftText={thinkingDraftText}
+            draftStreaming={thinkingDraftStreaming}
             notes={thinkingNotes}
             taskRunning={thinkingRunning}
             streaming={thinkingStreaming}

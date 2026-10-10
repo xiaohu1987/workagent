@@ -293,16 +293,14 @@ describe("thread UI state helpers", () => {
       note("note-2", "接着检查过滤链路。", "2026-09-24T03:00:03.000Z")
     ];
 
-    // While the turn runs the notes stay out of the transcript; the panel carries
-    // them in arrival order so the reader can still follow the play-by-play.
     expect(filterTranscriptMessages(notes, "running")).toEqual([]);
     expect(selectActiveTurnProcessNotes(notes, "running")).toEqual(["我先核对项目规则。", "接着检查过滤链路。"]);
     expect(selectActiveTurnProcessNotes(notes, "completed")).toEqual([]);
 
-    // Frozen turns keep the old rule: with no answer yet the notes are the turn body...
-    expect(filterTranscriptMessages(notes, "completed").map((message) => message.id)).toEqual(["note-1", "note-2"]);
+    expect(filterTranscriptMessages(notes, "completed")).toEqual([]);
+    expect(filterTranscriptMessages(notes, "waiting")).toEqual([]);
+    expect(filterTranscriptMessages(notes, "idle")).toEqual([]);
 
-    // ...and once an answer lands, the notes fold away for good.
     const answer: MessageRecord = {
       ...note("answer-1", "结论：两处都处理好了。", "2026-09-24T03:00:05.000Z"),
       content: "结论：两处都处理好了。",
@@ -311,6 +309,7 @@ describe("thread UI state helpers", () => {
     const withAnswer = [...notes, answer];
     expect(filterTranscriptMessages(withAnswer, "completed").map((message) => message.id)).toEqual(["answer-1"]);
     expect(filterTranscriptMessages(withAnswer, "running").map((message) => message.id)).toEqual(["answer-1"]);
+    expect(filterTranscriptMessages(withAnswer, "waiting").map((message) => message.id)).toEqual(["answer-1"]);
   });
   it("refreshes a parent task snapshot for runtime events from its subagents", () => {
     expect(shouldRefreshSelectedSnapshotForRuntimeEvent(
@@ -479,7 +478,7 @@ describe("thread UI state helpers", () => {
   it("provides a clean thread-scoped GPA state when no snapshot exists", () => {
     expect(normalizeGpaStateForThread("project", null)).toMatchObject({
       stage: "off",
-      fullAccess: false,
+      fullAccess: true,
       knowledgeEnabled: false,
       awaitingConfirmation: null,
       planTasks: []
@@ -488,11 +487,11 @@ describe("thread UI state helpers", () => {
 
   it("restores durable GPA flags after a thread switch reset", () => {
     const resetState = normalizeGpaStateForThread("chat", null);
-    expect(resetState.fullAccess).toBe(false);
+    expect(resetState.fullAccess).toBe(true);
 
-    const restored = mergeDurableGpaFlags(resetState, { fullAccess: true, knowledgeEnabled: true });
+    const restored = mergeDurableGpaFlags(resetState, { fullAccess: false, knowledgeEnabled: true });
 
-    expect(restored.fullAccess).toBe(true);
+    expect(restored.fullAccess).toBe(false);
     expect(restored.knowledgeEnabled).toBe(true);
     expect(restored.stage).toBe("off");
     expect(restored.planTasks).toEqual([]);
@@ -501,7 +500,7 @@ describe("thread UI state helpers", () => {
   it("keeps the same GPA state reference when durable flags already match", () => {
     const state = normalizeGpaStateForThread("chat", null);
 
-    expect(mergeDurableGpaFlags(state, { fullAccess: false, knowledgeEnabled: false })).toBe(state);
+    expect(mergeDurableGpaFlags(state, { fullAccess: true, knowledgeEnabled: false })).toBe(state);
   });
 
   it("waits for the latest queued full-access write before sending", async () => {
@@ -1337,7 +1336,7 @@ describe("tool timeline grouping", () => {
     expect(fileSummary).toBeDefined();
     expect(toolGroup).toBeDefined();
     expect(shouldKeepTimelineEntryWhenTurnCollapsed(fileSummary!, section, new Set([section!.id]))).toBe(true);
-    expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, section, new Set([section!.id]))).toBe(false);
+    expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, section, new Set([section!.id]))).toBe(true);
   });
 
   it("keeps generated images visible when a completed turn is collapsed", () => {

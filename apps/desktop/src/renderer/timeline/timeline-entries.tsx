@@ -1,6 +1,5 @@
 import { Fragment, memo, useMemo } from "react";
 import type { RefObject } from "react";
-import type { ToolCallRecord } from "@shared-types";
 import { shouldKeepTimelineEntryWhenTurnCollapsed, type SkillNameMap } from "../lib/conversation-utils";
 import type { TimelineEntry } from "../lib/conversation-utils";
 import type { UserMessageActions } from "./transcript";
@@ -26,7 +25,6 @@ type Props = {
   latestTurnId: string | null;
   taskProcessing: boolean;
   collapsedTurnIds: Set<string>;
-  deferredRuntimeToolGroup: ToolCallRecord[] | null;
   skillNames?: SkillNameMap;
   assistantLabel: string;
   userMessageActions: UserMessageActions;
@@ -61,7 +59,6 @@ export const TimelineEntries = memo(function TimelineEntries({
   latestTurnId,
   taskProcessing,
   collapsedTurnIds,
-  deferredRuntimeToolGroup,
   skillNames,
   assistantLabel,
   userMessageActions,
@@ -81,15 +78,8 @@ export const TimelineEntries = memo(function TimelineEntries({
 }: Props) {
   const visibleEntries = useMemo(() => entries.filter((entry) => {
     const entryTurn = turnByEntryId.get(entry.id);
-    if (!shouldKeepTimelineEntryWhenTurnCollapsed(entry, entryTurn, collapsedTurnIds)) {
-      return false;
-    }
-    return !(
-      deferredRuntimeToolGroup &&
-      entry.kind === "tool-group" &&
-      entry.toolCalls.some((toolCall) => deferredRuntimeToolGroup.some((tool) => tool.id === toolCall.id))
-    );
-  }), [collapsedTurnIds, deferredRuntimeToolGroup, entries, turnByEntryId]);
+    return shouldKeepTimelineEntryWhenTurnCollapsed(entry, entryTurn, collapsedTurnIds);
+  }), [collapsedTurnIds, entries, turnByEntryId]);
 
   return (
     <VirtualizedTimeline

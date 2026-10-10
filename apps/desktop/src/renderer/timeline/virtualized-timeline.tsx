@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 
 const DEFAULT_ESTIMATED_ROW_HEIGHT = 196;
@@ -26,6 +26,16 @@ type VirtualizedTimelineProps<T> = {
 };
 
 type VisibleRange = { start: number; end: number };
+
+export function buildNonVirtualizedTimelineItems<T>(
+  items: readonly T[],
+  getKey: (item: T) => string,
+  renderItem: (item: T, index: number) => ReactNode
+): ReactNode[] {
+  return items.map((item, index) => (
+    <Fragment key={getKey(item)}>{renderItem(item, index)}</Fragment>
+  ));
+}
 
 export function clampVirtualizedRange(range: VisibleRange, itemCount: number): VisibleRange {
   if (itemCount <= 0) {
@@ -109,6 +119,10 @@ export function resolveMeasurementScrollAdjustment(
   return !pinnedToBottom && rowBottom <= viewportTop ? nextHeight - previousHeight : 0;
 }
 
+export function isValidVirtualizedRowMeasurement(height: number): boolean {
+  return Number.isFinite(height) && height > 0;
+}
+
 export function shouldDeferVirtualTimelineMeasurement(
   scrollInteractionActive: boolean,
   deferredCommitPending: boolean
@@ -174,6 +188,7 @@ export function VirtualizedTimeline<T>({
   const measurementsRef = useRef(new Map<string, number>());
   const deferredMeasurementsRef = useRef(new Map<string, number>());
   const deferMeasurementsRef = useRef(scrollInteractionActive);
+  const measurementCommitFrameRef = useRef<number | null>(null);
   const deferredScrollCorrectionRef = useRef<{
     applyAfterVersion: number;
     adjustment: number;
@@ -343,10 +358,23 @@ export function VirtualizedTimeline<T>({
       if (frameRef.current) window.cancelAnimationFrame(frameRef.current);
       frameRef.current = 0;
       frameRerunRef.current = false;
+      if (measurementCommitFrameRef.current !== null) {
+        window.cancelAnimationFrame(measurementCommitFrameRef.current);
+        measurementCommitFrameRef.current = null;
+      }
     };
   }, [scheduleRangeUpdate, scrollElementRef, virtualized]);
 
+  const scheduleMeasurementCommit = useCallback(() => {
+    if (measurementCommitFrameRef.current !== null) return;
+    measurementCommitFrameRef.current = window.requestAnimationFrame(() => {
+      measurementCommitFrameRef.current = null;
+      setMeasurementVersion((current) => current + 1);
+    });
+  }, []);
+
   const recordMeasurement = useCallback((key: string, height: number) => {
+    if (!isValidVirtualizedRowMeasurement(height)) return;
     const previous = deferredMeasurementsRef.current.get(key) ?? measurementsRef.current.get(key);
     if (previous !== undefined && Math.abs(previous - height) < 0.5) return;
     if (shouldDeferVirtualTimelineMeasurement(scrollInteractionActive, deferMeasurementsRef.current)) {
@@ -366,7 +394,7 @@ export function VirtualizedTimeline<T>({
       : null;
     const viewportTop = scrollElement?.getBoundingClientRect().top ?? null;
     measurementsRef.current.set(key, height);
-    setMeasurementVersion((current) => current + 1);
+    scheduleMeasurementCommit();
     if (pinnedToBottom && scrollElement) {
       // Prefer the parent's animated follow. The direct write stays as the fallback so a
       // caller that renders this list on its own keeps the previous pinned behaviour.
@@ -386,10 +414,10 @@ export function VirtualizedTimeline<T>({
         pinnedToBottom
       );
     }
-  }, [estimatedRowHeight, requestFollowLatest, scrollElementRef, scrollInteractionActive]);
+  }, [estimatedRowHeight, requestFollowLatest, scheduleMeasurementCommit, scrollElementRef, scrollInteractionActive]);
 
   if (!virtualized) {
-    return <>{items.map((item, index) => renderItem(item, index))}</>;
+    return <>{buildNonVirtualizedTimelineItems(items, getKey, renderItem)}</>;
   }
 
   const followTail = shouldVirtualizedTimelineFollowTail(followLatest, scrollElementRef.current);

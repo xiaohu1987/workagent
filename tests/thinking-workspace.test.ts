@@ -67,6 +67,20 @@ describe("deep thinking workspace tab", () => {
     expect(settled).not.toContain("思考中");
   });
 
+  it("keeps an unfinished answer draft in the thinking workspace", () => {
+    const markup = renderToStaticMarkup(createElement(ThinkingWorkspace, {
+      text: "",
+      draftText: "正在生成的回答草稿",
+      draftStreaming: true,
+      taskRunning: true,
+      streaming: true
+    }));
+
+    expect(markup).toContain("thinking-workspace-draft");
+    expect(markup).toContain("回答草稿 · 尚未定稿");
+    expect(markup).toContain("正在生成的回答草稿");
+  });
+
   it("maps each phase to its own status label and class", () => {
     expect(resolveThinkingStatus({ taskRunning: true, streaming: true })).toBe("thinking");
     expect(resolveThinkingStatus({ taskRunning: true, streaming: false })).toBe("executing");
@@ -140,6 +154,8 @@ describe("deep thinking workspace tab", () => {
   it("stops streaming reasoning inside the chat transcript", () => {
     // The transcript mounts no reasoning block at all any more.
     expect(appSource).not.toContain("<AssistantDraftReasoning");
+    expect(appSource).not.toContain("<AssistantDraftMessage");
+    expect(appSource).toContain("thinkingDraftText={activeDraftContent}");
     expect(appSource).toContain("rememberThinkingText");
     expect(appSource).toContain("thinkingStreaming={thinkingStreaming}");
   });

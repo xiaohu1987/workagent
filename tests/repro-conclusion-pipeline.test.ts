@@ -223,18 +223,15 @@ describeWithFixture("final answer survives the transcript pipeline", () => {
     );
     expect(legacyHidden.length).toBeGreaterThan(0);
     // Nothing the user is waiting to read may vanish: every formal assistant entry
-    // survives the collapse. Interim commentary may fold away - keeping *all*
-    // assistant text visible here is what left finished turns fully expanded
-    // (the "过程不收起了" half of the symptom reported against this fix).
+    // survives the collapse. Interim commentary may fold away.
     expect(
       hiddenEntries.filter((entry) =>
         entry.kind === "message"
         && entry.message.role === "assistant"
-        && getMessageDisplayKind(entry.message) !== "commentary")
+        && getMessageDisplayKind(entry.message) !== "commentary"
+      )
     ).toEqual([]);
-    // The noisy tool activity is still folded away - that is the whole point of
-    // collapsing a finished turn.
-    expect(hiddenEntries.some((entry) => entry.kind === "tool-group")).toBe(true);
+    expect(hiddenEntries.some((entry) => entry.kind === "tool-group")).toBe(false);
   });
 });
 

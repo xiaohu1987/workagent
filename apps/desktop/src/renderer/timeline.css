@@ -151,13 +151,6 @@
 .task-timeline .tool-activity-group,
 .task-timeline .plan-timeline {
   position: relative;
-  /* No fill-mode on purpose. Transcript entries can be appended below the fold while
-     `content-visibility: auto` (styles.css) still treats them as skipped content. An
-     animation that never advances its clock would then pin the card to its `from`
-     frame (opacity: 0) indefinitely — the "conclusion never renders until I switch
-     thread" report. With the default fill-mode the element falls back to its natural,
-     visible state the moment the animation cannot run. */
-  animation: timeline-enter 180ms ease-out;
 }
 
 .task-timeline .message-card:not(.user)::before,
@@ -1460,22 +1453,19 @@
    until I scroll or switch threads" report. Fill-mode is not the lever here — the
    animation is already running, only its clock is stopped. Keeping opacity out of
    the start frame means the worst case is a few pixels of offset instead of an
-   invisible message. (`assistant-finalize-enter` starts at 0.28 and never fully
-   disappears, so it stays as a fade.) */
+   invisible message. */
 @keyframes timeline-enter { from { opacity: 1; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes assistant-finalize-enter { from { opacity: 0.28; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes user-message-send { 0% { opacity: 1; transform: translateX(24px) scale(0.96); } 58% { opacity: 1; transform: translateX(-2px) scale(1.008); } 100% { opacity: 1; transform: translateX(0) scale(1); } }
 @keyframes timeline-pulse { 0%, 100% { opacity: 0.58; } 50% { opacity: 1; } }
 @keyframes streaming-caret { 50% { opacity: 0; } }
 @keyframes task-processing-dot { 0%, 100% { opacity: 0.35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
 
 .task-timeline .message-card.assistant.is-finalizing-from-draft {
-  animation: assistant-finalize-enter 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: assistant-finalize-enter 180ms ease-out;
 }
 
-.task-timeline .message-card.user.is-sending {
-  transform-origin: right center;
-  animation: user-message-send 280ms cubic-bezier(0.22, 1, 0.36, 1);
+@keyframes assistant-finalize-enter {
+  from { opacity: 0.72; }
+  to { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1486,7 +1476,6 @@
   .streaming-assistant,
   .task-processing-indicator,
   .task-timeline .message-card.assistant.is-finalizing-from-draft,
-  .task-timeline .message-card.user.is-sending,
   .task-processing-dots i,
   .assistant-draft-waiting i,
   .streaming-assistant-plain-body,
