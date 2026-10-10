@@ -112,6 +112,7 @@ import {
   MEMORY_DISTILL_DEBOUNCE_MS,
   type MemoryDistillStore
 } from "./memory-distiller";
+import { remapThreadModelSelections } from "./thread-model-remap";
 import { buildThreadTitleFromFirstMessage, ThreadTitleService } from "./thread-title";
 import { parseEditableMessageMetadata } from "./message-metadata";
 import { detectShareTargets, sendShareImage, sendShareToTarget } from "./share-service";
@@ -2485,26 +2486,19 @@ export class DesktopBackend {
       .map((connection) => this.#databaseCredentials.remove(connection.credentialRef)));
 
     await saveConfig(this.#layout.configFile, this.#config);
-    const selectionCache = new Map<string, Pick<ThreadRecord, "providerId" | "modelId">>();
-    for (const thread of this.#db.listThreads()) {
-      const cacheKey = `${thread.providerId ?? ""}::${thread.modelId ?? ""}`;
-      let selection = selectionCache.get(cacheKey);
-      if (!selection) {
-        selection = resolveThreadModelSelection(this.#config, thread.providerId, thread.modelId);
-        selectionCache.set(cacheKey, selection);
+    await remapThreadModelSelections({
+      database: this.#db,
+      resolveSelection: (thread) =>
+        resolveThreadModelSelection(this.#config, thread.providerId, thread.modelId),
+      onThreadUpdated: async (updated) => {
+        await this.emit({
+          type: "thread.updated",
+          threadId: updated.id,
+          payload: { thread: updated },
+          createdAt: new Date().toISOString()
+        });
       }
-      if (selection.providerId === thread.providerId && selection.modelId === thread.modelId) {
-        continue;
-      }
-
-      const updated = this.#db.updateThread(thread.id, selection);
-      await this.emit({
-        type: "thread.updated",
-        threadId: thread.id,
-        payload: { thread: updated },
-        createdAt: new Date().toISOString()
-      });
-    }
+    });
     // Only rebuild MCP state when server definitions actually changed. Saving
     // Unrelated settings (tone, multi-agent, ...) must not respawn MCP.
     // child processes — that blocked the IPC handler for seconds on Windows.
