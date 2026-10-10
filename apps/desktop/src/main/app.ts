@@ -115,6 +115,7 @@ import {
 import { buildThreadTitleFromFirstMessage, ThreadTitleService } from "./thread-title";
 import { parseEditableMessageMetadata } from "./message-metadata";
 import { detectShareTargets, sendShareImage, sendShareToTarget } from "./share-service";
+import { resolveAttachmentMaxBytes } from "./attachment-limits";
 import { isProjectAttachmentPath } from "./attachment-path";
 import {
   DatabaseService,
@@ -1433,7 +1434,8 @@ export class DesktopBackend {
       const mimeType = normalizeAttachmentMimeType(input.mimeType, name);
       const isImage = mimeType.startsWith("image/");
       const isVideo = mimeType.startsWith("video/");
-      const maxBytes = isVideo ? 100 * 1024 * 1024 : isImage ? 10 * 1024 * 1024 : 20 * 1024 * 1024;
+      const kind: MessageAttachment["kind"] = isImage ? "image" : isVideo ? "video" : "file";
+      const maxBytes = resolveAttachmentMaxBytes(kind);
       const sizeBytes = linkedProjectPath
         ? (await fs.stat(linkedProjectPath)).size
         : inputData!.byteLength;
@@ -1443,7 +1445,7 @@ export class DesktopBackend {
       const absolutePath = linkedProjectPath ?? await this.copyAttachment(targetDir, name, mimeType, inputData!);
       attachments.push({
         id: randomUUID(),
-        kind: isImage ? "image" : isVideo ? "video" : "file",
+        kind,
         name,
         mimeType,
         absolutePath,
