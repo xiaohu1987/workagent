@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTimelineEntries,
+  canEditUserMessage,
   dropSupersededOptimisticMessages,
   filterTranscriptMessages,
   isOptimisticUserMessage,
@@ -62,6 +63,21 @@ describe("isOptimisticUserMessage", () => {
     expect(isOptimisticUserMessage(placeholder)).toBe(true);
     expect(isOptimisticUserMessage(persistedTwin)).toBe(false);
     expect(isOptimisticUserMessage(message({ id: "optimistic-not-user", role: "assistant" }))).toBe(false);
+  });
+});
+
+describe("canEditUserMessage", () => {
+  it("refuses the placeholder whose persisted row does not exist yet", () => {
+    // Reported as "更新消息失败。Error invoking remote method 'threads:replace-message':
+    // Error: The message to edit is no longer available." - the editor submitted the
+    // client-side id, the thread database could not resolve it, and every retry failed
+    // the same way because a refresh kept the still-queued bubble on screen.
+    expect(canEditUserMessage(placeholder)).toBe(false);
+  });
+
+  it("allows the persisted row only", () => {
+    expect(canEditUserMessage(persistedTwin)).toBe(true);
+    expect(canEditUserMessage(message({ id: "assistant-row", role: "assistant" }))).toBe(false);
   });
 });
 

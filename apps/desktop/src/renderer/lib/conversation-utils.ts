@@ -2157,6 +2157,19 @@ export function isOptimisticUserMessage(message: Pick<MessageRecord, "id" | "rol
 }
 
 /**
+ * Whether the edit flow may open for a transcript row.
+ *
+ * The editor sends the row id to `threads:replace-message`, and the main process can
+ * only edit a row the thread database already holds. A bubble still painted as
+ * `optimistic-<uuid>` has no such row, so submitting the editor for it failed every
+ * time with "The message to edit is no longer available." - the refresh afterwards
+ * kept the still-queued bubble on screen and invited another retry.
+ */
+export function canEditUserMessage(message: Pick<MessageRecord, "id" | "role">): boolean {
+  return message.role === "user" && !isOptimisticUserMessage(message);
+}
+
+/**
  * How far apart a placeholder and its persisted twin are still considered the same
  * message. The renderer and the runtime share one clock, but the placeholder is
  * stamped when the user hits send while the row is stamped when the runtime accepts

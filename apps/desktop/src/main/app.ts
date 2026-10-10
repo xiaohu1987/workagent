@@ -1334,10 +1334,28 @@ export class DesktopBackend {
     return { queued, queuedBehindActiveTask };
   }
 
-  public async guideActiveThread(threadId: string, content: string): Promise<{ accepted: boolean }> {
+  public async guideActiveThread(
+    threadId: string,
+    content: string,
+    options: {
+      displayContent?: string;
+      mediaIntent?: "image" | "video" | null;
+      attachments?: MessageAttachment[];
+    } = {}
+  ): Promise<{ accepted: boolean; queuedWithMedia?: boolean }> {
     const guidance = content.trim();
     if (!guidance) {
       throw new Error("Guidance cannot be empty.");
+    }
+    const attachments = options.attachments ?? [];
+    const mediaIntent = options.mediaIntent ?? null;
+    // Live guidance is a text-only channel, so a queued message that carries
+    // attachments or an image/video intent keeps its media by re-entering the
+    // FIFO message path instead of being steered as bare text, which would
+    // silently drop the pictures.
+    if (attachments.length > 0 || mediaIntent) {
+      await this.sendMessage(threadId, guidance, attachments, options.displayContent, true, mediaIntent);
+      return { accepted: false, queuedWithMedia: true };
     }
     const activeTurnRunId = this.#runtime.guideActiveTurn(threadId, guidance);
     if (activeTurnRunId) {
@@ -1358,7 +1376,7 @@ export class DesktopBackend {
     }
     // A completed turn has no remaining model decision to guide. Preserve the
     // request by routing it through the established FIFO message path.
-    await this.sendMessage(threadId, guidance);
+    await this.sendMessage(threadId, guidance, [], options.displayContent, true, mediaIntent);
     return { accepted: false };
   }
 

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   DatabaseConnectionConfig,
+  MessageAttachment,
   NotificationNavigationTarget,
   RuntimeEvent,
   ShareSendRequest,
@@ -791,8 +792,12 @@ function registerIpc(): void {
   ipcMain.handle("http:request", (_event, payload: HttpProxyRequestPayload) =>
     executeHttpRequest(payload, (threadId) => backend.getThreadOutputDir(threadId))
   );
-  ipcMain.handle("threads:guide", (_event, payload: { threadId: string; content: string }) =>
-    backend.guideActiveThread(payload.threadId, payload.content)
+  ipcMain.handle("threads:guide", (_event, payload: { threadId: string; content: string; displayContent?: string; mediaIntent?: "image" | "video" | null; attachments?: unknown[] }) =>
+    backend.guideActiveThread(payload.threadId, payload.content, {
+      displayContent: payload.displayContent,
+      mediaIntent: payload.mediaIntent ?? null,
+      attachments: payload.attachments as MessageAttachment[] | undefined
+    })
   );
   ipcMain.handle("threads:replace-message", (_event, payload: { threadId: string; messageId: string; content: string }) =>
     backend.replaceMessage(payload.threadId, payload.messageId, payload.content)

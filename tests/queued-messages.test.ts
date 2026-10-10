@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DatabaseService } from "../apps/desktop/src/main/storage";
+import type { MessageAttachment } from "../packages/shared-types/src/index";
 
 const tempDirs: string[] = [];
 const databases: DatabaseService[] = [];
@@ -34,6 +35,35 @@ describe("queued messages", () => {
     expect(db.listQueuedMessages("thread-1")[0]?.status).toBe("queued");
     expect(db.deleteQueuedMessage("thread-1", second.id)).toBe(true);
     expect(db.listQueuedMessages("thread-1").map((item) => item.id)).toEqual([first.id]);
+  });
+
+  it("keeps the image attachment and media intent of a queued message", async () => {
+    const db = await createDatabase();
+    const attachment: MessageAttachment = {
+      id: "attachment-1",
+      kind: "image",
+      name: "screenshot.png",
+      mimeType: "image/png",
+      absolutePath: path.join("D:", "workagent", "tmp", "screenshot.png"),
+      sizeBytes: 2048,
+      source: "user"
+    };
+    const queued = db.enqueueQueuedMessage({
+      threadId: "thread-1",
+      content: "看看这张截图",
+      displayContent: "看看这张截图",
+      mediaIntent: "image",
+      attachments: [attachment]
+    });
+
+    const stored = db.listQueuedMessages("thread-1").find((item) => item.id === queued.id);
+    expect(stored?.attachments).toEqual([attachment]);
+    expect(stored?.mediaIntent).toBe("image");
+
+    expect(db.claimNextQueuedMessage("thread-1")?.id).toBe(queued.id);
+    const claimed = db.listQueuedMessages("thread-1").find((item) => item.id === queued.id);
+    expect(claimed?.attachments).toEqual([attachment]);
+    expect(claimed?.status).toBe("dispatching");
   });
 
   it("reuses the persisted user message when an in-flight queue item is recovered", async () => {

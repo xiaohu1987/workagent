@@ -109,8 +109,8 @@ const api = {
     body?: string;
     downloadFileName?: string;
   }) => ipcRenderer.invoke("http:request", payload),
-  guideActiveThread: (payload: { threadId: string; content: string }) =>
-    ipcRenderer.invoke("threads:guide", payload),
+  guideActiveThread: (payload: { threadId: string; content: string; displayContent?: string; mediaIntent?: "image" | "video" | null; attachments?: unknown[] }) =>
+    ipcRenderer.invoke("threads:guide", payload) as Promise<{ accepted: boolean; queuedWithMedia?: boolean }>,
   replaceMessage: (payload: { threadId: string; messageId: string; content: string }) =>
     ipcRenderer.invoke("threads:replace-message", payload),
   deleteQueuedMessage: (payload: { threadId: string; id: string }) =>

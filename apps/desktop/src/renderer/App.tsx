@@ -154,6 +154,7 @@ import {
   collectMissingSnapshotMessages,
   resolveSnapshotRecoveryMessages,
   expectedVisibleMessageIds,
+  canEditUserMessage,
   reconcilePendingUserMessagesDetailed,
   shouldKeepOptimisticBaselineMessage,
   resolveLatestThreadRecord,
@@ -6434,6 +6435,10 @@ export function App() {
       showNotice("任务执行中，停止后才能重新编辑消息。");
       return;
     }
+    if (!canEditUserMessage(message)) {
+      showNotice("消息还在发送队列中，等发送完成后再重新编辑。");
+      return;
+    }
     setEditingUserMessage({ id: message.id, content: message.content });
   }
 
@@ -6870,8 +6875,19 @@ export function App() {
       await window.codexh.deleteQueuedMessage({ threadId, id: message.id });
       removedFromQueue = true;
       removeQueuedMessageFromSnapshots(threadId, message.id);
-      const result = await window.codexh.guideActiveThread({ threadId, content: message.content });
-      if (result.accepted) {
+      const result = await window.codexh.guideActiveThread({
+        threadId,
+        content: message.content,
+        displayContent: message.displayContent,
+        mediaIntent: message.mediaIntent ?? null,
+        attachments: message.attachments
+      });
+      if (result.queuedWithMedia) {
+        showNotice("该排队消息带附件，已按普通消息重新入队", {
+          tone: "success",
+          message: "方向调整只支持文字，附件与图片已保留，将在当前任务结束后发送。"
+        });
+      } else if (result.accepted) {
         showNotice("已按方向调整当前任务", {
           tone: "success",
           message: "该排队消息已作为方向调整生效。"
