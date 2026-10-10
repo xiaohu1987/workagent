@@ -49,3 +49,5 @@ assets/tree-sitter-grammars/*.wasm
 /.graphify_detect.json
 /$null
 /-
+/.playwright-mcp/
+/0
