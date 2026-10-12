@@ -19,6 +19,30 @@ export function normalizeHistoryGroupKey(cwd: string): string {
   return cwd.replace(/\\/g, "/").toLocaleLowerCase();
 }
 
+function parseHistoryTimestamp(value: string | null | undefined): number {
+  const parsed = Date.parse(value ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Orders history rows by their most recent conversation so the chat the user
+ * just talked in floats to the top. Pinned rows stay above the others and keep
+ * their own pin recency order.
+ */
+export function sortHistoryThreadsByRecentActivity(threads: readonly ThreadRecord[]): ThreadRecord[] {
+  return [...threads].sort((left, right) => {
+    const pinDelta = Number(Boolean(right.isPinned)) - Number(Boolean(left.isPinned));
+    if (pinDelta !== 0) return pinDelta;
+    if (left.isPinned && right.isPinned) {
+      const pinRecencyDelta = parseHistoryTimestamp(right.pinnedAt) - parseHistoryTimestamp(left.pinnedAt);
+      if (pinRecencyDelta !== 0) return pinRecencyDelta;
+    }
+    const activityDelta = parseHistoryTimestamp(right.updatedAt) - parseHistoryTimestamp(left.updatedAt);
+    if (activityDelta !== 0) return activityDelta;
+    return parseHistoryTimestamp(right.createdAt) - parseHistoryTimestamp(left.createdAt);
+  });
+}
+
 export function readStoredStringSet(key: string): Set<string> {
   try {
     const raw = window.localStorage.getItem(key);

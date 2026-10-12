@@ -63,3 +63,26 @@ export function getDocumentViewKindLabel(kind: DocumentViewKind): string {
 export function getDocumentViewModeLabel(mode: DocumentViewMode): string {
   return mode === "rendered" ? "预览" : "源码";
 }
+
+/** 新建空白页的标题前缀：未保存前不占磁盘路径，靠序号彼此区分。 */
+export const UNTITLED_DOCUMENT_TITLE_PREFIX = "未命名";
+
+/** 新建空白页的标题，例如「未命名 1」。 */
+export function getUntitledDocumentTitle(sequence: number): string {
+  return `${UNTITLED_DOCUMENT_TITLE_PREFIX} ${sequence}`;
+}
+
+/** 在已占用的标题里挑一个不重名的未命名标题，多次新建不会出现同名页签。 */
+export function getNextUntitledDocumentTitle(takenTitles: string[]): string {
+  const taken = new Set(takenTitles);
+  let index = 1;
+  while (taken.has(getUntitledDocumentTitle(index))) {
+    index += 1;
+  }
+  return getUntitledDocumentTitle(index);
+}
+
+/** 空白页另存为时的默认文件名：空白页按纯文本起手，默认存成 .txt。 */
+export function getUntitledDocumentSuggestedFileName(title: string): string {
+  return `${title}.txt`;
+}

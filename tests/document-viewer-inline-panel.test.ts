@@ -267,12 +267,68 @@ describe("查看文档：侧栏入口 + 聊天区内联面板", () => {
     expect(panel).toContain('${dropActive ? " is-drop-target" : ""}');
     // 与文件对话框共用同一份加载流程，不另写一份去重与加载。
     expect(tabs).toContain("const openDroppedPaths = useCallback(");
-    expect(tabs).toContain("await openPaths(paths);");
+    expect(tabs).toContain("await openPaths(paths, { openDuplicatePaths: true });");
     expect(tabs).toContain("await openPaths(chosen);");
+    // 拖入不查面板里已打开的同路径页签：已经有文件打开时再拖入也会新开一个页签。
+    expect(tabs).toContain("async (paths: string[], options?: { openDuplicatePaths?: boolean }) => {");
+    expect(tabs).toContain("options?.openDuplicatePaths");
+    expect(tabs).toContain("current.find((tab) => tab.path === path)");
     expect(utils).toContain("export function isSupportedDocumentPath(path: string): boolean {");
     expect(env).toContain("resolveDroppedFilePath: (file: File) => string;");
     expect(preload).toContain("webUtils.getPathForFile(file)");
     expect(styles).toContain(".document-viewer-drop-hint {");
     expect(styles).toContain(".document-viewer-sheet.is-drop-target");
+  });
+
+  it("标题栏的「+」新建空白页，打开文件另有独立入口", () => {
+    const header = section(
+      panel,
+      '<div className="document-viewer-header-leading">',
+      '<div className="document-viewer-header-actions">'
+    );
+    expect(header).toContain('aria-label="新建空白页"');
+    expect(header).toContain("onClick={documents.newBlankDocument}");
+    expect(header).toContain('aria-label="打开文件"');
+    expect(header).toContain("onClick={() => void documents.openDocuments()}");
+    expect(header).toContain("<IconPlus />");
+    expect(header).toContain("<IconFile />");
+    // 两个按钮共用同一套样式，不另起一份。
+    expect(header.match(/className="document-viewer-open-button"/g)?.length).toBe(2);
+  });
+
+  it("新建空白页是未落盘的可编辑页签，重复新建会复用已有的干净空页", () => {
+    const blankFn = section(
+      tabs,
+      "const newBlankDocument = useCallback(",
+      "const selectTab = useCallback("
+    );
+    expect(blankFn).toContain("getNextUntitledDocumentTitle(current.map((item) => item.title))");
+    expect(blankFn).toContain('path: ""');
+    expect(blankFn).toContain('kind: "text"');
+    expect(blankFn).toContain('mode: "source"');
+    expect(blankFn).toContain("loading: false");
+    expect(blankFn).toContain("!tab.path && !isDocumentDirty(tab.content, tab.savedContent)");
+    expect(tabs).toContain("newBlankDocument,");
+    expect(tabs).toContain("newBlankDocument: () => void;");
+  });
+
+  it("空白页没有路径时保存即另存为，默认文件名由标题推导", () => {
+    const saveFn = section(tabs, "const saveTab = useCallback(", "const requestCloseTab = useCallback(");
+    expect(saveFn).toContain("if (!tab.path) {");
+    expect(saveFn).toContain("return saveTabAs(tabId);");
+
+    const saveAsFn = section(tabs, "const saveTabAs = useCallback(", "const saveTab = useCallback(");
+    expect(saveAsFn).toContain(
+      "suggestedPath: tab.path || getUntitledDocumentSuggestedFileName(tab.title)"
+    );
+  });
+
+  it("未命名标题按序号避重，默认另存为 txt", () => {
+    expect(utils).toContain('export const UNTITLED_DOCUMENT_TITLE_PREFIX = "未命名";');
+    expect(utils).toContain("export function getUntitledDocumentTitle(sequence: number): string {");
+    expect(utils).toContain("export function getNextUntitledDocumentTitle(takenTitles: string[]): string {");
+    expect(utils).toContain("while (taken.has(getUntitledDocumentTitle(index))) {");
+    expect(utils).toContain("export function getUntitledDocumentSuggestedFileName(title: string): string {");
+    expect(utils).toContain("return `${title}.txt`;");
   });
 });

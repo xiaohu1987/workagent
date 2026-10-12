@@ -388,6 +388,7 @@ import {
   HISTORY_EXPANDED_GROUPS_STORAGE_KEY,
   normalizeHistoryGroupKey,
   readStoredStringSet,
+  sortHistoryThreadsByRecentActivity,
   writeStoredStringSet
 } from "./history/history-utils";
 import {
@@ -7562,10 +7563,12 @@ export function App() {
       }
     }
 
-    return [...groups.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+    return [...groups.values()]
+      .map((group) => ({ ...group, threads: sortHistoryThreadsByRecentActivity(group.threads) }))
+      .sort((left, right) => right.updatedAt - left.updatedAt);
   }, [threads]);
   const standaloneHistoryThreads = useMemo(
-    () => threads.filter((thread) => thread.mode !== "project" || !thread.cwd),
+    () => sortHistoryThreadsByRecentActivity(threads.filter((thread) => thread.mode !== "project" || !thread.cwd)),
     [threads]
   );
   const recentProjectPaths = useMemo(

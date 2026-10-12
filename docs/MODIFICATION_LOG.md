@@ -4,6 +4,9 @@
 
 ## 2026-10-12
 
+- 「查看文档」的两处调整：①空白页另存为的默认文件名由 `.md` 改为 `.txt`，与空白页按纯文本起手保持一致，保存分支与默认名推导（`getUntitledDocumentSuggestedFileName`）不变；②拖入文件改为总是新开页签，`openPaths` 增加 `openDuplicatePaths` 选项，拖入（`openDroppedPaths`）时只在同一批拖入内部去重、不再命中面板里已打开的同路径页签，因此已经有文件打开时再拖入也会各占一个新页签，文件对话框仍按路径去重以避免重复打开同一个文件。回归测试同步更新 `tests/document-viewer-inline-panel.test.ts`（默认名断言改为 `.txt`，新增拖入不去重的三条断言），该文件全部通过，完整 `vitest run` 无回归。
+- 「查看文档」标题栏的「+」改为新建空白页，不再打开文件选择框：点它直接得到一个未落盘的「未命名 N」页签（默认按纯文本源码编辑），并新增一个独立图标按钮负责打开已有文件，两者共用 `.document-viewer-open-button` 样式；空白页保存时走另存为，默认文件名按标题推导成 `未命名 N.md`，另存成功后页签换成新路径与文件名。连点「+」会复用已有的干净空白页，不会堆出一排空页签；页签在未落盘时标题提示为「尚未保存到磁盘」。新增 `getUntitledDocumentTitle`、`getNextUntitledDocumentTitle`、`getUntitledDocumentSuggestedFileName` 三个工具函数集中处理未命名标题与默认文件名，`saveTab` 在没有路径时委托给 `saveTabAs`，不重复实现落盘逻辑。归属改动：`workspace/document-viewer-utils.ts`、`hooks/use-document-tabs.ts`、`workspace/document-viewer-panel.tsx`；回归测试 `tests/document-viewer-inline-panel.test.ts` 扩到 21 项并全部通过。
+
 - 按随手记的观感重排「查看文档」面板的标题栏与空态：标题栏左侧只留一个居左的「+」图标按钮（原来的「打开文件」文字按钮已移除），同时去掉标题栏里的面板名称与说明文案整行，把识别出的文档类型与「预览 / 源码」切换统一收在右侧；空态从一行素文字改成居中的引导卡片，含图标、标题、支持的格式徽标（Markdown / HTML / C# / SQL / JSON / 纯文本）与一个文字化的打开入口，徽标由 `DOCUMENT_EMPTY_BADGES` 统一提供。样式层补齐 `.document-viewer-open-button`、`.document-viewer-empty-*` 与 `.document-viewer-kind-chip`，并删掉已无引用的 `.document-viewer-choose-button`；回归测试同步新增标题栏与空态断言，`tests/document-viewer-inline-panel.test.ts` 16 项、完整 `vitest run` 107 个文件 1612 项全部通过。
 
 - 新增「查看文档」内联面板，侧栏入口排在「接口卡片」下方：不做弹窗，而是接管聊天区显示与操作，并与随手记、接口卡片互斥——打开时会收起这两者、退出分享模式并收起终端抽屉，再点一次或按 Esc 收起，点左侧任意会话或「新建任务」也直接切回聊天。面板按文件后缀名决定渲染方式：Markdown 与 HTML 可在「预览 / 源码」之间自由切换，C#、SQL 等代码文件复用既有 hljs 语法高亮，其余按纯文本显示；读取走只读的 `window.codexh.readDocumentFile` / `chooseDocumentFile`，不提供编辑。新增 `workspace/document-viewer-panel.tsx` 与 `workspace/document-viewer-utils.ts`，配色与布局沿用 `.document-viewer-sheet` 既有作用域，仅在 `styles.css` 补齐内联容器的尺寸与让位规则；新增回归测试 `tests/document-viewer-inline-panel.test.ts`，覆盖侧栏顺序、面板挂载位置、互斥与切换逻辑、Esc 关闭、后缀到渲染方式的映射以及样式契约。

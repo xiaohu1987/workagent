@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { ThreadRecord } from "@shared-types";
 import {
   HISTORY_DELETE_DRAG_THRESHOLD_PX,
   HISTORY_DELETE_PRESS_MS,
@@ -10,17 +11,82 @@ import {
   resolveHistoryDeleteDragTarget,
   shouldIgnoreHistoryDeleteDragFrom,
   shouldShowHistoryPressCursor,
-  shouldStartHistoryDeleteDrag
+  shouldStartHistoryDeleteDrag,
+  sortHistoryThreadsByRecentActivity
 } from "../apps/desktop/src/renderer/history/history-utils";
 
 const historySidebar = readFileSync(new URL("../apps/desktop/src/renderer/history/history-sidebar.tsx", import.meta.url), "utf8");
 const historyStyles = readFileSync(new URL("../apps/desktop/src/renderer/styles.css", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../apps/desktop/src/renderer/App.tsx", import.meta.url), "utf8");
+
+function historyThread(id: string, updatedAt: string, extra: Partial<ThreadRecord> = {}): ThreadRecord {
+  return {
+    id,
+    title: id,
+    mode: "chat",
+    workspaceKind: "projectless",
+    cwd: null,
+    projectId: null,
+    workspaceId: null,
+    modelId: "model",
+    providerId: "provider",
+    status: "idle",
+    selectedSkillIds: [],
+    selectedPluginIds: [],
+    knowledgeBaseIds: [],
+    createdAt: updatedAt,
+    updatedAt,
+    isPinned: false,
+    pinnedAt: null,
+    gpaStateJson: null,
+    parentThreadId: null,
+    rootThreadId: id,
+    agentPath: id,
+    agentRole: null,
+    lastTaskMessage: null,
+    multiAgentMode: "disabled",
+    ...extra
+  };
+}
 
 describe("history project folders", () => {
   it("collapses project folders until they are explicitly expanded", () => {
     expect(isHistoryProjectGroupCollapsed(new Set(), "d:/workagent")).toBe(true);
     expect(isHistoryProjectGroupCollapsed(new Set(["d:/workagent"]), "d:/workagent")).toBe(false);
     expect(isHistoryProjectGroupCollapsed(new Set(), "__standalone__", false)).toBe(false);
+  });
+});
+
+describe("history thread ordering", () => {
+  it("lists the chat talked in most recently before a more recently created one", () => {
+    const older = historyThread("older", "2026-09-01T10:00:00.000Z", { createdAt: "2026-08-30T10:00:00.000Z" });
+    const recent = historyThread("recent", "2026-09-02T10:00:00.000Z", { createdAt: "2026-08-01T10:00:00.000Z" });
+
+    expect(sortHistoryThreadsByRecentActivity([older, recent]).map((thread) => thread.id)).toEqual(["recent", "older"]);
+  });
+
+  it("keeps pinned chats above fresher unpinned chats", () => {
+    const pinned = historyThread("pinned", "2026-08-01T10:00:00.000Z", {
+      isPinned: true,
+      pinnedAt: "2026-09-01T10:00:00.000Z"
+    });
+    const fresh = historyThread("fresh", "2026-09-10T10:00:00.000Z");
+
+    expect(sortHistoryThreadsByRecentActivity([fresh, pinned]).map((thread) => thread.id)).toEqual(["pinned", "fresh"]);
+  });
+
+  it("falls back to creation time on identical activity and tolerates unparsable timestamps", () => {
+    const sameA = historyThread("a", "2026-09-01T10:00:00.000Z", { createdAt: "2026-09-01T10:00:00.000Z" });
+    const sameB = historyThread("b", "2026-09-01T10:00:00.000Z", { createdAt: "2026-09-02T10:00:00.000Z" });
+    const invalid = historyThread("invalid", "not-a-date");
+
+    expect(sortHistoryThreadsByRecentActivity([sameA, sameB]).map((thread) => thread.id)).toEqual(["b", "a"]);
+    expect(sortHistoryThreadsByRecentActivity([invalid, sameA]).map((thread) => thread.id)).toEqual(["a", "invalid"]);
+  });
+
+  it("sorts standalone chats and project-group children by recent activity", () => {
+    expect(appSource).toContain("sortHistoryThreadsByRecentActivity(threads.filter((thread) => thread.mode !== \"project\" || !thread.cwd))");
+    expect(appSource).toContain("threads: sortHistoryThreadsByRecentActivity(group.threads)");
   });
 });
 

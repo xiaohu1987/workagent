@@ -133,12 +133,21 @@ export function DocumentViewerPanel({ motionPhase, onClose, onRegisterCloseReque
           <button
             className="document-viewer-open-button"
             type="button"
+            title="新建空白页"
+            aria-label="新建空白页"
+            onClick={documents.newBlankDocument}
+          >
+            <IconPlus />
+          </button>
+          <button
+            className="document-viewer-open-button"
+            type="button"
             disabled={picking}
             title={`打开文件（${DOCUMENT_CHOOSE_EXTENSIONS.length} 种可识别后缀）`}
             aria-label="打开文件"
             onClick={() => void documents.openDocuments()}
           >
-            {picking ? <IconSpinner /> : <IconPlus />}
+            {picking ? <IconSpinner /> : <IconFile />}
           </button>
         </div>
         <div className="document-viewer-header-actions">
@@ -256,7 +265,7 @@ function DocumentTabStrip({ tabs, activeTabId, onSelect, onCloseTab }: DocumentT
               role="tab"
               aria-selected={tab.id === activeTabId}
               className="document-tab-label"
-              title={tab.path}
+              title={tab.path || "尚未保存到磁盘"}
               onClick={() => onSelect(tab.id)}
             >
               <span className="document-tab-name">{tab.title}</span>

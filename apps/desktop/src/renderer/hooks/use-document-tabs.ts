@@ -3,6 +3,8 @@ import {
   DOCUMENT_CHOOSE_EXTENSIONS,
   getDefaultDocumentViewMode,
   getDocumentFileName,
+  getNextUntitledDocumentTitle,
+  getUntitledDocumentSuggestedFileName,
   resolveDocumentViewKind,
   type DocumentViewKind,
   type DocumentViewMode
@@ -44,6 +46,7 @@ export type DocumentTabsController = {
   dirtyCount: number;
   openDocuments: () => Promise<void>;
   openDroppedPaths: (paths: string[]) => Promise<void>;
+  newBlankDocument: () => void;
   selectTab: (tabId: string) => void;
   requestCloseTab: (tabId: string) => void;
   requestClosePanel: () => void;
@@ -134,17 +137,20 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
   );
 
   /**
-   * 打开一批已知绝对路径的文档：文件对话框与从系统拖入共用这一份加载逻辑，
-   * 同一路径只保留一个页签，已打开的直接激活而不是重复开。
+   * 打开一批已知绝对路径的文档：文件对话框与从系统拖入共用这一份加载逻辑。
+   * 文件对话框按路径去重，已打开的直接激活；拖入时每次都新开页签。
    */
   const openPaths = useCallback(
-    async (paths: string[]) => {
+    async (paths: string[], options?: { openDuplicatePaths?: boolean }) => {
       const current = tabsRef.current;
       const opened: DocumentTab[] = [];
       let focusId: string | null = null;
       for (const path of paths) {
-        const existing = current.find((tab) => tab.path === path)
-          ?? opened.find((tab) => tab.path === path);
+        // 拖入时只在一批拖入内部去重，不查面板里已打开的页签：已有文件打开时再拖入也会新开一个页签。
+        const existing = options?.openDuplicatePaths
+          ? opened.find((tab) => tab.path === path)
+          : current.find((tab) => tab.path === path)
+            ?? opened.find((tab) => tab.path === path);
         if (existing) {
           focusId = existing.id;
           continue;
@@ -189,13 +195,49 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
     }
   }, [openPaths]);
 
-  /** 从系统拖入的文件：路径已由预加载脚本解析好，直接复用页签打开流程。 */
+  /**
+   * 从系统拖入的文件：路径已由预加载脚本解析好，复用页签打开流程。
+   * 拖入总是新开页签，面板里已有文件打开时也不会顶掉或复用现有页签。
+   */
   const openDroppedPaths = useCallback(
     async (paths: string[]) => {
-      await openPaths(paths);
+      await openPaths(paths, { openDuplicatePaths: true });
     },
     [openPaths]
   );
+
+  /**
+   * 新建空白页：不读磁盘、不占路径，直接给一个可编辑的空页签。
+   * 已经有一个没改过的空白页时复用它，连点「+」不会堆出一排空页签。
+   */
+  const newBlankDocument = useCallback(() => {
+    const current = tabsRef.current;
+    const reusable = current.find(
+      (tab) => !tab.path && !isDocumentDirty(tab.content, tab.savedContent)
+    );
+    if (reusable) {
+      setActiveTabId(reusable.id);
+      setPendingAction(null);
+      return;
+    }
+    const tab: DocumentTab = {
+      id: `document-tab-${nextTabIdRef.current++}`,
+      path: "",
+      title: getNextUntitledDocumentTitle(current.map((item) => item.title)),
+      content: "",
+      savedContent: "",
+      kind: "text",
+      mode: "source",
+      lineEnding: "lf",
+      truncated: false,
+      binary: false,
+      loading: false,
+      error: null
+    };
+    applyTabs((latest) => [...latest, tab]);
+    setActiveTabId(tab.id);
+    setPendingAction(null);
+  }, [applyTabs]);
 
   const selectTab = useCallback((tabId: string) => {
     setActiveTabId(tabId);
@@ -222,34 +264,6 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
     [applyTabs]
   );
 
-  const saveTab = useCallback(
-    async (tabId: string): Promise<boolean> => {
-      const tab = tabsRef.current.find((item) => item.id === tabId);
-      if (!tab || tab.binary || tab.loading) {
-        return false;
-      }
-      if (tab.truncated) {
-        // 只读到前 512 KB 就写回会把文件截断，直接拒绝并说明原因。
-        patchTab(tabId, { error: "文件超过预览上限，只读到了前 512 KB，已取消保存以免截断原文件。" });
-        return false;
-      }
-      try {
-        await window.codexh.writeDocumentFile({
-          path: tab.path,
-          content: applyLineEnding(tab.content, tab.lineEnding)
-        });
-        patchTab(tabId, { savedContent: tab.content, error: null });
-        return true;
-      } catch (error) {
-        patchTab(tabId, {
-          error: error instanceof Error ? error.message : String(error)
-        });
-        return false;
-      }
-    },
-    [patchTab]
-  );
-
   const saveTabAs = useCallback(
     async (tabId: string): Promise<boolean> => {
       const tab = tabsRef.current.find((item) => item.id === tabId);
@@ -258,7 +272,8 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
       }
       try {
         const savedPath = await window.codexh.saveDocumentFileAs({
-          suggestedPath: tab.path,
+          // 空白页还没有落盘位置，给一个按标题推导的默认文件名。
+          suggestedPath: tab.path || getUntitledDocumentSuggestedFileName(tab.title),
           content: applyLineEnding(tab.content, tab.lineEnding)
         });
         if (!savedPath) {
@@ -283,6 +298,38 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
       }
     },
     [patchTab]
+  );
+
+  const saveTab = useCallback(
+    async (tabId: string): Promise<boolean> => {
+      const tab = tabsRef.current.find((item) => item.id === tabId);
+      if (!tab || tab.binary || tab.loading) {
+        return false;
+      }
+      if (!tab.path) {
+        // 空白页没有落盘位置，保存即另存为，避免往空路径上写文件。
+        return saveTabAs(tabId);
+      }
+      if (tab.truncated) {
+        // 只读到前 512 KB 就写回会把文件截断，直接拒绝并说明原因。
+        patchTab(tabId, { error: "文件超过预览上限，只读到了前 512 KB，已取消保存以免截断原文件。" });
+        return false;
+      }
+      try {
+        await window.codexh.writeDocumentFile({
+          path: tab.path,
+          content: applyLineEnding(tab.content, tab.lineEnding)
+        });
+        patchTab(tabId, { savedContent: tab.content, error: null });
+        return true;
+      } catch (error) {
+        patchTab(tabId, {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return false;
+      }
+    },
+    [patchTab, saveTabAs]
   );
 
   const requestCloseTab = useCallback(
@@ -370,6 +417,7 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
     dirtyCount,
     openDocuments,
     openDroppedPaths,
+    newBlankDocument,
     selectTab,
     requestCloseTab,
     requestClosePanel,
