@@ -18,6 +18,12 @@ const navigation = readText(
 );
 const styles = readText(new URL("../apps/desktop/src/renderer/styles.css", import.meta.url));
 const icons = readText(new URL("../apps/desktop/src/renderer/icons.tsx", import.meta.url));
+const rail = readText(
+  new URL("../apps/desktop/src/renderer/history/sidebar-nav-items.ts", import.meta.url)
+);
+const railMore = readText(
+  new URL("../apps/desktop/src/renderer/history/sidebar-nav-more.tsx", import.meta.url)
+);
 
 /** 取出一段实现代码，避免断言命中同名的其它位置。 */
 function section(source: string, start: string, end: string): string {
@@ -31,19 +37,24 @@ function section(source: string, start: string, end: string): string {
 describe("接口卡片：侧栏入口 + 聊天区内联面板", () => {
   it("侧栏入口排在「随手记」下面，并带选中态", () => {
     const nav = section(sidebar, '<div className="sidebar-nav">', '<div className="history-list"');
-    const quickNotesIndex = nav.indexOf("随手记");
-    const apiFavoritesIndex = nav.indexOf("接口卡片");
-    expect(quickNotesIndex).toBeGreaterThanOrEqual(0);
-    expect(apiFavoritesIndex).toBeGreaterThan(quickNotesIndex);
-    expect(nav).toContain("onClick={onOpenApiFavorites}");
-    expect(nav).toContain('apiFavoritesActive ? "is-active" : ""');
+    // 入口顺序由目录定义：随手记在前，接口卡片紧随其后。
+    const quickNotesLabel = rail.indexOf('quickNotes: "随手记"');
+    const apiFavoritesLabel = rail.indexOf('apiFavorites: "接口卡片"');
+    expect(quickNotesLabel).toBeGreaterThanOrEqual(0);
+    expect(apiFavoritesLabel).toBeGreaterThan(quickNotesLabel);
+
+    expect(nav).toContain("{railItems.visible.map(renderRailItem)}");
+    expect(nav).toContain("<SidebarNavMore items={railItems.hidden}");
+    expect(sidebar).toContain("apiFavorites: onOpenApiFavorites,");
+    expect(sidebar).toContain('railItemActiveStates[id] ? "is-active" : ""');
   });
 
   it("侧栏入口用卡片图标，不再借用地球图标", () => {
     const nav = section(sidebar, '<div className="sidebar-nav">', '<div className="history-list"');
-    expect(nav).toContain("<IconApiCard />");
+    expect(railMore).toContain("apiFavorites: <IconApiCard />");
     expect(nav).not.toContain("<IconGlobe />");
-    expect(sidebar).toContain("IconApiCard,");
+    expect(railMore).not.toContain("<IconGlobe />");
+    expect(railMore).toContain("IconApiCard,");
 
     const iconStart = icons.indexOf("export function IconApiCard() {");
     expect(iconStart).toBeGreaterThanOrEqual(0);

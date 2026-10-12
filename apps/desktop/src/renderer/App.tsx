@@ -298,6 +298,7 @@ import { KnowledgePage } from "./settings/pages/knowledge/knowledge-page";
 import { CloudNotesPage } from "./settings/pages/connections/cloud-notes-page";
 import { MemoryPage } from "./settings/pages/knowledge/memory-page";
 import { ResponseTonePage } from "./settings/pages/general/response-tone-page";
+import { SidebarNavPage } from "./settings/pages/general/sidebar-nav-page";
 import { RuntimeOverviewPage } from "./settings/pages/general/runtime-overview-page";
 import { DatabasePage } from "./settings/pages/connections/database-page";
 import { McpPage } from "./settings/pages/connections/mcp-page";
@@ -7840,6 +7841,7 @@ export function App() {
         apiFavoritesActive={isApiFavoritesOpen}
         onOpenDocumentViewer={openDocumentViewerEvent}
         documentViewerActive={isDocumentViewerOpen}
+        hiddenSidebarItems={config?.desktop.hiddenSidebarItems}
         onOpenSearch={openHistorySearchEvent}
         onOpenSettings={openSettingsEvent}
         updatePhase={updateState?.phase}
@@ -8601,6 +8603,10 @@ export function App() {
 
               {settingsTab === "general" && configDraft ? (
                 <ResponseTonePage configDraft={configDraft} options={RESPONSE_TONE_OPTIONS} defaultTone={DEFAULT_RESPONSE_TONE} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
+              ) : null}
+
+              {settingsTab === "general" && configDraft ? (
+                <SidebarNavPage configDraft={configDraft} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 
               {settingsTab === "update" ? (

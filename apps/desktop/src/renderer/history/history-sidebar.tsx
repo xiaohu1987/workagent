@@ -1,23 +1,20 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { Dispatch, PointerEvent as ReactPointerEvent, ReactNode, SetStateAction } from "react";
-import type { ThreadRecord } from "@shared-types";
+import type { SidebarNavItemId, ThreadRecord } from "@shared-types";
 import { canDeleteThread, getHistoryItemAffordance } from "../core/thread-ui-state";
 import { useMotionPresence } from "../core/motion-presence";
 import { getFileLeafName } from "../markdown";
 import {
-  IconApiCard,
   IconChatBubbles,
   IconCheck,
   IconChevronDown,
   IconChevronRight,
   IconClose,
   IconCompose,
-  IconFile,
   IconFolder,
   IconFolders,
   IconGear,
   IconHelpCircle,
-  IconNotebook,
   IconPin,
   IconPlus,
   IconRename,
@@ -51,6 +48,8 @@ import {
 import { HistoryTrashOverlay } from "./history-trash-overlay";
 import { formatRelativeTime } from "../core/app-formatters";
 import { WorkspaceContextMenu } from "../workspace/panels";
+import { SIDEBAR_NAV_ITEM_LABELS, splitSidebarNavItems } from "./sidebar-nav-items";
+import { SIDEBAR_NAV_ITEM_ICONS, SidebarNavMore } from "./sidebar-nav-more";
 
 type ProjectGroup = { cwd: string; threads: ThreadRecord[] };
 type RenameState = { id: string; title: string } | null;
@@ -93,6 +92,8 @@ type Props = {
   apiFavoritesActive?: boolean;
   onOpenDocumentViewer: () => void;
   documentViewerActive?: boolean;
+  /** Rail entries the user tucked into the "更多" flyout; empty keeps them inline. */
+  hiddenSidebarItems?: SidebarNavItemId[];
   onOpenSearch: () => void;
   onOpenSettings: (tab: "provider" | "update") => void;
   updatePhase?: string;
@@ -110,7 +111,7 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readStoredStringSet(HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY));
@@ -459,10 +460,39 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
     </section>;
   }
 
+  const railItems = splitSidebarNavItems(hiddenSidebarItems);
+  const railItemHandlers: Record<SidebarNavItemId, () => void> = {
+    quickNotes: () => void onOpenQuickNotes(),
+    apiFavorites: onOpenApiFavorites,
+    documentViewer: onOpenDocumentViewer
+  };
+  const railItemActiveStates: Record<SidebarNavItemId, boolean> = {
+    quickNotes: quickNotesActive,
+    apiFavorites: apiFavoritesActive,
+    documentViewer: documentViewerActive
+  };
+
+  function renderRailItem(id: SidebarNavItemId) {
+    return (
+      <button key={id} className={`sidebar-nav-button ${railItemActiveStates[id] ? "is-active" : ""}`} type="button" onClick={railItemHandlers[id]}>
+        <span className="sidebar-nav-icon">{SIDEBAR_NAV_ITEM_ICONS[id]}</span>
+        <span>{SIDEBAR_NAV_ITEM_LABELS[id]}</span>
+      </button>
+    );
+  }
+
+  function openHiddenRailItem(id: SidebarNavItemId) {
+    railItemHandlers[id]();
+  }
+
   return <aside className="sidebar">
     <div className="sidebar-scroll">
       <div className="sidebar-brand-row"><div className="sidebar-brand"><strong>Code<span className="sidebar-brand-accent">XH</span></strong><span>AI Workspace</span></div><div className="sidebar-brand-tools"><button className="sidebar-search" type="button" title="搜索历史对话" onClick={onOpenSearch}><IconSearch /></button></div></div>
-      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={onCreateTask}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span><span className="sidebar-nav-plus"><IconPlus /></span></button><button className={`sidebar-nav-button ${quickNotesActive ? "is-active" : ""}`} type="button" onClick={() => void onOpenQuickNotes()}><span className="sidebar-nav-icon"><IconNotebook /></span><span>随手记</span></button><button className={`sidebar-nav-button ${apiFavoritesActive ? "is-active" : ""}`} type="button" onClick={onOpenApiFavorites}><span className="sidebar-nav-icon"><IconApiCard /></span><span>接口卡片</span></button><button className={`sidebar-nav-button ${documentViewerActive ? "is-active" : ""}`} type="button" onClick={onOpenDocumentViewer}><span className="sidebar-nav-icon"><IconFile /></span><span>查看文档</span></button></div>
+      <div className="sidebar-nav">
+        <button className="sidebar-nav-button" onClick={onCreateTask}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span><span className="sidebar-nav-plus"><IconPlus /></span></button>
+        {railItems.visible.map(renderRailItem)}
+        <SidebarNavMore items={railItems.hidden} activeItemId={railItems.hidden.find((id) => railItemActiveStates[id]) ?? null} onSelect={openHiddenRailItem} />
+      </div>
       <div className="history-list" aria-label="任务与项目">
         {selectionMode ? (
           <div className="history-selection-toolbar" aria-label="批量选择历史对话">

@@ -11,6 +11,12 @@ const panel = readText(
   new URL("../apps/desktop/src/renderer/workspace/quick-notes-panel.tsx", import.meta.url)
 );
 const styles = readText(new URL("../apps/desktop/src/renderer/styles.css", import.meta.url));
+const rail = readText(
+  new URL("../apps/desktop/src/renderer/history/sidebar-nav-items.ts", import.meta.url)
+);
+const railMore = readText(
+  new URL("../apps/desktop/src/renderer/history/sidebar-nav-more.tsx", import.meta.url)
+);
 
 /** 取出一段实现代码，避免断言命中同名的其它位置。 */
 function section(source: string, start: string, end: string): string {
@@ -25,11 +31,20 @@ describe("随手记：侧栏入口 + 聊天区内联面板", () => {
   it("侧栏入口排在「新建任务」下面，并带选中态", () => {
     const nav = section(sidebar, '<div className="sidebar-nav">', '<div className="history-list"');
     const createTaskIndex = nav.indexOf("新建任务");
-    const quickNotesIndex = nav.indexOf("随手记");
+    const railItemsIndex = nav.indexOf("{railItems.visible.map(renderRailItem)}");
     expect(createTaskIndex).toBeGreaterThanOrEqual(0);
-    expect(quickNotesIndex).toBeGreaterThan(createTaskIndex);
-    expect(nav).toContain("onClick={() => void onOpenQuickNotes()}");
-    expect(nav).toContain('quickNotesActive ? "is-active" : ""');
+    expect(railItemsIndex).toBeGreaterThan(createTaskIndex);
+
+    // 入口顺序由目录定义：随手记在最前，其余入口按目录顺序跟随。
+    const quickNotesLabel = rail.indexOf('quickNotes: "随手记"');
+    const apiFavoritesLabel = rail.indexOf('apiFavorites: "接口卡片"');
+    expect(quickNotesLabel).toBeGreaterThanOrEqual(0);
+    expect(apiFavoritesLabel).toBeGreaterThan(quickNotesLabel);
+
+    expect(nav).toContain("<SidebarNavMore items={railItems.hidden}");
+    expect(sidebar).toContain("quickNotes: () => void onOpenQuickNotes()");
+    expect(sidebar).toContain('railItemActiveStates[id] ? "is-active" : ""');
+    expect(railMore).toContain('SIDEBAR_NAV_ITEM_LABELS[id]');
   });
 
   it("面板渲染在聊天画布内，代替聊天记录与输入区", () => {

@@ -20,6 +20,12 @@ const tabs = readText(
 const main = readText(new URL("../apps/desktop/src/main/index.ts", import.meta.url));
 const preload = readText(new URL("../apps/desktop/src/preload/index.ts", import.meta.url));
 const env = readText(new URL("../apps/desktop/src/renderer/env.d.ts", import.meta.url));
+const rail = readText(
+  new URL("../apps/desktop/src/renderer/history/sidebar-nav-items.ts", import.meta.url)
+);
+const railMore = readText(
+  new URL("../apps/desktop/src/renderer/history/sidebar-nav-more.tsx", import.meta.url)
+);
 
 /** 取出一段实现代码，避免断言命中同名的其它位置。 */
 function section(source: string, start: string, end: string): string {
@@ -33,15 +39,18 @@ function section(source: string, start: string, end: string): string {
 describe("查看文档：侧栏入口 + 聊天区内联面板", () => {
   it("侧栏入口排在「接口卡片」下面，并带选中态", () => {
     const nav = section(sidebar, '<div className="sidebar-nav">', '<div className="history-list"');
-    const quickNotesIndex = nav.indexOf("随手记");
-    const apiFavoritesIndex = nav.indexOf("接口卡片");
-    const documentViewerIndex = nav.indexOf("查看文档");
-    expect(quickNotesIndex).toBeGreaterThanOrEqual(0);
-    expect(apiFavoritesIndex).toBeGreaterThan(quickNotesIndex);
-    expect(documentViewerIndex).toBeGreaterThan(apiFavoritesIndex);
-    expect(nav).toContain("onClick={onOpenDocumentViewer}");
-    expect(nav).toContain('documentViewerActive ? "is-active" : ""');
-    expect(nav).toContain("<IconFile />");
+    expect(nav).toContain("{railItems.visible.map(renderRailItem)}");
+    expect(nav).toContain("<SidebarNavMore items={railItems.hidden}");
+
+    // 入口顺序由目录定义：接口卡片在前，查看文档紧随其后。
+    const apiFavoritesLabel = rail.indexOf('apiFavorites: "接口卡片"');
+    const documentViewerLabel = rail.indexOf('documentViewer: "查看文档"');
+    expect(apiFavoritesLabel).toBeGreaterThanOrEqual(0);
+    expect(documentViewerLabel).toBeGreaterThan(apiFavoritesLabel);
+
+    expect(sidebar).toContain("documentViewer: onOpenDocumentViewer");
+    expect(sidebar).toContain('railItemActiveStates[id] ? "is-active" : ""');
+    expect(railMore).toContain("documentViewer: <IconFile />");
   });
 
   it("侧栏声明了查看文档的 props", () => {
