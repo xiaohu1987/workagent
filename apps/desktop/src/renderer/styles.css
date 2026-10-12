@@ -31268,4 +31268,76 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   display: flex;
   align-items: center;
   gap: 8px;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+/* 列表行：左侧名称与元信息占满剩余宽度，右侧编辑/删除图标贴边对齐。 */
+:root .api-favorites-inline .quick-notes-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+:root .api-favorites-inline .quick-notes-item .api-favorites-item-main {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+:root .api-favorites-inline .quick-notes-item .api-favorites-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  overflow: visible;
+  opacity: 0.65;
+  transition: opacity var(--motion-fast) ease;
+}
+
+:root .api-favorites-inline .quick-notes-item:hover .api-favorites-item-actions,
+:root .api-favorites-inline .quick-notes-item:focus-within .api-favorites-item-actions,
+:root .api-favorites-inline .quick-notes-item.selected .api-favorites-item-actions {
+  opacity: 1;
+}
+
+/* 列表行比详情区窄，图标按钮同步收一号，避免挤压名称。 */
+:root .api-favorites-inline .api-favorites-item-actions .api-favorites-icon-button {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  border-radius: 6px;
+}
+
+:root .api-favorites-inline .api-favorites-item-actions .api-favorites-icon-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* 收藏卡片编辑态：URL、入参 JSON 与授权开关铺满卡片内容区。 */
+:root .api-favorites-inline .api-favorites-card-edit {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+}
+
+:root .api-favorites-inline .api-favorites-edit-error {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 92, 92, 0.45);
+  border-radius: 8px;
+  color: #ff5c5c;
+  font-size: 12px;
+  line-height: 1.5;
+  background: rgba(255, 92, 92, 0.12);
 }

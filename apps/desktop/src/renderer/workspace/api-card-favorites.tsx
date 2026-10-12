@@ -3,11 +3,18 @@ import {
   filterApiCardFavorites,
   removeApiCardFavorite,
   renameApiCardFavorite,
+  updateApiCardFavoriteConfig,
   useApiCardFavorites,
   type ApiCardFavorite
 } from "../api-card-favorites";
-import { IconSearch } from "../icons";
+import { IconRename, IconSearch, IconTrash } from "../icons";
 import { ApiCardMessage, ApiCardThreadContext } from "../cards/api-card-message";
+import {
+  ApiFavoritesCardEdit,
+  createApiCardEditDraft,
+  resolveApiCardEditDraft,
+  type ApiCardEditDraft
+} from "./api-favorites-card-edit";
 
 function formatFavoriteTime(timestamp: number): string {
   const date = new Date(timestamp);
@@ -22,10 +29,12 @@ type FavoritesSidebarProps = {
   selectedId: string | null;
   onQueryChange: (value: string) => void;
   onSelect: (id: string) => void;
+  onStartEdit: (favorite: ApiCardFavorite) => void;
+  onDelete: (favorite: ApiCardFavorite) => void;
 };
 
-/** 左栏：搜索框 + 收藏列表；条目结构与随手记一致（标题 + 元信息行）。 */
-function FavoritesSidebar({ favorites, visible, query, selectedId, onQueryChange, onSelect }: FavoritesSidebarProps) {
+/** 左栏：搜索框 + 收藏列表；条目左侧是标题与元信息，右侧贴边放编辑与删除图标。 */
+function FavoritesSidebar({ favorites, visible, query, selectedId, onQueryChange, onSelect, onStartEdit, onDelete }: FavoritesSidebarProps) {
   return (
     <aside className="quick-notes-list">
       <div className="quick-notes-list-header">
@@ -47,19 +56,44 @@ function FavoritesSidebar({ favorites, visible, query, selectedId, onQueryChange
       {visible.length ? (
         <div className="quick-notes-items" aria-label="接口卡片收藏列表">
           {visible.map((favorite) => (
-            <button
+            <div
               key={favorite.id}
-              type="button"
               className={`quick-notes-item ${selectedId === favorite.id ? "selected" : ""}`}
               data-method={favorite.config.method.toLowerCase()}
-              onClick={() => onSelect(favorite.id)}
             >
-              <strong>{favorite.name}</strong>
-              <span className="quick-notes-item-meta">
-                <span className="api-favorites-method">{favorite.config.method}</span>
-                <span className="quick-notes-item-time">{formatFavoriteTime(favorite.createdAt)}</span>
+              {/* 行主体负责选中；图标按钮独立成组，避免按钮嵌套按钮。 */}
+              <button
+                type="button"
+                className="api-favorites-item-main"
+                onClick={() => onSelect(favorite.id)}
+              >
+                <strong>{favorite.name}</strong>
+                <span className="quick-notes-item-meta">
+                  <span className="api-favorites-method">{favorite.config.method}</span>
+                  <span className="quick-notes-item-time">{formatFavoriteTime(favorite.createdAt)}</span>
+                </span>
+              </button>
+              <span className="api-favorites-item-actions">
+                <button
+                  type="button"
+                  className="api-favorites-icon-button"
+                  title="编辑卡片"
+                  aria-label={`编辑 ${favorite.name}`}
+                  onClick={() => onStartEdit(favorite)}
+                >
+                  <IconRename />
+                </button>
+                <button
+                  type="button"
+                  className="api-favorites-icon-button is-danger"
+                  title="删除收藏"
+                  aria-label={`删除 ${favorite.name}`}
+                  onClick={() => onDelete(favorite)}
+                >
+                  <IconTrash />
+                </button>
               </span>
-            </button>
+            </div>
           ))}
         </div>
       ) : (
@@ -74,21 +108,17 @@ function FavoritesSidebar({ favorites, visible, query, selectedId, onQueryChange
 
 type FavoritesDetailProps = {
   selected: ApiCardFavorite | null;
-  editorOpen: boolean;
-  editingId: string | null;
-  editingName: string;
+  draft: ApiCardEditDraft | null;
+  editError: string | null;
   threadId: string | null;
   onInsert?: (favorite: ApiCardFavorite) => void;
-  onToggleEditor: () => void;
-  onCollapseEditor: () => void;
-  onStartRename: (favorite: ApiCardFavorite) => void;
-  onEditingNameChange: (value: string) => void;
-  onCommitRename: () => void;
-  onCancelRename: () => void;
+  onEditChange: (patch: Partial<ApiCardEditDraft>) => void;
+  onSaveEdit: () => void;
+  onCancelEdit: () => void;
 };
 
 /** 右栏：选中卡片的信息栏、完整卡片与底部操作，骨架与随手记编辑器一致。 */
-function FavoritesDetail({ selected, editorOpen, editingId, editingName, threadId, onInsert, onToggleEditor, onCollapseEditor, onStartRename, onEditingNameChange, onCommitRename, onCancelRename }: FavoritesDetailProps) {
+function FavoritesDetail({ selected, draft, editError, threadId, onInsert, onEditChange, onSaveEdit, onCancelEdit }: FavoritesDetailProps) {
   if (!selected) {
     return (
       <section className="quick-notes-editor" aria-label="接口卡片详情">
@@ -97,6 +127,9 @@ function FavoritesDetail({ selected, editorOpen, editingId, editingName, threadI
     );
   }
 
+  /** 草稿只属于选中的那张收藏，切换条目后草稿失效即视为退出编辑。 */
+  const editing = draft !== null && draft.id === selected.id;
+
   return (
     <section className="quick-notes-editor" aria-label="接口卡片详情">
       <div className="quick-notes-markdown-bar" aria-label="接口卡片信息">
@@ -104,57 +137,38 @@ function FavoritesDetail({ selected, editorOpen, editingId, editingName, threadI
         <span>{selected.config.url}</span>
       </div>
       <div className="api-favorites-detail-title">
-        {editingId === selected.id ? (
-          <input
-            className="form-input api-favorites-rename-input"
-            value={editingName}
-            autoFocus
-            onChange={(event) => onEditingNameChange(event.target.value)}
-            onBlur={onCommitRename}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") onCommitRename();
-              if (event.key === "Escape") onCancelRename();
-            }}
-          />
-        ) : (
-          <strong
-            className="api-favorites-detail-name"
-            title="双击重命名"
-            onDoubleClick={() => onStartRename(selected)}
-          >
-            {selected.name}
-          </strong>
-        )}
+        <strong className="api-favorites-detail-name" title={selected.name}>
+          {selected.name}
+        </strong>
         {selected.config.auth ? <span className="api-favorites-chip is-auth">需要授权</span> : null}
         {selected.config.fields.length > 0 ? (
           <span className="api-favorites-chip">{selected.config.fields.length} 个参数</span>
         ) : null}
       </div>
-      {editorOpen ? (
-        <div className="api-favorites-card-editor">
+      <div className="api-favorites-card-editor">
+        {editing && draft ? (
+          <ApiFavoritesCardEdit draft={draft} error={editError} onChange={onEditChange} />
+        ) : (
           <ApiCardThreadContext.Provider value={threadId ?? null}>
-            <ApiCardMessage
-              configText={JSON.stringify(selected.config)}
-              onCollapsedChange={(collapsed) => {
-                if (collapsed) onCollapseEditor();
-              }}
-            />
+            <ApiCardMessage key={selected.id} configText={JSON.stringify(selected.config)} />
           </ApiCardThreadContext.Provider>
-        </div>
-      ) : null}
+        )}
+      </div>
       <footer className="quick-notes-footer">
-        <span className="quick-notes-status">收藏于 {formatFavoriteTime(selected.createdAt)}</span>
+        <span className="quick-notes-status">
+          {editing ? "改动只保存在收藏里，保存后立即生效。" : `收藏于 ${formatFavoriteTime(selected.createdAt)}`}
+        </span>
         <div className="quick-notes-footer-actions">
-          <button type="button" className="button secondary" onClick={onToggleEditor}>
-            {editorOpen ? "收起卡片" : "展开卡片"}
-          </button>
-          <button type="button" className="button secondary" onClick={() => onStartRename(selected)}>
-            重命名
-          </button>
-          <button type="button" className="button secondary" onClick={() => removeApiCardFavorite(selected.id)}>
-            删除
-          </button>
-          {onInsert ? (
+          {editing ? (
+            <>
+              <button type="button" className="button secondary" onClick={onCancelEdit}>
+                取消
+              </button>
+              <button type="button" className="button primary" onClick={onSaveEdit}>
+                保存
+              </button>
+            </>
+          ) : onInsert ? (
             <button type="button" className="button primary" onClick={() => onInsert(selected)}>
               发送到聊天
             </button>
@@ -175,10 +189,9 @@ export function ApiCardFavoritesPanel({
 }) {
   const favorites = useApiCardFavorites();
   const [query, setQuery] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [editorOpen, setEditorOpen] = useState(true);
+  const [draft, setDraft] = useState<ApiCardEditDraft | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
   const visible = useMemo(() => filterApiCardFavorites(favorites, query), [favorites, query]);
   const selected = useMemo<ApiCardFavorite | null>(() => {
@@ -186,10 +199,32 @@ export function ApiCardFavoritesPanel({
     return visible.find((favorite) => favorite.id === selectedId) ?? visible[0] ?? null;
   }, [visible, selectedId]);
 
-  function commitRename() {
-    if (editingId) renameApiCardFavorite(editingId, editingName);
-    setEditingId(null);
-    setEditingName("");
+  function startEdit(favorite: ApiCardFavorite) {
+    setDraft(createApiCardEditDraft(favorite));
+    setEditError(null);
+  }
+
+  function cancelEdit() {
+    setDraft(null);
+    setEditError(null);
+  }
+
+  /** 保存：按草稿重建配置并整体校验，通过后写回名称与配置。 */
+  function saveEdit() {
+    if (!draft) return;
+    const favorite = favorites.find((item) => item.id === draft.id);
+    if (!favorite) {
+      cancelEdit();
+      return;
+    }
+    const resolved = resolveApiCardEditDraft(favorite, draft);
+    if (!resolved.ok) {
+      setEditError(resolved.error);
+      return;
+    }
+    if (resolved.name !== favorite.name) renameApiCardFavorite(favorite.id, resolved.name);
+    updateApiCardFavoriteConfig(favorite.id, resolved.config);
+    cancelEdit();
   }
 
   return (
@@ -202,28 +237,26 @@ export function ApiCardFavoritesPanel({
         onQueryChange={setQuery}
         onSelect={(id) => {
           setSelectedId(id);
-          setEditorOpen(true);
+          cancelEdit();
+        }}
+        onStartEdit={(favorite) => {
+          setSelectedId(favorite.id);
+          startEdit(favorite);
+        }}
+        onDelete={(favorite) => {
+          removeApiCardFavorite(favorite.id);
+          if (draft?.id === favorite.id) cancelEdit();
         }}
       />
       <FavoritesDetail
         selected={selected}
-        editorOpen={editorOpen}
-        editingId={editingId}
-        editingName={editingName}
+        draft={draft}
+        editError={editError}
         threadId={threadId ?? null}
         onInsert={onInsert}
-        onToggleEditor={() => setEditorOpen((current) => !current)}
-        onCollapseEditor={() => setEditorOpen(false)}
-        onStartRename={(favorite) => {
-          setEditingId(favorite.id);
-          setEditingName(favorite.name);
-        }}
-        onEditingNameChange={setEditingName}
-        onCommitRename={commitRename}
-        onCancelRename={() => {
-          setEditingId(null);
-          setEditingName("");
-        }}
+        onEditChange={(patch) => setDraft((current) => (current ? { ...current, ...patch } : current))}
+        onSaveEdit={saveEdit}
+        onCancelEdit={cancelEdit}
       />
     </div>
   );

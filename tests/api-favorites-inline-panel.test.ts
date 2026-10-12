@@ -206,7 +206,24 @@ describe("接口卡片：侧栏入口 + 聊天区内联面板", () => {
     expect(favoritesPanel).toContain('className="button primary"');
     expect(favoritesPanel).toContain('className="button secondary"');
     expect(favoritesPanel).toContain("<ApiCardMessage");
-    expect(favoritesPanel).toContain('import { IconSearch } from "../icons";');
+    expect(favoritesPanel).toContain('import { IconRename, IconSearch, IconTrash } from "../icons";');
+
+    // 编辑与删除图标改挂在列表行右侧；编辑态仍在右栏原位展开表单。
+    expect(favoritesPanel).not.toContain("收起卡片");
+    expect(favoritesPanel).not.toContain("展开卡片");
+    expect(sidebarSection).toContain('className="api-favorites-item-main"');
+    expect(sidebarSection).toContain('className="api-favorites-item-actions"');
+    expect(sidebarSection).toContain("<IconRename />");
+    expect(sidebarSection).toContain("<IconTrash />");
+    expect(sidebarSection).toContain('className="api-favorites-icon-button"');
+    expect(sidebarSection).toContain('className="api-favorites-icon-button is-danger"');
+    expect(favoritesPanel).toContain("<ApiFavoritesCardEdit");
+
+    // 底部操作区不再放图标，只剩发送按钮，并整体靠右。
+    const footerActions = section(favoritesPanel, '<div className="quick-notes-footer-actions">', "</div>");
+    expect(footerActions).toContain("发送到聊天");
+    expect(footerActions).not.toContain("<IconRename />");
+    expect(footerActions).not.toContain("<IconTrash />");
 
     // 接口卡片专属样式限定在 .api-favorites-inline 作用域内，不会波及随手记。
     for (const selector of [
@@ -217,7 +234,12 @@ describe("接口卡片：侧栏入口 + 聊天区内联面板", () => {
       ":root .api-favorites-inline .api-favorites-detail-title {",
       ":root .api-favorites-inline .api-favorites-search-wrap {",
       ":root .api-favorites-inline .api-favorites-hint {",
-      ":root .api-favorites-inline .quick-notes-footer-actions {"
+      ":root .api-favorites-inline .quick-notes-footer-actions {",
+      ":root .api-favorites-inline .quick-notes-item .api-favorites-item-actions {",
+      ":root .api-favorites-inline .quick-notes-item .api-favorites-item-main {",
+      ":root .api-favorites-inline .api-favorites-icon-button {",
+      ":root .api-favorites-inline .api-favorites-card-edit {",
+      ":root .api-favorites-inline .api-favorites-edit-error {"
     ]) {
       expect(styles).toContain(selector);
     }
