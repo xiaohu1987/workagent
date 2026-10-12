@@ -259,15 +259,23 @@ export function isProjectWorkspaceThread(mode: string | null | undefined): boole
   return mode === "project";
 }
 
-export function getDefaultRightWorkspaceTab(mode: string | null | undefined): RightWorkspaceTab {
-  return isProjectWorkspaceThread(mode) ? "files" : "thinking";
+/**
+ * `hasProjectWorkspace` 表示「已经选中项目文件夹」——新建任务页还没有线程，
+ * 但只要用户挑好了文件夹，右侧就应当和 project 会话一样默认落在文件夹页。
+ */
+export function getDefaultRightWorkspaceTab(
+  mode: string | null | undefined,
+  hasProjectWorkspace = false
+): RightWorkspaceTab {
+  return isProjectWorkspaceThread(mode) || hasProjectWorkspace ? "files" : "thinking";
 }
 
 export function resolveRightWorkspaceTabForMode(
   mode: string | null | undefined,
-  tab: RightWorkspaceTab
+  tab: RightWorkspaceTab,
+  hasProjectWorkspace = false
 ): RightWorkspaceTab {
-  if (isProjectWorkspaceThread(mode)) {
+  if (isProjectWorkspaceThread(mode) || hasProjectWorkspace) {
     return tab;
   }
   return tab === "files" || tab === "changes" ? "thinking" : tab;
@@ -277,9 +285,10 @@ export function shouldLoadProjectWorkspaceResource(
   mode: string | null | undefined,
   workspaceOpen: boolean,
   tab: RightWorkspaceTab,
-  resource: "files" | "git"
+  resource: "files" | "git",
+  hasProjectWorkspace = false
 ): boolean {
-  if (!isProjectWorkspaceThread(mode) || !workspaceOpen) {
+  if ((!isProjectWorkspaceThread(mode) && !hasProjectWorkspace) || !workspaceOpen) {
     return false;
   }
   return resource === "files" ? tab === "files" : tab === "changes";

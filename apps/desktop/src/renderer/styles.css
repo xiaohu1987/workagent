@@ -464,6 +464,626 @@ pre {
   color: #54c991;
 }
 
+/* ---------------------------------------------------------------------------
+   接口卡片：与随手记同构，常驻聊天区内显示与操作，不再占用设置页。
+--------------------------------------------------------------------------- */
+.chat-canvas.is-api-favorites {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chat-canvas.is-api-favorites > .chat-scroll,
+.chat-canvas.is-api-favorites > footer {
+  display: none;
+}
+
+.api-favorites-sheet.api-favorites-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.api-favorites-sheet .project-sheet-header {
+  flex: 0 0 auto;
+  min-height: 48px;
+  align-items: center;
+  padding: 6px 14px 6px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.api-favorites-header-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.api-favorites-header-icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgba(100, 168, 255, 0.28);
+  border-radius: 6px;
+  color: #7fb6ff;
+  background: rgba(100, 168, 255, 0.1);
+}
+
+.api-favorites-header-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.api-favorites-header-title strong {
+  color: var(--text-soft);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.api-favorites-header-scope {
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.api-favorites-inline .api-favorites-inline-body {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  padding: 18px 22px;
+  overflow: hidden;
+}
+
+.api-favorites-inline .api-favorites-panel {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+
+/* ---------------------------------------------------------------------------
+   查看文档：与随手记、接口卡片同构，常驻聊天区显示与操作。
+   面板沿用既有 .document-viewer-sheet 作用域，这里只补容器尺寸与让位规则。
+--------------------------------------------------------------------------- */
+.chat-canvas.is-document-viewer {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chat-canvas.is-document-viewer > .chat-scroll,
+.chat-canvas.is-document-viewer > footer {
+  display: none;
+}
+
+.document-viewer-sheet.document-viewer-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+/* 查看文档：把文件从系统拖进来时的落点提示，以及被忽略文件的提示条。 */
+.document-viewer-drop-notice {
+  flex: 0 0 auto;
+  padding: 7px 22px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 12px;
+  opacity: 0.86;
+}
+
+.document-viewer-drop-hint {
+  position: absolute;
+  inset: 10px;
+  z-index: 3;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  border: 1px dashed rgba(127, 127, 127, 0.5);
+  border-radius: 16px;
+  background: rgba(127, 127, 127, 0.16);
+  text-align: center;
+  pointer-events: none;
+}
+
+.document-viewer-drop-hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(127, 127, 127, 0.2);
+}
+
+.document-viewer-drop-hint-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.document-viewer-drop-hint-copy {
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+/* 拖拽期间让 iframe 与编辑器交出命中测试，避免提示闪烁或落点被内层吃掉。 */
+.document-viewer-sheet.is-drop-target .document-viewer-html-frame,
+.document-viewer-sheet.is-drop-target .document-editor-input {
+  pointer-events: none;
+}
+
+.document-viewer-inline .document-viewer-inline-body {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  padding: 18px 22px;
+  overflow: auto;
+}
+
+.document-viewer-inline .document-viewer-content {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.document-viewer-inline .document-viewer-markdown,
+.document-viewer-inline .document-viewer-html-frame {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+}
+
+.document-viewer-inline .document-viewer-html-frame {
+  border: 0;
+}
+
+.document-viewer-code {
+  margin: 0;
+  padding: 12px 0;
+  list-style: none;
+}
+
+/* 查看文档：标题栏左侧只留一个「+」入口，识别结果与展示方式收在右侧。 */
+.document-viewer-header {
+  flex: 0 0 auto;
+  min-height: 48px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px 6px 12px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+}
+
+.document-viewer-header-leading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.document-viewer-open-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(127, 127, 127, 0.26);
+  border-radius: 9px;
+  background: rgba(127, 127, 127, 0.12);
+  color: inherit;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.document-viewer-open-button:hover:not(:disabled) {
+  background: rgba(127, 127, 127, 0.22);
+  border-color: rgba(127, 127, 127, 0.42);
+}
+
+.document-viewer-open-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.document-viewer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.document-viewer-kind-chip {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.14);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
+/* 空态：一张引导卡片，把支持的格式与打开入口放在一起，而不是一行素文字。 */
+.document-viewer-empty {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  width: 100%;
+  padding: 24px;
+}
+
+.document-viewer-empty-card {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  width: min(460px, 100%);
+  padding: 30px 32px;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 18px;
+  background: rgba(127, 127, 127, 0.07);
+  text-align: center;
+}
+
+.document-viewer-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  background: rgba(127, 127, 127, 0.14);
+}
+
+.document-viewer-empty-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.document-viewer-empty-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.document-viewer-empty-copy {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  opacity: 0.72;
+}
+
+.document-viewer-empty-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+.document-viewer-empty-badge {
+  padding: 3px 9px;
+  border: 1px solid rgba(127, 127, 127, 0.22);
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
+.document-viewer-empty-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 7px 16px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 10px;
+  background: rgba(127, 127, 127, 0.18);
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.document-viewer-empty-open:hover:not(:disabled) {
+  background: rgba(127, 127, 127, 0.3);
+  border-color: rgba(127, 127, 127, 0.44);
+}
+
+.document-viewer-empty-open:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.document-viewer-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.document-viewer-mode-button {
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.document-viewer-mode-button.is-active {
+  background: rgba(127, 127, 127, 0.24);
+}
+
+.document-viewer-language {
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+/* 页签栏：多文件并排打开，激活页签高亮，未保存用圆点提示。 */
+.document-tab-strip {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.document-tab {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 8px 8px 0 0;
+}
+
+.document-tab.is-active {
+  background: rgba(127, 127, 127, 0.16);
+}
+
+.document-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 8px 6px 8px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.document-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.document-tab-dirty {
+  color: #e5a13a;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.document-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+.document-tab-close:hover {
+  background: rgba(127, 127, 127, 0.24);
+  opacity: 1;
+}
+
+.document-tab-close svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* 源码编辑器：行号、高亮层与 textarea 叠在同一套行高上，三者必须同步。 */
+.document-editor {
+  --editor-font: "Cascadia Mono", "Consolas", "SFMono-Regular", Menlo, monospace;
+  --editor-size: 13px;
+  --editor-line: 20px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.document-editor-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.document-editor-language {
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+.document-editor-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  opacity: 0.6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-editor-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.document-editor-action {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.16);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.document-editor-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.document-editor-surface {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(127, 127, 127, 0.24);
+  border-radius: 10px;
+}
+
+.document-editor-gutter {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 12px 8px 12px 12px;
+  background: rgba(127, 127, 127, 0.08);
+  color: rgba(127, 127, 127, 0.9);
+  font-family: var(--editor-font);
+  font-size: var(--editor-size);
+  line-height: var(--editor-line);
+  text-align: right;
+  white-space: pre;
+  overflow: hidden;
+  user-select: none;
+}
+
+.document-editor-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.document-editor-highlight,
+.document-editor-input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 12px 14px;
+  border: 0;
+  font-family: var(--editor-font);
+  font-size: var(--editor-size);
+  line-height: var(--editor-line);
+  letter-spacing: normal;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.document-editor-highlight {
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.document-editor-input {
+  overflow: auto;
+  background: transparent;
+  color: transparent;
+  caret-color: currentColor;
+  resize: none;
+  outline: none;
+}
+
+.document-editor-status {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+.document-editor-warning {
+  color: #e5a13a;
+  opacity: 1;
+}
+
+/* 关闭确认条：贴在面板底部，不遮罩、不抢焦点，与其它确认条观感一致。 */
+.document-viewer-confirm {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 22px;
+  border-top: 1px solid rgba(127, 127, 127, 0.18);
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.document-viewer-confirm-message {
+  font-size: 13px;
+}
+
+.document-viewer-confirm-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.document-viewer-confirm-actions button {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.16);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.document-viewer-confirm-save {
+  background: rgba(96, 165, 250, 0.28);
+}
+
 @media (max-width: 680px) {
   .quick-notes-sheet {
     width: calc(100vw - 24px);
@@ -30147,4 +30767,505 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 .composer-status-loading {
   color: var(--text-faint);
   font-size: 11px;
+}
+
+/* ---------------------------------------------------------------------------
+   随手记：改为聊天区内的常驻面板（不再使用居中弹窗）。
+   面板沿用既有 .quick-notes-sheet 作用域，这里只覆盖弹窗尺寸与容器外观。
+--------------------------------------------------------------------------- */
+.chat-canvas.is-quick-notes {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+/* 聊天记录与 composer 同为 chat-canvas 的直接子元素，随手记打开时让位给面板；
+   面板自身的 .quick-notes-footer 不在这一层，因此用子选择器限定。 */
+.chat-canvas.is-quick-notes > .chat-scroll,
+.chat-canvas.is-quick-notes > footer {
+  display: none;
+}
+
+.quick-notes-sheet.quick-notes-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 底部一行：状态文字、云笔记标签与按钮全部贴齐编辑区右侧。 */
+.quick-notes-sheet.quick-notes-inline .quick-notes-footer {
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.quick-notes-sheet.quick-notes-inline .quick-notes-status {
+  margin-left: auto;
+  text-align: right;
+}
+
+/* 删除确认由浮层改为页内确认条。 */
+.quick-notes-confirm-bar {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  border-top: 1px solid rgba(237, 107, 107, 0.32);
+  color: var(--text-soft);
+  background: rgba(206, 73, 73, 0.12);
+  font-size: 13px;
+}
+
+.quick-notes-confirm-bar strong {
+  color: #ed6b6b;
+}
+
+.quick-notes-confirm-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.quick-notes-confirm-actions button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-soft);
+  background: transparent;
+}
+
+.quick-notes-confirm-actions button.danger {
+  border-color: rgba(237, 107, 107, 0.48);
+  color: #ffffff;
+  background: #7d2d35;
+}
+
+.quick-notes-confirm-actions button.danger:hover {
+  background: #993640;
+}
+
+/* 侧栏随手记入口的选中态，沿用历史项的选中配色。 */
+.sidebar-nav-button.is-active {
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+  background: #17171b;
+}
+
+:root[data-theme="light"] .sidebar-nav-button.is-active {
+  border-color: rgba(38, 37, 30, 0.14);
+  color: var(--text);
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .quick-notes-confirm-bar {
+  border-top-color: rgba(206, 73, 73, 0.28);
+  color: #7d2d35;
+  background: rgba(206, 73, 73, 0.08);
+}
+
+:root[data-theme="light"] .quick-notes-confirm-bar strong {
+  color: #a8353f;
+}
+
+/* ---------------------------------------------------------------------------
+   接口卡片收藏：列表化排版。
+   旧的卡片式外观（每张卡片独立边框 + 大圆角 + 右侧一整排文字按钮）在宽窗口下
+   会被拉成超宽横条，这里统一改成「一个带边框的容器 + 行间分割线 + 按 HTTP 方法
+   着色的左侧色条」，并把文字按钮换成图标按钮。作用域限定在内联面板内，
+   因此不会影响聊天记录里真正的 API 卡片。
+   选择器统一加 :root 前缀，用来压过主题段落中针对 .api-favorites-card 的 !important 覆盖。
+--------------------------------------------------------------------------- */
+
+.api-favorites-inline .api-favorites-panel {
+  display: flex;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 左列表 + 右详情两栏：与随手记同构，纵向铺满聊天区。 */
+.api-favorites-inline .api-favorites-layout {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(210px, 288px) minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.api-favorites-inline .api-favorites-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+
+.api-favorites-inline .api-favorites-sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.api-favorites-inline .api-favorites-detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface-card, var(--surface));
+}
+
+.api-favorites-inline .api-favorites-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.api-favorites-inline .api-favorites-detail-placeholder {
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  padding: 24px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.api-favorites-search-wrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+}
+
+.api-favorites-search-icon {
+  position: absolute;
+  left: 11px;
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.api-favorites-search-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+:root .api-favorites-inline .api-favorites-search {
+  width: 100%;
+  padding-left: 33px;
+}
+
+:root .api-favorites-hint {
+  margin: 0;
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+:root .api-favorites-inline .api-favorites-list {
+  display: flex !important;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none !important;
+  flex-direction: column;
+  gap: 0 !important;
+  padding: 6px !important;
+  overflow: hidden auto;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+:root .api-favorites-inline .api-favorites-card {
+  display: flex !important;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px 9px 8px !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  text-align: left;
+}
+
+:root .api-favorites-inline .api-favorites-card[data-method] {
+  border-left: 3px solid var(--api-rail, var(--border)) !important;
+}
+
+:root .api-favorites-inline .api-favorites-card[data-method="get"] {
+  --api-rail: var(--violet, #b86cff);
+}
+
+:root .api-favorites-inline .api-favorites-card[data-method="post"] {
+  --api-rail: var(--green, #33c26f);
+}
+
+:root .api-favorites-inline .api-favorites-card[data-method="put"] {
+  --api-rail: var(--orange, #f28b35);
+}
+
+:root .api-favorites-inline .api-favorites-card[data-method="patch"] {
+  --api-rail: var(--accent-purple, #8b5cf6);
+}
+
+:root .api-favorites-inline .api-favorites-card[data-method="delete"] {
+  --api-rail: var(--accent-red, #ff5c5c);
+}
+
+:root .api-favorites-inline .api-favorites-card:hover {
+  border-color: var(--border) !important;
+  border-left-color: var(--api-rail, var(--border)) !important;
+  background: var(--surface-card-hover, var(--surface-soft, var(--surface))) !important;
+  box-shadow: none !important;
+}
+
+:root .api-favorites-inline .api-favorites-card.is-selected {
+  background: color-mix(in srgb, var(--text) 8%, transparent) !important;
+}
+
+:root .api-favorites-inline .api-favorites-detail-head .api-card-method {
+  margin: 0;
+}
+
+:root .api-favorites-inline .api-favorites-detail-head .api-favorites-card-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+:root .api-favorites-inline .api-favorites-card-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+:root .api-favorites-inline .api-favorites-card-name {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root .api-favorites-inline .api-favorites-card-url {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root .api-favorites-inline .api-favorites-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 1px;
+  font-size: 11px;
+}
+
+:root .api-favorites-inline .api-favorites-card-time {
+  color: var(--text-faint);
+}
+
+:root .api-favorites-inline .api-favorites-chip {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--surface-elevated, var(--surface)) 70%, transparent);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+:root .api-favorites-inline .api-favorites-chip.is-auth {
+  border-color: color-mix(in srgb, var(--orange, #f28b35) 40%, transparent);
+  color: var(--orange, #f28b35);
+}
+
+:root .api-favorites-inline .api-favorites-card-actions {
+  gap: 2px;
+  opacity: 0.7;
+  transition: opacity 120ms ease;
+}
+
+:root .api-favorites-inline .api-favorites-card:hover .api-favorites-card-actions,
+:root .api-favorites-inline .api-favorites-card:focus-within .api-favorites-card-actions,
+:root .api-favorites-inline .api-favorites-card.is-expanded .api-favorites-card-actions {
+  opacity: 1;
+}
+
+:root .api-favorites-inline .api-favorites-detail-head .api-favorites-card-actions {
+  opacity: 1;
+}
+
+:root .api-favorites-inline .api-favorites-icon-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: transparent;
+}
+
+:root .api-favorites-inline .api-favorites-icon-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+:root .api-favorites-inline .api-favorites-icon-button:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+:root .api-favorites-inline .api-favorites-icon-button.is-active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+:root .api-favorites-inline .api-favorites-icon-button.is-danger:hover:not(:disabled) {
+  color: #ff5c5c;
+  background: rgba(255, 92, 92, 0.12);
+}
+
+:root .api-favorites-inline .api-favorites-card-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border-top: 0;
+  background: var(--surface);
+}
+
+:root .api-favorites-inline .api-favorites-list .memory-empty-state {
+  margin: 0;
+  padding: 24px 12px;
+}
+
+:root .api-favorites-inline .api-favorites-detail .memory-empty-state {
+  flex: 1 1 auto;
+  place-self: center;
+  text-align: center;
+}
+
+/* 铺满整个聊天区：去掉内联容器内边距，留白交给左右两栏各自管理。 */
+.api-favorites-inline .api-favorites-inline-body {
+  padding: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   面板铺满聊天区：这几条必须排在文件靠后位置。
+   `.chat-canvas.is-new-task footer { display: flex }` 与下方的隐藏规则特异性相同
+   （均为 0,2,1），若写在文件前部会被它覆盖，打开面板时下方就会漏出新任务页的
+   标题、输入框与工作空间选择栏。三个内联面板在这里统一兜底隐藏。
+--------------------------------------------------------------------------- */
+.chat-canvas.is-api-favorites > .chat-scroll,
+.chat-canvas.is-quick-notes > .chat-scroll,
+.chat-canvas.is-document-viewer > .chat-scroll,
+.chat-canvas.is-api-favorites > footer,
+.chat-canvas.is-quick-notes > footer,
+.chat-canvas.is-document-viewer > footer {
+  display: none !important;
+}
+
+/* ---------------------------------------------------------------------------
+   接口卡片：面板骨架完全复用随手记（.quick-notes-sheet / -layout / -list /
+   -items / -item / -editor / -footer），这里只补接口卡片专属的少量样式。
+   选择器统一带 .api-favorites-inline 作用域与 :root 前缀，既压过文件前部的
+   历史覆盖，也不会波及随手记面板本身。
+--------------------------------------------------------------------------- */
+:root .api-favorites-inline .api-favorites-search-wrap {
+  margin-top: 12px;
+}
+
+:root .api-favorites-inline .quick-notes-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:root .api-favorites-inline .quick-notes-item[data-method="get"] {
+  --api-rail: var(--violet, #b86cff);
+}
+
+:root .api-favorites-inline .quick-notes-item[data-method="post"] {
+  --api-rail: var(--green, #33c26f);
+}
+
+:root .api-favorites-inline .quick-notes-item[data-method="put"] {
+  --api-rail: var(--orange, #f28b35);
+}
+
+:root .api-favorites-inline .quick-notes-item[data-method="patch"] {
+  --api-rail: var(--accent-purple, #8b5cf6);
+}
+
+:root .api-favorites-inline .quick-notes-item[data-method="delete"] {
+  --api-rail: var(--accent-red, #ff5c5c);
+}
+
+:root .api-favorites-inline .api-favorites-method {
+  color: var(--api-rail, var(--text-muted));
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+:root .api-favorites-inline .api-favorites-hint {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+:root .api-favorites-inline .api-favorites-detail-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+:root .api-favorites-inline .api-favorites-detail-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root .api-favorites-inline .api-favorites-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+:root .api-favorites-inline .quick-notes-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }

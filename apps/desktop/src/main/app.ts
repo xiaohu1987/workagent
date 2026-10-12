@@ -1020,46 +1020,63 @@ export class DesktopBackend {
     return listProjectDirectoryEntries(root, relativeDirectory);
   }
 
-  public async readProjectFile(threadId: string, rootPath: string | undefined, relativePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
-    const root = this.getProjectDirectory(threadId, rootPath);
-    const target = resolveProjectFilePath(root, relativePath);
+  /** 新建任务页还没有线程：按路径直接列出待创建项目根目录下的条目。 */
+  public async listProjectFilesByPath(cwd: string, relativeDirectory = ""): Promise<ProjectFileEntry[]> {
+    return listProjectDirectoryEntries(await resolveStandaloneProjectRoot(cwd), relativeDirectory);
+  }
+
+  /** 同上：新建任务页预览文件时按路径读取，不要求线程。 */
+  public async readProjectFileByPath(
+    cwd: string,
+    relativePath: string
+  ): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
+    return readProjectFileAtRoot(await resolveStandaloneProjectRoot(cwd), relativePath);
+  }
+
+  /** 同上：新建任务页保存文件时按路径写入，不要求线程。 */
+  public async writeProjectFileByPath(cwd: string, relativePath: string, content: string): Promise<{ path: string }> {
+    return writeProjectFileAtRoot(await resolveStandaloneProjectRoot(cwd), relativePath, content);
+  }
+
+  /** 查看文档：按绝对路径读取，供聊天区内的文档查看器使用，与项目文件预览共用同一套编码探测与截断策略。 */
+  public async readDocumentFileByPath(absolutePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
+    const target = path.resolve(absolutePath);
     const stats = await fs.stat(target);
     if (!stats.isFile()) {
-      throw new Error("The selected project entry is not a file.");
+      throw new Error("The selected document entry is not a file.");
     }
 
     const buffer = await fs.readFile(target);
-    const limit = 512_000;
+    const limit = DOCUMENT_PREVIEW_MAX_BYTES;
     const visible = buffer.subarray(0, limit);
     const decoded = decodeProjectText(visible);
     return {
-      path: relativePath,
+      path: target,
       content: decoded?.content ?? "Binary file preview is not available.",
       truncated: buffer.length > limit,
       binary: !decoded
     };
   }
 
+  /**
+   * 查看文档：按绝对路径写回已有文件。编码沿用读取时探测到的结果，避免把 GBK/UTF-16 文件
+   * 改写成 UTF-8；二进制文件与超过预览上限的文件拒绝保存，因为界面里那份内容并不完整。
+   */
+  public async writeDocumentFileByPath(absolutePath: string, content: string): Promise<{ path: string }> {
+    return writeDocumentFileAtPath(absolutePath, content);
+  }
+
+  /** 查看文档：另存为或新建落盘，保存位置已在主进程弹窗里由用户确认。 */
+  public async saveDocumentFileAs(absolutePath: string, content: string): Promise<{ path: string }> {
+    return saveDocumentFileAsAtPath(absolutePath, content);
+  }
+
+  public async readProjectFile(threadId: string, rootPath: string | undefined, relativePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
+    return readProjectFileAtRoot(this.getProjectDirectory(threadId, rootPath), relativePath);
+  }
+
   public async writeProjectFile(threadId: string, rootPath: string | undefined, relativePath: string, content: string): Promise<{ path: string }> {
-    if (typeof content !== "string") {
-      throw new Error("Project file content must be text.");
-    }
-
-    const root = this.getProjectDirectory(threadId, rootPath);
-    const target = resolveProjectFilePath(root, relativePath);
-    const stats = await fs.stat(target);
-    if (!stats.isFile()) {
-      throw new Error("The selected project entry is not a file.");
-    }
-
-    const existing = await fs.readFile(target);
-    const decoded = decodeProjectText(existing);
-    if (!decoded) {
-      throw new Error("Binary project files cannot be edited here.");
-    }
-
-    await fs.writeFile(target, encodeProjectText(content, decoded.encoding));
-    return { path: relativePath };
+    return writeProjectFileAtRoot(this.getProjectDirectory(threadId, rootPath), relativePath, content);
   }
 
   public getThreadSnapshot(threadId: string, cursor?: RuntimeThreadSnapshotCursor): RuntimeThreadSnapshot {
@@ -1175,6 +1192,11 @@ export class DesktopBackend {
 
   public getGitSnapshot(threadId: string, rootPath?: string): Promise<GitSnapshot> {
     return this.#git.snapshot(this.getProjectDirectory(threadId, rootPath));
+  }
+
+  /** 新建任务页还没有线程：按路径直接取 git 快照。 */
+  public async getGitSnapshotByPath(cwd: string): Promise<GitSnapshot> {
+    return this.#git.snapshot(await resolveStandaloneProjectRoot(cwd));
   }
 
   public stageGitFile(threadId: string, filePath: string, rootPath?: string): Promise<GitActionResult> {
@@ -6036,6 +6058,57 @@ export class DesktopBackend {
   }
 }
 
+/** 新建任务页还没有线程：按路径解析并校验待创建的项目根目录。 */
+async function resolveStandaloneProjectRoot(cwd: string): Promise<string> {
+  const root = normalizeWorkspaceRoot(cwd);
+  const stats = await fs.stat(root).catch(() => null);
+  if (!stats?.isDirectory()) throw new Error(`项目目录不可访问：${root}`);
+  return root;
+}
+
+async function readProjectFileAtRoot(
+  root: string,
+  relativePath: string
+): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
+  const target = resolveProjectFilePath(root, relativePath);
+  const stats = await fs.stat(target);
+  if (!stats.isFile()) {
+    throw new Error("The selected project entry is not a file.");
+  }
+
+  const buffer = await fs.readFile(target);
+  const limit = 512_000;
+  const visible = buffer.subarray(0, limit);
+  const decoded = decodeProjectText(visible);
+  return {
+    path: relativePath,
+    content: decoded?.content ?? "Binary file preview is not available.",
+    truncated: buffer.length > limit,
+    binary: !decoded
+  };
+}
+
+async function writeProjectFileAtRoot(root: string, relativePath: string, content: string): Promise<{ path: string }> {
+  if (typeof content !== "string") {
+    throw new Error("Project file content must be text.");
+  }
+
+  const target = resolveProjectFilePath(root, relativePath);
+  const stats = await fs.stat(target);
+  if (!stats.isFile()) {
+    throw new Error("The selected project entry is not a file.");
+  }
+
+  const existing = await fs.readFile(target);
+  const decoded = decodeProjectText(existing);
+  if (!decoded) {
+    throw new Error("Binary project files cannot be edited here.");
+  }
+
+  await fs.writeFile(target, encodeProjectText(content, decoded.encoding));
+  return { path: relativePath };
+}
+
 function normalizeWorkspaceRoot(value: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error("协作目录不能为空。");
   if (!path.isAbsolute(value.trim())) throw new Error("协作目录必须使用绝对路径。");
@@ -6699,6 +6772,60 @@ function encodeProjectText(content: string, encoding: ProjectTextEncoding): Buff
     default:
       return Buffer.from(content, "utf8");
   }
+}
+
+/** 查看文档的读取上限：读取与保存共用同一个数字，界面才能判定「显示的是否是完整内容」。 */
+const DOCUMENT_PREVIEW_MAX_BYTES = 512_000;
+
+/**
+ * 查看文档：覆写既有文件。只允许覆盖已经存在的文件，新建文件必须走「另存为」由用户选位置，
+ * 这样渲染层没有任何凭空往任意路径写文件的入口。
+ */
+async function writeDocumentFileAtPath(absolutePath: string, content: string): Promise<{ path: string }> {
+  if (typeof content !== "string") {
+    throw new Error("Document content must be text.");
+  }
+
+  const target = path.resolve(absolutePath);
+  const stats = await fs.stat(target);
+  if (!stats.isFile()) {
+    throw new Error("The selected document entry is not a file.");
+  }
+  if (stats.size > DOCUMENT_PREVIEW_MAX_BYTES) {
+    // 界面里只有前 512 KB，直接写回会把后半段内容整段截掉。
+    throw new Error("This document is too large to edit here.");
+  }
+
+  const existing = await fs.readFile(target);
+  const decoded = decodeProjectText(existing);
+  if (!decoded) {
+    throw new Error("Binary documents cannot be edited here.");
+  }
+
+  await fs.writeFile(target, encodeProjectText(content, decoded.encoding));
+  return { path: target };
+}
+
+/** 查看文档：另存为或新建落盘。目标不存在时按 UTF-8 创建，存在时沿用其原编码覆写。 */
+async function saveDocumentFileAsAtPath(absolutePath: string, content: string): Promise<{ path: string }> {
+  if (typeof content !== "string") {
+    throw new Error("Document content must be text.");
+  }
+
+  const trimmed = typeof absolutePath === "string" ? absolutePath.trim() : "";
+  if (!trimmed || !path.isAbsolute(trimmed)) {
+    throw new Error("Document save path must be absolute.");
+  }
+
+  const target = path.resolve(trimmed);
+  const existing = await fs.readFile(target).catch(() => null);
+  const decoded = existing ? decodeProjectText(existing) : null;
+  if (existing && !decoded) {
+    throw new Error("Binary documents cannot be overwritten here.");
+  }
+
+  await fs.writeFile(target, encodeProjectText(content, decoded?.encoding ?? "utf8"));
+  return { path: target };
 }
 
 function isValidUtf8(buffer: Buffer): boolean {

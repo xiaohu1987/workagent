@@ -445,6 +445,23 @@ describe("thread UI state helpers", () => {
     expect(shouldLoadProjectWorkspaceResource("project", true, "files", "git")).toBe(false);
   });
 
+  it("loads the folder and git workspace for the new-task page once a folder is chosen", () => {
+    expect(getDefaultRightWorkspaceTab(undefined, true)).toBe("files");
+    expect(getDefaultRightWorkspaceTab(null, false)).toBe("thinking");
+    expect(resolveRightWorkspaceTabForMode(undefined, "changes", true)).toBe("changes");
+    expect(resolveRightWorkspaceTabForMode(undefined, "browser", true)).toBe("browser");
+    expect(resolveRightWorkspaceTabForMode(undefined, "files", false)).toBe("thinking");
+    expect(shouldLoadProjectWorkspaceResource(undefined, true, "files", "files", true)).toBe(true);
+    expect(shouldLoadProjectWorkspaceResource(undefined, true, "changes", "git", true)).toBe(true);
+    expect(shouldLoadProjectWorkspaceResource(undefined, true, "files", "git", true)).toBe(false);
+    expect(shouldLoadProjectWorkspaceResource(undefined, true, "files", "files", false)).toBe(false);
+    expect(shouldLoadProjectWorkspaceResource(undefined, false, "files", "files", true)).toBe(false);
+
+    const appSource = readFileSync(new URL("../apps/desktop/src/renderer/App.tsx", import.meta.url), "utf8");
+    expect(appSource).toContain("window.codexh.listProjectFilesByPath");
+    expect(appSource).toContain("window.codexh.getGitSnapshotByPath");
+  });
+
   it("refreshes the selected thread git snapshot while the git workspace tab is closed", () => {
     // 分支徽标读的是同一份 git 快照：快照刷新不能要求右侧 Git 面板处于打开状态，
     // 否则切换会话后徽标会一直缺失，直到点开面板重新触发刷新。

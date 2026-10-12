@@ -723,6 +723,65 @@ function registerIpc(): void {
     const result = await dialog.showOpenDialog({ properties: ["openDirectory", "multiSelections"] });
     return result.canceled ? [] : result.filePaths;
   });
+  // 查看文档：只选一个文件，扩展名过滤器由渲染层按支持的文档/代码格式给出。
+  ipcMain.handle("documents:choose-file", async (_event, payload?: { extensions?: string[] }) => {
+    const extensions = (payload?.extensions ?? []).filter((extension) => /^[a-z0-9]+$/i.test(extension));
+    const result = await dialog.showOpenDialog({
+      properties: ["openFile"],
+      filters: extensions.length
+        ? [
+            { name: "文档与代码", extensions },
+            { name: "所有文件", extensions: ["*"] }
+          ]
+        : [{ name: "所有文件", extensions: ["*"] }]
+    });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  ipcMain.handle("documents:read-file", (_event, payload: { path: string }) =>
+    backend.readDocumentFileByPath(payload.path));
+  // 查看文档（页签）：一次可选多个文件，每个文件在渲染层各开一个页签。
+  ipcMain.handle("documents:choose-files", async (_event, payload?: { extensions?: string[] }) => {
+    const extensions = (payload?.extensions ?? []).filter((extension) => /^[a-z0-9]+$/i.test(extension));
+    const result = await dialog.showOpenDialog({
+      properties: ["openFile", "multiSelections"],
+      filters: extensions.length
+        ? [
+            { name: "文档与代码", extensions },
+            { name: "所有文件", extensions: ["*"] }
+          ]
+        : [{ name: "所有文件", extensions: ["*"] }]
+    });
+    return result.canceled ? [] : result.filePaths;
+  });
+  ipcMain.handle("documents:write-file", (_event, payload: { path: string; content: string }) =>
+    backend.writeDocumentFileByPath(payload.path, payload.content));
+  // 另存为与新建落盘：保存位置由用户在主进程弹窗里确定，渲染层不能自行指定任意路径。
+  ipcMain.handle("documents:save-as", async (_event, payload: { suggestedPath?: string; content: string }) => {
+    const suggestedPath = typeof payload?.suggestedPath === "string" ? payload.suggestedPath.trim() : "";
+    const result = await dialog.showSaveDialog({
+      defaultPath: suggestedPath || undefined,
+      filters: [
+        {
+          name: "文本与代码",
+          extensions: [
+            "txt", "md", "markdown", "json", "ts", "tsx", "js", "jsx", "mjs", "cjs",
+            "cs", "py", "java", "go", "rs", "rb", "php", "sql", "html", "htm", "css",
+            "scss", "xml", "yaml", "yml", "toml", "sh", "bat", "ps1", "csv", "log"
+          ]
+        },
+        { name: "所有文件", extensions: ["*"] }
+      ]
+    });
+    if (result.canceled || !result.filePath) return null;
+    const saved = await backend.saveDocumentFileAs(result.filePath, payload.content);
+    return saved.path;
+  });
+  ipcMain.handle("projects:list-files-by-path", (_event, payload: { cwd: string; relativeDirectory?: string }) =>
+    backend.listProjectFilesByPath(payload.cwd, payload.relativeDirectory ?? ""));
+  ipcMain.handle("projects:read-file-by-path", (_event, payload: { cwd: string; path: string }) =>
+    backend.readProjectFileByPath(payload.cwd, payload.path));
+  ipcMain.handle("projects:write-file-by-path", (_event, payload: { cwd: string; path: string; content: string }) =>
+    backend.writeProjectFileByPath(payload.cwd, payload.path, payload.content));
   ipcMain.handle("projects:list-files", (_event, payload: { threadId: string; rootPath?: string; relativeDirectory?: string }) =>
     backend.listProjectFiles(payload.threadId, payload.rootPath, payload.relativeDirectory)
   );
@@ -743,6 +802,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("live-edit-preview:ready", () => liveEditPreview.markReady());
   ipcMain.handle("git:snapshot", (_event, payload: { threadId: string; rootPath?: string }) => backend.getGitSnapshot(payload.threadId, payload.rootPath));
+  ipcMain.handle("git:snapshot-by-path", (_event, payload: { cwd: string }) => backend.getGitSnapshotByPath(payload.cwd));
   ipcMain.handle("git:branch-summary", (_event, payload: { cwd: string }) => backend.getGitBranchSummary(payload.cwd));
   ipcMain.handle("git:switch-branch-path", (_event, payload: { cwd: string; branch: string }) => backend.switchGitBranchByPath(payload.cwd, payload.branch));
   ipcMain.handle("git:stage-file", (_event, payload: { threadId: string; rootPath?: string; path: string }) =>

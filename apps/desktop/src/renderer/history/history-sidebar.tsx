@@ -5,12 +5,14 @@ import { canDeleteThread, getHistoryItemAffordance } from "../core/thread-ui-sta
 import { useMotionPresence } from "../core/motion-presence";
 import { getFileLeafName } from "../markdown";
 import {
+  IconApiCard,
   IconChatBubbles,
   IconCheck,
   IconChevronDown,
   IconChevronRight,
   IconClose,
   IconCompose,
+  IconFile,
   IconFolder,
   IconFolders,
   IconGear,
@@ -86,6 +88,11 @@ type Props = {
   onCreateTask: () => void;
   onOpenThread: (threadId: string, options?: { scrollToLatest?: boolean }) => Promise<void>;
   onOpenQuickNotes: () => Promise<void>;
+  quickNotesActive?: boolean;
+  onOpenApiFavorites: () => void;
+  apiFavoritesActive?: boolean;
+  onOpenDocumentViewer: () => void;
+  documentViewerActive?: boolean;
   onOpenSearch: () => void;
   onOpenSettings: (tab: "provider" | "update") => void;
   updatePhase?: string;
@@ -103,7 +110,7 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readStoredStringSet(HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY));
@@ -454,8 +461,8 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
 
   return <aside className="sidebar">
     <div className="sidebar-scroll">
-      <div className="sidebar-brand-row"><div className="sidebar-brand"><strong>Code<span className="sidebar-brand-accent">XH</span></strong><span>AI Workspace</span></div><div className="sidebar-brand-tools"><button className="sidebar-search sidebar-quick-notes" type="button" title="随手记" aria-label="随手记" onClick={() => void onOpenQuickNotes()}><IconNotebook /></button><button className="sidebar-search" type="button" title="搜索历史对话" onClick={onOpenSearch}><IconSearch /></button></div></div>
-      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={onCreateTask}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span><span className="sidebar-nav-plus"><IconPlus /></span></button></div>
+      <div className="sidebar-brand-row"><div className="sidebar-brand"><strong>Code<span className="sidebar-brand-accent">XH</span></strong><span>AI Workspace</span></div><div className="sidebar-brand-tools"><button className="sidebar-search" type="button" title="搜索历史对话" onClick={onOpenSearch}><IconSearch /></button></div></div>
+      <div className="sidebar-nav"><button className="sidebar-nav-button" onClick={onCreateTask}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span><span className="sidebar-nav-plus"><IconPlus /></span></button><button className={`sidebar-nav-button ${quickNotesActive ? "is-active" : ""}`} type="button" onClick={() => void onOpenQuickNotes()}><span className="sidebar-nav-icon"><IconNotebook /></span><span>随手记</span></button><button className={`sidebar-nav-button ${apiFavoritesActive ? "is-active" : ""}`} type="button" onClick={onOpenApiFavorites}><span className="sidebar-nav-icon"><IconApiCard /></span><span>接口卡片</span></button><button className={`sidebar-nav-button ${documentViewerActive ? "is-active" : ""}`} type="button" onClick={onOpenDocumentViewer}><span className="sidebar-nav-icon"><IconFile /></span><span>查看文档</span></button></div>
       <div className="history-list" aria-label="任务与项目">
         {selectionMode ? (
           <div className="history-selection-toolbar" aria-label="批量选择历史对话">

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { NotificationNavigationTarget, QueuedMessageRecord, RuntimeThreadSnapshotCursor, ShareTarget } from "@shared-types";
 
 const api = {
@@ -56,12 +56,38 @@ const api = {
     ipcRenderer.invoke("attachments:choose-files", payload),
   chooseKnowledgeFiles: () => ipcRenderer.invoke("knowledge:choose-files"),
   chooseKnowledgeFolders: () => ipcRenderer.invoke("knowledge:choose-folders"),
+  // 查看文档：按扩展名过滤选择单个文档/代码文件，再按绝对路径读取内容。
+  chooseDocumentFile: (payload?: { extensions?: string[] }) =>
+    ipcRenderer.invoke("documents:choose-file", payload),
+  chooseDocumentFiles: (payload?: { extensions?: string[] }) =>
+    ipcRenderer.invoke("documents:choose-files", payload),
+  readDocumentFile: (payload: { path: string }) =>
+    ipcRenderer.invoke("documents:read-file", payload),
+  writeDocumentFile: (payload: { path: string; content: string }) =>
+    ipcRenderer.invoke("documents:write-file", payload),
+  saveDocumentFileAs: (payload: { suggestedPath?: string; content: string }) =>
+    ipcRenderer.invoke("documents:save-as", payload),
+  // 查看文档：从系统拖入的文件在渲染层拿不到本地路径（File.path 已被 Electron 移除），
+  // 只能在预加载脚本里用 webUtils 解析；拿到路径后仍走既有的 documents:read-file。
+  resolveDroppedFilePath: (file: File) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return "";
+    }
+  },
   listProjectFiles: (payload: { threadId: string; rootPath?: string; relativeDirectory?: string }) =>
     ipcRenderer.invoke("projects:list-files", payload),
   readProjectFile: (payload: { threadId: string; rootPath?: string; path: string }) =>
     ipcRenderer.invoke("projects:read-file", payload),
   writeProjectFile: (payload: { threadId: string; rootPath?: string; path: string; content: string }) =>
     ipcRenderer.invoke("projects:write-file", payload),
+  listProjectFilesByPath: (payload: { cwd: string; relativeDirectory?: string }) =>
+    ipcRenderer.invoke("projects:list-files-by-path", payload),
+  readProjectFileByPath: (payload: { cwd: string; path: string }) =>
+    ipcRenderer.invoke("projects:read-file-by-path", payload),
+  writeProjectFileByPath: (payload: { cwd: string; path: string; content: string }) =>
+    ipcRenderer.invoke("projects:write-file-by-path", payload),
   setLiveEditPreviewActiveThread: (threadId: string | null) =>
     ipcRenderer.invoke("live-edit-preview:set-active-thread", threadId),
   acknowledgeLiveEditPreviewPath: (payload: { toolCallId: string; path: string }) =>
@@ -70,6 +96,7 @@ const api = {
   getGitSnapshot: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:snapshot", payload),
   getGitBranchSummary: (payload: { cwd: string }) => ipcRenderer.invoke("git:branch-summary", payload),
   switchGitBranchByPath: (payload: { cwd: string; branch: string }) => ipcRenderer.invoke("git:switch-branch-path", payload),
+  getGitSnapshotByPath: (payload: { cwd: string }) => ipcRenderer.invoke("git:snapshot-by-path", payload),
   stageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => ipcRenderer.invoke("git:stage-file", payload),
   stageAllGitChanges: (payload: { threadId: string; rootPath?: string }) => ipcRenderer.invoke("git:stage-all", payload),
   unstageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => ipcRenderer.invoke("git:unstage-file", payload),

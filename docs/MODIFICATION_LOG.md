@@ -2,6 +2,14 @@
 
 记录用户提出并已落地的修改。后续每次完成用户请求后，在本文件追加一条记录。
 
+## 2026-10-12
+
+- 按随手记的观感重排「查看文档」面板的标题栏与空态：标题栏左侧只留一个居左的「+」图标按钮（原来的「打开文件」文字按钮已移除），同时去掉标题栏里的面板名称与说明文案整行，把识别出的文档类型与「预览 / 源码」切换统一收在右侧；空态从一行素文字改成居中的引导卡片，含图标、标题、支持的格式徽标（Markdown / HTML / C# / SQL / JSON / 纯文本）与一个文字化的打开入口，徽标由 `DOCUMENT_EMPTY_BADGES` 统一提供。样式层补齐 `.document-viewer-open-button`、`.document-viewer-empty-*` 与 `.document-viewer-kind-chip`，并删掉已无引用的 `.document-viewer-choose-button`；回归测试同步新增标题栏与空态断言，`tests/document-viewer-inline-panel.test.ts` 16 项、完整 `vitest run` 107 个文件 1612 项全部通过。
+
+- 新增「查看文档」内联面板，侧栏入口排在「接口卡片」下方：不做弹窗，而是接管聊天区显示与操作，并与随手记、接口卡片互斥——打开时会收起这两者、退出分享模式并收起终端抽屉，再点一次或按 Esc 收起，点左侧任意会话或「新建任务」也直接切回聊天。面板按文件后缀名决定渲染方式：Markdown 与 HTML 可在「预览 / 源码」之间自由切换，C#、SQL 等代码文件复用既有 hljs 语法高亮，其余按纯文本显示；读取走只读的 `window.codexh.readDocumentFile` / `chooseDocumentFile`，不提供编辑。新增 `workspace/document-viewer-panel.tsx` 与 `workspace/document-viewer-utils.ts`，配色与布局沿用 `.document-viewer-sheet` 既有作用域，仅在 `styles.css` 补齐内联容器的尺寸与让位规则；新增回归测试 `tests/document-viewer-inline-panel.test.ts`，覆盖侧栏顺序、面板挂载位置、互斥与切换逻辑、Esc 关闭、后缀到渲染方式的映射以及样式契约。
+
+- 修复输入框右侧「清空本次聊天」按钮提示已清空、聊天记录却没有变化的问题：清空动作此前只删掉了快照缓存与增量游标，本地快照基线仍被紧随其后的全量读取当作“服务端比本地旧”的依据，于是刚在服务端删除的消息又被合并回界面。现在改为复用 `invalidateThreadSnapshotForFullRefresh` 一并作废快照缓存、增量游标、在途读取请求与运行时消息映射，并丢弃本地快照基线与已上屏消息 id；新增回归测试覆盖“基线残留会复原旧记录、清空后服务端空列表保持为空”。替换了原先分别 `delete snapshotCursorByThreadRef`、`delete persistedRuntimeMessagesRef` 与删除快照缓存的三行局部清理写法。
+
 ## 2026-10-10
 
 - 调整完全访问的默认值：新建任务（普通对话与项目任务一致）默认开启“完全访问”，空状态界面重新默认预勾选；空白页手动关闭后创建的首个任务会按当前选择持久化，创建后仍可随时手动修改。
@@ -119,3 +127,10 @@
 - Restrict GPA Git mutations to explicit user requests: staging, reverting, committing, pushing, pulling, PR creation, and worktree changes are hidden and blocked by default, including equivalent shell commands. Read-only Git inspection remains available for verification.
 - Hide the right-side Git workspace until the current task directory is successfully identified as a Git repository with a resolved repository root. Unknown, non-Git, and stale snapshots no longer display a branch or change list.
 - Tighten Git panel ownership further: the resolved Git root must exactly match the selected task's project directory. A repository detected only above or below that directory is treated as unrecognized and is hidden.
+
+- Add a document viewer beside the API cards: a sidebar entry below API cards opens a chat-area panel instead of an overlay dialog. Files render by extension — Markdown reuses the chat renderer with preview/source switching, HTML runs in a sandboxed iframe, and code or text files use the existing highlight.js pipeline with line numbers — while several files open as tabs with unsaved-change dots, in-place editing, Ctrl+S save, save-as, LF/CRLF-faithful write-back, and a save/discard prompt before closing a dirty tab or collapsing the panel. The active tab's detected document kind is shown next to the panel title, and reads and writes go through the new `documents:*` IPC channels wired in the main process, preload, and renderer types.
+
+- Rework the API card panel into a two-column workspace: the favorites panel now opens in the chat area as a full-height layout with the favorite list on the left and the selected card's detail on the right. Rows use an `is-selected` state with the method color rail and icon-only actions, the sidebar carries the search box and hint, and the detail column hosts the card editor, so both columns fill the whole panel without outer padding.
+
+- Make the inline panels fill the chat area: the new-task page rule (`.chat-canvas.is-new-task footer { display: flex }`) has the same specificity as the panel hiding rules but is declared later in the stylesheet, so it overrode `display: none` and left the welcome hero, composer, and workspace bar visible below the panel. The hiding rules for the quick notes, API card, and document viewer panels are now declared at the end of the stylesheet with `display: none !important`, so each panel occupies the whole chat area while it is open.
+- Reuse the quick-notes skeleton for the API card panel: the favorites panel now renders with the `quick-notes-*` structure (`quick-notes-sheet`, `-inline`, `-layout`, `-list`, `-items`, `-item`, `-editor`, `-footer`) instead of its own `api-favorites-*` skeleton, so list rows, the detail column, and the bottom action row match the quick notes panel one-to-one. API-card-specific styling is scoped to `.api-favorites-inline` with a `:root` prefix and only adds the method rail per `data-method`, the method label color, the search-box spacing, and the detail title/name styles, which keeps quick notes itself untouched.

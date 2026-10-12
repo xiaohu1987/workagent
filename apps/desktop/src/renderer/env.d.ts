@@ -81,6 +81,13 @@ declare global {
       chooseAttachmentFiles: (payload?: { imagesOnly?: boolean }) => Promise<string[]>;
       chooseKnowledgeFiles: () => Promise<string[]>;
       chooseKnowledgeFolders: () => Promise<string[]>;
+      chooseDocumentFile: (payload?: { extensions?: string[] }) => Promise<string | null>;
+      chooseDocumentFiles: (payload?: { extensions?: string[] }) => Promise<string[]>;
+      readDocumentFile: (payload: { path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
+      writeDocumentFile: (payload: { path: string; content: string }) => Promise<{ path: string }>;
+      saveDocumentFileAs: (payload: { suggestedPath?: string; content: string }) => Promise<string | null>;
+      /** 查看文档：把系统拖入的文件解析成本地绝对路径，解析不出来时返回空串。 */
+      resolveDroppedFilePath: (file: File) => string;
       listQuickNotes: () => Promise<Array<{ id: string; title: string; content: string; knowledgeBaseId: string; knowledgeSourcePath: string; createdAt: string; updatedAt: string; cloudNoteId: string | null }>>;
       saveQuickNote: (payload: { id?: string; title?: string; content: string }) => Promise<{ id: string; title: string; content: string; knowledgeBaseId: string; knowledgeSourcePath: string; createdAt: string; updatedAt: string }>;
       deleteQuickNote: (id: string) => Promise<void>;
@@ -144,12 +151,16 @@ declare global {
       listProjectFiles: (payload: { threadId: string; rootPath?: string; relativeDirectory?: string }) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
       readProjectFile: (payload: { threadId: string; rootPath?: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
       writeProjectFile: (payload: { threadId: string; rootPath?: string; path: string; content: string }) => Promise<{ path: string }>;
+      listProjectFilesByPath: (payload: { cwd: string; relativeDirectory?: string }) => Promise<Array<{ path: string; kind: "file" | "directory"; size?: number }>>;
+      readProjectFileByPath: (payload: { cwd: string; path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
+      writeProjectFileByPath: (payload: { cwd: string; path: string; content: string }) => Promise<{ path: string }>;
       setLiveEditPreviewEnabled: (enabled: boolean) => Promise<boolean>;
       setLlmLogViewerEnabled: (enabled: boolean) => Promise<boolean>;
       setLiveEditPreviewActiveThread: (threadId: string | null) => Promise<void>;
       acknowledgeLiveEditPreviewPath: (payload: { toolCallId: string; path: string }) => Promise<void>;
       markLiveEditPreviewReady: () => Promise<void>;
       getGitSnapshot: (payload: { threadId: string; rootPath?: string }) => Promise<any>;
+      getGitSnapshotByPath: (payload: { cwd: string }) => Promise<any>;
       getGitBranchSummary: (payload: { cwd: string }) => Promise<import("@shared-types").GitBranchSummary>;
       switchGitBranchByPath: (payload: { cwd: string; branch: string }) => Promise<import("@shared-types").GitActionResult>;
       stageGitFile: (payload: { threadId: string; rootPath?: string; path: string }) => Promise<any>;

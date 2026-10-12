@@ -598,3 +598,14 @@ export function IconGpa() {
     </SvgIcon>
   );
 }
+
+/** 接口卡片入口：一张带内容行的卡片，避免与「地球/浏览器」图标混淆。 */
+export function IconApiCard() {
+  return (
+    <SvgIcon>
+      <rect x="3.5" y="5" width="17" height="14" rx="3" />
+      <path d="M7.5 9.5h6" />
+      <path d="M7.5 14h9" />
+    </SvgIcon>
+  );
+}

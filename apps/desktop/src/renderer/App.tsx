@@ -208,6 +208,7 @@ import {
   UsageStatisticsPanel
 } from "./workspace/usage-stats";
 import { TokenUsagePopover } from "./workspace/token-usage-popover";
+import { DocumentViewerPanel } from "./workspace/document-viewer-panel";
 import { ApiCardFavoritesPanel } from "./workspace/api-card-favorites";
 import {
   filterApiCardFavorites,
@@ -239,7 +240,6 @@ import {
   IconCompose,
   IconCopy,
   IconDownload,
-  IconEraser,
   IconEye,
   IconFileChanges,
   IconFolder,
@@ -294,7 +294,6 @@ import { MultimodalPickerDialog } from "./settings/multimodal-picker-dialog";
 import { AppearanceSettingsPage } from "./settings/pages/application/appearance-page";
 import { MultimodalSettingsPage } from "./settings/pages/models/multimodal-page";
 import { ProviderSettingsPage } from "./settings/pages/models/provider-page";
-import { ApiFavoritesPage } from "./settings/pages/knowledge/api-favorites-page";
 import { KnowledgePage } from "./settings/pages/knowledge/knowledge-page";
 import { CloudNotesPage } from "./settings/pages/connections/cloud-notes-page";
 import { MemoryPage } from "./settings/pages/knowledge/memory-page";
@@ -343,7 +342,8 @@ import { RightWorkspacePanel, getDefaultRightWorkspaceTab, isProjectWorkspaceThr
 import { rememberThinkingText, selectThinkingText, type ThinkingMemory } from "./workspace/thinking-state";
 import { NotificationCenter } from "./workspace/notification-center";
 import { HelpSheet } from "./workspace/help-sheet";
-import { QuickNotesSheet } from "./workspace/quick-notes-sheet";
+import { QuickNotesPanel } from "./workspace/quick-notes-panel";
+import { ApiFavoritesInlinePanel } from "./workspace/api-favorites-inline-panel";
 import { ShareBar } from "./workspace/share-bar";
 import type { ShareBarFeedback } from "./workspace/share-bar";
 import { mountShareCard } from "./workspace/share-capture-document";
@@ -1010,7 +1010,6 @@ export function App() {
   const filesRoot = workspaceRoots.includes(activeFilesRoot) ? activeFilesRoot : workspaceRoots[0] ?? "";
   const gitRoot = workspaceRoots.includes(activeGitRoot) ? activeGitRoot : workspaceRoots[0] ?? "";
   const terminalRoot = workspaceRoots.includes(activeTerminalRoot) ? activeTerminalRoot : workspaceRoots[0] ?? "";
-  const visibleRightWorkspaceTab = resolveRightWorkspaceTabForMode(selectedThread?.mode, rightWorkspaceTab);
   const timelineBuildCacheRef = useRef<TimelineIncrementalCache | null>(null);
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
@@ -1104,6 +1103,20 @@ export function App() {
     syncToCloud: syncQuickNoteToCloud,
     selectedCloudNoteId: selectedQuickNoteCloudId
   } = quickNotesState;
+  // 接口卡片与随手记并列，同样在聊天区内显示与操作，不再占用设置页。
+  const [isApiFavoritesOpen, setIsApiFavoritesOpen] = useState(false);
+  // 查看文档排在接口卡片下方，同样常驻聊天区，与随手记、接口卡片互斥显示。
+  const [isDocumentViewerOpen, setIsDocumentViewerOpen] = useState(false);
+  // 面板把「请求收起」注册到这里，Esc 与侧栏再次点击才能先走未保存确认，而不是直接卸载。
+  const documentViewerCloseRef = useRef<(() => void) | null>(null);
+  const requestDocumentViewerClose = useStableEvent(() => {
+    const handler = documentViewerCloseRef.current;
+    if (handler) {
+      handler();
+      return;
+    }
+    setIsDocumentViewerOpen(false);
+  });
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const historySearch = useHistorySearch(showNotice);
   const {
@@ -1399,6 +1412,20 @@ export function App() {
   const [newTaskBranchSummary, setNewTaskBranchSummary] = useState<GitBranchSummary | null>(null);
   const [newTaskBranchLoading, setNewTaskBranchLoading] = useState(false);
   const [isPickingNewTaskFolder, setIsPickingNewTaskFolder] = useState(false);
+  // 新建任务页还没有线程：只要用户选好了文件夹，右侧就和 project 会话一样
+  // 以该文件夹为作用域加载文件夹树与 Git，而不是停在固定的空态。
+  const newTaskFolderCwd =
+    isNewTaskComposerOpen && newTaskWorkspace.kind === "folder" ? newTaskWorkspace.cwd : null;
+  const rightWorkspaceActive = Boolean(selectedThreadId)
+    ? isProjectWorkspaceThread(selectedThread?.mode)
+    : Boolean(newTaskFolderCwd);
+  const workspaceScopeCwd = selectedThreadId ? filesRoot : newTaskFolderCwd ?? "";
+  const rightWorkspaceRoots = selectedThreadId ? workspaceRoots : newTaskFolderCwd ? [newTaskFolderCwd] : [];
+  const visibleRightWorkspaceTab = resolveRightWorkspaceTabForMode(
+    selectedThread?.mode,
+    rightWorkspaceTab,
+    rightWorkspaceActive
+  );
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
   const [projectEditDraft, setProjectEditDraft] = useState<{ cwd: string; workspaceRoots: string[] } | null>(null);
@@ -1511,8 +1538,6 @@ export function App() {
   const [historyBatchDeleteConfirmation, setHistoryBatchDeleteConfirmation] = useState<string[] | null>(null);
   const [deletingHistoryBatch, setDeletingHistoryBatch] = useState(false);
   const [deletingQueuedMessageId, setDeletingQueuedMessageId] = useState<string | null>(null);
-  const [isClearChatConfirmOpen, setIsClearChatConfirmOpen] = useState(false);
-  const [isClearingChat, setIsClearingChat] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatTranscriptRef = useRef<HTMLDivElement | null>(null);
@@ -3315,15 +3340,15 @@ export function App() {
   }, [activeTerminalSession?.output]);
 
   useEffect(() => {
-    const nextTab = resolveRightWorkspaceTabForMode(selectedThread?.mode, rightWorkspaceTab);
+    const nextTab = resolveRightWorkspaceTabForMode(selectedThread?.mode, rightWorkspaceTab, rightWorkspaceActive);
     if (nextTab !== rightWorkspaceTab) {
       setRightWorkspaceTab(nextTab);
       setRightWorkspaceExpandedTab(nextTab);
     }
-  }, [rightWorkspaceTab, selectedThread?.mode]);
+  }, [rightWorkspaceActive, rightWorkspaceTab, selectedThread?.mode]);
 
   useEffect(() => {
-    if (!shouldLoadProjectWorkspaceResource(selectedThread?.mode, isRightWorkspaceOpen, rightWorkspaceTab, "files") || !selectedThreadId || !filesRoot) {
+    if (!shouldLoadProjectWorkspaceResource(selectedThread?.mode, isRightWorkspaceOpen, rightWorkspaceTab, "files", rightWorkspaceActive) || !workspaceScopeCwd) {
       setIsProjectFilesLoading(false);
       return;
     }
@@ -3334,16 +3359,20 @@ export function App() {
     setProjectFilesRevision(revision);
     setProjectFiles([]);
     setIsProjectFilesLoading(true);
-    void window.codexh.listProjectFiles({ threadId: selectedThreadId, rootPath: filesRoot, relativeDirectory: "" }).then((entries) => {
+    const scopeCwd = workspaceScopeCwd;
+    void (selectedThreadId
+      ? window.codexh.listProjectFiles({ threadId: selectedThreadId, rootPath: filesRoot, relativeDirectory: "" })
+      : window.codexh.listProjectFilesByPath({ cwd: scopeCwd, relativeDirectory: "" })
+    ).then((entries) => {
       if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
         return;
       }
       setProjectFiles(entries);
-      reconcileSelectedFile(selectedThreadId, filesRoot, entries);
+      if (selectedThreadId) reconcileSelectedFile(selectedThreadId, filesRoot, entries);
     }).catch(() => {
       if (!cancelled) {
         setProjectFiles([]);
-        clearSelectedFile(selectedThreadId, filesRoot);
+        if (selectedThreadId) clearSelectedFile(selectedThreadId, filesRoot);
       }
     }).finally(() => {
       if (!cancelled) {
@@ -3354,14 +3383,17 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [clearSelectedFile, filesRoot, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThread?.mode, selectedThreadId]);
+  }, [clearSelectedFile, filesRoot, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceActive, rightWorkspaceTab, selectedThread?.mode, selectedThreadId, workspaceScopeCwd]);
 
   const loadProjectDirectory = useCallback(async (relativeDirectory: string): Promise<boolean> => {
     const threadId = selectedThreadId;
+    const scopeCwd = workspaceScopeCwd;
     const revision = projectFilesRevisionRef.current;
-    if (!threadId) return false;
+    if (!threadId && !scopeCwd) return false;
     try {
-      const entries = await window.codexh.listProjectFiles({ threadId, rootPath: filesRoot, relativeDirectory });
+      const entries = threadId
+        ? await window.codexh.listProjectFiles({ threadId, rootPath: filesRoot, relativeDirectory })
+        : await window.codexh.listProjectFilesByPath({ cwd: scopeCwd, relativeDirectory });
       if (selectedThreadIdRef.current !== threadId || projectFilesRevisionRef.current !== revision) {
         return false;
       }
@@ -3371,23 +3403,26 @@ export function App() {
       showNotice("无法读取文件夹", { message: error instanceof Error ? error.message : String(error) });
       return false;
     }
-  }, [filesRoot, selectedThreadId, showNotice]);
+  }, [filesRoot, selectedThreadId, showNotice, workspaceScopeCwd]);
 
   useEffect(() => {
     // 分支徽标与文件变更标记在右侧面板之外读取同一份 git 快照：
     // 选中项目会话就刷新，不能要求 Git 面板处于打开状态。
-    if (!isProjectWorkspaceThread(selectedThread?.mode) || !selectedThreadId || !gitRoot) {
+    if ((!isProjectWorkspaceThread(selectedThread?.mode) && !rightWorkspaceActive) || !workspaceScopeCwd) {
       setGitLoading(false);
       return;
     }
     let cancelled = false;
-    const snapshotKey = `${selectedThreadId}:${gitRoot}`;
+    const snapshotKey = `${selectedThreadId ?? "new-task"}:${selectedThreadId ? gitRoot : workspaceScopeCwd}`;
     // 同一会话刷新时保留旧快照，避免徽标在例行刷新期间闪现空档。
     setGitSnapshotThreadId((current) => (current === snapshotKey ? current : null));
     setGitActionMessage(null);
     const timer = window.setTimeout(() => {
       setGitLoading(true);
-      void window.codexh.getGitSnapshot({ threadId: selectedThreadId, rootPath: gitRoot }).then((next) => {
+      const gitSnapshotRequest = selectedThreadId
+        ? window.codexh.getGitSnapshot({ threadId: selectedThreadId, rootPath: gitRoot })
+        : window.codexh.getGitSnapshotByPath({ cwd: workspaceScopeCwd });
+      void gitSnapshotRequest.then((next) => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
           setGitSnapshot(next as GitSnapshot);
           setGitSnapshotThreadId(snapshotKey);
@@ -3413,7 +3448,7 @@ export function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [gitRefreshRevision, gitRoot, isRightWorkspaceOpen, rightWorkspaceTab, selectedThread?.mode, selectedThreadId]);
+  }, [gitRefreshRevision, gitRoot, isRightWorkspaceOpen, rightWorkspaceActive, rightWorkspaceTab, selectedThread?.mode, selectedThreadId, workspaceScopeCwd]);
 
   // Share mode is a transcript selection state, not a dialog: the composer is
   // replaced by the share bar and each message grows a tick box.
@@ -3426,7 +3461,7 @@ export function App() {
   const [shareFeedback, setShareFeedback] = useState<ShareBarFeedback>(null);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu && !isSharing) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !isApiFavoritesOpen && !isDocumentViewerOpen && !quickNoteDeleteConfirm && !quickNoteListMenu && !isSharing) {
       return;
     }
 
@@ -3457,6 +3492,16 @@ export function App() {
           return;
         }
 
+        if (isApiFavoritesOpen) {
+          setIsApiFavoritesOpen(false);
+          return;
+        }
+
+        if (isDocumentViewerOpen) {
+          requestDocumentViewerClose();
+          return;
+        }
+
         if (isSharing && shareBusyChannel === null && !shareGenerating) {
           setIsSharing(false);
           return;
@@ -3464,11 +3509,6 @@ export function App() {
 
         if (isHelpOpen) {
           setIsHelpOpen(false);
-          return;
-        }
-
-        if (isClearChatConfirmOpen && !isClearingChat) {
-          setIsClearChatConfirmOpen(false);
           return;
         }
 
@@ -3528,7 +3568,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deletingHistoryBatch, deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyBatchDeleteConfirmation, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, isSharing, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, shareBusyChannel, shareGenerating, updateConfirmDialog]);
+  }, [deletingHistoryBatch, deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyBatchDeleteConfirmation, historyThreadDeleteConfirmation, isApiFavoritesOpen, isDocumentViewerOpen, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, isSharing, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, shareBusyChannel, shareGenerating, updateConfirmDialog]);
 
   useLayoutEffect(() => {
     snapshotThreadIdRef.current = snapshot?.thread.id ?? null;
@@ -5391,6 +5431,10 @@ export function App() {
   }
 
   function activateNewThread(thread: ThreadRecord) {
+    // 新会话与随手记共用聊天区，创建后直接展示会话。
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
     selectThreadId(thread.id);
     seedOptimisticThreadSnapshot(thread);
     // The composer is usable from the optimistic state. Fetch everything else
@@ -5400,6 +5444,10 @@ export function App() {
   }
 
   async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
+    // 点左侧任意会话即回到聊天：随手记让位，不必先按面板上的关闭按钮。
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
     const isSwitchingThread = selectedThreadIdRef.current !== threadId;
     if (options?.scrollToLatest) {
       cancelPendingAutoScrollFrame();
@@ -5589,6 +5637,10 @@ export function App() {
   // 合并后的「新建任务」入口：清空上一轮选择，进入空白任务页（右侧居中显示输入框）。
   // preset.workspaceCwd：删除项目内的任务后回到此页时，默认沿用该项目的工作空间与当前分支。
   function openNewTaskComposer(preset?: { workspaceCwd?: string | null }) {
+    // 点「新建任务」同样回到聊天区，随手记面板收起。
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
     if (selectedThreadId) selectThreadId(null);
     setInput("");
     setIsNewTaskComposerOpen(true);
@@ -5957,72 +6009,6 @@ export function App() {
       showNotice("暂时无法批量删除任务。", { message: getThreadDeleteFailureMessage(error) });
     } finally {
       setDeletingHistoryBatch(false);
-    }
-  }
-
-  function requestClearCurrentChat() {
-    if (!selectedThreadId) {
-      return;
-    }
-    if (isThreadExecutionInProgress(selectedThreadStatus)) {
-      showNotice("任务正在执行，请先停止任务再清空聊天记录。");
-      return;
-    }
-    setIsClearChatConfirmOpen(true);
-  }
-
-  async function confirmClearCurrentChat() {
-    const threadId = selectedThreadId;
-    if (!threadId || isClearingChat) {
-      return;
-    }
-
-    setIsClearingChat(true);
-    try {
-      await window.codexh.clearThreadConversation(threadId);
-      delete pendingUserMessagesRef.current[threadId];
-      delete snapshotCursorByThreadRef.current[threadId];
-      delete latestRuntimeThreadsRef.current[threadId];
-      delete persistedRuntimeMessagesRef.current[threadId];
-      snapshotCacheByThreadRef.current.delete(threadId);
-      delete suppressRuntimeProgressRef.current[threadId];
-      discardQueuedAssistantDraftsForThread(threadId);
-      gpaSameSessionAutoResumeRef.current.delete(threadId);
-      gpaPlanResumeDismissedRef.current.delete(threadId);
-      gpaPlanResumeAttemptRef.current.delete(threadId);
-      gpaPlanResumeRetryRequiredRef.current.delete(threadId);
-      setAssistantDrafts((current) =>
-        Object.fromEntries(Object.entries(current).filter(([, entry]) => entry.threadId !== threadId))
-      );
-      setRuntimeActivities((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
-      setCompletedTurnTimers((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
-      clearTerminalThread(threadId);
-      setBrowserTabsByThread((current) => ({ ...current, [threadId]: [] }));
-      setActiveToolCall((current) => current?.threadId === threadId ? null : current);
-      setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
-      setComposerSubmission(null);
-      setEditingUserMessage(null);
-      setGpaPlanResumeRetryPrompt(null);
-      setIsTerminalOpen(false);
-      setIsClearChatConfirmOpen(false);
-      setThreadTokenUsage({ turn: createEmptyTokenUsage(), thread: createEmptyTokenUsage(), turnRunId: null });
-      await refreshThreads();
-      showNotice("聊天记录已清空。", { tone: "success" });
-      window.setTimeout(() => composerRef.current?.focus(), 0);
-    } catch (error) {
-      showNotice("暂时无法清空聊天记录。", {
-        message: error instanceof Error ? error.message : "请稍后重试。"
-      });
-    } finally {
-      setIsClearingChat(false);
     }
   }
 
@@ -7498,7 +7484,6 @@ export function App() {
   const visibleUserSkillGenerationDialog = userSkillGenerationDialog ?? userSkillGenerationDialogPresence.value;
   const managedRemovalPresence = useMotionPresence(managedRemoval);
   const visibleManagedRemoval = managedRemoval ?? managedRemovalPresence.value;
-  const clearChatConfirmPresence = useMotionPresence(isClearChatConfirmOpen ? true : null);
   const clearErrorSolutionsConfirmPresence = useMotionPresence(isClearErrorSolutionsConfirmOpen ? true : null);
   const clearSelfImprovementConfirmPresence = useMotionPresence(isClearSelfImprovementConfirmOpen ? true : null);
   const clearLogsConfirmPresence = useMotionPresence(isClearLogsConfirmOpen ? true : null);
@@ -7513,6 +7498,8 @@ export function App() {
   const terminalDrawerPresence = useMotionPresence(isTerminalOpen ? true : null, 220);
   const helpPresence = useMotionPresence(isHelpOpen ? true : null, 220);
   const quickNotesPresence = useMotionPresence(isQuickNotesOpen ? true : null, 220);
+  const apiFavoritesPresence = useMotionPresence(isApiFavoritesOpen ? true : null, 220);
+  const documentViewerPresence = useMotionPresence(isDocumentViewerOpen ? true : null, 220);
   // Sharing reads the same transcript the user sees, so a shared message always
   // matches the rendered answer (tool event blocks are excluded) and the tick
   // boxes line up with the conversation on screen.
@@ -7664,7 +7651,40 @@ export function App() {
   });
   const openNewTaskComposerEvent = useStableEvent(openNewTaskComposer);
   const openThreadEvent = useStableEvent(openThread);
-  const openQuickNotesEvent = useStableEvent(openQuickNotes);
+  // 随手记接管聊天区：打开前先退出分享模式并收起终端抽屉，避免多套界面同时占位。
+  const openQuickNotesEvent = useStableEvent(() => {
+    // 已打开时再点一次侧栏入口即收起：随手记与聊天共用同一块区域，入口兼作切换。
+    if (isQuickNotesOpen) return Promise.resolve();
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
+    if (isSharing) exitShareMode();
+    if (isTerminalOpen) setIsTerminalOpen(false);
+    return openQuickNotes();
+  });
+  // 接口卡片入口就在随手记下方，同样接管聊天区，两个面板互斥显示。
+  const openApiFavoritesEvent = useStableEvent(() => {
+    if (isApiFavoritesOpen) {
+      setIsApiFavoritesOpen(false);
+      return;
+    }
+    setIsQuickNotesOpen(false);
+    setIsDocumentViewerOpen(false);
+    if (isSharing) exitShareMode();
+    if (isTerminalOpen) setIsTerminalOpen(false);
+    setIsApiFavoritesOpen(true);
+  });
+  // 查看文档入口排在接口卡片下方，同样接管聊天区，与随手记、接口卡片互斥显示。
+  const openDocumentViewerEvent = useStableEvent(() => {
+    if (isDocumentViewerOpen) {
+      requestDocumentViewerClose();
+      return;
+    }
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    if (isSharing) exitShareMode();
+    if (isTerminalOpen) setIsTerminalOpen(false);
+    setIsDocumentViewerOpen(true);
+  });
   const openHistorySearchEvent = useStableEvent(openHistorySearch);
   const openSettingsEvent = useStableEvent((tab: SettingsTab) => {
     if (config) resetConfigDraft(config);
@@ -7694,7 +7714,8 @@ export function App() {
     if (!selectedThreadId || gitLoading) return;
     setGitRefreshRevision((current) => current + 1);
   });
-  const visibleGitSnapshot = gitSnapshotThreadId === `${selectedThreadId}:${gitRoot}` ? gitSnapshot : null;
+  const gitSnapshotScopeKey = `${selectedThreadId ?? "new-task"}:${selectedThreadId ? gitRoot : workspaceScopeCwd}`;
+  const visibleGitSnapshot = gitSnapshotThreadId === gitSnapshotScopeKey ? gitSnapshot : null;
   const selectedProjectBranch = visibleGitSnapshot?.available
     ? visibleGitSnapshot.branch?.trim() || null
     : null;
@@ -7811,6 +7832,11 @@ export function App() {
         onCreateTask={openNewTaskComposerEvent}
         onOpenThread={openThreadEvent}
         onOpenQuickNotes={openQuickNotesEvent}
+        quickNotesActive={isQuickNotesOpen}
+        onOpenApiFavorites={openApiFavoritesEvent}
+        apiFavoritesActive={isApiFavoritesOpen}
+        onOpenDocumentViewer={openDocumentViewerEvent}
+        documentViewerActive={isDocumentViewerOpen}
         onOpenSearch={openHistorySearchEvent}
         onOpenSettings={openSettingsEvent}
         updatePhase={updateState?.phase}
@@ -7857,7 +7883,7 @@ export function App() {
             onTerminalVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
           />
         ) : null}
-        <WorkspaceControls
+        {isQuickNotesOpen || isApiFavoritesOpen || isDocumentViewerOpen ? null : <WorkspaceControls
           tokenUsage={threadTokenUsage.thread}
           tokenUsageOpen={isTokenUsagePanelOpen}
           tokenUsageMotionPhase={tokenUsagePanelPresence.value ? tokenUsagePanelPresence.phase : undefined}
@@ -7894,7 +7920,7 @@ export function App() {
             setIsRightWorkspaceOpen(true);
           }}
           projectWorkspace={isProjectWorkspaceThread(selectedThread?.mode)}
-        />
+        />}
         {pendingInteractionsPresence.value ? (
           <div className="pending-strip" data-motion={pendingInteractionsPresence.phase}>
             {visiblePendingApprovalCount > 0 ? (
@@ -7920,7 +7946,60 @@ export function App() {
           </div>
         ) : null}
 
-        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""}`}>
+        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""} ${isQuickNotesOpen ? "is-quick-notes" : ""} ${isApiFavoritesOpen ? "is-api-favorites" : ""} ${isDocumentViewerOpen ? "is-document-viewer" : ""}`}>
+          {quickNotesPresence.value ? (
+            <QuickNotesPanel
+              motionPhase={quickNotesPresence.phase}
+              notes={quickNotes}
+              selectedId={selectedQuickNoteId}
+              title={quickNoteTitle}
+              content={quickNoteContent}
+              saving={quickNoteSaving}
+              status={quickNoteStatus}
+              renamingId={renamingQuickNoteId}
+              setRenamingId={setRenamingQuickNoteId}
+              renameDraft={quickNoteRenameDraft}
+              setRenameDraft={setQuickNoteRenameDraft}
+              visibleMenu={visibleQuickNoteListMenu}
+              menuMotionPhase={quickNoteListMenuPresence.phase}
+              visibleDeleteConfirm={visibleQuickNoteDeleteConfirm}
+              deleteMotionPhase={quickNoteDeleteConfirmPresence.phase}
+              onClose={() => setIsQuickNotesOpen(false)}
+              onCreate={createQuickNote}
+              onSelect={selectQuickNote}
+              onOpenMenu={setQuickNoteListMenu}
+              onCloseMenu={() => setQuickNoteListMenu(null)}
+              onRequestDelete={setQuickNoteDeleteConfirm}
+              onCloseDeleteConfirm={() => setQuickNoteDeleteConfirm(null)}
+              onRename={renameQuickNote}
+              onContentChange={changeQuickNoteContent}
+              cloudNoteId={selectedQuickNoteCloudId}
+              syncingCloud={quickNoteSyncingCloud}
+              onSyncToCloud={syncQuickNoteToCloud}
+              onSave={saveQuickNote}
+              onDelete={deleteQuickNote}
+            />
+          ) : null}
+          {apiFavoritesPresence.value ? (
+            <ApiFavoritesInlinePanel
+              motionPhase={apiFavoritesPresence.phase}
+              threadId={selectedThreadId}
+              onClose={() => setIsApiFavoritesOpen(false)}
+              onInsert={(favorite) => {
+                setIsApiFavoritesOpen(false);
+                void sendApiCardFavoriteToChat(favorite);
+              }}
+            />
+          ) : null}
+          {documentViewerPresence.value ? (
+            <DocumentViewerPanel
+              motionPhase={documentViewerPresence.phase}
+              onClose={() => setIsDocumentViewerOpen(false)}
+              onRegisterCloseRequest={(handler) => {
+                documentViewerCloseRef.current = handler;
+              }}
+            />
+          ) : null}
           <div
             ref={chatScrollRef}
             className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""}`}
@@ -8298,16 +8377,6 @@ export function App() {
                   ) : null}
                 </div>
                 <div className="composer-toolbar-right">
-                  <button
-                    className="composer-icon-button composer-clear-chat-button"
-                    type="button"
-                    title={isThreadExecutionInProgress(selectedThreadStatus) ? "请先停止任务" : "清空本次聊天"}
-                    aria-label="清空本次聊天"
-                    disabled={!selectedThreadId || showWelcome || isClearingChat || isThreadExecutionInProgress(selectedThreadStatus)}
-                    onClick={requestClearCurrentChat}
-                  >
-                    <IconEraser />
-                  </button>
                   <ComposerModelPicker
                     triggerLabel={currentModelTriggerLabel}
                     providers={composerProviderOptions}
@@ -8404,10 +8473,10 @@ export function App() {
           expandedTab={rightWorkspaceExpandedTab}
           onExpandedTabChange={setRightWorkspaceExpandedTab}
           onHide={hideRightWorkspaceEvent}
-          projectRoot={filesRoot}
-          workspaceRoots={workspaceRoots}
+          projectRoot={workspaceScopeCwd}
+          workspaceRoots={rightWorkspaceRoots}
           onProjectRootChange={setActiveFilesRoot}
-          gitRoot={gitRoot}
+          gitRoot={selectedThreadId ? gitRoot : workspaceScopeCwd}
           onGitRootChange={setActiveGitRoot}
           onAddAttachment={addComposerAttachmentEvent}
           projectFiles={projectFiles}
@@ -8428,7 +8497,7 @@ export function App() {
           browserTabsByThread={browserTabsByThread}
           mountedBrowserThreadIds={mountedBrowserThreadIds}
           onCloseBrowserTab={closeBrowserTabEvent}
-          showProjectWorkspace={isProjectWorkspaceThread(selectedThread?.mode)}
+          showProjectWorkspace={rightWorkspaceActive}
           showSubagentTab={subagentPresentations.length > 0}
           subagentItems={workspaceSubagentPresentations}
           selectedSubagentId={selectedSubagentId}
@@ -8572,12 +8641,6 @@ export function App() {
                 />
               ) : null}
 
-              {settingsTab === "apiFavorites" ? (
-                <ApiFavoritesPage onInsert={(favorite) => {
-                  setIsSettingsOpen(false);
-                  void sendApiCardFavoriteToChat(favorite);
-                }} threadId={selectedThreadId} />
-              ) : null}
               {settingsTab === "cloudNotes" ? (
                 <CloudNotesPage showNotice={showNotice} />
               ) : null}
@@ -8613,40 +8676,6 @@ export function App() {
       ) : null}
 
       {helpPresence.value ? <HelpSheet motionPhase={helpPresence.phase} onClose={() => setIsHelpOpen(false)} /> : null}
-
-      {quickNotesPresence.value ? (
-        <QuickNotesSheet
-          motionPhase={quickNotesPresence.phase}
-          notes={quickNotes}
-          selectedId={selectedQuickNoteId}
-          title={quickNoteTitle}
-          content={quickNoteContent}
-          saving={quickNoteSaving}
-          status={quickNoteStatus}
-          renamingId={renamingQuickNoteId}
-          setRenamingId={setRenamingQuickNoteId}
-          renameDraft={quickNoteRenameDraft}
-          setRenameDraft={setQuickNoteRenameDraft}
-          visibleMenu={visibleQuickNoteListMenu}
-          menuMotionPhase={quickNoteListMenuPresence.phase}
-          visibleDeleteConfirm={visibleQuickNoteDeleteConfirm}
-          deleteMotionPhase={quickNoteDeleteConfirmPresence.phase}
-          onClose={() => setIsQuickNotesOpen(false)}
-          onCreate={createQuickNote}
-          onSelect={selectQuickNote}
-          onOpenMenu={setQuickNoteListMenu}
-          onCloseMenu={() => setQuickNoteListMenu(null)}
-          onRequestDelete={setQuickNoteDeleteConfirm}
-          onCloseDeleteConfirm={() => setQuickNoteDeleteConfirm(null)}
-          onRename={renameQuickNote}
-          onContentChange={changeQuickNoteContent}
-          cloudNoteId={selectedQuickNoteCloudId}
-          syncingCloud={quickNoteSyncingCloud}
-          onSyncToCloud={syncQuickNoteToCloud}
-          onSave={saveQuickNote}
-          onDelete={deleteQuickNote}
-        />
-      ) : null}
 
       {mcpCreatePresence.value && visibleMcpCreateDraft ? (
         <McpCreateSheet
@@ -8738,19 +8767,6 @@ export function App() {
           role="alertdialog"
           onClose={() => setIsClearLogsConfirmOpen(false)}
           onConfirm={() => void confirmClearRuntimeLogs()}
-        />
-      ) : null}
-
-      {clearChatConfirmPresence.value ? (
-        <ConfirmationSheet
-          motionPhase={clearChatConfirmPresence.phase}
-          titleId="clear-chat-confirm-title"
-          title="清空本次聊天？"
-          description="消息、执行记录和本次打开的网页都会被永久删除，且无法恢复。项目文件不会被删除。"
-          confirmLabel={isClearingChat ? "正在清空..." : "确认清空"}
-          busy={isClearingChat}
-          onClose={() => setIsClearChatConfirmOpen(false)}
-          onConfirm={() => void confirmClearCurrentChat()}
         />
       ) : null}
 
