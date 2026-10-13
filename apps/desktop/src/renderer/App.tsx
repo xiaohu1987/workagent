@@ -154,6 +154,7 @@ import {
   reconcileAssistantDraftUpdate,
   isSnapshotReadShort,
   collectMissingSnapshotMessages,
+  collectMissingSnapshotRecords,
   resolveSnapshotRecoveryMessages,
   expectedVisibleMessageIds,
   canEditUserMessage,
@@ -211,9 +212,7 @@ import { TokenUsagePopover } from "./workspace/token-usage-popover";
 import { DocumentViewerPanel } from "./workspace/document-viewer-panel";
 import { ApiCardFavoritesPanel } from "./workspace/api-card-favorites";
 import {
-  filterApiCardFavorites,
   subscribeApiCardFavoriteNotices,
-  useApiCardFavorites,
   type ApiCardFavorite
 } from "./api-card-favorites";
 import {
@@ -1042,13 +1041,6 @@ export function App() {
   const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
   const [completedTurnTimers, setCompletedTurnTimers] = useState<Record<string, { startedAt: string; completedAt: string }>>({});
   const [input, setInput] = useState("");
-  const apiCardFavorites = useApiCardFavorites();
-  // + 菜单"接口卡片"子菜单搜索
-  const [apiCardMenuQuery, setApiCardMenuQuery] = useState("");
-  const apiCardMenuMatches = useMemo(
-    () => filterApiCardFavorites(apiCardFavorites, apiCardMenuQuery).slice(0, 20),
-    [apiCardFavorites, apiCardMenuQuery]
-  );
   // 收藏/取消收藏时弹出全局提醒
   const { notice, isNoticeHovered, setIsNoticeHovered, exitingNoticeId, showNotice, dismissNotice } = useAppNotice();
   useEffect(() => {
@@ -1160,7 +1152,7 @@ export function App() {
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
-  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp" | "database" | "apiCards">("root");
+  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp" | "database">("root");
   const [skillsMenuQuery, setSkillsMenuQuery] = useState("");
   const [composerAddSubmenuAnchor, setComposerAddSubmenuAnchor] = useState<HTMLElement | null>(null);
   const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
@@ -5096,7 +5088,10 @@ export function App() {
       } else {
         delete pendingUserMessagesRef.current[threadId];
       };
-      const toolCalls = next.snapshotMode === "delta" && base
+      // Tool calls are durable append-only transcript records. Keep locally known
+      // calls across both delta and full reads: a partial/stale full response must
+      // not make completed tools disappear until the next reload.
+      const toolCalls = base
         ? mergeSnapshotRecords(base.toolCalls, next.toolCalls, (toolCall) => toolCall.startedAt)
         : next.toolCalls;
       const artifacts = next.snapshotMode === "delta" && base
@@ -5145,6 +5140,15 @@ export function App() {
       const hasNewMessages = [...expectedMessageIds].some(
         (messageId) => !renderedMessageIds.has(messageId)
       );
+      const renderedToolCalls = liveSnapshot?.toolCalls ?? base?.toolCalls ?? [];
+      const renderedToolCallsById = new Map(renderedToolCalls.map((toolCall) => [toolCall.id, toolCall]));
+      const hasNewToolCalls = mergedSnapshot.toolCalls.some((toolCall) => {
+        const previous = renderedToolCallsById.get(toolCall.id);
+        return !previous ||
+          previous.status !== toolCall.status ||
+          previous.resultJson !== toolCall.resultJson ||
+          previous.completedAt !== toolCall.completedAt;
+      });
       const reachedTerminalState = Boolean(
         liveSnapshot &&
         isThreadExecutionInProgress(liveSnapshot.thread.status) &&
@@ -5190,6 +5194,7 @@ export function App() {
           {
             hasPendingOptimisticMessages: (pendingUserMessagesRef.current[threadId] ?? remaining).length > 0,
             hasNewMessages,
+            hasNewToolCalls,
             reachedTerminalState
           }
         )) {
@@ -5213,18 +5218,21 @@ export function App() {
           startTransition(commitSelectedSnapshot);
           window.setTimeout(() => {
             if (selectedThreadIdRef.current !== threadId) return;
-            const expected = snapshotCacheByThreadRef.current.get(threadId)?.messages
-              ?? mergedSnapshot.messages;
+            const expected = snapshotCacheByThreadRef.current.get(threadId) ?? mergedSnapshot;
             flushSync(() => {
               setSnapshot((current) => {
                 if (!current || current.thread.id !== threadId) return current;
-                const missing = collectMissingSnapshotMessages(current.messages, expected);
-                if (missing.length === 0) return current;
-                const messages = mergeRecoveredSnapshotMessages(current.messages, missing);
-                if (messages === current.messages) return current;
+                const missingMessages = collectMissingSnapshotMessages(current.messages, expected.messages);
+                const messages = mergeRecoveredSnapshotMessages(current.messages, missingMessages);
+                const missingToolCalls = collectMissingSnapshotRecords(current.toolCalls, expected.toolCalls);
+                const toolCalls = missingToolCalls.length > 0
+                  ? mergeSnapshotRecords(current.toolCalls, missingToolCalls, (toolCall) => toolCall.startedAt)
+                  : current.toolCalls;
+                if (messages === current.messages && toolCalls === current.toolCalls) return current;
                 return {
                   ...current,
                   messages,
+                  toolCalls,
                   messageCount: Math.max(current.messageCount, messages.length)
                 };
               });
@@ -7184,7 +7192,7 @@ export function App() {
     }, 160);
   }
 
-  function openComposerAddSubmenu(view: "skills" | "mcp" | "database" | "apiCards", target: HTMLElement) {
+  function openComposerAddSubmenu(view: "skills" | "mcp" | "database", target: HTMLElement) {
     clearComposerAddMenuCloseTimer();
     setComposerAddSubmenuAnchor(target);
     setComposerAddMenuView(view);
@@ -8905,18 +8913,13 @@ export function App() {
           onSelectMediaIntent={(intent) => setComposerMediaIntent((current) => (current === intent ? null : intent))}
           skills={visibleComposerSkills}
           filteredSkills={filteredComposerSkills}
-          apiCardFavorites={apiCardFavorites}
-          apiCardMatches={apiCardMenuMatches}
           skillsQuery={skillsMenuQuery}
-          apiCardQuery={apiCardMenuQuery}
           onClose={() => { setGpaMenuOpen(false); setGpaMenuPos(null); }}
           onChooseFiles={chooseComposerFiles}
           onOpenSubmenu={openComposerAddSubmenu}
           onSetView={setComposerAddMenuView}
           onSetSkillsQuery={setSkillsMenuQuery}
-          onSetApiCardQuery={setApiCardMenuQuery}
           onAddAttachment={addComposerAttachment}
-          onSendApiCard={sendApiCardFavoriteToChat}
           onSetFullAccess={setFullAccess}
           onSetKnowledgeEnabled={setKnowledgeEnabled}
           onSetMultiAgentMode={updateMultiAgentMode}

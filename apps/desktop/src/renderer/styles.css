@@ -8918,7 +8918,7 @@ input[type="radio"]:focus-visible {
   margin: -2px 0 12px;
 }
 
-/* + 菜单"接口卡片"子菜单搜索框 */
+/* + 菜单子菜单搜索框（Skills 列表等） */
 .composer-add-menu-search {
   padding: 2px 2px 6px;
 }

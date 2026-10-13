@@ -138,6 +138,7 @@ export function shouldCommitThreadSnapshotImmediately(
   options?: boolean | {
     hasPendingOptimisticMessages?: boolean;
     hasNewMessages?: boolean;
+    hasNewToolCalls?: boolean;
     reachedTerminalState?: boolean;
   }
 ): boolean {
@@ -148,9 +149,14 @@ export function shouldCommitThreadSnapshotImmediately(
     return true;
   }
   // A transition can be starved by runtime events. User sends, newly persisted
-  // replies, and the final running -> terminal render must commit synchronously.
+  // replies/tool calls, and the final running -> terminal render must commit synchronously.
   if (typeof options === "boolean") return options;
-  return Boolean(options?.hasPendingOptimisticMessages || options?.hasNewMessages || options?.reachedTerminalState);
+  return Boolean(
+    options?.hasPendingOptimisticMessages ||
+    options?.hasNewMessages ||
+    options?.hasNewToolCalls ||
+    options?.reachedTerminalState
+  );
 }
 
 /** Whether a runtime event can change the currently selected task's snapshot. */
